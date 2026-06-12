@@ -1,0 +1,82 @@
+/*
+Copyright (c) 2023-2026 Microbus LLC and various contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package fixtures
+
+import (
+	"context"
+	"testing"
+
+	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
+	"github.com/microbus-io/testarossa"
+)
+
+func TestFailedfanoutflow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+
+	graph := workflow.NewGraph("failedfanoutflow.verify:428/failed-fan-out")
+	graph.AddTask("src", "failedfanoutflow.verify:428/src")
+	graph.AddTask("a", "failedfanoutflow.verify:428/a")
+	graph.AddTask("b", "failedfanoutflow.verify:428/b")
+	graph.AddTask("c", "failedfanoutflow.verify:428/c")
+	graph.AddTask("j", "failedfanoutflow.verify:428/j")
+	graph.SetFanIn("j")
+	graph.SetReducer("executed", workflow.ReducerAdd)
+	graph.AddTransition("src", "a")
+	graph.AddTransition("src", "b")
+	graph.AddTransition("src", "c")
+	graph.AddTransition("a", "j")
+	graph.AddTransition("b", "j")
+	graph.AddTransition("c", "j")
+	graph.AddTransition("j", workflow.END)
+	proxy.HandleGraph("failedfanoutflow.verify:428/failed-fan-out", graph)
+
+	proxy.HandleTask("failedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		return nil
+	})
+	proxy.HandleTask("failedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		f.SetInt("executed", 1)
+		return nil
+	})
+	proxy.HandleTask("failedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		return errors.New("triggered failure in B")
+	})
+	proxy.HandleTask("failedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		f.SetInt("executed", 1)
+		return nil
+	})
+	proxy.HandleTask("failedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		return nil
+	})
+
+	eng := engine.NewEngine().
+		WithGraphLoader(proxy.LoadGraph).
+		WithTaskExecutor(proxy.ExecuteTask)
+	eng.RunInTest(t)
+
+	t.Run("failing_branch_fails_the_flow", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		outcome, err := eng.Run(ctx, "failedfanoutflow.verify:428/failed-fan-out", nil, nil, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusFailed, outcome.Status)
+	})
+}

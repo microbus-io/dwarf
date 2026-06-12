@@ -1,0 +1,175 @@
+/*
+Copyright (c) 2023-2026 Microbus LLC and various contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package fixtures
+
+import (
+	"context"
+	"testing"
+
+	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/testarossa"
+)
+
+func TestSwitchflow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+
+	graph := workflow.NewGraph("switchflow.verify:428/switch")
+	graph.AddTask("router", "switchflow.verify:428/router")
+	graph.AddTask("handleHigh", "switchflow.verify:428/handle-high")
+	graph.AddTask("handleMid", "switchflow.verify:428/handle-mid")
+	graph.AddTask("handleLow", "switchflow.verify:428/handle-low")
+	graph.AddTransitionSwitch("router", "handleHigh", "amount >= 10000")
+	graph.AddTransitionSwitch("router", "handleMid", "amount >= 1000")
+	graph.AddTransitionSwitch("router", "handleLow", "true")
+	graph.AddTransition("handleHigh", workflow.END)
+	graph.AddTransition("handleMid", workflow.END)
+	graph.AddTransition("handleLow", workflow.END)
+	proxy.HandleGraph("switchflow.verify:428/switch", graph)
+
+	// No-match graph: same router but no default arm.
+	noMatchGraph := workflow.NewGraph("switchflow.verify:428/switch-no-match")
+	noMatchGraph.AddTask("router", "switchflow.verify:428/router")
+	noMatchGraph.AddTask("handleHigh", "switchflow.verify:428/handle-high")
+	noMatchGraph.AddTask("handleMid", "switchflow.verify:428/handle-mid")
+	noMatchGraph.AddTransitionSwitch("router", "handleHigh", "amount >= 10000")
+	noMatchGraph.AddTransitionSwitch("router", "handleMid", "amount >= 1000")
+	noMatchGraph.AddTransition("handleHigh", workflow.END)
+	noMatchGraph.AddTransition("handleMid", workflow.END)
+	proxy.HandleGraph("switchflow.verify:428/switch-no-match", noMatchGraph)
+
+	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		return nil
+	})
+	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		f.SetString("branch", "high")
+		return nil
+	})
+	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		f.SetString("branch", "mid")
+		return nil
+	})
+	proxy.HandleTask("switchflow.verify:428/handle-low", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		f.SetString("branch", "low")
+		return nil
+	})
+
+	eng := engine.NewEngine().
+		WithGraphLoader(proxy.LoadGraph).
+		WithTaskExecutor(proxy.ExecuteTask)
+	eng.RunInTest(t)
+
+	t.Run("amount_above_high_threshold_takes_high_branch", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 50000}, nil, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("high", outcome.State["branch"])
+	})
+
+	t.Run("amount_in_mid_band_takes_mid_branch", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 5000}, nil, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("mid", outcome.State["branch"])
+	})
+
+	t.Run("amount_below_thresholds_takes_default_branch", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 100}, nil, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("low", outcome.State["branch"])
+	})
+
+	t.Run("boundary_10000_takes_high_branch", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 10000}, nil, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("high", outcome.State["branch"])
+	})
+
+	t.Run("boundary_1000_takes_mid_branch", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 1000}, nil, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("mid", outcome.State["branch"])
+	})
+}
+
+func TestSwitchflow_NoMatch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+
+	graph := workflow.NewGraph("switchflow.verify:428/switch-no-match")
+	graph.AddTask("router", "switchflow.verify:428/router")
+	graph.AddTask("handleHigh", "switchflow.verify:428/handle-high")
+	graph.AddTask("handleMid", "switchflow.verify:428/handle-mid")
+	graph.AddTransitionSwitch("router", "handleHigh", "amount >= 10000")
+	graph.AddTransitionSwitch("router", "handleMid", "amount >= 1000")
+	graph.AddTransition("handleHigh", workflow.END)
+	graph.AddTransition("handleMid", workflow.END)
+	proxy.HandleGraph("switchflow.verify:428/switch-no-match", graph)
+
+	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		return nil
+	})
+	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		f.SetString("branch", "high")
+		return nil
+	})
+	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+		f.SetString("branch", "mid")
+		return nil
+	})
+
+	eng := engine.NewEngine().
+		WithGraphLoader(proxy.LoadGraph).
+		WithTaskExecutor(proxy.ExecuteTask)
+	eng.RunInTest(t)
+
+	t.Run("no_match_completes_flow_without_branching", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 100}, nil, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal(nil, outcome.State["branch"])
+	})
+
+	t.Run("matching_input_still_routes_normally", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 5000}, nil, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("mid", outcome.State["branch"])
+	})
+}
