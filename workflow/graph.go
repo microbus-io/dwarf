@@ -31,7 +31,7 @@ const END = "END"
 
 // Node describes a task or subgraph node registered in a workflow graph.
 // Name is the node's identifier within the graph and the value stored on
-// step rows (microbus_steps.task_name). URL is the dispatch target the
+// step rows (dwarf_steps.task_name). URL is the dispatch target the
 // engine calls when the node is reached.
 type Node struct {
 	Name string

@@ -1,5 +1,5 @@
 -- DRIVER: mysql
-CREATE TABLE IF NOT EXISTS microbus_steps (
+CREATE TABLE IF NOT EXISTS dwarf_steps (
     step_id            BIGINT       NOT NULL AUTO_INCREMENT,
     flow_id            BIGINT       NOT NULL,
     step_depth         INT          NOT NULL,
@@ -36,15 +36,15 @@ CREATE TABLE IF NOT EXISTS microbus_steps (
     started_at         DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at         DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (step_id),
-    INDEX idx_microbus_steps_flow_id (flow_id, step_id),
-    INDEX idx_microbus_steps_status (status, updated_at),
-    INDEX idx_microbus_steps_created_at (created_at),
-    INDEX idx_microbus_steps_selection (status, parked, priority, fairness_key),
-    INDEX idx_microbus_steps_saturation (status, parked, task_name)
+    INDEX idx_dwarf_steps_flow_id (flow_id, step_id),
+    INDEX idx_dwarf_steps_status (status, updated_at),
+    INDEX idx_dwarf_steps_created_at (created_at),
+    INDEX idx_dwarf_steps_selection (status, parked, priority, fairness_key),
+    INDEX idx_dwarf_steps_saturation (status, parked, task_name)
 );
 
 -- DRIVER: pgx
-CREATE TABLE IF NOT EXISTS microbus_steps (
+CREATE TABLE IF NOT EXISTS dwarf_steps (
     step_id            BIGSERIAL    NOT NULL,
     flow_id            BIGINT       NOT NULL,
     step_depth         INT          NOT NULL,
@@ -84,22 +84,22 @@ CREATE TABLE IF NOT EXISTS microbus_steps (
 );
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_steps_flow_id ON microbus_steps (flow_id);
+CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id);
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_steps_status ON microbus_steps (status, updated_at) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_status ON dwarf_steps (status, updated_at) WHERE status IN ('pending', 'running');
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_steps_created_at ON microbus_steps (created_at);
+CREATE INDEX idx_dwarf_steps_created_at ON dwarf_steps (created_at);
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_steps_selection ON microbus_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_steps_saturation ON microbus_steps (status, parked, task_name) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_name) WHERE status IN ('pending', 'running');
 
 -- DRIVER: mssql
-CREATE TABLE microbus_steps (
+CREATE TABLE dwarf_steps (
     step_id            BIGINT        NOT NULL IDENTITY(1,1),
     flow_id            BIGINT        NOT NULL,
     step_depth         INT           NOT NULL,
@@ -139,22 +139,22 @@ CREATE TABLE microbus_steps (
 );
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_steps_flow_id ON microbus_steps (flow_id);
+CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id);
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_steps_status ON microbus_steps (status, updated_at) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_status ON dwarf_steps (status, updated_at) WHERE status IN ('pending', 'running');
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_steps_created_at ON microbus_steps (created_at);
+CREATE INDEX idx_dwarf_steps_created_at ON dwarf_steps (created_at);
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_steps_selection ON microbus_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_steps_saturation ON microbus_steps (status, parked, task_name) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_name) WHERE status IN ('pending', 'running');
 
 -- DRIVER: sqlite
-CREATE TABLE IF NOT EXISTS microbus_steps (
+CREATE TABLE IF NOT EXISTS dwarf_steps (
     step_id            INTEGER      NOT NULL PRIMARY KEY AUTOINCREMENT,
     flow_id            INTEGER      NOT NULL,
     step_depth         INTEGER      NOT NULL,
@@ -193,16 +193,16 @@ CREATE TABLE IF NOT EXISTS microbus_steps (
 );
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_steps_flow_id ON microbus_steps (flow_id, step_id);
+CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id, step_id);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_steps_status ON microbus_steps (status, updated_at) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_status ON dwarf_steps (status, updated_at) WHERE status IN ('pending', 'running');
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_steps_created_at ON microbus_steps (created_at);
+CREATE INDEX idx_dwarf_steps_created_at ON dwarf_steps (created_at);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_steps_selection ON microbus_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_steps_saturation ON microbus_steps (status, parked, task_name) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_name) WHERE status IN ('pending', 'running');

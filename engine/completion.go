@@ -38,7 +38,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 
 	var inherited workflow.FlowOptions
 	err = db.QueryRowContext(ctx,
-		"SELECT priority, fairness_key, fairness_weight FROM microbus_flows WHERE flow_id=?",
+		"SELECT priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
 		surgraphFlowID,
 	).Scan(&inherited.Priority, &inherited.FairnessKey, &inherited.FairnessWeight)
 	if err != nil {
@@ -55,7 +55,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	}
 
 	_, err = db.ExecContext(ctx,
-		"UPDATE microbus_flows SET surgraph_flow_id=?, surgraph_step_depth=?, surgraph_step_id=?, actor_claims=?, breakpoints=?, updated_at=NOW_UTC() WHERE flow_id=?",
+		"UPDATE dwarf_flows SET surgraph_flow_id=?, surgraph_step_depth=?, surgraph_step_id=?, actor_claims=?, breakpoints=?, updated_at=NOW_UTC() WHERE flow_id=?",
 		surgraphFlowID, surgraphStepDepth, surgraphStepID, metadataJSON, breakpointsJSON, subgraphFlowID,
 	)
 	if err != nil {
@@ -74,7 +74,7 @@ func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *s
 	}
 	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, updated_at=NOW_UTC() WHERE step_id=?",
+			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE step_id=?",
 			workflow.StatusCompleted, stepID,
 		)
 		return nil
@@ -132,7 +132,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 	}
 
 	merged, found, err := merge(
-		"SELECT state, changes FROM microbus_steps WHERE flow_id=? AND successor_id=0 AND status=? ORDER BY step_id",
+		"SELECT state, changes FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status=? ORDER BY step_id",
 		flowID, workflow.StatusCompleted,
 	)
 	if err != nil {
@@ -143,7 +143,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 	}
 
 	merged, found, err = merge(
-		"SELECT state, changes FROM microbus_steps WHERE flow_id=? AND successor_id=0 ORDER BY step_id",
+		"SELECT state, changes FROM dwarf_steps WHERE flow_id=? AND successor_id=0 ORDER BY step_id",
 		flowID,
 	)
 	if err != nil {
@@ -159,7 +159,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, flowID int) (string, string, error) {
 	var graphJSON, workflowName string
 	err := db.QueryRowContext(ctx,
-		"SELECT graph, workflow_name FROM microbus_flows WHERE flow_id=?",
+		"SELECT graph, workflow_name FROM dwarf_flows WHERE flow_id=?",
 		flowID,
 	).Scan(&graphJSON, &workflowName)
 	if err != nil {
@@ -199,7 +199,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		}
 		finalStateJSON = fs
 		res, err := tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET status=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+			"UPDATE dwarf_flows SET status=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
 			workflow.StatusCompleted, finalStateJSON, flowID,
 			workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 		)
@@ -238,7 +238,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	// Propagate to surgraph
 	var surgraphFlowID, surgraphStepDepth, surgraphStepID int
 	err = db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id FROM microbus_flows WHERE flow_id=?",
+		"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id FROM dwarf_flows WHERE flow_id=?",
 		flowID,
 	).Scan(&surgraphFlowID, &surgraphStepDepth, &surgraphStepID)
 	if err != nil {
@@ -272,7 +272,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		// the just-cancelled row. The guard also subsumes the "step still live" check — a step that is no
 		// longer running/parked matches no row — and the rows-affected gate keeps Enqueue off a no-op.
 		res, err := tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
+			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
 			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID, workflow.StatusRunning, parkedSubgraph,
 		)
 		if err != nil {
@@ -312,7 +312,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 
 	var stepLineageID int
 	err = db.QueryRowContext(ctx,
-		"SELECT lineage_id FROM microbus_steps WHERE step_id=?",
+		"SELECT lineage_id FROM dwarf_steps WHERE step_id=?",
 		stepID,
 	).Scan(&stepLineageID)
 	if err != nil {
@@ -326,7 +326,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 		failFlow = stepLineageID == 0
 		finalStateJSON = ""
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
+			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
 			workflow.StatusFailed, parkedNone, errMsg, stepID,
 		)
 		if !failFlow {
@@ -343,7 +343,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 				return errors.Trace(err)
 			}
 			tx.ExecContext(ctx,
-				"UPDATE microbus_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+				"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
 				finalStateJSON, workflow.StatusFailed, errMsg, flowID,
 				workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 			)
@@ -361,7 +361,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 	e.logger.LogInfo(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusFailed)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))
 	var notifyHostname string
-	db.QueryRowContext(ctx, "SELECT notify_hostname FROM microbus_flows WHERE flow_id=?", flowID).Scan(&notifyHostname)
+	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&notifyHostname)
 	notifyHostname = strings.TrimSpace(notifyHostname)
 	if notifyHostname != "" && e.flowStoppedCallback != nil {
 		var finalState map[string]any
@@ -382,7 +382,7 @@ func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor,
 	current := spawnStepID
 	for {
 		_, err := tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET cohort_arrivals = cohort_arrivals + 1, cohort_failures = cohort_failures + 1 WHERE step_id=?",
+			"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + 1, cohort_failures = cohort_failures + 1 WHERE step_id=?",
 			current,
 		)
 		if err != nil {
@@ -390,7 +390,7 @@ func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor,
 		}
 		var arrivals, size, lineageID int
 		err = tx.QueryRowContext(ctx,
-			"SELECT cohort_arrivals, cohort_size, lineage_id FROM microbus_steps WHERE step_id=?",
+			"SELECT cohort_arrivals, cohort_size, lineage_id FROM dwarf_steps WHERE step_id=?",
 			current,
 		).Scan(&arrivals, &size, &lineageID)
 		if err != nil {
@@ -410,7 +410,7 @@ func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor,
 func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowID int) (int, bool, error) {
 	var surgraphFlowID, surgraphStepID int
 	err := db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, surgraph_step_id FROM microbus_flows WHERE flow_id=?",
+		"SELECT surgraph_flow_id, surgraph_step_id FROM dwarf_flows WHERE flow_id=?",
 		flowID,
 	).Scan(&surgraphFlowID, &surgraphStepID)
 	if err != nil {
@@ -433,16 +433,16 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childSt
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatchParent = false
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
+			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
 			workflow.StatusFailed, parkedNone, errMsg, childStepID,
 		)
 		childFinalState, _, _ := e.computeFinalState(ctx, tx, childFlowID)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+			"UPDATE dwarf_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
 			workflow.StatusFailed, errMsg, childFinalState, childFlowID, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 		)
 		res, err := tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
+			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
 			workflow.StatusPending, parkedNone, errMsg, parentStepID, workflow.StatusRunning, parkedSubgraph,
 		)
 		if err != nil {
@@ -474,7 +474,7 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 		args := append([]any{}, current...)
 		args = append(args, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled)
 		rows, err := db.QueryContext(ctx,
-			"SELECT flow_id, flow_token FROM microbus_flows WHERE surgraph_flow_id IN ("+placeholders+") AND status NOT IN (?, ?, ?)",
+			"SELECT flow_id, flow_token FROM dwarf_flows WHERE surgraph_flow_id IN ("+placeholders+") AND status NOT IN (?, ?, ?)",
 			args...,
 		)
 		if err != nil {
@@ -507,7 +507,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	for {
 		var stepID, stepDepth int
 		err = db.QueryRowContext(ctx,
-			"SELECT step_id, step_depth FROM microbus_steps WHERE flow_id=? AND status=? ORDER BY updated_at LIMIT_OFFSET(1, 0)",
+			"SELECT step_id, step_depth FROM dwarf_steps WHERE flow_id=? AND status=? ORDER BY updated_at LIMIT_OFFSET(1, 0)",
 			currentFlowID, workflow.StatusInterrupted,
 		).Scan(&stepID, &stepDepth)
 		if err != nil {
@@ -518,7 +518,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 		var subFlowID int
 		var subFlowToken string
 		err = db.QueryRowContext(ctx,
-			"SELECT flow_id, flow_token FROM microbus_flows WHERE surgraph_flow_id=? AND surgraph_step_depth=? AND status=?",
+			"SELECT flow_id, flow_token FROM dwarf_flows WHERE surgraph_flow_id=? AND surgraph_step_depth=? AND status=?",
 			currentFlowID, stepDepth, workflow.StatusInterrupted,
 		).Scan(&subFlowID, &subFlowToken)
 		if err == sql.ErrNoRows {
@@ -547,7 +547,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, breakpoint bool, da
 	}
 
 	var flowStatus string
-	err = db.QueryRowContext(ctx, "SELECT status FROM microbus_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&flowStatus)
+	err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&flowStatus)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
 	}
@@ -579,7 +579,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, breakpoint bool, da
 
 	var leafInterruptDone, leafBreakpointHit bool
 	var leafStateJSON string
-	db.QueryRowContext(ctx, "SELECT interrupt_done, breakpoint_hit, state FROM microbus_steps WHERE step_id=?", leafStepID).Scan(&leafInterruptDone, &leafBreakpointHit, &leafStateJSON)
+	db.QueryRowContext(ctx, "SELECT interrupt_done, breakpoint_hit, state FROM dwarf_steps WHERE step_id=?", leafStepID).Scan(&leafInterruptDone, &leafBreakpointHit, &leafStateJSON)
 	if breakpoint && (leafInterruptDone || !leafBreakpointHit) {
 		return errors.New("flow is not paused at a breakpoint; use Resume to continue an interrupt", http.StatusConflict)
 	}
@@ -607,26 +607,26 @@ func (e *Engine) resume(ctx context.Context, flowKey string, breakpoint bool, da
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		allStepIDs := append([]any{leafStepID}, parkStepIDs...)
 		clearPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET interrupt_payload='{}' WHERE step_id IN ("+clearPlaceholders+")", allStepIDs...)
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload='{}' WHERE step_id IN ("+clearPlaceholders+")", allStepIDs...)
 
 		if len(parkStepIDs) > 0 {
 			parkPlaceholders := strings.Repeat("?,", len(parkStepIDs)-1) + "?"
 			parkArgs := append([]any{workflow.StatusRunning, parkedSubgraph}, parkStepIDs...)
 			parkArgs = append(parkArgs, workflow.StatusInterrupted)
-			tx.ExecContext(ctx, "UPDATE microbus_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status=?", parkArgs...)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status=?", parkArgs...)
 		}
 
 		if breakpoint {
-			tx.ExecContext(ctx, "UPDATE microbus_steps SET status=?, state=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, state=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 				workflow.StatusPending, breakpointStateJSON, leafStepID, workflow.StatusInterrupted)
 		} else {
-			tx.ExecContext(ctx, "UPDATE microbus_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 				workflow.StatusPending, resumeDataJSON, leafStepID, workflow.StatusInterrupted)
 		}
 
 		for _, chainFlowID := range chainFlowIDs {
 			tx.ExecContext(ctx,
-				"UPDATE microbus_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id=? AND status=? AND (SELECT COUNT(*) FROM microbus_steps WHERE flow_id=? AND status=?)=0",
+				"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id=? AND status=? AND (SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status=?)=0",
 				workflow.StatusRunning, chainFlowID, workflow.StatusInterrupted, chainFlowID, workflow.StatusInterrupted,
 			)
 		}
@@ -657,7 +657,7 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 		var surgraphFlowID, surgraphStepDepth, surgraphStepID int
 		var wfName string
 		err = db.QueryRowContext(ctx,
-			"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id, workflow_name FROM microbus_flows WHERE flow_id=?",
+			"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id, workflow_name FROM dwarf_flows WHERE flow_id=?",
 			currentFlowID,
 		).Scan(&surgraphFlowID, &surgraphStepDepth, &surgraphStepID, &wfName)
 		if err != nil {
@@ -668,12 +668,12 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 		}
 		var surgraphFlowToken string
 		db.QueryRowContext(ctx,
-			"SELECT flow_token FROM microbus_flows WHERE flow_id=?",
+			"SELECT flow_token FROM dwarf_flows WHERE flow_id=?",
 			surgraphFlowID,
 		).Scan(&surgraphFlowToken)
 		if surgraphStepID == 0 {
 			db.QueryRowContext(ctx,
-				"SELECT step_id FROM microbus_steps WHERE flow_id=? AND step_depth=? AND task_name=?",
+				"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND step_depth=? AND task_name=?",
 				surgraphFlowID, surgraphStepDepth, strings.TrimSpace(wfName),
 			).Scan(&surgraphStepID)
 		}

@@ -44,7 +44,7 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 		return nil, errors.Trace(err)
 	}
 	var exists int
-	err = db.QueryRowContext(ctx, "SELECT 1 FROM microbus_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&exists)
+	err = db.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&exists)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("flow not found", http.StatusNotFound)
 	}
@@ -62,12 +62,12 @@ func (e *Engine) historyBeforeStep(ctx context.Context, shardNum int, flowID int
 	var rows *sql.Rows
 	if beforeStepDepth > 0 {
 		rows, err = db.QueryContext(ctx,
-			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id FROM microbus_steps WHERE flow_id=? AND step_depth<? ORDER BY step_depth, step_id",
+			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id FROM dwarf_steps WHERE flow_id=? AND step_depth<? ORDER BY step_depth, step_id",
 			flowID, beforeStepDepth,
 		)
 	} else {
 		rows, err = db.QueryContext(ctx,
-			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id FROM microbus_steps WHERE flow_id=? ORDER BY step_depth, step_id",
+			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id FROM dwarf_steps WHERE flow_id=? ORDER BY step_depth, step_id",
 			flowID,
 		)
 	}
@@ -118,7 +118,7 @@ func (e *Engine) subgraphHistory(ctx context.Context, shardNum int, surgraphStep
 	}
 	var subFlowID int
 	var subWorkflowName string
-	err = db.QueryRowContext(ctx, "SELECT flow_id, workflow_name FROM microbus_flows WHERE surgraph_step_id=?", surgraphStepID).Scan(&subFlowID, &subWorkflowName)
+	err = db.QueryRowContext(ctx, "SELECT flow_id, workflow_name FROM dwarf_flows WHERE surgraph_step_id=?", surgraphStepID).Scan(&subFlowID, &subWorkflowName)
 	if err == sql.ErrNoRows {
 		return "", nil, nil
 	}
@@ -144,7 +144,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	var stepDepth, attempt, predID, succID int
 	var createdAt, updatedAt time.Time
 	err = db.QueryRowContext(ctx,
-		"SELECT step_depth, task_name, attempt, state, changes, interrupt_payload, status, error, created_at, updated_at, predecessor_id, successor_id FROM microbus_steps WHERE step_id=? AND step_token=?",
+		"SELECT step_depth, task_name, attempt, state, changes, interrupt_payload, status, error, created_at, updated_at, predecessor_id, successor_id FROM dwarf_steps WHERE step_id=? AND step_token=?",
 		stepID, stepToken,
 	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID)
 	if err == sql.ErrNoRows {
@@ -199,7 +199,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		// We may be inside a subgraph - look up our own flow's surgraph linkage.
 		var surgraphStepID int
 		err = db.QueryRowContext(ctx,
-			"SELECT f.surgraph_step_id FROM microbus_steps s JOIN microbus_flows f ON s.flow_id = f.flow_id WHERE s.step_id=?",
+			"SELECT f.surgraph_step_id FROM dwarf_steps s JOIN dwarf_flows f ON s.flow_id = f.flow_id WHERE s.step_id=?",
 			stepID,
 		).Scan(&surgraphStepID)
 		if err != nil && err != sql.ErrNoRows {
@@ -210,7 +210,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 			// intra-flow neighbor in the parent flow.
 			var parentPred, parentSucc int
 			err = db.QueryRowContext(ctx,
-				"SELECT predecessor_id, successor_id FROM microbus_steps WHERE step_id=?",
+				"SELECT predecessor_id, successor_id FROM dwarf_steps WHERE step_id=?",
 				surgraphStepID,
 			).Scan(&parentPred, &parentSucc)
 			if err != nil && err != sql.ErrNoRows {
@@ -229,7 +229,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	// past it.
 	var ownChildFlow int
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_id FROM microbus_flows WHERE surgraph_step_id=?",
+		"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?",
 		stepID,
 	).Scan(&ownChildFlow)
 	if err != nil && err != sql.ErrNoRows {
@@ -238,7 +238,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if ownChildFlow > 0 {
 		var entry int
 		err = db.QueryRowContext(ctx,
-			"SELECT step_id FROM microbus_steps WHERE flow_id=? AND predecessor_id=0 ORDER BY step_id LIMIT_OFFSET(1, 0)",
+			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND predecessor_id=0 ORDER BY step_id LIMIT_OFFSET(1, 0)",
 			ownChildFlow,
 		).Scan(&entry)
 		if err != nil && err != sql.ErrNoRows {
@@ -273,7 +273,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		placeholders := strings.Repeat("?,", len(ids))
 		placeholders = placeholders[:len(placeholders)-1]
 		nrows, err := db.QueryContext(ctx,
-			"SELECT step_id, step_token FROM microbus_steps WHERE step_id IN ("+placeholders+")",
+			"SELECT step_id, step_token FROM dwarf_steps WHERE step_id IN ("+placeholders+")",
 			ids...,
 		)
 		if err != nil {
@@ -304,7 +304,7 @@ func (e *Engine) skipSurgraphForward(ctx context.Context, db *sequel.DB, id int)
 	for id > 0 {
 		var childFlow int
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id FROM microbus_flows WHERE surgraph_step_id=?",
+			"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?",
 			id,
 		).Scan(&childFlow)
 		if err == sql.ErrNoRows {
@@ -318,7 +318,7 @@ func (e *Engine) skipSurgraphForward(ctx context.Context, db *sequel.DB, id int)
 		}
 		var entry int
 		err = db.QueryRowContext(ctx,
-			"SELECT step_id FROM microbus_steps WHERE flow_id=? AND predecessor_id=0 ORDER BY step_id LIMIT_OFFSET(1, 0)",
+			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND predecessor_id=0 ORDER BY step_id LIMIT_OFFSET(1, 0)",
 			childFlow,
 		).Scan(&entry)
 		if err != nil {
@@ -339,7 +339,7 @@ func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, id int
 	for id > 0 {
 		var childFlow int
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id FROM microbus_flows WHERE surgraph_step_id=?",
+			"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?",
 			id,
 		).Scan(&childFlow)
 		if err == sql.ErrNoRows {
@@ -353,7 +353,7 @@ func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, id int
 		}
 		var exit int
 		err = db.QueryRowContext(ctx,
-			"SELECT step_id FROM microbus_steps WHERE flow_id=? AND successor_id=0 AND status='completed' ORDER BY step_id DESC LIMIT_OFFSET(1, 0)",
+			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='completed' ORDER BY step_id DESC LIMIT_OFFSET(1, 0)",
 			childFlow,
 		).Scan(&exit)
 		if err != nil {
@@ -377,7 +377,7 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 		return "", "", errors.Trace(err)
 	}
 	var status string
-	err = db.QueryRowContext(ctx, "SELECT status FROM microbus_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&status)
+	err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&status)
 	if err == sql.ErrNoRows {
 		return "", "", errors.New("flow not found", http.StatusNotFound)
 	}
@@ -402,7 +402,7 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 	// into any and hash its string form — the fingerprint only needs a stable,
 	// change-detecting digest, not a parsed timestamp.
 	var maxUpdated any
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(updated_at) FROM microbus_steps WHERE flow_id IN ("+ph+")", flowIDs...).Scan(&count, &maxUpdated)
+	err = db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(updated_at) FROM dwarf_steps WHERE flow_id IN ("+ph+")", flowIDs...).Scan(&count, &maxUpdated)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
@@ -472,7 +472,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 		}
 		args = append(args, perShardLimit)
 		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at" +
-			" FROM microbus_flows f" + joinSQL +
+			" FROM dwarf_flows f" + joinSQL +
 			" WHERE " + strings.Join(conditions, " AND ") +
 			" ORDER BY f.flow_id DESC LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, stmt, args...)
@@ -591,7 +591,7 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string
 			return "", "", nil, 0, errors.Trace(dErr)
 		}
 		var resolvedThreadID int
-		err := db.QueryRowContext(ctx, "SELECT thread_id FROM microbus_flows WHERE flow_id=? AND flow_token=?", threadFlowID, threadFlowToken).Scan(&resolvedThreadID)
+		err := db.QueryRowContext(ctx, "SELECT thread_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", threadFlowID, threadFlowToken).Scan(&resolvedThreadID)
 		if err != nil {
 			return "", "", nil, 0, errors.New("flow not found", http.StatusNotFound)
 		}
@@ -616,7 +616,7 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string
 		args = append(args, -int64(query.NewerThan/time.Millisecond))
 	}
 
-	joinSQL := " LEFT JOIN microbus_steps s ON f.step_id = s.step_id"
+	joinSQL := " LEFT JOIN dwarf_steps s ON f.step_id = s.step_id"
 	whereSQL := strings.Join(conditions, " AND ")
 	return joinSQL, whereSQL, args, restrictShardNum, nil
 }
@@ -658,7 +658,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			args = append(args, scArgs...)
 		}
 		args = append(args, workflow.StatusRunning, perShardLimit)
-		selectIDs := "SELECT DISTINCT f.flow_id FROM microbus_flows f" + joinSQL +
+		selectIDs := "SELECT DISTINCT f.flow_id FROM dwarf_flows f" + joinSQL +
 			" WHERE " + where + " AND f.status<>? ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, selectIDs, args...)
 		if err != nil {
@@ -684,14 +684,14 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		return db.Transact(ctx, func(tx *sequel.Tx) error {
 			placeholders := strings.Repeat("?,", len(flowIDs)-1) + "?"
 			tx.ExecContext(ctx,
-				"DELETE FROM microbus_steps WHERE flow_id IN ("+placeholders+")",
+				"DELETE FROM dwarf_steps WHERE flow_id IN ("+placeholders+")",
 				flowIDs...,
 			)
 			// Re-guard against the race where a flow transitioned to running between SELECT and DELETE.
 			delArgs := append([]any(nil), flowIDs...)
 			delArgs = append(delArgs, workflow.StatusRunning)
 			res, err := tx.ExecContext(ctx,
-				"DELETE FROM microbus_flows WHERE flow_id IN ("+placeholders+") AND status<>?",
+				"DELETE FROM dwarf_flows WHERE flow_id IN ("+placeholders+") AND status<>?",
 				delArgs...,
 			)
 			if err != nil {
@@ -725,8 +725,8 @@ func (e *Engine) shardInfo(ctx context.Context) ([]ShardSummary, error) {
 			results[shardIdx].Error = err.Error()
 			return nil
 		}
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM microbus_steps").Scan(&results[shardIdx].Steps)
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM microbus_flows").Scan(&results[shardIdx].Flows)
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps").Scan(&results[shardIdx].Steps)
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&results[shardIdx].Flows)
 		return nil
 	})
 	shards := make([]ShardSummary, 0, numShards)
@@ -749,7 +749,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 
 	var threadID int
 	var threadToken string
-	err = db.QueryRowContext(ctx, "SELECT thread_id, thread_token FROM microbus_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&threadID, &threadToken)
+	err = db.QueryRowContext(ctx, "SELECT thread_id, thread_token FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&threadID, &threadToken)
 	if err != nil {
 		return "", errors.New("flow not found", http.StatusNotFound)
 	}
@@ -757,7 +757,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 
 	var flowStatus, finalStateJSON, graphJSON, workflowName string
 	err = db.QueryRowContext(ctx,
-		"SELECT status, final_state, graph, workflow_name FROM microbus_flows WHERE thread_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+		"SELECT status, final_state, graph, workflow_name FROM dwarf_flows WHERE thread_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 		threadID,
 	).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowName)
 	if err != nil {
@@ -795,7 +795,7 @@ func (e *Engine) setBreakpoint(ctx context.Context, flowKey string, key string, 
 		return errors.Trace(err)
 	}
 	var breakpointsJSON string
-	err = db.QueryRowContext(ctx, "SELECT breakpoints FROM microbus_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&breakpointsJSON)
+	err = db.QueryRowContext(ctx, "SELECT breakpoints FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&breakpointsJSON)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
 	}
@@ -810,6 +810,6 @@ func (e *Engine) setBreakpoint(ctx context.Context, flowKey string, key string, 
 		delete(breakpoints, key)
 	}
 	updatedJSON, _ := json.Marshal(breakpoints)
-	_, err = db.ExecContext(ctx, "UPDATE microbus_flows SET breakpoints=?, updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=?", string(updatedJSON), flowID, flowToken)
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET breakpoints=?, updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=?", string(updatedJSON), flowID, flowToken)
 	return errors.Trace(err)
 }

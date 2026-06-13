@@ -85,7 +85,7 @@ func (e *Engine) restart(ctx context.Context, flowKey string, stateOverrides any
 
 	var flowStatus string
 	err = db.QueryRowContext(ctx,
-		"SELECT status FROM microbus_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
 	).Scan(&flowStatus)
 	if err == sql.ErrNoRows {
@@ -102,7 +102,7 @@ func (e *Engine) restart(ctx context.Context, flowKey string, stateOverrides any
 	var entryStepID int
 	var entryState string
 	err = db.QueryRowContext(ctx,
-		"SELECT step_id, state FROM microbus_steps WHERE flow_id=? AND predecessor_id=0",
+		"SELECT step_id, state FROM dwarf_steps WHERE flow_id=? AND predecessor_id=0",
 		flowID,
 	).Scan(&entryStepID, &entryState)
 	if err == sql.ErrNoRows {
@@ -129,13 +129,13 @@ func (e *Engine) restart(ctx context.Context, flowKey string, stateOverrides any
 			for _, id := range descendantFlowIDs {
 				args = append(args, id)
 			}
-			tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id IN ("+ph+")", args...)
-			tx.ExecContext(ctx, "DELETE FROM microbus_flows WHERE flow_id IN ("+ph+")", args...)
+			tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN ("+ph+")", args...)
+			tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id IN ("+ph+")", args...)
 		}
 
-		tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id=? AND step_id<>?", flowID, entryStepID)
+		tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id=? AND step_id<>?", flowID, entryStepID)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='',"+
+			"UPDATE dwarf_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='',"+
 				" attempt=0, breakpoint_hit=0, interrupt_done=0, resume_data='{}',"+
 				" subgraph_done=0, subgraph_result='{}', subgraph_error='',"+
 				" successor_id=0, cohort_arrivals=0, cohort_failures=0,"+
@@ -144,7 +144,7 @@ func (e *Engine) restart(ctx context.Context, flowKey string, stateOverrides any
 			workflow.StatusPending, parkedNone, mergedStateJSON, entryStepID,
 		)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET status=?, step_id=?, error='', cancel_reason='', final_state='{}', created_at=NOW_UTC(), started_at=NOW_UTC(), updated_at=NOW_UTC()"+
+			"UPDATE dwarf_flows SET status=?, step_id=?, error='', cancel_reason='', final_state='{}', created_at=NOW_UTC(), started_at=NOW_UTC(), updated_at=NOW_UTC()"+
 				" WHERE flow_id=? AND flow_token=?",
 			workflow.StatusRunning, entryStepID, flowID, flowToken,
 		)
@@ -173,7 +173,7 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 	var flowID, lineageID, predecessorID int
 	var stepStatus, stepState string
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_id, status, state, lineage_id, predecessor_id FROM microbus_steps WHERE step_id=? AND step_token=?",
+		"SELECT flow_id, status, state, lineage_id, predecessor_id FROM dwarf_steps WHERE step_id=? AND step_token=?",
 		stepID, stepToken,
 	).Scan(&flowID, &stepStatus, &stepState, &lineageID, &predecessorID)
 	if err == sql.ErrNoRows {
@@ -188,7 +188,7 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 	}
 
 	var flowStatus, flowToken string
-	err = db.QueryRowContext(ctx, "SELECT status, flow_token FROM microbus_flows WHERE flow_id=?", flowID).Scan(&flowStatus, &flowToken)
+	err = db.QueryRowContext(ctx, "SELECT status, flow_token FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&flowStatus, &flowToken)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -218,7 +218,7 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 		parentFlowID := upFlowIDs[i+1].(int)
 		callerStepID := sid.(int)
 		var pTok, pStatus string
-		db.QueryRowContext(ctx, "SELECT flow_token, status FROM microbus_flows WHERE flow_id=?", parentFlowID).Scan(&pTok, &pStatus)
+		db.QueryRowContext(ctx, "SELECT flow_token, status FROM dwarf_flows WHERE flow_id=?", parentFlowID).Scan(&pTok, &pStatus)
 		pStatus = strings.TrimSpace(pStatus)
 		if pStatus == workflow.StatusCancelled {
 			return errors.New("ancestor surgraph flow is cancelled", http.StatusConflict)
@@ -284,7 +284,7 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 				ids = append(ids, m.stepID)
 			}
 			ph := strings.Repeat("?,", len(ids)-1) + "?"
-			tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE step_id IN ("+ph+")", ids...)
+			tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE step_id IN ("+ph+")", ids...)
 		}
 		deleteIDs(subtree)
 		for _, p := range parents {
@@ -292,7 +292,7 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 		}
 
 		if predecessorID != 0 {
-			tx.ExecContext(ctx, "UPDATE microbus_steps SET successor_id=0 WHERE step_id=? AND successor_id<>?", predecessorID, stepID)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET successor_id=0 WHERE step_id=? AND successor_id<>?", predecessorID, stepID)
 		}
 
 		for spawnID, d := range deltaBySpawn {
@@ -300,7 +300,7 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 		}
 
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='',"+
+			"UPDATE dwarf_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='',"+
 				" attempt=0, breakpoint_hit=0, interrupt_done=0, resume_data='{}',"+
 				" subgraph_done=0, subgraph_result='{}', subgraph_error='',"+
 				" successor_id=0,"+
@@ -311,14 +311,14 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 
 		for _, p := range parents {
 			tx.ExecContext(ctx,
-				"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, error='', goto_next='', lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, error='', goto_next='', lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
 				workflow.StatusRunning, parkedSubgraph, p.callerStepID,
 			)
 		}
 
 		if flowStatus != workflow.StatusRunning {
 			tx.ExecContext(ctx,
-				"UPDATE microbus_flows SET status=?, error='', cancel_reason='', final_state='{}', updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=? AND status<>?",
+				"UPDATE dwarf_flows SET status=?, error='', cancel_reason='', final_state='{}', updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=? AND status<>?",
 				workflow.StatusRunning, flowID, flowToken, workflow.StatusCancelled,
 			)
 		}
@@ -327,7 +327,7 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 				continue
 			}
 			tx.ExecContext(ctx,
-				"UPDATE microbus_flows SET status=?, error='', cancel_reason='', final_state='{}', updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=? AND status<>?",
+				"UPDATE dwarf_flows SET status=?, error='', cancel_reason='', final_state='{}', updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=? AND status<>?",
 				workflow.StatusRunning, p.flowID, p.flowToken, workflow.StatusCancelled,
 			)
 		}
@@ -368,8 +368,8 @@ func (e *Engine) collectDAGSubtree(ctx context.Context, db interface {
 	for len(frontier) > 0 {
 		ph := strings.Repeat("?,", len(frontier)-1) + "?"
 		args := append([]any{flowID}, frontier...)
-		query := "SELECT step_id, lineage_id, status FROM microbus_steps WHERE flow_id=? AND (" +
-			"step_id IN (SELECT successor_id FROM microbus_steps WHERE step_id IN (" + ph + ") AND successor_id<>0)" +
+		query := "SELECT step_id, lineage_id, status FROM dwarf_steps WHERE flow_id=? AND (" +
+			"step_id IN (SELECT successor_id FROM dwarf_steps WHERE step_id IN (" + ph + ") AND successor_id<>0)" +
 			" OR predecessor_id IN (" + ph + "))"
 		args = append(args, frontier...)
 		rows, err := db.QueryContext(ctx, query, args...)
@@ -401,7 +401,7 @@ func (e *Engine) allDescendantSubgraphFlows(ctx context.Context, db interface {
 	current := []any{flowID}
 	for len(current) > 0 {
 		ph := strings.Repeat("?,", len(current)-1) + "?"
-		rows, err := db.QueryContext(ctx, "SELECT flow_id FROM microbus_flows WHERE surgraph_flow_id IN ("+ph+")", current...)
+		rows, err := db.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id IN ("+ph+")", current...)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -422,7 +422,7 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }, surgraphStepID int) error {
 	var rootChildren []int
-	rows, err := tx.QueryContext(ctx, "SELECT flow_id FROM microbus_flows WHERE surgraph_step_id=?", surgraphStepID)
+	rows, err := tx.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?", surgraphStepID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -442,7 +442,7 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx interface {
 	}
 	for len(current) > 0 {
 		ph := strings.Repeat("?,", len(current)-1) + "?"
-		nestedRows, err := tx.QueryContext(ctx, "SELECT flow_id FROM microbus_flows WHERE surgraph_flow_id IN ("+ph+")", current...)
+		nestedRows, err := tx.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id IN ("+ph+")", current...)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -460,8 +460,8 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx interface {
 		args = append(args, id)
 	}
 	ph := strings.Repeat("?,", len(allIDs)-1) + "?"
-	tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id IN ("+ph+")", args...)
-	tx.ExecContext(ctx, "DELETE FROM microbus_flows WHERE flow_id IN ("+ph+")", args...)
+	tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN ("+ph+")", args...)
+	tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id IN ("+ph+")", args...)
 	return nil
 }
 
@@ -474,21 +474,21 @@ func (e *Engine) undoCohortBumps(ctx context.Context, tx interface {
 	}
 	var priorArrivals, priorFailures, size, lineageID int
 	tx.QueryRowContext(ctx,
-		"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM microbus_steps WHERE step_id=?",
+		"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM dwarf_steps WHERE step_id=?",
 		spawnID,
 	).Scan(&priorArrivals, &size, &priorFailures, &lineageID)
 	tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET cohort_arrivals = cohort_arrivals - ?, cohort_failures = cohort_failures - ? WHERE step_id=?",
+		"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals - ?, cohort_failures = cohort_failures - ? WHERE step_id=?",
 		arrivalsDelta, failuresDelta, spawnID,
 	)
 	for priorArrivals >= size && priorFailures > 0 && lineageID != 0 {
 		parent := lineageID
 		tx.QueryRowContext(ctx,
-			"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM microbus_steps WHERE step_id=?",
+			"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM dwarf_steps WHERE step_id=?",
 			parent,
 		).Scan(&priorArrivals, &size, &priorFailures, &lineageID)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET cohort_arrivals = cohort_arrivals - 1, cohort_failures = cohort_failures - 1 WHERE step_id=?",
+			"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals - 1, cohort_failures = cohort_failures - 1 WHERE step_id=?",
 			parent,
 		)
 	}

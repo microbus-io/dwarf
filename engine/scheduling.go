@@ -107,13 +107,13 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 
 	e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		db.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, updated_at=NOW_UTC() WHERE status=? AND parked=0 AND lease_expires<=NOW_UTC()",
+			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE status=? AND parked=0 AND lease_expires<=NOW_UTC()",
 			workflow.StatusPending, workflow.StatusRunning,
 		)
 
 		var nearestMs sql.NullFloat64
 		db.QueryRowContext(ctx,
-			"SELECT DATE_DIFF_MILLIS(MIN(not_before), NOW_UTC()) FROM microbus_steps"+
+			"SELECT DATE_DIFF_MILLIS(MIN(not_before), NOW_UTC()) FROM dwarf_steps"+
 				" WHERE status=? AND parked=0 AND not_before>NOW_UTC() AND not_before<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND lease_expires<=NOW_UTC()",
 			workflow.StatusPending, maxPollInterval.Milliseconds(),
 		).Scan(&nearestMs)
@@ -124,7 +124,7 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 
 		var dueExists sql.NullInt64
 		err := db.QueryRowContext(ctx,
-			"SELECT 1 FROM microbus_steps WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() ORDER BY step_id LIMIT_OFFSET(1, 0)",
+			"SELECT 1 FROM dwarf_steps WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() ORDER BY step_id LIMIT_OFFSET(1, 0)",
 			workflow.StatusPending,
 		).Scan(&dueExists)
 		if err == nil && (shardNearestDelay < 0 || shardNearestDelay > backlogPollInterval) {
@@ -136,7 +136,7 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 		// for the next maxPollInterval sweep.
 		var leaseMs sql.NullFloat64
 		db.QueryRowContext(ctx,
-			"SELECT DATE_DIFF_MILLIS(MIN(lease_expires), NOW_UTC()) FROM microbus_steps"+
+			"SELECT DATE_DIFF_MILLIS(MIN(lease_expires), NOW_UTC()) FROM dwarf_steps"+
 				" WHERE status=? AND parked=0 AND lease_expires>NOW_UTC() AND lease_expires<=DATE_ADD_MILLIS(NOW_UTC(), ?)",
 			workflow.StatusRunning, maxPollInterval.Milliseconds(),
 		).Scan(&leaseMs)
@@ -191,9 +191,9 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 	results := make([]*shardResult, numShards+1)
 	err := e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
-			"SELECT step_id, task_name, fairness_key, fairness_weight, priority, DATE_DIFF_MILLIS(NOW_UTC(), created_at) FROM microbus_steps"+
+			"SELECT step_id, task_name, fairness_key, fairness_weight, priority, DATE_DIFF_MILLIS(NOW_UTC(), created_at) FROM dwarf_steps"+
 				" WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?"+
-				" AND priority=(SELECT MIN(priority) FROM microbus_steps"+
+				" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
 				" WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?)"+
 				" ORDER BY step_id",
 			workflow.StatusPending, prevBand, workflow.StatusPending, prevBand,

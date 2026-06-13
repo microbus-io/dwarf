@@ -1,5 +1,5 @@
 -- DRIVER: mysql
-CREATE TABLE IF NOT EXISTS microbus_flows (
+CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              BIGINT       NOT NULL AUTO_INCREMENT,
     flow_token           CHAR(16)     NOT NULL,
     workflow_name        VARCHAR(512) NOT NULL,
@@ -26,15 +26,15 @@ CREATE TABLE IF NOT EXISTS microbus_flows (
     started_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (flow_id),
-    INDEX idx_microbus_flows_status (status, updated_at),
-    INDEX idx_microbus_flows_workflow_name (workflow_name),
-    INDEX idx_microbus_flows_surgraph (surgraph_flow_id),
-    INDEX idx_microbus_flows_thread (thread_id, flow_id),
-    INDEX idx_microbus_flows_created_at (created_at)
+    INDEX idx_dwarf_flows_status (status, updated_at),
+    INDEX idx_dwarf_flows_workflow_name (workflow_name),
+    INDEX idx_dwarf_flows_surgraph (surgraph_flow_id),
+    INDEX idx_dwarf_flows_thread (thread_id, flow_id),
+    INDEX idx_dwarf_flows_created_at (created_at)
 );
 
 -- DRIVER: pgx
-CREATE TABLE IF NOT EXISTS microbus_flows (
+CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              BIGSERIAL    NOT NULL,
     flow_token           CHAR(16)     NOT NULL,
     workflow_name        VARCHAR(512) NOT NULL,
@@ -64,22 +64,22 @@ CREATE TABLE IF NOT EXISTS microbus_flows (
 );
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_flows_status ON microbus_flows (status, updated_at);
+CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_flows_workflow_name ON microbus_flows (workflow_name);
+CREATE INDEX idx_dwarf_flows_workflow_name ON dwarf_flows (workflow_name);
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_flows_surgraph ON microbus_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
+CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_flows_thread ON microbus_flows (thread_id, flow_id);
+CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
 
 -- DRIVER: pgx
-CREATE INDEX idx_microbus_flows_created_at ON microbus_flows (created_at);
+CREATE INDEX idx_dwarf_flows_created_at ON dwarf_flows (created_at);
 
 -- DRIVER: mssql
-CREATE TABLE microbus_flows (
+CREATE TABLE dwarf_flows (
     flow_id              BIGINT        NOT NULL IDENTITY(1,1),
     flow_token           NCHAR(16)     NOT NULL,
     workflow_name        NVARCHAR(512) NOT NULL,
@@ -109,22 +109,22 @@ CREATE TABLE microbus_flows (
 );
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_flows_status ON microbus_flows (status, updated_at);
+CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_flows_workflow_name ON microbus_flows (workflow_name);
+CREATE INDEX idx_dwarf_flows_workflow_name ON dwarf_flows (workflow_name);
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_flows_surgraph ON microbus_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
+CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_flows_thread ON microbus_flows (thread_id, flow_id);
+CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
 
 -- DRIVER: mssql
-CREATE INDEX idx_microbus_flows_created_at ON microbus_flows (created_at);
+CREATE INDEX idx_dwarf_flows_created_at ON dwarf_flows (created_at);
 
 -- DRIVER: sqlite
-CREATE TABLE IF NOT EXISTS microbus_flows (
+CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              INTEGER      NOT NULL PRIMARY KEY AUTOINCREMENT,
     flow_token           TEXT         NOT NULL,
     workflow_name        TEXT         NOT NULL,
@@ -153,16 +153,16 @@ CREATE TABLE IF NOT EXISTS microbus_flows (
 );
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_flows_status ON microbus_flows (status, updated_at);
+CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_flows_workflow_name ON microbus_flows (workflow_name);
+CREATE INDEX idx_dwarf_flows_workflow_name ON dwarf_flows (workflow_name);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_flows_surgraph ON microbus_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
+CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_flows_thread ON microbus_flows (thread_id, flow_id);
+CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_microbus_flows_created_at ON microbus_flows (created_at);
+CREATE INDEX idx_dwarf_flows_created_at ON dwarf_flows (created_at);

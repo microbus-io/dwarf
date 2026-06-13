@@ -102,7 +102,7 @@ func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
 		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-			"INSERT INTO microbus_flows (flow_token, workflow_name, graph, actor_claims, status, priority, fairness_key, fairness_weight)"+
+			"INSERT INTO dwarf_flows (flow_token, workflow_name, graph, actor_claims, status, priority, fairness_key, fairness_weight)"+
 				" VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			flowToken, workflowName, string(graphJSON), string(metadataJSON), workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
 		)
@@ -117,7 +117,7 @@ func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken
 			}
 		}
 		newStepID, err := tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
 				" VALUES (?, 1, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
 			newFlowID, stepToken, entryPoint, string(stateJSON), workflow.StatusCreated, timeBudget.Milliseconds(), startDelayMs, leaseMargin.Milliseconds(), opts.Priority, opts.FairnessKey, opts.FairnessWeight,
 		)
@@ -133,7 +133,7 @@ func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken
 			ttok = flowToken
 		}
 		tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET thread_id=?, thread_token=?, step_id=?, updated_at=NOW_UTC() WHERE flow_id=?",
+			"UPDATE dwarf_flows SET thread_id=?, thread_token=?, step_id=?, updated_at=NOW_UTC() WHERE flow_id=?",
 			tid, ttok, newStepID, newFlowID,
 		)
 		return nil
@@ -155,7 +155,7 @@ func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname
 	var flowStatus string
 	var stepID int
 	err = db.QueryRowContext(ctx,
-		"SELECT status, step_id FROM microbus_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT status, step_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
 	).Scan(&flowStatus, &stepID)
 	if err == sql.ErrNoRows {
@@ -172,7 +172,7 @@ func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname
 	notifyHostname = strings.TrimSpace(notifyHostname)
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
+			"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
 			workflow.StatusPending, flowID, workflow.StatusCreated,
 		); err != nil {
 			return errors.Trace(err)
@@ -184,7 +184,7 @@ func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname
 			return errors.Trace(err)
 		}
 		res, err := tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET status=?, notify_hostname=?, started_at=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
+			"UPDATE dwarf_flows SET status=?, notify_hostname=?, started_at=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
 			workflow.StatusRunning, notifyHostname, flowID, workflow.StatusCreated,
 		)
 		if err != nil {
@@ -223,7 +223,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	var flowErrorMsg string
 	var flowCancelReason string
 	err = db.QueryRowContext(ctx,
-		"SELECT status, final_state, error, cancel_reason FROM microbus_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT status, final_state, error, cancel_reason FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
 	).Scan(&flowStatus, &finalStateJSON, &flowErrorMsg, &flowCancelReason)
 	if err == sql.ErrNoRows {
@@ -261,7 +261,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 		var stepStateJSON, stepChangesJSON string
 		var interruptPayloadJSON sql.NullString
 		err = db.QueryRowContext(ctx,
-			"SELECT state, changes, interrupt_payload FROM microbus_steps"+
+			"SELECT state, changes, interrupt_payload FROM dwarf_steps"+
 				" WHERE flow_id=? AND status=? ORDER BY step_depth DESC, step_id DESC LIMIT_OFFSET(1, 0)",
 			flowID, workflow.StatusInterrupted,
 		).Scan(&stepStateJSON, &stepChangesJSON, &interruptPayloadJSON)
@@ -377,7 +377,7 @@ func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 	var notBeforeDelayMs sql.NullFloat64
 	if db, err := e.shard(shard); err == nil {
 		db.QueryRowContext(ctx,
-			"SELECT priority, DATE_DIFF_MILLIS(not_before, NOW_UTC()) FROM microbus_steps WHERE step_id=?",
+			"SELECT priority, DATE_DIFF_MILLIS(not_before, NOW_UTC()) FROM dwarf_steps WHERE step_id=?",
 			stepID,
 		).Scan(&priority, &notBeforeDelayMs)
 	}
@@ -407,7 +407,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 
 	var flowStatus string
 	err = db.QueryRowContext(ctx,
-		"SELECT status FROM microbus_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
 	).Scan(&flowStatus)
 	if err == sql.ErrNoRows {
@@ -442,7 +442,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
 		stepArgs = append(stepArgs, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?, ?, ?)",
+			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?, ?, ?)",
 			stepArgs...,
 		)
 
@@ -451,7 +451,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 			surgraphStepArgs := append([]any{workflow.StatusCancelled, parkedNone}, surgraphStepIDs...)
 			surgraphStepArgs = append(surgraphStepArgs, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning)
 			tx.ExecContext(ctx,
-				"UPDATE microbus_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+surgraphStepPlaceholders+") AND status IN (?, ?, ?, ?)",
+				"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+surgraphStepPlaceholders+") AND status IN (?, ?, ?, ?)",
 				surgraphStepArgs...,
 			)
 		}
@@ -475,7 +475,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		flowArgs = append(flowArgs, allFlowIDs...)
 		flowArgs = append(flowArgs, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled)
 		res, err := tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN (?, ?, ?)",
+			"UPDATE dwarf_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN (?, ?, ?)",
 			flowArgs...,
 		)
 		if err != nil {
@@ -493,7 +493,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	rootIdx := len(surgraphFlowIDs) - 1
 	rootCompositeID := surgraphCompositeIDs[rootIdx]
 	var rootNotifyHostname string
-	db.QueryRowContext(ctx, "SELECT notify_hostname FROM microbus_flows WHERE flow_id=?", surgraphFlowIDs[rootIdx]).Scan(&rootNotifyHostname)
+	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", surgraphFlowIDs[rootIdx]).Scan(&rootNotifyHostname)
 	rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
 	if rootNotifyHostname != "" && e.flowStoppedCallback != nil {
 		var finalState map[string]any
@@ -526,7 +526,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
 		var flowStatus string
 		err := tx.QueryRowContext(ctx,
-			"SELECT status FROM microbus_flows WHERE flow_id=? AND flow_token=?",
+			"SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 			flowID, flowToken,
 		).Scan(&flowStatus)
 		if err == sql.ErrNoRows {
@@ -538,9 +538,9 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		if strings.TrimSpace(flowStatus) == workflow.StatusRunning {
 			return errors.New("cannot delete a running flow; cancel it first", http.StatusConflict)
 		}
-		tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id=?", flowID)
+		tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id=?", flowID)
 		tx.ExecContext(ctx,
-			"DELETE FROM microbus_flows WHERE flow_id=? AND flow_token=? AND status<>?",
+			"DELETE FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND status<>?",
 			flowID, flowToken, workflow.StatusRunning,
 		)
 		return nil

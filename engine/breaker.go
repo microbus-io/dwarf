@@ -87,7 +87,7 @@ func (e *Engine) parkTrippedSteps(ctx context.Context, tx sequel.Executor, flowI
 	// Pull only the task names that actually appear in this flow's pending set so we
 	// avoid running a per-task UPDATE for tasks that aren't in this graph.
 	rows, err := tx.QueryContext(ctx,
-		"SELECT DISTINCT task_name FROM microbus_steps WHERE flow_id=? AND status=? AND parked=?",
+		"SELECT DISTINCT task_name FROM dwarf_steps WHERE flow_id=? AND status=? AND parked=?",
 		flowID, workflow.StatusPending, parkedNone,
 	)
 	if err != nil {
@@ -109,7 +109,7 @@ func (e *Engine) parkTrippedSteps(ctx context.Context, tx sequel.Executor, flowI
 	}
 	for _, name := range affectedTasks {
 		_, err = tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET parked=?, updated_at=NOW_UTC() WHERE flow_id=? AND task_name=? AND status=? AND parked=?",
+			"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE flow_id=? AND task_name=? AND status=? AND parked=?",
 			parkedBreaker, flowID, name, workflow.StatusPending, parkedNone,
 		)
 		if err != nil {
@@ -131,7 +131,7 @@ func (e *Engine) parkTrippedSteps(ctx context.Context, tx sequel.Executor, flowI
 func (e *Engine) reconstituteBreakers(ctx context.Context) error {
 	return e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
-			"SELECT DISTINCT task_name FROM microbus_steps WHERE parked=? AND status=?",
+			"SELECT DISTINCT task_name FROM dwarf_steps WHERE parked=? AND status=?",
 			parkedBreaker, workflow.StatusPending,
 		)
 		if err != nil {

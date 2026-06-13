@@ -38,7 +38,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if sequel.IsLockContentionError(err) {
 			if db, derr := e.shard(shardNum); derr == nil {
 				db.ExecContext(ctx,
-					"UPDATE microbus_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+					"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 					workflow.StatusPending, stepID, workflow.StatusRunning,
 				)
 			}
@@ -65,7 +65,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	switch db.DriverName() {
 	case "pgx", "sqlite":
 		err = db.QueryRowContext(ctx,
-			"UPDATE microbus_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC(),"+
+			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
 				" RETURNING step_depth, task_name, state, changes, breakpoint_hit, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error",
@@ -78,7 +78,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 	case "mssql":
 		err = db.QueryRowContext(ctx,
-			"UPDATE microbus_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC(),"+
+			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.state, INSERTED.changes, INSERTED.breakpoint_hit, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error"+
 				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
@@ -97,7 +97,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		go func() {
 			defer wg.Done()
 			res, e := db.ExecContext(ctx,
-				"UPDATE microbus_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC(),"+
+				"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC(),"+
 					" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 					" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
 				workflow.StatusRunning, leaseMs, stepID, workflow.StatusPending, parkedNone,
@@ -111,7 +111,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		go func() {
 			defer wg.Done()
 			e := db.QueryRowContext(ctx,
-				"SELECT step_depth, task_name, state, changes, breakpoint_hit, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error FROM microbus_steps WHERE step_id=?",
+				"SELECT step_depth, task_name, state, changes, breakpoint_hit, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error FROM dwarf_steps WHERE step_id=?",
 				stepID,
 			).Scan(&stepDepth, &taskName, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr)
 			if e != nil && e != sql.ErrNoRows {
@@ -140,7 +140,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	var flowFairnessKey string
 	var flowFairnessWeight float64
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_token, status, workflow_name, graph, actor_claims, notify_hostname, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM microbus_flows WHERE flow_id=?",
+		"SELECT flow_token, status, workflow_name, graph, actor_claims, notify_hostname, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
 		flowID,
 	).Scan(&flowToken, &flowStatus, &workflowName, &graphJSON, &metadataJSON, &notifyHostname, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight)
 	if err != nil {
@@ -151,7 +151,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	flowToken = strings.TrimSpace(flowToken)
 	if flowStatus == workflow.StatusCancelled || flowStatus == workflow.StatusFailed || flowStatus == workflow.StatusCompleted {
 		_, err = db.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+			"UPDATE dwarf_steps SET status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
 			flowStatus, parkedNone, stepID,
 		)
 		return errors.Trace(err)
@@ -324,7 +324,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if subgraphWorkflow, subgraphInput, subgraphRequested := resultFlow.SubgraphRequested(); subgraphRequested {
 		e.logger.LogDebug(ctx, "Task requested subgraph", "task", taskName, "flow", workflowName, "subgraph", subgraphWorkflow)
 		db.ExecContext(ctx,
-			"UPDATE microbus_steps SET changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+			"UPDATE dwarf_steps SET changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 			string(changesJSON), stepID, workflow.StatusRunning,
 		)
 		subgraphGraph, err := e.graphLoader(ctx, subgraphWorkflow, metadata)
@@ -347,7 +347,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			return errors.Trace(err)
 		}
 		db.ExecContext(ctx,
-			"UPDATE microbus_steps SET parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+			"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 			parkedSubgraph, stepID, workflow.StatusRunning,
 		)
 		return nil
@@ -372,7 +372,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			retrySleepMs = time.Duration(delay).Milliseconds()
 		}
 		db.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='' WHERE step_id=?",
+			"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='' WHERE step_id=?",
 			workflow.StatusPending, string(changesJSON), attempt+1, retrySleepMs, stepID,
 		)
 		if retrySleepMs > 0 {
@@ -391,7 +391,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 	gotoTarget := resultFlow.GotoRequested()
 	stepRes, err := db.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, changes=?, goto_next=?, updated_at=NOW_UTC() WHERE step_id=? AND status!=?",
+		"UPDATE dwarf_steps SET status=?, changes=?, goto_next=?, updated_at=NOW_UTC() WHERE step_id=? AND status!=?",
 		workflow.StatusCompleted, string(changesJSON), gotoTarget, stepID, workflow.StatusCancelled,
 	)
 	if err != nil {
@@ -474,7 +474,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		flowFailed = false
 		flowFailedErr, flowFailedFinalState = "", ""
 
-		tx.ExecContext(ctx, "UPDATE microbus_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
+		tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
 
 		for i, next := range normalNexts {
 			stepStateJSON := childInputJSON
@@ -493,7 +493,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			}
 			nextTimeBudget := e.taskTimeBudget()
 			newStepID, err := tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
 				flowID, nextStepDepth, randomIdentifier(16), next.taskName, string(stepStateJSON), workflow.StatusPending, e.initialParkedFor(next.taskName), nextTimeBudget.Milliseconds(), childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
 			)
@@ -504,19 +504,19 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 
 		if len(newStepIDs) > 0 {
-			tx.ExecContext(ctx, "UPDATE microbus_steps SET successor_id=? WHERE step_id=?", newStepIDs[0], stepID)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET successor_id=? WHERE step_id=?", newStepIDs[0], stepID)
 		}
 
 		if isPushTransition {
-			tx.ExecContext(ctx, "UPDATE microbus_steps SET cohort_size=? WHERE step_id=?", cohortSize, stepID)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=? WHERE step_id=?", cohortSize, stepID)
 			e.logger.LogDebug(ctx, "Fan-out cohort spawned", "flow", flowID, "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
 		}
 
 		if fanInArrivals > 0 {
-			tx.ExecContext(ctx, "UPDATE microbus_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?", fanInArrivals, cohortSpawnID)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?", fanInArrivals, cohortSpawnID)
 			var arrivals, size, failures, spawnLineageID int
 			if err := tx.QueryRowContext(ctx,
-				"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM microbus_steps WHERE step_id=?",
+				"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM dwarf_steps WHERE step_id=?",
 				cohortSpawnID,
 			).Scan(&arrivals, &size, &failures, &spawnLineageID); err != nil {
 				return errors.Trace(err)
@@ -536,7 +536,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 				if failFlow {
 					var sampleErr string
 					tx.QueryRowContext(ctx,
-						"SELECT error FROM microbus_steps WHERE flow_id=? AND status=? AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
+						"SELECT error FROM dwarf_steps WHERE flow_id=? AND status=? AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
 						flowID, workflow.StatusFailed,
 					).Scan(&sampleErr)
 					sampleErr = strings.TrimSpace(sampleErr)
@@ -548,7 +548,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 						return errors.Trace(cfsErr)
 					}
 					tx.ExecContext(ctx,
-						"UPDATE microbus_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+						"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
 						finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
 						workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 					)
@@ -564,7 +564,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			nextFlowStepID = newStepIDs[0]
 		}
 		if !flowFailed {
-			tx.ExecContext(ctx, "UPDATE microbus_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", nextFlowStepID, flowID)
+			tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", nextFlowStepID, flowID)
 		}
 		return nil
 	})
@@ -609,7 +609,7 @@ func (e *Engine) handleBreakpoint(ctx context.Context, shardNum int, db *sequel.
 		flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
 		flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
+			"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
 			flowArgs...,
 		)
 
@@ -618,10 +618,10 @@ func (e *Engine) handleBreakpoint(ctx context.Context, shardNum int, db *sequel.
 		stepArgs := append([]any{workflow.StatusInterrupted}, allStepIDs...)
 		stepArgs = append(stepArgs, workflow.StatusRunning, workflow.StatusInterrupted)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
+			"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
 			stepArgs...,
 		)
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET breakpoint_hit=1 WHERE step_id=?", stepID)
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET breakpoint_hit=1 WHERE step_id=?", stepID)
 		return nil
 	})
 	if err != nil {
@@ -636,7 +636,7 @@ func (e *Engine) handleBreakpoint(ctx context.Context, shardNum int, db *sequel.
 	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1]
 	if e.flowStoppedCallback != nil {
 		var rootNotifyHostname string
-		db.QueryRowContext(ctx, "SELECT notify_hostname FROM microbus_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
+		db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
 		rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
 		if rootNotifyHostname != "" {
 			e.flowStoppedCallback(ctx, rootNotifyHostname, &workflow.FlowOutcome{
@@ -660,7 +660,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
 		flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
+			"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
 			flowArgs...,
 		)
 
@@ -670,7 +670,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		stepArgs = append(stepArgs, allStepIDs...)
 		stepArgs = append(stepArgs, workflow.StatusRunning, workflow.StatusInterrupted)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
+			"UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
 			stepArgs...,
 		)
 
@@ -679,7 +679,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 			payloadArgs := []any{string(payloadJSON)}
 			payloadArgs = append(payloadArgs, allStepIDs...)
 			tx.ExecContext(ctx,
-				"UPDATE microbus_steps SET interrupt_payload=? WHERE step_id IN ("+stepPlaceholders+") AND interrupt_payload='{}'",
+				"UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+stepPlaceholders+") AND interrupt_payload='{}'",
 				payloadArgs...,
 			)
 		}
@@ -697,7 +697,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1]
 	if e.flowStoppedCallback != nil {
 		var rootNotifyHostname string
-		db.QueryRowContext(ctx, "SELECT notify_hostname FROM microbus_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
+		db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
 		rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
 		if rootNotifyHostname != "" {
 			e.flowStoppedCallback(ctx, rootNotifyHostname, &workflow.FlowOutcome{
@@ -718,7 +718,7 @@ func (e *Engine) handleBackpressure(ctx context.Context, shardNum, stepID int, t
 		return errors.Trace(err)
 	}
 	res, err := db.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+		"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 		workflow.StatusPending, stepID, workflow.StatusRunning,
 	)
 	if err != nil {
@@ -825,17 +825,17 @@ func (e *Engine) breakerBulkPark(ctx context.Context, taskName string, nextProbe
 		return db.Transact(ctx, func(tx *sequel.Tx) error {
 			if shard == failedShard && failedStepID != 0 {
 				tx.ExecContext(ctx,
-					"UPDATE microbus_steps SET status=?, parked=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+					"UPDATE dwarf_steps SET status=?, parked=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 					workflow.StatusPending, parkedBreaker, failedStepID, workflow.StatusRunning,
 				)
 			}
 			tx.ExecContext(ctx,
-				"UPDATE microbus_steps SET parked=?, updated_at=NOW_UTC() WHERE task_name=? AND status=? AND parked IN (?,?)",
+				"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE task_name=? AND status=? AND parked IN (?,?)",
 				parkedBreaker, taskName, workflow.StatusPending, parkedNone, parkedBreaker,
 			)
 			var probeID int
 			err := tx.QueryRowContext(ctx,
-				"SELECT step_id FROM microbus_steps WHERE task_name=? AND status=? AND parked=? ORDER BY created_at ASC, step_id ASC LIMIT_OFFSET(1, 0)",
+				"SELECT step_id FROM dwarf_steps WHERE task_name=? AND status=? AND parked=? ORDER BY created_at ASC, step_id ASC LIMIT_OFFSET(1, 0)",
 				taskName, workflow.StatusPending, parkedBreaker,
 			).Scan(&probeID)
 			if err == sql.ErrNoRows {
@@ -845,7 +845,7 @@ func (e *Engine) breakerBulkPark(ctx context.Context, taskName string, nextProbe
 				return errors.Trace(err)
 			}
 			tx.ExecContext(ctx,
-				"UPDATE microbus_steps SET parked=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+				"UPDATE dwarf_steps SET parked=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 				parkedNone, probeBackoffMs, probeID, workflow.StatusPending,
 			)
 			return nil
@@ -860,7 +860,7 @@ func (e *Engine) breakerBulkUnpark(ctx context.Context, taskName string, shardNu
 		return
 	}
 	db.ExecContext(ctx,
-		"UPDATE microbus_steps SET parked=?, updated_at=NOW_UTC() WHERE task_name=? AND parked=?",
+		"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE task_name=? AND parked=?",
 		parkedNone, taskName, parkedBreaker,
 	)
 }
@@ -869,11 +869,11 @@ func (e *Engine) breakerBulkUnpark(ctx context.Context, taskName string, shardNu
 func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget string, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64) error {
 	var fanInStepID int64
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
-		tx.ExecContext(ctx, "UPDATE microbus_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET cohort_size=0 WHERE step_id=?", stepID)
+		tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=0 WHERE step_id=?", stepID)
 
 		var ourStateJSON, ourChangesJSON string
-		tx.QueryRowContext(ctx, "SELECT state, changes FROM microbus_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON)
+		tx.QueryRowContext(ctx, "SELECT state, changes FROM dwarf_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON)
 		var ourState, ourChanges map[string]any
 		unmarshalJSONMap(ourStateJSON, &ourState)
 		unmarshalJSONMap(ourChangesJSON, &ourChanges)
@@ -885,15 +885,15 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		nextTimeBudget := e.taskTimeBudget()
 		var err error
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
 			flowID, nextStepDepth, randomIdentifier(16), fanInTarget, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInTarget), nextTimeBudget.Milliseconds(), lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET successor_id=? WHERE step_id=?", int(fanInStepID), stepID)
-		tx.ExecContext(ctx, "UPDATE microbus_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", int(fanInStepID), flowID)
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET successor_id=? WHERE step_id=?", int(fanInStepID), stepID)
+		tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", int(fanInStepID), flowID)
 		return nil
 	})
 	if err != nil {
@@ -913,7 +913,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	var spawnStateJSON, spawnChangesJSON, spawnTaskName string
 	var spawnLineageID int
 	tx.QueryRowContext(ctx,
-		"SELECT state, changes, lineage_id, task_name FROM microbus_steps WHERE step_id=?",
+		"SELECT state, changes, lineage_id, task_name FROM dwarf_steps WHERE step_id=?",
 		cohortSpawnID,
 	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnLineageID, &spawnTaskName)
 	var spawnState, spawnChanges map[string]any
@@ -922,7 +922,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	merged, _ := workflow.MergeState(spawnState, spawnChanges, graph.Reducers())
 
 	rows, err := tx.QueryContext(ctx,
-		"SELECT status, changes FROM microbus_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_id",
+		"SELECT status, changes FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_id",
 		flowID, cohortSpawnID,
 	)
 	if err != nil {
@@ -955,7 +955,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	mergedJSON, _ := json.Marshal(merged)
 	nextTimeBudget := e.taskTimeBudget()
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
-		"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
 		flowID, nextStepDepth, randomIdentifier(16), fanInTaskName, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInTaskName), nextTimeBudget.Milliseconds(), spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
 	)
@@ -971,7 +971,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 			args = append(args, t)
 		}
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET successor_id=? WHERE flow_id=? AND lineage_id=? AND task_name IN ("+placeholders+")",
+			"UPDATE dwarf_steps SET successor_id=? WHERE flow_id=? AND lineage_id=? AND task_name IN ("+placeholders+")",
 			args...,
 		)
 	}

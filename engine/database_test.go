@@ -46,12 +46,12 @@ func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
 	db, err := e.shard(1)
 	assert.NoError(err)
 	var count int
-	err = db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM microbus_flows").Scan(&count)
+	err = db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_flows").Scan(&count)
 	assert.NoError(err)
 	assert.Equal(0, count)
 
 	// Verify steps table exists too.
-	err = db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM microbus_steps").Scan(&count)
+	err = db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_steps").Scan(&count)
 	assert.NoError(err)
 	assert.Equal(0, count)
 }

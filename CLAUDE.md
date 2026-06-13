@@ -111,7 +111,7 @@ flow to `running` in one transaction, then rings the doorbell for the current st
 `FlowStoppedCallback` with that hostname and a `*workflow.FlowOutcome`.
 
 **Snapshot** - Returns the current state, status, task name, and step number. During fan-out (`step_id=0`), it queries
-`microbus_steps` directly for the active steps.
+`dwarf_steps` directly for the active steps.
 
 **Resume** - Continues a flow paused by `flow.Interrupt`. Walks up the surgraph chain (`surgraphChain`) and down the
 interrupted subgraph chain (`interruptedSubgraphChain`) to the leaf interrupted step. Records resume data on the
@@ -409,7 +409,7 @@ branch regardless of attempts, so retry can't double-count.
 so an entire per-element sub-pipeline collapses into a single lineage and cannot reconstruct true parent/child
 structure.
 
-`microbus_steps.predecessor_id` and `successor_id` (migration `7.sql`) record the actual execution edges, so the DAG
+`dwarf_steps.predecessor_id` and `successor_id` (migration `7.sql`) record the actual execution edges, so the DAG
 is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
 
 - **Linear** `X->Y`: `Y.predecessor_id=X` (at insert) and `X.successor_id=Y` (post-loop UPDATE in `processStep`).
@@ -671,8 +671,8 @@ concurrency). Operators with a different workload mix (longer DB-hold, larger sh
 
 ### Flow Scheduling (priority / fairness)
 
-`8.sql` adds `priority`, `fairness_key`, `fairness_weight` to **both** `microbus_flows` (authoritative) and
-`microbus_steps` (denormalized), so the two-level selection never joins `microbus_flows` on the hot path - the same
+`8.sql` adds `priority`, `fairness_key`, `fairness_weight` to **both** `dwarf_flows` (authoritative) and
+`dwarf_steps` (denormalized), so the two-level selection never joins `dwarf_flows` on the hot path - the same
 split used for `time_budget_ms`/`actor_claims`.
 
 `resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to
@@ -789,7 +789,7 @@ rule - taken from the oldest *admissible* step.
 
 ### Step Parking (`parked` column)
 
-`microbus_steps.parked SMALLINT NOT NULL DEFAULT 0` takes a step out of the selection band without changing its
+`dwarf_steps.parked SMALLINT NOT NULL DEFAULT 0` takes a step out of the selection band without changing its
 `status`. The selection index `(status, parked, priority, fairness_key)` and saturation index
 `(status, parked, task_name)` lead with the partitioning columns, so parked rows are physically excluded from every
 hot-path scan - no in-memory filter at refill time. The `parked` value labels *why* the step is held:
@@ -909,7 +909,7 @@ rows) - a one-dispatch-per-replica bounded window. The state is a single `trippe
 **Reconstitution on startup.** A restarting replica's in-memory breaker map is empty, but `parked=parkedBreaker` rows
 survive in the DB and are invisible to selection. `reconstituteBreakers` (called inside Startup between the
 breakers-map init and the worker goroutines starting) scans each shard for `SELECT DISTINCT task_name FROM
-microbus_steps WHERE parked=parkedBreaker AND status=pending` and calls `breakerTrip(taskName)` for each. The schedule
+dwarf_steps WHERE parked=parkedBreaker AND status=pending` and calls `breakerTrip(taskName)` for each. The schedule
 starts fresh on this replica (first probe at `now+100ms`), independent of peers. No gossip - sending our `time.Now()`
 would clobber peers' accumulated `probeAttempt`. The DB-side state is already what `breakerBulkPark` would produce,
 so no SQL writes are issued. If the task was fixed during downtime, the first reconstituted probe succeeds and
@@ -926,11 +926,10 @@ transition, or propagate as flow failure). The breaker is specifically for "I ca
 
 ## Schema Column Catalog
 
-The `resources/sql/*.sql` migration files carry **no prose comments by design** - only the functional
-`-- DRIVER: <dialect>` directives the `sequel` runner parses. All schema rationale lives here. (The table names
-`microbus_*` are retained verbatim from the engine's origin.)
+The `migrations/*.sql` migration files carry **no prose comments by design** - only the functional
+`-- DRIVER: <dialect>` directives the `sequel` runner parses. All schema rationale lives here.
 
-#### `microbus_flows`
+#### `dwarf_flows`
 
 | Column | Meaning |
 |---|---|
@@ -960,7 +959,7 @@ The `resources/sql/*.sql` migration files carry **no prose comments by design** 
 | `cancel_reason` | (`9.sql`) Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
 | `tenant_id` | (`9.sql`) Tenant identifier supplied by the host at flow creation. `0` is the no-tenant sentinel. Inherited by subgraph. Immutable. Filterable via `Query.TenantID` |
 
-#### `microbus_steps`
+#### `dwarf_steps`
 
 | Column | Meaning |
 |---|---|
@@ -1001,7 +1000,7 @@ The `resources/sql/*.sql` migration files carry **no prose comments by design** 
 
 ## Database Indexing Strategy
 
-The `microbus_flows` and `microbus_steps` tables grow indefinitely. The indexing strategy keeps hot-path queries fast
+The `dwarf_flows` and `dwarf_steps` tables grow indefinitely. The indexing strategy keeps hot-path queries fast
 without fragmentation or excessive write amplification.
 
 ### Design Principles
@@ -1016,27 +1015,27 @@ without fragmentation or excessive write amplification.
 
 ### Index Catalog
 
-#### `microbus_flows`
+#### `dwarf_flows`
 
 | Index | Columns | Purpose |
 |---|---|---|
 | PK | `(flow_id)` | Row lookups by flow ID |
-| `idx_microbus_flows_status` | `(status, updated_at)` | `List` by status |
-| `idx_microbus_flows_workflow_name` | `(workflow_name)` | `List` by workflow name |
-| `idx_microbus_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
-| `idx_microbus_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite | Walking the subgraph chain |
-| `idx_microbus_flows_created_at` | `(created_at)` (`4.sql`) | Time-window queries; append-only/monotonic |
+| `idx_dwarf_flows_status` | `(status, updated_at)` | `List` by status |
+| `idx_dwarf_flows_workflow_name` | `(workflow_name)` | `List` by workflow name |
+| `idx_dwarf_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
+| `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite | Walking the subgraph chain |
+| `idx_dwarf_flows_created_at` | `(created_at)` (`4.sql`) | Time-window queries; append-only/monotonic |
 
-#### `microbus_steps`
+#### `dwarf_steps`
 
 | Index | Columns | Purpose |
 |---|---|---|
 | PK | `(step_id)` | Row lookups, lease acquisition in `processStep` |
-| `idx_microbus_steps_flow_id` | `(flow_id, step_id)` on MySQL; `(flow_id)` on pgx/mssql | Per-flow step queries |
-| `idx_microbus_steps_status` | `(status, updated_at)` - partial `WHERE status IN ('pending','running')` on pgx | `pollPendingSteps` recovery and pending discovery |
-| `idx_microbus_steps_created_at` | `(created_at)` (`4.sql`) | Time-window queries |
-| `idx_microbus_steps_selection` | `(status, parked, priority, fairness_key)` (`8.sql`+`11.sql`) - partial on pgx/mssql/sqlite, full on mysql | Two-level priority+fairness candidate selection. The `parked` second column excludes parked rows without an in-memory filter |
-| `idx_microbus_steps_saturation` | `(status, parked, task_name)` (`8.sql`+`11.sql`) - partial as above | Per-task in-flight count for the adaptive controller. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
+| `idx_dwarf_steps_flow_id` | `(flow_id, step_id)` on MySQL; `(flow_id)` on pgx/mssql | Per-flow step queries |
+| `idx_dwarf_steps_status` | `(status, updated_at)` - partial `WHERE status IN ('pending','running')` on pgx | `pollPendingSteps` recovery and pending discovery |
+| `idx_dwarf_steps_created_at` | `(created_at)` (`4.sql`) | Time-window queries |
+| `idx_dwarf_steps_selection` | `(status, parked, priority, fairness_key)` (`8.sql`+`11.sql`) - partial on pgx/mssql/sqlite, full on mysql | Two-level priority+fairness candidate selection. The `parked` second column excludes parked rows without an in-memory filter |
+| `idx_dwarf_steps_saturation` | `(status, parked, task_name)` (`8.sql`+`11.sql`) - partial as above | Per-task in-flight count for the adaptive controller. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
 
 ### Data Retention
 
@@ -1050,7 +1049,7 @@ and no single policy fits both a 1-hour batch and a 30-day approval workflow. Fo
   WorkflowName, ThreadKey, TaskName, OlderThan, Shard, Limit). Capped at 10000 per call; returns the count deleted.
   The non-running guard is enforced inside the DELETE.
 
-Both share filter clauses with `List`. The `Query.TaskName` filter joins `microbus_steps` and matches the current
+Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the current
 step's `task_name` (excludes fan-out flows, `step_id=0`). `Query.OlderThan`/`NewerThan` are database-anchored
 (`f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), -ms)` etc.) and compose. `Query.TenantID` narrows to one tenant; tenant 0
 is treated as "no filter."
