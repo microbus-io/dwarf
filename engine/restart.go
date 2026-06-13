@@ -154,7 +154,7 @@ func (e *Engine) restart(ctx context.Context, flowKey string, stateOverrides any
 		return errors.Trace(err)
 	}
 
-	e.logger.LogInfo(ctx, "Flow status transition", "flow", flowID, "from", flowStatus, "to", workflow.StatusRunning, "via", "Restart")
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "from", flowStatus, "to", workflow.StatusRunning, "via", "Restart")
 	e.notifyStatusChange(flowKey, workflow.StatusRunning)
 	e.enqueueStep(ctx, shardNum, entryStepID)
 	return nil
@@ -340,7 +340,7 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 
 	flowKey := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 	if flowStatus != workflow.StatusRunning {
-		e.logger.LogInfo(ctx, "Flow status transition", "flow", flowID, "from", flowStatus, "to", workflow.StatusRunning, "via", "RestartFrom", "step", stepID)
+		e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "from", flowStatus, "to", workflow.StatusRunning, "via", "RestartFrom", "step", stepID)
 		e.notifyStatusChange(flowKey, workflow.StatusRunning)
 	}
 	for _, p := range parents {

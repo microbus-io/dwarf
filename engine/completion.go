@@ -67,7 +67,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 
 // completeFlowSequential marks a flow completed when no successor exists.
 func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID int, notifyHostname, workflowName string) error {
-	e.logger.LogDebug(ctx, "Flow completed", "flow", workflowName)
+	e.logger.DebugContext(ctx, "Flow completed", "flow", workflowName)
 	_, err := e.completeFlow(ctx, shardNum, flowID, flowToken, notifyHostname)
 	if err != nil {
 		return errors.Trace(err)
@@ -218,7 +218,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		return false, nil
 	}
 
-	e.logger.LogInfo(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusCompleted)
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 	notifyHostname = strings.TrimSpace(notifyHostname)
 	if notifyHostname != "" && e.flowStoppedCallback != nil {
@@ -287,7 +287,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		return errors.Trace(err)
 	}
 	if reDispatch {
-		e.logger.LogDebug(ctx, "Resuming surgraph task after subgraph flow completion",
+		e.logger.DebugContext(ctx, "Resuming surgraph task after subgraph flow completion",
 			"surgraphFlow", surgraphFlowID, "surgraphStep", surgraphStepDepth)
 		e.enqueueStep(ctx, shardNum, surgraphStepID)
 	}
@@ -358,7 +358,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 		return nil
 	}
 
-	e.logger.LogInfo(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusFailed)
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusFailed)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))
 	var notifyHostname string
 	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&notifyHostname)

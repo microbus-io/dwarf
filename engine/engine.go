@@ -66,32 +66,6 @@ type PeerNotifier interface {
 	NotifyStatusChange(ctx context.Context, flowKey string, status string)
 }
 
-// Logger receives structured log messages from the engine. The foreman injects one
-// whose methods delegate to svc.LogDebug/LogInfo/LogError/LogWarn. Standalone users
-// pass any implementation they like, or leave the default DiscardLogger.
-type Logger interface {
-	LogDebug(ctx context.Context, msg string, args ...any)
-	LogInfo(ctx context.Context, msg string, args ...any)
-	LogWarn(ctx context.Context, msg string, args ...any)
-	LogError(ctx context.Context, msg string, args ...any)
-}
-
-// StandardLogger delegates to the standard library's slog package.
-type StandardLogger struct{}
-
-func (StandardLogger) LogDebug(ctx context.Context, msg string, args ...any) {
-	slog.DebugContext(ctx, msg, args...)
-}
-func (StandardLogger) LogInfo(ctx context.Context, msg string, args ...any) {
-	slog.InfoContext(ctx, msg, args...)
-}
-func (StandardLogger) LogWarn(ctx context.Context, msg string, args ...any) {
-	slog.WarnContext(ctx, msg, args...)
-}
-func (StandardLogger) LogError(ctx context.Context, msg string, args ...any) {
-	slog.ErrorContext(ctx, msg, args...)
-}
-
 // ShardSummary is the health/size summary of a single database shard.
 type ShardSummary struct {
 	Shard     int    `json:"shard,omitzero"`
@@ -125,7 +99,7 @@ type Engine struct {
 	taskExecutor        TaskExecutor
 	flowStoppedCallback FlowStoppedCallback
 	peerNotifier        PeerNotifier
-	logger              Logger
+	logger              *slog.Logger
 
 	// Configuration (atomically updated, safe to change after Startup)
 	dsn             atomic.Value // string
@@ -187,7 +161,7 @@ type Engine struct {
 // NewEngine creates a new workflow engine.
 func NewEngine() *Engine {
 	e := &Engine{
-		logger: StandardLogger{},
+		logger: slog.Default(),
 	}
 	e.dsn.Store("")
 	e.numShards.Store(1)
@@ -263,9 +237,15 @@ func (e *Engine) WithPeerNotifier(pn PeerNotifier) *Engine {
 	return e
 }
 
-// WithLogger sets the logging callback. The level argument is "debug", "info", "warn", or "error".
-// Args follow the slog name=value pair pattern.
-func (e *Engine) WithLogger(l Logger) *Engine {
+// WithLogger sets the structured logger. The engine logs through the *Context variants
+// (DebugContext/InfoContext/WarnContext/ErrorContext) so a handler that reads the context -
+// e.g. the otelslog bridge - can correlate each record with the active step span. Defaults
+// to slog.Default(); a host routes logs to OTEL by passing a logger whose handler bridges
+// there. A nil logger is treated as slog.Default().
+func (e *Engine) WithLogger(l *slog.Logger) *Engine {
+	if l == nil {
+		l = slog.Default()
+	}
 	e.logger = l
 	return e
 }
@@ -330,7 +310,7 @@ func (e *Engine) initRuntime() {
 	// restarting replica does not strand a breaker-parked backlog or dispatch it into a known-bad
 	// endpoint. No-op on a fresh database.
 	if err := e.reconstituteBreakers(e.lifetimeCtx); err != nil {
-		e.logger.LogError(e.lifetimeCtx, "Reconstituting breakers", "error", err)
+		e.logger.ErrorContext(e.lifetimeCtx, "Reconstituting breakers", "error", err)
 	}
 
 	numWorkers := int(e.workers.Load())
@@ -670,7 +650,7 @@ func (e *Engine) HandleTripBreaker(ctx context.Context, taskName string) error {
 	}
 	err := e.breakerBulkPark(ctx, taskName, nextProbeAt, 0, 0)
 	if err != nil {
-		e.logger.LogError(ctx, "Bulk-park on gossip trip", "task", taskName, "error", err)
+		e.logger.ErrorContext(ctx, "Bulk-park on gossip trip", "task", taskName, "error", err)
 	}
 	return nil
 }

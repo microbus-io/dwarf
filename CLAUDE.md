@@ -28,8 +28,9 @@ adapter," it means that wrapping layer.
   publishes these to peers; inbound signals from peers are delivered back into the engine via `HandleEnqueue`,
   `HandleSyncValve`, `HandleTripBreaker`, `HandleNotifyStatusChange`. In a single-replica deployment the notifier is
   nil and none of this runs.
-- **`Logger`** - structured logging sink (`WithLogger`); defaults to slog. Metrics and tracing are deferred (see
-  "Observability" notes inline).
+- **`*slog.Logger`** - structured logging sink (`WithLogger`); defaults to `slog.Default()`. The engine logs
+  through the `…Context` variants so a context-aware handler (e.g. the `otelslog` bridge) can correlate records
+  with the active step span. Metrics and tracing are deferred (see "Observability" notes inline).
 
 The **`metadata map[string]any`** is opaque to the engine: set once at `Create`, stored on the flow row (in the
 `actor_claims` column, named for historical reasons), and passed through to every `GraphLoader` and `TaskExecutor`

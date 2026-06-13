@@ -92,7 +92,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	e.logger.LogDebug(ctx, "Flow created", "flow", workflowName, "task", entryPoint)
+	e.logger.DebugContext(ctx, "Flow created", "flow", workflowName, "task", entryPoint)
 	return fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, flowToken), nil
 }
 
@@ -199,7 +199,7 @@ func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname
 		return errors.Trace(err)
 	}
 
-	e.logger.LogInfo(ctx, "Flow status transition", "flow", flowID, "from", workflow.StatusCreated, "to", workflow.StatusRunning)
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "from", workflow.StatusCreated, "to", workflow.StatusRunning)
 
 	// Ring the doorbell locally and wake peer replicas: a replica that started the flow but has no spare
 	// capacity (or zero workers) must not leave the first step unclaimed until a peer's backstop poll.
@@ -384,11 +384,11 @@ func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 	if notBeforeDelayMs.Valid && notBeforeDelayMs.Float64 > 0 {
 		wakeAt := time.Now().Add(time.Duration(notBeforeDelayMs.Float64 * float64(time.Millisecond)))
 		e.shortenNextPoll(wakeAt)
-		e.logger.LogDebug(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
+		e.logger.DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
 		return
 	}
 	ring := e.cache.offer(job{stepID: stepID, shard: shard}, priority)
-	e.logger.LogDebug(ctx, "Doorbell", "stepID", stepID, "priority", priority, "ring", ring)
+	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "ring", ring)
 	if ring {
 		e.requestRefill()
 	}
@@ -506,7 +506,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		})
 	}
 	for _, cid := range allCompositeIDs {
-		e.logger.LogInfo(ctx, "Flow status transition", "to", workflow.StatusCancelled)
+		e.logger.InfoContext(ctx, "Flow status transition", "to", workflow.StatusCancelled)
 		e.signalStop(ctx, cid, workflow.StatusCancelled)
 	}
 	return nil

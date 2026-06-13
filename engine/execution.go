@@ -211,14 +211,14 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			}
 		}
 		if len(breakpoints) > 0 && breakpointMatch {
-			e.logger.LogDebug(ctx, "Breakpoint hit", "task", taskName, "step", stepDepth, "flow", workflowName)
+			e.logger.DebugContext(ctx, "Breakpoint hit", "task", taskName, "step", stepDepth, "flow", workflowName)
 			return e.handleBreakpoint(ctx, shardNum, db, stepID, flowID, flowToken)
 		}
 	}
 
 	// Execute the task. The step's time_budget_ms bounds the executor call's context deadline; the
 	// surrounding DB work keeps using the undeadlined ctx so persistence is never cut short.
-	e.logger.LogDebug(ctx, "Executing task", "task", taskName, "flow", workflowName)
+	e.logger.DebugContext(ctx, "Executing task", "task", taskName, "flow", workflowName)
 	e.breakerCommit(taskName)
 	dispatchURL := dispatchURLOf(graph, taskName)
 	taskCtx := ctx
@@ -251,7 +251,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 
 		if _, ok := graph.ErrorTransition(taskName); ok {
-			e.logger.LogDebug(ctx, "Task error routed", "task", taskName, "flow", workflowName, "error", execErr)
+			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowName, "error", execErr)
 			tracedErr := errors.Convert(execErr)
 			errStatusCode = tracedErr.StatusCode
 			resultFlow = workflow.NewRawFlow()
@@ -316,13 +316,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Handle interrupt
 	if interruptPayload, interrupted := resultFlow.InterruptRequested(); interrupted {
-		e.logger.LogDebug(ctx, "Task interrupted", "task", taskName, "flow", workflowName)
+		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "flow", workflowName)
 		return e.handleInterrupt(ctx, shardNum, db, stepID, flowID, flowToken, changesJSON, interruptPayload)
 	}
 
 	// Handle subgraph
 	if subgraphWorkflow, subgraphInput, subgraphRequested := resultFlow.SubgraphRequested(); subgraphRequested {
-		e.logger.LogDebug(ctx, "Task requested subgraph", "task", taskName, "flow", workflowName, "subgraph", subgraphWorkflow)
+		e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "flow", workflowName, "subgraph", subgraphWorkflow)
 		db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 			string(changesJSON), stepID, workflow.StatusRunning,
@@ -357,7 +357,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Handle retry
 	if maxAttempts, initialDelay, multiplier, maxDelay, retryRequested := resultFlow.RetryRequested(); retryRequested {
-		e.logger.LogDebug(ctx, "Task retried", "task", taskName, "flow", workflowName, "step", stepID, "attempt", attempt)
+		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "flow", workflowName, "step", stepID, "attempt", attempt)
 		retrySleepMs := sleepDur.Milliseconds()
 		if maxAttempts > 0 {
 			delay := float64(initialDelay)
@@ -385,9 +385,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Complete the step
 	if errorRouted {
-		e.logger.LogDebug(ctx, "Task error routed", "task", taskName, "flow", workflowName)
+		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowName)
 	} else {
-		e.logger.LogDebug(ctx, "Task completed", "task", taskName, "flow", workflowName)
+		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "flow", workflowName)
 	}
 	gotoTarget := resultFlow.GotoRequested()
 	stepRes, err := db.ExecContext(ctx,
@@ -509,7 +509,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 		if isPushTransition {
 			tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=? WHERE step_id=?", cohortSize, stepID)
-			e.logger.LogDebug(ctx, "Fan-out cohort spawned", "flow", flowID, "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
+			e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", flowID, "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
 		}
 
 		if fanInArrivals > 0 {
@@ -727,7 +727,7 @@ func (e *Engine) handleBackpressure(ctx context.Context, shardNum, stepID int, t
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil // step was cancelled / failed / completed by a concurrent path
 	}
-	e.logger.LogDebug(ctx, "Task backpressured (429)", "task", taskName, "step", stepID)
+	e.logger.DebugContext(ctx, "Task backpressured (429)", "task", taskName, "step", stepID)
 	e.shortenNextPoll(time.Now())
 	return nil
 }
@@ -760,7 +760,7 @@ func (e *Engine) handleBreakerTrip(ctx context.Context, shardNum, stepID int, ta
 	if fresh && e.peerNotifier != nil {
 		e.peerNotifier.TripBreaker(ctx, taskName)
 	}
-	e.logger.LogDebug(ctx, "Task breaker tripped", "task", taskName, "step", stepID, "cause", cause, "fresh", fresh)
+	e.logger.DebugContext(ctx, "Task breaker tripped", "task", taskName, "step", stepID, "cause", cause, "fresh", fresh)
 	// Serialize bulk-park for this task within the replica: a burst of trips on the same down task would
 	// otherwise issue concurrent UPDATEs over the same task_name rows and deadlock under pessimistic
 	// locking. The bulk-park SQL is idempotent, so the queued-behind callers re-park cheaply.

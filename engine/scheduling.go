@@ -40,12 +40,12 @@ func (e *Engine) workerLoop(ctx context.Context) {
 		if !ok {
 			return
 		}
-		e.logger.LogDebug(ctx, "Worker popped", "stepID", j.stepID, "shard", j.shard, "needRefill", needRefill)
+		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.stepID, "shard", j.shard, "needRefill", needRefill)
 		err := errors.CatchPanic(func() error {
 			return e.processStep(ctx, j.stepID, j.shard)
 		})
 		if err != nil {
-			e.logger.LogError(ctx, "Failed to process step", "stepID", j.stepID, "error", err)
+			e.logger.ErrorContext(ctx, "Failed to process step", "stepID", j.stepID, "error", err)
 		}
 		e.requestRefill()
 	}
@@ -94,7 +94,7 @@ func (e *Engine) refillerLoop(ctx context.Context) {
 				return nil
 			})
 			if err != nil {
-				e.logger.LogError(ctx, "Refilling candidate cache", "error", err)
+				e.logger.ErrorContext(ctx, "Refilling candidate cache", "error", err)
 			}
 		}
 	}
@@ -294,11 +294,11 @@ func (e *Engine) runRefill(ctx context.Context) {
 			kb.steps = append(kb.steps, c)
 		}
 		if len(byKey) == 0 {
-			e.logger.LogDebug(ctx, "Refill band saturated, advancing", "band", band, "rows", len(rows))
+			e.logger.DebugContext(ctx, "Refill band saturated, advancing", "band", band, "rows", len(rows))
 			prevBand = band
 			continue
 		}
-		e.logger.LogDebug(ctx, "Refill selecting", "band", band, "distinctKeys", len(order))
+		e.logger.DebugContext(ctx, "Refill selecting", "band", band, "distinctKeys", len(order))
 		for _, kb := range byKey {
 			sort.Slice(kb.steps, func(a, b int) bool {
 				x, y := kb.steps[a], kb.steps[b]
@@ -340,7 +340,7 @@ func (e *Engine) runRefill(ctx context.Context) {
 		break
 	}
 
-	e.logger.LogDebug(ctx, "Refill batch", "size", len(batch))
+	e.logger.DebugContext(ctx, "Refill batch", "size", len(batch))
 	// The floor is the cached batch's actual band so the doorbell's priority-preemption decision
 	// (head-insert when a strictly more important step arrives) is made against the right threshold.
 	// chosenBand stays MaxInt when no band was selected (empty batch), matching the empty-cache case.
