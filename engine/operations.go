@@ -88,73 +88,57 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName
 		return "", errors.Trace(err)
 	}
 
-	const maxAttempts = 5
-	var newFlowID int64
-	for attempt := range maxAttempts {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Millisecond)
-		}
-		newFlowID, err = e.createWithGraphTx(ctx, db, flowToken, workflowName, graphJSON, metadataJSON, threadID, threadToken, entryPoint, stateJSON, stepToken, timeBudget, opts)
-		if err == nil {
-			break
-		}
-		if !sequel.IsLockContentionError(err) || attempt == maxAttempts-1 {
-			return "", errors.Trace(err)
-		}
+	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowName, graphJSON, metadataJSON, threadID, threadToken, entryPoint, stateJSON, stepToken, timeBudget, opts)
+	if err != nil {
+		return "", errors.Trace(err)
 	}
 	e.logger.LogDebug(ctx, "Flow created", "flow", workflowName, "task", entryPoint)
 	return fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, flowToken), nil
 }
 
-// createWithGraphTx executes one attempt of the create-flow transaction.
+// createWithGraphTx inserts a flow and its entry step in one retryable transaction.
 func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowName string, graphJSON, metadataJSON []byte, threadID int, threadToken, entryPoint string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	defer tx.Rollback()
-
-	newFlowID, err := tx.InsertReturnID(ctx, "flow_id",
-		"INSERT INTO microbus_flows (flow_token, workflow_name, graph, actor_claims, status, priority, fairness_key, fairness_weight)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		flowToken, workflowName, string(graphJSON), string(metadataJSON), workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
-	)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-
-	startDelayMs := int64(0)
-	if !opts.StartAt.IsZero() {
-		if d := time.Until(opts.StartAt).Milliseconds(); d > 0 {
-			startDelayMs = d
+	var newFlowID int64
+	err := db.Transact(ctx, func(tx *sequel.Tx) error {
+		var err error
+		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
+			"INSERT INTO microbus_flows (flow_token, workflow_name, graph, actor_claims, status, priority, fairness_key, fairness_weight)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			flowToken, workflowName, string(graphJSON), string(metadataJSON), workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
+		)
+		if err != nil {
+			return errors.Trace(err)
 		}
-	}
-	newStepID, err := tx.InsertReturnID(ctx, "step_id",
-		"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
-			" VALUES (?, 1, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-		newFlowID, stepToken, entryPoint, string(stateJSON), workflow.StatusCreated, timeBudget.Milliseconds(), startDelayMs, leaseMargin.Milliseconds(), opts.Priority, opts.FairnessKey, opts.FairnessWeight,
-	)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
 
-	if threadID == 0 {
-		threadID = int(newFlowID)
-		threadToken = flowToken
-	}
-	_, err = tx.ExecContext(ctx,
-		"UPDATE microbus_flows SET thread_id=?, thread_token=?, step_id=?, updated_at=NOW_UTC() WHERE flow_id=?",
-		threadID, threadToken, newStepID, newFlowID,
-	)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
+		startDelayMs := int64(0)
+		if !opts.StartAt.IsZero() {
+			if d := time.Until(opts.StartAt).Milliseconds(); d > 0 {
+				startDelayMs = d
+			}
+		}
+		newStepID, err := tx.InsertReturnID(ctx, "step_id",
+			"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
+				" VALUES (?, 1, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
+			newFlowID, stepToken, entryPoint, string(stateJSON), workflow.StatusCreated, timeBudget.Milliseconds(), startDelayMs, leaseMargin.Milliseconds(), opts.Priority, opts.FairnessKey, opts.FairnessWeight,
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
 
-	err = tx.Commit()
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	return newFlowID, nil
+		// Derive the thread from the new flow inside the closure so a retry (with a new flow_id) recomputes
+		// it rather than reusing the prior attempt's id.
+		tid, ttok := threadID, threadToken
+		if tid == 0 {
+			tid = int(newFlowID)
+			ttok = flowToken
+		}
+		tx.ExecContext(ctx,
+			"UPDATE microbus_flows SET thread_id=?, thread_token=?, step_id=?, updated_at=NOW_UTC() WHERE flow_id=?",
+			tid, ttok, newStepID, newFlowID,
+		)
+		return nil
+	})
+	return newFlowID, errors.Trace(err)
 }
 
 // startNotify transitions a created flow to running.
@@ -185,41 +169,32 @@ func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname
 		return errors.New("flow is not in created status (status: %s)", flowStatus, http.StatusConflict)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
-		workflow.StatusPending, flowID, workflow.StatusCreated,
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	// If any of the just-transitioned steps belong to a task whose local breaker is currently
-	// tripped, park them at the moment CREATED becomes PENDING so selection never sees them.
-	// Skipped entirely when no breakers are tripped (the common case).
-	err = e.parkTrippedSteps(ctx, tx, flowID)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
 	notifyHostname = strings.TrimSpace(notifyHostname)
-	res, err := tx.ExecContext(ctx,
-		"UPDATE microbus_flows SET status=?, notify_hostname=?, started_at=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
-		workflow.StatusRunning, notifyHostname, flowID, workflow.StatusCreated,
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return errors.New("flow is already started", http.StatusConflict)
-	}
-
-	err = tx.Commit()
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
+			workflow.StatusPending, flowID, workflow.StatusCreated,
+		); err != nil {
+			return errors.Trace(err)
+		}
+		// If any of the just-transitioned steps belong to a task whose local breaker is currently
+		// tripped, park them at the moment CREATED becomes PENDING so selection never sees them.
+		// Skipped entirely when no breakers are tripped (the common case).
+		if err := e.parkTrippedSteps(ctx, tx, flowID); err != nil {
+			return errors.Trace(err)
+		}
+		res, err := tx.ExecContext(ctx,
+			"UPDATE microbus_flows SET status=?, notify_hostname=?, started_at=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
+			workflow.StatusRunning, notifyHostname, flowID, workflow.StatusCreated,
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return errors.New("flow is already started", http.StatusConflict)
+		}
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -460,68 +435,57 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	allCompositeIDs := append([]string{}, surgraphCompositeIDs...)
 	allCompositeIDs = append(allCompositeIDs, descendantCompositeIDs...)
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
+	reason = strings.TrimSpace(reason)
+	finalStates := make([]string, len(allFlowIDs))
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
+		stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
+		stepArgs = append(stepArgs, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning)
+		tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?, ?, ?)",
+			stepArgs...,
+		)
 
-	flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
-	stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
-	stepArgs = append(stepArgs, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning)
-	_, err = tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?, ?, ?)",
-		stepArgs...,
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
+		if len(surgraphStepIDs) > 0 {
+			surgraphStepPlaceholders := strings.Repeat("?,", len(surgraphStepIDs)-1) + "?"
+			surgraphStepArgs := append([]any{workflow.StatusCancelled, parkedNone}, surgraphStepIDs...)
+			surgraphStepArgs = append(surgraphStepArgs, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning)
+			tx.ExecContext(ctx,
+				"UPDATE microbus_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+surgraphStepPlaceholders+") AND status IN (?, ?, ?, ?)",
+				surgraphStepArgs...,
+			)
+		}
 
-	if len(surgraphStepIDs) > 0 {
-		surgraphStepPlaceholders := strings.Repeat("?,", len(surgraphStepIDs)-1) + "?"
-		surgraphStepArgs := append([]any{workflow.StatusCancelled, parkedNone}, surgraphStepIDs...)
-		surgraphStepArgs = append(surgraphStepArgs, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning)
-		_, err = tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+surgraphStepPlaceholders+") AND status IN (?, ?, ?, ?)",
-			surgraphStepArgs...,
+		for i, fid := range allFlowIDs {
+			fs, _, err := e.computeFinalState(ctx, tx, fid.(int))
+			if err != nil {
+				return errors.Trace(err)
+			}
+			finalStates[i] = fs
+		}
+
+		caseClause := "CASE"
+		var flowArgs []any
+		for i, fid := range allFlowIDs {
+			caseClause += " WHEN flow_id=? THEN ?"
+			flowArgs = append(flowArgs, fid, finalStates[i])
+		}
+		caseClause += " END"
+		flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
+		flowArgs = append(flowArgs, allFlowIDs...)
+		flowArgs = append(flowArgs, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled)
+		res, err := tx.ExecContext(ctx,
+			"UPDATE microbus_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN (?, ?, ?)",
+			flowArgs...,
 		)
 		if err != nil {
 			return errors.Trace(err)
 		}
-	}
-
-	finalStates := make([]string, len(allFlowIDs))
-	for i, fid := range allFlowIDs {
-		fs, _, err := e.computeFinalState(ctx, tx, fid.(int))
-		if err != nil {
-			return errors.Trace(err)
+		if n, _ := res.RowsAffected(); n == 0 {
+			return errors.New("flow is already in terminal status", http.StatusConflict)
 		}
-		finalStates[i] = fs
-	}
-
-	reason = strings.TrimSpace(reason)
-	caseClause := "CASE"
-	var flowArgs []any
-	for i, fid := range allFlowIDs {
-		caseClause += " WHEN flow_id=? THEN ?"
-		flowArgs = append(flowArgs, fid, finalStates[i])
-	}
-	caseClause += " END"
-	flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
-	flowArgs = append(flowArgs, allFlowIDs...)
-	flowArgs = append(flowArgs, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled)
-	res, err := tx.ExecContext(ctx,
-		"UPDATE microbus_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN (?, ?, ?)",
-		flowArgs...,
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return errors.New("flow is already in terminal status", http.StatusConflict)
-	}
-
-	err = tx.Commit()
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -559,38 +523,28 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		return errors.Trace(err)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
-
-	var flowStatus string
-	err = tx.QueryRowContext(ctx,
-		"SELECT status FROM microbus_flows WHERE flow_id=? AND flow_token=?",
-		flowID, flowToken,
-	).Scan(&flowStatus)
-	if err == sql.ErrNoRows {
-		return errors.New("flow not found", http.StatusNotFound)
-	}
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if strings.TrimSpace(flowStatus) == workflow.StatusRunning {
-		return errors.New("cannot delete a running flow; cancel it first", http.StatusConflict)
-	}
-	_, err = tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id=?", flowID)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	_, err = tx.ExecContext(ctx,
-		"DELETE FROM microbus_flows WHERE flow_id=? AND flow_token=? AND status<>?",
-		flowID, flowToken, workflow.StatusRunning,
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	return errors.Trace(tx.Commit())
+	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
+		var flowStatus string
+		err := tx.QueryRowContext(ctx,
+			"SELECT status FROM microbus_flows WHERE flow_id=? AND flow_token=?",
+			flowID, flowToken,
+		).Scan(&flowStatus)
+		if err == sql.ErrNoRows {
+			return errors.New("flow not found", http.StatusNotFound)
+		}
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if strings.TrimSpace(flowStatus) == workflow.StatusRunning {
+			return errors.New("cannot delete a running flow; cancel it first", http.StatusConflict)
+		}
+		tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id=?", flowID)
+		tx.ExecContext(ctx,
+			"DELETE FROM microbus_flows WHERE flow_id=? AND flow_token=? AND status<>?",
+			flowID, flowToken, workflow.StatusRunning,
+		)
+		return nil
+	}))
 }
 
 // run creates, starts, and awaits a flow in one call.

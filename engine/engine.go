@@ -168,6 +168,11 @@ type Engine struct {
 	// Per-task breaker
 	breakers     map[string]*taskBreaker
 	breakersLock sync.RWMutex
+	// breakerParkLocks serializes breakerBulkPark per task within this replica. A burst of flows hitting
+	// a down task trips the breaker on many workers at once; their bulk-park UPDATEs all target the same
+	// task_name rows and deadlock under pessimistic locking (SQL Server). Serializing per task removes the
+	// self-inflicted storm; residual cross-replica contention is still handled by the retry loop.
+	breakerParkLocks sync.Map // taskName -> *sync.Mutex
 
 	// Per-flow parsed-graph cache. The graph JSON is frozen at flow creation, so processStep reuses
 	// the parsed *workflow.Graph across the flow's steps instead of re-unmarshalling it each step.

@@ -183,9 +183,12 @@ func TestSoakflow(t *testing.T) {
 			}
 		}
 
-		// Drain: wait for all to finish.
-		drainDeadline := time.Now().Add(30 * time.Second)
-		for len(active) > 0 && time.Now().Before(drainDeadline) {
+		// Drain: wait for all to finish. The wait is bounded by lack of *progress*, not a fixed clock, so
+		// a slow backend (the backlog drains slower) keeps waiting as long as flows keep terminating;
+		// only a sustained stall (genuinely stuck flows) fails the test.
+		lastActive := len(active)
+		lastProgress := time.Now()
+		for len(active) > 0 {
 			var remaining []started
 			for _, s := range active {
 				outcome, _ := eng.Snapshot(ctx, s.key)
@@ -195,6 +198,12 @@ func TestSoakflow(t *testing.T) {
 				remaining = append(remaining, s)
 			}
 			active = remaining
+			if len(active) < lastActive {
+				lastActive = len(active)
+				lastProgress = time.Now()
+			} else if time.Since(lastProgress) > 60*time.Second {
+				break // no flow has terminated in 60s: a real stall, not just a slow server
+			}
 			if len(active) > 0 {
 				time.Sleep(50 * time.Millisecond)
 			}

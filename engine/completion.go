@@ -303,45 +303,36 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 	}
 
 	errMsg := taskErr.Error()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
-		workflow.StatusFailed, parkedNone, errMsg, stepID,
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	failFlow := stepLineageID == 0
-	if !failFlow {
-		failFlow, err = e.propagateCohortFailure(ctx, tx, stepLineageID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-	}
-
+	failFlow := false
 	var finalStateJSON string
-	if failFlow {
-		finalStateJSON, _, err = e.computeFinalState(ctx, tx, flowID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		_, err = tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
-			finalStateJSON, workflow.StatusFailed, errMsg, flowID,
-			workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		failFlow = stepLineageID == 0
+		finalStateJSON = ""
+		tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
+			workflow.StatusFailed, parkedNone, errMsg, stepID,
 		)
-		if err != nil {
-			return errors.Trace(err)
+		if !failFlow {
+			var err error
+			failFlow, err = e.propagateCohortFailure(ctx, tx, stepLineageID)
+			if err != nil {
+				return errors.Trace(err)
+			}
 		}
-	}
-
-	err = tx.Commit()
+		if failFlow {
+			var err error
+			finalStateJSON, _, err = e.computeFinalState(ctx, tx, flowID)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			tx.ExecContext(ctx,
+				"UPDATE microbus_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+				finalStateJSON, workflow.StatusFailed, errMsg, flowID,
+				workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
+			)
+		}
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -421,33 +412,34 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childSt
 		return errors.Trace(err)
 	}
 	errMsg := taskErr.Error()
-	tx, err := db.BeginTx(ctx, nil)
+	reDispatchParent := false
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		reDispatchParent = false
+		tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
+			workflow.StatusFailed, parkedNone, errMsg, childStepID,
+		)
+		childFinalState, _, _ := e.computeFinalState(ctx, tx, childFlowID)
+		tx.ExecContext(ctx,
+			"UPDATE microbus_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+			workflow.StatusFailed, errMsg, childFinalState, childFlowID, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
+		)
+		res, err := tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
+			workflow.StatusPending, parkedNone, errMsg, parentStepID, workflow.StatusRunning, parkedSubgraph,
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			reDispatchParent = true
+		}
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer tx.Rollback()
-
-	tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
-		workflow.StatusFailed, parkedNone, errMsg, childStepID,
-	)
-	childFinalState, _, _ := e.computeFinalState(ctx, tx, childFlowID)
-	tx.ExecContext(ctx,
-		"UPDATE microbus_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
-		workflow.StatusFailed, errMsg, childFinalState, childFlowID, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
-	)
-	res, err := tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
-		workflow.StatusPending, parkedNone, errMsg, parentStepID, workflow.StatusRunning, parkedSubgraph,
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	err = tx.Commit()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
+	if reDispatchParent {
 		e.enqueueStep(ctx, shardNum, parentStepID)
 	}
 	return nil
@@ -595,39 +587,34 @@ func (e *Engine) resume(ctx context.Context, flowKey string, breakpoint bool, da
 		}
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		allStepIDs := append([]any{leafStepID}, parkStepIDs...)
+		clearPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
+		tx.ExecContext(ctx, "UPDATE microbus_steps SET interrupt_payload='{}' WHERE step_id IN ("+clearPlaceholders+")", allStepIDs...)
 
-	allStepIDs := append([]any{leafStepID}, parkStepIDs...)
-	clearPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
-	tx.ExecContext(ctx, "UPDATE microbus_steps SET interrupt_payload='{}' WHERE step_id IN ("+clearPlaceholders+")", allStepIDs...)
+		if len(parkStepIDs) > 0 {
+			parkPlaceholders := strings.Repeat("?,", len(parkStepIDs)-1) + "?"
+			parkArgs := append([]any{workflow.StatusRunning, parkedSubgraph}, parkStepIDs...)
+			parkArgs = append(parkArgs, workflow.StatusInterrupted)
+			tx.ExecContext(ctx, "UPDATE microbus_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status=?", parkArgs...)
+		}
 
-	if len(parkStepIDs) > 0 {
-		parkPlaceholders := strings.Repeat("?,", len(parkStepIDs)-1) + "?"
-		parkArgs := append([]any{workflow.StatusRunning, parkedSubgraph}, parkStepIDs...)
-		parkArgs = append(parkArgs, workflow.StatusInterrupted)
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status=?", parkArgs...)
-	}
+		if breakpoint {
+			tx.ExecContext(ctx, "UPDATE microbus_steps SET status=?, state=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+				workflow.StatusPending, breakpointStateJSON, leafStepID, workflow.StatusInterrupted)
+		} else {
+			tx.ExecContext(ctx, "UPDATE microbus_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+				workflow.StatusPending, resumeDataJSON, leafStepID, workflow.StatusInterrupted)
+		}
 
-	if breakpoint {
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET status=?, state=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-			workflow.StatusPending, breakpointStateJSON, leafStepID, workflow.StatusInterrupted)
-	} else {
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-			workflow.StatusPending, resumeDataJSON, leafStepID, workflow.StatusInterrupted)
-	}
-
-	for _, chainFlowID := range chainFlowIDs {
-		tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id=? AND status=? AND (SELECT COUNT(*) FROM microbus_steps WHERE flow_id=? AND status=?)=0",
-			workflow.StatusRunning, chainFlowID, workflow.StatusInterrupted, chainFlowID, workflow.StatusInterrupted,
-		)
-	}
-
-	err = tx.Commit()
+		for _, chainFlowID := range chainFlowIDs {
+			tx.ExecContext(ctx,
+				"UPDATE microbus_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id=? AND status=? AND (SELECT COUNT(*) FROM microbus_steps WHERE flow_id=? AND status=?)=0",
+				workflow.StatusRunning, chainFlowID, workflow.StatusInterrupted, chainFlowID, workflow.StatusInterrupted,
+			)
+		}
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}

@@ -18,9 +18,12 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -165,8 +168,20 @@ func (e *Engine) closeDatabase() {
 func (e *Engine) openTestDatabase(t *testing.T) error {
 	t.Helper()
 	dataSourceName := e.dsn.Load().(string)
+	// Allow the whole fixture suite to run against a real server database without changing any test:
+	// when no DSN was set explicitly, fall back to DWARF_TEST_DSN. Unset/empty keeps the SQLite
+	// in-memory default. sequel.CreateTestingDatabase creates an isolated, auto-dropped testing_*
+	// database per shard off this base DSN (needs CREATE/DROP DATABASE privilege on a server).
+	if dataSourceName == "" {
+		dataSourceName = os.Getenv("DWARF_TEST_DSN")
+	}
 	numShards := int(e.numShards.Load())
-	testID := t.Name()
+	// sequel.CreateTestingDatabase derives the throwaway database name as testing_<hour>_<base>_<testID>,
+	// which must fit the strictest SQL identifier limit (Postgres 63, MySQL 64 chars). Hash the test name
+	// to a fixed 16 hex chars so the derived name is always bounded, regardless of how long or deeply
+	// nested the Go (sub)test name is. 16 hex chars (64 bits) is collision-free across a test suite.
+	sum := sha256.Sum256([]byte(t.Name()))
+	testID := hex.EncodeToString(sum[:])[:16]
 	for i := 1; i <= numShards; i++ {
 		db, err := e.openDatabaseShardForTest(context.Background(), dataSourceName, i, testID)
 		if err != nil {

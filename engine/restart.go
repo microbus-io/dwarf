@@ -26,6 +26,7 @@ import (
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
 )
 
 func isRestartable(status string) bool {
@@ -121,39 +122,34 @@ func (e *Engine) restart(ctx context.Context, flowKey string, stateOverrides any
 		return errors.Trace(err)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
-
-	if len(descendantFlowIDs) > 0 {
-		ph := strings.Repeat("?,", len(descendantFlowIDs)-1) + "?"
-		args := make([]any, 0, len(descendantFlowIDs))
-		for _, id := range descendantFlowIDs {
-			args = append(args, id)
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		if len(descendantFlowIDs) > 0 {
+			ph := strings.Repeat("?,", len(descendantFlowIDs)-1) + "?"
+			args := make([]any, 0, len(descendantFlowIDs))
+			for _, id := range descendantFlowIDs {
+				args = append(args, id)
+			}
+			tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id IN ("+ph+")", args...)
+			tx.ExecContext(ctx, "DELETE FROM microbus_flows WHERE flow_id IN ("+ph+")", args...)
 		}
-		tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id IN ("+ph+")", args...)
-		tx.ExecContext(ctx, "DELETE FROM microbus_flows WHERE flow_id IN ("+ph+")", args...)
-	}
 
-	tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id=? AND step_id<>?", flowID, entryStepID)
-	tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='',"+
-			" attempt=0, breakpoint_hit=0, interrupt_done=0, resume_data='{}',"+
-			" subgraph_done=0, subgraph_result='{}', subgraph_error='',"+
-			" successor_id=0, cohort_arrivals=0, cohort_failures=0,"+
-			" not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC()"+
-			" WHERE step_id=?",
-		workflow.StatusPending, parkedNone, mergedStateJSON, entryStepID,
-	)
-	tx.ExecContext(ctx,
-		"UPDATE microbus_flows SET status=?, step_id=?, error='', cancel_reason='', final_state='{}', created_at=NOW_UTC(), started_at=NOW_UTC(), updated_at=NOW_UTC()"+
-			" WHERE flow_id=? AND flow_token=?",
-		workflow.StatusRunning, entryStepID, flowID, flowToken,
-	)
-
-	err = tx.Commit()
+		tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE flow_id=? AND step_id<>?", flowID, entryStepID)
+		tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='',"+
+				" attempt=0, breakpoint_hit=0, interrupt_done=0, resume_data='{}',"+
+				" subgraph_done=0, subgraph_result='{}', subgraph_error='',"+
+				" successor_id=0, cohort_arrivals=0, cohort_failures=0,"+
+				" not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC()"+
+				" WHERE step_id=?",
+			workflow.StatusPending, parkedNone, mergedStateJSON, entryStepID,
+		)
+		tx.ExecContext(ctx,
+			"UPDATE microbus_flows SET status=?, step_id=?, error='', cancel_reason='', final_state='{}', created_at=NOW_UTC(), started_at=NOW_UTC(), updated_at=NOW_UTC()"+
+				" WHERE flow_id=? AND flow_token=?",
+			workflow.StatusRunning, entryStepID, flowID, flowToken,
+		)
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -239,109 +235,105 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 		return errors.Trace(err)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		sweepAll := func(members []sweptMember) {
+			for _, m := range members {
+				e.deleteSubgraphFlowsRootedAt(ctx, tx, m.stepID)
+			}
+		}
+		sweepAll(subtree)
+		for _, p := range parents {
+			sweepAll(p.subtree)
+		}
 
-	sweepAll := func(members []sweptMember) {
-		for _, m := range members {
-			e.deleteSubgraphFlowsRootedAt(ctx, tx, m.stepID)
+		type cohortDelta struct{ arrivalsDelta, failuresDelta int }
+		deltaBySpawn := map[int]*cohortDelta{}
+		bump := func(spawnID int, status string) {
+			if spawnID == 0 {
+				return
+			}
+			d, ok := deltaBySpawn[spawnID]
+			if !ok {
+				d = &cohortDelta{}
+				deltaBySpawn[spawnID] = d
+			}
+			switch status {
+			case workflow.StatusCompleted, workflow.StatusCancelled, workflow.StatusFailed:
+				d.arrivalsDelta++
+			}
+			if status == workflow.StatusFailed {
+				d.failuresDelta++
+			}
 		}
-	}
-	sweepAll(subtree)
-	for _, p := range parents {
-		sweepAll(p.subtree)
-	}
-
-	type cohortDelta struct{ arrivalsDelta, failuresDelta int }
-	deltaBySpawn := map[int]*cohortDelta{}
-	bump := func(spawnID int, status string) {
-		if spawnID == 0 {
-			return
-		}
-		d, ok := deltaBySpawn[spawnID]
-		if !ok {
-			d = &cohortDelta{}
-			deltaBySpawn[spawnID] = d
-		}
-		switch status {
-		case workflow.StatusCompleted, workflow.StatusCancelled, workflow.StatusFailed:
-			d.arrivalsDelta++
-		}
-		if status == workflow.StatusFailed {
-			d.failuresDelta++
-		}
-	}
-	for _, m := range subtree {
-		bump(m.lineageID, m.status)
-	}
-	bump(lineageID, stepStatus)
-	for _, p := range parents {
-		for _, m := range p.subtree {
+		for _, m := range subtree {
 			bump(m.lineageID, m.status)
 		}
-	}
-
-	deleteIDs := func(members []sweptMember) {
-		if len(members) == 0 {
-			return
+		bump(lineageID, stepStatus)
+		for _, p := range parents {
+			for _, m := range p.subtree {
+				bump(m.lineageID, m.status)
+			}
 		}
-		ids := make([]any, 0, len(members))
-		for _, m := range members {
-			ids = append(ids, m.stepID)
+
+		deleteIDs := func(members []sweptMember) {
+			if len(members) == 0 {
+				return
+			}
+			ids := make([]any, 0, len(members))
+			for _, m := range members {
+				ids = append(ids, m.stepID)
+			}
+			ph := strings.Repeat("?,", len(ids)-1) + "?"
+			tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE step_id IN ("+ph+")", ids...)
 		}
-		ph := strings.Repeat("?,", len(ids)-1) + "?"
-		tx.ExecContext(ctx, "DELETE FROM microbus_steps WHERE step_id IN ("+ph+")", ids...)
-	}
-	deleteIDs(subtree)
-	for _, p := range parents {
-		deleteIDs(p.subtree)
-	}
-
-	if predecessorID != 0 {
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET successor_id=0 WHERE step_id=? AND successor_id<>?", predecessorID, stepID)
-	}
-
-	for spawnID, d := range deltaBySpawn {
-		e.undoCohortBumps(ctx, tx, spawnID, d.arrivalsDelta, d.failuresDelta)
-	}
-
-	tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='',"+
-			" attempt=0, breakpoint_hit=0, interrupt_done=0, resume_data='{}',"+
-			" subgraph_done=0, subgraph_result='{}', subgraph_error='',"+
-			" successor_id=0,"+
-			" not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC()"+
-			" WHERE step_id=?",
-		workflow.StatusPending, parkedNone, mergedStateJSON, stepID,
-	)
-
-	for _, p := range parents {
-		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, error='', goto_next='', lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-			workflow.StatusRunning, parkedSubgraph, p.callerStepID,
-		)
-	}
-
-	if flowStatus != workflow.StatusRunning {
-		tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET status=?, error='', cancel_reason='', final_state='{}', updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=? AND status<>?",
-			workflow.StatusRunning, flowID, flowToken, workflow.StatusCancelled,
-		)
-	}
-	for _, p := range parents {
-		if p.flowStatus == workflow.StatusRunning {
-			continue
+		deleteIDs(subtree)
+		for _, p := range parents {
+			deleteIDs(p.subtree)
 		}
-		tx.ExecContext(ctx,
-			"UPDATE microbus_flows SET status=?, error='', cancel_reason='', final_state='{}', updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=? AND status<>?",
-			workflow.StatusRunning, p.flowID, p.flowToken, workflow.StatusCancelled,
-		)
-	}
 
-	err = tx.Commit()
+		if predecessorID != 0 {
+			tx.ExecContext(ctx, "UPDATE microbus_steps SET successor_id=0 WHERE step_id=? AND successor_id<>?", predecessorID, stepID)
+		}
+
+		for spawnID, d := range deltaBySpawn {
+			e.undoCohortBumps(ctx, tx, spawnID, d.arrivalsDelta, d.failuresDelta)
+		}
+
+		tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='',"+
+				" attempt=0, breakpoint_hit=0, interrupt_done=0, resume_data='{}',"+
+				" subgraph_done=0, subgraph_result='{}', subgraph_error='',"+
+				" successor_id=0,"+
+				" not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC()"+
+				" WHERE step_id=?",
+			workflow.StatusPending, parkedNone, mergedStateJSON, stepID,
+		)
+
+		for _, p := range parents {
+			tx.ExecContext(ctx,
+				"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, error='', goto_next='', lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				workflow.StatusRunning, parkedSubgraph, p.callerStepID,
+			)
+		}
+
+		if flowStatus != workflow.StatusRunning {
+			tx.ExecContext(ctx,
+				"UPDATE microbus_flows SET status=?, error='', cancel_reason='', final_state='{}', updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=? AND status<>?",
+				workflow.StatusRunning, flowID, flowToken, workflow.StatusCancelled,
+			)
+		}
+		for _, p := range parents {
+			if p.flowStatus == workflow.StatusRunning {
+				continue
+			}
+			tx.ExecContext(ctx,
+				"UPDATE microbus_flows SET status=?, error='', cancel_reason='', final_state='{}', updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=? AND status<>?",
+				workflow.StatusRunning, p.flowID, p.flowToken, workflow.StatusCancelled,
+			)
+		}
+
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}

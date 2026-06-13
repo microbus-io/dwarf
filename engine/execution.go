@@ -454,115 +454,120 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
-
-	tx.ExecContext(ctx, "UPDATE microbus_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
-
 	childInputState, _ := workflow.MergeState(state, accumulatedChanges, nil)
 	childInputJSON, _ := json.Marshal(childInputState)
-
 	nextStepDepth := stepDepth + 1
 	sleepMs := sleepDur.Milliseconds()
+
 	var newStepIDs []int
-
-	for i, next := range normalNexts {
-		stepStateJSON := childInputJSON
-		if next.item != nil {
-			perStepState := make(map[string]any, len(childInputState)+3)
-			maps.Copy(perStepState, childInputState)
-			if next.forEachKey != "" && next.forEachKey != next.itemKey {
-				delete(perStepState, next.forEachKey)
-			}
-			perStepState[next.itemKey] = next.item
-			if next.forEachKey != "" {
-				perStepState[next.itemKey+"Index"] = next.cohortIndex
-				perStepState[next.itemKey+"Count"] = next.cohortCount
-			}
-			stepStateJSON, _ = json.Marshal(perStepState)
-		}
-		nextTimeBudget := e.taskTimeBudget()
-		newStepID, err := tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-			flowID, nextStepDepth, randomIdentifier(16), next.taskName, string(stepStateJSON), workflow.StatusPending, e.initialParkedFor(next.taskName), nextTimeBudget.Milliseconds(), childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		newStepIDs = append(newStepIDs, int(newStepID))
-	}
-
-	if len(newStepIDs) > 0 {
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET successor_id=? WHERE step_id=?", newStepIDs[0], stepID)
-	}
-
-	if isPushTransition {
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET cohort_size=? WHERE step_id=?", cohortSize, stepID)
-		e.logger.LogDebug(ctx, "Fan-out cohort spawned", "flow", flowID, "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
-	}
-
 	flowFailed := false
 	var flowFailedErr, flowFailedFinalState string
-	if fanInArrivals > 0 {
-		tx.ExecContext(ctx, "UPDATE microbus_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?", fanInArrivals, cohortSpawnID)
-		var arrivals, size, failures, spawnLineageID int
-		err = tx.QueryRowContext(ctx,
-			"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM microbus_steps WHERE step_id=?",
-			cohortSpawnID,
-		).Scan(&arrivals, &size, &failures, &spawnLineageID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		fullyResolved := size > 0 && arrivals >= size
-		if fullyResolved && failures == 0 {
-			fanInStepID, err := e.insertFanInStep(ctx, tx, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight)
+
+	// The transition (insert next steps, then advance or fail the flow) runs as one retryable
+	// transaction. Under pessimistic locking it can deadlock with a concurrent worker, and a deadlocked
+	// attempt MUST re-run rather than leave the just-completed step with no successor — which would wedge
+	// the flow, since a completed step is not lease-recoverable. Transact rolls back and re-runs the
+	// closure (re-reading the fan-in counts so the decision stays correct), and its Tx records any
+	// statement error so a partial transition can never commit.
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		newStepIDs = newStepIDs[:0]
+		flowFailed = false
+		flowFailedErr, flowFailedFinalState = "", ""
+
+		tx.ExecContext(ctx, "UPDATE microbus_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
+
+		for i, next := range normalNexts {
+			stepStateJSON := childInputJSON
+			if next.item != nil {
+				perStepState := make(map[string]any, len(childInputState)+3)
+				maps.Copy(perStepState, childInputState)
+				if next.forEachKey != "" && next.forEachKey != next.itemKey {
+					delete(perStepState, next.forEachKey)
+				}
+				perStepState[next.itemKey] = next.item
+				if next.forEachKey != "" {
+					perStepState[next.itemKey+"Index"] = next.cohortIndex
+					perStepState[next.itemKey+"Count"] = next.cohortCount
+				}
+				stepStateJSON, _ = json.Marshal(perStepState)
+			}
+			nextTimeBudget := e.taskTimeBudget()
+			newStepID, err := tx.InsertReturnID(ctx, "step_id",
+				"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
+					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
+				flowID, nextStepDepth, randomIdentifier(16), next.taskName, string(stepStateJSON), workflow.StatusPending, e.initialParkedFor(next.taskName), nextTimeBudget.Milliseconds(), childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
+			)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			newStepIDs = append(newStepIDs, fanInStepID)
-		} else if fullyResolved && failures > 0 {
-			failFlow := spawnLineageID == 0
-			if !failFlow {
-				failFlow, _ = e.propagateCohortFailure(ctx, tx, spawnLineageID)
+			newStepIDs = append(newStepIDs, int(newStepID))
+		}
+
+		if len(newStepIDs) > 0 {
+			tx.ExecContext(ctx, "UPDATE microbus_steps SET successor_id=? WHERE step_id=?", newStepIDs[0], stepID)
+		}
+
+		if isPushTransition {
+			tx.ExecContext(ctx, "UPDATE microbus_steps SET cohort_size=? WHERE step_id=?", cohortSize, stepID)
+			e.logger.LogDebug(ctx, "Fan-out cohort spawned", "flow", flowID, "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
+		}
+
+		if fanInArrivals > 0 {
+			tx.ExecContext(ctx, "UPDATE microbus_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?", fanInArrivals, cohortSpawnID)
+			var arrivals, size, failures, spawnLineageID int
+			if err := tx.QueryRowContext(ctx,
+				"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM microbus_steps WHERE step_id=?",
+				cohortSpawnID,
+			).Scan(&arrivals, &size, &failures, &spawnLineageID); err != nil {
+				return errors.Trace(err)
 			}
-			if failFlow {
-				var sampleErr string
-				tx.QueryRowContext(ctx,
-					"SELECT error FROM microbus_steps WHERE flow_id=? AND status=? AND error!='' LIMIT 1",
-					flowID, workflow.StatusFailed,
-				).Scan(&sampleErr)
-				sampleErr = strings.TrimSpace(sampleErr)
-				if sampleErr == "" {
-					sampleErr = "cohort failed"
+			fullyResolved := size > 0 && arrivals >= size
+			if fullyResolved && failures == 0 {
+				fanInStepID, err := e.insertFanInStep(ctx, tx, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight)
+				if err != nil {
+					return errors.Trace(err)
 				}
-				finalStateJSON, _, cfsErr := e.computeFinalState(ctx, tx, flowID)
-				if cfsErr != nil {
-					return errors.Trace(cfsErr)
+				newStepIDs = append(newStepIDs, fanInStepID)
+			} else if fullyResolved && failures > 0 {
+				failFlow := spawnLineageID == 0
+				if !failFlow {
+					failFlow, _ = e.propagateCohortFailure(ctx, tx, spawnLineageID)
 				}
-				tx.ExecContext(ctx,
-					"UPDATE microbus_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
-					finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
-					workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
-				)
-				flowFailed = true
-				flowFailedErr = sampleErr
-				flowFailedFinalState = finalStateJSON
+				if failFlow {
+					var sampleErr string
+					tx.QueryRowContext(ctx,
+						"SELECT error FROM microbus_steps WHERE flow_id=? AND status=? AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
+						flowID, workflow.StatusFailed,
+					).Scan(&sampleErr)
+					sampleErr = strings.TrimSpace(sampleErr)
+					if sampleErr == "" {
+						sampleErr = "cohort failed"
+					}
+					finalStateJSON, _, cfsErr := e.computeFinalState(ctx, tx, flowID)
+					if cfsErr != nil {
+						return errors.Trace(cfsErr)
+					}
+					tx.ExecContext(ctx,
+						"UPDATE microbus_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+						finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
+						workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
+					)
+					flowFailed = true
+					flowFailedErr = sampleErr
+					flowFailedFinalState = finalStateJSON
+				}
 			}
 		}
-	}
 
-	nextFlowStepID := 0
-	if len(newStepIDs) == 1 {
-		nextFlowStepID = newStepIDs[0]
-	}
-	if !flowFailed {
-		tx.ExecContext(ctx, "UPDATE microbus_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", nextFlowStepID, flowID)
-	}
-	err = tx.Commit()
+		nextFlowStepID := 0
+		if len(newStepIDs) == 1 {
+			nextFlowStepID = newStepIDs[0]
+		}
+		if !flowFailed {
+			tx.ExecContext(ctx, "UPDATE microbus_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", nextFlowStepID, flowID)
+		}
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -599,31 +604,26 @@ func (e *Engine) handleBreakpoint(ctx context.Context, shardNum int, db *sequel.
 		return errors.Trace(err)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
+		flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
+		flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
+		tx.ExecContext(ctx,
+			"UPDATE microbus_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
+			flowArgs...,
+		)
 
-	flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
-	flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
-	flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
-	tx.ExecContext(ctx,
-		"UPDATE microbus_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
-		flowArgs...,
-	)
-
-	allStepIDs := append([]any{stepID}, chainStepIDs...)
-	stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
-	stepArgs := append([]any{workflow.StatusInterrupted}, allStepIDs...)
-	stepArgs = append(stepArgs, workflow.StatusRunning, workflow.StatusInterrupted)
-	tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
-		stepArgs...,
-	)
-	tx.ExecContext(ctx, "UPDATE microbus_steps SET breakpoint_hit=1 WHERE step_id=?", stepID)
-
-	err = tx.Commit()
+		allStepIDs := append([]any{stepID}, chainStepIDs...)
+		stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
+		stepArgs := append([]any{workflow.StatusInterrupted}, allStepIDs...)
+		stepArgs = append(stepArgs, workflow.StatusRunning, workflow.StatusInterrupted)
+		tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
+			stepArgs...,
+		)
+		tx.ExecContext(ctx, "UPDATE microbus_steps SET breakpoint_hit=1 WHERE step_id=?", stepID)
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -655,41 +655,36 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		return errors.Trace(err)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
-
-	flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
-	flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
-	flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
-	tx.ExecContext(ctx,
-		"UPDATE microbus_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
-		flowArgs...,
-	)
-
-	allStepIDs := append([]any{stepID}, chainStepIDs...)
-	stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
-	stepArgs := []any{stepID, string(changesJSON), stepID, workflow.StatusInterrupted, parkedNone}
-	stepArgs = append(stepArgs, allStepIDs...)
-	stepArgs = append(stepArgs, workflow.StatusRunning, workflow.StatusInterrupted)
-	tx.ExecContext(ctx,
-		"UPDATE microbus_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
-		stepArgs...,
-	)
-
-	if len(interruptPayload) > 0 {
-		payloadJSON, _ := json.Marshal(interruptPayload)
-		payloadArgs := []any{string(payloadJSON)}
-		payloadArgs = append(payloadArgs, allStepIDs...)
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
+		flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
+		flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
 		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET interrupt_payload=? WHERE step_id IN ("+stepPlaceholders+") AND interrupt_payload='{}'",
-			payloadArgs...,
+			"UPDATE microbus_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
+			flowArgs...,
 		)
-	}
 
-	err = tx.Commit()
+		allStepIDs := append([]any{stepID}, chainStepIDs...)
+		stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
+		stepArgs := []any{stepID, string(changesJSON), stepID, workflow.StatusInterrupted, parkedNone}
+		stepArgs = append(stepArgs, allStepIDs...)
+		stepArgs = append(stepArgs, workflow.StatusRunning, workflow.StatusInterrupted)
+		tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
+			stepArgs...,
+		)
+
+		if len(interruptPayload) > 0 {
+			payloadJSON, _ := json.Marshal(interruptPayload)
+			payloadArgs := []any{string(payloadJSON)}
+			payloadArgs = append(payloadArgs, allStepIDs...)
+			tx.ExecContext(ctx,
+				"UPDATE microbus_steps SET interrupt_payload=? WHERE step_id IN ("+stepPlaceholders+") AND interrupt_payload='{}'",
+				payloadArgs...,
+			)
+		}
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -766,25 +761,18 @@ func (e *Engine) handleBreakerTrip(ctx context.Context, shardNum, stepID int, ta
 		e.peerNotifier.TripBreaker(ctx, taskName)
 	}
 	e.logger.LogDebug(ctx, "Task breaker tripped", "task", taskName, "step", stepID, "cause", cause, "fresh", fresh)
-	// Demote the just-failed probe and re-elect a probe atomically. Doing the demote as a separate
-	// statement before the bulk-park lets a contended bulk-park transaction roll back after the demote
-	// has committed, stranding the task with zero parked=0 probes and no future trigger to re-elect one,
-	// which permanently wedges recovery. Folding the demote into the bulk-park transaction makes the two
-	// outcomes all-or-nothing. Retry on lock contention so a probe is re-elected before we return.
-	const maxBulkParkAttempts = 5
-	for attempt := range maxBulkParkAttempts {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Millisecond)
-		}
-		err := e.breakerBulkPark(ctx, taskName, nextProbeAt, shardNum, stepID)
-		if err == nil {
-			break
-		}
-		if !sequel.IsLockContentionError(err) || attempt == maxBulkParkAttempts-1 {
-			return errors.Trace(err)
-		}
-	}
-	return nil
+	// Serialize bulk-park for this task within the replica: a burst of trips on the same down task would
+	// otherwise issue concurrent UPDATEs over the same task_name rows and deadlock under pessimistic
+	// locking. The bulk-park SQL is idempotent, so the queued-behind callers re-park cheaply.
+	parkMu, _ := e.breakerParkLocks.LoadOrStore(taskName, &sync.Mutex{})
+	mu := parkMu.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+	// Demote the just-failed probe and re-elect a probe within one transaction (per shard), so a rollback
+	// can never leave the task with the probe demoted but no replacement elevated — which would wedge
+	// recovery. breakerBulkPark runs each shard's work through Transact, retrying on lock contention so a
+	// probe is re-elected before we return.
+	return errors.Trace(e.breakerBulkPark(ctx, taskName, nextProbeAt, shardNum, stepID))
 }
 
 // breakerCommit advances the probe schedule when the genuinely-scheduled probe is dispatched.
@@ -834,37 +822,34 @@ func (e *Engine) breakerBulkPark(ctx context.Context, taskName string, nextProbe
 		probeBackoffMs = 0
 	}
 	return e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		defer tx.Rollback()
-		if shard == failedShard && failedStepID != 0 {
+		return db.Transact(ctx, func(tx *sequel.Tx) error {
+			if shard == failedShard && failedStepID != 0 {
+				tx.ExecContext(ctx,
+					"UPDATE microbus_steps SET status=?, parked=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+					workflow.StatusPending, parkedBreaker, failedStepID, workflow.StatusRunning,
+				)
+			}
 			tx.ExecContext(ctx,
-				"UPDATE microbus_steps SET status=?, parked=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-				workflow.StatusPending, parkedBreaker, failedStepID, workflow.StatusRunning,
+				"UPDATE microbus_steps SET parked=?, updated_at=NOW_UTC() WHERE task_name=? AND status=? AND parked IN (?,?)",
+				parkedBreaker, taskName, workflow.StatusPending, parkedNone, parkedBreaker,
 			)
-		}
-		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET parked=?, updated_at=NOW_UTC() WHERE task_name=? AND status=? AND parked IN (?,?)",
-			parkedBreaker, taskName, workflow.StatusPending, parkedNone, parkedBreaker,
-		)
-		var probeID int
-		err = tx.QueryRowContext(ctx,
-			"SELECT step_id FROM microbus_steps WHERE task_name=? AND status=? AND parked=? ORDER BY created_at ASC, step_id ASC LIMIT_OFFSET(1, 0)",
-			taskName, workflow.StatusPending, parkedBreaker,
-		).Scan(&probeID)
-		if err == sql.ErrNoRows {
-			return tx.Commit()
-		}
-		if err != nil {
-			return errors.Trace(err)
-		}
-		tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET parked=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-			parkedNone, probeBackoffMs, probeID, workflow.StatusPending,
-		)
-		return tx.Commit()
+			var probeID int
+			err := tx.QueryRowContext(ctx,
+				"SELECT step_id FROM microbus_steps WHERE task_name=? AND status=? AND parked=? ORDER BY created_at ASC, step_id ASC LIMIT_OFFSET(1, 0)",
+				taskName, workflow.StatusPending, parkedBreaker,
+			).Scan(&probeID)
+			if err == sql.ErrNoRows {
+				return nil // nothing parked on this shard to elevate as a probe
+			}
+			if err != nil {
+				return errors.Trace(err)
+			}
+			tx.ExecContext(ctx,
+				"UPDATE microbus_steps SET parked=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+				parkedNone, probeBackoffMs, probeID, workflow.StatusPending,
+			)
+			return nil
+		})
 	})
 }
 
@@ -882,37 +867,35 @@ func (e *Engine) breakerBulkUnpark(ctx context.Context, taskName string, shardNu
 
 // fireFanInDirect creates the fan-in step immediately for an empty-cohort case.
 func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget string, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer tx.Rollback()
+	var fanInStepID int64
+	err := db.Transact(ctx, func(tx *sequel.Tx) error {
+		tx.ExecContext(ctx, "UPDATE microbus_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
+		tx.ExecContext(ctx, "UPDATE microbus_steps SET cohort_size=0 WHERE step_id=?", stepID)
 
-	tx.ExecContext(ctx, "UPDATE microbus_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
-	tx.ExecContext(ctx, "UPDATE microbus_steps SET cohort_size=0 WHERE step_id=?", stepID)
+		var ourStateJSON, ourChangesJSON string
+		tx.QueryRowContext(ctx, "SELECT state, changes FROM microbus_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON)
+		var ourState, ourChanges map[string]any
+		unmarshalJSONMap(ourStateJSON, &ourState)
+		unmarshalJSONMap(ourChangesJSON, &ourChanges)
+		mergedState, _ := workflow.MergeState(ourState, ourChanges, nil)
+		mergedJSON, _ := json.Marshal(mergedState)
 
-	var ourStateJSON, ourChangesJSON string
-	tx.QueryRowContext(ctx, "SELECT state, changes FROM microbus_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON)
-	var ourState, ourChanges map[string]any
-	unmarshalJSONMap(ourStateJSON, &ourState)
-	unmarshalJSONMap(ourChangesJSON, &ourChanges)
-	mergedState, _ := workflow.MergeState(ourState, ourChanges, nil)
-	mergedJSON, _ := json.Marshal(mergedState)
-
-	nextStepDepth := stepDepth + 1
-	sleepMs := sleepDur.Milliseconds()
-	nextTimeBudget := e.taskTimeBudget()
-	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
-		"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-		flowID, nextStepDepth, randomIdentifier(16), fanInTarget, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInTarget), nextTimeBudget.Milliseconds(), lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	tx.ExecContext(ctx, "UPDATE microbus_steps SET successor_id=? WHERE step_id=?", int(fanInStepID), stepID)
-	tx.ExecContext(ctx, "UPDATE microbus_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", int(fanInStepID), flowID)
-	err = tx.Commit()
+		nextStepDepth := stepDepth + 1
+		sleepMs := sleepDur.Milliseconds()
+		nextTimeBudget := e.taskTimeBudget()
+		var err error
+		fanInStepID, err = tx.InsertReturnID(ctx, "step_id",
+			"INSERT INTO microbus_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
+			flowID, nextStepDepth, randomIdentifier(16), fanInTarget, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInTarget), nextTimeBudget.Milliseconds(), lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		tx.ExecContext(ctx, "UPDATE microbus_steps SET successor_id=? WHERE step_id=?", int(fanInStepID), stepID)
+		tx.ExecContext(ctx, "UPDATE microbus_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", int(fanInStepID), flowID)
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}

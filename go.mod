@@ -7,7 +7,7 @@ tool github.com/microbus-io/copyrighter
 require (
 	github.com/microbus-io/boolexp v1.1.1
 	github.com/microbus-io/errors v1.0.1
-	github.com/microbus-io/sequel v1.7.1
+	github.com/microbus-io/sequel v1.8.0
 	github.com/microbus-io/testarossa v0.7.3
 	github.com/microbus-io/throttle v0.3.1
 )

@@ -659,7 +659,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		}
 		args = append(args, workflow.StatusRunning, perShardLimit)
 		selectIDs := "SELECT DISTINCT f.flow_id FROM microbus_flows f" + joinSQL +
-			" WHERE " + where + " AND f.status<>? LIMIT_OFFSET(?, 0)"
+			" WHERE " + where + " AND f.status<>? ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, selectIDs, args...)
 		if err != nil {
 			return errors.Trace(err)
@@ -681,33 +681,26 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			return nil
 		}
 
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		defer tx.Rollback()
-
-		placeholders := strings.Repeat("?,", len(flowIDs)-1) + "?"
-		_, err = tx.ExecContext(ctx,
-			"DELETE FROM microbus_steps WHERE flow_id IN ("+placeholders+")",
-			flowIDs...,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		// Re-guard against the race where a flow transitioned to running between SELECT and DELETE.
-		delArgs := append([]any(nil), flowIDs...)
-		delArgs = append(delArgs, workflow.StatusRunning)
-		res, err := tx.ExecContext(ctx,
-			"DELETE FROM microbus_flows WHERE flow_id IN ("+placeholders+") AND status<>?",
-			delArgs...,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		n, _ := res.RowsAffected()
-		perShardDeleted[shardIdx] = int(n)
-		return errors.Trace(tx.Commit())
+		return db.Transact(ctx, func(tx *sequel.Tx) error {
+			placeholders := strings.Repeat("?,", len(flowIDs)-1) + "?"
+			tx.ExecContext(ctx,
+				"DELETE FROM microbus_steps WHERE flow_id IN ("+placeholders+")",
+				flowIDs...,
+			)
+			// Re-guard against the race where a flow transitioned to running between SELECT and DELETE.
+			delArgs := append([]any(nil), flowIDs...)
+			delArgs = append(delArgs, workflow.StatusRunning)
+			res, err := tx.ExecContext(ctx,
+				"DELETE FROM microbus_flows WHERE flow_id IN ("+placeholders+") AND status<>?",
+				delArgs...,
+			)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			n, _ := res.RowsAffected()
+			perShardDeleted[shardIdx] = int(n)
+			return nil
+		})
 	})
 	if err != nil {
 		return 0, errors.Trace(err)

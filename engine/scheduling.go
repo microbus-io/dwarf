@@ -124,7 +124,7 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 
 		var dueExists sql.NullInt64
 		err := db.QueryRowContext(ctx,
-			"SELECT 1 FROM microbus_steps WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() LIMIT_OFFSET(1, 0)",
+			"SELECT 1 FROM microbus_steps WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() ORDER BY step_id LIMIT_OFFSET(1, 0)",
 			workflow.StatusPending,
 		).Scan(&dueExists)
 		if err == nil && (shardNearestDelay < 0 || shardNearestDelay > backlogPollInterval) {

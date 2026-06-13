@@ -7,23 +7,30 @@ CREATE TABLE IF NOT EXISTS microbus_flows (
     actor_claims         JSON         NOT NULL DEFAULT ('{}'),
     status               CHAR(16)     NOT NULL,
     step_id              BIGINT       NOT NULL DEFAULT 0,
-    forked_flow_id       BIGINT       NOT NULL,
-    forked_step_depth    INT          NOT NULL,
     surgraph_flow_id     BIGINT       NOT NULL DEFAULT 0,
     surgraph_step_depth  INT          NOT NULL DEFAULT 0,
+    surgraph_step_id     BIGINT       NOT NULL DEFAULT 0,
     thread_id            BIGINT       NOT NULL DEFAULT 0,
     thread_token         CHAR(16)     NOT NULL DEFAULT '',
     trace_parent         VARCHAR(128) NOT NULL DEFAULT '',
     notify_hostname      VARCHAR(256) NOT NULL DEFAULT '',
     final_state          TEXT         NOT NULL DEFAULT ('{}'),
     breakpoints          JSON         NOT NULL DEFAULT ('{}'),
+    error                TEXT         NOT NULL DEFAULT (''),
+    cancel_reason        TEXT         NOT NULL DEFAULT (''),
+    tenant_id            INT          NOT NULL DEFAULT 0,
+    priority             INT          NOT NULL DEFAULT 5,
+    fairness_key         VARCHAR(256) NOT NULL DEFAULT '',
+    fairness_weight      DOUBLE       NOT NULL DEFAULT 1,
     created_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
+    started_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (flow_id),
     INDEX idx_microbus_flows_status (status, updated_at),
     INDEX idx_microbus_flows_workflow_name (workflow_name),
     INDEX idx_microbus_flows_surgraph (surgraph_flow_id),
-    INDEX idx_microbus_flows_thread (thread_id, flow_id)
+    INDEX idx_microbus_flows_thread (thread_id, flow_id),
+    INDEX idx_microbus_flows_created_at (created_at)
 );
 
 -- DRIVER: pgx
@@ -35,17 +42,23 @@ CREATE TABLE IF NOT EXISTS microbus_flows (
     actor_claims         JSONB        NOT NULL DEFAULT '{}',
     status               CHAR(16)     NOT NULL,
     step_id              BIGINT       NOT NULL DEFAULT 0,
-    forked_flow_id       BIGINT       NOT NULL,
-    forked_step_depth    INT          NOT NULL,
     surgraph_flow_id     BIGINT       NOT NULL DEFAULT 0,
     surgraph_step_depth  INT          NOT NULL DEFAULT 0,
+    surgraph_step_id     BIGINT       NOT NULL DEFAULT 0,
     thread_id            BIGINT       NOT NULL DEFAULT 0,
     thread_token         CHAR(16)     NOT NULL DEFAULT '',
     trace_parent         VARCHAR(128) NOT NULL DEFAULT '',
     notify_hostname      VARCHAR(256) NOT NULL DEFAULT '',
-    final_state          TEXT         NOT NULL DEFAULT '{}',
+    final_state          TEXT             NOT NULL DEFAULT '{}',
     breakpoints          JSONB        NOT NULL DEFAULT '{}',
+    error                TEXT             NOT NULL DEFAULT '',
+    cancel_reason        TEXT             NOT NULL DEFAULT '',
+    tenant_id            INT          NOT NULL DEFAULT 0,
+    priority             INT          NOT NULL DEFAULT 5,
+    fairness_key         VARCHAR(256) NOT NULL DEFAULT '',
+    fairness_weight      DOUBLE PRECISION NOT NULL DEFAULT 1,
     created_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW_UTC(),
+    started_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW_UTC(),
     updated_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (flow_id)
 );
@@ -62,6 +75,9 @@ CREATE INDEX idx_microbus_flows_surgraph ON microbus_flows (surgraph_flow_id) WH
 -- DRIVER: pgx
 CREATE INDEX idx_microbus_flows_thread ON microbus_flows (thread_id, flow_id);
 
+-- DRIVER: pgx
+CREATE INDEX idx_microbus_flows_created_at ON microbus_flows (created_at);
+
 -- DRIVER: mssql
 CREATE TABLE microbus_flows (
     flow_id              BIGINT        NOT NULL IDENTITY(1,1),
@@ -71,17 +87,23 @@ CREATE TABLE microbus_flows (
     actor_claims         NVARCHAR(MAX) NOT NULL DEFAULT '{}',
     status               NCHAR(16)     NOT NULL,
     step_id              BIGINT        NOT NULL DEFAULT 0,
-    forked_flow_id       BIGINT        NOT NULL,
-    forked_step_depth    INT           NOT NULL,
     surgraph_flow_id     BIGINT        NOT NULL DEFAULT 0,
     surgraph_step_depth  INT           NOT NULL DEFAULT 0,
+    surgraph_step_id     BIGINT        NOT NULL DEFAULT 0,
     thread_id            BIGINT        NOT NULL DEFAULT 0,
     thread_token         NCHAR(16)     NOT NULL DEFAULT '',
     trace_parent         NVARCHAR(128) NOT NULL DEFAULT '',
     notify_hostname      NVARCHAR(256) NOT NULL DEFAULT '',
     final_state          NVARCHAR(MAX) NOT NULL DEFAULT '{}',
     breakpoints          NVARCHAR(MAX) NOT NULL DEFAULT '{}',
+    error                NVARCHAR(MAX) NOT NULL DEFAULT '',
+    cancel_reason        NVARCHAR(MAX) NOT NULL DEFAULT '',
+    tenant_id            INT           NOT NULL DEFAULT 0,
+    priority             INT           NOT NULL DEFAULT 5,
+    fairness_key         NVARCHAR(256) NOT NULL DEFAULT '',
+    fairness_weight      FLOAT         NOT NULL DEFAULT 1,
     created_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
+    started_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (flow_id)
 );
@@ -98,6 +120,9 @@ CREATE INDEX idx_microbus_flows_surgraph ON microbus_flows (surgraph_flow_id) WH
 -- DRIVER: mssql
 CREATE INDEX idx_microbus_flows_thread ON microbus_flows (thread_id, flow_id);
 
+-- DRIVER: mssql
+CREATE INDEX idx_microbus_flows_created_at ON microbus_flows (created_at);
+
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS microbus_flows (
     flow_id              INTEGER      NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -107,17 +132,23 @@ CREATE TABLE IF NOT EXISTS microbus_flows (
     actor_claims         TEXT         NOT NULL DEFAULT '{}',
     status               TEXT         NOT NULL,
     step_id              INTEGER      NOT NULL DEFAULT 0,
-    forked_flow_id       INTEGER      NOT NULL,
-    forked_step_depth    INTEGER      NOT NULL,
     surgraph_flow_id     INTEGER      NOT NULL DEFAULT 0,
     surgraph_step_depth  INTEGER      NOT NULL DEFAULT 0,
+    surgraph_step_id     INTEGER      NOT NULL DEFAULT 0,
     thread_id            INTEGER      NOT NULL DEFAULT 0,
     thread_token         TEXT         NOT NULL DEFAULT '',
     trace_parent         TEXT         NOT NULL DEFAULT '',
     notify_hostname      TEXT         NOT NULL DEFAULT '',
     final_state          TEXT         NOT NULL DEFAULT '{}',
     breakpoints          TEXT         NOT NULL DEFAULT '{}',
+    error                TEXT         NOT NULL DEFAULT '',
+    cancel_reason        TEXT         NOT NULL DEFAULT '',
+    tenant_id            INTEGER      NOT NULL DEFAULT 0,
+    priority             INTEGER      NOT NULL DEFAULT 5,
+    fairness_key         TEXT         NOT NULL DEFAULT '',
+    fairness_weight      REAL         NOT NULL DEFAULT 1,
     created_at           DATETIME     NOT NULL DEFAULT NOW_UTC(),
+    started_at           DATETIME     NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME     NOT NULL DEFAULT NOW_UTC()
 );
 
@@ -132,3 +163,6 @@ CREATE INDEX idx_microbus_flows_surgraph ON microbus_flows (surgraph_flow_id) WH
 
 -- DRIVER: sqlite
 CREATE INDEX idx_microbus_flows_thread ON microbus_flows (thread_id, flow_id);
+
+-- DRIVER: sqlite
+CREATE INDEX idx_microbus_flows_created_at ON microbus_flows (created_at);
