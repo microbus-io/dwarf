@@ -45,6 +45,8 @@ github.com/microbus-io/errors v1.0.1 h1:pujosfRSEqSJi0gcx6d+A7Mf2RZr2vQVMSQz0pG+
 github.com/microbus-io/errors v1.0.1/go.mod h1:NZTmmm+wxKQ8JFCeOMWWj+oqGylYsMKmS1YXysHZASM=
 github.com/microbus-io/sequel v1.8.0 h1:XVbgbuOIAq7u2IinFIIGXBH1DbnyVFO4P/ILxAaGXig=
 github.com/microbus-io/sequel v1.8.0/go.mod h1:XgfpjAePhqcw8j/xpzSVUtST9QtzAZpM7OjKo4+iTKI=
+github.com/microbus-io/sequel v1.8.1 h1:l6JeNpiq06ya9s8TRQ1Ux1pI84a5xGa/04xppu/wW9E=
+github.com/microbus-io/sequel v1.8.1/go.mod h1:XgfpjAePhqcw8j/xpzSVUtST9QtzAZpM7OjKo4+iTKI=
 github.com/microbus-io/testarossa v0.7.3 h1:CsLpfjFG1/+rl0FqT1jJpjBiXZBydEe7CZOnQWbob9A=
 github.com/microbus-io/testarossa v0.7.3/go.mod h1:VNzOPk+3EQSXb4bmV7ZXC1wOAOPKock3H/eYJqxUqBg=
 github.com/microbus-io/throttle v0.3.1 h1:0ho9AgK7AoHFdisfVpK+XHvsiJtjBs3sx1HouIalZMA=

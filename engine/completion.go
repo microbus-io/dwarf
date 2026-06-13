@@ -72,11 +72,13 @@ func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *s
 	if err != nil {
 		return errors.Trace(err)
 	}
-	_, err = db.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, updated_at=NOW_UTC() WHERE step_id=?",
-		workflow.StatusCompleted, stepID,
-	)
-	return errors.Trace(err)
+	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
+		tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, updated_at=NOW_UTC() WHERE step_id=?",
+			workflow.StatusCompleted, stepID,
+		)
+		return nil
+	}))
 }
 
 // mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail.
@@ -187,21 +189,32 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	finalStateJSON, _, err := e.computeFinalState(ctx, db, flowID)
+	var finalStateJSON string
+	completed := false
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		completed = false
+		fs, _, err := e.computeFinalState(ctx, tx, flowID)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		finalStateJSON = fs
+		res, err := tx.ExecContext(ctx,
+			"UPDATE microbus_flows SET status=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+			workflow.StatusCompleted, finalStateJSON, flowID,
+			workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			completed = true
+		}
+		return nil
+	})
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-
-	res, err := db.ExecContext(ctx,
-		"UPDATE microbus_flows SET status=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
-		workflow.StatusCompleted, finalStateJSON, flowID,
-		workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
-	)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	if !completed {
 		return false, nil
 	}
 
@@ -246,34 +259,43 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if surgraphStepID != 0 {
-		var existing int
-		err = db.QueryRowContext(ctx,
-			"SELECT step_id FROM microbus_steps WHERE step_id=? AND status=?",
-			surgraphStepID, workflow.StatusRunning,
-		).Scan(&existing)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return errors.Trace(err)
-		}
-	}
-
 	resultJSON := subgraphFinalStateJSON
 	if strings.TrimSpace(resultJSON) == "" {
 		resultJSON = "{}"
 	}
-	_, err = db.ExecContext(ctx,
-		"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-		workflow.StatusPending, parkedNone, resultJSON, surgraphStepID,
-	)
+	reDispatch := false
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		reDispatch = false
+		if surgraphStepID != 0 {
+			var existing int
+			err := tx.QueryRowContext(ctx,
+				"SELECT step_id FROM microbus_steps WHERE step_id=? AND status=?",
+				surgraphStepID, workflow.StatusRunning,
+			).Scan(&existing)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil // the surgraph step is no longer parked-running; nothing to re-dispatch
+			}
+			if err != nil {
+				return errors.Trace(err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID,
+		); err != nil {
+			return errors.Trace(err)
+		}
+		reDispatch = true
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
-	e.logger.LogDebug(ctx, "Resuming surgraph task after subgraph flow completion",
-		"surgraphFlow", surgraphFlowID, "surgraphStep", surgraphStepDepth)
-	e.enqueueStep(ctx, shardNum, surgraphStepID)
+	if reDispatch {
+		e.logger.LogDebug(ctx, "Resuming surgraph task after subgraph flow completion",
+			"surgraphFlow", surgraphFlowID, "surgraphStep", surgraphStepDepth)
+		e.enqueueStep(ctx, shardNum, surgraphStepID)
+	}
 	return nil
 }
 
