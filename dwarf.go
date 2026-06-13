@@ -14,6 +14,47 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package dwarf is a standalone, embeddable workflow-orchestration engine.
+//
+// Dwarf executes workflow graphs: it dispatches tasks, manages state between steps, and handles
+// fan-out/fan-in, retries, sleeps, conditional routing, subgraphs, human-in-the-loop interrupts,
+// adaptive backpressure, and circuit breakers. It is library code with no built-in transport: a host
+// application wires it to its own task execution, graph storage, and observability through a small set
+// of injected dependency interfaces (see the engine package). It depends only on a SQL database (via
+// sequel) and a rate limiter (via throttle).
+//
+// This root package is a thin convenience: NewEngine returns an *engine.Engine. The real API lives in
+// two sub-packages:
+//
+//   - github.com/microbus-io/dwarf/engine - the engine: Startup/Shutdown, the Create/Run/Await
+//     operations, configuration, and the dependency interfaces. Import this only in the process that
+//     hosts the engine.
+//   - github.com/microbus-io/dwarf/workflow - the pure types: Graph, Flow, FlowOptions, FlowOutcome,
+//     reducers, and the error-disposition helpers. Import this in code that defines tasks and graphs;
+//     it has no heavy dependencies.
+//
+// A 30-second taste, using the in-process test harness:
+//
+//	proxy := engine.NewTestProxy()
+//	g := workflow.NewGraph("greet")
+//	g.AddTask("hello", "hello")
+//	g.AddTransition("hello", workflow.END)
+//	proxy.HandleGraph("greet", g)
+//	proxy.HandleTask("hello", func(ctx context.Context, f *workflow.Flow) error {
+//		f.SetString("greeting", "hello "+f.GetString("name"))
+//		return nil
+//	})
+//
+//	eng := dwarf.NewEngine().
+//		WithGraphLoader(proxy.LoadGraph).
+//		WithTaskExecutor(proxy.ExecuteTask)
+//	eng.RunInTest(t) // SQLite in-memory, auto cleanup
+//
+//	out, _ := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
+//	fmt.Println(out.State["greeting"]) // hello ada
+//
+// See the docs/ directory in the repository for guides on graphs, tasks, scheduling, observability, and
+// deployment.
 package dwarf
 
 import "github.com/microbus-io/dwarf/engine"

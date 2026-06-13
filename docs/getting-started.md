@@ -1,0 +1,121 @@
+# Getting started
+
+## Install
+
+```bash
+go get github.com/microbus-io/dwarf
+```
+
+Dwarf requires Go 1.26+ and a SQL database for production use (PostgreSQL, MySQL/MariaDB, or SQL Server).
+For tests and local experiments it uses SQLite in-memory automatically — no database to set up.
+
+## The three things you provide
+
+The engine handles scheduling, state, durability, and recovery. You provide three things:
+
+1. **A graph** — the shape of the workflow, built with `workflow.NewGraph`.
+2. **A GraphLoader** — a function that returns a graph by name. The engine calls it once when a flow is
+   created, then freezes the graph onto the flow.
+3. **A TaskExecutor** — a function that runs one task. It receives a `*workflow.Flow` with the step's
+   input state already populated; it does the work and writes outputs back onto the flow.
+
+That's the whole contract. The engine never learns *how* a task is reached — whether your executor calls a
+local function, makes an RPC, or publishes to a bus is entirely up to you.
+
+## Your first flow (test harness)
+
+The fastest way to see dwarf run is the in-process test harness. `engine.TestProxy` implements both the
+GraphLoader and the TaskExecutor against in-memory registries, and `Engine.RunInTest(t)` spins up an
+isolated SQLite database with automatic cleanup.
+
+```go
+package example
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/microbus-io/dwarf"
+	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/testarossa"
+)
+
+func TestGreeting(t *testing.T) {
+	ctx := context.Background()
+	proxy := engine.NewTestProxy()
+
+	// 1. Define a two-task graph: greet -> shout -> END.
+	g := workflow.NewGraph("greet")
+	g.AddTask("greet", "greet")
+	g.AddTask("shout", "shout")
+	g.AddTransition("greet", "shout")
+	g.AddTransition("shout", workflow.END)
+	proxy.HandleGraph("greet", g)
+
+	// 2. Register the tasks.
+	proxy.HandleTask("greet", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetString("message", "hello "+f.GetString("name"))
+		return nil
+	})
+	proxy.HandleTask("shout", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetString("message", strings.ToUpper(f.GetString("message")))
+		return nil
+	})
+
+	// 3. Wire and start the engine.
+	eng := dwarf.NewEngine().
+		WithGraphLoader(proxy.LoadGraph).
+		WithTaskExecutor(proxy.ExecuteTask)
+	eng.RunInTest(t)
+
+	// 4. Run a flow to completion.
+	out, err := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
+	testarossa.NoError(t, err)
+	testarossa.Equal(t, workflow.StatusCompleted, out.Status)
+	testarossa.Equal(t, "HELLO ADA", out.State["message"])
+}
+```
+
+`Run` is `Create` + `Start` + `Await` in one call. The `nil` last argument is `*workflow.FlowOptions`
+(scheduling and baggage) — see [Engine operations](operations.md).
+
+## Wiring a real engine
+
+In production you replace `TestProxy` with your own loader and executor, point the engine at a real
+database with `WithDSN`, and manage its lifecycle explicitly.
+
+```go
+graphs := loadGraphRegistry() // your graph source
+
+eng := dwarf.NewEngine().
+	WithDSN("postgres://user:pass@db:5432/dwarf").
+	WithGraphLoader(func(ctx context.Context, name string) (*workflow.Graph, error) {
+		g, ok := graphs[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown workflow %q", name)
+		}
+		return g, nil
+	}).
+	WithTaskExecutor(func(ctx context.Context, taskName string, f *workflow.Flow) error {
+		return dispatch(ctx, taskName, f) // your local table / RPC / bus
+	})
+
+if err := eng.Startup(ctx); err != nil {
+	log.Fatal(err)
+}
+defer eng.Shutdown(ctx)
+```
+
+- `Startup` opens the database connections, runs schema migrations, and starts the worker pool.
+- `Shutdown` drains the workers and closes the connections cleanly.
+- The database must already exist; the engine migrates the schema but does not `CREATE DATABASE`.
+
+A nil `GraphLoader` or `TaskExecutor` makes `Startup` return an error.
+
+## Where to go next
+
+- The [Concepts](concepts.md) guide explains flows, steps, threads, and reducers — the vocabulary the rest
+  of the docs assume.
+- [Building graphs](graphs.md) and [Writing tasks](tasks.md) are the two day-to-day authoring guides.
