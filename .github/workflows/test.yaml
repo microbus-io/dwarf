@@ -1,0 +1,107 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+# The suite picks its database from the DWARF_TEST_DSN environment variable. An unset/empty
+# value runs against in-memory SQLite; otherwise sequel.CreateTestingDatabase connects to the
+# server's master database and provisions an isolated, auto-dropped testing_* database per shard.
+# The DSN must contain %d (substituted with the 1-based shard index) because sharded fixtures run
+# up to 8 shards. Credentials below are throwaway CI service-container values, not secrets.
+
+jobs:
+  sqlite:
+    name: SQLite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test (SQLite in-memory)
+        run: go test ./... -count=1 -timeout 20m
+
+  postgres:
+    name: PostgreSQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DWARF_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/dwarf_%d?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test (PostgreSQL)
+        run: go test ./... -count=1 -timeout 20m
+
+  mysql:
+    name: MySQL
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DWARF_TEST_DSN: root:root@tcp(127.0.0.1:3306)/dwarf_%d
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test (MySQL)
+        run: go test ./... -count=1 -timeout 20m
+
+  sqlserver:
+    name: SQL Server
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Dwarf_CI_Pass_2026
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Dwarf_CI_Pass_2026 -Q 'SELECT 1' -b"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
+    env:
+      DWARF_TEST_DSN: sqlserver://sa:Dwarf_CI_Pass_2026@127.0.0.1:1433?database=dwarf_%d
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test (SQL Server)
+        run: go test ./... -count=1 -timeout 20m
