@@ -397,16 +397,19 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 
 	ph := strings.Repeat("?,", len(flowIDs)-1) + "?"
 	var count int
-	var maxUpdated sql.NullTime
+	// MAX(updated_at) is an untyped aggregate expression; SQLite returns it as a
+	// string (no column affinity) while other dialects return a time value. Scan
+	// into any and hash its string form — the fingerprint only needs a stable,
+	// change-detecting digest, not a parsed timestamp.
+	var maxUpdated any
 	err = db.QueryRowContext(ctx, "SELECT COUNT(*), MAX(updated_at) FROM microbus_steps WHERE flow_id IN ("+ph+")", flowIDs...).Scan(&count, &maxUpdated)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
-	var maxMs int64
-	if maxUpdated.Valid {
-		maxMs = maxUpdated.Time.UnixMilli()
+	if b, ok := maxUpdated.([]byte); ok {
+		maxUpdated = string(b)
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d", status, count, maxMs)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%v", status, count, maxUpdated)))
 	return hex.EncodeToString(sum[:]), status, nil
 }
 

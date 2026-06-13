@@ -157,12 +157,18 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		return errors.Trace(err)
 	}
 
-	// Parse graph
-	graph := &workflow.Graph{}
-	err = json.Unmarshal([]byte(graphJSON), graph)
-	if err != nil {
-		e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
-		return errors.Trace(err)
+	// Parse graph, reusing the cached parse — graphJSON is frozen at flow creation, so every step of
+	// the same flow sees identical bytes.
+	graphKey := graphCacheKey{shard: shardNum, flowID: flowID}
+	graph, cached := e.graphCache.Load(graphKey)
+	if !cached {
+		graph = &workflow.Graph{}
+		err = json.Unmarshal([]byte(graphJSON), graph)
+		if err != nil {
+			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			return errors.Trace(err)
+		}
+		e.graphCache.Store(graphKey, graph)
 	}
 
 	// Build the Flow carrier
@@ -210,11 +216,18 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 	}
 
-	// Execute the task
+	// Execute the task. The step's time_budget_ms bounds the executor call's context deadline; the
+	// surrounding DB work keeps using the undeadlined ctx so persistence is never cut short.
 	e.logger.LogDebug(ctx, "Executing task", "task", taskName, "flow", workflowName)
 	e.breakerCommit(taskName)
 	dispatchURL := dispatchURLOf(graph, taskName)
-	execErr := e.taskExecutor(ctx, dispatchURL, &flow.Flow, metadata)
+	taskCtx := ctx
+	if timeBudgetMs > 0 {
+		var cancel context.CancelFunc
+		taskCtx, cancel = context.WithTimeout(ctx, time.Duration(timeBudgetMs)*time.Millisecond)
+		defer cancel()
+	}
+	execErr := e.taskExecutor(taskCtx, dispatchURL, &flow.Flow, metadata)
 
 	var resultFlow *workflow.RawFlow
 	errorRouted := false

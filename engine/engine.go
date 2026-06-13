@@ -109,6 +109,13 @@ const (
 	parkedNone     = 0
 	parkedSubgraph = 1
 	parkedBreaker  = 2
+
+	// Bounds for the per-flow parsed-graph cache (see graphcache.go). The graph JSON is frozen on the
+	// flow row at creation, so a cached graph is immutable and never needs invalidation; entry count +
+	// TTL alone keep the cache bounded. A graph definition is ~1-2KB parsed, so a few thousand entries
+	// costs only single-digit MB while covering the active flows of a busy replica without thrashing.
+	graphCacheMaxEntries = 4096
+	graphCacheTTL        = 15 * time.Minute
 )
 
 // Engine is the standalone workflow orchestration engine.
@@ -161,6 +168,10 @@ type Engine struct {
 	// Per-task breaker
 	breakers     map[string]*taskBreaker
 	breakersLock sync.RWMutex
+
+	// Per-flow parsed-graph cache. The graph JSON is frozen at flow creation, so processStep reuses
+	// the parsed *workflow.Graph across the flow's steps instead of re-unmarshalling it each step.
+	graphCache *lruCache[graphCacheKey, *workflow.Graph]
 
 	// Lifecycle
 	started        atomic.Bool
@@ -306,6 +317,7 @@ func (e *Engine) initRuntime() {
 	e.nextPoll = time.Now()
 	e.valves = map[string]*taskValve{}
 	e.breakers = map[string]*taskBreaker{}
+	e.graphCache = newLRUCache[graphCacheKey, *workflow.Graph](graphCacheMaxEntries, graphCacheTTL)
 	e.waiters = nil
 	e.started.Store(true)
 
