@@ -189,15 +189,16 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	var finalStateJSON string
+	var finalStateJSON, workflowName string
 	completed := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
-		fs, _, err := e.computeFinalState(ctx, tx, flowID)
+		fs, wf, err := e.computeFinalState(ctx, tx, flowID)
 		if err != nil {
 			return errors.Trace(err)
 		}
 		finalStateJSON = fs
+		workflowName = wf
 		res, err := tx.ExecContext(ctx,
 			"UPDATE dwarf_flows SET status=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
 			workflow.StatusCompleted, finalStateJSON, flowID,
@@ -219,6 +220,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusCompleted)
+	e.metricFlowTerminated(ctx, workflowName, workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 	notifyHostname = strings.TrimSpace(notifyHostname)
 	if notifyHostname != "" && e.flowStoppedCallback != nil {
@@ -353,6 +355,8 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 	if err != nil {
 		return errors.Trace(err)
 	}
+	// The step is now failed regardless of whether the whole flow fails - count it like the foreman did.
+	e.metricStepExecuted(ctx, taskName, workflow.StatusFailed)
 
 	if !failFlow {
 		return nil

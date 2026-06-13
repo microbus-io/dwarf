@@ -212,6 +212,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 		if len(breakpoints) > 0 && breakpointMatch {
 			e.logger.DebugContext(ctx, "Breakpoint hit", "task", taskName, "step", stepDepth, "flow", workflowName)
+			e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
 			return e.handleBreakpoint(ctx, shardNum, db, stepID, flowID, flowToken)
 		}
 	}
@@ -317,6 +318,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Handle interrupt
 	if interruptPayload, interrupted := resultFlow.InterruptRequested(); interrupted {
 		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "flow", workflowName)
+		e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
 		return e.handleInterrupt(ctx, shardNum, db, stepID, flowID, flowToken, changesJSON, interruptPayload)
 	}
 
@@ -350,6 +352,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 			parkedSubgraph, stepID, workflow.StatusRunning,
 		)
+		e.metricStepExecuted(ctx, taskName, "subgraph")
 		return nil
 	}
 
@@ -380,14 +383,17 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		} else {
 			e.enqueueStep(ctx, shardNum, stepID)
 		}
+		e.metricStepExecuted(ctx, taskName, "retried")
 		return nil
 	}
 
 	// Complete the step
 	if errorRouted {
 		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowName)
+		e.metricStepExecuted(ctx, taskName, "error_routed")
 	} else {
 		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "flow", workflowName)
+		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted)
 	}
 	gotoTarget := resultFlow.GotoRequested()
 	stepRes, err := db.ExecContext(ctx,
@@ -749,6 +755,7 @@ func (e *Engine) valveRegulate(ctx context.Context, taskName string) {
 	e.valvesLock.Unlock()
 	// tCong was just set to now under the lock, so pass now for both.
 	v.throttle.SetLimit(recoverRate(newW, now, now))
+	e.metricTaskRateCut(ctx, taskName)
 	if e.peerNotifier != nil {
 		e.peerNotifier.SyncValve(ctx, taskName, newW, now)
 	}
@@ -757,8 +764,13 @@ func (e *Engine) valveRegulate(ctx context.Context, taskName string) {
 // handleBreakerTrip bounces a step and trips the breaker.
 func (e *Engine) handleBreakerTrip(ctx context.Context, shardNum, stepID int, taskName, cause string) error {
 	fresh, nextProbeAt := e.breakerTrip(taskName, cause)
-	if fresh && e.peerNotifier != nil {
-		e.peerNotifier.TripBreaker(ctx, taskName)
+	// Every breaker-tripping dispatch is a failed probe; the trip itself counts only on the fresh transition.
+	e.metricBreakerProbe(ctx, taskName, "failure", cause)
+	if fresh {
+		e.metricBreakerTrip(ctx, taskName, cause)
+		if e.peerNotifier != nil {
+			e.peerNotifier.TripBreaker(ctx, taskName)
+		}
 	}
 	e.logger.DebugContext(ctx, "Task breaker tripped", "task", taskName, "step", stepID, "cause", cause, "fresh", fresh)
 	// Serialize bulk-park for this task within the replica: a burst of trips on the same down task would
@@ -803,12 +815,15 @@ func (e *Engine) breakerClose(ctx context.Context, taskName string, shardNum int
 		e.breakersLock.Unlock()
 		return
 	}
+	cause := b.cause // capture before clearing, for the probe-success metric
 	b.trippedAt = time.Time{}
 	b.probeAttempt = 0
 	b.nextProbeAt = time.Time{}
 	b.cause = ""
 	e.refreshNextProbeLocked()
 	e.breakersLock.Unlock()
+	// This dispatch was the probe that closed the breaker.
+	e.metricBreakerProbe(ctx, taskName, "success", cause)
 	e.breakerBulkUnpark(ctx, taskName, shardNum)
 }
 

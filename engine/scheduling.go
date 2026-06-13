@@ -106,10 +106,14 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 	var nearestDelay time.Duration = -1
 
 	e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		db.ExecContext(ctx,
+		if res, err := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE status=? AND parked=0 AND lease_expires<=NOW_UTC()",
 			workflow.StatusPending, workflow.StatusRunning,
-		)
+		); err == nil {
+			if recovered, _ := res.RowsAffected(); recovered > 0 {
+				e.metricStepsRecovered(ctx, int(recovered))
+			}
+		}
 
 		var nearestMs sql.NullFloat64
 		db.QueryRowContext(ctx,
@@ -280,6 +284,7 @@ func (e *Engine) runRefill(ctx context.Context) {
 		order := []string{}
 		for _, c := range rows {
 			if !admittable(c.task) {
+				e.metricStepSkippedSaturated(ctx, c.task)
 				continue
 			}
 			kb := byKey[c.key]
@@ -299,6 +304,12 @@ func (e *Engine) runRefill(ctx context.Context) {
 			continue
 		}
 		e.logger.DebugContext(ctx, "Refill selecting", "band", band, "distinctKeys", len(order))
+		// Record this refill's selected band and its distinct-fairness-key count for the
+		// dwarf_steps_fairness_keys observable gauge (read at metric-collection time).
+		e.lastRefillLock.Lock()
+		e.lastRefillBand = band
+		e.lastRefillKeys = len(order)
+		e.lastRefillLock.Unlock()
 		for _, kb := range byKey {
 			sort.Slice(kb.steps, func(a, b int) bool {
 				x, y := kb.steps[a], kb.steps[b]
@@ -316,6 +327,7 @@ func (e *Engine) runRefill(ctx context.Context) {
 			for _, k := range order {
 				kb := byKey[k]
 				for len(kb.steps) > 0 && !admittable(kb.steps[0].task) {
+					e.metricStepSkippedSaturated(ctx, kb.steps[0].task)
 					kb.steps = kb.steps[1:]
 				}
 				if len(kb.steps) == 0 {

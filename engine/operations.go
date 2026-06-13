@@ -152,12 +152,12 @@ func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname
 		return errors.Trace(err)
 	}
 
-	var flowStatus string
+	var flowStatus, workflowName string
 	var stepID int
 	err = db.QueryRowContext(ctx,
-		"SELECT status, step_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT status, step_id, workflow_name FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
-	).Scan(&flowStatus, &stepID)
+	).Scan(&flowStatus, &stepID, &workflowName)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
 	}
@@ -200,6 +200,7 @@ func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "from", workflow.StatusCreated, "to", workflow.StatusRunning)
+	e.metricFlowStarted(ctx, workflowName)
 
 	// Ring the doorbell locally and wake peer replicas: a replica that started the flow but has no spare
 	// capacity (or zero workers) must not leave the first step unclaimed until a peer's backstop poll.

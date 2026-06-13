@@ -31,6 +31,7 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/throttle"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // GraphLoader fetches a workflow graph definition by name. The metadata is the opaque
@@ -100,6 +101,8 @@ type Engine struct {
 	flowStoppedCallback FlowStoppedCallback
 	peerNotifier        PeerNotifier
 	logger              *slog.Logger
+	meterProvider       metric.MeterProvider
+	metrics             *engineMetrics
 
 	// Configuration (atomically updated, safe to change after Startup)
 	dsn             atomic.Value // string
@@ -118,10 +121,15 @@ type Engine struct {
 	workerPool sync.WaitGroup
 
 	// Single-slot refiller
-	refillTrigger      chan struct{}
-	refillStop         chan struct{}
-	refiller           sync.WaitGroup
-	lastRefillPriority int
+	refillTrigger chan struct{}
+	refillStop    chan struct{}
+	refiller      sync.WaitGroup
+	// Most recent refill's selected band and its distinct-fairness-key count, observed by the
+	// dwarf_steps_fairness_keys gauge. Written by the single refiller goroutine, read at metric
+	// collection time. lastRefillBand < 0 means no refill has selected a band yet.
+	lastRefillLock sync.Mutex
+	lastRefillBand int
+	lastRefillKeys int
 
 	// Timer goroutine
 	nextPoll     time.Time
@@ -161,7 +169,8 @@ type Engine struct {
 // NewEngine creates a new workflow engine.
 func NewEngine() *Engine {
 	e := &Engine{
-		logger: slog.Default(),
+		logger:         slog.Default(),
+		lastRefillBand: -1,
 	}
 	e.dsn.Store("")
 	e.numShards.Store(1)
@@ -237,6 +246,15 @@ func (e *Engine) WithPeerNotifier(pn PeerNotifier) *Engine {
 	return e
 }
 
+// WithMeterProvider sets the OpenTelemetry MeterProvider the engine builds its dwarf_* instruments
+// from. Defaults to the global otel.GetMeterProvider() (the no-op provider unless the host configures
+// the OTEL SDK). The engine creates instruments under the "github.com/microbus-io/dwarf" scope; the
+// provider's Resource carries the host service's identity. Must be set before Startup.
+func (e *Engine) WithMeterProvider(mp metric.MeterProvider) *Engine {
+	e.meterProvider = mp
+	return e
+}
+
 // WithLogger sets the structured logger. The engine logs through the *Context variants
 // (DebugContext/InfoContext/WarnContext/ErrorContext) so a handler that reads the context -
 // e.g. the otelslog bridge - can correlate each record with the active step span. Defaults
@@ -306,6 +324,12 @@ func (e *Engine) initRuntime() {
 	e.waiters = nil
 	e.started.Store(true)
 
+	// Create the dwarf_* instruments and register the observable-gauge callback before workers start
+	// emitting. Falls back to the global (no-op) provider when none was injected.
+	if err := e.initMetrics(); err != nil {
+		e.logger.ErrorContext(e.lifetimeCtx, "Initializing metrics", "error", err)
+	}
+
 	// Re-arm the breaker map from surviving parked rows before workers start dispatching, so a
 	// restarting replica does not strand a breaker-parked backlog or dispatch it into a known-bad
 	// endpoint. No-op on a fresh database.
@@ -337,6 +361,9 @@ func (e *Engine) initRuntime() {
 // drainRuntime stops all goroutines in order.
 func (e *Engine) drainRuntime() {
 	e.started.Store(false)
+	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
+	// shards) while/after the databases are being closed.
+	e.closeMetrics()
 	e.cache.close()
 	e.workerPool.Wait()
 	if e.timerStop != nil {

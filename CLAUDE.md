@@ -30,7 +30,10 @@ adapter," it means that wrapping layer.
   nil and none of this runs.
 - **`*slog.Logger`** - structured logging sink (`WithLogger`); defaults to `slog.Default()`. The engine logs
   through the `…Context` variants so a context-aware handler (e.g. the `otelslog` bridge) can correlate records
-  with the active step span. Metrics and tracing are deferred (see "Observability" notes inline).
+  with the active step span.
+- **`metric.MeterProvider`** - OTEL meter provider (`WithMeterProvider`); defaults to the global
+  `otel.GetMeterProvider()` (no-op unless the host configures the SDK). The engine builds its `dwarf_*`
+  instruments under the `github.com/microbus-io/dwarf` scope (see "Metrics" below). Tracing is deferred.
 
 The **`metadata map[string]any`** is opaque to the engine: set once at `Create`, stored on the flow row (in the
 `actor_claims` column, named for historical reasons), and passed through to every `GraphLoader` and `TaskExecutor`
@@ -924,6 +927,44 @@ everything blocked on task X) is operator surface area, out of scope for the bre
 **Other 5xx (500, 502, 504, ...) are not the breaker's business.** A 5xx other than 503/529 means the downstream
 exists, served the request, and answered with a server error - a task-level decision (`flow.Retry`, an `onError`
 transition, or propagate as flow failure). The breaker is specifically for "I cannot serve right now" signals.
+
+## Metrics (`engine/metrics.go`)
+
+The engine emits 15 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `WithMeterProvider`
+injects the provider; it defaults to the global `otel.GetMeterProvider()` - the no-op provider unless the host
+configures the SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in
+`initMetrics` (called from `initRuntime`, so both `Startup` and `RunInTest` get them) from
+`mp.Meter("github.com/microbus-io/dwarf")` - that scope distinguishes dwarf's metrics; **service identity lives
+in the provider's Resource, not in per-metric attributes** (no `service.name` on data points - that would
+explode cardinality and is off-spec). The only attributes the engine attaches are the metric-specific labels:
+`workflow`, `status`, `task`, `cause`, `outcome`, `priority`.
+
+**8 counters, incremented inline** at the same logical event sites the foreman used: `dwarf_flows_started_total`
+(start path), `dwarf_flows_terminated_total` (completeFlow), `dwarf_steps_executed_total` (every terminal step
+disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered_total`
+(pollPendingSteps lease recovery), `dwarf_steps_skipped_saturated_total` (refill admission skips),
+`dwarf_task_rate_cuts_total` (valveRegulate), `dwarf_task_breaker_trips_total` /
+`dwarf_task_breaker_probes_total` (handleBreakerTrip + breakerClose). The inline helpers no-op when
+`e.metrics == nil` (before Startup).
+
+**7 gauges, observable (async)** via a single `RegisterCallback`, replacing the foreman's `OnObserve*`
+endpoints. The callback runs at metric-collection time and reads engine state: in-memory for
+`dwarf_steps_queue_depth` (cache length), `dwarf_task_rate_limit` (valves with an anchored `wCong`),
+`dwarf_task_breaker_state` (breaker map), and `dwarf_steps_fairness_keys` (the last refill's selected band +
+distinct-key count, stashed under `lastRefillLock` by the refiller); shard queries for `dwarf_steps_pending`
+and `dwarf_steps_oldest_pending_age_seconds` (per priority band) and `dwarf_task_concurrency_running` (running
+steps per task). Gauges emit **per replica**; cluster-wide aggregates are summed at the backend. The callback is
+`Unregister`ed first thing in `drainRuntime` so the OTEL reader can't query a closing database.
+
+**Fidelity choices vs. the foreman:** `flows_terminated` fires only on `completed` (the foreman never counted
+failed/cancelled; `steps_executed{status=failed}` still covers the failed-step case). Subgraph flows are counted
+like the foreman - the start path and `completeFlow` run for them too - so no `surgraph_flow_id` filter; the
+`workflow` label lets dashboards slice root-vs-subgraph. `TestMetrics_EmittedOnRun` pins emission with an
+in-memory SDK `ManualReader`.
+
+> Observability note (deferred): tracing is not yet wired (no `WithTracerProvider`/`trace_parent` use). The
+> per-priority/per-task gauges are aggregate-only by design - no per-`fairness_key` labels (unbounded
+> cardinality).
 
 ## Schema Column Catalog
 
