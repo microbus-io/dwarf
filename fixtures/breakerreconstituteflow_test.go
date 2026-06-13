@@ -50,7 +50,7 @@ func TestBreakerreconstituteflow(t *testing.T) {
 	broken.Store(true)
 	proxy.HandleTask("breakerreconstituteflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		if broken.Load() {
-			return errors.New("ack timeout: breakerreconstituteflow.verify:428/work", http.StatusNotFound)
+			return workflow.ErrBreakerTrip(errors.New("ack timeout: breakerreconstituteflow.verify:428/work", http.StatusNotFound), "ack_timeout")
 		}
 		return nil
 	})

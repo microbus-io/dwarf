@@ -48,7 +48,8 @@ func TestAdaptiveconcurrencyflow(t *testing.T) {
 	proxy.HandleTask("adaptiveconcurrencyflow.verify:428/adaptive", func(ctx context.Context, f *workflow.Flow) error {
 		if admit, _ := rate.Allow(); !admit {
 			rejections.Add(1)
-			return errors.New("rate limited", http.StatusTooManyRequests)
+			// Wrap the transport's 429 as backpressure; the engine bounces the step and cuts the rate.
+			return workflow.ErrBackpressure(errors.New("rate limited", http.StatusTooManyRequests), "")
 		}
 		time.Sleep(10 * time.Millisecond)
 		completions.Add(1)

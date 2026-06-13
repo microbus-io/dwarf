@@ -99,7 +99,7 @@ func TestDistributedbackpressureflow(t *testing.T) {
 		}
 		mu.Unlock()
 		if over {
-			return errors.New("saturated", http.StatusTooManyRequests)
+			return workflow.ErrBackpressure(errors.New("saturated", http.StatusTooManyRequests), "")
 		}
 		time.Sleep(50 * time.Millisecond)
 		mu.Lock()

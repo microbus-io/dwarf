@@ -20,7 +20,10 @@ adapter," it means that wrapping layer.
   (`workflow.BaggageFrom(ctx)`) for identity-dependent loading (authz, per-actor graphs).
 - **`TaskExecutor`** `func(ctx, taskName string, flow *workflow.Flow) error` - executes one task. Receives the flow
   carrier with state pre-populated; writes its changes back onto the flow. The engine never knows *how* the task is
-  reached (local call, RPC, message bus). The flow's baggage rides on ctx (`workflow.BaggageFrom(ctx)`).
+  reached (local call, RPC, message bus). The flow's baggage rides on ctx (`workflow.BaggageFrom(ctx)`). To engage an
+  adaptive mechanism, wrap the returned error with `workflow.ErrBackpressure(err, cause)` (rate-limit the task) or
+  `workflow.ErrBreakerTrip(err, cause)` (trip the task's breaker); an undecorated error is an ordinary failure. The
+  engine never sniffs status codes - the host owns the mapping (see "Per-Task Breaker → Error classification").
 - **`FlowStoppedCallback`** `func(ctx, hostname string, outcome *workflow.FlowOutcome)` - fired when a flow stops
   (completed/failed/cancelled/interrupted) for a flow started via `StartNotify`. The hostname is whatever was passed
   to `StartNotify`.
@@ -34,7 +37,12 @@ adapter," it means that wrapping layer.
   with the active step span.
 - **`metric.MeterProvider`** - OTEL meter provider (`WithMeterProvider`); defaults to the global
   `otel.GetMeterProvider()` (no-op unless the host configures the SDK). The engine builds its `dwarf_*`
-  instruments under the `github.com/microbus-io/dwarf` scope (see "Metrics" below). Tracing is deferred.
+  instruments under the `github.com/microbus-io/dwarf` scope (see "Metrics" below).
+- **`trace.TracerProvider`** - OTEL tracer provider (`WithTracerProvider`); defaults to the global
+  `otel.GetTracerProvider()` (no-op unless the host configures the SDK). The engine mints the root
+  "workflow" span at `Create` and a per-step span in `processStep`, both under the
+  `github.com/microbus-io/dwarf` scope (see "Tracing" below). The host injects only the provider - no
+  span code.
 
 The **baggage** is opaque to the engine: set once at `Create` via `FlowOptions.Baggage` (an `any`, like
 `initialState`), stored on the flow row (the `baggage` column), and delivered to every `GraphLoader` and
@@ -860,11 +868,32 @@ valve gates via `valvePeek` in `runRefill`; the breaker gates via the `parked` c
 of the selection index entirely. They operate independently; a task with both signals tripped has its rate cut AND
 its backlog parked.
 
-> The error classification (which `TaskExecutor` error is a 429 vs an ack-timeout 404 vs 503/529) is currently
-> hardcoded in the dispatch error path (status code plus, for 404, an `ack timeout:` string prefix). That prefix is a
-> Microbus-bus artifact; a standalone host using a different transport has no such signal. A cleaner design injects
-> the classification as a callback so the host owns the mapping. Until then, a host must surface "downstream
-> unreachable" as `404` with an `ack timeout:`-prefixed message to engage the breaker.
+**Error classification is host-owned, via error wrappers (no status-code sniffing).** The engine never
+inspects a `TaskExecutor` error's status code or text. Instead the host wraps the error its transport
+returned with one of two `workflow` constructors, and the engine classifies by `errors.As` on the
+unexported wrapper:
+
+- `workflow.ErrBackpressure(err, cause)` → the valve (bounce + rate cut). For "you're going too fast"
+  (e.g. HTTP 429).
+- `workflow.ErrBreakerTrip(err, cause)` → the breaker (park + probe). For "I cannot serve right now"
+  (downstream unreachable / unavailable / overloaded - e.g. an ack timeout, HTTP 503, HTTP 529).
+
+The engine extracts these in `processStep`'s dispatch-error path with `workflow.IsBackpressure(err)` /
+`workflow.IsBreakerTrip(err)`, each returning `(cause, ok)`. An **undecorated** error is an ordinary
+failure: the engine takes the task's `onError` transition if one matches, else `failStep`s. There are
+**exactly two** dispositions because the engine has exactly two adaptive mechanisms (valve, breaker); the
+three breaker *causes* (`ack_timeout` / `unavailable` / `overloaded`) are not separate dispositions but an
+**opaque cause string** carried on `ErrBreakerTrip` purely as a metric label (`dwarf_task_breaker_*{cause}`)
+- the engine never branches on it. `cause` is symmetric on `ErrBackpressure` too (forwarded to a debug log;
+no backpressure metric consumes it today). The wrappers preserve the inner error (`Unwrap`), so
+`errors.Is`/`As` and any status-code extraction still see through. This is the Phase-7 boundary contract
+(Open Question #1 resolved): the engine stays transport-agnostic, and the **foreman adapter** owns the
+mapping - `429 → ErrBackpressure`, `404+"ack timeout:" → ErrBreakerTrip(…, "ack_timeout")`,
+`503 → ErrBreakerTrip(…, "unavailable")`, `529 → ErrBreakerTrip(…, "overloaded")` - defining those cause
+constants on its own side. `GraphLoader` keeps plain `error` semantics (graph load has no breaker). The
+engine's internal `breakerCause*` constants (`breaker.go`) are only its own default labels for internally
+originated trips (reconstitution); the dispatch path uses the host-supplied cause. The `Disposition` enum
+itself is unexported - the whole API surface is the two constructors plus the two accessors.
 
 **Why 503 and 529 go to the breaker, not the valve.** Both mean the downstream is unavailable, not serving at a
 reduced rate. The valve's additive-decrease-with-CUBIC-recovery is designed for the latter; applied to a downed
@@ -981,9 +1010,59 @@ like the foreman - the start path and `completeFlow` run for them too - so no `s
 `workflow` label lets dashboards slice root-vs-subgraph. `TestMetrics_EmittedOnRun` pins emission with an
 in-memory SDK `ManualReader`.
 
-> Observability note (deferred): tracing is not yet wired (no `WithTracerProvider`/`trace_parent` use). The
-> per-priority/per-task gauges are aggregate-only by design - no per-`fairness_key` labels (unbounded
-> cardinality).
+> Observability note: the per-priority/per-task gauges are aggregate-only by design - no
+> per-`fairness_key` labels (unbounded cardinality).
+
+## Tracing (`engine/tracing.go`)
+
+The engine is OTEL-native for tracing, symmetric with metrics: `WithTracerProvider(tp)` overrides the
+global `otel.GetTracerProvider()` (the no-op provider unless the host configures the SDK), and the engine
+creates spans from `tp.Tracer("github.com/microbus-io/dwarf")` (same scope as the metrics; service
+identity lives in the provider's Resource, not in span attributes). The host injects **only** the
+provider - no span code, no `trace_parent` handling. Resolved once in `initRuntime` (`initTracer`); under
+the no-op tracer every site below is free.
+
+**Two span sites, persisted across replicas via the `trace_parent` column.** A flow's trace context is
+minted once and reconstructed on every step dispatch (which may land on any replica), so it must survive
+in the database - hence `trace_parent` is a **first-class dwarf-owned column** (the honest asymmetry vs.
+metrics: spans need cross-replica continuity, metrics don't).
+
+- **Root "workflow" span at `Create`** (`mintWorkflowSpan`, called from `createWithGraph`). The span is
+  created, `End()`ed immediately, and its W3C context serialized into the flow's `trace_parent` column
+  (`extractTraceParent`). Top-level `Create`/`CreateTask`/`Continue` mint it **detached**
+  (`trace.ContextWithSpan(ctx, nil)` strips any ambient request span) so each flow - and each `Continue`
+  turn - roots its own fresh trace rather than nesting under the request that created it.
+- **Per-step span in `processStep`**, named by the task. The stored `trace_parent` is reconstructed
+  (`injectTraceParent`) as the parent, the span is started with `workflow.id`=flowKey and `workflow.name`
+  attributes, and the span's context is **placed on the `TaskExecutor`'s ctx** so the task's own
+  downstream spans nest under it automatically. The span records the dispatch error
+  (`recordSpanError` → `RecordError`+`SetStatus(codes.Error)`) when the executor returns one.
+
+**Subgraphs nest, they don't flatten.** A subgraph gets its **own** "workflow" span parented to the
+**caller step's span**, not the parent flow's root - so the trace reads
+`workflow → caller-step → workflow(subgraph) → subgraph-steps`, mirroring the call structure. The
+mechanism: when a task arms `flow.Subgraph` and `processStep` creates the child flow, the caller step's
+span is still live on `taskCtx`, so the engine extracts its context (`extractTraceParent(taskCtx)`) and
+hands it to `createSubgraphFlow` → `createWithGraph` as the `parentTraceParent`; `mintWorkflowSpan` then
+parents the subgraph's "workflow" span under it (rather than minting detached). Span IDs are fixed at
+`Start`, so it does not matter that the caller span (and the subgraph "workflow" span) have already ended
+by the time the subgraph's steps dispatch later - the children simply reference the recorded parent span
+ID. `createSubgraphFlow` no longer reads the parent flow's `trace_parent` column (it uses the live caller
+span instead); baggage is still inherited via its post-insert UPDATE.
+
+**Reentrancy → one span per dispatch.** The per-step span is created inside each `processStep` call, so a
+step that yields (`flow.Subgraph`/`flow.Interrupt`) and later re-dispatches produces **two** spans - one
+per real execution attempt, each capturing that attempt's queue wait and body. This is intentional and
+matches the foreman.
+
+`TestTracing_SpansEmittedOnRun` pins all of the above (root detached, steps parented to root, subgraph
+"workflow" parented to the caller step, subgraph step parented to the subgraph span, two `runInner` spans
+for the yield+resume) using the trace SDK's in-memory `tracetest.SpanRecorder`. Test-only caveat: the
+**last** step of the awaited flow is the one whose completion wakes `Await`, and its span ends in a
+`defer` that fires just after that wake on the worker goroutine - so a synchronous `sr.Ended()` read right
+after `Run` returns may miss it. The fixture keeps a trailing task last and asserts only on spans that
+are deterministically flushed by then. Not an engine concern: a real exporter keeps flushing after
+`Await` returns.
 
 ## Schema Column Catalog
 
@@ -1006,7 +1085,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `surgraph_step_id` | PK of the parent's parked surgraph step, so a subgraph flow identifies its surgraph step unambiguously when parallel parked surgraph steps coexist at one depth |
 | `thread_id` | Groups flows in a `Continue` thread; defaults to `flow_id` (each flow its own thread) |
 | `thread_token` | Token component of the thread's flowKey |
-| `trace_parent` | W3C `traceparent` for distributed-trace continuity (stored and carried; the engine does not currently create spans from it - tracing is deferred) |
+| `trace_parent` | W3C `traceparent` of the flow's root "workflow" span, minted at `Create` (or, for a subgraph, parented to the caller step's span). Reconstructed as the parent of every per-step span. Inherited by `Continue` only as a fresh trace (a new root span is minted per turn); a subgraph inherits the caller step's context, not this column. See "Tracing" |
 | `notify_hostname` | Set by `StartNotify`; the `FlowStoppedCallback` fires with this hostname when the flow stops. `''` = no notification |
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
 | `breakpoints` | JSON `map[taskName]string` of `BreakBefore` breakpoints |

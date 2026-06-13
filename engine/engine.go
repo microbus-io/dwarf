@@ -32,6 +32,7 @@ import (
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/throttle"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // GraphLoader fetches a workflow graph definition by name. The flow's opaque baggage rides on ctx;
@@ -103,6 +104,8 @@ type Engine struct {
 	logger              *slog.Logger
 	meterProvider       metric.MeterProvider
 	metrics             *engineMetrics
+	tracerProvider      trace.TracerProvider
+	tracer              trace.Tracer
 
 	// Configuration (atomically updated, safe to change after Startup)
 	dsn             atomic.Value // string
@@ -255,6 +258,19 @@ func (e *Engine) WithMeterProvider(mp metric.MeterProvider) *Engine {
 	return e
 }
 
+// WithTracerProvider sets the OpenTelemetry TracerProvider the engine builds its spans from. Defaults
+// to the global otel.GetTracerProvider() (the no-op provider unless the host configures the OTEL SDK).
+// The engine mints the root "workflow" span at Create (persisted to the dwarf-owned trace_parent
+// column) and a per-step span in processStep, parented to the reconstructed root and placed on the
+// TaskExecutor's context so the task's downstream spans nest under it. The host injects only the
+// provider - no span code, no trace_parent handling. Spans are created under the
+// "github.com/microbus-io/dwarf" scope; the provider's Resource carries the host's identity. Must be
+// set before Startup.
+func (e *Engine) WithTracerProvider(tp trace.TracerProvider) *Engine {
+	e.tracerProvider = tp
+	return e
+}
+
 // WithLogger sets the structured logger. The engine logs through the *Context variants
 // (DebugContext/InfoContext/WarnContext/ErrorContext) so a handler that reads the context -
 // e.g. the otelslog bridge - can correlate each record with the active step span. Defaults
@@ -329,6 +345,9 @@ func (e *Engine) initRuntime() {
 	if err := e.initMetrics(); err != nil {
 		e.logger.ErrorContext(e.lifetimeCtx, "Initializing metrics", "error", err)
 	}
+
+	// Resolve the tracer (no-op unless a TracerProvider was injected or the global SDK is configured).
+	e.initTracer()
 
 	// Re-arm the breaker map from surviving parked rows before workers start dispatching, so a
 	// restarting replica does not strand a breaker-parked backlog or dispatch it into a known-bad

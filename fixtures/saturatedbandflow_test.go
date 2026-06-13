@@ -68,7 +68,7 @@ func TestSaturatedbandflow(t *testing.T) {
 		}
 		mu.Unlock()
 		if over {
-			return errors.New("saturated", http.StatusTooManyRequests)
+			return workflow.ErrBackpressure(errors.New("saturated", http.StatusTooManyRequests), "")
 		}
 		time.Sleep(80 * time.Millisecond)
 		mu.Lock()

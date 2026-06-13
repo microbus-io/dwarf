@@ -30,7 +30,7 @@ import (
 )
 
 // createSubgraphFlow creates a subgraph flow for a dynamic subgraph transition.
-func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepDepth int, surgraphStepID int, subgraphWorkflowName string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, breakpointsJSON string) (string, error) {
+func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepDepth int, surgraphStepID int, subgraphWorkflowName string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, callerTraceParent string, breakpointsJSON string) (string, error) {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
@@ -45,7 +45,9 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 		return "", errors.Trace(err)
 	}
 
-	subgraphFlowKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowName, subgraphGraph, childState, 0, "", &inherited)
+	// The subgraph gets its own "workflow" span parented to the caller step's span (callerTraceParent),
+	// so its whole subtree nests under the task that launched it rather than starting a detached trace.
+	subgraphFlowKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowName, subgraphGraph, childState, 0, "", callerTraceParent, &inherited)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

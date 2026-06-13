@@ -45,7 +45,7 @@ func (e *Engine) create(ctx context.Context, workflowName string, initialState a
 		return "", errors.Trace(err)
 	}
 	shardNum := rand.IntN(e.numDBShards()) + 1
-	flowKey, err = e.createWithGraph(ctx, shardNum, workflowName, graph, initialState, 0, "", opts)
+	flowKey, err = e.createWithGraph(ctx, shardNum, workflowName, graph, initialState, 0, "", "", opts)
 	return flowKey, errors.Trace(err)
 }
 
@@ -57,7 +57,7 @@ func (e *Engine) createTask(ctx context.Context, taskName string, initialState a
 	graph := workflow.NewGraph(taskName)
 	graph.AddTransition(taskName, workflow.END)
 	shardNum := rand.IntN(e.numDBShards()) + 1
-	flowKey, err = e.createWithGraph(ctx, shardNum, taskName, graph, initialState, 0, "", e.resolveFlowOptions(opts))
+	flowKey, err = e.createWithGraph(ctx, shardNum, taskName, graph, initialState, 0, "", "", e.resolveFlowOptions(opts))
 	return flowKey, errors.Trace(err)
 }
 
@@ -81,11 +81,17 @@ func baggageMap(v any) map[string]any {
 
 // createWithGraph is the shared implementation for create, createTask, and continue. opts.Baggage is
 // the opaque host value, marshalled to the flow's baggage column (any JSON value, like initialState).
-func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName string, graph *workflow.Graph, initialState any, threadID int, threadToken string, opts *workflow.FlowOptions) (flowKey string, err error) {
+// parentTraceParent controls the flow's own "workflow" span: empty mints a detached root span (top-level
+// Create / CreateTask / Continue, each its own trace); non-empty parents the span under that context (a
+// subgraph nests under the caller step's span). The minted span's context is stored in the flow's
+// trace_parent column and reconstructed as the parent of every per-step span.
+func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName string, graph *workflow.Graph, initialState any, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions) (flowKey string, err error) {
 	entryPoint := graph.EntryPoint()
 	if entryPoint == "" {
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
 	}
+
+	traceParent := e.mintWorkflowSpan(ctx, workflowName, parentTraceParent)
 
 	baggageJSON, err := json.Marshal(opts.Baggage)
 	if err != nil {
@@ -109,7 +115,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName
 		return "", errors.Trace(err)
 	}
 
-	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowName, graphJSON, baggageJSON, threadID, threadToken, entryPoint, stateJSON, stepToken, timeBudget, opts)
+	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowName, graphJSON, baggageJSON, traceParent, threadID, threadToken, entryPoint, stateJSON, stepToken, timeBudget, opts)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -118,14 +124,14 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName
 }
 
 // createWithGraphTx inserts a flow and its entry step in one retryable transaction.
-func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowName string, graphJSON, baggageJSON []byte, threadID int, threadToken, entryPoint string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
+func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowName string, graphJSON, baggageJSON []byte, traceParent string, threadID int, threadToken, entryPoint string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
 	var newFlowID int64
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
 		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-			"INSERT INTO dwarf_flows (flow_token, workflow_name, graph, baggage, status, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			flowToken, workflowName, string(graphJSON), string(baggageJSON), workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
+			"INSERT INTO dwarf_flows (flow_token, workflow_name, graph, baggage, trace_parent, status, priority, fairness_key, fairness_weight)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			flowToken, workflowName, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)

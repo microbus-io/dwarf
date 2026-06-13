@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +29,8 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
@@ -133,16 +134,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 
 	// Read flow data
-	var flowToken, flowStatus, workflowName, graphJSON, baggageJSON string
+	var flowToken, flowStatus, workflowName, graphJSON, baggageJSON, traceParent string
 	var notifyHostname, breakpointsJSON string
 	var flowCreatedAt, flowUpdatedAt time.Time
 	var flowPriority int
 	var flowFairnessKey string
 	var flowFairnessWeight float64
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_token, status, workflow_name, graph, baggage, notify_hostname, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
+		"SELECT flow_token, status, workflow_name, graph, baggage, trace_parent, notify_hostname, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&flowToken, &flowStatus, &workflowName, &graphJSON, &baggageJSON, &notifyHostname, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight)
+	).Scan(&flowToken, &flowStatus, &workflowName, &graphJSON, &baggageJSON, &traceParent, &notifyHostname, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -223,32 +224,43 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	e.breakerCommit(taskName)
 	dispatchURL := dispatchURLOf(graph, taskName)
 	taskCtx := workflow.ContextWithBaggage(ctx, baggage)
+
+	// Open a per-step span parented to the flow's root "workflow" span (reconstructed from the stored
+	// trace_parent), and place it on the executor's context so the task's downstream spans nest under it.
+	// The span is named by the task; no-op unless a TracerProvider is configured.
+	flowKey := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
+	taskCtx = injectTraceParent(taskCtx, traceParent)
+	taskCtx, taskSpan := e.tracer.Start(taskCtx, taskName,
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("workflow.id", flowKey),
+			attribute.String("workflow.name", workflowName),
+		),
+	)
+	defer taskSpan.End()
+
 	if timeBudgetMs > 0 {
 		var cancel context.CancelFunc
 		taskCtx, cancel = context.WithTimeout(taskCtx, time.Duration(timeBudgetMs)*time.Millisecond)
 		defer cancel()
 	}
 	execErr := e.taskExecutor(taskCtx, dispatchURL, &flow.Flow)
+	recordSpanError(taskSpan, execErr)
 
 	var resultFlow *workflow.RawFlow
 	errorRouted := false
 	errStatusCode := 0
 
 	if execErr != nil {
-		if errors.StatusCode(execErr) == http.StatusTooManyRequests {
+		// The host classifies its transport's "can't take more work" signals by wrapping the error; the
+		// engine never inspects status codes or error text itself. Backpressure bounces the step and cuts
+		// the rate; a breaker trip parks the task's backlog and probes. cause is an opaque metric label.
+		if cause, ok := workflow.IsBackpressure(execErr); ok {
+			e.logger.DebugContext(ctx, "Task backpressure", "task", taskName, "flow", workflowName, "cause", cause)
 			return e.handleBackpressure(ctx, shardNum, stepID, taskName)
 		}
-		var breakerCause string
-		switch {
-		case errors.StatusCode(execErr) == http.StatusNotFound && strings.HasPrefix(execErr.Error(), "ack timeout"):
-			breakerCause = breakerCauseAckTimeout
-		case errors.StatusCode(execErr) == http.StatusServiceUnavailable:
-			breakerCause = breakerCauseUnavailable
-		case errors.StatusCode(execErr) == 529:
-			breakerCause = breakerCauseOverloaded
-		}
-		if breakerCause != "" {
-			return e.handleBreakerTrip(ctx, shardNum, stepID, taskName, breakerCause)
+		if cause, ok := workflow.IsBreakerTrip(execErr); ok {
+			return e.handleBreakerTrip(ctx, shardNum, stepID, taskName, cause)
 		}
 
 		if _, ok := graph.ErrorTransition(taskName); ok {
@@ -338,7 +350,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if childInputState == nil {
 			childInputState = map[string]any{}
 		}
-		subgraphFlowKey, err := e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphWorkflow, subgraphGraph, childInputState, baggageJSON, breakpointsJSON)
+		// The caller step's span is still live on taskCtx; parent the subgraph's "workflow" span under it
+		// so the subgraph subtree nests beneath this task in the trace.
+		callerTraceParent := extractTraceParent(taskCtx)
+		subgraphFlowKey, err := e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphWorkflow, subgraphGraph, childInputState, baggageJSON, callerTraceParent, breakpointsJSON)
 		if err != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)

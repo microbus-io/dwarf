@@ -55,7 +55,7 @@ func TestCancelbackpressureflow(t *testing.T) {
 		case <-ctx.Done():
 			return errors.Trace(ctx.Err())
 		}
-		return errors.New("saturated", http.StatusTooManyRequests)
+		return workflow.ErrBackpressure(errors.New("saturated", http.StatusTooManyRequests), "")
 	})
 
 	eng := engine.NewEngine().

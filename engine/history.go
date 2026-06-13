@@ -796,7 +796,8 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		opts.Baggage = inherited
 	}
 
-	return e.createWithGraph(ctx, shardNum, workflowName, &graph, mergedState, threadID, threadToken, opts)
+	// A Continue turn starts its own trace (fresh root span), so pass an empty trace_parent.
+	return e.createWithGraph(ctx, shardNum, workflowName, &graph, mergedState, threadID, threadToken, "", opts)
 }
 
 func (e *Engine) setBreakpoint(ctx context.Context, flowKey string, key string, enabled bool) error {

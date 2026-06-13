@@ -53,7 +53,7 @@ func TestBreakerstartparkflow(t *testing.T) {
 		mu.Lock()
 		seen[f.GetString("marker")] = true
 		mu.Unlock()
-		return errors.New("ack timeout: breakerstartparkflow.verify:428/work", http.StatusNotFound)
+		return workflow.ErrBreakerTrip(errors.New("ack timeout: breakerstartparkflow.verify:428/work", http.StatusNotFound), "ack_timeout")
 	})
 
 	eng := engine.NewEngine().

@@ -52,7 +52,8 @@ func TestAckdroppedflow(t *testing.T) {
 
 	proxy.HandleTask("ackdroppedflow.verify:428/park", func(ctx context.Context, f *workflow.Flow) error {
 		if parkDisabled.Load() {
-			return errors.New("ack timeout: ackdroppedflow.verify:428/park", http.StatusNotFound)
+			// Wrap the transport's unreachable signal as a breaker trip with an ack_timeout cause.
+			return workflow.ErrBreakerTrip(errors.New("ack timeout: ackdroppedflow.verify:428/park", http.StatusNotFound), "ack_timeout")
 		}
 		parkHits.Add(1)
 		return nil
