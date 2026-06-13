@@ -21,7 +21,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"strings"
@@ -31,10 +30,10 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 
-	"github.com/microbus-io/dwarf/engine/resources"
+	"github.com/microbus-io/dwarf/migrations"
 )
 
-const sequenceName = "foreman@2026-03-10" // Do not change
+const sequenceName = "github.com/microbus-io/dwarf" // Namespaces this engine's migrations in sequel_migrations; do not change once deployed
 
 // shard returns the database connection for the given 1-based shard index.
 func (e *Engine) shard(n int) (*sequel.DB, error) {
@@ -145,11 +144,7 @@ func (e *Engine) openAndMigrate(dsn string) (*sequel.DB, error) {
 	poolSize := int(e.maxOpenConns.Load())
 	db.SetMaxOpenConns(poolSize)
 	db.SetMaxIdleConns(poolSize)
-	dirFS, err := fs.Sub(resources.FS, "sql")
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	err = db.Migrate(sequenceName, dirFS)
+	err = db.Migrate(sequenceName, migrations.FS)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
