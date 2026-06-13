@@ -45,11 +45,11 @@ func TestInterruptpayloadflow(t *testing.T) {
 	graph.AddTransition("ask", workflow.END)
 	proxy.HandleGraph("interruptpayloadflow.verify:428/interrupt", graph)
 
-	proxy.HandleTask("interruptpayloadflow.verify:428/setup", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("interruptpayloadflow.verify:428/setup", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("prompt", "choose")
 		return nil
 	})
-	proxy.HandleTask("interruptpayloadflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("interruptpayloadflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		_, yield, err := f.Interrupt(map[string]any{
 			"question": "pick one",
 			"options":  []string{"a", "b"},

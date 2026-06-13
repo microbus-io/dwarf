@@ -50,14 +50,14 @@ func TestAckdroppedflow(t *testing.T) {
 	var parkDisabled atomic.Bool
 	parkDisabled.Store(true)
 
-	proxy.HandleTask("ackdroppedflow.verify:428/park", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("ackdroppedflow.verify:428/park", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		if parkDisabled.Load() {
 			return errors.New("ack timeout: ackdroppedflow.verify:428/park", http.StatusNotFound)
 		}
 		parkHits.Add(1)
 		return nil
 	})
-	proxy.HandleTask("ackdroppedflow.verify:428/ping", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("ackdroppedflow.verify:428/ping", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		pingHits.Add(1)
 		return nil
 	})

@@ -48,14 +48,14 @@ func TestInterruptedfanoutflow(t *testing.T) {
 	graph.AddTransition("j", workflow.END)
 	proxy.HandleGraph("interruptedfanoutflow.verify:428/interrupted-fan-out", graph)
 
-	proxy.HandleTask("interruptedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		_, yield, err := f.Interrupt(map[string]any{"branch": "B"})
 		if yield || err != nil {
 			return err
@@ -63,11 +63,11 @@ func TestInterruptedfanoutflow(t *testing.T) {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetInt("totalExecuted", f.GetInt("executed"))
 		return nil
 	})

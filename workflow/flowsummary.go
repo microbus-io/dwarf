@@ -34,6 +34,10 @@ type FlowSummary struct {
 	// this flow first appear."
 	StartedAt time.Time `json:"startedAt,omitzero"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
+	// Priority is the flow's scheduling priority (>= 1, lower runs first), resolved at Create.
+	Priority int `json:"priority,omitzero"`
+	// FairnessKey is the flow's scheduling fairness bucket, resolved at Create.
+	FairnessKey string `json:"fairnessKey,omitzero"`
 }
 
 // Duration is the wall-clock time from StartedAt to UpdatedAt.

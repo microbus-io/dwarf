@@ -46,17 +46,17 @@ func TestFingerprintflow(t *testing.T) {
 	graph.AddTransition("done", workflow.END)
 	proxy.HandleGraph("fingerprintflow.verify:428/fingerprint", graph)
 
-	proxy.HandleTask("fingerprintflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("fingerprintflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("fingerprintflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("fingerprintflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		_, yield, err := f.Interrupt(map[string]any{"need": "input"})
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("fingerprintflow.verify:428/done", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("fingerprintflow.verify:428/done", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("result", "finished")
 		return nil
 	})

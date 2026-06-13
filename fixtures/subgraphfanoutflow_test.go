@@ -57,18 +57,18 @@ func TestSubgraphfanoutflow(t *testing.T) {
 	sub.AddTransition("taskY", workflow.END)
 	proxy.HandleGraph("subgraphfanoutflow.verify:428/sub", sub)
 
-	proxy.HandleTask("subgraphfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("subgraphfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("subgraphfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("bResult", "b")
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("subgraphfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetBool("xPassed", true)
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("subgraphfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		if f.GetBool("xPassed") {
 			f.SetString("subResult", "sub")
 		} else {
@@ -76,7 +76,7 @@ func TestSubgraphfanoutflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/run-sub", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("subgraphfanoutflow.verify:428/run-sub", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		out, yield, err := f.Subgraph("subgraphfanoutflow.verify:428/sub", nil)
 		if yield || err != nil {
 			return err
@@ -86,11 +86,11 @@ func TestSubgraphfanoutflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/normal-d", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("subgraphfanoutflow.verify:428/normal-d", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("dResult", "d")
 		return nil
 	})
-	proxy.HandleTask("subgraphfanoutflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("subgraphfanoutflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("result", fmt.Sprintf("%s/%s/%s", f.GetString("bResult"), f.GetString("subResult"), f.GetString("dResult")))
 		return nil
 	})

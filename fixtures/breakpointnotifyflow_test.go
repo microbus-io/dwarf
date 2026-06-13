@@ -43,10 +43,10 @@ func TestBreakpointnotifyflow(t *testing.T) {
 	graph.AddTransition("taskA", "taskB")
 	graph.AddTransition("taskB", workflow.END)
 	proxy.HandleGraph("breakpointnotifyflow.verify:428/flow", graph)
-	proxy.HandleTask("breakpointnotifyflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("breakpointnotifyflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("breakpointnotifyflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("breakpointnotifyflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
 

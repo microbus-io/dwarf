@@ -55,18 +55,18 @@ func TestSwitchflow(t *testing.T) {
 	noMatchGraph.AddTransition("handleMid", workflow.END)
 	proxy.HandleGraph("switchflow.verify:428/switch-no-match", noMatchGraph)
 
-	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("branch", "mid")
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-low", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-low", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("branch", "low")
 		return nil
 	})
@@ -138,14 +138,14 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 	graph.AddTransition("handleMid", workflow.END)
 	proxy.HandleGraph("switchflow.verify:428/switch-no-match", graph)
 
-	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("branch", "mid")
 		return nil
 	})

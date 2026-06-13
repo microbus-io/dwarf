@@ -33,34 +33,53 @@ import (
 )
 
 // Create creates a new flow for a workflow without starting it.
-func (e *Engine) create(ctx context.Context, workflowName string, initialState any, baggage map[string]any, opts *workflow.FlowOptions) (flowKey string, err error) {
+func (e *Engine) create(ctx context.Context, workflowName string, initialState any, baggage any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	if workflowName == "" {
 		return "", errors.New("workflow name is required", http.StatusBadRequest)
 	}
-	graph, err := e.graphLoader(ctx, workflowName, baggage)
+	baggageM := baggageMap(baggage)
+	graph, err := e.graphLoader(ctx, workflowName, baggageM)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 	shardNum := rand.IntN(e.numDBShards()) + 1
-	opts = e.resolveFlowOptions(opts, baggage)
+	opts = e.resolveFlowOptions(opts, baggageM)
 	flowKey, err = e.createWithGraph(ctx, shardNum, workflowName, graph, initialState, baggage, 0, "", opts)
 	return flowKey, errors.Trace(err)
 }
 
 // createTask creates a flow that executes a single task and then terminates.
-func (e *Engine) createTask(ctx context.Context, taskName string, initialState any, baggage map[string]any) (flowKey string, err error) {
+func (e *Engine) createTask(ctx context.Context, taskName string, initialState any, baggage any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	if taskName == "" {
 		return "", errors.New("task name is required", http.StatusBadRequest)
 	}
 	graph := workflow.NewGraph(taskName)
 	graph.AddTransition(taskName, workflow.END)
 	shardNum := rand.IntN(e.numDBShards()) + 1
-	flowKey, err = e.createWithGraph(ctx, shardNum, taskName, graph, initialState, baggage, 0, "", e.resolveFlowOptions(nil, baggage))
+	flowKey, err = e.createWithGraph(ctx, shardNum, taskName, graph, initialState, baggage, 0, "", e.resolveFlowOptions(opts, baggageMap(baggage)))
 	return flowKey, errors.Trace(err)
 }
 
-// createWithGraph is the shared implementation for create, createTask, and continue.
-func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName string, graph *workflow.Graph, initialState any, baggage map[string]any, threadID int, threadToken string, opts *workflow.FlowOptions) (flowKey string, err error) {
+// baggageMap normalizes an opaque baggage value to the map the create-time GraphLoader receives. It
+// round-trips through JSON - the same path the value takes through the baggage column - so the loader
+// sees exactly what every dispatch-time callback sees (e.g. JSON numbers as float64), rather than the
+// caller's original Go types. A nil value, or a value that does not decode to a JSON object, yields nil.
+func baggageMap(v any) map[string]any {
+	if v == nil {
+		return nil
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	_ = json.Unmarshal(data, &m)
+	return m
+}
+
+// createWithGraph is the shared implementation for create, createTask, and continue. baggage is the
+// opaque host value, marshalled to the flow's baggage column (any JSON value, like initialState).
+func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName string, graph *workflow.Graph, initialState any, baggage any, threadID int, threadToken string, opts *workflow.FlowOptions) (flowKey string, err error) {
 	entryPoint := graph.EntryPoint()
 	if entryPoint == "" {
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
@@ -549,7 +568,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 }
 
 // run creates, starts, and awaits a flow in one call.
-func (e *Engine) run(ctx context.Context, workflowName string, initialState any, baggage map[string]any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
+func (e *Engine) run(ctx context.Context, workflowName string, initialState any, baggage any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
 	flowKey, err := e.create(ctx, workflowName, initialState, baggage, opts)
 	if err != nil {
 		return nil, errors.Trace(err)

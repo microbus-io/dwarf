@@ -48,7 +48,7 @@ func TestBreakerreconstituteflow(t *testing.T) {
 
 	var broken atomic.Bool
 	broken.Store(true)
-	proxy.HandleTask("breakerreconstituteflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("breakerreconstituteflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		if broken.Load() {
 			return errors.New("ack timeout: breakerreconstituteflow.verify:428/work", http.StatusNotFound)
 		}

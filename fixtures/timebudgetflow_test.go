@@ -39,12 +39,12 @@ func TestTimebudgetflow(t *testing.T) {
 	graph.AddTransition("slow", workflow.END)
 	proxy.HandleGraph("timebudgetflow.verify:428/time-budget", graph)
 
-	proxy.HandleTask("timebudgetflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("timebudgetflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
 	// In Microbus, the connector enforced a per-subscription time budget (sub.TimeBudget).
 	// In dwarf, the task handler enforces its own timeout.
-	proxy.HandleTask("timebudgetflow.verify:428/slow", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("timebudgetflow.verify:428/slow", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		ctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 		defer cancel()
 		select {

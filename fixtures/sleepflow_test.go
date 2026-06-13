@@ -41,15 +41,15 @@ func TestSleepflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("sleepflow.verify:428/delay", graph)
 
-	proxy.HandleTask("sleepflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("sleepflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("sleepflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("sleepflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.Sleep(f.GetDuration("sleepFor"))
 		f.SetBool("marked", true)
 		return nil
 	})
-	proxy.HandleTask("sleepflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("sleepflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
 

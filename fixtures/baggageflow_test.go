@@ -52,13 +52,13 @@ func TestBaggageflow(t *testing.T) {
 	inner.AddTransition("taskX", workflow.END)
 	proxy.HandleGraph("baggageflow.verify:428/inner", inner)
 
-	proxy.HandleTask("baggageflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("baggageflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("baggageflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("baggageflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("baggageflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("baggageflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		_, yield, err := f.Subgraph("baggageflow.verify:428/inner", nil)
 		if yield || err != nil {
 			return err
@@ -70,15 +70,15 @@ func TestBaggageflow(t *testing.T) {
 	var mu sync.Mutex
 	seenLoad := map[string]map[string]any{}
 	seenTask := map[string]map[string]any{}
-	loader := func(ctx context.Context, name string, md map[string]any) (*workflow.Graph, error) {
+	loader := func(ctx context.Context, name string, md any) (*workflow.Graph, error) {
 		mu.Lock()
-		seenLoad[name] = md
+		seenLoad[name] = md.(map[string]any)
 		mu.Unlock()
 		return proxy.LoadGraph(ctx, name, md)
 	}
-	executor := func(ctx context.Context, taskName string, f *workflow.Flow, md map[string]any) error {
+	executor := func(ctx context.Context, taskName string, f *workflow.Flow, md any) error {
 		mu.Lock()
-		seenTask[taskName] = md
+		seenTask[taskName] = md.(map[string]any)
 		mu.Unlock()
 		return proxy.ExecuteTask(ctx, taskName, f, md)
 	}
@@ -91,7 +91,9 @@ func TestBaggageflow(t *testing.T) {
 	t.Run("baggage_reaches_loader_and_every_task_including_subgraph", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		md := map[string]any{"actor": "alice", "scope": "s1"}
+		// "n" is an int on the way in; it must arrive JSON-decoded (float64) everywhere, including the
+		// create-time loader — proving baggage is normalized through JSON, not handed over raw.
+		md := map[string]any{"actor": "alice", "scope": "s1", "n": 5}
 		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, md, nil)
 		if !assert.NoError(err) {
 			return
@@ -111,6 +113,8 @@ func TestBaggageflow(t *testing.T) {
 		// Loader saw baggage for the parent graph and the subgraph.
 		assert.Equal("alice", seenLoad["baggageflow.verify:428/parent"]["actor"])
 		assert.Equal("alice", seenLoad["baggageflow.verify:428/inner"]["actor"])
+		// The create-time loader saw the JSON-decoded form (float64), identical to dispatch.
+		assert.Equal(float64(5), seenLoad["baggageflow.verify:428/parent"]["n"])
 
 		// Every task — parent tasks and the inherited subgraph task — saw it.
 		for _, task := range []string{
@@ -125,5 +129,92 @@ func TestBaggageflow(t *testing.T) {
 			assert.Equal("alice", got["actor"], "task %s", task)
 			assert.Equal("s1", got["scope"], "task %s", task)
 		}
+	})
+
+	t.Run("baggage_inherited_across_continue", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		// Turn 1 carries the caller's baggage.
+		md := map[string]any{"actor": "bob", "scope": "s2"}
+		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, md, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		if !assert.NoError(eng.Start(ctx, flowKey)) {
+			return
+		}
+		if _, err = eng.Await(ctx, flowKey); !assert.NoError(err) {
+			return
+		}
+
+		// Clear observations so what we assert below comes only from the continued turn.
+		mu.Lock()
+		seenLoad = map[string]map[string]any{}
+		seenTask = map[string]map[string]any{}
+		mu.Unlock()
+
+		// Turn 2 (Continue) must inherit turn 1's baggage even though the caller passes none.
+		nextKey, err := eng.Continue(ctx, flowKey, nil, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		if !assert.NoError(eng.Start(ctx, nextKey)) {
+			return
+		}
+		outcome, err := eng.Await(ctx, nextKey)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		// The continued flow reuses the frozen parent graph (loader not re-invoked for it), but its
+		// subgraph is still loaded — with the inherited baggage.
+		assert.Equal("bob", seenLoad["baggageflow.verify:428/inner"]["actor"])
+
+		// Every task in the continued turn saw the inherited baggage.
+		for _, task := range []string{
+			"baggageflow.verify:428/task-a",
+			"baggageflow.verify:428/run-inner",
+			"baggageflow.verify:428/task-x",
+		} {
+			got := seenTask[task]
+			if !assert.NotNil(got, "continued task %s never received baggage", task) {
+				continue
+			}
+			assert.Equal("bob", got["actor"], "continued task %s", task)
+			assert.Equal("s2", got["scope"], "continued task %s", task)
+		}
+	})
+
+	t.Run("nil_baggage_is_safe", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		mu.Lock()
+		seenTask = map[string]map[string]any{}
+		mu.Unlock()
+
+		// A nil baggage at Create round-trips through the column and reaches tasks as an empty/nil map
+		// — reads on it are safe, so the flow completes without panicking.
+		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, nil, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		if !assert.NoError(eng.Start(ctx, flowKey)) {
+			return
+		}
+		outcome, err := eng.Await(ctx, flowKey)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+
+		mu.Lock()
+		defer mu.Unlock()
+		got, ok := seenTask["baggageflow.verify:428/task-a"]
+		assert.True(ok, "task-a should have been dispatched")
+		assert.Equal(0, len(got), "nil baggage should arrive as an empty/nil map")
 	})
 }

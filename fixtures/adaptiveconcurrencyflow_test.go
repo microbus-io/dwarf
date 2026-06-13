@@ -45,7 +45,7 @@ func TestAdaptiveconcurrencyflow(t *testing.T) {
 	var rejections atomic.Int32
 	var completions atomic.Int32
 
-	proxy.HandleTask("adaptiveconcurrencyflow.verify:428/adaptive", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("adaptiveconcurrencyflow.verify:428/adaptive", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		if admit, _ := rate.Allow(); !admit {
 			rejections.Add(1)
 			return errors.New("rate limited", http.StatusTooManyRequests)

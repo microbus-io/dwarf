@@ -47,23 +47,23 @@ func TestFanoutflow(t *testing.T) {
 	graph.AddTransition("taskE", workflow.END)
 	proxy.HandleGraph("fanoutflow.verify:428/fan-out", graph)
 
-	proxy.HandleTask("fanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("fanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetBool("markA", true)
 		return nil
 	})
-	proxy.HandleTask("fanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("fanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetBool("markB", f.GetBool("markA"))
 		return nil
 	})
-	proxy.HandleTask("fanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("fanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetBool("markC", f.GetBool("markA"))
 		return nil
 	})
-	proxy.HandleTask("fanoutflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("fanoutflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetBool("markD", f.GetBool("markA"))
 		return nil
 	})
-	proxy.HandleTask("fanoutflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("fanoutflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetBool("allMarked", f.GetBool("markB") && f.GetBool("markC") && f.GetBool("markD"))
 		return nil
 	})

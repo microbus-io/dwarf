@@ -112,11 +112,11 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 
 	for _, name := range []string{"taskA", "taskB", "taskC", "taskD", "taskE", "taskZ", "errorHandler", "subTaskA", "subTaskB"} {
 		taskName := name
-		proxy.HandleTask("superflow.verify:428/"+kebab(taskName), func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+		proxy.HandleTask("superflow.verify:428/"+kebab(taskName), func(ctx context.Context, f *workflow.Flow, baggage any) error {
 			return step(ctx, f, taskName)
 		})
 	}
-	proxy.HandleTask("superflow.verify:428/super-sub-call", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("superflow.verify:428/super-sub-call", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		_, yield, err := f.Subgraph("superflow.verify:428/super-sub", nil)
 		if yield || err != nil {
 			return err

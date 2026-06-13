@@ -40,15 +40,15 @@ func TestBasicflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("basicflow.verify:428/basic", graph)
 
-	proxy.HandleTask("basicflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("basicflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("path", "A")
 		return nil
 	})
-	proxy.HandleTask("basicflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("basicflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("path", f.GetString("path")+"B")
 		return nil
 	})
-	proxy.HandleTask("basicflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("basicflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("path", f.GetString("path")+"C")
 		return nil
 	})

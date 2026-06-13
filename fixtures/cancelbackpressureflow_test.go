@@ -48,7 +48,7 @@ func TestCancelbackpressureflow(t *testing.T) {
 	ready := make(chan struct{})
 	release := make(chan struct{})
 
-	proxy.HandleTask("cancelbackpressureflow.verify:428/bounce-and-cancel", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("cancelbackpressureflow.verify:428/bounce-and-cancel", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		readyOnce.Do(func() { close(ready) })
 		select {
 		case <-release:

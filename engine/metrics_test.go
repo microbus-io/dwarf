@@ -85,8 +85,8 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	g.AddTransition("taskA", "taskB")
 	g.AddTransition("taskB", workflow.END)
 	proxy.HandleGraph("metricsflow.verify:428/g", g)
-	proxy.HandleTask("metricsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow, md map[string]any) error { return nil })
-	proxy.HandleTask("metricsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow, md map[string]any) error { return nil })
+	proxy.HandleTask("metricsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow, md any) error { return nil })
+	proxy.HandleTask("metricsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow, md any) error { return nil })
 
 	eng := NewEngine().
 		WithGraphLoader(proxy.LoadGraph).

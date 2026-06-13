@@ -471,7 +471,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			args = append(args, scArgs...)
 		}
 		args = append(args, perShardLimit)
-		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at" +
+		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key" +
 			" FROM dwarf_flows f" + joinSQL +
 			" WHERE " + strings.Join(conditions, " AND ") +
 			" ORDER BY f.flow_id DESC LIMIT_OFFSET(?, 0)"
@@ -486,7 +486,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			var flowToken, threadToken, flowError, cancelReason string
 			var threadID int
 			var taskName sql.NullString
-			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt)
+			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -759,11 +759,11 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	}
 	threadToken = strings.TrimSpace(threadToken)
 
-	var flowStatus, finalStateJSON, graphJSON, workflowName string
+	var flowStatus, finalStateJSON, graphJSON, workflowName, baggageJSON string
 	err = db.QueryRowContext(ctx,
-		"SELECT status, final_state, graph, workflow_name FROM dwarf_flows WHERE thread_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+		"SELECT status, final_state, graph, workflow_name, baggage FROM dwarf_flows WHERE thread_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 		threadID,
-	).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowName)
+	).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowName, &baggageJSON)
 	if err != nil {
 		return "", errors.New("no flows found in thread", http.StatusNotFound)
 	}
@@ -786,7 +786,13 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		return "", errors.Trace(err)
 	}
 
-	return e.createWithGraph(ctx, shardNum, workflowName, &graph, mergedState, nil, threadID, threadToken, opts)
+	// Inherit the thread's baggage: a multi-turn conversation keeps the original caller's identity /
+	// host context across turns, matching subgraph inheritance. The host scrubs it in an entry adapter
+	// task if a turn needs narrower context.
+	var baggage map[string]any
+	unmarshalJSONMap(baggageJSON, &baggage)
+
+	return e.createWithGraph(ctx, shardNum, workflowName, &graph, mergedState, baggage, threadID, threadToken, opts)
 }
 
 func (e *Engine) setBreakpoint(ctx context.Context, flowKey string, key string, enabled bool) error {

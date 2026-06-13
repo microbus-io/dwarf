@@ -42,7 +42,7 @@ func TestShardinfoflow(t *testing.T) {
 	graph.AddTransition("only", workflow.END)
 	proxy.HandleGraph("shardinfoflow.verify:428/flow", graph)
 
-	proxy.HandleTask("shardinfoflow.verify:428/only", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("shardinfoflow.verify:428/only", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("done", "yes")
 		return nil
 	})

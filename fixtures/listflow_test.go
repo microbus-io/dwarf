@@ -41,7 +41,7 @@ func TestListflow(t *testing.T) {
 	graph.AddTransition("only", workflow.END)
 	proxy.HandleGraph("listflow.verify:428/list", graph)
 
-	proxy.HandleTask("listflow.verify:428/only", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("listflow.verify:428/only", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetString("done", "yes")
 		return nil
 	})

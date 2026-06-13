@@ -36,7 +36,7 @@ func TestContinueflow(t *testing.T) {
 	graph.AddTransition("increment", workflow.END)
 	proxy.HandleGraph("continueflow.verify:428/counting", graph)
 
-	proxy.HandleTask("continueflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("continueflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetInt("counter", f.GetInt("counter")+1)
 		return nil
 	})

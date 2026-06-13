@@ -59,10 +59,10 @@ func TestReducervariantsflow(t *testing.T) {
 	graph.AddTransition("join", workflow.END)
 	proxy.HandleGraph("reducervariantsflow.verify:428/reducer", graph)
 
-	proxy.HandleTask("reducervariantsflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		return nil
 	})
-	proxy.HandleTask("reducervariantsflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetInt("lo", 5)
 		f.SetInt("hi", 5)
 		f.SetBool("allOk", true)
@@ -71,7 +71,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.Set("obj", map[string]any{"k1": 1.0})
 		return nil
 	})
-	proxy.HandleTask("reducervariantsflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetInt("lo", 2)
 		f.SetInt("hi", 8)
 		f.SetBool("allOk", true)
@@ -80,7 +80,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.Set("obj", map[string]any{"k2": 2.0})
 		return nil
 	})
-	proxy.HandleTask("reducervariantsflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		f.SetInt("lo", 9)
 		f.SetInt("hi", 3)
 		f.SetBool("allOk", false)
@@ -89,7 +89,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.Set("obj", map[string]any{"k1": 9.0})
 		return nil
 	})
-	proxy.HandleTask("reducervariantsflow.verify:428/join", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/join", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		// Copy merged values forward under stable result keys.
 		f.SetFloat("rLo", f.GetFloat("lo"))
 		f.SetFloat("rHi", f.GetFloat("hi"))
@@ -116,11 +116,11 @@ func TestReducervariantsflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-		assert.Equal(2.0, outcome.State["rLo"])          // min(5,2,9)
-		assert.Equal(8.0, outcome.State["rHi"])          // max(5,8,3)
-		assert.Equal(false, outcome.State["rAll"])       // true AND true AND false
-		assert.Equal(true, outcome.State["rAny"])        // false OR false OR true
-		assert.Equal("abc", outcome.State["rWord"])      // concat in B,C,D order
+		assert.Equal(2.0, outcome.State["rLo"])     // min(5,2,9)
+		assert.Equal(8.0, outcome.State["rHi"])     // max(5,8,3)
+		assert.Equal(false, outcome.State["rAll"])  // true AND true AND false
+		assert.Equal(true, outcome.State["rAny"])   // false OR false OR true
+		assert.Equal("abc", outcome.State["rWord"]) // concat in B,C,D order
 
 		// merge: later contribution (D) wins on key collisions; union of keys.
 		obj, ok := outcome.State["rObj"].(map[string]any)

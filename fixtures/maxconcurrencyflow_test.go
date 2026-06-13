@@ -47,7 +47,7 @@ func TestMaxconcurrencyflow(t *testing.T) {
 	var inFlight, peak int
 	var rejections atomic.Int32
 
-	proxy.HandleTask("maxconcurrencyflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+	proxy.HandleTask("maxconcurrencyflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow, baggage any) error {
 		mu.Lock()
 		inFlight++
 		if inFlight > peak {

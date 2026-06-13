@@ -582,7 +582,10 @@ only when no interrupted steps remain at any level.
 The opaque `baggage` map captured at `Create` (stored in the `baggage` column) is passed to every
 `GraphLoader` and `TaskExecutor` call for the flow's lifetime, including dispatches long after creation. The engine
 never interprets it; a host uses it to carry the original caller's identity (e.g. mint a fresh token inside its
-`TaskExecutor`).
+`TaskExecutor`). It is **inherited** by subgraph flows (`createSubgraphFlow` copies the parent's `baggage`) and by
+`Continue` (the next turn reads the prior flow's `baggage` column and carries it forward), so a multi-turn
+conversation keeps the caller's identity across turns. A turn wanting narrower context scrubs it in an entry
+adapter task.
 
 ### Await
 
