@@ -299,7 +299,7 @@ func TestGraph_ValidateWhenExpression(t *testing.T) {
 	assert.Contains(err.Error(), "invalid 'when' expression")
 }
 
-func TestGraph_AddTransitionOnTimeout(t *testing.T) {
+func TestGraph_AddTransitionOnError(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
@@ -308,41 +308,17 @@ func TestGraph_AddTransitionOnTimeout(t *testing.T) {
 	g.AddTransition("svc/b", END)
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
 	g.AddTransition("svc/errHandler", END)
-	g.AddTransitionOnTimeout("svc/a", "svc/timeoutHandler")
-	g.AddTransition("svc/timeoutHandler", END)
 
 	transitions := g.Transitions()
-	assert.Equal(6, len(transitions))
+	assert.Equal(4, len(transitions))
 
-	// AddTransitionOnError: OnError=true, StatusCode=0
+	// AddTransitionOnError: OnError=true
 	assert.True(transitions[2].OnError)
-	assert.Equal(0, transitions[2].StatusCode)
-
-	// AddTransitionOnTimeout: OnError=true, StatusCode=408
-	assert.True(transitions[4].OnError)
-	assert.Equal(408, transitions[4].StatusCode)
 
 	assert.NoError(g.Validate())
 }
 
-func TestGraph_StatusCodeWithoutOnErrorRejected(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	g := NewGraph("test")
-	g.AddTask("svc/a", "svc/a")
-	g.AddTask("svc/b", "svc/b")
-	// Manually craft a malformed transition that the public API would never produce.
-	g.transitions = append(g.transitions, Transition{From: "svc/a", To: "svc/b", StatusCode: 408})
-	g.AddTransition("svc/b", END)
-
-	err := g.Validate()
-	if assert.Error(err) {
-		assert.Contains(err.Error(), "statusCode without onError")
-	}
-}
-
-func TestGraph_OnErrorAndOnTimeoutJSONRoundTrip(t *testing.T) {
+func TestGraph_OnErrorJSONRoundTrip(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
@@ -350,8 +326,6 @@ func TestGraph_OnErrorAndOnTimeoutJSONRoundTrip(t *testing.T) {
 	g.AddTransition("svc/a", END)
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
 	g.AddTransition("svc/errHandler", END)
-	g.AddTransitionOnTimeout("svc/a", "svc/timeoutHandler")
-	g.AddTransition("svc/timeoutHandler", END)
 
 	data, err := json.Marshal(g)
 	assert.NoError(err)
@@ -359,18 +333,17 @@ func TestGraph_OnErrorAndOnTimeoutJSONRoundTrip(t *testing.T) {
 	var restored Graph
 	err = json.Unmarshal(data, &restored)
 	assert.NoError(err)
-	assert.Equal(5, len(restored.Transitions()))
+	assert.Equal(3, len(restored.Transitions()))
 
-	// Find the timeout transition by status code.
-	var foundTimeout bool
+	// Find the onError transition.
+	var found bool
 	for _, tr := range restored.Transitions() {
-		if tr.StatusCode == 408 {
-			assert.True(tr.OnError)
-			assert.Equal("svc/timeoutHandler", tr.To)
-			foundTimeout = true
+		if tr.OnError {
+			assert.Equal("svc/errHandler", tr.To)
+			found = true
 		}
 	}
-	assert.True(foundTimeout)
+	assert.True(found)
 }
 
 func TestGraph_MermaidForEachShape(t *testing.T) {
@@ -454,7 +427,7 @@ func TestGraph_MermaidNestedForEachLabels(t *testing.T) {
 	assert.NotContains(mmd, `subgraph fo_`)
 }
 
-func TestGraph_MermaidLabelsOnErrorAndOnTimeout(t *testing.T) {
+func TestGraph_MermaidLabelsOnError(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
@@ -462,12 +435,9 @@ func TestGraph_MermaidLabelsOnErrorAndOnTimeout(t *testing.T) {
 	g.AddTransition("svc/a", END)
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
 	g.AddTransition("svc/errHandler", END)
-	g.AddTransitionOnTimeout("svc/a", "svc/timeoutHandler")
-	g.AddTransition("svc/timeoutHandler", END)
 
 	mmd := must(NewGraphRenderer(g).Render())
 	assert.Contains(mmd, `"onError"`)
-	assert.Contains(mmd, `"onTimeout"`)
 }
 
 func TestGraph_SelfLoopOnErrorRejected(t *testing.T) {
@@ -482,20 +452,6 @@ func TestGraph_SelfLoopOnErrorRejected(t *testing.T) {
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "to itself")
 		assert.Contains(err.Error(), "flow.Retry")
-	}
-}
-
-func TestGraph_SelfLoopOnTimeoutRejected(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	g := NewGraph("test")
-	g.AddTransition("svc/a", END)
-	g.AddTransitionOnTimeout("svc/a", "svc/a")
-
-	err := g.Validate()
-	if assert.Error(err) {
-		assert.Contains(err.Error(), "to itself")
 	}
 }
 

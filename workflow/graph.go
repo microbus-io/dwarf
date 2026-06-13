@@ -18,7 +18,6 @@ package workflow
 
 import (
 	"encoding/json"
-	"net/http"
 	"strings"
 
 	"github.com/microbus-io/boolexp"
@@ -41,15 +40,14 @@ type Node struct {
 // Transition defines a possible transition between two nodes in a workflow graph.
 // From and To are node names, not URLs.
 type Transition struct {
-	From       string `json:"from"`
-	To         string `json:"to"`
-	When       string `json:"when,omitzero"`
-	WithGoto   bool   `json:"withGoto,omitzero"`
-	ForEach    string `json:"forEach,omitzero"` // dynamic fan-out over a state field
-	As         string `json:"as,omitzero"`      // alias for the current element during forEach fan-out
-	OnError    bool   `json:"onError,omitzero"` // taken when the source task returns an error
-	Switch     bool   `json:"switch,omitzero"`  // first-match-wins among siblings; never fans out
-	StatusCode int    `json:"statusCode,omitzero"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	When     string `json:"when,omitzero"`
+	WithGoto bool   `json:"withGoto,omitzero"`
+	ForEach  string `json:"forEach,omitzero"` // dynamic fan-out over a state field
+	As       string `json:"as,omitzero"`      // alias for the current element during forEach fan-out
+	OnError  bool   `json:"onError,omitzero"` // taken when the source task returns an error
+	Switch   bool   `json:"switch,omitzero"`  // first-match-wins among siblings; never fans out
 }
 
 // Graph is the definition of a workflow. It describes the tasks, transitions between them,
@@ -208,14 +206,6 @@ func (g *Graph) AddTransitionOnError(from, to string) {
 	g.transitions = append(g.transitions, Transition{From: from, To: to, OnError: true})
 }
 
-// AddTransitionOnTimeout adds an error transition that is taken only when the source task's
-// error carries HTTP status 408.
-func (g *Graph) AddTransitionOnTimeout(from, to string) {
-	from = g.autoRegister(from)
-	to = g.autoRegister(to)
-	g.transitions = append(g.transitions, Transition{From: from, To: to, OnError: true, StatusCode: http.StatusRequestTimeout})
-}
-
 // autoRegister resolves a transition endpoint string to a node name, registering a new
 // node if needed.
 func (g *Graph) autoRegister(s string) string {
@@ -371,9 +361,6 @@ func (g *Graph) Validate() error {
 		}
 		if tr.Switch && tr.When == "" {
 			return errors.New("switch transition from '%s' to '%s' in graph '%s' requires a 'when' expression (use \"true\" for the default branch)", stripProto(tr.From), stripProto(tr.To), g.name)
-		}
-		if tr.StatusCode != 0 && !tr.OnError {
-			return errors.New("transition from '%s' to '%s' in graph '%s' sets statusCode without onError", tr.From, tr.To, g.name)
 		}
 		if tr.OnError && tr.From == tr.To {
 			return errors.New("transition from '%s' to itself in graph '%s' would loop unboundedly; use flow.Retry in the task body for bounded retries with backoff", stripProto(tr.From), g.name)

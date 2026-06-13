@@ -249,7 +249,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	var resultFlow *workflow.RawFlow
 	errorRouted := false
-	errStatusCode := 0
 
 	if execErr != nil {
 		// The host classifies its transport's "can't take more work" signals by wrapping the error; the
@@ -266,7 +265,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if _, ok := graph.ErrorTransition(taskName); ok {
 			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowName, "error", execErr)
 			tracedErr := errors.Convert(execErr)
-			errStatusCode = tracedErr.StatusCode
 			resultFlow = workflow.NewRawFlow()
 			resultFlow.SetRawState(state)
 			resultFlow.Set("onErr", tracedErr)
@@ -425,7 +423,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Evaluate transitions
 	var nextTasks []nextStep
 	if errorRouted {
-		nextTasks, err = evaluateErrorTransitions(graph, taskName, resultFlow, errStatusCode)
+		nextTasks, err = evaluateErrorTransitions(graph, taskName, resultFlow)
 	} else {
 		nextTasks, err = evaluateTransitions(graph, taskName, resultFlow)
 	}

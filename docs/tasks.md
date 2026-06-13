@@ -232,7 +232,7 @@ workflow-level deadline in author space — the engine imposes none:
 
 ```go
 if time.Since(f.CreatedAt()) > 24*time.Hour {
-    return errors.New("workflow exceeded its 24h budget", http.StatusRequestTimeout)
+    return errors.New("workflow exceeded its 24h budget")
 }
 ```
 

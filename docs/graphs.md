@@ -90,21 +90,24 @@ g.AddTransitionGoto("evaluate", "finish")
 
 See [`flow.Goto`](tasks.md#goto).
 
-### Error handling (`onError`, `onTimeout`)
+### Error handling (`onError`)
 
-When a task returns an ordinary error, the engine looks for a matching error transition before failing the
-flow:
+When a task returns an ordinary error, the engine routes to an `onError` handler if one is declared,
+before failing the flow:
 
 ```go
-g.AddTransitionOnError("charge", "refund")     // any error from charge -> refund
-g.AddTransitionOnTimeout("charge", "slowPath")  // only when the error carries HTTP 408
+g.AddTransitionOnError("charge", "refund") // any error from charge -> refund
 ```
 
-If an error transition matches, the error is serialized into the state field `onErr` (as a structured
-error), the failed step is marked completed with its changes preserved, and the handler task runs next. If
-no error transition matches, the flow fails. Error transitions may carry a `when` but not `forEach`,
-`goto`, or `switch`. If the failing task was part of a fan-out, its siblings are cancelled. `AddTransitionOnTimeout` is
-shorthand for "on an error with HTTP status 408."
+The error from `charge` routes to `refund` rather than failing the flow. The error is serialized into the
+state field `onErr` (as a structured error the handler can read), the failed step is marked completed with
+its changes preserved, and the handler runs next. If no `onError` handler is declared, the flow fails. An
+`onError` transition can't combine with `forEach`, `goto`, or `switch`. If the failing task was part of a
+fan-out, its siblings are cancelled.
+
+> The engine routes on *any* error — it never inspects the error's HTTP status or text. To handle a
+> specific failure kind (e.g. a timeout), branch inside the task: `flow.Retry` for transient failures,
+> `flow.Goto` for computed recovery, or return the error and let the `onError` handler deal with it.
 
 > Backpressure and breaker signals are **not** errors in this sense — a task wraps those with
 > `workflow.ErrBackpressure` / `workflow.ErrBreakerTrip` and the engine handles them before error routing.

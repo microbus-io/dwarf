@@ -18,7 +18,6 @@ package workflow
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 )
@@ -259,14 +258,10 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 			}
 		}
 		if tr.OnError {
-			errLabel := "onError"
-			if tr.StatusCode == http.StatusRequestTimeout {
-				errLabel = "onTimeout"
-			}
 			if label != "" {
-				label = errLabel + "; " + label
+				label = "onError; " + label
 			} else {
-				label = errLabel
+				label = "onError"
 			}
 		}
 		if label != "" {

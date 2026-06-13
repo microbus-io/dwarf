@@ -431,14 +431,13 @@ unlimited retry pass math.MaxInt32 as maxAttempts.
 
 Retry carries no condition of its own - it is the single retry primitive, called inside whatever
 error branch the task decides is retryable. Keeping the condition explicit at the call site avoids
-the "retry on every error" trap (most errors - validation, 4xx, business rejections - should not be
-retried). To retry only on a timeout, gate on the 408 status; both a foreman-side pub.Timeout expiry
-and a subscriber-side handler timeout surface as http.StatusRequestTimeout:
+the "retry on every error" trap (most errors - validation, bad input, business rejections - should
+not be retried). Gate it on whatever your task considers transient:
 
 	result, err := callExternalAPI(ctx)
 	if err != nil {
-	    if errors.StatusCode(err) == http.StatusRequestTimeout && flow.Retry(5, 1*time.Second, 2.0, 30*time.Second) {
-	        return result, nil // transient timeout: retry scheduled, don't report error
+	    if isTransient(err) && flow.Retry(5, 1*time.Second, 2.0, 30*time.Second) {
+	        return result, nil // transient failure: retry scheduled, don't report error
 	    }
 	    return result, err // non-retryable, or attempts exhausted
 	}

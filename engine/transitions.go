@@ -141,7 +141,7 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 }
 
 // evaluateErrorTransitions determines the error handler task to route to when a task fails.
-func evaluateErrorTransitions(graph *workflow.Graph, currentTask string, flow *workflow.RawFlow, errStatusCode int) ([]nextStep, error) {
+func evaluateErrorTransitions(graph *workflow.Graph, currentTask string, flow *workflow.RawFlow) ([]nextStep, error) {
 	stateMap := make(map[string]any, len(flow.RawState()))
 	for k, v := range flow.RawState() {
 		if raw, ok := v.(json.RawMessage); ok {
@@ -153,31 +153,20 @@ func evaluateErrorTransitions(graph *workflow.Graph, currentTask string, flow *w
 		}
 	}
 
-	for _, statusCoded := range []bool{true, false} {
-		for _, tr := range graph.Transitions() {
-			if tr.From != currentTask || !tr.OnError {
-				continue
+	for _, tr := range graph.Transitions() {
+		if tr.From != currentTask || !tr.OnError {
+			continue
+		}
+		taken := true
+		if tr.When != "" {
+			match, err := boolexp.Eval(tr.When, stateMap)
+			if err != nil {
+				return nil, errors.Trace(err)
 			}
-			if statusCoded {
-				if tr.StatusCode == 0 || tr.StatusCode != errStatusCode {
-					continue
-				}
-			} else {
-				if tr.StatusCode != 0 {
-					continue
-				}
-			}
-			taken := true
-			if tr.When != "" {
-				match, err := boolexp.Eval(tr.When, stateMap)
-				if err != nil {
-					return nil, errors.Trace(err)
-				}
-				taken = match
-			}
-			if taken {
-				return []nextStep{{taskName: tr.To}}, nil
-			}
+			taken = match
+		}
+		if taken {
+			return []nextStep{{taskName: tr.To}}, nil
 		}
 	}
 	return nil, nil
