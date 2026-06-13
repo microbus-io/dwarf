@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2023-2026 Microbus LLC and various contributors
+Copyright (c) 2026 Microbus LLC and various contributors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -346,11 +346,16 @@ func (f *Flow) Interrupt(payload any) (resumeData map[string]any, yield bool, er
 	if f.interruptDone {
 		return f.resumeData, false, nil
 	}
-	// Single-park guard: a step parks at most once, interrupt XOR subgraph. Reject arming an
-	// interrupt when this step already parked for a subgraph - either resolved (subgraphDone)
-	// or armed earlier in this same dispatch (subgraphWorkflow set).
+	// Single-park guard: a step parks at most once - interrupt XOR subgraph, and at most once per kind.
+	// Reject arming an interrupt when this step already parked for a subgraph (resolved subgraphDone, or
+	// armed earlier in this same dispatch via subgraphWorkflow)...
 	if f.subgraphDone || f.subgraphWorkflow != "" {
 		return nil, false, errors.New("cannot interrupt: step already parked for a subgraph")
+	}
+	// ...or when an interrupt was already armed earlier in this same dispatch: a second flow.Interrupt
+	// call before the task returns would otherwise silently overwrite the payload.
+	if f.interrupt {
+		return nil, false, errors.New("cannot interrupt: step already armed an interrupt this dispatch")
 	}
 	var payloadMap map[string]any
 	if payload != nil {
@@ -401,11 +406,16 @@ func (f *Flow) Subgraph(workflowURL string, input map[string]any) (out map[strin
 		}
 		return f.subgraphResult, false, nil
 	}
-	// Single-park guard: a step parks at most once, interrupt XOR subgraph. Reject arming a
-	// subgraph when this step already parked for an interrupt - either resolved (interruptDone)
-	// or armed earlier in this same dispatch (interrupt set).
+	// Single-park guard: a step parks at most once - interrupt XOR subgraph, and at most once per kind.
+	// Reject arming a subgraph when this step already parked for an interrupt (resolved interruptDone, or
+	// armed earlier in this same dispatch via interrupt)...
 	if f.interruptDone || f.interrupt {
 		return nil, false, errors.New("cannot start subgraph: step already parked for an interrupt")
+	}
+	// ...or when a subgraph was already armed earlier in this same dispatch: a second flow.Subgraph call
+	// before the task returns would otherwise silently overwrite the child workflow/input.
+	if f.subgraphWorkflow != "" {
+		return nil, false, errors.New("cannot start subgraph: step already armed a subgraph this dispatch")
 	}
 	f.subgraphWorkflow = workflowURL
 	f.subgraphInput = input

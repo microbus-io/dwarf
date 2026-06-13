@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2023-2026 Microbus LLC and various contributors
+Copyright (c) 2026 Microbus LLC and various contributors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -250,6 +250,14 @@ func reduceUnion(existing, incoming any) (any, error) {
 }
 
 func reduceAnd(existing, incoming any) (any, error) {
+	// A cleared slot is the reducer's identity (true for AND), so it must leave the running result
+	// unchanged rather than fold in as false - same short-circuit as the numeric reducers.
+	if isCleared(existing) {
+		return incoming, nil
+	}
+	if isCleared(incoming) {
+		return existing, nil
+	}
 	a, err := unmarshalBool(existing, "and")
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -263,6 +271,14 @@ func reduceAnd(existing, incoming any) (any, error) {
 }
 
 func reduceOr(existing, incoming any) (any, error) {
+	// A cleared slot is the reducer's identity (false for OR); deferring keeps OR consistent with AND
+	// and the numeric reducers (harmless either way since false is OR's identity, but explicit).
+	if isCleared(existing) {
+		return incoming, nil
+	}
+	if isCleared(incoming) {
+		return existing, nil
+	}
 	a, err := unmarshalBool(existing, "or")
 	if err != nil {
 		return nil, errors.Trace(err)

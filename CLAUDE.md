@@ -60,8 +60,9 @@ siblings share a `step_depth`. Once terminal (`completed`/`failed`/`cancelled`),
 
 **Reducer** - A merge strategy for state fields during fan-in. When parallel branches converge, each branch's changes
 are merged using the reducer for that field: `replace` (last write wins, default), `append` (concatenate arrays),
-`add` (sum numbers), `union` (deduplicate arrays), or `merge` (combine objects, new key wins). Selected by field-name
-prefix (`sum*`, `list*`, `set*`); `graph.SetReducer` is the escape hatch for other names.
+`add` (sum numbers), `union` (deduplicate arrays), or `merge` (combine objects, new key wins). A field with no
+registered reducer uses `replace`; every non-default fan-in field is wired explicitly with
+`graph.SetReducer(name, reducer)` (the older `sum*`/`list*`/`set*` name-prefix inference was removed).
 
 **Thread** - A chain of flows linked by `Continue`. Each flow has a `thread_id` grouping it with others in the same
 multi-turn conversation; defaults to `flow_id` (each flow its own thread). `Continue` inherits the thread's
@@ -80,7 +81,7 @@ Create --> created --> Start --> running --> completed
                                   v
                         failed <--+
                           |
-                          | Retry
+                          | Restart / RestartFrom
                           v
                         running --> ...
 
@@ -92,7 +93,8 @@ Create --> created --> Start --> running --> completed
 3. A worker picks up the step, executes the task, and evaluates transitions to create next steps.
 4. Repeats until no transitions match (flow completes), a task errors (flow fails), or the flow is cancelled.
 5. Tasks can call `flow.Interrupt()` to pause for external input; `Resume` continues.
-6. Failed flows can be retried with `Retry`, which re-executes the last failed step.
+6. Terminated flows can be re-run with `Restart` (from the entry step) or `RestartFrom` (from a chosen step),
+   optionally with state overrides. A task can also re-run itself in place via `flow.Retry`.
 
 ### Engine Operations
 
@@ -142,10 +144,6 @@ the hierarchy, atomically cancels all steps across all flows, computes `final_st
 with per-flow `final_state` via CASE - all in one transaction. Callable on any flow in the chain. Takes a reason
 string surfaced as `FlowOutcome.CancelReason`.
 
-**Retry** - Re-executes the last failed step in place. Resets the step row to `pending` (clearing prior error and park
-slot) and transitions the flow back to `running`. All failed fan-out siblings are retried. The `attempt` counter
-increments; `started_at` is preserved (the retry stays "inside" the step).
-
 **Restart / RestartFrom** - `Restart` re-runs a flow from its entry point as a fresh attempt (resets `created_at` and
 `started_at`); `RestartFrom` surgically rewinds the subtree below a chosen step without resetting the flow's run
 timestamps. Both re-zero `parked` on the target step (see "Step Parking").
@@ -161,7 +159,7 @@ Returns `ThreadKey` in each `workflow.FlowSummary`.
 column on the flow row (`map[taskName]string`). During `processStep`, if the current task matches a breakpoint and
 `breakpoint_hit` is false, the engine interrupts the flow (same propagation as `flow.Interrupt`) and sets
 `breakpoint_hit=1`. Continued with `ResumeBreak`, not `Resume` (which rejects a breakpoint with 409). Inherited by
-subgraph and forked flows.
+subgraph flows.
 
 **Continue** - Creates a new flow from the latest completed flow in a thread, merged with additional state using the
 graph's reducers. The `threadKey` accepts any flowKey in the thread; `Continue` resolves the thread via `thread_id`,
@@ -401,7 +399,7 @@ via `failStep`, `Cancel` sets the flow terminal directly, and the terminal-flow 
 siblings. An earlier revision had the fan-in *poison* itself when any member was failed/cancelled; that regressed the
 OnError recovery invariant and made the fanouterrorflow fixture flaky, so it was removed.
 
-**Retry rejoins its cohort naturally.** `Retry` rewinds the failed step in place - same `step_id`, `lineage_id`,
+**Retry rejoins its cohort naturally.** `flow.Retry` rewinds the failed step in place - same `step_id`, `lineage_id`,
 `fan_out_ordinal`, just `status='pending'` and the prior error/park slot cleared. The merge query sees one row per
 branch regardless of attempts, so retry can't double-count.
 
@@ -421,12 +419,12 @@ is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
   `successor_id=Z`. The exit set is `lineage_id == cohortSpawnID AND task_name IN` the graph-predecessor tasks of the
   fan-in - **not** the whole lineage, so `A`/`B` in `forEach->{A->B->C}->J` are excluded and only the `C`s point at
   `J`.
-- **Retry**: the new step copies the failed step's `predecessor_id`.
-- **Entry / subgraph-entry / fork-entry steps**: `predecessor_id` defaults to 0.
+- **flow.Retry / RestartFrom**: rewind the step in place (same row), so `predecessor_id` is preserved.
+- **Entry / subgraph-entry steps**: `predecessor_id` defaults to 0.
 
 The Mermaid renderer ignores `step_depth` and `lineage_id`: it draws the deduped union of `{predecessor_id -> step}`
 and `{step -> successor_id}`, exact for arbitrary nesting. Heads are nodes with no incoming edge, tails with no
-outgoing. Forked flows render as their own connected sub-DAG from `_start` (the forked entry has `predecessor_id=0`).
+outgoing.
 
 `computeFinalState` also reads the DAG, not `step_depth`. The terminal state is the merge of the tail steps -
 completed steps with `successor_id = 0` (`mergeTerminalSteps`). The earlier `MAX(step_depth)` heuristic was wrong for
@@ -466,15 +464,16 @@ elapsed-time guard is one call away inside any task.
 
 Each step has three JSON columns: `state` (input snapshot), `changes` (output delta), `interrupt_payload` (from
 `flow.Interrupt`). `state` is set at creation and normally immutable; `changes` is written after execution. The next
-step's `state` is `merge(currentState, changes)`. This immutability enables checkpointing, fork, and recovery.
+step's `state` is `merge(currentState, changes)`. This immutability enables checkpointing, restart, and recovery.
 
 **State mutation on retry:** on `flow.Retry()`, the engine merges `state + changes` back into `state` so the task
 sees its own prior output next attempt; `changes` is preserved. `Resume` does **not** mutate `state`: it writes the
 caller's data to `resume_data`, which `flow.Interrupt` returns on re-dispatch.
 
 **Reducer delta convention:** tasks writing to reducer-managed fields (append, add, union, merge) set only the
-**delta**, not the accumulated value. E.g. for a `list*` (append) field, set `flow.Set("listMessages",
-[]string{newMessage})`, not the whole history. Violating this duplicates during fan-in merge.
+**delta**, not the accumulated value. E.g. for a field wired to the append reducer via
+`graph.SetReducer("messages", workflow.ReducerAppend)`, set `flow.Set("messages", []string{newMessage})`, not the
+whole history. Violating this duplicates during fan-in merge.
 
 **forEach element injection:** the current element is injected into `state` only (under `as`), not `changes`, so it is
 available to the task but does not participate in fan-in merge.
@@ -487,8 +486,9 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   backoff. Returns `true` while attempts remain (task should return `nil`), `false` at `maxAttempts` (task should
   return its error). Pass zero delays for immediate retry, `math.MaxInt32` for unlimited. The step row is reused. The
   engine tracks `attempt` and computes `min(initialDelay * multiplier^attempt, maxDelay)`, merging `state + changes`
-  back into `state` so the task sees its prior output. Both `flow.Retry` and the API-level `Retry` rewind the same
-  row in place; the API path additionally clears the prior error for operator recovery. **A retry clears the park
+  back into `state` so the task sees its prior output. Both `flow.Retry` and the operator-facing `RestartFrom` rewind
+  a step row in place; `RestartFrom` additionally sweeps the step's downstream subtree and merges optional state
+  overrides, for operator-driven recovery after a flow has already terminated. **A retry clears the park
   slot** (`interrupt_done`/`subgraph_done` -> 0, `resume_data`/`subgraph_result` -> `'{}'`, `subgraph_error` -> `''`),
   so a retry after a resolved `flow.Subgraph` re-runs the child and after a resolved `flow.Interrupt` re-interrupts.
   `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`
@@ -681,8 +681,9 @@ values are immutable for the flow's life (switching a flow's fairness key mid-ru
 vector). `Create`/`CreateTask` resolve from options; `Continue` and `createSubgraphFlow` **inherit** the parent/thread
 flow's values, so a high-priority parent never silently spawns default-priority descendants.
 
-Propagation onto step rows: where the resolved values are in hand (entry step, the API `Retry` insert copying off the
-failed step row), they are literal bind parameters; in the deep `processStep` paths (fan-out and the two fan-in
+Propagation onto step rows: where the resolved values are in hand (the entry step), they are literal bind parameters
+(`Restart`/`RestartFrom` rewind their target step in place via UPDATE, so the row's immutable priority/fairness
+values are already present and need no re-propagation); in the deep `processStep` paths (fan-out and the two fan-in
 inserts), the values are read once per step execution in the parallel flow-row SELECT and threaded through the call
 chain into the INSERTs as bind parameters (vs. the previous scalar subqueries, which meant 3N PK lookups per N-way
 fan-out).
@@ -885,10 +886,12 @@ All three transitions call `refreshNextProbeLocked`, which recomputes the soones
 deadline. `nextProbe` is a *separate* deadline from `nextPoll` so `pollPendingSteps`' per-cycle `nextPoll` reset
 cannot clobber the probe wake.
 
-**`handleBreakerTrip` retries `breakerBulkPark` on lock contention.** The failed probe is demoted to `parkedBreaker`
-before bulk-park re-elects a probe. If the park-and-elevate transaction rolls back (contention) after the demote
-committed, the task would be left with no `parked=0` probe: no probe dispatches, so no further 404 re-trips, and
-nothing re-runs bulk-park - recovery wedges permanently. The retry re-elects a probe before returning, so a probe
+**`handleBreakerTrip` serializes bulk-park per task and runs it transactionally.** The failed probe is demoted to
+`parkedBreaker` and a replacement probe is re-elected within one `sequel.Transact` per shard, so a rollback can never
+leave the task with the probe demoted but no replacement elevated - which would wedge recovery permanently (no probe
+dispatches, so no further 404 re-trips, and nothing re-runs bulk-park). `Transact` retries the park-and-elevate on
+lock contention, and a per-task in-process lock (`breakerParkLocks`) serializes concurrent trips for the same task so
+a burst of trips doesn't issue overlapping `task_name` UPDATEs that deadlock under pessimistic locking. A probe
 always survives a trip.
 
 **`TripBreaker` gossips only the trip event, payload-free.** The wire is just `(taskName)`. Each peer stamps
@@ -988,7 +991,7 @@ The `resources/sql/*.sql` migration files carry **no prose comments by design** 
 | `lineage_id` | (`5.sql`) Cohort frame: the spawn step's `step_id` on a push, else inherited. Drives explicit `SetFanIn` arrival counting and merge. A cohort-counting device, **not** a DAG. `0` = no `SetFanIn` |
 | `cohort_size` | (`5.sql`) On a fan-out spawn step: number of branches spawned |
 | `cohort_arrivals` | (`5.sql`) On a fan-out spawn step: branches that reached the fan-in; fan-in fires when `arrivals >= size` |
-| `fan_out_ordinal` | (`6.sql`) This branch's index in its fan-out; fan-in merges in this order so list/sum reducers are deterministic. Retry copies it. `0` = not part of a fan-out |
+| `fan_out_ordinal` | (`6.sql`) This branch's index in its fan-out; fan-in merges in this order so list/sum reducers are deterministic. Preserved across an in-place rewind (`flow.Retry`/`RestartFrom`). `0` = not part of a fan-out |
 | `predecessor_id` | (`7.sql`) Step that ran immediately before this one in the execution DAG. `0` = none |
 | `successor_id` | (`7.sql`) Step that runs immediately after this one. `0` = none (exit) |
 | `priority` | (`8.sql`) Denormalized copy of the flow's `priority` for the hot selection path |
@@ -1038,7 +1041,7 @@ without fragmentation or excessive write amplification.
 ### Data Retention
 
 The engine does not auto-purge flows: every row remains potentially-resurrectable - an `interrupted` flow via
-`Resume`, a `completed` flow via `Continue`, a `failed` flow via `Retry`. A fixed timer would silently break these,
+`Resume`, a `completed` flow via `Continue`, a `failed` flow via `Restart`/`RestartFrom`. A fixed timer would silently break these,
 and no single policy fits both a 1-hour batch and a 30-day approval workflow. For operator-driven retention:
 
 - **`Delete(flowKey)`** removes one flow and its steps in a transaction. Refuses a running flow (409). Subgraph
@@ -1065,29 +1068,36 @@ is the `TaskExecutor` call: `executeTask` derives it from the lifetime ctx with 
 
 ### Shutdown ordering: drain workers, then timer, then refiller
 
-`shortenNextPoll` signals the timer via `select { case wakeTimer <- struct{}{}: default: }`. The `default` only guards
-a *full* channel - a send on a *closed* channel still panics, even inside a `select`. The only callers of
-`shortenNextPoll` are workers (`processStep` and its retry/sleep/poison paths); `timerLoop` only receives from
-`wakeTimer`. So Shutdown drains the worker pool before closing `wakeTimer`, then stops the refiller:
+`signalTimer` (the sender behind `shortenNextPoll` and `refreshNextProbeLocked`) nudges the timer via
+`select { case wakeTimer <- struct{}{}: default: }`. The `default` only guards a *full* channel - a send on a
+*closed* channel still panics, even inside a `select`. The senders are not just worker goroutines (`processStep` and
+its retry/sleep/recovery paths): the breaker subsystem (`refreshNextProbeLocked`, including from the inbound
+`HandleTripBreaker` signal) also signals the timer, so there is no drain point after which a `wakeTimer` send is
+guaranteed impossible. `wakeTimer` is therefore **never closed** (the same rationale as `refillTrigger`); `timerLoop`
+is terminated by a dedicated `timerStop` channel it selects on. So Shutdown drains the worker pool, then stops the
+timer, then the refiller:
 
 ```
 cache.close()        // unblocks blocked candidate pops independently of any channel
 workers.Wait()       // no shortenNextPoll / requestRefill worker caller remains
-close(wakeTimer)     // timerLoop's only termination signal
+close(timerStop)     // timerLoop's termination signal (wakeTimer is never closed)
 timerWorker.Wait()   // timerLoop fully exited (last requestRefill caller gone)
 close(refillStop)    // refiller's termination signal
 refiller.Wait()      // refiller fully exited; its DB ops complete
 ```
 
 The timer and refiller each have their own WaitGroup, separate from the worker pool, so the close-then-wait order can
-be staged (`timerLoop` exits only when `wakeTimer` closes, so draining it before the close would deadlock).
-`refillTrigger` is **never closed** and only sent to non-blockingly, so a late coalesced `requestRefill` from the
-timer's final poll is a harmless no-op; the refiller is stopped by closing the *separate* `refillStop`. A
-`cache.refill` into an already-closed cache is a no-op.
+be staged. `timerStop` is stopped before `refillStop` because `timerLoop`'s final poll can still `requestRefill`;
+stopping the refiller first would lose that work or race the trigger. `refillTrigger`, like `wakeTimer`, is **never
+closed** and only sent to non-blockingly, so a late coalesced `requestRefill` from the timer's final poll is a
+harmless no-op rather than a `send on closed channel` panic; the refiller is stopped by closing the *separate*
+`refillStop`. A `cache.refill` into an already-closed cache is a no-op. Using never-closed nudge channels plus
+dedicated `timerStop`/`refillStop` termination signals removes the ordering hazard an earlier design carried, where
+closing `wakeTimer` before draining the workers let a worker mid-`processStep` race the close and panic.
 
 ### Transactions
 
-`Start`, `Resume`, `Retry`, and `Cancel` wrap their step and flow mutations in a transaction with
+`Start`, `Resume`, `Restart`, `RestartFrom`, and `Cancel` wrap their step and flow mutations in a transaction with
 **steps-first-then-flow lock ordering** to prevent deadlocks. `processStep`'s transition evaluation (insert next steps
 + update flow's `step_id`) also runs in a transaction.
 
@@ -1116,7 +1126,8 @@ Transactions don't help when a worker crashes during the `TaskExecutor` call (ou
   `pollPendingSteps` picks up the orphaned `pending` step. Self-healing.
 - **Start / Resume** - one transaction (steps -> `pending`, flow -> `running`). A crash after commit but before the
   doorbell is recovered by `pollPendingSteps`. Self-healing.
-- **Retry** - one transaction (reset failed step in place, flow -> `running`). Self-healing.
+- **Restart / RestartFrom** - one transaction (rewind the target step in place, delete the rewound subtree, flow ->
+  `running`). Self-healing.
 - **Cancel / failStep** - one transaction over the whole surgraph chain. A pre-commit crash rolls back; a post-commit
   crash leaves correct terminal state, `Await` callers discover it on the next poll. Self-healing.
 - **processStep - Interrupt** - one transaction. A pre-commit crash rolls back and re-execution produces the interrupt
@@ -1139,7 +1150,7 @@ with a bounds check.
 
 **Shard routing:** external flow IDs encode the shard; every operation parses it and routes via `e.shard(n)`.
 
-**Shard affinity:** subgraph and forked flows are created on the parent's shard (avoids cross-shard references during
+**Shard affinity:** subgraph flows are created on the parent's shard (avoids cross-shard references during
 subgraph completion and history reconstruction). Only top-level flow creation picks a random shard.
 
 **Cross-shard fan-out is always parallel, never sequential.** Any operation touching every shard builds a per-shard

@@ -15,13 +15,3 @@ limitations under the License.
 */
 
 package workflow
-
-const (
-	StatusCreated     = "created"     // Flow/step exists but has not been started
-	StatusPending     = "pending"     // Step is awaiting execution
-	StatusRunning     = "running"     // Flow is actively executing a task
-	StatusInterrupted = "interrupted" // Flow is paused, waiting for external input
-	StatusCompleted   = "completed"   // Flow has finished successfully
-	StatusFailed      = "failed"      // Flow has failed with an error
-	StatusCancelled   = "cancelled"   // Flow was cancelled by the user
-)

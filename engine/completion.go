@@ -266,26 +266,21 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	reDispatch := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatch = false
-		if surgraphStepID != 0 {
-			var existing int
-			err := tx.QueryRowContext(ctx,
-				"SELECT step_id FROM microbus_steps WHERE step_id=? AND status=?",
-				surgraphStepID, workflow.StatusRunning,
-			).Scan(&existing)
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil // the surgraph step is no longer parked-running; nothing to re-dispatch
-			}
-			if err != nil {
-				return errors.Trace(err)
-			}
-		}
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID,
-		); err != nil {
+		// Guard the revive on the exact park state (running + parkedSubgraph), mirroring
+		// deliverSubgraphError. Without it, a Cancel that cascaded to this caller step (between the child's
+		// completion and this revive) would be resurrected to pending: keying on step_id alone overwrites
+		// the just-cancelled row. The guard also subsumes the "step still live" check — a step that is no
+		// longer running/parked matches no row — and the rows-affected gate keeps Enqueue off a no-op.
+		res, err := tx.ExecContext(ctx,
+			"UPDATE microbus_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
+			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID, workflow.StatusRunning, parkedSubgraph,
+		)
+		if err != nil {
 			return errors.Trace(err)
 		}
-		reDispatch = true
+		if n, _ := res.RowsAffected(); n > 0 {
+			reDispatch = true
+		}
 		return nil
 	})
 	if err != nil {
