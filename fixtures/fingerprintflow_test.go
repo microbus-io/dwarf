@@ -46,17 +46,17 @@ func TestFingerprintflow(t *testing.T) {
 	graph.AddTransition("done", workflow.END)
 	proxy.HandleGraph("fingerprintflow.verify:428/fingerprint", graph)
 
-	proxy.HandleTask("fingerprintflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("fingerprintflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("fingerprintflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("fingerprintflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
 		_, yield, err := f.Interrupt(map[string]any{"need": "input"})
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("fingerprintflow.verify:428/done", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("fingerprintflow.verify:428/done", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", "finished")
 		return nil
 	})
@@ -69,7 +69,7 @@ func TestFingerprintflow(t *testing.T) {
 	t.Run("fingerprint_stable_then_changes_on_progress", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "fingerprintflow.verify:428/fingerprint", nil, nil, nil)
+		flowKey, err := eng.Create(ctx, "fingerprintflow.verify:428/fingerprint", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

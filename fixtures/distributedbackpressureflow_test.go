@@ -86,7 +86,7 @@ func TestDistributedbackpressureflow(t *testing.T) {
 	var inFlight, peak int
 	var rejections, completions atomic.Int32
 
-	proxy.HandleTask("distributedbackpressureflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("distributedbackpressureflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		inFlight++
 		if inFlight > peak {
@@ -145,7 +145,7 @@ func TestDistributedbackpressureflow(t *testing.T) {
 		const totalFlows = 16
 		var keys []string
 		for range totalFlows {
-			k, err := eng1.Create(ctx, "distributedbackpressureflow.verify:428/distributed-backpressure", nil, nil, nil)
+			k, err := eng1.Create(ctx, "distributedbackpressureflow.verify:428/distributed-backpressure", nil, nil)
 			assert.NoError(err)
 			eng1.Start(ctx, k)
 			keys = append(keys, k)

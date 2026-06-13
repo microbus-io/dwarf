@@ -34,14 +34,14 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// GraphLoader fetches a workflow graph definition by name. The baggage is the opaque
-// map stored on the flow at Create time.
-type GraphLoader func(ctx context.Context, workflowName string, baggage any) (*workflow.Graph, error)
+// GraphLoader fetches a workflow graph definition by name. The flow's opaque baggage rides on ctx;
+// read it with workflow.BaggageFrom(ctx) if loading is identity-dependent (authz, per-actor graphs).
+type GraphLoader func(ctx context.Context, workflowName string) (*workflow.Graph, error)
 
 // TaskExecutor executes a single task within a workflow. The flow carrier has its state
-// pre-populated; the executor should call the task and let it write changes to the flow.
-// The baggage is the opaque map stored on the flow at Create time.
-type TaskExecutor func(ctx context.Context, taskName string, flow *workflow.Flow, baggage any) error
+// pre-populated; the executor should call the task and let it write changes to the flow. The flow's
+// opaque baggage rides on ctx - read it with workflow.BaggageFrom(ctx) (e.g. to mint a token).
+type TaskExecutor func(ctx context.Context, taskName string, flow *workflow.Flow) error
 
 // FlowStoppedCallback is fired when a flow stops (completed, failed, cancelled, interrupted).
 // The hostname is the notify_hostname stored on the flow via StartNotify.
@@ -421,7 +421,7 @@ func (e *Engine) taskTimeBudget() time.Duration {
 }
 
 // resolveFlowOptions applies defaults to caller-supplied options.
-func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions, baggage map[string]any) *workflow.FlowOptions {
+func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOptions {
 	resolved := &workflow.FlowOptions{
 		Priority:       int(e.defaultPriority.Load()),
 		FairnessWeight: 1,
@@ -435,6 +435,7 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions, baggage map[stri
 		}
 		resolved.FairnessKey = opts.FairnessKey
 		resolved.StartAt = opts.StartAt
+		resolved.Baggage = opts.Baggage
 	}
 	return resolved
 }
@@ -513,17 +514,16 @@ func (e *Engine) valveCommit(taskName string, now time.Time) {
 
 // --- Public API ---
 
-// Create creates a new flow for a workflow without starting it. baggage is an opaque host value (any
-// JSON-marshalable value, like initialState) stored on the flow and handed back to every GraphLoader/
-// TaskExecutor call as a map.
-func (e *Engine) Create(ctx context.Context, workflowName string, initialState any, baggage any, opts *workflow.FlowOptions) (flowKey string, err error) {
-	return e.create(ctx, workflowName, initialState, baggage, opts)
+// Create creates a new flow for a workflow without starting it. opts carries the flow's scheduling
+// (priority/fairness/start-at) and its opaque host Baggage; nil opts uses defaults.
+func (e *Engine) Create(ctx context.Context, workflowName string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
+	return e.create(ctx, workflowName, initialState, opts)
 }
 
-// CreateTask creates a flow for a single task without starting it. baggage is opaque host context (see
-// Create); opts sets flow-level scheduling (priority/fairness/start-at), nil for defaults.
-func (e *Engine) CreateTask(ctx context.Context, taskName string, initialState any, baggage any, opts *workflow.FlowOptions) (flowKey string, err error) {
-	return e.createTask(ctx, taskName, initialState, baggage, opts)
+// CreateTask creates a flow for a single task without starting it. opts carries scheduling and the
+// opaque host Baggage (see Create); nil opts uses defaults.
+func (e *Engine) CreateTask(ctx context.Context, taskName string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
+	return e.createTask(ctx, taskName, initialState, opts)
 }
 
 // Start transitions a created flow to running.
@@ -606,9 +606,10 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 	return e.await(ctx, flowKey)
 }
 
-// Run creates, starts, and awaits a flow in one call.
-func (e *Engine) Run(ctx context.Context, workflowName string, initialState any, baggage any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
-	return e.run(ctx, workflowName, initialState, baggage, opts)
+// Run creates, starts, and awaits a flow in one call. opts carries scheduling and the opaque host
+// Baggage; nil opts uses defaults.
+func (e *Engine) Run(ctx context.Context, workflowName string, initialState any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
+	return e.run(ctx, workflowName, initialState, opts)
 }
 
 // Continue creates a new flow from the latest completed flow in a thread.

@@ -43,7 +43,7 @@ func TestPriorityflow(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 
-	proxy.HandleTask("priorityflow.verify:428/record", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("priorityflow.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
 		delayMs := f.GetInt("delayMs")
 		if delayMs > 0 {
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)
@@ -69,7 +69,7 @@ func TestPriorityflow(t *testing.T) {
 		// Holder flow at priority 1 with long delay to fill the single worker.
 		holderKey, err := eng.Create(ctx, "priorityflow.verify:428/priority",
 			map[string]any{"delayMs": 1500, "tag": "holder"},
-			nil, &workflow.FlowOptions{Priority: 1})
+			&workflow.FlowOptions{Priority: 1})
 		assert.NoError(err)
 		err = eng.Start(ctx, holderKey)
 		assert.NoError(err)
@@ -89,7 +89,7 @@ func TestPriorityflow(t *testing.T) {
 		for _, fl := range flows {
 			k, err := eng.Create(ctx, "priorityflow.verify:428/priority",
 				map[string]any{"delayMs": 50, "tag": fl.tag},
-				nil, &workflow.FlowOptions{Priority: fl.priority})
+				&workflow.FlowOptions{Priority: fl.priority})
 			assert.NoError(err)
 			err = eng.Start(ctx, k)
 			assert.NoError(err)

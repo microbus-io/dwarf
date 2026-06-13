@@ -70,7 +70,7 @@ func TestSoakflow(t *testing.T) {
 	innerGraph.AddTransition("innerEntry", workflow.END)
 	proxy.HandleGraph("soakflow.verify:428/inner", innerGraph)
 
-	proxy.HandleTask("soakflow.verify:428/seed", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
 		branch := f.GetInt("branch") % 5
 		f.SetInt("branch", branch)
 		fanWidth := f.GetInt("fanWidth")
@@ -95,17 +95,17 @@ func TestSoakflow(t *testing.T) {
 		f.SetInt("loopsLeft", loops)
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/fan-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/fan-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("work", 1)
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/collect", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/collect", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/loop", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/loop", func(ctx context.Context, f *workflow.Flow) error {
 		left := f.GetInt("loopsLeft") - 1
 		f.SetInt("loopsLeft", left)
 		if left > 0 {
@@ -113,26 +113,26 @@ func TestSoakflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/sub", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/sub", func(ctx context.Context, f *workflow.Flow) error {
 		_, yield, err := f.Subgraph("soakflow.verify:428/inner", nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/boom-r", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/boom-r", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("soak boom (recoverable)")
 	})
-	proxy.HandleTask("soakflow.verify:428/recover", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/recover", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/boom-f", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/boom-f", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("soak boom (fatal)")
 	})
-	proxy.HandleTask("soakflow.verify:428/join", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("soakflow.verify:428/inner-entry", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("soakflow.verify:428/inner-entry", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -162,7 +162,7 @@ func TestSoakflow(t *testing.T) {
 			fanWidth := rng.IntN(7)
 			loops := rng.IntN(6)
 			state := map[string]any{"branch": branch, "fanWidth": fanWidth, "loops": loops}
-			k, err := eng.Create(ctx, "soakflow.verify:428/soak", state, nil, nil)
+			k, err := eng.Create(ctx, "soakflow.verify:428/soak", state, nil)
 			if !assert.NoError(err) {
 				return
 			}

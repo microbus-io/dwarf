@@ -36,7 +36,7 @@ func TestContinueflow(t *testing.T) {
 	graph.AddTransition("increment", workflow.END)
 	proxy.HandleGraph("continueflow.verify:428/counting", graph)
 
-	proxy.HandleTask("continueflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("continueflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("counter", f.GetInt("counter")+1)
 		return nil
 	})
@@ -50,7 +50,7 @@ func TestContinueflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		// Turn 1: create + start a flow starting from counter=0.
-		flowKey, err := eng.Create(ctx, "continueflow.verify:428/counting", map[string]any{"counter": 0}, nil, nil)
+		flowKey, err := eng.Create(ctx, "continueflow.verify:428/counting", map[string]any{"counter": 0}, nil)
 		if !assert.NoError(err) {
 			return
 		}

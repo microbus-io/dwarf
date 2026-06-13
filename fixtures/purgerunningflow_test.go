@@ -44,7 +44,7 @@ func TestPurgerunningflow(t *testing.T) {
 	// The task blocks until the test releases it, so the flow stays running across the Purge call.
 	release := make(chan struct{})
 	running := make(chan struct{}, 1)
-	proxy.HandleTask("purgerunningflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("purgerunningflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		select {
 		case running <- struct{}{}:
 		default:
@@ -59,7 +59,7 @@ func TestPurgerunningflow(t *testing.T) {
 		WithWorkers(2)
 	eng.RunInTest(t)
 
-	flowKey, err := eng.Create(ctx, "purgerunningflow.verify:428/flow", nil, nil, nil)
+	flowKey, err := eng.Create(ctx, "purgerunningflow.verify:428/flow", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}

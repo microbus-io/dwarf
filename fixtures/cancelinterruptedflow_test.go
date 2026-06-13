@@ -46,17 +46,17 @@ func TestCancelinterruptedflow(t *testing.T) {
 	graph.AddTransition("taskB", workflow.END)
 	proxy.HandleGraph("cancelinterruptedflow.verify:428/flow", graph)
 
-	proxy.HandleTask("cancelinterruptedflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("cancelinterruptedflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("cancelinterruptedflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("cancelinterruptedflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
 		_, yield, err := f.Interrupt(map[string]any{"need": "input"})
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	proxy.HandleTask("cancelinterruptedflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("cancelinterruptedflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", "reached B")
 		return nil
 	})
@@ -69,7 +69,7 @@ func TestCancelinterruptedflow(t *testing.T) {
 	t.Run("cancel_an_interrupted_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "cancelinterruptedflow.verify:428/flow", nil, nil, nil)
+		flowKey, err := eng.Create(ctx, "cancelinterruptedflow.verify:428/flow", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

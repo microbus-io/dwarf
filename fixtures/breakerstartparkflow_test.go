@@ -49,7 +49,7 @@ func TestBreakerstartparkflow(t *testing.T) {
 	// trips and stays tripped.
 	var mu sync.Mutex
 	seen := map[string]bool{}
-	proxy.HandleTask("breakerstartparkflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("breakerstartparkflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		seen[f.GetString("marker")] = true
 		mu.Unlock()
@@ -64,7 +64,7 @@ func TestBreakerstartparkflow(t *testing.T) {
 
 	// Trip the breaker with a batch of older flows.
 	for range 5 {
-		k, err := eng.Create(ctx, "breakerstartparkflow.verify:428/flow", map[string]any{"marker": "pre"}, nil, nil)
+		k, err := eng.Create(ctx, "breakerstartparkflow.verify:428/flow", map[string]any{"marker": "pre"}, nil)
 		assert.NoError(err)
 		eng.Start(ctx, k)
 	}
@@ -80,7 +80,7 @@ func TestBreakerstartparkflow(t *testing.T) {
 	}
 
 	// Start a fresh flow AFTER the trip. Its entry step must be born parked, not dispatched.
-	postKey, err := eng.Create(ctx, "breakerstartparkflow.verify:428/flow", map[string]any{"marker": "post"}, nil, nil)
+	postKey, err := eng.Create(ctx, "breakerstartparkflow.verify:428/flow", map[string]any{"marker": "post"}, nil)
 	if !assert.NoError(err) {
 		return
 	}

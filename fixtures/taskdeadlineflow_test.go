@@ -52,7 +52,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	const safety = 3 * time.Second
 
 	var deadlineObserved atomic.Bool
-	proxy.HandleTask("taskdeadlineflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("taskdeadlineflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		// No self-installed timeout: rely solely on the engine-provided budget deadline.
 		select {
 		case <-ctx.Done():
@@ -74,7 +74,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	start := time.Now()
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	outcome, err := eng.Run(timeoutCtx, "taskdeadlineflow.verify:428/flow", nil, nil, nil)
+	outcome, err := eng.Run(timeoutCtx, "taskdeadlineflow.verify:428/flow", nil, nil)
 	elapsed := time.Since(start)
 	if !assert.NoError(err) {
 		return

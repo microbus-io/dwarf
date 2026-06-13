@@ -58,7 +58,7 @@ func TestSaturatedbandflow(t *testing.T) {
 	}
 	var completions []completion
 
-	proxy.HandleTask("saturatedbandflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("saturatedbandflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		boundedInFlight++
 		over := boundedInFlight > boundedCap
@@ -77,7 +77,7 @@ func TestSaturatedbandflow(t *testing.T) {
 		mu.Unlock()
 		return nil
 	})
-	proxy.HandleTask("saturatedbandflow.verify:428/open", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("saturatedbandflow.verify:428/open", func(ctx context.Context, f *workflow.Flow) error {
 		time.Sleep(40 * time.Millisecond)
 		mu.Lock()
 		completions = append(completions, completion{tag: "open", at: time.Now()})
@@ -97,13 +97,13 @@ func TestSaturatedbandflow(t *testing.T) {
 		var keys []string
 		for range 8 {
 			k, _ := eng.Create(ctx, "saturatedbandflow.verify:428/saturated-band",
-				nil, nil, &workflow.FlowOptions{Priority: 1})
+				nil, &workflow.FlowOptions{Priority: 1})
 			eng.Start(ctx, k)
 			keys = append(keys, k)
 		}
 		for range 8 {
 			k, _ := eng.Create(ctx, "saturatedbandflow.verify:428/open-band",
-				nil, nil, &workflow.FlowOptions{Priority: 5})
+				nil, &workflow.FlowOptions{Priority: 5})
 			eng.Start(ctx, k)
 			keys = append(keys, k)
 		}

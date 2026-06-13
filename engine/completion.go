@@ -45,7 +45,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 		return "", errors.Trace(err)
 	}
 
-	subgraphFlowKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowName, subgraphGraph, childState, nil, 0, "", &inherited)
+	subgraphFlowKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowName, subgraphGraph, childState, 0, "", &inherited)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

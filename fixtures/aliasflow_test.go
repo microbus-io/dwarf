@@ -47,25 +47,25 @@ func TestAliasflow(t *testing.T) {
 	graph.AddTransition("d", workflow.END)
 	proxy.HandleGraph("aliasflow.verify:428/alias", graph)
 
-	proxy.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("branch") == "alt" {
 			f.Goto("bPrime")
 		}
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"A")
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"B")
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"C")
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"D")
 		return nil
 	})
@@ -79,7 +79,7 @@ func TestAliasflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"branch": ""}
-		outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("ABC", outcome.State["path"])
@@ -89,7 +89,7 @@ func TestAliasflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"branch": "alt"}
-		outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("BD", outcome.State["path"])
@@ -99,7 +99,7 @@ func TestAliasflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		// Default path: history should include "b" but not "bPrime".
-		flowKey, err := eng.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": ""}, nil, nil)
+		flowKey, err := eng.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": ""}, nil)
 		if !assert.NoError(err) {
 			return
 		}
@@ -129,7 +129,7 @@ func TestAliasflow(t *testing.T) {
 		assert.Equal(0, nodeNames["d"])
 
 		// Alt path: history should include "bPrime" but not "b".
-		flowKey, err = eng.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": "alt"}, nil, nil)
+		flowKey, err = eng.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": "alt"}, nil)
 		if !assert.NoError(err) {
 			return
 		}

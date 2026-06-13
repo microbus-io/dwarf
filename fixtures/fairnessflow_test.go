@@ -41,7 +41,7 @@ func TestFairnessflow(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 
-	proxy.HandleTask("fairnessflow.verify:428/tally", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("fairnessflow.verify:428/tally", func(ctx context.Context, f *workflow.Flow) error {
 		delayMs := f.GetInt("delayMs")
 		if delayMs > 0 {
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)
@@ -64,7 +64,7 @@ func TestFairnessflow(t *testing.T) {
 		// Holder flow blocks the single worker so test flows queue up.
 		holderKey, err := eng.Create(ctx, "fairnessflow.verify:428/fairness",
 			map[string]any{"delayMs": 1500, "tag": "holder"},
-			nil, &workflow.FlowOptions{Priority: 1, FairnessKey: "_holder"})
+			&workflow.FlowOptions{Priority: 1, FairnessKey: "_holder"})
 		assert.NoError(err)
 		eng.Start(ctx, holderKey)
 
@@ -75,13 +75,13 @@ func TestFairnessflow(t *testing.T) {
 		for i := range 40 {
 			hk, _ := eng.Create(ctx, "fairnessflow.verify:428/fairness",
 				map[string]any{"delayMs": 8, "tag": "heavy"},
-				nil, &workflow.FlowOptions{Priority: 5, FairnessKey: "heavy", FairnessWeight: 4})
+				&workflow.FlowOptions{Priority: 5, FairnessKey: "heavy", FairnessWeight: 4})
 			eng.Start(ctx, hk)
 			keys = append(keys, hk)
 
 			lk, _ := eng.Create(ctx, "fairnessflow.verify:428/fairness",
 				map[string]any{"delayMs": 8, "tag": "light"},
-				nil, &workflow.FlowOptions{Priority: 5, FairnessKey: "light", FairnessWeight: 1})
+				&workflow.FlowOptions{Priority: 5, FairnessKey: "light", FairnessWeight: 1})
 			eng.Start(ctx, lk)
 			keys = append(keys, lk)
 

@@ -18,8 +18,9 @@ package workflow
 
 import "time"
 
-// FlowOptions sets flow-level scheduling properties at Create or Run.
-// A nil *FlowOptions, or any zero field, uses the engine's defaults.
+// FlowOptions sets flow-level properties at Create or Run: scheduling (priority, fairness, start
+// time) plus the opaque host Baggage. A nil *FlowOptions, or any zero field, uses the engine's
+// defaults.
 type FlowOptions struct {
 	// Priority orders flows competing for workers; an explicit priority is >= 1,
 	// lower runs first. Zero means "unset" and uses the engine's
@@ -36,4 +37,10 @@ type FlowOptions struct {
 	// entry step's not_before column; the flow can still be created and started
 	// immediately, but no worker will pick the step up before StartAt.
 	StartAt time.Time `json:"startAt,omitzero"`
+	// Baggage is opaque, host-defined context (identity/claims, tenant, locale, ...) carried with the
+	// flow. The engine never interprets it: it is set once here, stored on the flow, inherited by
+	// subgraphs and Continue, and delivered to every GraphLoader/TaskExecutor call via the dispatch
+	// context - read it with BaggageFrom(ctx). Any JSON-marshalable value; the host receives the
+	// JSON-decoded form (typically map[string]any), exactly like flow state.
+	Baggage any `json:"baggage,omitzero"`
 }

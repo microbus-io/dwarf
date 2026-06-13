@@ -15,11 +15,12 @@ adapter," it means that wrapping layer.
 
 ### Dependency interfaces (how the engine reaches the outside world)
 
-- **`GraphLoader`** `func(ctx, workflowName string, baggage map[string]any) (*workflow.Graph, error)` - fetches a
-  workflow graph by name. Called once at `Create`; the graph JSON is then frozen on the flow row.
-- **`TaskExecutor`** `func(ctx, taskName string, flow *workflow.Flow, baggage map[string]any) error` - executes one
-  task. Receives the flow carrier with state pre-populated; writes its changes back onto the flow. The engine never
-  knows *how* the task is reached (local call, RPC, message bus).
+- **`GraphLoader`** `func(ctx, workflowName string) (*workflow.Graph, error)` - fetches a workflow graph by name.
+  Called once at `Create`; the graph JSON is then frozen on the flow row. The flow's opaque baggage rides on ctx
+  (`workflow.BaggageFrom(ctx)`) for identity-dependent loading (authz, per-actor graphs).
+- **`TaskExecutor`** `func(ctx, taskName string, flow *workflow.Flow) error` - executes one task. Receives the flow
+  carrier with state pre-populated; writes its changes back onto the flow. The engine never knows *how* the task is
+  reached (local call, RPC, message bus). The flow's baggage rides on ctx (`workflow.BaggageFrom(ctx)`).
 - **`FlowStoppedCallback`** `func(ctx, hostname string, outcome *workflow.FlowOutcome)` - fired when a flow stops
   (completed/failed/cancelled/interrupted) for a flow started via `StartNotify`. The hostname is whatever was passed
   to `StartNotify`.
@@ -35,11 +36,15 @@ adapter," it means that wrapping layer.
   `otel.GetMeterProvider()` (no-op unless the host configures the SDK). The engine builds its `dwarf_*`
   instruments under the `github.com/microbus-io/dwarf` scope (see "Metrics" below). Tracing is deferred.
 
-The **`baggage map[string]any`** is opaque to the engine: set once at `Create`, stored on the flow row (in the
-`baggage` column), and passed through to every `GraphLoader` and `TaskExecutor` call for the flow's lifetime. A
-host carries actor claims / tenant identity there; the engine never interprets it. (Unlike W3C/OTEL request
-baggage this is *flow*-scoped and frozen at `Create`, not per-request mutable - a host adapter bridging to a bus
-maps between the two at the seam.)
+The **baggage** is opaque to the engine: set once at `Create` via `FlowOptions.Baggage` (an `any`, like
+`initialState`), stored on the flow row (the `baggage` column), and delivered to every `GraphLoader` and
+`TaskExecutor` call for the flow's lifetime on the dispatch **context** - the host reads it with
+`workflow.BaggageFrom(ctx)`. It is authored in one visible, typed place (`FlowOptions`) and observed ambiently
+where used; most callbacks ignore it. The engine never interprets it; a host carries actor claims / tenant
+identity there. `BaggageFrom` lives in the `workflow` package so task code can read baggage without importing
+`engine`. The host always receives the JSON-decoded form (typically `map[string]any`), exactly like flow state.
+(Unlike W3C/OTEL request baggage this is *flow*-scoped and frozen at `Create`, not per-request mutable - a host
+adapter bridging to a bus maps between the two at the seam.)
 
 ### Configuration (builder methods, callable before and after Startup)
 
@@ -579,13 +584,22 @@ only when no interrupted steps remain at any level.
 
 ### Identity / baggage propagation
 
-The opaque `baggage` map captured at `Create` (stored in the `baggage` column) is passed to every
-`GraphLoader` and `TaskExecutor` call for the flow's lifetime, including dispatches long after creation. The engine
-never interprets it; a host uses it to carry the original caller's identity (e.g. mint a fresh token inside its
-`TaskExecutor`). It is **inherited** by subgraph flows (`createSubgraphFlow` copies the parent's `baggage`) and by
-`Continue` (the next turn reads the prior flow's `baggage` column and carries it forward), so a multi-turn
-conversation keeps the caller's identity across turns. A turn wanting narrower context scrubs it in an entry
-adapter task.
+The opaque baggage set in `FlowOptions.Baggage` at `Create` (stored in the `baggage` column) is delivered on the
+dispatch **context** to every `GraphLoader` and `TaskExecutor` call for the flow's lifetime, including dispatches
+long after creation - the host reads it with `workflow.BaggageFrom(ctx)`. The engine never interprets it; a host
+uses it to carry the original caller's identity (e.g. mint a fresh token inside its `TaskExecutor`). It is
+**inherited** by subgraph flows (`createSubgraphFlow` copies the parent's `baggage`) and by `Continue` (the next
+turn reads the prior flow's `baggage` column and carries it forward, unless the `Continue` call sets
+`opts.Baggage` to override), so a multi-turn conversation keeps the caller's identity across turns. A turn wanting
+narrower context scrubs it in an entry adapter task.
+
+**Delivery is context, authoring is `FlowOptions`.** Baggage is *set* explicitly and visibly (a typed
+`FlowOptions` field on `Create`/`CreateTask`/`Run`) but *read* ambiently (off ctx), so the value the engine never
+interprets is not a parameter on every callback and task handler. The engine injects it into the ctx it hands the
+callbacks (in `processStep` for the per-step executor, and at the create-time `GraphLoader` call); the
+`ContextWithBaggage`/`BaggageFrom` helpers live in the `workflow` package so task-defining code reads baggage
+without importing `engine`. The create-time injection round-trips the value through JSON (`baggageMap`) so the
+loader sees the same decoded shape every dispatch will.
 
 ### Await
 

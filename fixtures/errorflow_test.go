@@ -45,17 +45,17 @@ func TestErrorflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("errorflow.verify:428/error", graph)
 
-	proxy.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("errorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("errorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("trigger") == "fail" {
 			return errors.New("triggered failure")
 		}
 		f.SetString("result", "normal")
 		return nil
 	})
-	proxy.HandleTask("errorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("errorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
 		var onErr errors.TracedError
 		err := f.Get("onErr", &onErr)
 		if err != nil || onErr.Error() == "" {
@@ -65,7 +65,7 @@ func TestErrorflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("errorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("errorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("finalResult", "final:"+f.GetString("result"))
 		return nil
 	})
@@ -79,7 +79,7 @@ func TestErrorflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"trigger": "ok"}
-		outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("final:normal", outcome.State["finalResult"])
@@ -89,7 +89,7 @@ func TestErrorflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"trigger": "fail"}
-		outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		finalResult, _ := outcome.State["finalResult"].(string)

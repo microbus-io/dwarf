@@ -38,8 +38,8 @@ func TestCreatetaskflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	var seenBaggage any
-	proxy.HandleTask("createtaskflow.verify:428/only", func(ctx context.Context, f *workflow.Flow, baggage any) error {
-		seenBaggage = baggage
+	proxy.HandleTask("createtaskflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
+		seenBaggage = workflow.BaggageFrom(ctx)
 		f.SetString("ran", "yes")
 		return nil
 	})
@@ -54,8 +54,7 @@ func TestCreatetaskflow(t *testing.T) {
 
 		flowKey, err := eng.CreateTask(ctx, "createtaskflow.verify:428/only",
 			map[string]any{"in": 1},
-			map[string]any{"actor": "alice"},
-			&workflow.FlowOptions{Priority: 3, FairnessKey: "tk1"},
+			&workflow.FlowOptions{Priority: 3, FairnessKey: "tk1", Baggage: map[string]any{"actor": "alice"}},
 		)
 		if !assert.NoError(err) {
 			return
@@ -97,7 +96,7 @@ func TestCreatetaskflow(t *testing.T) {
 	t.Run("nil_options_use_defaults", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.CreateTask(ctx, "createtaskflow.verify:428/only", nil, nil, nil)
+		flowKey, err := eng.CreateTask(ctx, "createtaskflow.verify:428/only", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

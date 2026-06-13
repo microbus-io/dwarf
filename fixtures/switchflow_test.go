@@ -55,18 +55,18 @@ func TestSwitchflow(t *testing.T) {
 	noMatchGraph.AddTransition("handleMid", workflow.END)
 	proxy.HandleGraph("switchflow.verify:428/switch-no-match", noMatchGraph)
 
-	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "mid")
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-low", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-low", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "low")
 		return nil
 	})
@@ -79,7 +79,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("amount_above_high_threshold_takes_high_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 50000}, nil, nil)
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 50000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])
@@ -88,7 +88,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("amount_in_mid_band_takes_mid_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 5000}, nil, nil)
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 5000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("mid", outcome.State["branch"])
@@ -97,7 +97,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("amount_below_thresholds_takes_default_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 100}, nil, nil)
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 100}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("low", outcome.State["branch"])
@@ -106,7 +106,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("boundary_10000_takes_high_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 10000}, nil, nil)
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 10000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])
@@ -115,7 +115,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("boundary_1000_takes_mid_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 1000}, nil, nil)
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 1000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("mid", outcome.State["branch"])
@@ -138,14 +138,14 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 	graph.AddTransition("handleMid", workflow.END)
 	proxy.HandleGraph("switchflow.verify:428/switch-no-match", graph)
 
-	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-high", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("switchflow.verify:428/handle-mid", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "mid")
 		return nil
 	})
@@ -158,7 +158,7 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 	t.Run("no_match_completes_flow_without_branching", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 100}, nil, nil)
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 100}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(nil, outcome.State["branch"])
@@ -167,7 +167,7 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 	t.Run("matching_input_still_routes_normally", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 5000}, nil, nil)
+		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 5000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("mid", outcome.State["branch"])

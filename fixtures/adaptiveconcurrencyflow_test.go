@@ -45,7 +45,7 @@ func TestAdaptiveconcurrencyflow(t *testing.T) {
 	var rejections atomic.Int32
 	var completions atomic.Int32
 
-	proxy.HandleTask("adaptiveconcurrencyflow.verify:428/adaptive", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("adaptiveconcurrencyflow.verify:428/adaptive", func(ctx context.Context, f *workflow.Flow) error {
 		if admit, _ := rate.Allow(); !admit {
 			rejections.Add(1)
 			return errors.New("rate limited", http.StatusTooManyRequests)
@@ -66,7 +66,7 @@ func TestAdaptiveconcurrencyflow(t *testing.T) {
 		const flows = 49
 		var keys []string
 		for range flows {
-			k, err := eng.Create(ctx, "adaptiveconcurrencyflow.verify:428/adaptive-concurrency", nil, nil, nil)
+			k, err := eng.Create(ctx, "adaptiveconcurrencyflow.verify:428/adaptive-concurrency", nil, nil)
 			assert.NoError(err)
 			eng.Start(ctx, k)
 			keys = append(keys, k)

@@ -749,7 +749,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	opts = e.resolveFlowOptions(opts, nil)
+	opts = e.resolveFlowOptions(opts)
 
 	var threadID int
 	var threadToken string
@@ -786,13 +786,17 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		return "", errors.Trace(err)
 	}
 
-	// Inherit the thread's baggage: a multi-turn conversation keeps the original caller's identity /
-	// host context across turns, matching subgraph inheritance. The host scrubs it in an entry adapter
-	// task if a turn needs narrower context.
-	var baggage map[string]any
-	unmarshalJSONMap(baggageJSON, &baggage)
+	// Inherit the thread's baggage by default: a multi-turn conversation keeps the original caller's
+	// identity / host context across turns, matching subgraph inheritance. A caller that passes
+	// opts.Baggage explicitly overrides it. The host scrubs it in an entry adapter task if a turn
+	// needs narrower context.
+	if opts.Baggage == nil {
+		var inherited map[string]any
+		unmarshalJSONMap(baggageJSON, &inherited)
+		opts.Baggage = inherited
+	}
 
-	return e.createWithGraph(ctx, shardNum, workflowName, &graph, mergedState, baggage, threadID, threadToken, opts)
+	return e.createWithGraph(ctx, shardNum, workflowName, &graph, mergedState, threadID, threadToken, opts)
 }
 
 func (e *Engine) setBreakpoint(ctx context.Context, flowKey string, key string, enabled bool) error {

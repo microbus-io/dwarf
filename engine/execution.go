@@ -222,13 +222,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	e.logger.DebugContext(ctx, "Executing task", "task", taskName, "flow", workflowName)
 	e.breakerCommit(taskName)
 	dispatchURL := dispatchURLOf(graph, taskName)
-	taskCtx := ctx
+	taskCtx := workflow.ContextWithBaggage(ctx, baggage)
 	if timeBudgetMs > 0 {
 		var cancel context.CancelFunc
-		taskCtx, cancel = context.WithTimeout(ctx, time.Duration(timeBudgetMs)*time.Millisecond)
+		taskCtx, cancel = context.WithTimeout(taskCtx, time.Duration(timeBudgetMs)*time.Millisecond)
 		defer cancel()
 	}
-	execErr := e.taskExecutor(taskCtx, dispatchURL, &flow.Flow, baggage)
+	execErr := e.taskExecutor(taskCtx, dispatchURL, &flow.Flow)
 
 	var resultFlow *workflow.RawFlow
 	errorRouted := false
@@ -329,7 +329,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			"UPDATE dwarf_steps SET changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 			string(changesJSON), stepID, workflow.StatusRunning,
 		)
-		subgraphGraph, err := e.graphLoader(ctx, subgraphWorkflow, baggage)
+		subgraphGraph, err := e.graphLoader(workflow.ContextWithBaggage(ctx, baggage), subgraphWorkflow)
 		if err != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)

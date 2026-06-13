@@ -51,12 +51,12 @@ func TestRestartflow(t *testing.T) {
 	// Counts how many times the entry task body runs across the whole flow lifetime.
 	var entryRuns atomic.Int64
 
-	proxy.HandleTask("restartflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("restartflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		entryRuns.Add(1)
 		f.SetString("path", "A")
 		return nil
 	})
-	proxy.HandleTask("restartflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("restartflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"B")
 		return nil
 	})
@@ -69,7 +69,7 @@ func TestRestartflow(t *testing.T) {
 	t.Run("restart_reruns_from_entry_with_override", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "restartflow.verify:428/restart", map[string]any{"seed": "first"}, nil, nil)
+		flowKey, err := eng.Create(ctx, "restartflow.verify:428/restart", map[string]any{"seed": "first"}, nil)
 		if !assert.NoError(err) {
 			return
 		}
@@ -105,7 +105,7 @@ func TestRestartflow(t *testing.T) {
 	t.Run("restart_rejects_non_terminal_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "restartflow.verify:428/restart", nil, nil, nil)
+		flowKey, err := eng.Create(ctx, "restartflow.verify:428/restart", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

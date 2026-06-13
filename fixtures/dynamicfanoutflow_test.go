@@ -44,10 +44,10 @@ func TestDynamicfanoutflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("dynamicfanoutflow.verify:428/dynamic-fan-out", graph)
 
-	proxy.HandleTask("dynamicfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("dynamicfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("dynamicfanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("dynamicfanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("item") == "" {
 			return nil
 		}
@@ -56,7 +56,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		f.Set("seenCounts", []int{f.GetInt("itemCount")})
 		return nil
 	})
-	proxy.HandleTask("dynamicfanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("dynamicfanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("processedCount", f.GetInt("processed"))
 		return nil
 	})
@@ -70,7 +70,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{"x", "y", "z"}}
-		outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3.0, outcome.State["processedCount"])
@@ -80,7 +80,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{"only"}}
-		outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(1.0, outcome.State["processedCount"])
@@ -90,7 +90,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{}}
-		outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 	})

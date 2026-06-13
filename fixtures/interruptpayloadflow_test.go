@@ -45,11 +45,11 @@ func TestInterruptpayloadflow(t *testing.T) {
 	graph.AddTransition("ask", workflow.END)
 	proxy.HandleGraph("interruptpayloadflow.verify:428/interrupt", graph)
 
-	proxy.HandleTask("interruptpayloadflow.verify:428/setup", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptpayloadflow.verify:428/setup", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("prompt", "choose")
 		return nil
 	})
-	proxy.HandleTask("interruptpayloadflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptpayloadflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
 		_, yield, err := f.Interrupt(map[string]any{
 			"question": "pick one",
 			"options":  []string{"a", "b"},
@@ -68,7 +68,7 @@ func TestInterruptpayloadflow(t *testing.T) {
 	t.Run("payload_is_separate_from_state", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "interruptpayloadflow.verify:428/interrupt", nil, nil, nil)
+		flowKey, err := eng.Create(ctx, "interruptpayloadflow.verify:428/interrupt", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
@@ -91,7 +91,7 @@ func TestInterruptpayloadflow(t *testing.T) {
 		assert.False(hasQuestion, "payload field leaked into State")
 
 		// A caller wanting the combined view merges them explicitly.
-		graph, err := proxy.LoadGraph(ctx, "interruptpayloadflow.verify:428/interrupt", nil)
+		graph, err := proxy.LoadGraph(ctx, "interruptpayloadflow.verify:428/interrupt")
 		if !assert.NoError(err) {
 			return
 		}

@@ -41,15 +41,15 @@ func TestSleepflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("sleepflow.verify:428/delay", graph)
 
-	proxy.HandleTask("sleepflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("sleepflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("sleepflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("sleepflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.Sleep(f.GetDuration("sleepFor"))
 		f.SetBool("marked", true)
 		return nil
 	})
-	proxy.HandleTask("sleepflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("sleepflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -64,7 +64,7 @@ func TestSleepflow(t *testing.T) {
 		sleepFor := 100 * time.Millisecond
 		initialState := map[string]any{"sleepFor": sleepFor}
 		start := time.Now()
-		outcome, err := eng.Run(ctx, "sleepflow.verify:428/delay", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "sleepflow.verify:428/delay", initialState, nil)
 		elapsed := time.Since(start)
 
 		assert.NoError(err)

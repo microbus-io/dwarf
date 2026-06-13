@@ -53,7 +53,7 @@ func TestCancelledfanoutflow(t *testing.T) {
 
 	var executed atomic.Int32
 
-	branch := func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	branch := func(ctx context.Context, f *workflow.Flow) error {
 		executed.Add(1)
 		select {
 		case <-time.After(2 * time.Second):
@@ -64,13 +64,13 @@ func TestCancelledfanoutflow(t *testing.T) {
 		return nil
 	}
 
-	proxy.HandleTask("cancelledfanoutflow.verify:428/source", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("cancelledfanoutflow.verify:428/source", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 	proxy.HandleTask("cancelledfanoutflow.verify:428/a", branch)
 	proxy.HandleTask("cancelledfanoutflow.verify:428/b", branch)
 	proxy.HandleTask("cancelledfanoutflow.verify:428/c", branch)
-	proxy.HandleTask("cancelledfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("cancelledfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -83,7 +83,7 @@ func TestCancelledfanoutflow(t *testing.T) {
 	t.Run("cancel_mid_fan_out", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "cancelledfanoutflow.verify:428/cancelled-fan-out", nil, nil, nil)
+		flowKey, err := eng.Create(ctx, "cancelledfanoutflow.verify:428/cancelled-fan-out", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

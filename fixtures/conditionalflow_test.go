@@ -44,18 +44,18 @@ func TestConditionalflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("conditionalflow.verify:428/conditional", graph)
 
-	proxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-high", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("conditionalflow.verify:428/task-high", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-low", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("conditionalflow.verify:428/task-low", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "low")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("conditionalflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -68,7 +68,7 @@ func TestConditionalflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"score": 80}
-		outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])
@@ -78,7 +78,7 @@ func TestConditionalflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"score": 20}
-		outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("low", outcome.State["branch"])
@@ -88,7 +88,7 @@ func TestConditionalflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"score": 50}
-		outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])

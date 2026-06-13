@@ -49,21 +49,21 @@ func TestFailedfanoutflow(t *testing.T) {
 	graph.AddTransition("j", workflow.END)
 	proxy.HandleGraph("failedfanoutflow.verify:428/failed-fan-out", graph)
 
-	proxy.HandleTask("failedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("failedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("failedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("failedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("triggered failure in B")
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("failedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("failedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -75,7 +75,7 @@ func TestFailedfanoutflow(t *testing.T) {
 	t.Run("failing_branch_fails_the_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "failedfanoutflow.verify:428/failed-fan-out", nil, nil, nil)
+		outcome, err := eng.Run(ctx, "failedfanoutflow.verify:428/failed-fan-out", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 	})

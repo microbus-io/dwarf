@@ -50,14 +50,14 @@ func TestAckdroppedflow(t *testing.T) {
 	var parkDisabled atomic.Bool
 	parkDisabled.Store(true)
 
-	proxy.HandleTask("ackdroppedflow.verify:428/park", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("ackdroppedflow.verify:428/park", func(ctx context.Context, f *workflow.Flow) error {
 		if parkDisabled.Load() {
 			return errors.New("ack timeout: ackdroppedflow.verify:428/park", http.StatusNotFound)
 		}
 		parkHits.Add(1)
 		return nil
 	})
-	proxy.HandleTask("ackdroppedflow.verify:428/ping", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("ackdroppedflow.verify:428/ping", func(ctx context.Context, f *workflow.Flow) error {
 		pingHits.Add(1)
 		return nil
 	})
@@ -70,7 +70,7 @@ func TestAckdroppedflow(t *testing.T) {
 
 	var parkKeys []string
 	for range 20 {
-		k, err := eng.Create(ctx, "ackdroppedflow.verify:428/ack-dropped", nil, nil, nil)
+		k, err := eng.Create(ctx, "ackdroppedflow.verify:428/ack-dropped", nil, nil)
 		testarossa.For(t).NoError(err)
 		eng.Start(ctx, k)
 		parkKeys = append(parkKeys, k)
@@ -94,7 +94,7 @@ func TestAckdroppedflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		for range 5 {
-			k, err := eng.Create(ctx, "ackdroppedflow.verify:428/echo", nil, nil, nil)
+			k, err := eng.Create(ctx, "ackdroppedflow.verify:428/echo", nil, nil)
 			assert.NoError(err)
 			eng.Start(ctx, k)
 			timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

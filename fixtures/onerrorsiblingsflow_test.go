@@ -51,25 +51,25 @@ func TestOnerrorsiblingsflow(t *testing.T) {
 	graph.AddTransition("taskE", workflow.END)
 	proxy.HandleGraph("onerrorsiblingsflow.verify:428/fan-out-error", graph)
 
-	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("triggered failure in TaskB")
 	})
-	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markC", true)
 		return nil
 	})
-	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markD", true)
 		return nil
 	})
-	proxy.HandleTask("onerrorsiblingsflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("onerrorsiblingsflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("handled", true)
 		return nil
 	})
-	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("onerrorsiblingsflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
 		recovered := f.GetBool("handled") && !f.GetBool("markB")
 		siblingsRan := f.GetBool("markC") && f.GetBool("markD")
 		f.SetBool("recovered", recovered)
@@ -85,7 +85,7 @@ func TestOnerrorsiblingsflow(t *testing.T) {
 	t.Run("flow_completes_with_handler_and_siblings", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "onerrorsiblingsflow.verify:428/fan-out-error", nil, nil, nil)
+		outcome, err := eng.Run(ctx, "onerrorsiblingsflow.verify:428/fan-out-error", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(true, outcome.State["recovered"])

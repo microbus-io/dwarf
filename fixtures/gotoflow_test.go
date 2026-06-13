@@ -41,18 +41,18 @@ func TestGotoflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("gotoflow.verify:428/goto", graph)
 
-	proxy.HandleTask("gotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("gotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("loops", f.GetInt("loops")+1)
 		return nil
 	})
-	proxy.HandleTask("gotoflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("gotoflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("loops") < f.GetInt("target") {
 			f.Goto("gotoflow.verify:428/task-a")
 		}
 		f.SetBool("visited", true)
 		return nil
 	})
-	proxy.HandleTask("gotoflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("gotoflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("finalLoops", f.GetInt("loops"))
 		return nil
 	})
@@ -66,7 +66,7 @@ func TestGotoflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"target": 1}
-		outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(1.0, outcome.State["finalLoops"])
@@ -76,7 +76,7 @@ func TestGotoflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"target": 3}
-		outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3.0, outcome.State["finalLoops"])
@@ -94,7 +94,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 	graph.AddTransition("badGotoer", workflow.END)
 	proxy.HandleGraph("gotoflow.verify:428/bad-goto", graph)
 
-	proxy.HandleTask("gotoflow.verify:428/bad-gotoer", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("gotoflow.verify:428/bad-gotoer", func(ctx context.Context, f *workflow.Flow) error {
 		f.Goto("https://gotoflow.verify:428/no-such-task")
 		f.SetBool("stamp", true)
 		return nil
@@ -108,7 +108,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 	t.Run("goto_to_unregistered_target_fails_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "gotoflow.verify:428/bad-goto", nil, nil, nil)
+		outcome, err := eng.Run(ctx, "gotoflow.verify:428/bad-goto", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 	})

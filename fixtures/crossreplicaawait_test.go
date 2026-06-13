@@ -43,7 +43,7 @@ func TestCrossReplicaAwait(t *testing.T) {
 	// eng1: pure awaiter. Its task handler must never run (zero workers).
 	proxy1 := engine.NewTestProxy()
 	proxy1.HandleGraph("crossreplica.verify:428/flow", graph)
-	proxy1.HandleTask("crossreplica.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy1.HandleTask("crossreplica.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		t.Error("eng1 has zero workers and must never execute the task")
 		return nil
 	})
@@ -52,7 +52,7 @@ func TestCrossReplicaAwait(t *testing.T) {
 	var ranOnEng2 atomic.Bool
 	proxy2 := engine.NewTestProxy()
 	proxy2.HandleGraph("crossreplica.verify:428/flow", graph)
-	proxy2.HandleTask("crossreplica.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy2.HandleTask("crossreplica.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		ranOnEng2.Store(true)
 		f.SetString("result", "done-by-eng2")
 		return nil
@@ -85,7 +85,7 @@ func TestCrossReplicaAwait(t *testing.T) {
 
 	// Create and start on the awaiter replica. eng1 has no workers, so eng2 (reached via the relayed
 	// Enqueue doorbell, or its own poll) is the only replica that can run the step.
-	flowKey, err := eng1.Create(ctx, "crossreplica.verify:428/flow", nil, nil, nil)
+	flowKey, err := eng1.Create(ctx, "crossreplica.verify:428/flow", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}

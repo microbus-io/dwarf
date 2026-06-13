@@ -43,7 +43,7 @@ func TestStepnavflow(t *testing.T) {
 	graph.AddTransition("taskB", "taskC")
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("stepnavflow.verify:428/flow", graph)
-	noop := func(ctx context.Context, f *workflow.Flow, baggage any) error { return nil }
+	noop := func(ctx context.Context, f *workflow.Flow) error { return nil }
 	proxy.HandleTask("stepnavflow.verify:428/task-a", noop)
 	proxy.HandleTask("stepnavflow.verify:428/task-b", noop)
 	proxy.HandleTask("stepnavflow.verify:428/task-c", noop)
@@ -53,7 +53,7 @@ func TestStepnavflow(t *testing.T) {
 		WithTaskExecutor(proxy.ExecuteTask)
 	eng.RunInTest(t)
 
-	outcome, err := eng.Run(ctx, "stepnavflow.verify:428/flow", nil, nil, nil)
+	outcome, err := eng.Run(ctx, "stepnavflow.verify:428/flow", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}

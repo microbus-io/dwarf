@@ -15,11 +15,12 @@ limitations under the License.
 */
 
 /*
-The opaque baggage map captured at Create is stored on the flow row and passed,
-unchanged, to every GraphLoader and TaskExecutor call for the flow's lifetime —
-including subgraph flows, which inherit the parent's baggage. The engine never
-interprets it. This wires capturing loader/executor shims to assert baggage
-reaches every call site identically, across a subgraph boundary.
+The opaque baggage set in FlowOptions.Baggage at Create is stored on the flow row and delivered, via
+the dispatch context, to every GraphLoader and TaskExecutor call for the flow's lifetime - including
+subgraph flows, which inherit the parent's baggage, and Continue turns, which inherit the thread's.
+The engine never interprets it; the host reads it with workflow.BaggageFrom(ctx). This wires capturing
+loader/executor shims to assert baggage reaches every call site identically, across a subgraph boundary
+and a Continue.
 */
 package fixtures
 
@@ -52,13 +53,13 @@ func TestBaggageflow(t *testing.T) {
 	inner.AddTransition("taskX", workflow.END)
 	proxy.HandleGraph("baggageflow.verify:428/inner", inner)
 
-	proxy.HandleTask("baggageflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("baggageflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("baggageflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("baggageflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("baggageflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("baggageflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		_, yield, err := f.Subgraph("baggageflow.verify:428/inner", nil)
 		if yield || err != nil {
 			return err
@@ -66,21 +67,25 @@ func TestBaggageflow(t *testing.T) {
 		return nil
 	})
 
-	// Capturing shims record the baggage seen at each loader/executor call.
+	// Capturing shims record the baggage seen on the context at each loader/executor call.
 	var mu sync.Mutex
 	seenLoad := map[string]map[string]any{}
 	seenTask := map[string]map[string]any{}
-	loader := func(ctx context.Context, name string, md any) (*workflow.Graph, error) {
-		mu.Lock()
-		seenLoad[name] = md.(map[string]any)
-		mu.Unlock()
-		return proxy.LoadGraph(ctx, name, md)
+	bagOf := func(ctx context.Context) map[string]any {
+		m, _ := workflow.BaggageFrom(ctx).(map[string]any)
+		return m
 	}
-	executor := func(ctx context.Context, taskName string, f *workflow.Flow, md any) error {
+	loader := func(ctx context.Context, name string) (*workflow.Graph, error) {
 		mu.Lock()
-		seenTask[taskName] = md.(map[string]any)
+		seenLoad[name] = bagOf(ctx)
 		mu.Unlock()
-		return proxy.ExecuteTask(ctx, taskName, f, md)
+		return proxy.LoadGraph(ctx, name)
+	}
+	executor := func(ctx context.Context, taskName string, f *workflow.Flow) error {
+		mu.Lock()
+		seenTask[taskName] = bagOf(ctx)
+		mu.Unlock()
+		return proxy.ExecuteTask(ctx, taskName, f)
 	}
 
 	eng := engine.NewEngine().
@@ -94,7 +99,7 @@ func TestBaggageflow(t *testing.T) {
 		// "n" is an int on the way in; it must arrive JSON-decoded (float64) everywhere, including the
 		// create-time loader — proving baggage is normalized through JSON, not handed over raw.
 		md := map[string]any{"actor": "alice", "scope": "s1", "n": 5}
-		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, md, nil)
+		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, &workflow.FlowOptions{Baggage: md})
 		if !assert.NoError(err) {
 			return
 		}
@@ -136,7 +141,7 @@ func TestBaggageflow(t *testing.T) {
 
 		// Turn 1 carries the caller's baggage.
 		md := map[string]any{"actor": "bob", "scope": "s2"}
-		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, md, nil)
+		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, &workflow.FlowOptions{Baggage: md})
 		if !assert.NoError(err) {
 			return
 		}
@@ -196,9 +201,9 @@ func TestBaggageflow(t *testing.T) {
 		seenTask = map[string]map[string]any{}
 		mu.Unlock()
 
-		// A nil baggage at Create round-trips through the column and reaches tasks as an empty/nil map
-		// — reads on it are safe, so the flow completes without panicking.
-		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, nil, nil)
+		// No baggage set: the callbacks observe a nil map (BaggageFrom returns nil) — reads are safe,
+		// so the flow completes without panicking.
+		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
@@ -213,8 +218,8 @@ func TestBaggageflow(t *testing.T) {
 
 		mu.Lock()
 		defer mu.Unlock()
-		got, ok := seenTask["baggageflow.verify:428/task-a"]
+		_, ok := seenTask["baggageflow.verify:428/task-a"]
 		assert.True(ok, "task-a should have been dispatched")
-		assert.Equal(0, len(got), "nil baggage should arrive as an empty/nil map")
+		assert.Equal(0, len(seenTask["baggageflow.verify:428/task-a"]), "nil baggage should arrive as an empty/nil map")
 	})
 }

@@ -46,7 +46,7 @@ func TestDynamicsubgraphflow(t *testing.T) {
 	inner.AddTransition("innerB", workflow.END)
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/inner", inner)
 
-	proxy.HandleTask("dynamicsubgraphflow.verify:428/parent", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("dynamicsubgraphflow.verify:428/parent", func(ctx context.Context, f *workflow.Flow) error {
 		out, yield, err := f.Subgraph("dynamicsubgraphflow.verify:428/inner", map[string]any{"value": f.GetInt("value")})
 		if yield || err != nil {
 			return err
@@ -54,11 +54,11 @@ func TestDynamicsubgraphflow(t *testing.T) {
 		f.SetString("result", fmt.Sprintf("parent:%v", out["innerResult"]))
 		return nil
 	})
-	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("innerStage", f.GetInt("value")*2)
 		return nil
 	})
-	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("innerResult", f.GetInt("innerStage")+3)
 		return nil
 	})
@@ -72,7 +72,7 @@ func TestDynamicsubgraphflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"value": 5}
-		outcome, err := eng.Run(ctx, "dynamicsubgraphflow.verify:428/dynamic-subgraph", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "dynamicsubgraphflow.verify:428/dynamic-subgraph", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		// InnerA: 5*2=10, InnerB: 10+3=13, Parent: "parent:13"

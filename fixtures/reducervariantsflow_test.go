@@ -59,10 +59,10 @@ func TestReducervariantsflow(t *testing.T) {
 	graph.AddTransition("join", workflow.END)
 	proxy.HandleGraph("reducervariantsflow.verify:428/reducer", graph)
 
-	proxy.HandleTask("reducervariantsflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("reducervariantsflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("lo", 5)
 		f.SetInt("hi", 5)
 		f.SetBool("allOk", true)
@@ -71,7 +71,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.Set("obj", map[string]any{"k1": 1.0})
 		return nil
 	})
-	proxy.HandleTask("reducervariantsflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("lo", 2)
 		f.SetInt("hi", 8)
 		f.SetBool("allOk", true)
@@ -80,7 +80,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.Set("obj", map[string]any{"k2": 2.0})
 		return nil
 	})
-	proxy.HandleTask("reducervariantsflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("lo", 9)
 		f.SetInt("hi", 3)
 		f.SetBool("allOk", false)
@@ -89,7 +89,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.Set("obj", map[string]any{"k1": 9.0})
 		return nil
 	})
-	proxy.HandleTask("reducervariantsflow.verify:428/join", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		// Copy merged values forward under stable result keys.
 		f.SetFloat("rLo", f.GetFloat("lo"))
 		f.SetFloat("rHi", f.GetFloat("hi"))
@@ -110,7 +110,7 @@ func TestReducervariantsflow(t *testing.T) {
 	t.Run("min_max_and_or_concat_merge", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "reducervariantsflow.verify:428/reducer", nil, nil, nil)
+		outcome, err := eng.Run(ctx, "reducervariantsflow.verify:428/reducer", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

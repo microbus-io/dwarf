@@ -51,11 +51,11 @@ func TestSubgraphentryflow(t *testing.T) {
 	tail.AddTransition("taskTail", workflow.END)
 	proxy.HandleGraph("subgraphentryflow.verify:428/tail", tail)
 
-	proxy.HandleTask("subgraphentryflow.verify:428/task-inner", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphentryflow.verify:428/task-inner", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", "inner")
 		return nil
 	})
-	proxy.HandleTask("subgraphentryflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphentryflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		out, yield, err := f.Subgraph("subgraphentryflow.verify:428/inner", nil)
 		if yield || err != nil {
 			return err
@@ -65,11 +65,11 @@ func TestSubgraphentryflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphentryflow.verify:428/task-tail", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphentryflow.verify:428/task-tail", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("finalResult", f.GetString("innerResult")+"/tail")
 		return nil
 	})
-	proxy.HandleTask("subgraphentryflow.verify:428/run-tail", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphentryflow.verify:428/run-tail", func(ctx context.Context, f *workflow.Flow) error {
 		out, yield, err := f.Subgraph("subgraphentryflow.verify:428/tail", map[string]any{"innerResult": f.GetString("innerResult")})
 		if yield || err != nil {
 			return err
@@ -88,7 +88,7 @@ func TestSubgraphentryflow(t *testing.T) {
 	t.Run("subgraph_as_first_and_last_node", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "subgraphentryflow.verify:428/outer", nil, nil, nil)
+		outcome, err := eng.Run(ctx, "subgraphentryflow.verify:428/outer", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("inner/tail", outcome.State["finalResult"])

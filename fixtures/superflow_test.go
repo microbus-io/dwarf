@@ -112,11 +112,11 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 
 	for _, name := range []string{"taskA", "taskB", "taskC", "taskD", "taskE", "taskZ", "errorHandler", "subTaskA", "subTaskB"} {
 		taskName := name
-		proxy.HandleTask("superflow.verify:428/"+kebab(taskName), func(ctx context.Context, f *workflow.Flow, baggage any) error {
+		proxy.HandleTask("superflow.verify:428/"+kebab(taskName), func(ctx context.Context, f *workflow.Flow) error {
 			return step(ctx, f, taskName)
 		})
 	}
-	proxy.HandleTask("superflow.verify:428/super-sub-call", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("superflow.verify:428/super-sub-call", func(ctx context.Context, f *workflow.Flow) error {
 		_, yield, err := f.Subgraph("superflow.verify:428/super-sub", nil)
 		if yield || err != nil {
 			return err
@@ -158,7 +158,7 @@ func TestSuperflow_Sequential(t *testing.T) {
 			eng, _, visits := superflowSetup(t, shards)
 
 			state := map[string]any{"items": []string{"x", "y", "z"}, "behaviors": map[string]any{}}
-			outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil, nil)
+			outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 			assert.NoError(err)
 			assert.Equal(workflow.StatusCompleted, outcome.Status)
 			assert.Equal(1, visits.get("taskA"))
@@ -182,7 +182,7 @@ func TestSuperflow_Subgraph(t *testing.T) {
 			eng, _, visits := superflowSetup(t, shards)
 
 			state := map[string]any{"items": []string{"x"}, "useSubgraph": true, "behaviors": map[string]any{}}
-			outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil, nil)
+			outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 			assert.NoError(err)
 			assert.Equal(workflow.StatusCompleted, outcome.Status)
 			assert.Equal(1, visits.get("subTaskA"))
@@ -205,7 +205,7 @@ func TestSuperflow_Goto(t *testing.T) {
 			"items":     []string{"x"},
 			"behaviors": map[string]any{"taskE": map[string]any{"Goto": "taskZ"}},
 		}
-		outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil, nil)
+		outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(1, visits.get("taskE"))
@@ -226,7 +226,7 @@ func TestSuperflow_OnError(t *testing.T) {
 				"items":     []string{"x", "y"},
 				"behaviors": map[string]any{"taskC": map[string]any{"ErrorStatus": 500.0}},
 			}
-			outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil, nil)
+			outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 			assert.NoError(err)
 			assert.Equal(workflow.StatusCompleted, outcome.Status)
 			assert.True(visits.get("errorHandler") >= 1)
@@ -249,7 +249,7 @@ func TestSuperflow_Sleep(t *testing.T) {
 			"items":     []string{"x", "y", "z"},
 			"behaviors": map[string]any{"taskC": map[string]any{"SleepMs": 50.0}},
 		}
-		outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil, nil)
+		outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3, visits.get("taskC"))

@@ -40,15 +40,15 @@ func TestBasicflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("basicflow.verify:428/basic", graph)
 
-	proxy.HandleTask("basicflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("basicflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", "A")
 		return nil
 	})
-	proxy.HandleTask("basicflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("basicflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"B")
 		return nil
 	})
-	proxy.HandleTask("basicflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("basicflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"C")
 		return nil
 	})
@@ -61,7 +61,7 @@ func TestBasicflow(t *testing.T) {
 	t.Run("sequential_a_b_c", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "basicflow.verify:428/basic", nil, nil, nil)
+		outcome, err := eng.Run(ctx, "basicflow.verify:428/basic", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("ABC", outcome.State["path"])

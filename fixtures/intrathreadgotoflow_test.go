@@ -46,10 +46,10 @@ func TestIntrathreadgotoflow(t *testing.T) {
 	graph.AddTransition("taskD", workflow.END)
 	proxy.HandleGraph("intrathreadgotoflow.verify:428/intra-thread-goto", graph)
 
-	proxy.HandleTask("intrathreadgotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("intrathreadgotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("intrathreadgotoflow.verify:428/loop-task", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("intrathreadgotoflow.verify:428/loop-task", func(ctx context.Context, f *workflow.Flow) error {
 		loops := f.GetInt("loops") + 1
 		f.SetInt("loops", loops)
 		if loops < f.GetInt("target") {
@@ -57,11 +57,11 @@ func TestIntrathreadgotoflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("intrathreadgotoflow.verify:428/normal-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("intrathreadgotoflow.verify:428/normal-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("stamp", "stamped")
 		return nil
 	})
-	proxy.HandleTask("intrathreadgotoflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("intrathreadgotoflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", fmt.Sprintf("%s/%d", f.GetString("stamp"), f.GetInt("loops")))
 		return nil
 	})
@@ -75,7 +75,7 @@ func TestIntrathreadgotoflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"target": 3}
-		outcome, err := eng.Run(ctx, "intrathreadgotoflow.verify:428/intra-thread-goto", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "intrathreadgotoflow.verify:428/intra-thread-goto", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("stamped/3", outcome.State["result"])

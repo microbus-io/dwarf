@@ -48,10 +48,10 @@ func TestRetryfanoutflow(t *testing.T) {
 	graph.AddTransition("join", workflow.END)
 	proxy.HandleGraph("retryfanoutflow.verify:428/retry-fan-out", graph)
 
-	proxy.HandleTask("retryfanoutflow.verify:428/enter", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("retryfanoutflow.verify:428/enter", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("retryfanoutflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("retryfanoutflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
 		if rand.Float64() < 0.10 {
 			f.Retry(math.MaxInt32, 0, 0, 0)
 			return nil
@@ -59,7 +59,7 @@ func TestRetryfanoutflow(t *testing.T) {
 		f.Set("results", []int{f.GetInt("element") + 1})
 		return nil
 	})
-	proxy.HandleTask("retryfanoutflow.verify:428/join", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("retryfanoutflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -76,7 +76,7 @@ func TestRetryfanoutflow(t *testing.T) {
 			elements[i] = i
 		}
 		initialState := map[string]any{"elements": elements}
-		outcome, err := eng.Run(ctx, "retryfanoutflow.verify:428/retry-fan-out", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "retryfanoutflow.verify:428/retry-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 

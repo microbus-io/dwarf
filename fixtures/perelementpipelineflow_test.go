@@ -52,26 +52,26 @@ func TestPerelementpipelineflow(t *testing.T) {
 	graph.AddTransition("taskL", workflow.END)
 	proxy.HandleGraph("perelementpipelineflow.verify:428/per-element-pipeline", graph)
 
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("perelementpipelineflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-h", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("perelementpipelineflow.verify:428/task-h", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("item", strings.ToUpper(f.GetString("item")))
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("perelementpipelineflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("aResult", "a:"+f.GetString("item"))
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("perelementpipelineflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("bResult", "b:"+f.GetString("item"))
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-m", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("perelementpipelineflow.verify:428/task-m", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("mergedItems", []string{f.GetString("aResult") + "+" + f.GetString("bResult")})
 		return nil
 	})
-	proxy.HandleTask("perelementpipelineflow.verify:428/task-l", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("perelementpipelineflow.verify:428/task-l", func(ctx context.Context, f *workflow.Flow) error {
 		var items []string
 		f.Get("mergedItems", &items)
 		f.SetInt("finalCount", len(items))
@@ -87,7 +87,7 @@ func TestPerelementpipelineflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{"x", "y", "z"}}
-		outcome, err := eng.Run(ctx, "perelementpipelineflow.verify:428/per-element-pipeline", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "perelementpipelineflow.verify:428/per-element-pipeline", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3.0, outcome.State["finalCount"])

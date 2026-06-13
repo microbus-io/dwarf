@@ -50,18 +50,18 @@ func TestSubgraphflow(t *testing.T) {
 	inner.AddTransition("taskY", workflow.END)
 	proxy.HandleGraph("subgraphflow.verify:428/inner", inner)
 
-	proxy.HandleTask("subgraphflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", fmt.Sprintf("X(%s)", f.GetString("seed")))
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", fmt.Sprintf("Y(%s)", f.GetString("innerResult")))
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		out, yield, err := f.Subgraph("subgraphflow.verify:428/inner", map[string]any{"seed": f.GetString("seed")})
 		if yield || err != nil {
 			return err
@@ -71,7 +71,7 @@ func TestSubgraphflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", fmt.Sprintf("Z(%s)", f.GetString("innerResult")))
 		return nil
 	})
@@ -85,7 +85,7 @@ func TestSubgraphflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"seed": "seed1"}
-		outcome, err := eng.Run(ctx, "subgraphflow.verify:428/parent", initialState, nil, nil)
+		outcome, err := eng.Run(ctx, "subgraphflow.verify:428/parent", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("Z(Y(X(seed1)))", outcome.State["result"])

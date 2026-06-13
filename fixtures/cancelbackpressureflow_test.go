@@ -48,7 +48,7 @@ func TestCancelbackpressureflow(t *testing.T) {
 	ready := make(chan struct{})
 	release := make(chan struct{})
 
-	proxy.HandleTask("cancelbackpressureflow.verify:428/bounce-and-cancel", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("cancelbackpressureflow.verify:428/bounce-and-cancel", func(ctx context.Context, f *workflow.Flow) error {
 		readyOnce.Do(func() { close(ready) })
 		select {
 		case <-release:
@@ -67,7 +67,7 @@ func TestCancelbackpressureflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		flowKey, err := eng.Create(ctx, "cancelbackpressureflow.verify:428/cancel-backpressure",
-			map[string]any{"tag": "race"}, nil, nil)
+			map[string]any{"tag": "race"}, nil)
 		if !assert.NoError(err) {
 			return
 		}

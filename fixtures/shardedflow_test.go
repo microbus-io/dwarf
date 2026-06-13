@@ -44,7 +44,7 @@ func TestShardedflow(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 
-	proxy.HandleTask("shardedflow.verify:428/record", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("shardedflow.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
 		delayMs := f.GetInt("delayMs")
 		if delayMs > 0 {
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)
@@ -70,7 +70,7 @@ func TestShardedflow(t *testing.T) {
 
 		holderKey, _ := eng.Create(ctx, "shardedflow.verify:428/sharded",
 			map[string]any{"delayMs": 1500, "tag": "holder"},
-			nil, &workflow.FlowOptions{Priority: 1})
+			&workflow.FlowOptions{Priority: 1})
 		eng.Start(ctx, holderKey)
 		time.Sleep(100 * time.Millisecond)
 
@@ -80,7 +80,7 @@ func TestShardedflow(t *testing.T) {
 			tag := fmt.Sprintf("p%d", p)
 			k, _ := eng.Create(ctx, "shardedflow.verify:428/sharded",
 				map[string]any{"delayMs": 50, "tag": tag},
-				nil, &workflow.FlowOptions{Priority: p})
+				&workflow.FlowOptions{Priority: p})
 			eng.Start(ctx, k)
 			keys = append(keys, k)
 		}
@@ -106,7 +106,7 @@ func TestShardedflow(t *testing.T) {
 		shards := map[int]int{}
 		for range 400 {
 			k, err := eng.Create(ctx, "shardedflow.verify:428/sharded",
-				map[string]any{"delayMs": 0, "tag": "dist"}, nil, nil)
+				map[string]any{"delayMs": 0, "tag": "dist"}, nil)
 			assert.NoError(err)
 			parts := strings.SplitN(k, "-", 2)
 			shard, _ := strconv.Atoi(parts[0])

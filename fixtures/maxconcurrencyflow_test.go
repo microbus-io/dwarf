@@ -47,7 +47,7 @@ func TestMaxconcurrencyflow(t *testing.T) {
 	var inFlight, peak int
 	var rejections atomic.Int32
 
-	proxy.HandleTask("maxconcurrencyflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("maxconcurrencyflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		inFlight++
 		if inFlight > peak {
@@ -81,7 +81,7 @@ func TestMaxconcurrencyflow(t *testing.T) {
 		var keys []string
 		for i := range 24 {
 			k, err := eng.Create(ctx, "maxconcurrencyflow.verify:428/max-concurrency",
-				map[string]any{"tag": i}, nil, nil)
+				map[string]any{"tag": i}, nil)
 			assert.NoError(err)
 			err = eng.Start(ctx, k)
 			assert.NoError(err)

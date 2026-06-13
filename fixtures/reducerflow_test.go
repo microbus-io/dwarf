@@ -55,28 +55,28 @@ func TestReducerflow(t *testing.T) {
 	graph.AddTransition("taskE", workflow.END)
 	proxy.HandleGraph("reducerflow.verify:428/reducer", graph)
 
-	proxy.HandleTask("reducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("reducerflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducerflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 10)
 		f.SetStrings("tags", []string{"b"})
 		f.SetStrings("seen", []string{"x"})
 		return nil
 	})
-	proxy.HandleTask("reducerflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducerflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 20)
 		f.SetStrings("tags", []string{"c"})
 		f.SetStrings("seen", []string{"y", "x"})
 		return nil
 	})
-	proxy.HandleTask("reducerflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducerflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 30)
 		f.SetStrings("tags", []string{"d"})
 		f.SetStrings("seen", []string{"z"})
 		return nil
 	})
-	proxy.HandleTask("reducerflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("reducerflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("finalSum", f.GetInt("total"))
 		f.SetStrings("finalList", f.GetStrings("tags"))
 		f.SetStrings("finalSet", f.GetStrings("seen"))
@@ -91,7 +91,7 @@ func TestReducerflow(t *testing.T) {
 	t.Run("sum_list_and_set_reducers_apply", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "reducerflow.verify:428/reducer", nil, nil, nil)
+		outcome, err := eng.Run(ctx, "reducerflow.verify:428/reducer", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(60.0, outcome.State["finalSum"])

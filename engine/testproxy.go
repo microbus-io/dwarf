@@ -25,8 +25,9 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// TaskHandler is the signature for a test task handler.
-type TaskHandler func(ctx context.Context, flow *workflow.Flow, baggage any) error
+// TaskHandler is the signature for a test task handler. Read the flow's baggage, if any, with
+// workflow.BaggageFrom(ctx).
+type TaskHandler func(ctx context.Context, flow *workflow.Flow) error
 
 // TestProxy routes graph fetches and task dispatches to registered handlers.
 // It implements both GraphLoader and TaskExecutor for use with Engine.RunInTest.
@@ -61,7 +62,7 @@ func (p *TestProxy) HandleTask(name string, handler TaskHandler) {
 }
 
 // LoadGraph implements the GraphLoader signature.
-func (p *TestProxy) LoadGraph(ctx context.Context, workflowName string, baggage any) (*workflow.Graph, error) {
+func (p *TestProxy) LoadGraph(ctx context.Context, workflowName string) (*workflow.Graph, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	g, ok := p.graphs[workflowName]
@@ -72,12 +73,12 @@ func (p *TestProxy) LoadGraph(ctx context.Context, workflowName string, baggage 
 }
 
 // ExecuteTask implements the TaskExecutor signature.
-func (p *TestProxy) ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow, baggage any) error {
+func (p *TestProxy) ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error {
 	p.mu.RLock()
 	h, ok := p.tasks[taskName]
 	p.mu.RUnlock()
 	if !ok {
 		return errors.New("task not found: %s", taskName, http.StatusNotFound)
 	}
-	return h(ctx, flow, baggage)
+	return h(ctx, flow)
 }

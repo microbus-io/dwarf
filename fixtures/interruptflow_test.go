@@ -40,10 +40,10 @@ func TestInterruptflow(t *testing.T) {
 	graph.AddTransition("compose", workflow.END)
 	proxy.HandleGraph("interruptflow.verify:428/interrupt", graph)
 
-	proxy.HandleTask("interruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("interruptflow.verify:428/await-input", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptflow.verify:428/await-input", func(ctx context.Context, f *workflow.Flow) error {
 		resumeData, yield, err := f.Interrupt(map[string]any{"requestedInput": "userInput"})
 		if yield || err != nil {
 			return err
@@ -53,7 +53,7 @@ func TestInterruptflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("interruptflow.verify:428/compose", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptflow.verify:428/compose", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", f.GetString("prompt")+", "+f.GetString("userInput"))
 		return nil
 	})
@@ -66,7 +66,7 @@ func TestInterruptflow(t *testing.T) {
 	t.Run("interrupt_then_resume_completes_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "interruptflow.verify:428/interrupt", map[string]any{"prompt": "Hello"}, nil, nil)
+		flowKey, err := eng.Create(ctx, "interruptflow.verify:428/interrupt", map[string]any{"prompt": "Hello"}, nil)
 		if !assert.NoError(err) {
 			return
 		}

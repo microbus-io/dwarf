@@ -58,14 +58,14 @@ func TestSubgraphinterruptflow(t *testing.T) {
 	inner.AddTransition("taskY", workflow.END)
 	proxy.HandleGraph("subgraphinterruptflow.verify:428/inner", inner)
 
-	proxy.HandleTask("subgraphinterruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphinterruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphinterruptflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("inner", "X")
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphinterruptflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
 		resumeData, yield, err := f.Interrupt(map[string]any{"need": "input"})
 		if yield || err != nil {
 			return err
@@ -75,11 +75,11 @@ func TestSubgraphinterruptflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphinterruptflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", f.GetString("inner")+"->Y("+f.GetString("answer")+")")
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphinterruptflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		out, yield, err := f.Subgraph("subgraphinterruptflow.verify:428/inner", nil)
 		if yield || err != nil {
 			return err
@@ -89,7 +89,7 @@ func TestSubgraphinterruptflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("subgraphinterruptflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", "Z("+f.GetString("innerResult")+")")
 		return nil
 	})
@@ -102,7 +102,7 @@ func TestSubgraphinterruptflow(t *testing.T) {
 	t.Run("inner_interrupt_surfaces_and_resumes_at_root", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "subgraphinterruptflow.verify:428/parent", nil, nil, nil)
+		flowKey, err := eng.Create(ctx, "subgraphinterruptflow.verify:428/parent", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

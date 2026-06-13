@@ -41,7 +41,7 @@ func TestListflow(t *testing.T) {
 	graph.AddTransition("only", workflow.END)
 	proxy.HandleGraph("listflow.verify:428/list", graph)
 
-	proxy.HandleTask("listflow.verify:428/only", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("listflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("done", "yes")
 		return nil
 	})
@@ -54,7 +54,7 @@ func TestListflow(t *testing.T) {
 	const total = 5
 	created := make(map[string]bool, total)
 	for range total {
-		flowKey, err := eng.Create(ctx, "listflow.verify:428/list", nil, nil, nil)
+		flowKey, err := eng.Create(ctx, "listflow.verify:428/list", nil, nil)
 		testarossa.NoError(t, err)
 		testarossa.NoError(t, eng.Start(ctx, flowKey))
 		outcome, err := eng.Await(ctx, flowKey)
@@ -135,7 +135,7 @@ func TestListflow(t *testing.T) {
 
 		// Two flows in fairness key "tenantA" at priority 7, one in "tenantB" at priority 9.
 		for range 2 {
-			fk, err := eng.Create(ctx, "listflow.verify:428/list", nil, nil, &workflow.FlowOptions{FairnessKey: "tenantA", Priority: 7})
+			fk, err := eng.Create(ctx, "listflow.verify:428/list", nil, &workflow.FlowOptions{FairnessKey: "tenantA", Priority: 7})
 			if !assert.NoError(err) {
 				return
 			}
@@ -143,7 +143,7 @@ func TestListflow(t *testing.T) {
 			_, err = eng.Await(ctx, fk)
 			assert.NoError(err)
 		}
-		fkB, err := eng.Create(ctx, "listflow.verify:428/list", nil, nil, &workflow.FlowOptions{FairnessKey: "tenantB", Priority: 9})
+		fkB, err := eng.Create(ctx, "listflow.verify:428/list", nil, &workflow.FlowOptions{FairnessKey: "tenantB", Priority: 9})
 		if !assert.NoError(err) {
 			return
 		}

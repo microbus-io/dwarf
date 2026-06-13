@@ -48,14 +48,14 @@ func TestInterruptedfanoutflow(t *testing.T) {
 	graph.AddTransition("j", workflow.END)
 	proxy.HandleGraph("interruptedfanoutflow.verify:428/interrupted-fan-out", graph)
 
-	proxy.HandleTask("interruptedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		_, yield, err := f.Interrupt(map[string]any{"branch": "B"})
 		if yield || err != nil {
 			return err
@@ -63,11 +63,11 @@ func TestInterruptedfanoutflow(t *testing.T) {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("interruptedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("totalExecuted", f.GetInt("executed"))
 		return nil
 	})
@@ -80,7 +80,7 @@ func TestInterruptedfanoutflow(t *testing.T) {
 	t.Run("interrupt_then_resume_completes_with_sum_3", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "interruptedfanoutflow.verify:428/interrupted-fan-out", nil, nil, nil)
+		flowKey, err := eng.Create(ctx, "interruptedfanoutflow.verify:428/interrupted-fan-out", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

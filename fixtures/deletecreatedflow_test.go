@@ -39,7 +39,7 @@ func TestDeletecreatedflow(t *testing.T) {
 	graph.AddTask("work", "deletecreatedflow.verify:428/work")
 	graph.AddTransition("work", workflow.END)
 	proxy.HandleGraph("deletecreatedflow.verify:428/flow", graph)
-	proxy.HandleTask("deletecreatedflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("deletecreatedflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -49,7 +49,7 @@ func TestDeletecreatedflow(t *testing.T) {
 	eng.RunInTest(t)
 
 	// Create but never Start: the flow is in created status.
-	flowKey, err := eng.Create(ctx, "deletecreatedflow.verify:428/flow", nil, nil, nil)
+	flowKey, err := eng.Create(ctx, "deletecreatedflow.verify:428/flow", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}

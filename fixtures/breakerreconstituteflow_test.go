@@ -48,7 +48,7 @@ func TestBreakerreconstituteflow(t *testing.T) {
 
 	var broken atomic.Bool
 	broken.Store(true)
-	proxy.HandleTask("breakerreconstituteflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("breakerreconstituteflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		if broken.Load() {
 			return errors.New("ack timeout: breakerreconstituteflow.verify:428/work", http.StatusNotFound)
 		}
@@ -70,7 +70,7 @@ func TestBreakerreconstituteflow(t *testing.T) {
 	// Create a backlog of flows; they trip the breaker and park.
 	var keys []string
 	for range 8 {
-		k, err := eng1.Create(ctx, "breakerreconstituteflow.verify:428/flow", nil, nil, nil)
+		k, err := eng1.Create(ctx, "breakerreconstituteflow.verify:428/flow", nil, nil)
 		if !assert.NoError(err) {
 			eng1.Shutdown(ctx)
 			return

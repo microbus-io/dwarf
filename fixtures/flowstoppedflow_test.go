@@ -51,7 +51,7 @@ func TestFlowstoppedflow(t *testing.T) {
 	graph.AddTransition("gate", workflow.END)
 	proxy.HandleGraph("flowstoppedflow.verify:428/flow", graph)
 
-	proxy.HandleTask("flowstoppedflow.verify:428/gate", func(ctx context.Context, f *workflow.Flow, baggage any) error {
+	proxy.HandleTask("flowstoppedflow.verify:428/gate", func(ctx context.Context, f *workflow.Flow) error {
 		switch f.GetString("mode") {
 		case "fail":
 			return errors.New("gate refused", http.StatusInternalServerError)
@@ -99,7 +99,7 @@ func TestFlowstoppedflow(t *testing.T) {
 	t.Run("completed_fires_callback_with_state", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "complete"}, nil, nil)
+		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "complete"}, nil)
 		if !assert.NoError(err) {
 			return
 		}
@@ -115,7 +115,7 @@ func TestFlowstoppedflow(t *testing.T) {
 	t.Run("failed_fires_callback_with_error", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "fail"}, nil, nil)
+		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "fail"}, nil)
 		if !assert.NoError(err) {
 			return
 		}
@@ -131,7 +131,7 @@ func TestFlowstoppedflow(t *testing.T) {
 	t.Run("cancelled_fires_callback_with_reason", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "interrupt"}, nil, nil)
+		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "interrupt"}, nil)
 		if !assert.NoError(err) {
 			return
 		}
