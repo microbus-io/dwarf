@@ -603,9 +603,13 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string
 		conditions = append(conditions, "s.task_name=?")
 		args = append(args, query.TaskName)
 	}
-	if query.TenantID != 0 {
-		conditions = append(conditions, "f.tenant_id=?")
-		args = append(args, query.TenantID)
+	if query.FairnessKey != "" {
+		conditions = append(conditions, "f.fairness_key=?")
+		args = append(args, query.FairnessKey)
+	}
+	if query.Priority != 0 {
+		conditions = append(conditions, "f.priority=?")
+		args = append(args, query.Priority)
 	}
 	if query.OlderThan > 0 {
 		conditions = append(conditions, "f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)")

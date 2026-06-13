@@ -25,9 +25,13 @@ type Query struct {
 	ThreadKey    string `json:"threadKey,omitzero"`
 	// TaskName filters to flows whose current step is on the named task.
 	TaskName string `json:"taskName,omitzero"`
-	// TenantID filters to flows belonging to a specific tenant.
-	// Zero disables the filter.
-	TenantID int `json:"tenantID,omitzero"`
+	// FairnessKey filters to flows with this scheduling fairness key. The host typically sets the
+	// fairness key to the tenant, so this is how "list flows for tenant X" is expressed. Empty
+	// disables the filter.
+	FairnessKey string `json:"fairnessKey,omitzero"`
+	// Priority filters to flows at this scheduling priority band. Zero disables the filter
+	// (valid priorities are >= 1).
+	Priority int `json:"priority,omitzero"`
 	// OlderThan filters to flows whose updated_at is older than this duration relative to now.
 	// Zero disables the filter.
 	OlderThan time.Duration `json:"olderThan,omitzero"`

@@ -413,7 +413,7 @@ branch regardless of attempts, so retry can't double-count.
 so an entire per-element sub-pipeline collapses into a single lineage and cannot reconstruct true parent/child
 structure.
 
-`dwarf_steps.predecessor_id` and `successor_id` (migration `7.sql`) record the actual execution edges, so the DAG
+`dwarf_steps.predecessor_id` and `successor_id` record the actual execution edges, so the DAG
 is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
 
 - **Linear** `X->Y`: `Y.predecessor_id=X` (at insert) and `X.successor_id=Y` (post-loop UPDATE in `processStep`).
@@ -675,7 +675,7 @@ concurrency). Operators with a different workload mix (longer DB-hold, larger sh
 
 ### Flow Scheduling (priority / fairness)
 
-`8.sql` adds `priority`, `fairness_key`, `fairness_weight` to **both** `dwarf_flows` (authoritative) and
+The schema carries `priority`, `fairness_key`, `fairness_weight` on **both** `dwarf_flows` (authoritative) and
 `dwarf_steps` (denormalized), so the two-level selection never joins `dwarf_flows` on the hot path - the same
 split used for `time_budget_ms`/`actor_claims`.
 
@@ -984,7 +984,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `step_id` | The flow's current step; `0` during fan-out (multiple steps active at one depth) |
 | `surgraph_flow_id` | Parent (surgraph) flow id if this is a subgraph flow; `0` otherwise |
 | `surgraph_step_depth` | The parent's `step_depth` that spawned this subgraph |
-| `surgraph_step_id` | (`3.sql`) PK of the parent's parked surgraph step, so a subgraph flow identifies its surgraph step unambiguously when parallel parked surgraph steps coexist at one depth |
+| `surgraph_step_id` | PK of the parent's parked surgraph step, so a subgraph flow identifies its surgraph step unambiguously when parallel parked surgraph steps coexist at one depth |
 | `thread_id` | Groups flows in a `Continue` thread; defaults to `flow_id` (each flow its own thread) |
 | `thread_token` | Token component of the thread's flowKey |
 | `trace_parent` | W3C `traceparent` for distributed-trace continuity (stored and carried; the engine does not currently create spans from it - tracing is deferred) |
@@ -992,14 +992,13 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
 | `breakpoints` | JSON `map[taskName]string` of `BreakBefore` breakpoints |
 | `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. Reset by `Restart` (a fresh attempt); NOT by `RestartFrom` (a surgical rewind) |
-| `started_at` | (`15.sql`) UTC time this attempt began dispatching. Stamped by `Start` on `created` -> `running`. Reset by `Restart`, not `RestartFrom`. Distinct from `created_at` because a flow can sit `created` indefinitely or be parked behind a tripped breaker before its entry dispatches. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
+| `started_at` | UTC time this attempt began dispatching. Stamped by `Start` on `created` -> `running`. Reset by `Restart`, not `RestartFrom`. Distinct from `created_at` because a flow can sit `created` indefinitely or be parked behind a tripped breaker before its entry dispatches. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
 | `updated_at` | UTC time of the last status transition. Surfaced to tasks via `Flow.UpdatedAt()` |
-| `priority` | (`8.sql`) Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `WithDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
-| `fairness_key` | (`8.sql`) Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable |
-| `fairness_weight` | (`8.sql`) Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
-| `error` | (`9.sql`) Task error string for `failed` flows. Written by `failStep` to every flow in the surgraph chain in the same UPDATE that sets `status='failed'`; the `WHERE status NOT IN (terminal)` clause makes the write first-failure-wins. Surfaced as `FlowOutcome.Error` |
-| `cancel_reason` | (`9.sql`) Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
-| `tenant_id` | (`9.sql`) Tenant identifier supplied by the host at flow creation. `0` is the no-tenant sentinel. Inherited by subgraph. Immutable. Filterable via `Query.TenantID` |
+| `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `WithDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
+| `fairness_key` | Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable |
+| `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
+| `error` | Task error string for `failed` flows. Written by `failStep` to every flow in the surgraph chain in the same UPDATE that sets `status='failed'`; the `WHERE status NOT IN (terminal)` clause makes the write first-failure-wins. Surfaced as `FlowOutcome.Error` |
+| `cancel_reason` | Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
 
 #### `dwarf_steps`
 
@@ -1013,11 +1012,11 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `state` | JSON input snapshot. Immutable except on retry/resume |
 | `changes` | JSON output delta the task produced |
 | `interrupt_payload` | JSON outbound payload from `flow.Interrupt()` - what the awaiting caller sees |
-| `interrupt_done` | (`10.sql`) `1` once the interrupt park has been resumed; drives `flow.Interrupt`'s return-vs-arm decision. `0` for breakpoint pauses |
-| `resume_data` | (`10.sql`) JSON inbound payload recorded by `Resume`; returned by `flow.Interrupt` on re-dispatch. `'{}'` until resumed |
-| `subgraph_done` | (`10.sql`) `1` once a `flow.Subgraph` park resolved; drives `flow.Subgraph`'s return-vs-arm decision. A retry clears it to re-run the child |
-| `subgraph_result` | (`10.sql`) JSON child `final_state` returned by `flow.Subgraph`. `'{}'` until resolved |
-| `subgraph_error` | (`10.sql`) child error text for a failed `flow.Subgraph` park, returned as the `err`. `''` when none |
+| `interrupt_done` | `1` once the interrupt park has been resumed; drives `flow.Interrupt`'s return-vs-arm decision. `0` for breakpoint pauses |
+| `resume_data` | JSON inbound payload recorded by `Resume`; returned by `flow.Interrupt` on re-dispatch. `'{}'` until resumed |
+| `subgraph_done` | `1` once a `flow.Subgraph` park resolved; drives `flow.Subgraph`'s return-vs-arm decision. A retry clears it to re-run the child |
+| `subgraph_result` | JSON child `final_state` returned by `flow.Subgraph`. `'{}'` until resolved |
+| `subgraph_error` | child error text for a failed `flow.Subgraph` park, returned as the `err`. `''` when none |
 | `status` | Step lifecycle: `created`/`pending`/`running`/`interrupted`/`completed`/`failed`/`cancelled` |
 | `goto_next` | Task-requested `flow.Goto` target; `''` = none |
 | `error` | Error text when `failed`; `''` otherwise |
@@ -1027,18 +1026,18 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `not_before` | Earliest UTC time the step may execute (`flow.Sleep` / retry backoff / breaker probe) |
 | `lease_expires` | Crash-recovery lease; `pollPendingSteps` reclaims `running` steps past this |
 | `created_at` | UTC creation time |
-| `started_at` | (`14.sql`) UTC time the *current attempt* first dispatched. The lease UPDATE stamps it via CASE only on a fresh attempt's first dispatch (`attempt=0 AND subgraph_done=0 AND interrupt_done=0`) and **preserves** it on a continuation (subgraph re-dispatch, interrupt/ResumeBreak re-dispatch, retry re-dispatch). A retried step's duration includes every attempt. Drives per-step body duration and inter-step wait labels in `FlowRenderer` |
+| `started_at` | UTC time the *current attempt* first dispatched. The lease UPDATE stamps it via CASE only on a fresh attempt's first dispatch (`attempt=0 AND subgraph_done=0 AND interrupt_done=0`) and **preserves** it on a continuation (subgraph re-dispatch, interrupt/ResumeBreak re-dispatch, retry re-dispatch). A retried step's duration includes every attempt. Drives per-step body duration and inter-step wait labels in `FlowRenderer` |
 | `updated_at` | UTC time of the last status transition |
-| `lineage_id` | (`5.sql`) Cohort frame: the spawn step's `step_id` on a push, else inherited. Drives explicit `SetFanIn` arrival counting and merge. A cohort-counting device, **not** a DAG. `0` = no `SetFanIn` |
-| `cohort_size` | (`5.sql`) On a fan-out spawn step: number of branches spawned |
-| `cohort_arrivals` | (`5.sql`) On a fan-out spawn step: branches that reached the fan-in; fan-in fires when `arrivals >= size` |
-| `fan_out_ordinal` | (`6.sql`) This branch's index in its fan-out; fan-in merges in this order so list/sum reducers are deterministic. Preserved across an in-place rewind (`flow.Retry`/`RestartFrom`). `0` = not part of a fan-out |
-| `predecessor_id` | (`7.sql`) Step that ran immediately before this one in the execution DAG. `0` = none |
-| `successor_id` | (`7.sql`) Step that runs immediately after this one. `0` = none (exit) |
-| `priority` | (`8.sql`) Denormalized copy of the flow's `priority` for the hot selection path |
-| `fairness_key` | (`8.sql`) Denormalized copy of the flow's `fairness_key` |
-| `fairness_weight` | (`8.sql`) Denormalized copy of the flow's `fairness_weight` |
-| `parked` | (`11.sql`) Selection discriminator. `0` = active; `1` = surgraph park; `2` = breaker park. The selection and saturation indexes lead with `(status, parked)` and the claim CAS requires `parked=parkedNone`, so non-zero rows are excluded from the hot path. See "Step Parking" |
+| `lineage_id` | Cohort frame: the spawn step's `step_id` on a push, else inherited. Drives explicit `SetFanIn` arrival counting and merge. A cohort-counting device, **not** a DAG. `0` = no `SetFanIn` |
+| `cohort_size` | On a fan-out spawn step: number of branches spawned |
+| `cohort_arrivals` | On a fan-out spawn step: branches that reached the fan-in; fan-in fires when `arrivals >= size` |
+| `fan_out_ordinal` | This branch's index in its fan-out; fan-in merges in this order so list/sum reducers are deterministic. Preserved across an in-place rewind (`flow.Retry`/`RestartFrom`). `0` = not part of a fan-out |
+| `predecessor_id` | Step that ran immediately before this one in the execution DAG. `0` = none |
+| `successor_id` | Step that runs immediately after this one. `0` = none (exit) |
+| `priority` | Denormalized copy of the flow's `priority` for the hot selection path |
+| `fairness_key` | Denormalized copy of the flow's `fairness_key` |
+| `fairness_weight` | Denormalized copy of the flow's `fairness_weight` |
+| `parked` | Selection discriminator. `0` = active; `1` = surgraph park; `2` = breaker park. The selection and saturation indexes lead with `(status, parked)` and the claim CAS requires `parked=parkedNone`, so non-zero rows are excluded from the hot path. See "Step Parking" |
 
 ## Database Indexing Strategy
 
@@ -1066,7 +1065,7 @@ without fragmentation or excessive write amplification.
 | `idx_dwarf_flows_workflow_name` | `(workflow_name)` | `List` by workflow name |
 | `idx_dwarf_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
 | `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite | Walking the subgraph chain |
-| `idx_dwarf_flows_created_at` | `(created_at)` (`4.sql`) | Time-window queries; append-only/monotonic |
+| `idx_dwarf_flows_created_at` | `(created_at)` | Time-window queries; append-only/monotonic |
 
 #### `dwarf_steps`
 
@@ -1075,9 +1074,9 @@ without fragmentation or excessive write amplification.
 | PK | `(step_id)` | Row lookups, lease acquisition in `processStep` |
 | `idx_dwarf_steps_flow_id` | `(flow_id, step_id)` on MySQL; `(flow_id)` on pgx/mssql | Per-flow step queries |
 | `idx_dwarf_steps_status` | `(status, updated_at)` - partial `WHERE status IN ('pending','running')` on pgx | `pollPendingSteps` recovery and pending discovery |
-| `idx_dwarf_steps_created_at` | `(created_at)` (`4.sql`) | Time-window queries |
-| `idx_dwarf_steps_selection` | `(status, parked, priority, fairness_key)` (`8.sql`+`11.sql`) - partial on pgx/mssql/sqlite, full on mysql | Two-level priority+fairness candidate selection. The `parked` second column excludes parked rows without an in-memory filter |
-| `idx_dwarf_steps_saturation` | `(status, parked, task_name)` (`8.sql`+`11.sql`) - partial as above | Per-task in-flight count for the adaptive controller. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
+| `idx_dwarf_steps_created_at` | `(created_at)` | Time-window queries |
+| `idx_dwarf_steps_selection` | `(status, parked, priority, fairness_key)` - partial on pgx/mssql/sqlite, full on mysql | Two-level priority+fairness candidate selection. The `parked` second column excludes parked rows without an in-memory filter |
+| `idx_dwarf_steps_saturation` | `(status, parked, task_name)` - partial as above | Per-task in-flight count for the adaptive controller. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
 
 ### Data Retention
 
@@ -1088,13 +1087,15 @@ and no single policy fits both a 1-hour batch and a 30-day approval workflow. Fo
 - **`Delete(flowKey)`** removes one flow and its steps in a transaction. Refuses a running flow (409). Subgraph
   children and thread descendants are left dangling.
 - **`Purge(Query)`** bulk-deletes flows matching the query, except running. Same `Query` shape as `List` (Status,
-  WorkflowName, ThreadKey, TaskName, OlderThan, Shard, Limit). Capped at 10000 per call; returns the count deleted.
-  The non-running guard is enforced inside the DELETE.
+  WorkflowName, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit). Capped at 10000 per call;
+  returns the count deleted. The non-running guard is enforced inside the DELETE.
 
 Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the current
 step's `task_name` (excludes fan-out flows, `step_id=0`). `Query.OlderThan`/`NewerThan` are database-anchored
-(`f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), -ms)` etc.) and compose. `Query.TenantID` narrows to one tenant; tenant 0
-is treated as "no filter."
+(`f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), -ms)` etc.) and compose. `Query.FairnessKey` filters on the
+engine-native `f.fairness_key` (the host typically sets it to the tenant, so "list tenant X" is "list
+`fairness_key = X`"); `Query.Priority` narrows to one scheduling band. Empty key / zero priority disable their
+filters. The engine models no tenant concept of its own - the `tenant_id` column was dropped.
 
 ## Concurrency and Crash Recovery
 

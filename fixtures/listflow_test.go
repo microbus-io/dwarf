@@ -127,4 +127,50 @@ func TestListflow(t *testing.T) {
 			assert.True(seen[fk], "flow %s missing from paginated results", fk)
 		}
 	})
+
+	// Runs last: it adds flows under the same workflow name, which would change the by-workflow-name
+	// counts the earlier subtests assert.
+	t.Run("filter_by_fairness_key_and_priority", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		// Two flows in fairness key "tenantA" at priority 7, one in "tenantB" at priority 9.
+		for range 2 {
+			fk, err := eng.Create(ctx, "listflow.verify:428/list", nil, nil, &workflow.FlowOptions{FairnessKey: "tenantA", Priority: 7})
+			if !assert.NoError(err) {
+				return
+			}
+			assert.NoError(eng.Start(ctx, fk))
+			_, err = eng.Await(ctx, fk)
+			assert.NoError(err)
+		}
+		fkB, err := eng.Create(ctx, "listflow.verify:428/list", nil, nil, &workflow.FlowOptions{FairnessKey: "tenantB", Priority: 9})
+		if !assert.NoError(err) {
+			return
+		}
+		assert.NoError(eng.Start(ctx, fkB))
+		_, err = eng.Await(ctx, fkB)
+		assert.NoError(err)
+
+		// FairnessKey narrows to that key only.
+		flows, _, err := eng.List(ctx, workflow.Query{FairnessKey: "tenantA"})
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(2, len(flows))
+
+		// Priority combines with FairnessKey for an exact slice.
+		flows, _, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantB", Priority: 9})
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(1, len(flows))
+		assert.Equal(fkB, flows[0].FlowKey)
+
+		// A key/priority combination with no flows yields nothing.
+		flows, _, err = eng.List(ctx, workflow.Query{FairnessKey: "tenantA", Priority: 9})
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(0, len(flows))
+	})
 }
