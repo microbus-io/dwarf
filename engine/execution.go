@@ -133,16 +133,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 
 	// Read flow data
-	var flowToken, flowStatus, workflowName, graphJSON, metadataJSON string
+	var flowToken, flowStatus, workflowName, graphJSON, baggageJSON string
 	var notifyHostname, breakpointsJSON string
 	var flowCreatedAt, flowUpdatedAt time.Time
 	var flowPriority int
 	var flowFairnessKey string
 	var flowFairnessWeight float64
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_token, status, workflow_name, graph, actor_claims, notify_hostname, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
+		"SELECT flow_token, status, workflow_name, graph, baggage, notify_hostname, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&flowToken, &flowStatus, &workflowName, &graphJSON, &metadataJSON, &notifyHostname, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight)
+	).Scan(&flowToken, &flowStatus, &workflowName, &graphJSON, &baggageJSON, &notifyHostname, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -194,9 +194,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		flow.SetSubgraphResolution(subgraphResult, subgraphErrorStr)
 	}
 
-	// Parse metadata for the task executor
-	var metadata map[string]any
-	unmarshalJSONMap(metadataJSON, &metadata)
+	// Parse baggage for the task executor
+	var baggage map[string]any
+	unmarshalJSONMap(baggageJSON, &baggage)
 
 	// Breakpoint check
 	if !breakpointHit {
@@ -228,7 +228,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		taskCtx, cancel = context.WithTimeout(ctx, time.Duration(timeBudgetMs)*time.Millisecond)
 		defer cancel()
 	}
-	execErr := e.taskExecutor(taskCtx, dispatchURL, &flow.Flow, metadata)
+	execErr := e.taskExecutor(taskCtx, dispatchURL, &flow.Flow, baggage)
 
 	var resultFlow *workflow.RawFlow
 	errorRouted := false
@@ -329,7 +329,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			"UPDATE dwarf_steps SET changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 			string(changesJSON), stepID, workflow.StatusRunning,
 		)
-		subgraphGraph, err := e.graphLoader(ctx, subgraphWorkflow, metadata)
+		subgraphGraph, err := e.graphLoader(ctx, subgraphWorkflow, baggage)
 		if err != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
@@ -338,7 +338,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if childInputState == nil {
 			childInputState = map[string]any{}
 		}
-		subgraphFlowKey, err := e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphWorkflow, subgraphGraph, childInputState, metadataJSON, breakpointsJSON)
+		subgraphFlowKey, err := e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphWorkflow, subgraphGraph, childInputState, baggageJSON, breakpointsJSON)
 		if err != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)

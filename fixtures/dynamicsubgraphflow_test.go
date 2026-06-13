@@ -46,7 +46,7 @@ func TestDynamicsubgraphflow(t *testing.T) {
 	inner.AddTransition("innerB", workflow.END)
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/inner", inner)
 
-	proxy.HandleTask("dynamicsubgraphflow.verify:428/parent", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("dynamicsubgraphflow.verify:428/parent", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		out, yield, err := f.Subgraph("dynamicsubgraphflow.verify:428/inner", map[string]any{"value": f.GetInt("value")})
 		if yield || err != nil {
 			return err
@@ -54,11 +54,11 @@ func TestDynamicsubgraphflow(t *testing.T) {
 		f.SetString("result", fmt.Sprintf("parent:%v", out["innerResult"]))
 		return nil
 	})
-	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetInt("innerStage", f.GetInt("value")*2)
 		return nil
 	})
-	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("dynamicsubgraphflow.verify:428/inner-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetInt("innerResult", f.GetInt("innerStage")+3)
 		return nil
 	})

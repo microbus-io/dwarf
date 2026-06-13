@@ -26,7 +26,7 @@ type FlowOptions struct {
 	// DefaultPriority config.
 	Priority int `json:"priority,omitzero"`
 	// FairnessKey groups flows for fair scheduling, typically a tenant.
-	// Empty derives it from metadata, else the "" bucket.
+	// Empty derives it from baggage, else the "" bucket.
 	FairnessKey string `json:"fairnessKey,omitzero"`
 	// FairnessWeight is the relative dispatch share of the fairness key.
 	// Zero uses a weight of 1.

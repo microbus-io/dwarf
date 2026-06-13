@@ -15,10 +15,10 @@ limitations under the License.
 */
 
 /*
-The opaque metadata map captured at Create is stored on the flow row and passed,
+The opaque baggage map captured at Create is stored on the flow row and passed,
 unchanged, to every GraphLoader and TaskExecutor call for the flow's lifetime —
-including subgraph flows, which inherit the parent's metadata. The engine never
-interprets it. This wires capturing loader/executor shims to assert metadata
+including subgraph flows, which inherit the parent's baggage. The engine never
+interprets it. This wires capturing loader/executor shims to assert baggage
 reaches every call site identically, across a subgraph boundary.
 */
 package fixtures
@@ -33,40 +33,40 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-func TestMetadataflow(t *testing.T) {
+func TestBaggageflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 
 	// Parent: A -> runInner -> END; Inner: X -> END.
-	parent := workflow.NewGraph("metadataflow.verify:428/parent")
-	parent.AddTask("taskA", "metadataflow.verify:428/task-a")
-	parent.AddTask("runInner", "metadataflow.verify:428/run-inner")
+	parent := workflow.NewGraph("baggageflow.verify:428/parent")
+	parent.AddTask("taskA", "baggageflow.verify:428/task-a")
+	parent.AddTask("runInner", "baggageflow.verify:428/run-inner")
 	parent.AddTransition("taskA", "runInner")
 	parent.AddTransition("runInner", workflow.END)
-	proxy.HandleGraph("metadataflow.verify:428/parent", parent)
+	proxy.HandleGraph("baggageflow.verify:428/parent", parent)
 
-	inner := workflow.NewGraph("metadataflow.verify:428/inner")
-	inner.AddTask("taskX", "metadataflow.verify:428/task-x")
+	inner := workflow.NewGraph("baggageflow.verify:428/inner")
+	inner.AddTask("taskX", "baggageflow.verify:428/task-x")
 	inner.AddTransition("taskX", workflow.END)
-	proxy.HandleGraph("metadataflow.verify:428/inner", inner)
+	proxy.HandleGraph("baggageflow.verify:428/inner", inner)
 
-	proxy.HandleTask("metadataflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("baggageflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
-	proxy.HandleTask("metadataflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("baggageflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
-	proxy.HandleTask("metadataflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
-		_, yield, err := f.Subgraph("metadataflow.verify:428/inner", nil)
+	proxy.HandleTask("baggageflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
+		_, yield, err := f.Subgraph("baggageflow.verify:428/inner", nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
 
-	// Capturing shims record the metadata seen at each loader/executor call.
+	// Capturing shims record the baggage seen at each loader/executor call.
 	var mu sync.Mutex
 	seenLoad := map[string]map[string]any{}
 	seenTask := map[string]map[string]any{}
@@ -88,11 +88,11 @@ func TestMetadataflow(t *testing.T) {
 		WithTaskExecutor(executor)
 	eng.RunInTest(t)
 
-	t.Run("metadata_reaches_loader_and_every_task_including_subgraph", func(t *testing.T) {
+	t.Run("baggage_reaches_loader_and_every_task_including_subgraph", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		md := map[string]any{"actor": "alice", "scope": "s1"}
-		flowKey, err := eng.Create(ctx, "metadataflow.verify:428/parent", nil, md, nil)
+		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, md, nil)
 		if !assert.NoError(err) {
 			return
 		}
@@ -108,18 +108,18 @@ func TestMetadataflow(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 
-		// Loader saw metadata for the parent graph and the subgraph.
-		assert.Equal("alice", seenLoad["metadataflow.verify:428/parent"]["actor"])
-		assert.Equal("alice", seenLoad["metadataflow.verify:428/inner"]["actor"])
+		// Loader saw baggage for the parent graph and the subgraph.
+		assert.Equal("alice", seenLoad["baggageflow.verify:428/parent"]["actor"])
+		assert.Equal("alice", seenLoad["baggageflow.verify:428/inner"]["actor"])
 
 		// Every task — parent tasks and the inherited subgraph task — saw it.
 		for _, task := range []string{
-			"metadataflow.verify:428/task-a",
-			"metadataflow.verify:428/run-inner",
-			"metadataflow.verify:428/task-x",
+			"baggageflow.verify:428/task-a",
+			"baggageflow.verify:428/run-inner",
+			"baggageflow.verify:428/task-x",
 		} {
 			got := seenTask[task]
-			if !assert.NotNil(got, "task %s never received metadata", task) {
+			if !assert.NotNil(got, "task %s never received baggage", task) {
 				continue
 			}
 			assert.Equal("alice", got["actor"], "task %s", task)

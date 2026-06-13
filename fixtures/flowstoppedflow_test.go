@@ -51,7 +51,7 @@ func TestFlowstoppedflow(t *testing.T) {
 	graph.AddTransition("gate", workflow.END)
 	proxy.HandleGraph("flowstoppedflow.verify:428/flow", graph)
 
-	proxy.HandleTask("flowstoppedflow.verify:428/gate", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("flowstoppedflow.verify:428/gate", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		switch f.GetString("mode") {
 		case "fail":
 			return errors.New("gate refused", http.StatusInternalServerError)

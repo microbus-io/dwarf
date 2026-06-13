@@ -41,10 +41,10 @@ func TestRetryflow(t *testing.T) {
 	graph.AddTransition("taskB", workflow.END)
 	proxy.HandleGraph("retryflow.verify:428/retry", graph)
 
-	proxy.HandleTask("retryflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("retryflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
-	proxy.HandleTask("retryflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("retryflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		attempts := f.GetInt("attempts") + 1
 		f.SetInt("attempts", attempts)
 		if attempts >= f.GetInt("target") {
@@ -55,7 +55,7 @@ func TestRetryflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("retryflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("retryflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetInt("finalAttempts", f.GetInt("attempts"))
 		return nil
 	})

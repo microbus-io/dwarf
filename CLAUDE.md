@@ -15,9 +15,9 @@ adapter," it means that wrapping layer.
 
 ### Dependency interfaces (how the engine reaches the outside world)
 
-- **`GraphLoader`** `func(ctx, workflowName string, metadata map[string]any) (*workflow.Graph, error)` - fetches a
+- **`GraphLoader`** `func(ctx, workflowName string, baggage map[string]any) (*workflow.Graph, error)` - fetches a
   workflow graph by name. Called once at `Create`; the graph JSON is then frozen on the flow row.
-- **`TaskExecutor`** `func(ctx, taskName string, flow *workflow.Flow, metadata map[string]any) error` - executes one
+- **`TaskExecutor`** `func(ctx, taskName string, flow *workflow.Flow, baggage map[string]any) error` - executes one
   task. Receives the flow carrier with state pre-populated; writes its changes back onto the flow. The engine never
   knows *how* the task is reached (local call, RPC, message bus).
 - **`FlowStoppedCallback`** `func(ctx, hostname string, outcome *workflow.FlowOutcome)` - fired when a flow stops
@@ -35,9 +35,11 @@ adapter," it means that wrapping layer.
   `otel.GetMeterProvider()` (no-op unless the host configures the SDK). The engine builds its `dwarf_*`
   instruments under the `github.com/microbus-io/dwarf` scope (see "Metrics" below). Tracing is deferred.
 
-The **`metadata map[string]any`** is opaque to the engine: set once at `Create`, stored on the flow row (in the
-`actor_claims` column, named for historical reasons), and passed through to every `GraphLoader` and `TaskExecutor`
-call for the flow's lifetime. A host carries actor claims / tenant identity there; the engine never interprets it.
+The **`baggage map[string]any`** is opaque to the engine: set once at `Create`, stored on the flow row (in the
+`baggage` column), and passed through to every `GraphLoader` and `TaskExecutor` call for the flow's lifetime. A
+host carries actor claims / tenant identity there; the engine never interprets it. (Unlike W3C/OTEL request
+baggage this is *flow*-scoped and frozen at `Create`, not per-request mutable - a host adapter bridging to a bus
+maps between the two at the seam.)
 
 ### Configuration (builder methods, callable before and after Startup)
 
@@ -234,7 +236,7 @@ worker pops a candidate and calls `processStep`:
 1. Reserve the step (atomic CAS `UPDATE ... WHERE step_id=? AND status='pending' AND parked=parkedNone AND
    not_before<=NOW AND lease_expires<=NOW`).
 2. Check for terminal flow status (abort if cancelled/failed/completed).
-3. Load the flow's graph, config, and metadata.
+3. Load the flow's graph, config, and baggage.
 4. Execute the task via the injected `TaskExecutor` with a time budget on the call context.
 5. Persist changes, evaluate transitions, create next steps (in a transaction), ring the doorbell.
 
@@ -575,9 +577,9 @@ transitions all flows to `running`, and rings the doorbell - all in one transact
 first; others run to completion. `Resume` handles one interrupted sibling at a time; the flow returns to `running`
 only when no interrupted steps remain at any level.
 
-### Identity / metadata propagation
+### Identity / baggage propagation
 
-The opaque `metadata` map captured at `Create` (stored in the `actor_claims` column) is passed to every
+The opaque `baggage` map captured at `Create` (stored in the `baggage` column) is passed to every
 `GraphLoader` and `TaskExecutor` call for the flow's lifetime, including dispatches long after creation. The engine
 never interprets it; a host uses it to carry the original caller's identity (e.g. mint a fresh token inside its
 `TaskExecutor`).
@@ -677,7 +679,7 @@ concurrency). Operators with a different workload mix (longer DB-hold, larger sh
 
 The schema carries `priority`, `fairness_key`, `fairness_weight` on **both** `dwarf_flows` (authoritative) and
 `dwarf_steps` (denormalized), so the two-level selection never joins `dwarf_flows` on the hot path - the same
-split used for `time_budget_ms`/`actor_claims`.
+split used for `time_budget_ms`/`baggage`.
 
 `resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to
 `WithDefaultPriority`, the fairness key falls back to the host-supplied key (or `""`), the weight to `1`. The three
@@ -979,7 +981,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `flow_token` | Random token component of the flowKey, guards against id guessing |
 | `workflow_name` | Name of the workflow graph this flow runs (the name passed to the `GraphLoader`) |
 | `graph` | JSON of the workflow graph, frozen at `Create` time |
-| `actor_claims` | JSON of the opaque `metadata` map captured at `Create` and passed to every `GraphLoader`/`TaskExecutor` call. Named for historical reasons; the engine does not interpret it |
+| `baggage` | JSON of the opaque `baggage` map captured at `Create` and passed to every `GraphLoader`/`TaskExecutor` call. Flow-scoped and frozen at `Create`; the engine does not interpret it |
 | `status` | Flow lifecycle: `created`/`running`/`interrupted`/`completed`/`failed`/`cancelled` |
 | `step_id` | The flow's current step; `0` during fan-out (multiple steps active at one depth) |
 | `surgraph_flow_id` | Parent (surgraph) flow id if this is a subgraph flow; `0` otherwise |

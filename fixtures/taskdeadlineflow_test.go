@@ -52,7 +52,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	const safety = 3 * time.Second
 
 	var deadlineObserved atomic.Bool
-	proxy.HandleTask("taskdeadlineflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("taskdeadlineflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		// No self-installed timeout: rely solely on the engine-provided budget deadline.
 		select {
 		case <-ctx.Done():

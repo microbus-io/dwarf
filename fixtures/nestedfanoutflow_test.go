@@ -61,29 +61,29 @@ func TestNestedfanoutflow(t *testing.T) {
 	inner.AddTransition("taskW", workflow.END)
 	proxy.HandleGraph("nestedfanoutflow.verify:428/inner", inner)
 
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("normalResult", "normal")
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetInt("inner", 10)
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfanoutflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetInt("inner", 20)
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-w", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfanoutflow.verify:428/task-w", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetInt("innerResult", f.GetInt("inner"))
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfanoutflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		out, yield, err := f.Subgraph("nestedfanoutflow.verify:428/inner", nil)
 		if yield || err != nil {
 			return err
@@ -93,7 +93,7 @@ func TestNestedfanoutflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-j", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfanoutflow.verify:428/task-j", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("result", fmt.Sprintf("%s/%d", f.GetString("normalResult"), f.GetInt("innerResult")))
 		return nil
 	})

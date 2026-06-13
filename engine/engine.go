@@ -34,14 +34,14 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// GraphLoader fetches a workflow graph definition by name. The metadata is the opaque
+// GraphLoader fetches a workflow graph definition by name. The baggage is the opaque
 // map stored on the flow at Create time.
-type GraphLoader func(ctx context.Context, workflowName string, metadata map[string]any) (*workflow.Graph, error)
+type GraphLoader func(ctx context.Context, workflowName string, baggage map[string]any) (*workflow.Graph, error)
 
 // TaskExecutor executes a single task within a workflow. The flow carrier has its state
 // pre-populated; the executor should call the task and let it write changes to the flow.
-// The metadata is the opaque map stored on the flow at Create time.
-type TaskExecutor func(ctx context.Context, taskName string, flow *workflow.Flow, metadata map[string]any) error
+// The baggage is the opaque map stored on the flow at Create time.
+type TaskExecutor func(ctx context.Context, taskName string, flow *workflow.Flow, baggage map[string]any) error
 
 // FlowStoppedCallback is fired when a flow stops (completed, failed, cancelled, interrupted).
 // The hostname is the notify_hostname stored on the flow via StartNotify.
@@ -421,7 +421,7 @@ func (e *Engine) taskTimeBudget() time.Duration {
 }
 
 // resolveFlowOptions applies defaults to caller-supplied options.
-func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions, metadata map[string]any) *workflow.FlowOptions {
+func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions, baggage map[string]any) *workflow.FlowOptions {
 	resolved := &workflow.FlowOptions{
 		Priority:       int(e.defaultPriority.Load()),
 		FairnessWeight: 1,
@@ -514,13 +514,13 @@ func (e *Engine) valveCommit(taskName string, now time.Time) {
 // --- Public API ---
 
 // Create creates a new flow for a workflow without starting it.
-func (e *Engine) Create(ctx context.Context, workflowName string, initialState any, metadata map[string]any, opts *workflow.FlowOptions) (flowKey string, err error) {
-	return e.create(ctx, workflowName, initialState, metadata, opts)
+func (e *Engine) Create(ctx context.Context, workflowName string, initialState any, baggage map[string]any, opts *workflow.FlowOptions) (flowKey string, err error) {
+	return e.create(ctx, workflowName, initialState, baggage, opts)
 }
 
 // CreateTask creates a flow for a single task without starting it.
-func (e *Engine) CreateTask(ctx context.Context, taskName string, initialState any, metadata map[string]any) (flowKey string, err error) {
-	return e.createTask(ctx, taskName, initialState, metadata)
+func (e *Engine) CreateTask(ctx context.Context, taskName string, initialState any, baggage map[string]any) (flowKey string, err error) {
+	return e.createTask(ctx, taskName, initialState, baggage)
 }
 
 // Start transitions a created flow to running.
@@ -604,8 +604,8 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 }
 
 // Run creates, starts, and awaits a flow in one call.
-func (e *Engine) Run(ctx context.Context, workflowName string, initialState any, metadata map[string]any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
-	return e.run(ctx, workflowName, initialState, metadata, opts)
+func (e *Engine) Run(ctx context.Context, workflowName string, initialState any, baggage map[string]any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
+	return e.run(ctx, workflowName, initialState, baggage, opts)
 }
 
 // Continue creates a new flow from the latest completed flow in a thread.

@@ -25,11 +25,11 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-func noopGraphLoader(ctx context.Context, name string, metadata map[string]any) (*workflow.Graph, error) {
+func noopGraphLoader(ctx context.Context, name string, baggage map[string]any) (*workflow.Graph, error) {
 	return nil, nil
 }
 
-func noopTaskExecutor(ctx context.Context, name string, flow *workflow.Flow, metadata map[string]any) error {
+func noopTaskExecutor(ctx context.Context, name string, flow *workflow.Flow, baggage map[string]any) error {
 	return nil
 }
 

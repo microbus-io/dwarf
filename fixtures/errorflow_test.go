@@ -45,17 +45,17 @@ func TestErrorflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("errorflow.verify:428/error", graph)
 
-	proxy.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
-	proxy.HandleTask("errorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("errorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		if f.GetString("trigger") == "fail" {
 			return errors.New("triggered failure")
 		}
 		f.SetString("result", "normal")
 		return nil
 	})
-	proxy.HandleTask("errorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("errorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		var onErr errors.TracedError
 		err := f.Get("onErr", &onErr)
 		if err != nil || onErr.Error() == "" {
@@ -65,7 +65,7 @@ func TestErrorflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("errorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("errorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("finalResult", "final:"+f.GetString("result"))
 		return nil
 	})

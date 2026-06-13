@@ -58,7 +58,7 @@ func TestSaturatedbandflow(t *testing.T) {
 	}
 	var completions []completion
 
-	proxy.HandleTask("saturatedbandflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("saturatedbandflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		mu.Lock()
 		boundedInFlight++
 		over := boundedInFlight > boundedCap
@@ -77,7 +77,7 @@ func TestSaturatedbandflow(t *testing.T) {
 		mu.Unlock()
 		return nil
 	})
-	proxy.HandleTask("saturatedbandflow.verify:428/open", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("saturatedbandflow.verify:428/open", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		time.Sleep(40 * time.Millisecond)
 		mu.Lock()
 		completions = append(completions, completion{tag: "open", at: time.Now()})

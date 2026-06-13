@@ -40,15 +40,15 @@ func TestBreakpointflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("breakpointflow.verify:428/breakpoint", graph)
 
-	proxy.HandleTask("breakpointflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("breakpointflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetBool("stepA", true)
 		return nil
 	})
-	proxy.HandleTask("breakpointflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("breakpointflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetBool("stepB", f.GetBool("stepA"))
 		return nil
 	})
-	proxy.HandleTask("breakpointflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("breakpointflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetBool("stepC", f.GetBool("stepB"))
 		return nil
 	})

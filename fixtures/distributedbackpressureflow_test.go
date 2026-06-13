@@ -86,7 +86,7 @@ func TestDistributedbackpressureflow(t *testing.T) {
 	var inFlight, peak int
 	var rejections, completions atomic.Int32
 
-	proxy.HandleTask("distributedbackpressureflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("distributedbackpressureflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		mu.Lock()
 		inFlight++
 		if inFlight > peak {

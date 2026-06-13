@@ -33,40 +33,40 @@ import (
 )
 
 // Create creates a new flow for a workflow without starting it.
-func (e *Engine) create(ctx context.Context, workflowName string, initialState any, metadata map[string]any, opts *workflow.FlowOptions) (flowKey string, err error) {
+func (e *Engine) create(ctx context.Context, workflowName string, initialState any, baggage map[string]any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	if workflowName == "" {
 		return "", errors.New("workflow name is required", http.StatusBadRequest)
 	}
-	graph, err := e.graphLoader(ctx, workflowName, metadata)
+	graph, err := e.graphLoader(ctx, workflowName, baggage)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 	shardNum := rand.IntN(e.numDBShards()) + 1
-	opts = e.resolveFlowOptions(opts, metadata)
-	flowKey, err = e.createWithGraph(ctx, shardNum, workflowName, graph, initialState, metadata, 0, "", opts)
+	opts = e.resolveFlowOptions(opts, baggage)
+	flowKey, err = e.createWithGraph(ctx, shardNum, workflowName, graph, initialState, baggage, 0, "", opts)
 	return flowKey, errors.Trace(err)
 }
 
 // createTask creates a flow that executes a single task and then terminates.
-func (e *Engine) createTask(ctx context.Context, taskName string, initialState any, metadata map[string]any) (flowKey string, err error) {
+func (e *Engine) createTask(ctx context.Context, taskName string, initialState any, baggage map[string]any) (flowKey string, err error) {
 	if taskName == "" {
 		return "", errors.New("task name is required", http.StatusBadRequest)
 	}
 	graph := workflow.NewGraph(taskName)
 	graph.AddTransition(taskName, workflow.END)
 	shardNum := rand.IntN(e.numDBShards()) + 1
-	flowKey, err = e.createWithGraph(ctx, shardNum, taskName, graph, initialState, metadata, 0, "", e.resolveFlowOptions(nil, metadata))
+	flowKey, err = e.createWithGraph(ctx, shardNum, taskName, graph, initialState, baggage, 0, "", e.resolveFlowOptions(nil, baggage))
 	return flowKey, errors.Trace(err)
 }
 
 // createWithGraph is the shared implementation for create, createTask, and continue.
-func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName string, graph *workflow.Graph, initialState any, metadata map[string]any, threadID int, threadToken string, opts *workflow.FlowOptions) (flowKey string, err error) {
+func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName string, graph *workflow.Graph, initialState any, baggage map[string]any, threadID int, threadToken string, opts *workflow.FlowOptions) (flowKey string, err error) {
 	entryPoint := graph.EntryPoint()
 	if entryPoint == "" {
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
 	}
 
-	metadataJSON, err := json.Marshal(metadata)
+	baggageJSON, err := json.Marshal(baggage)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -88,7 +88,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName
 		return "", errors.Trace(err)
 	}
 
-	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowName, graphJSON, metadataJSON, threadID, threadToken, entryPoint, stateJSON, stepToken, timeBudget, opts)
+	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowName, graphJSON, baggageJSON, threadID, threadToken, entryPoint, stateJSON, stepToken, timeBudget, opts)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -97,14 +97,14 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName
 }
 
 // createWithGraphTx inserts a flow and its entry step in one retryable transaction.
-func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowName string, graphJSON, metadataJSON []byte, threadID int, threadToken, entryPoint string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
+func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowName string, graphJSON, baggageJSON []byte, threadID int, threadToken, entryPoint string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
 	var newFlowID int64
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
 		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-			"INSERT INTO dwarf_flows (flow_token, workflow_name, graph, actor_claims, status, priority, fairness_key, fairness_weight)"+
+			"INSERT INTO dwarf_flows (flow_token, workflow_name, graph, baggage, status, priority, fairness_key, fairness_weight)"+
 				" VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			flowToken, workflowName, string(graphJSON), string(metadataJSON), workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
+			flowToken, workflowName, string(graphJSON), string(baggageJSON), workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -549,8 +549,8 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 }
 
 // run creates, starts, and awaits a flow in one call.
-func (e *Engine) run(ctx context.Context, workflowName string, initialState any, metadata map[string]any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
-	flowKey, err := e.create(ctx, workflowName, initialState, metadata, opts)
+func (e *Engine) run(ctx context.Context, workflowName string, initialState any, baggage map[string]any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
+	flowKey, err := e.create(ctx, workflowName, initialState, baggage, opts)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

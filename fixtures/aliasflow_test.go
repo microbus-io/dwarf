@@ -47,25 +47,25 @@ func TestAliasflow(t *testing.T) {
 	graph.AddTransition("d", workflow.END)
 	proxy.HandleGraph("aliasflow.verify:428/alias", graph)
 
-	proxy.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		if f.GetString("branch") == "alt" {
 			f.Goto("bPrime")
 		}
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("path", f.GetString("path")+"A")
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("path", f.GetString("path")+"B")
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("path", f.GetString("path")+"C")
 		return nil
 	})
-	proxy.HandleTask("aliasflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("aliasflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("path", f.GetString("path")+"D")
 		return nil
 	})

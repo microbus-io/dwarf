@@ -39,7 +39,7 @@ func TestDeletecreatedflow(t *testing.T) {
 	graph.AddTask("work", "deletecreatedflow.verify:428/work")
 	graph.AddTransition("work", workflow.END)
 	proxy.HandleGraph("deletecreatedflow.verify:428/flow", graph)
-	proxy.HandleTask("deletecreatedflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("deletecreatedflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
 

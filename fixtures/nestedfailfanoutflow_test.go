@@ -55,16 +55,16 @@ func TestNestedfailfanoutflow(t *testing.T) {
 	var innerStarts, innerCompleted, joinIRuns, joinORuns int
 	gate := make(chan struct{})
 
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfailfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.Set("outers", []int{0, 1, 2})
 		return nil
 	})
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/task-o", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfailfanoutflow.verify:428/task-o", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.Set("inners", []int{0, 1, 2})
 		f.SetInt("currentOuter", f.GetInt("outerItem"))
 		return nil
 	})
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/task-i", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfailfanoutflow.verify:428/task-i", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		mu.Lock()
 		innerStarts++
 		mu.Unlock()
@@ -84,13 +84,13 @@ func TestNestedfailfanoutflow(t *testing.T) {
 		mu.Unlock()
 		return nil
 	})
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/join-i", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfailfanoutflow.verify:428/join-i", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		mu.Lock()
 		joinIRuns++
 		mu.Unlock()
 		return nil
 	})
-	proxy.HandleTask("nestedfailfanoutflow.verify:428/join-o", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("nestedfailfanoutflow.verify:428/join-o", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		mu.Lock()
 		joinORuns++
 		mu.Unlock()

@@ -44,18 +44,18 @@ func TestConditionalflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("conditionalflow.verify:428/conditional", graph)
 
-	proxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-high", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("conditionalflow.verify:428/task-high", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-low", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("conditionalflow.verify:428/task-low", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("branch", "low")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("conditionalflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
 

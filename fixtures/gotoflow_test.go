@@ -41,18 +41,18 @@ func TestGotoflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("gotoflow.verify:428/goto", graph)
 
-	proxy.HandleTask("gotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("gotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetInt("loops", f.GetInt("loops")+1)
 		return nil
 	})
-	proxy.HandleTask("gotoflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("gotoflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		if f.GetInt("loops") < f.GetInt("target") {
 			f.Goto("gotoflow.verify:428/task-a")
 		}
 		f.SetBool("visited", true)
 		return nil
 	})
-	proxy.HandleTask("gotoflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("gotoflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetInt("finalLoops", f.GetInt("loops"))
 		return nil
 	})
@@ -94,7 +94,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 	graph.AddTransition("badGotoer", workflow.END)
 	proxy.HandleGraph("gotoflow.verify:428/bad-goto", graph)
 
-	proxy.HandleTask("gotoflow.verify:428/bad-gotoer", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("gotoflow.verify:428/bad-gotoer", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.Goto("https://gotoflow.verify:428/no-such-task")
 		f.SetBool("stamp", true)
 		return nil

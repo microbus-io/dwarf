@@ -30,7 +30,7 @@ import (
 )
 
 // createSubgraphFlow creates a subgraph flow for a dynamic subgraph transition.
-func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepDepth int, surgraphStepID int, subgraphWorkflowName string, subgraphGraph *workflow.Graph, childState map[string]any, metadataJSON string, breakpointsJSON string) (string, error) {
+func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepDepth int, surgraphStepID int, subgraphWorkflowName string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, breakpointsJSON string) (string, error) {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
@@ -55,8 +55,8 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	}
 
 	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_flows SET surgraph_flow_id=?, surgraph_step_depth=?, surgraph_step_id=?, actor_claims=?, breakpoints=?, updated_at=NOW_UTC() WHERE flow_id=?",
-		surgraphFlowID, surgraphStepDepth, surgraphStepID, metadataJSON, breakpointsJSON, subgraphFlowID,
+		"UPDATE dwarf_flows SET surgraph_flow_id=?, surgraph_step_depth=?, surgraph_step_id=?, baggage=?, breakpoints=?, updated_at=NOW_UTC() WHERE flow_id=?",
+		surgraphFlowID, surgraphStepDepth, surgraphStepID, baggageJSON, breakpointsJSON, subgraphFlowID,
 	)
 	if err != nil {
 		return "", errors.Trace(err)

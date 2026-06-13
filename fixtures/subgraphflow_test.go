@@ -50,18 +50,18 @@ func TestSubgraphflow(t *testing.T) {
 	inner.AddTransition("taskY", workflow.END)
 	proxy.HandleGraph("subgraphflow.verify:428/inner", inner)
 
-	proxy.HandleTask("subgraphflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("subgraphflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("subgraphflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("innerResult", fmt.Sprintf("X(%s)", f.GetString("seed")))
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("subgraphflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("innerResult", fmt.Sprintf("Y(%s)", f.GetString("innerResult")))
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("subgraphflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		out, yield, err := f.Subgraph("subgraphflow.verify:428/inner", map[string]any{"seed": f.GetString("seed")})
 		if yield || err != nil {
 			return err
@@ -71,7 +71,7 @@ func TestSubgraphflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("subgraphflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("result", fmt.Sprintf("Z(%s)", f.GetString("innerResult")))
 		return nil
 	})

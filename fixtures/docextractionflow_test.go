@@ -54,7 +54,7 @@ func TestDocextractionflow(t *testing.T) {
 
 	words := []string{"the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "a", "and"}
 
-	proxy.HandleTask("docextractionflow.verify:428/scan-pdf", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("docextractionflow.verify:428/scan-pdf", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.Set("pdf", nil)
 		time.Sleep(50 * time.Millisecond)
 		pageCount := 5 + rand.IntN(18)
@@ -66,7 +66,7 @@ func TestDocextractionflow(t *testing.T) {
 		f.SetInt("pageCount", pageCount)
 		return nil
 	})
-	proxy.HandleTask("docextractionflow.verify:428/identify-chunks", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("docextractionflow.verify:428/identify-chunks", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		chunkCount := 2 + rand.IntN(4)
 		chunks := make([]string, chunkCount)
 		for i := range chunks {
@@ -75,7 +75,7 @@ func TestDocextractionflow(t *testing.T) {
 		f.Set("chunks", chunks)
 		return nil
 	})
-	proxy.HandleTask("docextractionflow.verify:428/transcribe-chunk", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("docextractionflow.verify:428/transcribe-chunk", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.Set("page", nil)
 		time.Sleep(time.Duration(50+rand.IntN(100)) * time.Millisecond)
 		if rand.Float64() < 0.05 {
@@ -92,13 +92,13 @@ func TestDocextractionflow(t *testing.T) {
 		f.Set("transcriptions", []string{strings.Join(sentence, " ")})
 		return nil
 	})
-	proxy.HandleTask("docextractionflow.verify:428/join-page-transcriptions", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("docextractionflow.verify:428/join-page-transcriptions", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		var transcriptions []string
 		f.Get("transcriptions", &transcriptions)
 		f.Set("pageTexts", []string{strings.Join(transcriptions, " ")})
 		return nil
 	})
-	proxy.HandleTask("docextractionflow.verify:428/join-doc-transcriptions", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("docextractionflow.verify:428/join-doc-transcriptions", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		var pageTexts []string
 		f.Get("pageTexts", &pageTexts)
 		f.SetString("docTranscription", strings.Join(pageTexts, "\n"))

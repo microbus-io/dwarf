@@ -44,10 +44,10 @@ func TestDynamicfanoutflow(t *testing.T) {
 	graph.AddTransition("taskC", workflow.END)
 	proxy.HandleGraph("dynamicfanoutflow.verify:428/dynamic-fan-out", graph)
 
-	proxy.HandleTask("dynamicfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("dynamicfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		return nil
 	})
-	proxy.HandleTask("dynamicfanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("dynamicfanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		if f.GetString("item") == "" {
 			return nil
 		}
@@ -56,7 +56,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		f.Set("seenCounts", []int{f.GetInt("itemCount")})
 		return nil
 	})
-	proxy.HandleTask("dynamicfanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("dynamicfanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetInt("processedCount", f.GetInt("processed"))
 		return nil
 	})

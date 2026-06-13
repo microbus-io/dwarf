@@ -41,7 +41,7 @@ func TestFairnessflow(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 
-	proxy.HandleTask("fairnessflow.verify:428/tally", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("fairnessflow.verify:428/tally", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		delayMs := f.GetInt("delayMs")
 		if delayMs > 0 {
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)

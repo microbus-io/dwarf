@@ -49,7 +49,7 @@ func TestBreakerstartparkflow(t *testing.T) {
 	// trips and stays tripped.
 	var mu sync.Mutex
 	seen := map[string]bool{}
-	proxy.HandleTask("breakerstartparkflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("breakerstartparkflow.verify:428/work", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		mu.Lock()
 		seen[f.GetString("marker")] = true
 		mu.Unlock()

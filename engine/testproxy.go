@@ -26,7 +26,7 @@ import (
 )
 
 // TaskHandler is the signature for a test task handler.
-type TaskHandler func(ctx context.Context, flow *workflow.Flow, metadata map[string]any) error
+type TaskHandler func(ctx context.Context, flow *workflow.Flow, baggage map[string]any) error
 
 // TestProxy routes graph fetches and task dispatches to registered handlers.
 // It implements both GraphLoader and TaskExecutor for use with Engine.RunInTest.
@@ -61,7 +61,7 @@ func (p *TestProxy) HandleTask(name string, handler TaskHandler) {
 }
 
 // LoadGraph implements the GraphLoader signature.
-func (p *TestProxy) LoadGraph(ctx context.Context, workflowName string, metadata map[string]any) (*workflow.Graph, error) {
+func (p *TestProxy) LoadGraph(ctx context.Context, workflowName string, baggage map[string]any) (*workflow.Graph, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	g, ok := p.graphs[workflowName]
@@ -72,12 +72,12 @@ func (p *TestProxy) LoadGraph(ctx context.Context, workflowName string, metadata
 }
 
 // ExecuteTask implements the TaskExecutor signature.
-func (p *TestProxy) ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow, metadata map[string]any) error {
+func (p *TestProxy) ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow, baggage map[string]any) error {
 	p.mu.RLock()
 	h, ok := p.tasks[taskName]
 	p.mu.RUnlock()
 	if !ok {
 		return errors.New("task not found: %s", taskName, http.StatusNotFound)
 	}
-	return h(ctx, flow, metadata)
+	return h(ctx, flow, baggage)
 }

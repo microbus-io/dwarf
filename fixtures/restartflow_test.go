@@ -51,12 +51,12 @@ func TestRestartflow(t *testing.T) {
 	// Counts how many times the entry task body runs across the whole flow lifetime.
 	var entryRuns atomic.Int64
 
-	proxy.HandleTask("restartflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("restartflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		entryRuns.Add(1)
 		f.SetString("path", "A")
 		return nil
 	})
-	proxy.HandleTask("restartflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, metadata map[string]any) error {
+	proxy.HandleTask("restartflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow, baggage map[string]any) error {
 		f.SetString("path", f.GetString("path")+"B")
 		return nil
 	})
