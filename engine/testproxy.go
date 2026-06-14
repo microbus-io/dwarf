@@ -74,23 +74,23 @@ func (p *TestProxy) OnFlowStopped(cb func(ctx context.Context, hostname string, 
 }
 
 // LoadGraph implements Host.
-func (p *TestProxy) LoadGraph(ctx context.Context, workflowName string) (*workflow.Graph, error) {
+func (p *TestProxy) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	g, ok := p.graphs[workflowName]
+	g, ok := p.graphs[workflowURL]
 	if !ok {
-		return nil, errors.New("graph not found: %s", workflowName, http.StatusNotFound)
+		return nil, errors.New("graph not found: %s", workflowURL, http.StatusNotFound)
 	}
 	return g, nil
 }
 
 // ExecuteTask implements Host.
-func (p *TestProxy) ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error {
+func (p *TestProxy) ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error {
 	p.mu.RLock()
-	h, ok := p.tasks[taskName]
+	h, ok := p.tasks[taskURL]
 	p.mu.RUnlock()
 	if !ok {
-		return errors.New("task not found: %s", taskName, http.StatusNotFound)
+		return errors.New("task not found: %s", taskURL, http.StatusNotFound)
 	}
 	return h(ctx, flow)
 }

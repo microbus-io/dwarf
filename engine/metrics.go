@@ -165,7 +165,7 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	}
 	e.valvesLock.RUnlock()
 	for task, rate := range rates {
-		o.ObserveInt64(g.rateLimit, int64(rate), metric.WithAttributes(attribute.String("task", task)))
+		o.ObserveInt64(g.rateLimit, int64(rate), metric.WithAttributes(attribute.String("task_url", task)))
 	}
 
 	// Per-task breaker state.
@@ -180,7 +180,7 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		if t {
 			state = 1
 		}
-		o.ObserveInt64(g.breakerState, state, metric.WithAttributes(attribute.String("task", task)))
+		o.ObserveInt64(g.breakerState, state, metric.WithAttributes(attribute.String("task_url", task)))
 	}
 
 	// Shard-querying gauges: pending count + oldest age per priority band, and running count per task.
@@ -200,7 +200,7 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		return errors.Trace(err)
 	}
 	for task, count := range running {
-		o.ObserveInt64(g.concurrency, int64(count), metric.WithAttributes(attribute.String("task", task)))
+		o.ObserveInt64(g.concurrency, int64(count), metric.WithAttributes(attribute.String("task_url", task)))
 	}
 	return nil
 }
@@ -259,13 +259,14 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 	return countByBand, oldestSecByBand, nil
 }
 
-// countRunningByTask returns the cluster-wide (this replica's shards) count of running steps per task.
+// countRunningByTask returns the cluster-wide (this replica's shards) count of running steps per task
+// URL (the downstream identity the saturation/concurrency view keys on).
 func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error) {
 	numShards := e.numDBShards()
 	perShard := make([]map[string]int, numShards+1)
 	err := e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
-			"SELECT task_name, COUNT(*) FROM dwarf_steps WHERE status=? GROUP BY task_name",
+			"SELECT task_url, COUNT(*) FROM dwarf_steps WHERE status=? GROUP BY task_url",
 			workflow.StatusRunning,
 		)
 		if err != nil {
@@ -320,8 +321,10 @@ func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string
 	if e.metrics == nil {
 		return
 	}
+	// Step disposition is keyed by node name (graph topology - "which node"), unlike the adaptive
+	// metrics which key by task_url (the downstream endpoint).
 	e.metrics.stepsExecuted.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("task", taskName), attribute.String("status", status)))
+		attribute.String("task_name", taskName), attribute.String("status", status)))
 }
 
 func (e *Engine) metricStepsRecovered(ctx context.Context, n int) {
@@ -331,32 +334,32 @@ func (e *Engine) metricStepsRecovered(ctx context.Context, n int) {
 	e.metrics.stepsRecovered.Add(ctx, int64(n))
 }
 
-func (e *Engine) metricStepSkippedSaturated(ctx context.Context, taskName string) {
+func (e *Engine) metricStepSkippedSaturated(ctx context.Context, taskURL string) {
 	if e.metrics == nil {
 		return
 	}
-	e.metrics.stepsSkippedSaturated.Add(ctx, 1, metric.WithAttributes(attribute.String("task", taskName)))
+	e.metrics.stepsSkippedSaturated.Add(ctx, 1, metric.WithAttributes(attribute.String("task_url", taskURL)))
 }
 
-func (e *Engine) metricTaskRateCut(ctx context.Context, taskName string) {
+func (e *Engine) metricTaskRateCut(ctx context.Context, taskURL string) {
 	if e.metrics == nil {
 		return
 	}
-	e.metrics.taskRateCuts.Add(ctx, 1, metric.WithAttributes(attribute.String("task", taskName)))
+	e.metrics.taskRateCuts.Add(ctx, 1, metric.WithAttributes(attribute.String("task_url", taskURL)))
 }
 
-func (e *Engine) metricBreakerTrip(ctx context.Context, taskName, cause string) {
+func (e *Engine) metricBreakerTrip(ctx context.Context, taskURL, cause string) {
 	if e.metrics == nil {
 		return
 	}
 	e.metrics.taskBreakerTrips.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("task", taskName), attribute.String("cause", cause)))
+		attribute.String("task_url", taskURL), attribute.String("cause", cause)))
 }
 
-func (e *Engine) metricBreakerProbe(ctx context.Context, taskName, outcome, cause string) {
+func (e *Engine) metricBreakerProbe(ctx context.Context, taskURL, outcome, cause string) {
 	if e.metrics == nil {
 		return
 	}
 	e.metrics.taskBreakerProbes.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("task", taskName), attribute.String("outcome", outcome), attribute.String("cause", cause)))
+		attribute.String("task_url", taskURL), attribute.String("outcome", outcome), attribute.String("cause", cause)))
 }

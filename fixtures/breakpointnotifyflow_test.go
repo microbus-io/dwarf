@@ -71,7 +71,7 @@ func TestBreakpointnotifyflow(t *testing.T) {
 		return
 	}
 	// Breakpoint before taskB so the flow pauses (interrupted) after taskA.
-	if !assert.NoError(eng.BreakBefore(ctx, flowKey, "breakpointnotifyflow.verify:428/task-b", true)) {
+	if !assert.NoError(eng.BreakBefore(ctx, flowKey, "taskB", true)) {
 		return
 	}
 	if !assert.NoError(eng.StartNotify(ctx, flowKey, "host-breakpoint")) {

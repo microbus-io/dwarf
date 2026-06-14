@@ -79,12 +79,12 @@ func TestBreakerreconstituteflow(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if eng1.BreakerTripped("work") {
+		if eng1.BreakerTripped("breakerreconstituteflow.verify:428/work") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if !assert.True(eng1.BreakerTripped("work")) {
+	if !assert.True(eng1.BreakerTripped("breakerreconstituteflow.verify:428/work")) {
 		eng1.Shutdown(ctx)
 		return
 	}

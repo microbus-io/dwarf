@@ -131,19 +131,6 @@ func (g *Graph) URLOf(name string) string {
 	return ""
 }
 
-// NamesForURL returns all node names whose dispatch URL matches the given URL.
-// Empty result means no node uses that URL. Multiple results mean the URL is reused
-// at distinct graph positions.
-func (g *Graph) NamesForURL(url string) []string {
-	var names []string
-	for _, n := range g.nodes {
-		if n.URL == url {
-			names = append(names, n.Name)
-		}
-	}
-	return names
-}
-
 // SetEntryPoint sets the entry point of the graph explicitly, overriding the default
 // (first task added). The argument is a node name.
 func (g *Graph) SetEntryPoint(name string) {
@@ -207,7 +194,8 @@ func (g *Graph) AddTransitionOnError(from, to string) {
 }
 
 // autoRegister resolves a transition endpoint string to a node name, registering a new
-// node if needed.
+// node if needed. Endpoints are keyed by node name only; an unknown string registers a new
+// node (name == url == s).
 func (g *Graph) autoRegister(s string) string {
 	if s == END {
 		return END
@@ -216,10 +204,6 @@ func (g *Graph) autoRegister(s string) string {
 		if n.Name == s {
 			return n.Name
 		}
-	}
-	matches := g.NamesForURL(s)
-	if len(matches) == 1 {
-		return matches[0]
 	}
 	g.AddTask(s, s)
 	return s

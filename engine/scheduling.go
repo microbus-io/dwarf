@@ -195,7 +195,7 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 	results := make([]*shardResult, numShards+1)
 	err := e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
-			"SELECT step_id, task_name, fairness_key, fairness_weight, priority, DATE_DIFF_MILLIS(NOW_UTC(), created_at) FROM dwarf_steps"+
+			"SELECT step_id, task_url, fairness_key, fairness_weight, priority, DATE_DIFF_MILLIS(NOW_UTC(), created_at) FROM dwarf_steps"+
 				" WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?"+
 				" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
 				" WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?)"+

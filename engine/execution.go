@@ -215,11 +215,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			json.Unmarshal([]byte(breakpointsJSON), &breakpoints)
 		}
 		breakpointMatch := breakpoints[taskName] == "b"
-		if !breakpointMatch {
-			if u := graph.URLOf(taskName); u != "" && breakpoints[u] == "b" && len(graph.NamesForURL(u)) == 1 {
-				breakpointMatch = true
-			}
-		}
 		if len(breakpoints) > 0 && breakpointMatch {
 			e.logger.DebugContext(ctx, "Breakpoint hit", "task", taskName, "step", stepDepth, "flow", workflowName)
 			e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
@@ -230,8 +225,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Execute the task. The step's time_budget_ms bounds the executor call's context deadline; the
 	// surrounding DB work keeps using the undeadlined ctx so persistence is never cut short.
 	e.logger.DebugContext(ctx, "Executing task", "task", taskName, "flow", workflowName)
-	e.breakerCommit(taskName)
 	dispatchURL := dispatchURLOf(graph, taskName)
+	// The adaptive mechanisms (breaker, valve) key on the dispatch URL - the real downstream - not the
+	// graph node name, so two graphs naming a node identically but pointing at different URLs don't share
+	// one breaker/valve.
+	e.breakerCommit(dispatchURL)
 	taskCtx := workflow.ContextWithBaggage(ctx, baggage)
 
 	// Open a per-step span parented to the flow's root "workflow" span (reconstructed from the stored
@@ -265,10 +263,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// the rate; a breaker trip parks the task's backlog and probes. cause is an opaque metric label.
 		if cause, ok := workflow.IsBackpressure(execErr); ok {
 			e.logger.DebugContext(ctx, "Task backpressure", "task", taskName, "flow", workflowName, "cause", cause)
-			return e.handleBackpressure(ctx, shardNum, stepID, taskName)
+			return e.handleBackpressure(ctx, shardNum, stepID, dispatchURL)
 		}
 		if cause, ok := workflow.IsBreakerTrip(execErr); ok {
-			return e.handleBreakerTrip(ctx, shardNum, stepID, taskName, cause)
+			return e.handleBreakerTrip(ctx, shardNum, stepID, dispatchURL, cause)
 		}
 
 		if _, ok := graph.ErrorTransition(taskName); ok {
@@ -286,7 +284,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// Re-read the flow's changes after execution: the task executor wrote to the Flow
 		// directly (it receives *workflow.Flow, which is the embedded Flow inside our RawFlow).
 		resultFlow = flow
-		e.breakerClose(ctx, taskName, shardNum)
+		e.breakerClose(ctx, dispatchURL, shardNum)
 	}
 
 	// Accumulate changes
@@ -456,7 +454,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if fanInTarget == "" {
 			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, strings.TrimSpace(notifyHostname), workflowName)
 		}
-		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight)
+		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight)
 	}
 
 	if cohortSize == 0 {
@@ -520,10 +518,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 				stepStateJSON, _ = json.Marshal(perStepState)
 			}
 			nextTimeBudget := e.taskTimeBudget()
+			nextURL := dispatchURLOf(graph, next.taskName)
 			newStepID, err := tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
-					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-				flowID, nextStepDepth, randomIdentifier(16), next.taskName, string(stepStateJSON), workflow.StatusPending, e.initialParkedFor(next.taskName), nextTimeBudget.Milliseconds(), childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
+					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
+				flowID, nextStepDepth, randomIdentifier(16), next.taskName, nextURL, string(stepStateJSON), workflow.StatusPending, e.initialParkedFor(nextURL), nextTimeBudget.Milliseconds(), childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
 			)
 			if err != nil {
 				return errors.Trace(err)
@@ -744,8 +743,8 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 }
 
 // handleBackpressure bounces a step back to pending after a 429.
-func (e *Engine) handleBackpressure(ctx context.Context, shardNum, stepID int, taskName string) error {
-	e.valveRegulate(ctx, taskName)
+func (e *Engine) handleBackpressure(ctx context.Context, shardNum, stepID int, taskURL string) error {
+	e.valveRegulate(ctx, taskURL)
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
@@ -760,16 +759,16 @@ func (e *Engine) handleBackpressure(ctx context.Context, shardNum, stepID int, t
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil // step was cancelled / failed / completed by a concurrent path
 	}
-	e.logger.DebugContext(ctx, "Task backpressured (429)", "task", taskName, "step", stepID)
+	e.logger.DebugContext(ctx, "Task backpressured (429)", "task", taskURL, "step", stepID)
 	e.shortenNextPoll(time.Now())
 	return nil
 }
 
 // valveRegulate cuts wCong by 1 and gossips the new point.
-func (e *Engine) valveRegulate(ctx context.Context, taskName string) {
+func (e *Engine) valveRegulate(ctx context.Context, taskURL string) {
 	now := time.Now()
 	e.valvesLock.Lock()
-	v := e.valves[taskName]
+	v := e.valves[taskURL]
 	_, observed := v.throttle.Peek()
 	if v.tCong.IsZero() || now.Sub(v.tCong) > time.Second {
 		if observed > v.wCong {
@@ -782,24 +781,24 @@ func (e *Engine) valveRegulate(ctx context.Context, taskName string) {
 	e.valvesLock.Unlock()
 	// tCong was just set to now under the lock, so pass now for both.
 	v.throttle.SetLimit(recoverRate(newW, now, now))
-	e.metricTaskRateCut(ctx, taskName)
-	e.signalSyncValve(ctx, taskName, newW, now)
+	e.metricTaskRateCut(ctx, taskURL)
+	e.signalSyncValve(ctx, taskURL, newW, now)
 }
 
 // handleBreakerTrip bounces a step and trips the breaker.
-func (e *Engine) handleBreakerTrip(ctx context.Context, shardNum, stepID int, taskName, cause string) error {
-	fresh, nextProbeAt := e.breakerTrip(taskName, cause)
+func (e *Engine) handleBreakerTrip(ctx context.Context, shardNum, stepID int, taskURL, cause string) error {
+	fresh, nextProbeAt := e.breakerTrip(taskURL, cause)
 	// Every breaker-tripping dispatch is a failed probe; the trip itself counts only on the fresh transition.
-	e.metricBreakerProbe(ctx, taskName, "failure", cause)
+	e.metricBreakerProbe(ctx, taskURL, "failure", cause)
 	if fresh {
-		e.metricBreakerTrip(ctx, taskName, cause)
-		e.signalTripBreaker(ctx, taskName)
+		e.metricBreakerTrip(ctx, taskURL, cause)
+		e.signalTripBreaker(ctx, taskURL)
 	}
-	e.logger.DebugContext(ctx, "Task breaker tripped", "task", taskName, "step", stepID, "cause", cause, "fresh", fresh)
+	e.logger.DebugContext(ctx, "Task breaker tripped", "task", taskURL, "step", stepID, "cause", cause, "fresh", fresh)
 	// Serialize bulk-park for this task within the replica: a burst of trips on the same down task would
-	// otherwise issue concurrent UPDATEs over the same task_name rows and deadlock under pessimistic
+	// otherwise issue concurrent UPDATEs over the same task_url rows and deadlock under pessimistic
 	// locking. The bulk-park SQL is idempotent, so the queued-behind callers re-park cheaply.
-	parkMu, _ := e.breakerParkLocks.LoadOrStore(taskName, &sync.Mutex{})
+	parkMu, _ := e.breakerParkLocks.LoadOrStore(taskURL, &sync.Mutex{})
 	mu := parkMu.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
@@ -807,15 +806,15 @@ func (e *Engine) handleBreakerTrip(ctx context.Context, shardNum, stepID int, ta
 	// can never leave the task with the probe demoted but no replacement elevated — which would wedge
 	// recovery. breakerBulkPark runs each shard's work through Transact, retrying on lock contention so a
 	// probe is re-elected before we return.
-	return errors.Trace(e.breakerBulkPark(ctx, taskName, nextProbeAt, shardNum, stepID))
+	return errors.Trace(e.breakerBulkPark(ctx, taskURL, nextProbeAt, shardNum, stepID))
 }
 
 // breakerCommit advances the probe schedule when the genuinely-scheduled probe is dispatched.
-func (e *Engine) breakerCommit(taskName string) {
+func (e *Engine) breakerCommit(taskURL string) {
 	now := time.Now()
 	e.breakersLock.Lock()
 	defer e.breakersLock.Unlock()
-	b, ok := e.breakers[taskName]
+	b, ok := e.breakers[taskURL]
 	if !ok || b.trippedAt.IsZero() {
 		return
 	}
@@ -831,9 +830,9 @@ func (e *Engine) breakerCommit(taskName string) {
 }
 
 // breakerClose flips a tripped breaker back to closed.
-func (e *Engine) breakerClose(ctx context.Context, taskName string, shardNum int) {
+func (e *Engine) breakerClose(ctx context.Context, taskURL string, shardNum int) {
 	e.breakersLock.Lock()
-	b, ok := e.breakers[taskName]
+	b, ok := e.breakers[taskURL]
 	if !ok || b.trippedAt.IsZero() {
 		e.breakersLock.Unlock()
 		return
@@ -846,15 +845,15 @@ func (e *Engine) breakerClose(ctx context.Context, taskName string, shardNum int
 	e.refreshNextProbeLocked()
 	e.breakersLock.Unlock()
 	// This dispatch was the probe that closed the breaker.
-	e.metricBreakerProbe(ctx, taskName, "success", cause)
-	e.breakerBulkUnpark(ctx, taskName, shardNum)
+	e.metricBreakerProbe(ctx, taskURL, "success", cause)
+	e.breakerBulkUnpark(ctx, taskURL, shardNum)
 }
 
 // breakerBulkPark parks all pending steps for a tripped task and designates one probe per shard. The
 // just-failed probe (failedStepID on failedShard, may be 0 when no step triggered the trip) is demoted
 // from running into the held-back set inside the same transaction as the re-election, so a rollback can
 // never leave the task with the probe demoted but no replacement elevated.
-func (e *Engine) breakerBulkPark(ctx context.Context, taskName string, nextProbeAt time.Time, failedShard, failedStepID int) error {
+func (e *Engine) breakerBulkPark(ctx context.Context, taskURL string, nextProbeAt time.Time, failedShard, failedStepID int) error {
 	probeBackoffMs := time.Until(nextProbeAt).Milliseconds()
 	if probeBackoffMs < 0 {
 		probeBackoffMs = 0
@@ -868,13 +867,13 @@ func (e *Engine) breakerBulkPark(ctx context.Context, taskName string, nextProbe
 				)
 			}
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE task_name=? AND status=? AND parked IN (?,?)",
-				parkedBreaker, taskName, workflow.StatusPending, parkedNone, parkedBreaker,
+				"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE task_url=? AND status=? AND parked IN (?,?)",
+				parkedBreaker, taskURL, workflow.StatusPending, parkedNone, parkedBreaker,
 			)
 			var probeID int
 			err := tx.QueryRowContext(ctx,
-				"SELECT step_id FROM dwarf_steps WHERE task_name=? AND status=? AND parked=? ORDER BY created_at ASC, step_id ASC LIMIT_OFFSET(1, 0)",
-				taskName, workflow.StatusPending, parkedBreaker,
+				"SELECT step_id FROM dwarf_steps WHERE task_url=? AND status=? AND parked=? ORDER BY created_at ASC, step_id ASC LIMIT_OFFSET(1, 0)",
+				taskURL, workflow.StatusPending, parkedBreaker,
 			).Scan(&probeID)
 			if err == sql.ErrNoRows {
 				return nil // nothing parked on this shard to elevate as a probe
@@ -892,19 +891,19 @@ func (e *Engine) breakerBulkPark(ctx context.Context, taskName string, nextProbe
 }
 
 // breakerBulkUnpark releases breaker-parked steps for a task on a single shard.
-func (e *Engine) breakerBulkUnpark(ctx context.Context, taskName string, shardNum int) {
+func (e *Engine) breakerBulkUnpark(ctx context.Context, taskURL string, shardNum int) {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return
 	}
 	db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE task_name=? AND parked=?",
-		parkedNone, taskName, parkedBreaker,
+		"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE task_url=? AND parked=?",
+		parkedNone, taskURL, parkedBreaker,
 	)
 }
 
 // fireFanInDirect creates the fan-in step immediately for an empty-cohort case.
-func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget string, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64) error {
+func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget, fanInURL string, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64) error {
 	var fanInStepID int64
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
@@ -923,9 +922,9 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		nextTimeBudget := e.taskTimeBudget()
 		var err error
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-			flowID, nextStepDepth, randomIdentifier(16), fanInTarget, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInTarget), nextTimeBudget.Milliseconds(), lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
+			flowID, nextStepDepth, randomIdentifier(16), fanInTarget, fanInURL, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInURL), nextTimeBudget.Milliseconds(), lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -992,10 +991,11 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 
 	mergedJSON, _ := json.Marshal(merged)
 	nextTimeBudget := e.taskTimeBudget()
+	fanInURL := dispatchURLOf(graph, fanInTaskName)
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-		flowID, nextStepDepth, randomIdentifier(16), fanInTaskName, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInTaskName), nextTimeBudget.Milliseconds(), spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
+		flowID, nextStepDepth, randomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInURL), nextTimeBudget.Milliseconds(), spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
 	)
 	if err != nil {
 		return 0, errors.Trace(err)

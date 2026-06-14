@@ -115,7 +115,8 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName
 		return "", errors.Trace(err)
 	}
 
-	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowName, graphJSON, baggageJSON, traceParent, threadID, threadToken, entryPoint, stateJSON, stepToken, timeBudget, opts)
+	entryURL := dispatchURLOf(graph, entryPoint)
+	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowName, graphJSON, baggageJSON, traceParent, threadID, threadToken, entryPoint, entryURL, stateJSON, stepToken, timeBudget, opts)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -124,7 +125,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowName
 }
 
 // createWithGraphTx inserts a flow and its entry step in one retryable transaction.
-func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowName string, graphJSON, baggageJSON []byte, traceParent string, threadID int, threadToken, entryPoint string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
+func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowName string, graphJSON, baggageJSON []byte, traceParent string, threadID int, threadToken, entryPoint, entryURL string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
 	var newFlowID int64
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
@@ -144,9 +145,9 @@ func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken
 			}
 		}
 		newStepID, err := tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, 1, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-			newFlowID, stepToken, entryPoint, string(stateJSON), workflow.StatusCreated, timeBudget.Milliseconds(), startDelayMs, leaseMargin.Milliseconds(), opts.Priority, opts.FairnessKey, opts.FairnessWeight,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
+				" VALUES (?, 1, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
+			newFlowID, stepToken, entryPoint, entryURL, string(stateJSON), workflow.StatusCreated, timeBudget.Milliseconds(), startDelayMs, leaseMargin.Milliseconds(), opts.Priority, opts.FairnessKey, opts.FairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)

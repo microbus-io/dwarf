@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     step_depth         INT          NOT NULL,
     step_token         CHAR(16)     NOT NULL,
     task_name          VARCHAR(512) NOT NULL,
+    task_url           VARCHAR(512) NOT NULL,
     state              JSON         NOT NULL DEFAULT ('{}'),
     changes            JSON         NOT NULL DEFAULT ('{}'),
     interrupt_payload  JSON         NOT NULL DEFAULT ('{}'),
@@ -54,7 +55,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     INDEX idx_dwarf_steps_status (status, updated_at),
     INDEX idx_dwarf_steps_created_at (created_at),
     INDEX idx_dwarf_steps_selection (status, parked, priority, fairness_key),
-    INDEX idx_dwarf_steps_saturation (status, parked, task_name)
+    INDEX idx_dwarf_steps_saturation (status, parked, task_url)
 );
 
 -- DRIVER: pgx
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     step_depth         INT          NOT NULL,
     step_token         CHAR(16)     NOT NULL,
     task_name          VARCHAR(512) NOT NULL,
+    task_url           VARCHAR(512) NOT NULL,
     state              JSONB        NOT NULL DEFAULT '{}',
     changes            JSONB        NOT NULL DEFAULT '{}',
     interrupt_payload  JSONB        NOT NULL DEFAULT '{}',
@@ -110,7 +112,7 @@ CREATE INDEX idx_dwarf_steps_created_at ON dwarf_steps (created_at);
 CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_name) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_url) WHERE status IN ('pending', 'running');
 
 -- DRIVER: mssql
 CREATE TABLE dwarf_steps (
@@ -119,6 +121,7 @@ CREATE TABLE dwarf_steps (
     step_depth         INT           NOT NULL,
     step_token         NCHAR(16)     NOT NULL,
     task_name          NVARCHAR(512) NOT NULL,
+    task_url           NVARCHAR(512) NOT NULL,
     state              NVARCHAR(MAX) NOT NULL DEFAULT '{}',
     changes            NVARCHAR(MAX) NOT NULL DEFAULT '{}',
     interrupt_payload  NVARCHAR(MAX) NOT NULL DEFAULT '{}',
@@ -165,7 +168,7 @@ CREATE INDEX idx_dwarf_steps_created_at ON dwarf_steps (created_at);
 CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_name) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_url) WHERE status IN ('pending', 'running');
 
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_steps (
@@ -174,6 +177,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     step_depth         INTEGER      NOT NULL,
     step_token         TEXT         NOT NULL,
     task_name          TEXT         NOT NULL,
+    task_url           TEXT         NOT NULL,
     state              TEXT         NOT NULL DEFAULT '{}',
     changes            TEXT         NOT NULL DEFAULT '{}',
     interrupt_payload  TEXT         NOT NULL DEFAULT '{}',
@@ -219,4 +223,4 @@ CREATE INDEX idx_dwarf_steps_created_at ON dwarf_steps (created_at);
 CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_name) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_saturation ON dwarf_steps (status, parked, task_url) WHERE status IN ('pending', 'running');

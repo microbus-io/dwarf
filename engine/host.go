@@ -43,14 +43,16 @@ import (
 // self-delivery. Because the host never branches on op or inspects payload, adding a new engine signal
 // kind requires no host change.
 type Host interface {
-	// LoadGraph fetches a workflow graph definition by name. The flow's opaque baggage rides on ctx;
-	// read it with workflow.BaggageFrom(ctx) if loading is identity-dependent (authz, per-actor graphs).
-	LoadGraph(ctx context.Context, workflowName string) (*workflow.Graph, error)
+	// LoadGraph fetches a workflow graph definition by its URL (the addressable resolve key passed to
+	// Create). The flow's opaque baggage rides on ctx; read it with workflow.BaggageFrom(ctx) if loading
+	// is identity-dependent (authz, per-actor graphs).
+	LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error)
 
-	// ExecuteTask executes a single task within a workflow. The flow carrier has its state
-	// pre-populated; the executor should call the task and let it write changes to the flow. The flow's
-	// opaque baggage rides on ctx - read it with workflow.BaggageFrom(ctx) (e.g. to mint a token).
-	ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error
+	// ExecuteTask executes a single task within a workflow. taskURL is the task's dispatch URL (the real
+	// downstream address), not the graph node name. The flow carrier has its state pre-populated; the
+	// executor should call the task and let it write changes to the flow. The flow's opaque baggage rides
+	// on ctx - read it with workflow.BaggageFrom(ctx) (e.g. to mint a token).
+	ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error
 
 	// FlowStopped is fired when a flow stops (completed, failed, cancelled, interrupted). The hostname
 	// is the notify_hostname stored on the flow via StartNotify. Optional: a host with no notification

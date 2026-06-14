@@ -427,18 +427,19 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 }
 
 // initialParkedFor returns the parked value a new pending step should be inserted with.
-func (e *Engine) initialParkedFor(taskName string) int {
-	if e.BreakerTripped(taskName) {
+func (e *Engine) initialParkedFor(taskURL string) int {
+	if e.BreakerTripped(taskURL) {
 		return parkedBreaker
 	}
 	return parkedNone
 }
 
-// BreakerTripped reports whether the breaker for taskName is currently tripped.
-func (e *Engine) BreakerTripped(taskName string) bool {
+// BreakerTripped reports whether the breaker for the given task URL (the downstream endpoint, the key the
+// breaker is partitioned on) is currently tripped.
+func (e *Engine) BreakerTripped(taskURL string) bool {
 	e.breakersLock.RLock()
 	defer e.breakersLock.RUnlock()
-	b, ok := e.breakers[taskName]
+	b, ok := e.breakers[taskURL]
 	if !ok {
 		return false
 	}
@@ -622,15 +623,15 @@ func (e *Engine) HistoryMermaid(ctx context.Context, flowKey string, w io.String
 	return errors.Trace(err)
 }
 
-// breakerTrip records a trip in the local in-memory breaker map.
-func (e *Engine) breakerTrip(taskName, cause string) (fresh bool, nextProbeAt time.Time) {
+// breakerTrip records a trip in the local in-memory breaker map, keyed by the task's dispatch URL.
+func (e *Engine) breakerTrip(taskURL, cause string) (fresh bool, nextProbeAt time.Time) {
 	now := time.Now()
 	e.breakersLock.Lock()
 	defer e.breakersLock.Unlock()
-	b, ok := e.breakers[taskName]
+	b, ok := e.breakers[taskURL]
 	if !ok {
 		b = &taskBreaker{}
-		e.breakers[taskName] = b
+		e.breakers[taskURL] = b
 	}
 	if b.trippedAt.IsZero() {
 		b.trippedAt = now

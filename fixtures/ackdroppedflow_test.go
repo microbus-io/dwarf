@@ -78,7 +78,7 @@ func TestAckdroppedflow(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if eng.BreakerTripped("park") {
+		if eng.BreakerTripped("ackdroppedflow.verify:428/park") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -86,7 +86,7 @@ func TestAckdroppedflow(t *testing.T) {
 
 	t.Run("park_flows_park_in_pending_and_breaker_trips", func(t *testing.T) {
 		assert := testarossa.For(t)
-		assert.True(eng.BreakerTripped("park"))
+		assert.True(eng.BreakerTripped("ackdroppedflow.verify:428/park"))
 		assert.Equal(int64(0), parkHits.Load())
 	})
 
@@ -104,7 +104,7 @@ func TestAckdroppedflow(t *testing.T) {
 			assert.Equal(workflow.StatusCompleted, outcome.Status)
 		}
 		assert.True(pingHits.Load() >= 5)
-		assert.True(eng.BreakerTripped("park"))
+		assert.True(eng.BreakerTripped("ackdroppedflow.verify:428/park"))
 	})
 
 	t.Run("reactivating_park_drains_blocked_flows", func(t *testing.T) {
@@ -122,6 +122,6 @@ func TestAckdroppedflow(t *testing.T) {
 			assert.Equal(workflow.StatusCompleted, outcome.Status)
 		}
 		assert.True(parkHits.Load() >= 20)
-		assert.False(eng.BreakerTripped("park"))
+		assert.False(eng.BreakerTripped("ackdroppedflow.verify:428/park"))
 	})
 }
