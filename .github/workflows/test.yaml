@@ -11,7 +11,7 @@ concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 
-# The suite picks its database from the DWARF_TEST_DSN environment variable. An unset/empty
+# The suite picks its database from the SEQUEL_TESTING_DSN environment variable. An unset/empty
 # value runs against in-memory SQLite; otherwise sequel.CreateTestingDatabase connects to the
 # server's master database and provisions an isolated, auto-dropped testing_* database per shard.
 # The DSN must contain %d (substituted with the 1-based shard index) because sharded fixtures run
@@ -45,7 +45,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DWARF_TEST_DSN: postgres://postgres:postgres@127.0.0.1:5432/dwarf_%d?sslmode=disable
+      SEQUEL_TESTING_DSN: postgres://postgres:postgres@127.0.0.1:5432/dwarf_%d?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -70,7 +70,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DWARF_TEST_DSN: root:root@tcp(127.0.0.1:3306)/dwarf_%d
+      SEQUEL_TESTING_DSN: root:root@tcp(127.0.0.1:3306)/dwarf_%d
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -97,7 +97,7 @@ jobs:
           --health-retries 20
           --health-start-period 30s
     env:
-      DWARF_TEST_DSN: sqlserver://sa:Dwarf_CI_Pass_2026@127.0.0.1:1433?database=dwarf_%d
+      SEQUEL_TESTING_DSN: sqlserver://sa:Dwarf_CI_Pass_2026@127.0.0.1:1433?database=dwarf_%d
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

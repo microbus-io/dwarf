@@ -194,11 +194,12 @@ func (e *Engine) openTestDatabase(t *testing.T) error {
 	t.Helper()
 	dataSourceName := e.dsn.Load().(string)
 	// Allow the whole fixture suite to run against a real server database without changing any test:
-	// when no DSN was set explicitly, fall back to DWARF_TEST_DSN. Unset/empty keeps the SQLite
-	// in-memory default. sequel.CreateTestingDatabase creates an isolated, auto-dropped testing_*
-	// database per shard off this base DSN (needs CREATE/DROP DATABASE privilege on a server).
+	// when no DSN was set explicitly, fall back to SEQUEL_TESTING_DSN — the same variable sequel itself
+	// reads, so one knob redirects dwarf and any other sequel-backed suite at the same server. Unset/empty
+	// keeps the SQLite in-memory default. sequel.CreateTestingDatabase creates an isolated, auto-dropped
+	// testing_* database per shard off this base DSN (needs CREATE/DROP DATABASE privilege on a server).
 	if dataSourceName == "" {
-		dataSourceName = os.Getenv("DWARF_TEST_DSN")
+		dataSourceName = os.Getenv("SEQUEL_TESTING_DSN")
 	}
 	numShards := int(e.numShards.Load())
 	// sequel.CreateTestingDatabase derives the throwaway database name as testing_<hour>_<base>_<testID>,
