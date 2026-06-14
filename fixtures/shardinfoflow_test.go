@@ -49,8 +49,7 @@ func TestShardinfoflow(t *testing.T) {
 
 	const numShards = 3
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
+		WithHost(proxy).
 		WithNumShards(numShards)
 	eng.RunInTest(t)
 

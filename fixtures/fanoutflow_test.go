@@ -69,8 +69,7 @@ func TestFanoutflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("static_fan_out_and_fan_in", func(t *testing.T) {

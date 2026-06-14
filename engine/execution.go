@@ -253,7 +253,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		taskCtx, cancel = context.WithTimeout(taskCtx, time.Duration(timeBudgetMs)*time.Millisecond)
 		defer cancel()
 	}
-	execErr := e.taskExecutor(taskCtx, dispatchURL, &flow.Flow)
+	execErr := e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	recordSpanError(taskSpan, execErr)
 
 	var resultFlow *workflow.RawFlow
@@ -348,7 +348,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			"UPDATE dwarf_steps SET changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 			string(changesJSON), stepID, workflow.StatusRunning,
 		)
-		subgraphGraph, err := e.graphLoader(workflow.ContextWithBaggage(ctx, baggage), subgraphWorkflow)
+		subgraphGraph, err := e.host.LoadGraph(workflow.ContextWithBaggage(ctx, baggage), subgraphWorkflow)
 		if err != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
@@ -603,10 +603,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if flowFailed {
 		compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 		notifyHostnameTrimmed := strings.TrimSpace(notifyHostname)
-		if notifyHostnameTrimmed != "" && e.flowStoppedCallback != nil {
+		if notifyHostnameTrimmed != "" {
 			var finalState map[string]any
 			json.Unmarshal([]byte(flowFailedFinalState), &finalState)
-			e.flowStoppedCallback(ctx, notifyHostnameTrimmed, &workflow.FlowOutcome{
+			e.host.FlowStopped(ctx, notifyHostnameTrimmed, &workflow.FlowOutcome{
 				FlowKey: compositeID,
 				Status:  workflow.StatusFailed,
 				State:   finalState,
@@ -662,16 +662,14 @@ func (e *Engine) handleBreakpoint(ctx context.Context, shardNum int, db *sequel.
 
 	rootCompositeID := chainCompositeIDs[len(chainCompositeIDs)-1]
 	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1]
-	if e.flowStoppedCallback != nil {
-		var rootNotifyHostname string
-		db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
-		rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
-		if rootNotifyHostname != "" {
-			e.flowStoppedCallback(ctx, rootNotifyHostname, &workflow.FlowOutcome{
-				FlowKey: rootCompositeID,
-				Status:  workflow.StatusInterrupted,
-			})
-		}
+	var rootNotifyHostname string
+	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
+	rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
+	if rootNotifyHostname != "" {
+		e.host.FlowStopped(ctx, rootNotifyHostname, &workflow.FlowOutcome{
+			FlowKey: rootCompositeID,
+			Status:  workflow.StatusInterrupted,
+		})
 	}
 	return nil
 }
@@ -732,17 +730,15 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 
 	rootCompositeID := chainCompositeIDs[len(chainCompositeIDs)-1]
 	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1]
-	if e.flowStoppedCallback != nil {
-		var rootNotifyHostname string
-		db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
-		rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
-		if rootNotifyHostname != "" {
-			e.flowStoppedCallback(ctx, rootNotifyHostname, &workflow.FlowOutcome{
-				FlowKey:          rootCompositeID,
-				Status:           workflow.StatusInterrupted,
-				InterruptPayload: interruptPayload,
-			})
-		}
+	var rootNotifyHostname string
+	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
+	rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
+	if rootNotifyHostname != "" {
+		e.host.FlowStopped(ctx, rootNotifyHostname, &workflow.FlowOutcome{
+			FlowKey:          rootCompositeID,
+			Status:           workflow.StatusInterrupted,
+			InterruptPayload: interruptPayload,
+		})
 	}
 	return nil
 }
@@ -787,9 +783,7 @@ func (e *Engine) valveRegulate(ctx context.Context, taskName string) {
 	// tCong was just set to now under the lock, so pass now for both.
 	v.throttle.SetLimit(recoverRate(newW, now, now))
 	e.metricTaskRateCut(ctx, taskName)
-	if e.peerNotifier != nil {
-		e.peerNotifier.SyncValve(ctx, taskName, newW, now)
-	}
+	e.host.SyncValve(ctx, taskName, newW, now)
 }
 
 // handleBreakerTrip bounces a step and trips the breaker.
@@ -799,9 +793,7 @@ func (e *Engine) handleBreakerTrip(ctx context.Context, shardNum, stepID int, ta
 	e.metricBreakerProbe(ctx, taskName, "failure", cause)
 	if fresh {
 		e.metricBreakerTrip(ctx, taskName, cause)
-		if e.peerNotifier != nil {
-			e.peerNotifier.TripBreaker(ctx, taskName)
-		}
+		e.host.TripBreaker(ctx, taskName)
 	}
 	e.logger.DebugContext(ctx, "Task breaker tripped", "task", taskName, "step", stepID, "cause", cause, "fresh", fresh)
 	// Serialize bulk-park for this task within the replica: a burst of trips on the same down task would

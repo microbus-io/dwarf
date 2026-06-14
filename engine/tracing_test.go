@@ -74,8 +74,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	})
 
 	eng := NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
+		WithHost(proxy).
 		WithTracerProvider(tp)
 	eng.RunInTest(t)
 

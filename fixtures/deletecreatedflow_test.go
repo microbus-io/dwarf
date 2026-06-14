@@ -44,8 +44,7 @@ func TestDeletecreatedflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	// Create but never Start: the flow is in created status.

@@ -73,8 +73,7 @@ func TestInterruptedfanoutflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("interrupt_then_resume_completes_with_sum_3", func(t *testing.T) {

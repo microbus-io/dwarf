@@ -64,8 +64,7 @@ func TestRetryfanoutflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("ordered_despite_random_retries", func(t *testing.T) {

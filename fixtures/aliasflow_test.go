@@ -71,8 +71,7 @@ func TestAliasflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("default_path_runs_s_a_b_c", func(t *testing.T) {

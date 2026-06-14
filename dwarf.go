@@ -46,8 +46,7 @@ limitations under the License.
 //	})
 //
 //	eng := dwarf.NewEngine().
-//		WithGraphLoader(proxy.LoadGraph).
-//		WithTaskExecutor(proxy.ExecuteTask)
+//		WithHost(proxy)
 //	eng.RunInTest(t) // SQLite in-memory, auto cleanup
 //
 //	out, _ := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)

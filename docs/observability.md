@@ -74,7 +74,7 @@ The engine creates two kinds of span, under the `github.com/microbus-io/dwarf` s
   created the flow — a flow is a long-lived, async thing), and its W3C context is persisted on the flow so
   it survives across replicas and time.
 - A **per-step span** in each dispatch, named by the task, parented to the flow's root span and **placed on
-  the context handed to your `TaskExecutor`** — so any spans your task creates (the downstream call it
+  the context handed to your host's `ExecuteTask`** — so any spans your task creates (the downstream call it
   makes) nest under it automatically.
 
 Subgraphs nest naturally: a subgraph gets its own "workflow" span parented to the *caller step's* span, so
@@ -106,8 +106,7 @@ eng := dwarf.NewEngine().
     WithLogger(slog.New(otelslog.NewHandler("myapp"))).
     WithMeterProvider(otel.GetMeterProvider()).
     WithTracerProvider(otel.GetTracerProvider()).
-    WithGraphLoader(loadGraph).
-    WithTaskExecutor(runTask)
+    WithHost(host)
 ```
 
 Next: [Deployment](deployment.md).

@@ -14,18 +14,18 @@ For tests and local experiments it uses SQLite in-memory automatically — no da
 The engine handles scheduling, state, durability, and recovery. You provide three things:
 
 1. **A graph** — the shape of the workflow, built with `workflow.NewGraph`.
-2. **A GraphLoader** — a function that returns a graph by name. The engine calls it once when a flow is
+2. **A `Host` implementing `LoadGraph`** — returns a graph by name. The engine calls it once when a flow is
    created, then freezes the graph onto the flow.
-3. **A TaskExecutor** — a function that runs one task. It receives a `*workflow.Flow` with the step's
-   input state already populated; it does the work and writes outputs back onto the flow.
+3. **The same `Host` implementing `ExecuteTask`** — runs one task. It receives a `*workflow.Flow` with the
+   step's input state already populated; it does the work and writes outputs back onto the flow.
 
-That's the whole contract. The engine never learns *how* a task is reached — whether your executor calls a
-local function, makes an RPC, or publishes to a bus is entirely up to you.
+That's the whole contract. The engine never learns *how* a task is reached — whether your host's
+`ExecuteTask` calls a local function, makes an RPC, or publishes to a bus is entirely up to you.
 
 ## Your first flow (test harness)
 
-The fastest way to see dwarf run is the in-process test harness. `engine.TestProxy` implements both the
-GraphLoader and the TaskExecutor against in-memory registries, and `Engine.RunInTest(t)` spins up an
+The fastest way to see dwarf run is the in-process test harness. `engine.TestProxy` implements the `Host`
+interface against in-memory registries, and `Engine.RunInTest(t)` spins up an
 isolated SQLite database with automatic cleanup.
 
 ```go
@@ -66,8 +66,7 @@ func TestGreeting(t *testing.T) {
 
 	// 3. Wire and start the engine.
 	eng := dwarf.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	// 4. Run a flow to completion.
@@ -83,24 +82,37 @@ func TestGreeting(t *testing.T) {
 
 ## Wiring a real engine
 
-In production you replace `TestProxy` with your own loader and executor, point the engine at a real
-database with `WithDSN`, and manage its lifecycle explicitly.
+In production you replace `TestProxy` with your own `Host`, point the engine at a real
+database with `WithDSN`, and manage its lifecycle explicitly. A standalone host need only implement the
+two required methods — the optional peer/notify methods can be no-ops:
 
 ```go
-graphs := loadGraphRegistry() // your graph source
+type myHost struct {
+	graphs map[string]*workflow.Graph // your graph source
+}
+
+func (h *myHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) {
+	g, ok := h.graphs[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown workflow %q", name)
+	}
+	return g, nil
+}
+
+func (h *myHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.Flow) error {
+	return dispatch(ctx, taskName, f) // your local table / RPC / bus
+}
+
+// Optional methods (no-ops for a single-replica host with no stop-notification need):
+func (h *myHost) FlowStopped(context.Context, string, *workflow.FlowOutcome) {}
+func (h *myHost) Enqueue(context.Context, int, int)                          {}
+func (h *myHost) SyncValve(context.Context, string, int, time.Time)          {}
+func (h *myHost) TripBreaker(context.Context, string)                        {}
+func (h *myHost) NotifyStatusChange(context.Context, string, string)         {}
 
 eng := dwarf.NewEngine().
 	WithDSN("postgres://user:pass@db:5432/dwarf").
-	WithGraphLoader(func(ctx context.Context, name string) (*workflow.Graph, error) {
-		g, ok := graphs[name]
-		if !ok {
-			return nil, fmt.Errorf("unknown workflow %q", name)
-		}
-		return g, nil
-	}).
-	WithTaskExecutor(func(ctx context.Context, taskName string, f *workflow.Flow) error {
-		return dispatch(ctx, taskName, f) // your local table / RPC / bus
-	})
+	WithHost(&myHost{graphs: loadGraphRegistry()})
 
 if err := eng.Startup(ctx); err != nil {
 	log.Fatal(err)
@@ -112,7 +124,7 @@ defer eng.Shutdown(ctx)
 - `Shutdown` drains the workers and closes the connections cleanly.
 - The database must already exist; the engine migrates the schema but does not `CREATE DATABASE`.
 
-A nil `GraphLoader` or `TaskExecutor` makes `Startup` return an error.
+Not registering a host (`WithHost`) makes `Startup` return an error.
 
 ## Where to go next
 

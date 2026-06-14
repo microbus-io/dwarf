@@ -64,8 +64,7 @@ func TestAckdroppedflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
+		WithHost(proxy).
 		WithWorkers(4)
 	eng.RunInTest(t)
 

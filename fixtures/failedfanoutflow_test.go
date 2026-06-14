@@ -68,8 +68,7 @@ func TestFailedfanoutflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("failing_branch_fails_the_flow", func(t *testing.T) {

@@ -58,7 +58,7 @@ func ExampleMergeState() {
 	// Output: {"items":["a","b"],"total":3}
 }
 
-// A TaskExecutor wraps its transport's "can't serve" signal so the engine trips the task's breaker
+// A host's ExecuteTask wraps its transport's "can't serve" signal so the engine trips the task's breaker
 // instead of failing the flow. The engine classifies with IsBreakerTrip.
 func ExampleErrBreakerTrip() {
 	err := workflow.ErrBreakerTrip(errors.New("503 from billing"), "unavailable")

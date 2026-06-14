@@ -72,11 +72,9 @@ func TestFlowstoppedflow(t *testing.T) {
 	cb := func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome) {
 		events <- stopEvent{hostname: hostname, outcome: outcome}
 	}
+	proxy.OnFlowStopped(cb)
 
-	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
-		WithFlowStoppedCallback(cb)
+	eng := engine.NewEngine().WithHost(proxy)
 	eng.RunInTest(t)
 
 	// waitStop drains the channel for the stop event of a specific flow.

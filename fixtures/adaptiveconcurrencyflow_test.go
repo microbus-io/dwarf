@@ -57,8 +57,7 @@ func TestAdaptiveconcurrencyflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("rate_convergence", func(t *testing.T) {

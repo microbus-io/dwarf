@@ -1,6 +1,6 @@
 # Writing tasks
 
-A task is a function your `TaskExecutor` runs. It receives a `*workflow.Flow` — the carrier holding the
+A task is a function your host's `ExecuteTask` runs. It receives a `*workflow.Flow` — the carrier holding the
 step's state and control signals — does its work, writes outputs back onto the flow, and returns. This
 guide covers the Flow API a task uses.
 

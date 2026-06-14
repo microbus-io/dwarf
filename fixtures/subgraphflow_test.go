@@ -77,8 +77,7 @@ func TestSubgraphflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("subgraph_output_merges_into_parent_state", func(t *testing.T) {

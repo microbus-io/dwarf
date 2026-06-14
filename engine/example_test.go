@@ -25,10 +25,28 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 )
 
-// Wire an engine to a graph source and a task runner, then create, start, and await a flow. A real host
-// injects a GraphLoader that fetches graphs (from a registry, file, database, or RPC) and a TaskExecutor
-// that dispatches the named task (local call, RPC, message bus); here a small in-memory registry and a
-// local function stand in for both.
+// exampleHost implements engine.Host. A real host loads graphs from a registry/file/database/RPC and
+// dispatches tasks over a local call, RPC, or message bus; here an in-memory registry and a local
+// function stand in. LoadGraph and ExecuteTask are required; the remaining Host methods (flow-stop
+// notification and the cross-replica signals) are left as no-ops.
+type exampleHost struct {
+	graphs map[string]*workflow.Graph
+}
+
+func (h exampleHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) {
+	return h.graphs[name], nil
+}
+func (h exampleHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.Flow) error {
+	f.SetString("greeting", "hello "+f.GetString("name"))
+	return nil
+}
+func (exampleHost) FlowStopped(context.Context, string, *workflow.FlowOutcome) {}
+func (exampleHost) Enqueue(context.Context, int, int)                          {}
+func (exampleHost) SyncValve(context.Context, string, int, time.Time)          {}
+func (exampleHost) TripBreaker(context.Context, string)                        {}
+func (exampleHost) NotifyStatusChange(context.Context, string, string)         {}
+
+// Wire an engine to a host, then create, start, and await a flow.
 func Example() {
 	ctx := context.Background()
 
@@ -40,13 +58,7 @@ func Example() {
 
 	eng := engine.NewEngine().
 		WithDSN("postgres://user:pass@localhost:5432/dwarf").
-		WithGraphLoader(func(ctx context.Context, name string) (*workflow.Graph, error) {
-			return graphs[name], nil
-		}).
-		WithTaskExecutor(func(ctx context.Context, taskName string, f *workflow.Flow) error {
-			f.SetString("greeting", "hello "+f.GetString("name"))
-			return nil
-		})
+		WithHost(exampleHost{graphs: graphs})
 
 	if err := eng.Startup(ctx); err != nil {
 		panic(err)

@@ -225,19 +225,17 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	e.metricFlowTerminated(ctx, workflowName, workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 	notifyHostname = strings.TrimSpace(notifyHostname)
-	if notifyHostname != "" && e.flowStoppedCallback != nil {
+	if notifyHostname != "" {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStateJSON), &finalState)
-		e.flowStoppedCallback(ctx, notifyHostname, &workflow.FlowOutcome{
+		e.host.FlowStopped(ctx, notifyHostname, &workflow.FlowOutcome{
 			FlowKey: compositeID,
 			Status:  workflow.StatusCompleted,
 			State:   finalState,
 		})
 	}
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
-	if e.peerNotifier != nil {
-		e.peerNotifier.Enqueue(ctx, 0, 0) // Wake peers
-	}
+	e.host.Enqueue(ctx, 0, 0) // Wake peers
 
 	// Propagate to surgraph
 	var surgraphFlowID, surgraphStepDepth, surgraphStepID int
@@ -369,10 +367,10 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 	var notifyHostname string
 	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&notifyHostname)
 	notifyHostname = strings.TrimSpace(notifyHostname)
-	if notifyHostname != "" && e.flowStoppedCallback != nil {
+	if notifyHostname != "" {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStateJSON), &finalState)
-		e.flowStoppedCallback(ctx, notifyHostname, &workflow.FlowOutcome{
+		e.host.FlowStopped(ctx, notifyHostname, &workflow.FlowOutcome{
 			FlowKey: compositeID,
 			Status:  workflow.StatusFailed,
 			State:   finalState,

@@ -35,39 +35,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// GraphLoader fetches a workflow graph definition by name. The flow's opaque baggage rides on ctx;
-// read it with workflow.BaggageFrom(ctx) if loading is identity-dependent (authz, per-actor graphs).
-type GraphLoader func(ctx context.Context, workflowName string) (*workflow.Graph, error)
-
-// TaskExecutor executes a single task within a workflow. The flow carrier has its state
-// pre-populated; the executor should call the task and let it write changes to the flow. The flow's
-// opaque baggage rides on ctx - read it with workflow.BaggageFrom(ctx) (e.g. to mint a token).
-type TaskExecutor func(ctx context.Context, taskName string, flow *workflow.Flow) error
-
-// FlowStoppedCallback is fired when a flow stops (completed, failed, cancelled, interrupted).
-// The hostname is the notify_hostname stored on the flow via StartNotify.
-type FlowStoppedCallback func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome)
-
-// PeerNotifier sends cross-replica coordination signals. All methods are fire-and-forget.
-//
-// Every signal must be delivered to OTHER replicas only, EXCLUDING the calling replica. The engine
-// always applies a signal's effect locally before invoking the corresponding PeerNotifier method
-// (e.g. startNotify rings the local doorbell via handleEnqueue and then calls Enqueue; valveRegulate
-// mutates the local valve and then calls SyncValve). An implementation that echoes the signal back to
-// the sender would cause it to be processed twice on the originating replica — a doubled enqueue,
-// valve cut, breaker trip, or status-change wake. If the underlying transport delivers published
-// messages to the publisher, the implementation is responsible for filtering out self-delivery.
-type PeerNotifier interface {
-	Enqueue(ctx context.Context, shard, stepID int)
-	SyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time)
-	TripBreaker(ctx context.Context, taskName string)
-	// NotifyStatusChange tells peer replicas a flow reached a stopped status (completed, failed,
-	// cancelled, interrupted) so their Await callers wake and re-check. Without it, an Await on the
-	// replica that did not run the flow's final step blocks until its context deadline. The receiving
-	// replica routes the signal to HandleNotifyStatusChange.
-	NotifyStatusChange(ctx context.Context, flowKey string, status string)
-}
-
 // ShardSummary is the health/size summary of a single database shard.
 type ShardSummary struct {
 	Shard     int    `json:"shard,omitzero"`
@@ -97,16 +64,13 @@ const (
 // Engine is the standalone workflow orchestration engine.
 type Engine struct {
 	// Dependencies (set before Startup)
-	graphLoader         GraphLoader
-	taskExecutor        TaskExecutor
-	flowStoppedCallback FlowStoppedCallback
-	peerNotifier        PeerNotifier
-	logger              *slog.Logger
-	loggerSet           bool // true once WithLogger received a non-nil logger; gates whether sequel logs
-	meterProvider       metric.MeterProvider
-	metrics             *engineMetrics
-	tracerProvider      trace.TracerProvider
-	tracer              trace.Tracer
+	host           Host
+	logger         *slog.Logger
+	loggerSet      bool // true once WithLogger received a non-nil logger; gates whether sequel logs
+	meterProvider  metric.MeterProvider
+	metrics        *engineMetrics
+	tracerProvider trace.TracerProvider
+	tracer         trace.Tracer
 
 	// Configuration (atomically updated, safe to change after Startup)
 	dsn             atomic.Value // string
@@ -229,27 +193,12 @@ func (e *Engine) WithMaxOpenConns(n int) *Engine {
 
 // --- Dependency injection (must be set before Startup) ---
 
-// WithGraphLoader sets the function that fetches workflow graph definitions.
-func (e *Engine) WithGraphLoader(gl GraphLoader) *Engine {
-	e.graphLoader = gl
-	return e
-}
-
-// WithTaskExecutor sets the function that executes workflow tasks.
-func (e *Engine) WithTaskExecutor(te TaskExecutor) *Engine {
-	e.taskExecutor = te
-	return e
-}
-
-// WithFlowStoppedCallback sets the callback fired when a flow stops.
-func (e *Engine) WithFlowStoppedCallback(cb FlowStoppedCallback) *Engine {
-	e.flowStoppedCallback = cb
-	return e
-}
-
-// WithPeerNotifier sets the cross-replica coordination interface.
-func (e *Engine) WithPeerNotifier(pn PeerNotifier) *Engine {
-	e.peerNotifier = pn
+// WithHost registers the host the engine reaches the outside world through: it loads graphs, executes
+// tasks, and (optionally) receives flow-stop notifications and carries cross-replica coordination
+// signals. A host must implement LoadGraph and ExecuteTask; the remaining Host methods may be no-ops.
+// Must be set before Startup.
+func (e *Engine) WithHost(h Host) *Engine {
+	e.host = h
 	return e
 }
 
@@ -310,11 +259,8 @@ func (e *Engine) WithLogger(l *slog.Logger) *Engine {
 // Startup initializes the engine: opens database connections, runs migrations,
 // and starts worker goroutines.
 func (e *Engine) Startup(ctx context.Context) error {
-	if e.graphLoader == nil {
-		return errors.New("graph loader is required")
-	}
-	if e.taskExecutor == nil {
-		return errors.New("task executor is required")
+	if e.host == nil {
+		return errors.New("host is required")
 	}
 	err := e.openDatabase(ctx)
 	if err != nil {

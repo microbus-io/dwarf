@@ -96,8 +96,7 @@ func TestSubgraphfanoutflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("subgraph_as_sibling_in_fan_out", func(t *testing.T) {

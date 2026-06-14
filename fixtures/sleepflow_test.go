@@ -54,8 +54,7 @@ func TestSleepflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("flow_sleeps_for_configured_duration", func(t *testing.T) {

@@ -1,12 +1,12 @@
 # Building graphs
 
 A `workflow.Graph` is the definition of a workflow. You build one in code and hand it to the engine via
-your `GraphLoader`. This guide covers the full graph-authoring API.
+your host's `LoadGraph`. This guide covers the full graph-authoring API.
 
 ## Tasks
 
 A graph is a set of tasks connected by transitions. Add a task with a **node name** (its identity in the
-graph) and a **URL** (the address your `TaskExecutor` resolves to reach it):
+graph) and a **URL** (the address your host's `ExecuteTask` resolves to reach it):
 
 ```go
 g := workflow.NewGraph("checkout")

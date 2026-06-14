@@ -62,8 +62,7 @@ func TestFingerprintflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("fingerprint_stable_then_changes_on_progress", func(t *testing.T) {

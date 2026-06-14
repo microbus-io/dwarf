@@ -34,6 +34,24 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
+// baggageRecordingHost wraps a TestProxy and records the baggage seen on ctx at each LoadGraph and
+// ExecuteTask call, then delegates to the proxy.
+type baggageRecordingHost struct {
+	*engine.TestProxy
+	onLoad func(ctx context.Context, name string)
+	onTask func(ctx context.Context, taskName string)
+}
+
+func (h *baggageRecordingHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) {
+	h.onLoad(ctx, name)
+	return h.TestProxy.LoadGraph(ctx, name)
+}
+
+func (h *baggageRecordingHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.Flow) error {
+	h.onTask(ctx, taskName)
+	return h.TestProxy.ExecuteTask(ctx, taskName, f)
+}
+
 func TestBaggageflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -75,22 +93,21 @@ func TestBaggageflow(t *testing.T) {
 		m, _ := workflow.BaggageFrom(ctx).(map[string]any)
 		return m
 	}
-	loader := func(ctx context.Context, name string) (*workflow.Graph, error) {
-		mu.Lock()
-		seenLoad[name] = bagOf(ctx)
-		mu.Unlock()
-		return proxy.LoadGraph(ctx, name)
-	}
-	executor := func(ctx context.Context, taskName string, f *workflow.Flow) error {
-		mu.Lock()
-		seenTask[taskName] = bagOf(ctx)
-		mu.Unlock()
-		return proxy.ExecuteTask(ctx, taskName, f)
+	host := &baggageRecordingHost{
+		TestProxy: proxy,
+		onLoad: func(ctx context.Context, name string) {
+			mu.Lock()
+			seenLoad[name] = bagOf(ctx)
+			mu.Unlock()
+		},
+		onTask: func(ctx context.Context, taskName string) {
+			mu.Lock()
+			seenTask[taskName] = bagOf(ctx)
+			mu.Unlock()
+		},
 	}
 
-	eng := engine.NewEngine().
-		WithGraphLoader(loader).
-		WithTaskExecutor(executor)
+	eng := engine.NewEngine().WithHost(host)
 	eng.RunInTest(t)
 
 	t.Run("baggage_reaches_loader_and_every_task_including_subgraph", func(t *testing.T) {

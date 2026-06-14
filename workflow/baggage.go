@@ -25,7 +25,7 @@ type baggageKeyType struct{}
 var baggageKey = baggageKeyType{}
 
 // ContextWithBaggage returns a copy of ctx carrying the flow's opaque baggage. The engine calls this
-// when dispatching to GraphLoader/TaskExecutor (and at the create-time GraphLoader call); hosts read
+// when dispatching to the host's LoadGraph/ExecuteTask (and at the create-time LoadGraph call); hosts read
 // the value back with BaggageFrom. Set the baggage itself via FlowOptions.Baggage at Create, not here.
 func ContextWithBaggage(ctx context.Context, baggage any) context.Context {
 	return context.WithValue(ctx, baggageKey, baggage)

@@ -14,7 +14,7 @@ See [Building graphs](graphs.md).
 ## Task
 
 A **task** is a named unit of work in a graph. It has a node name (its identity within the graph) and a
-URL (the address your `TaskExecutor` uses to reach it — a function key, an endpoint, a topic). A task
+URL (the address your host's `ExecuteTask` uses to reach it — a function key, an endpoint, a topic). A task
 reads inputs from the flow's state, does its work, and writes outputs back. Tasks are reusable across
 graphs; the same task URL can appear at several positions.
 

@@ -125,8 +125,7 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
+		WithHost(proxy).
 		WithNumShards(numShards)
 	eng.RunInTest(t)
 

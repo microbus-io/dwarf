@@ -59,8 +59,7 @@ func TestBreakerreconstituteflow(t *testing.T) {
 	dsn := "file:" + filepath.Join(t.TempDir(), "reconstitute.db")
 
 	eng1 := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
+		WithHost(proxy).
 		WithDSN(dsn).
 		WithWorkers(4)
 	if !assert.NoError(eng1.Startup(ctx)) {
@@ -98,8 +97,7 @@ func TestBreakerreconstituteflow(t *testing.T) {
 	// Downstream recovers, then a fresh engine boots on the same database.
 	broken.Store(false)
 	eng2 := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
+		WithHost(proxy).
 		WithDSN(dsn).
 		WithWorkers(4)
 	if !assert.NoError(eng2.Startup(ctx)) {

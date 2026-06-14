@@ -66,8 +66,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
+		WithHost(proxy).
 		WithTimeBudget(budget)
 	eng.RunInTest(t)
 

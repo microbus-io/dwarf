@@ -59,18 +59,14 @@ func TestCrossReplicaAwait(t *testing.T) {
 	})
 
 	dsn := "file:xrepl%d?mode=memory&cache=shared"
-	bridge1 := &peerBridge{}
-	bridge2 := &peerBridge{}
+	bridge1 := &peerBridge{TestProxy: proxy1}
+	bridge2 := &peerBridge{TestProxy: proxy2}
 	eng1 := engine.NewEngine().
-		WithGraphLoader(proxy1.LoadGraph).
-		WithTaskExecutor(proxy1.ExecuteTask).
-		WithPeerNotifier(bridge1).
+		WithHost(bridge1).
 		WithDSN(dsn).
 		WithWorkers(0)
 	eng2 := engine.NewEngine().
-		WithGraphLoader(proxy2.LoadGraph).
-		WithTaskExecutor(proxy2.ExecuteTask).
-		WithPeerNotifier(bridge2).
+		WithHost(bridge2).
 		WithDSN(dsn).
 		WithWorkers(2)
 	bridge1.peer = eng2

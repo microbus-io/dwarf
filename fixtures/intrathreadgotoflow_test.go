@@ -67,8 +67,7 @@ func TestIntrathreadgotoflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("loops_branch_converges_with_normal_branch_at_fan_in", func(t *testing.T) {

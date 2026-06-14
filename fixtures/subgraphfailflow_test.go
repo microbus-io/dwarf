@@ -58,8 +58,7 @@ func TestSubgraphfailflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("parent_recovers_from_subgraph_error_via_on_error", func(t *testing.T) {

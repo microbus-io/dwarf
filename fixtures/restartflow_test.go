@@ -62,8 +62,7 @@ func TestRestartflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("restart_reruns_from_entry_with_override", func(t *testing.T) {

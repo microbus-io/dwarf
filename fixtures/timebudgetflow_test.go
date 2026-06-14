@@ -57,8 +57,7 @@ func TestTimebudgetflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("slow_task_exceeds_budget_and_fails_flow", func(t *testing.T) {

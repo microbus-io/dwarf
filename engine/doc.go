@@ -23,32 +23,33 @@ limitations under the License.
 //
 // # Lifecycle
 //
-// Build an engine with NewEngine and the With* builder methods, inject at least a GraphLoader and a
-// TaskExecutor, then Startup (opens the database, runs migrations, starts workers). Shutdown drains the
-// workers and closes the database. In tests, RunInTest replaces Startup/Shutdown with per-test SQLite
-// databases and t.Cleanup.
+// Build an engine with NewEngine and the With* builder methods, register a Host (see WithHost), then
+// Startup (opens the database, runs migrations, starts workers). Shutdown drains the workers and closes
+// the database. In tests, RunInTest replaces Startup/Shutdown with per-test SQLite databases and
+// t.Cleanup.
 //
 //	eng := engine.NewEngine().
 //		WithDSN("postgres://user:pass@host:5432/dwarf").
-//		WithGraphLoader(loadGraph).
-//		WithTaskExecutor(runTask)
+//		WithHost(host)
 //	if err := eng.Startup(ctx); err != nil { ... }
 //	defer eng.Shutdown(ctx)
 //
-// The With* configuration methods are atomic and may be called after Startup for hot reconfiguration.
+// The configuration With* methods are atomic and may be called after Startup for hot reconfiguration.
 //
-// # Dependency interfaces
+// # Host
 //
-// The engine reaches the outside world through four injection points:
+// The engine reaches the outside world through a single injected Host interface (see WithHost):
 //
-//   - GraphLoader fetches a workflow graph by name (called once at Create; the graph JSON is then frozen
-//     on the flow).
-//   - TaskExecutor executes one task, given the Flow carrier with its state pre-populated.
-//   - FlowStoppedCallback (optional) is fired when a flow stops, for flows started via StartNotify.
-//   - PeerNotifier (optional) carries cross-replica coordination signals; nil in single-replica mode.
+//   - LoadGraph fetches a workflow graph by name (called at Create; the graph JSON is then frozen on the
+//     flow), and on subgraph spawn.
+//   - ExecuteTask executes one task, given the Flow carrier with its state pre-populated.
+//   - FlowStopped is fired when a flow stops, for flows started via StartNotify; a host with no
+//     notification need does nothing here.
+//   - Enqueue/SyncValve/TripBreaker/NotifyStatusChange carry cross-replica coordination signals; a
+//     single-replica host does nothing in them.
 //
 // The flow's opaque baggage (host identity/tenant/context, set in workflow.FlowOptions) rides on the
-// dispatch context of every GraphLoader and TaskExecutor call; read it with workflow.BaggageFrom(ctx).
+// dispatch context of every LoadGraph and ExecuteTask call; read it with workflow.BaggageFrom(ctx).
 //
 // # Operations
 //

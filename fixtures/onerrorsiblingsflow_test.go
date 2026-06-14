@@ -78,8 +78,7 @@ func TestOnerrorsiblingsflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("flow_completes_with_handler_and_siblings", func(t *testing.T) {

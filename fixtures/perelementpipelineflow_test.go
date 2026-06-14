@@ -79,8 +79,7 @@ func TestPerelementpipelineflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("three_elements_produce_three_pipelines", func(t *testing.T) {

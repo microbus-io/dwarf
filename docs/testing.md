@@ -8,8 +8,9 @@ interrupts, retries — with no database to set up and no transport to stand up.
 - **`Engine.RunInTest(t)`** replaces `Startup`/`Shutdown`. It opens an isolated SQLite in-memory database
   (per test, and per shard for multi-shard tests), runs migrations, and registers cleanup via `t.Cleanup`.
   No DSN, no teardown code.
-- **`engine.TestProxy`** is an in-memory stand-in for both dependency interfaces. Register graphs and task
-  functions on it, then use its `LoadGraph` as the `GraphLoader` and `ExecuteTask` as the `TaskExecutor`.
+- **`engine.TestProxy`** is an in-memory implementation of the `Host` interface. Register graphs and task
+  functions on it, then register it with `WithHost(proxy)` — its `LoadGraph`/`ExecuteTask` back the
+  required methods, and its peer methods are no-ops.
 
 ```go
 func TestCheckout(t *testing.T) {
@@ -33,8 +34,7 @@ func TestCheckout(t *testing.T) {
     })
 
     eng := dwarf.NewEngine().
-        WithGraphLoader(proxy.LoadGraph).
-        WithTaskExecutor(proxy.ExecuteTask)
+        WithHost(proxy)
     eng.RunInTest(t)
 
     out, err := eng.Run(ctx, "checkout", map[string]any{"sku": "ABC"}, nil)
@@ -54,8 +54,7 @@ you write in production.
 
 ```go
 eng := dwarf.NewEngine().
-    WithGraphLoader(proxy.LoadGraph).
-    WithTaskExecutor(proxy.ExecuteTask).
+    WithHost(proxy).
     WithWorkers(1).        // serialize dispatch to assert ordering
     WithNumShards(4)       // each shard gets its own in-memory database
 eng.RunInTest(t)
@@ -104,7 +103,10 @@ eyeballing what ran in what order.
 ## Multi-replica tests
 
 To test cross-replica behavior, stand up two engines sharing nothing but a relay that forwards each engine's
-`PeerNotifier` calls to the other's `Handle*` methods. This is how the engine's own cross-replica `Await`
+host peer-signal calls to the other's `Handle*` methods. The usual pattern is a `peerBridge` struct that
+embeds `*engine.TestProxy` and overrides the four peer methods
+(`Enqueue`/`SyncValve`/`TripBreaker`/`NotifyStatusChange`) to relay to the peer engine, then
+`WithHost(bridge)`. This is how the engine's own cross-replica `Await`
 and distributed-backpressure tests are written — see the `fixtures` package in the repository for worked
 examples.
 

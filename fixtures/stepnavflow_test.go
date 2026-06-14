@@ -49,8 +49,7 @@ func TestStepnavflow(t *testing.T) {
 	proxy.HandleTask("stepnavflow.verify:428/task-c", noop)
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	outcome, err := eng.Run(ctx, "stepnavflow.verify:428/flow", nil, nil)

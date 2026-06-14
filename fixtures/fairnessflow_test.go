@@ -53,8 +53,7 @@ func TestFairnessflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
+		WithHost(proxy).
 		WithWorkers(1)
 	eng.RunInTest(t)
 

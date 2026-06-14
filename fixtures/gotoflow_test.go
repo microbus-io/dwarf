@@ -58,8 +58,7 @@ func TestGotoflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("loops_one_then_falls_through", func(t *testing.T) {
@@ -101,8 +100,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("goto_to_unregistered_target_fails_flow", func(t *testing.T) {

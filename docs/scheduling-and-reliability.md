@@ -104,7 +104,7 @@ engine transport-agnostic. See [Writing tasks](tasks.md#signaling-backpressure-a
 
 ## Time budgets
 
-Each step's `TaskExecutor` call runs under a context deadline set by `WithTimeBudget` (default 2 minutes),
+Each step's `ExecuteTask` call runs under a context deadline set by `WithTimeBudget` (default 2 minutes),
 applied uniformly to every step. Your executor must honor `ctx` cancellation. For a tighter per-task bound,
 enforce it inside your executor (shorten the call context); the engine's budget is the outer ceiling. There
 is no engine-imposed *flow* deadline — implement one in author space with a `CreatedAt()` guard (see
@@ -113,7 +113,7 @@ is no engine-imposed *flow* deadline — implement one in author space with a `C
 ## Workers
 
 `WithWorkers` (default 64) caps per-replica concurrency. It's a generous static ceiling, not the
-backpressure mechanism — a worker blocked on a `TaskExecutor` call is just a goroutine and a socket, so
+backpressure mechanism — a worker blocked on an `ExecuteTask` call is just a goroutine and a socket, so
 over-provisioning is cheap. The adaptive valve, not the pool size, is what throttles a pressured downstream.
 
 Next: [Observability](observability.md).

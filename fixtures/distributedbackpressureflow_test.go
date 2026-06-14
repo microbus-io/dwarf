@@ -39,7 +39,11 @@ import (
 // peerBridge relays cross-replica coordination signals to a peer engine, standing in for the bus in a
 // single-process multi-replica test. All three signals are fire-and-forget; the bridge dispatches them
 // asynchronously to mirror bus semantics and avoid synchronous reentrancy into a peer mid-processStep.
+// peerBridge wraps a TestProxy (for LoadGraph/ExecuteTask) and relays the engine's cross-replica signals
+// to a peer engine's Handle* methods. Its own peer methods shadow the embedded proxy's single-replica
+// no-ops, so the bridge is a complete Host.
 type peerBridge struct {
+	*engine.TestProxy
 	peer *engine.Engine
 }
 
@@ -112,19 +116,15 @@ func TestDistributedbackpressureflow(t *testing.T) {
 	// Two replicas sharing the same shards. cache=shared keeps the named in-memory DB alive and visible
 	// to both engines' connection pools.
 	dsn := "file:dbpf%d?mode=memory&cache=shared"
-	bridge1 := &peerBridge{}
-	bridge2 := &peerBridge{}
+	bridge1 := &peerBridge{TestProxy: proxy}
+	bridge2 := &peerBridge{TestProxy: proxy}
 	eng1 := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
-		WithPeerNotifier(bridge1).
+		WithHost(bridge1).
 		WithDSN(dsn).
 		WithNumShards(2).
 		WithWorkers(2)
 	eng2 := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
-		WithPeerNotifier(bridge2).
+		WithHost(bridge2).
 		WithDSN(dsn).
 		WithNumShards(2).
 		WithWorkers(2)

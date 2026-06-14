@@ -98,8 +98,7 @@ func TestNestedfailfanoutflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	flowKey, err := eng.Create(ctx, "nestedfailfanoutflow.verify:428/nested", nil, nil)

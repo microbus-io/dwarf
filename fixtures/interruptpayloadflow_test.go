@@ -61,8 +61,7 @@ func TestInterruptpayloadflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("payload_is_separate_from_state", func(t *testing.T) {

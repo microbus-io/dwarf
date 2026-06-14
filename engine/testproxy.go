@@ -20,6 +20,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -29,12 +30,16 @@ import (
 // workflow.BaggageFrom(ctx).
 type TaskHandler func(ctx context.Context, flow *workflow.Flow) error
 
-// TestProxy routes graph fetches and task dispatches to registered handlers.
-// It implements both GraphLoader and TaskExecutor for use with Engine.RunInTest.
+// TestProxy routes graph fetches and task dispatches to registered handlers. It implements the Host
+// interface for use with Engine.WithHost / Engine.RunInTest: LoadGraph and ExecuteTask dispatch to the
+// registered handlers, FlowStopped invokes an optional callback set via OnFlowStopped, and the four
+// cross-replica signals are no-ops (single-replica). For a multi-replica test, wrap the proxy in a host
+// that overrides the peer-signal methods.
 type TestProxy struct {
-	mu     sync.RWMutex
-	graphs map[string]*workflow.Graph
-	tasks  map[string]TaskHandler
+	mu          sync.RWMutex
+	graphs      map[string]*workflow.Graph
+	tasks       map[string]TaskHandler
+	flowStopped func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome)
 }
 
 // NewTestProxy creates a new test proxy with empty handler registries.
@@ -61,7 +66,14 @@ func (p *TestProxy) HandleTask(name string, handler TaskHandler) {
 	p.tasks[name] = handler
 }
 
-// LoadGraph implements the GraphLoader signature.
+// OnFlowStopped registers a callback invoked by FlowStopped. Nil (the default) makes FlowStopped a no-op.
+func (p *TestProxy) OnFlowStopped(cb func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.flowStopped = cb
+}
+
+// LoadGraph implements Host.
 func (p *TestProxy) LoadGraph(ctx context.Context, workflowName string) (*workflow.Graph, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -72,7 +84,7 @@ func (p *TestProxy) LoadGraph(ctx context.Context, workflowName string) (*workfl
 	return g, nil
 }
 
-// ExecuteTask implements the TaskExecutor signature.
+// ExecuteTask implements Host.
 func (p *TestProxy) ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error {
 	p.mu.RLock()
 	h, ok := p.tasks[taskName]
@@ -82,3 +94,25 @@ func (p *TestProxy) ExecuteTask(ctx context.Context, taskName string, flow *work
 	}
 	return h(ctx, flow)
 }
+
+// FlowStopped implements Host; it invokes the callback set via OnFlowStopped, if any.
+func (p *TestProxy) FlowStopped(ctx context.Context, hostname string, outcome *workflow.FlowOutcome) {
+	p.mu.RLock()
+	cb := p.flowStopped
+	p.mu.RUnlock()
+	if cb != nil {
+		cb(ctx, hostname, outcome)
+	}
+}
+
+// Enqueue implements Host; the test proxy is single-replica, so it is a no-op.
+func (p *TestProxy) Enqueue(ctx context.Context, shard, stepID int) {}
+
+// SyncValve implements Host; no-op (single-replica).
+func (p *TestProxy) SyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time) {}
+
+// TripBreaker implements Host; no-op (single-replica).
+func (p *TestProxy) TripBreaker(ctx context.Context, taskName string) {}
+
+// NotifyStatusChange implements Host; no-op (single-replica).
+func (p *TestProxy) NotifyStatusChange(ctx context.Context, flowKey string, status string) {}

@@ -40,7 +40,7 @@ func (e *Engine) create(ctx context.Context, workflowName string, initialState a
 	opts = e.resolveFlowOptions(opts)
 	// The create-time GraphLoader sees the baggage on ctx in the same decoded shape every dispatch will.
 	loaderCtx := workflow.ContextWithBaggage(ctx, baggageMap(opts.Baggage))
-	graph, err := e.graphLoader(loaderCtx, workflowName)
+	graph, err := e.host.LoadGraph(loaderCtx, workflowName)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -363,9 +363,7 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 // cancelled, interrupted); non-terminal transitions (running) need only the local notifyStatusChange.
 func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) {
 	e.notifyStatusChange(flowKey, status)
-	if e.peerNotifier != nil {
-		e.peerNotifier.NotifyStatusChange(ctx, flowKey, status)
-	}
+	e.host.NotifyStatusChange(ctx, flowKey, status)
 }
 
 // notifyStatusChange wakes up all Await callers waiting on the given flow.
@@ -394,9 +392,7 @@ func (e *Engine) notifyStatusChange(flowKey string, status string) {
 // the local-only handleEnqueue primitive.
 func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	e.handleEnqueue(ctx, shard, stepID)
-	if e.peerNotifier != nil {
-		e.peerNotifier.Enqueue(ctx, shard, stepID)
-	}
+	e.host.Enqueue(ctx, shard, stepID)
 }
 
 // handleEnqueue processes a doorbell signal on the local replica only.
@@ -523,10 +519,10 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	var rootNotifyHostname string
 	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", surgraphFlowIDs[rootIdx]).Scan(&rootNotifyHostname)
 	rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
-	if rootNotifyHostname != "" && e.flowStoppedCallback != nil {
+	if rootNotifyHostname != "" {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStates[rootIdx]), &finalState)
-		e.flowStoppedCallback(ctx, rootNotifyHostname, &workflow.FlowOutcome{
+		e.host.FlowStopped(ctx, rootNotifyHostname, &workflow.FlowOutcome{
 			FlowKey:      rootCompositeID,
 			Status:       workflow.StatusCancelled,
 			State:        finalState,

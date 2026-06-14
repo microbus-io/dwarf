@@ -103,8 +103,7 @@ func TestReducervariantsflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("min_max_and_or_concat_merge", func(t *testing.T) {

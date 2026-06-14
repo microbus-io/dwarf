@@ -20,26 +20,16 @@ import (
 	"context"
 	"testing"
 
-	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
-
-func noopGraphLoader(ctx context.Context, name string) (*workflow.Graph, error) {
-	return nil, nil
-}
-
-func noopTaskExecutor(ctx context.Context, name string, flow *workflow.Flow) error {
-	return nil
-}
 
 func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine().
-		WithGraphLoader(noopGraphLoader).
-		WithTaskExecutor(noopTaskExecutor)
+		WithHost(noopHost{})
 	e.RunInTest(t)
 
 	// Verify the schema was created by querying the flows table.
@@ -61,8 +51,7 @@ func TestDatabase_ShardOutOfRange(t *testing.T) {
 	assert := testarossa.For(t)
 
 	e := NewEngine().
-		WithGraphLoader(noopGraphLoader).
-		WithTaskExecutor(noopTaskExecutor)
+		WithHost(noopHost{})
 	e.RunInTest(t)
 
 	_, err := e.shard(0)
@@ -78,8 +67,7 @@ func TestDatabase_EachShardSingleShard(t *testing.T) {
 	assert := testarossa.For(t)
 
 	e := NewEngine().
-		WithGraphLoader(noopGraphLoader).
-		WithTaskExecutor(noopTaskExecutor)
+		WithHost(noopHost{})
 	e.RunInTest(t)
 
 	var visited []int

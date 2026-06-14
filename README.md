@@ -27,8 +27,7 @@ proxy.HandleTask("hello", func(ctx context.Context, f *workflow.Flow) error {
 })
 
 eng := dwarf.NewEngine().
-    WithGraphLoader(proxy.LoadGraph).
-    WithTaskExecutor(proxy.ExecuteTask)
+    WithHost(proxy) // TestProxy implements the Host interface
 eng.RunInTest(t) // SQLite in-memory, auto-cleanup
 
 out, _ := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
@@ -70,32 +69,40 @@ Requires Go 1.26+.
 | Import | Role | Who imports it |
 |---|---|---|
 | `github.com/microbus-io/dwarf` | Thin convenience: `NewEngine()` | The host process |
-| `github.com/microbus-io/dwarf/engine` | The engine: lifecycle, operations, config, dependency interfaces | The host process only |
+| `github.com/microbus-io/dwarf/engine` | The engine: lifecycle, operations, config, the `Host` interface | The host process only |
 | `github.com/microbus-io/dwarf/workflow` | Pure types: `Graph`, `Flow`, `FlowOptions`, reducers, error helpers | Any code that defines tasks or graphs |
 
 The split matters: `dwarf/workflow` is a lightweight type package. Code that *defines* tasks and graphs
 imports only `dwarf/workflow`, never the engine, so the engine's heavy dependencies (SQL drivers, the
 scheduler) stay out of those builds.
 
-## The dependency-injection model
+## The host model
 
-The engine reaches the outside world through four injection points. Only the first two are required.
+The engine reaches the outside world through a single `Host` interface, registered once with
+`WithHost`. Only the first two methods are required; an implementation does nothing in the rest when it
+has no stop-notification need or runs single-replica.
 
 ```go
-// Fetch a workflow graph by name. Called once at Create; the graph is then frozen on the flow.
-type GraphLoader func(ctx context.Context, workflowName string) (*workflow.Graph, error)
+type Host interface {
+    // Required. Fetch a workflow graph by name (called at Create; the graph is then frozen on the flow,
+    // and on subgraph spawn).
+    LoadGraph(ctx context.Context, workflowName string) (*workflow.Graph, error)
 
-// Execute one task. The Flow carrier arrives with its input state populated; write outputs to it.
-type TaskExecutor func(ctx context.Context, taskName string, flow *workflow.Flow) error
+    // Required. Execute one task. The Flow carrier arrives with its input state populated; write outputs.
+    ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error
 
-// Optional: fired when a flow stops, for flows started via StartNotify.
-type FlowStoppedCallback func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome)
+    // Optional. Fired when a flow stops, for flows started via StartNotify.
+    FlowStopped(ctx context.Context, hostname string, outcome *workflow.FlowOutcome)
 
-// Optional: cross-replica coordination (nil for single-replica).
-type PeerNotifier interface { ... }
+    // Optional. Cross-replica coordination signals (no-ops for single-replica).
+    Enqueue(ctx context.Context, shard, stepID int)
+    SyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time)
+    TripBreaker(ctx context.Context, taskName string)
+    NotifyStatusChange(ctx context.Context, flowKey string, status string)
+}
 ```
 
-A standalone host backs `GraphLoader` with an in-memory registry / file / database, and `TaskExecutor`
+A standalone host backs `LoadGraph` with an in-memory registry / file / database, and `ExecuteTask`
 with a local function table or an RPC client. A bus-based host (for example a microservice mesh) bridges
 them to its transport. The engine never learns how tasks are reached.
 
@@ -106,8 +113,7 @@ eng := dwarf.NewEngine().
     WithDSN("postgres://user:pass@db:5432/dwarf").
     WithNumShards(2).
     WithWorkers(64).
-    WithGraphLoader(loadGraph).
-    WithTaskExecutor(runTask).
+    WithHost(host).
     WithLogger(slog.Default()).
     WithMeterProvider(otel.GetMeterProvider()).
     WithTracerProvider(otel.GetTracerProvider())

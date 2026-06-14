@@ -54,17 +54,16 @@ func TestBreakpointnotifyflow(t *testing.T) {
 	var notifiedStatus atomic.Value
 	notified := make(chan struct{}, 1)
 
-	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask).
-		WithFlowStoppedCallback(func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome) {
-			notifiedHost.Store(hostname)
-			notifiedStatus.Store(outcome.Status)
-			select {
-			case notified <- struct{}{}:
-			default:
-			}
-		})
+	proxy.OnFlowStopped(func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome) {
+		notifiedHost.Store(hostname)
+		notifiedStatus.Store(outcome.Status)
+		select {
+		case notified <- struct{}{}:
+		default:
+		}
+	})
+
+	eng := engine.NewEngine().WithHost(proxy)
 	eng.RunInTest(t)
 
 	flowKey, err := eng.Create(ctx, "breakpointnotifyflow.verify:428/flow", nil, nil)

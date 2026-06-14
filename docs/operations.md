@@ -14,7 +14,7 @@ flowKey, err := eng.Create(ctx, workflowName, initialState, opts) // makes a flo
 outcome,  err := eng.Run(ctx, workflowName, initialState, opts)   // Create + Start + Await
 ```
 
-`Create` calls your `GraphLoader`, inserts the flow and its entry step, and freezes the graph — but does
+`Create` calls your host's `LoadGraph`, inserts the flow and its entry step, and freezes the graph — but does
 not start it. `Run` does the whole round-trip and returns the final `*workflow.FlowOutcome`.
 
 `initialState` is any JSON-marshalable value (typically `map[string]any`). `opts` is a
@@ -41,12 +41,12 @@ handy for running one unit of work with the engine's durability and scheduling.
 
 ```go
 err := eng.Start(ctx, flowKey)                       // created -> running
-err := eng.StartNotify(ctx, flowKey, "my-hostname")  // also fire FlowStoppedCallback on stop
+err := eng.StartNotify(ctx, flowKey, "my-hostname")  // also fire the host's FlowStopped on stop
 ```
 
 `Start` transitions a created flow to running and signals the workers to pick it up. `StartNotify`
 additionally
-records a hostname; when the flow stops, the engine invokes your injected `FlowStoppedCallback` with that
+records a hostname; when the flow stops, the engine invokes your host's `FlowStopped` with that
 hostname and the outcome — useful for push notification instead of blocking on `Await`.
 
 ### Await
@@ -57,7 +57,7 @@ outcome, err := eng.Await(ctx, flowKey)
 
 Blocks until the flow stops — `completed`, `failed`, `cancelled`, or `interrupted` — and returns the
 outcome. It wakes on a status-change notification or context cancellation; there is no polling. Across
-replicas, `Await` relies on the `PeerNotifier` broadcast (see [Deployment](deployment.md)).
+replicas, `Await` relies on the host's `NotifyStatusChange` broadcast (see [Deployment](deployment.md)).
 
 ## The outcome
 
@@ -176,7 +176,7 @@ tripped := eng.BreakerTripped(taskName) // is this task's breaker open right now
 
 ## Cross-replica inbound signals
 
-When running multiple replicas, your `PeerNotifier` publishes coordination signals; the receiving replica
+When running multiple replicas, your host's peer-signal methods publish coordination signals; the receiving replica
 feeds them back in via `HandleEnqueue`, `HandleSyncValve`, `HandleTripBreaker`, and
 `HandleNotifyStatusChange`. These are the inbound half of multi-replica coordination, not part of the
 day-to-day API — see [Deployment → Running multiple replicas](deployment.md#running-multiple-replicas).

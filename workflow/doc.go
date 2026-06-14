@@ -53,7 +53,7 @@ limitations under the License.
 //
 // # Signaling backpressure and breakers
 //
-// To engage the engine's adaptive mechanisms from a TaskExecutor, wrap the returned error with
+// To engage the engine's adaptive mechanisms from a host's ExecuteTask, wrap the returned error with
 // ErrBackpressure (rate-limit the task) or ErrBreakerTrip (trip the task's circuit breaker). The engine
 // classifies via IsBackpressure / IsBreakerTrip; it never inspects status codes itself.
 //

@@ -13,12 +13,12 @@ All configuration is set with `With*` builder methods. They are applied atomical
 | `WithDSN(dsn)` | `""` | Database connection string (dialect auto-detected) |
 | `WithNumShards(n)` | 1 | Number of database shards |
 | `WithWorkers(n)` | 64 | Per-replica worker concurrency cap |
-| `WithTimeBudget(d)` | 2m | Per-step `TaskExecutor` deadline |
+| `WithTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `WithDefaultPriority(p)` | 100 | Priority for flows that don't set one |
 | `WithMaxOpenConns(n)` | 8 | Max open DB connections per shard (idle == open) |
 
-Dependency injection (set before `Startup`): `WithGraphLoader`, `WithTaskExecutor`,
-`WithFlowStoppedCallback`, `WithPeerNotifier`, `WithLogger`, `WithMeterProvider`, `WithTracerProvider`.
+Dependency injection (set before `Startup`): `WithHost`, `WithLogger`, `WithMeterProvider`,
+`WithTracerProvider`.
 
 ## Choosing a database
 
@@ -82,7 +82,7 @@ eng.WithDSN("postgres://user:pass@db:5432/dwarf_%d?sslmode=disable").WithNumShar
 ## Connection pool
 
 `WithMaxOpenConns` (default 8 per shard, with `MaxIdle == MaxOpen`) sizes each shard's pool. Workers spend
-most of their time waiting on the `TaskExecutor` call, not holding a SQL connection, so a small absolute
+most of their time waiting on the `ExecuteTask` call, not holding a SQL connection, so a small absolute
 number suffices. Keeping idle == open matters more than the absolute number: under bursty load, close/reopen
 churn (TCP + TLS + auth per cycle) dominates query time. Pool 8 is a good default; much larger regresses
 (pool-mutex contention with no usable extra concurrency). Tune explicitly only for a different workload mix.
@@ -94,11 +94,13 @@ dispatches work independently; the database (via an atomic claim) arbitrates, so
 same step. Most coordination is recovered automatically by each replica's background poll, but for low
 latency replicas exchange **fire-and-forget peer signals**.
 
-Provide a `PeerNotifier` to publish those signals to your other replicas (over whatever transport you
-have), and feed inbound signals back in with the matching `Handle*` method:
+Implement your host's peer-signal methods to publish those signals to your other replicas (over whatever
+transport you have), and feed inbound signals back in with the matching `Handle*` method. These are the
+optional methods on the `Host` interface:
 
 ```go
-type PeerNotifier interface {
+type Host interface {
+    // ... required LoadGraph / ExecuteTask, plus optional FlowStopped ...
     Enqueue(ctx context.Context, shard, stepID int)                          // a step is pending
     SyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time) // rate-controller gossip
     TripBreaker(ctx context.Context, taskName string)                        // breaker gossip
@@ -121,8 +123,8 @@ Two delivery rules:
 - **`NotifyStatusChange` is what wakes a cross-replica `Await`.** A flow created on replica A but completed
   on replica B wakes A's `Await` only via this broadcast — without it, A blocks until its context deadline.
 
-In a single-replica deployment, leave `PeerNotifier` nil; none of this runs, and the background poll is the
-only (and sufficient) recovery path.
+In a single-replica deployment, leave the host's peer methods as no-ops; none of this runs, and the
+background poll is the only (and sufficient) recovery path.
 
 ## Crash recovery
 

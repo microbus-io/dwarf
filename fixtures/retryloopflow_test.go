@@ -63,8 +63,7 @@ func TestRetryloopflow(t *testing.T) {
 	})
 
 	eng := engine.NewEngine().
-		WithGraphLoader(proxy.LoadGraph).
-		WithTaskExecutor(proxy.ExecuteTask)
+		WithHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("loops_until_target_then_succeeds", func(t *testing.T) {
