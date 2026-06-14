@@ -29,7 +29,7 @@ import (
 
 // TestCrossReplicaAwait verifies that an Await on the replica that did NOT run a flow's final step still
 // wakes when a peer replica completes it. eng1 is a pure awaiter (zero workers, so it can never claim or
-// execute a step); eng2 does all the work. The peerBridge relays NotifyStatusChange from eng2 to eng1, so
+// execute a step); eng2 does all the work. proxy2's SignalPeers relays the status-change signal from eng2 to eng1, so
 // the only path by which eng1's Await can return is the cross-replica notification. Without that wiring
 // this test would block until its context deadline.
 func TestCrossReplicaAwait(t *testing.T) {
@@ -59,18 +59,16 @@ func TestCrossReplicaAwait(t *testing.T) {
 	})
 
 	dsn := "file:xrepl%d?mode=memory&cache=shared"
-	bridge1 := &peerBridge{TestProxy: proxy1}
-	bridge2 := &peerBridge{TestProxy: proxy2}
 	eng1 := engine.NewEngine().
-		WithHost(bridge1).
+		WithHost(proxy1).
 		WithDSN(dsn).
 		WithWorkers(0)
 	eng2 := engine.NewEngine().
-		WithHost(bridge2).
+		WithHost(proxy2).
 		WithDSN(dsn).
 		WithWorkers(2)
-	bridge1.peer = eng2
-	bridge2.peer = eng1
+	proxy1.AddPeer(eng2)
+	proxy2.AddPeer(eng1)
 
 	err := eng1.Startup(ctx)
 	assert.NoError(err)

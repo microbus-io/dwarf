@@ -15,10 +15,11 @@ limitations under the License.
 */
 
 /*
-Multi-replica testing: two Engine instances sharing the same in-memory SQLite databases. A peerBridge
-relays each engine's SignalPeers to the other's DeliverSignal, standing in for the bus so a doorbell,
-valve cut, or breaker trip on one replica reaches the other. SUM(running) aggregation across every shard
-produces cluster-wide saturation; a 429 on one replica propagates via valve gossip so both converge.
+Multi-replica testing: two Engine instances sharing the same in-memory SQLite databases. Each replica has
+its own TestProxy with the other engine added via AddPeer, so each engine's SignalPeers relays to the
+other's DeliverSignal, standing in for the bus — a doorbell, valve cut, or breaker trip on one replica
+reaches the other. SUM(running) aggregation across every shard produces cluster-wide saturation; a 429 on
+one replica propagates via valve gossip so both converge.
 */
 package fixtures
 
@@ -36,38 +37,24 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// peerBridge wraps a TestProxy (for LoadGraph/ExecuteTask) and relays the engine's cross-replica signals
-// to a peer engine's DeliverSignal, standing in for the bus. Its SignalPeers shadows the embedded
-// proxy's single-replica no-op, so the bridge is a complete Host. The relay is async to mirror bus
-// semantics and avoid synchronous reentrancy into a peer mid-processStep.
-type peerBridge struct {
-	*engine.TestProxy
-	peer *engine.Engine
-}
-
-func (b *peerBridge) SignalPeers(ctx context.Context, op string, payload []byte) {
-	p := b.peer
-	if p != nil {
-		go p.DeliverSignal(context.WithoutCancel(ctx), op, payload)
-	}
-}
-
 func TestDistributedbackpressureflow(t *testing.T) {
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
+	proxy1 := engine.NewTestProxy()
+	proxy2 := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("distributedbackpressureflow.verify:428/distributed-backpressure")
 	graph.AddTask("bounded", "distributedbackpressureflow.verify:428/bounded")
 	graph.AddTransition("bounded", workflow.END)
-	proxy.HandleGraph("distributedbackpressureflow.verify:428/distributed-backpressure", graph)
+	proxy1.HandleGraph("distributedbackpressureflow.verify:428/distributed-backpressure", graph)
+	proxy2.HandleGraph("distributedbackpressureflow.verify:428/distributed-backpressure", graph)
 
 	const cap = 2
 	var mu sync.Mutex
 	var inFlight, peak int
 	var rejections, completions atomic.Int32
 
-	proxy.HandleTask("distributedbackpressureflow.verify:428/bounded", func(ctx context.Context, f *workflow.Flow) error {
+	boundedTask := func(ctx context.Context, f *workflow.Flow) error {
 		mu.Lock()
 		inFlight++
 		if inFlight > peak {
@@ -88,25 +75,26 @@ func TestDistributedbackpressureflow(t *testing.T) {
 		mu.Unlock()
 		completions.Add(1)
 		return nil
-	})
+	}
+	// Both replicas share the same handler closure (and its cluster-wide counters).
+	proxy1.HandleTask("distributedbackpressureflow.verify:428/bounded", boundedTask)
+	proxy2.HandleTask("distributedbackpressureflow.verify:428/bounded", boundedTask)
 
 	// Two replicas sharing the same shards. cache=shared keeps the named in-memory DB alive and visible
 	// to both engines' connection pools.
 	dsn := "file:dbpf%d?mode=memory&cache=shared"
-	bridge1 := &peerBridge{TestProxy: proxy}
-	bridge2 := &peerBridge{TestProxy: proxy}
 	eng1 := engine.NewEngine().
-		WithHost(bridge1).
+		WithHost(proxy1).
 		WithDSN(dsn).
 		WithNumShards(2).
 		WithWorkers(2)
 	eng2 := engine.NewEngine().
-		WithHost(bridge2).
+		WithHost(proxy2).
 		WithDSN(dsn).
 		WithNumShards(2).
 		WithWorkers(2)
-	bridge1.peer = eng2
-	bridge2.peer = eng1
+	proxy1.AddPeer(eng2)
+	proxy2.AddPeer(eng1)
 
 	err := eng1.Startup(ctx)
 	testarossa.For(t).NoError(err)
@@ -128,8 +116,8 @@ func TestDistributedbackpressureflow(t *testing.T) {
 			keys = append(keys, k)
 		}
 
-		// Await on eng1 even for flows eng2 ran: the peerBridge relays NotifyStatusChange so eng1's
-		// waiters wake when a peer completes the flow.
+		// Await on eng1 even for flows eng2 ran: proxy2's SignalPeers relays the status-change signal to
+		// eng1's DeliverSignal so eng1's waiters wake when a peer completes the flow.
 		for _, k := range keys {
 			timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			outcome, err := eng1.Await(timeoutCtx, k)

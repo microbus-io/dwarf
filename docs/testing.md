@@ -102,12 +102,22 @@ eyeballing what ran in what order.
 
 ## Multi-replica tests
 
-To test cross-replica behavior, stand up two engines sharing nothing but a relay that forwards each engine's
-`SignalPeers` calls to the other's `DeliverSignal`. The usual pattern is a `peerBridge` struct that
-embeds `*engine.TestProxy` and overrides `SignalPeers` to relay `(op, payload)` to the peer engine, then
-`WithHost(bridge)`. This is how the engine's own cross-replica `Await`
-and distributed-backpressure tests are written — see the `fixtures` package in the repository for worked
-examples.
+To test cross-replica behavior, give each engine its own `TestProxy` and register the other engines with
+`proxy.AddPeer(otherEngine)`. The proxy's `SignalPeers` then relays each signal to every peer's
+`DeliverSignal`, standing in for the bus:
+
+```go
+proxy1, proxy2 := engine.NewTestProxy(), engine.NewTestProxy()
+// register the same graphs/tasks on both...
+eng1 := engine.NewEngine().WithHost(proxy1).WithDSN(sharedDSN)
+eng2 := engine.NewEngine().WithHost(proxy2).WithDSN(sharedDSN)
+proxy1.AddPeer(eng2)
+proxy2.AddPeer(eng1)
+```
+
+Use a shared in-memory DSN (e.g. `"file:x%d?mode=memory&cache=shared"`) so both engines see the same
+databases. This is how the engine's own cross-replica `Await` and distributed-backpressure tests are
+written — see the `fixtures` package in the repository for worked examples.
 
 ## Where examples live
 

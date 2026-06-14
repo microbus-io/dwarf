@@ -31,14 +31,15 @@ type TaskHandler func(ctx context.Context, flow *workflow.Flow) error
 
 // TestProxy routes graph fetches and task dispatches to registered handlers. It implements the Host
 // interface for use with Engine.WithHost / Engine.RunInTest: LoadGraph and ExecuteTask dispatch to the
-// registered handlers, FlowStopped invokes an optional callback set via OnFlowStopped, and the four
-// cross-replica signals are no-ops (single-replica). For a multi-replica test, wrap the proxy in a host
-// that overrides the peer-signal methods.
+// registered handlers, FlowStopped invokes an optional callback set via OnFlowStopped, and SignalPeers
+// relays to the peer engines registered with AddPeer (none by default, i.e. single-replica). For a
+// multi-replica test, give each replica its own proxy and AddPeer the other engines.
 type TestProxy struct {
 	mu          sync.RWMutex
 	graphs      map[string]*workflow.Graph
 	tasks       map[string]TaskHandler
 	flowStopped func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome)
+	peers       []*Engine
 }
 
 // NewTestProxy creates a new test proxy with empty handler registries.
@@ -104,5 +105,23 @@ func (p *TestProxy) FlowStopped(ctx context.Context, hostname string, outcome *w
 	}
 }
 
-// SignalPeers implements Host; the test proxy is single-replica, so it is a no-op.
-func (p *TestProxy) SignalPeers(ctx context.Context, op string, payload []byte) {}
+// AddPeer registers a peer engine that SignalPeers relays to, standing in for the bus in a
+// single-process multi-replica test. Add every OTHER replica's engine (not this proxy's own), so the
+// engine's self-exclusion contract holds. Call before Startup/RunInTest.
+func (p *TestProxy) AddPeer(peer *Engine) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.peers = append(p.peers, peer)
+}
+
+// SignalPeers implements Host; it relays the signal to every peer engine registered with AddPeer. With
+// no peers (the default) it is a single-replica no-op. The relay is async to mirror bus semantics and
+// avoid synchronous reentrancy into a peer mid-processStep.
+func (p *TestProxy) SignalPeers(ctx context.Context, op string, payload []byte) {
+	p.mu.RLock()
+	peers := p.peers
+	p.mu.RUnlock()
+	for _, peer := range peers {
+		go peer.DeliverSignal(context.WithoutCancel(ctx), op, payload)
+	}
+}
