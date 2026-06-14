@@ -38,10 +38,19 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	defer func() {
 		if sequel.IsLockContentionError(err) {
 			if db, derr := e.shard(shardNum); derr == nil {
-				db.ExecContext(ctx,
-					"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-					workflow.StatusPending, stepID, workflow.StatusRunning,
-				)
+				// Reset the leased step so the immediate re-poll can re-dispatch it. This recovery
+				// runs precisely during a lock-contention storm, so a single best-effort UPDATE can
+				// itself lose to contention and silently fail - leaving the step `running` with its
+				// full lease (TimeBudget+margin) and stranding the flow until lease expiry, minutes
+				// past the poll cadence. Transact retries on contention; the WHERE status='running'
+				// guard keeps it idempotent.
+				db.Transact(ctx, func(tx *sequel.Tx) error {
+					_, terr := tx.ExecContext(ctx,
+						"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+						workflow.StatusPending, stepID, workflow.StatusRunning,
+					)
+					return terr
+				})
 			}
 			e.shortenNextPoll(time.Now())
 		}

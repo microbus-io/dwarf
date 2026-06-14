@@ -102,6 +102,7 @@ type Engine struct {
 	flowStoppedCallback FlowStoppedCallback
 	peerNotifier        PeerNotifier
 	logger              *slog.Logger
+	loggerSet           bool // true once WithLogger received a non-nil logger; gates whether sequel logs
 	meterProvider       metric.MeterProvider
 	metrics             *engineMetrics
 	tracerProvider      trace.TracerProvider
@@ -172,7 +173,10 @@ type Engine struct {
 // NewEngine creates a new workflow engine.
 func NewEngine() *Engine {
 	e := &Engine{
-		logger:         slog.Default(),
+		// Default to a discard logger: a library stays silent until the host opts in by injecting one
+		// (WithLogger), rather than writing unbidden to the application-owned slog.Default(). Non-nil so
+		// the engine's e.logger.*Context call sites are nil-safe; produces no output until configured.
+		logger:         slog.New(slog.DiscardHandler),
 		lastRefillBand: -1,
 	}
 	e.dsn.Store("")
@@ -252,8 +256,12 @@ func (e *Engine) WithPeerNotifier(pn PeerNotifier) *Engine {
 // WithMeterProvider sets the OpenTelemetry MeterProvider the engine builds its dwarf_* instruments
 // from. Defaults to the global otel.GetMeterProvider() (the no-op provider unless the host configures
 // the OTEL SDK). The engine creates instruments under the "github.com/microbus-io/dwarf" scope; the
-// provider's Resource carries the host service's identity. Must be set before Startup.
+// provider's Resource carries the host service's identity. Must be set before Startup; the engine
+// resolves the meter once at startup, so a call after Startup is a no-op.
 func (e *Engine) WithMeterProvider(mp metric.MeterProvider) *Engine {
+	if e.started.Load() {
+		return e
+	}
 	e.meterProvider = mp
 	return e
 }
@@ -265,20 +273,33 @@ func (e *Engine) WithMeterProvider(mp metric.MeterProvider) *Engine {
 // TaskExecutor's context so the task's downstream spans nest under it. The host injects only the
 // provider - no span code, no trace_parent handling. Spans are created under the
 // "github.com/microbus-io/dwarf" scope; the provider's Resource carries the host's identity. Must be
-// set before Startup.
+// set before Startup; the engine resolves the tracer once at startup, so a call after Startup is a no-op.
 func (e *Engine) WithTracerProvider(tp trace.TracerProvider) *Engine {
+	if e.started.Load() {
+		return e
+	}
 	e.tracerProvider = tp
 	return e
 }
 
 // WithLogger sets the structured logger. The engine logs through the *Context variants
 // (DebugContext/InfoContext/WarnContext/ErrorContext) so a handler that reads the context -
-// e.g. the otelslog bridge - can correlate each record with the active step span. Defaults
-// to slog.Default(); a host routes logs to OTEL by passing a logger whose handler bridges
-// there. A nil logger is treated as slog.Default().
+// e.g. the otelslog bridge - can correlate each record with the active step span. A host
+// routes logs to OTEL by passing a logger whose handler bridges there. Defaults to a discard
+// logger: until a logger is injected the engine (and its sequel DB layer) stay silent rather
+// than writing to the application-owned slog.Default(). A nil logger resets to that silent
+// default. Must be set before Startup; the engine wires the logger into the worker hot path and
+// the shard DBs at startup, so a call after Startup is a no-op (keeping the hot-path read of the
+// logger lock-free).
 func (e *Engine) WithLogger(l *slog.Logger) *Engine {
+	if e.started.Load() {
+		return e
+	}
 	if l == nil {
-		l = slog.Default()
+		l = slog.New(slog.DiscardHandler)
+		e.loggerSet = false
+	} else {
+		e.loggerSet = true
 	}
 	e.logger = l
 	return e

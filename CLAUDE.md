@@ -32,9 +32,12 @@ adapter," it means that wrapping layer.
   publishes these to peers; inbound signals from peers are delivered back into the engine via `HandleEnqueue`,
   `HandleSyncValve`, `HandleTripBreaker`, `HandleNotifyStatusChange`. In a single-replica deployment the notifier is
   nil and none of this runs.
-- **`*slog.Logger`** - structured logging sink (`WithLogger`); defaults to `slog.Default()`. The engine logs
-  through the `…Context` variants so a context-aware handler (e.g. the `otelslog` bridge) can correlate records
-  with the active step span.
+- **`*slog.Logger`** - structured logging sink (`WithLogger`); defaults to a **discard** logger (the engine and
+  its sequel DB layer stay silent until a logger is injected, rather than writing to the application-owned
+  `slog.Default()` - the library convention). A nil logger resets to that silent default. The engine logs through
+  the `…Context` variants so a context-aware handler (e.g. the `otelslog` bridge) can correlate records with the
+  active step span. The injected logger is also handed to sequel (only when explicitly set), so the SQL layer's
+  migration logs flow through the same sink.
 - **`metric.MeterProvider`** - OTEL meter provider (`WithMeterProvider`); defaults to the global
   `otel.GetMeterProvider()` (no-op unless the host configures the SDK). The engine builds its `dwarf_*`
   instruments under the `github.com/microbus-io/dwarf` scope (see "Metrics" below).
@@ -58,6 +61,15 @@ adapter bridging to a bus maps between the two at the seam.)
 
 `WithDSN`, `WithNumShards`, `WithWorkers`, `WithTimeBudget`, `WithDefaultPriority`, `WithMaxOpenConns`. They are
 atomically applied, so they double as hot-reconfiguration knobs after `Startup`.
+
+The observability builders - `WithLogger`, `WithMeterProvider`, `WithTracerProvider` - are by contrast
+**construction-time only**: each guards on `e.started` and is a no-op once `Startup` has run. The engine resolves
+the logger/tracer/meter once at startup (the logger feeds the worker hot path and is read lock-free; the meter
+registers an async gauge callback) and wires all three into every shard's sequel DB in `configureDBTelemetry`.
+Hot-swapping a provider on a live engine is deliberately unsupported: a half-hot version that only re-pointed the
+DBs (sequel's setters are atomic/hot) but left the engine's own logger/tracer/metrics frozen would be inconsistent,
+and a full-hot version (atomic logger + tracer re-resolve + meter rebuild/Unregister) is real complexity for a need
+that does not arise in practice.
 
 ### Core Concepts
 
@@ -129,8 +141,13 @@ flow to `running` in one transaction, then rings the doorbell for the current st
 **StartNotify** - Like `Start`, but stores a `notify_hostname`. When the flow stops, the engine invokes the
 `FlowStoppedCallback` with that hostname and a `*workflow.FlowOutcome`.
 
-**Snapshot** - Returns the current state, status, task name, and step number. During fan-out (`step_id=0`), it queries
-`dwarf_steps` directly for the active steps.
+**Snapshot** - Returns a `*workflow.FlowOutcome` for a flow at the current moment. For terminal statuses
+(`completed`/`failed`/`cancelled`) it returns the flow's `final_state` (plus `Error`/`CancelReason`); for
+`interrupted` it returns the leaf interrupted step's merged `state+changes` and its `interrupt_payload`.
+For a `running` or `created` flow it returns the status with an **empty `State`** - dwarf does not
+currently reconstruct the live in-flight merged state (including the fan-out `step_id=0` case). Porting the
+foreman's live fan-out snapshot is a deliberately-deferred behavioral decision (it returns work-in-progress
+state that no other path exposes); confirm against product intent before implementing.
 
 **Resume** - Continues a flow paused by `flow.Interrupt`. Walks up the surgraph chain (`surgraphChain`) and down the
 interrupted subgraph chain (`interruptedSubgraphChain`) to the leaf interrupted step. Records resume data on the

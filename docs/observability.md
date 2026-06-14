@@ -12,7 +12,9 @@ Inject a standard library `*slog.Logger`:
 eng.WithLogger(slog.Default())
 ```
 
-It defaults to `slog.Default()`; a nil logger is coerced to it. The engine logs through the `…Context`
+It defaults to a discard logger — the engine (and its sequel DB layer) stay silent until you inject one,
+rather than writing to the application-owned `slog.Default()`; a nil logger resets to that silent default.
+The engine logs through the `…Context`
 variants (`InfoContext`, `DebugContext`, …), so a context-aware handler can correlate each record with the
 active step span. To route logs to OpenTelemetry, pass a logger whose handler bridges there — e.g. the
 `otelslog` bridge — optionally fanned out to a stdout handler for container logs. The bridge stamps each
@@ -79,6 +81,21 @@ Subgraphs nest naturally: a subgraph gets its own "workflow" span parented to th
 a trace reads `workflow → caller-step → workflow(subgraph) → subgraph-steps`, mirroring the call structure.
 A step that yields and re-dispatches (after an interrupt or subgraph) produces one span per execution
 attempt.
+
+## SQL layer
+
+The same three providers are handed to the engine's `sequel` database layer, so the SQL underneath your
+workflows shows up in the same pipeline: `sequel_*` query/transaction/lock-contention metrics, per-operation
+spans (nested under the active step span), and migration logs — all under the scope
+`github.com/microbus-io/sequel`. The logger is forwarded only when you explicitly set one, so an
+unconfigured engine stays silent here too.
+
+## Configuration timing
+
+All three observability knobs — `WithLogger`, `WithMeterProvider`, `WithTracerProvider` — are
+**construction-time**: set them before `Startup`. The engine resolves the providers and wires them into the
+worker hot path and the shard DBs once at startup, so a call after `Startup` is a deliberate no-op (it
+keeps the hot-path reads lock-free). Hot-swapping a provider on a live engine is not supported.
 
 ## Putting it together
 

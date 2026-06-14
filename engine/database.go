@@ -29,6 +29,7 @@ import (
 
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
+	"go.opentelemetry.io/otel"
 
 	"github.com/microbus-io/dwarf/migrations"
 )
@@ -144,11 +145,40 @@ func (e *Engine) openAndMigrate(dsn string) (*sequel.DB, error) {
 	poolSize := int(e.maxOpenConns.Load())
 	db.SetMaxOpenConns(poolSize)
 	db.SetMaxIdleConns(poolSize)
+	// Point sequel at the engine's own observability providers before migrating, so the SQL layer's
+	// sequel_* spans/metrics and its migration logs flow through the same logger/tracer/meter the host
+	// injected into dwarf - and migration telemetry is captured too. Resolved injected-or-global,
+	// matching how the engine resolves its own providers in initTracer/initMetrics.
+	e.configureDBTelemetry(db)
 	err = db.Migrate(sequenceName, migrations.FS)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return db, nil
+}
+
+// configureDBTelemetry directs a shard's sequel DB to the engine's logger, tracer, and meter providers,
+// so the SQL layer emits sequel_* telemetry under the host's configured OTEL pipeline. The tracer/meter
+// fall back to the global providers (no-op unless the host configured the SDK) when none was injected,
+// exactly as initTracer/initMetrics resolve the engine's own providers.
+func (e *Engine) configureDBTelemetry(db *sequel.DB) {
+	// Only hand sequel a logger when the host explicitly set one. The engine's own e.logger defaults to a
+	// discard logger so its internal logging is silent until configured; sequel similarly should not log
+	// (it emits migration events at Info) unless the host opted in. A nil logger disables sequel's logging
+	// entirely.
+	if e.loggerSet {
+		db.SetLogger(e.logger)
+	}
+	tp := e.tracerProvider
+	if tp == nil {
+		tp = otel.GetTracerProvider()
+	}
+	db.SetTracerProvider(tp)
+	mp := e.meterProvider
+	if mp == nil {
+		mp = otel.GetMeterProvider()
+	}
+	db.SetMeterProvider(mp)
 }
 
 // closeDatabase closes all database shard connections.

@@ -467,7 +467,7 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx interface {
 
 func (e *Engine) undoCohortBumps(ctx context.Context, tx interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryRowContext(ctx context.Context, query string, args ...any) *sequel.Row
 }, spawnID int, arrivalsDelta int, failuresDelta int) error {
 	if spawnID == 0 || (arrivalsDelta == 0 && failuresDelta == 0) {
 		return nil

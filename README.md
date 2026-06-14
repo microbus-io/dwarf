@@ -55,8 +55,7 @@ fmt.Println(out.State["greeting"]) // hello ada
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
 
 Dwarf depends only on [`sequel`](https://github.com/microbus-io/sequel) (SQL) and
-[`throttle`](https://github.com/microbus-io/throttle) (rate limiting), plus the OpenTelemetry API. It
-does not pull in any web framework, message bus, or service mesh.
+[`throttle`](https://github.com/microbus-io/throttle) (rate limiting), plus the OpenTelemetry API.
 
 ## Install
 
