@@ -20,7 +20,6 @@ import (
 	"context"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -105,14 +104,5 @@ func (p *TestProxy) FlowStopped(ctx context.Context, hostname string, outcome *w
 	}
 }
 
-// Enqueue implements Host; the test proxy is single-replica, so it is a no-op.
-func (p *TestProxy) Enqueue(ctx context.Context, shard, stepID int) {}
-
-// SyncValve implements Host; no-op (single-replica).
-func (p *TestProxy) SyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time) {}
-
-// TripBreaker implements Host; no-op (single-replica).
-func (p *TestProxy) TripBreaker(ctx context.Context, taskName string) {}
-
-// NotifyStatusChange implements Host; no-op (single-replica).
-func (p *TestProxy) NotifyStatusChange(ctx context.Context, flowKey string, status string) {}
+// SignalPeers implements Host; the test proxy is single-replica, so it is a no-op.
+func (p *TestProxy) SignalPeers(ctx context.Context, op string, payload []byte) {}

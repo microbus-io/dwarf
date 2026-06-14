@@ -8,30 +8,36 @@ retries, subgraphs, backpressure, breakers, and failure recovery. It depends onl
 (rate limiting), plus the pure-types sub-package `dwarf/workflow`.
 
 This document captures the engine's internal design rationale - the *why* behind the mechanics, which godoc does not
-record. The engine is library code: it reaches tasks, fetches graphs, signals peers, and reports stops through
-**injected dependency interfaces** rather than a built-in transport. A host application (for example a microservice)
-wires those interfaces to its own transport, identity, and observability. Where this doc refers to "the host" or "the
-adapter," it means that wrapping layer.
+record. The engine is library code: it reaches tasks, fetches graphs, signals peers, and reports stops through a
+single **injected `Host` interface** (plus separately injected observability providers) rather than a built-in
+transport. A host application (for example a microservice) wires that interface to its own transport, identity, and
+observability. Where this doc refers to "the host" or "the adapter," it means that wrapping layer.
 
-### Dependency interfaces (how the engine reaches the outside world)
+### The Host interface (how the engine reaches the outside world)
 
-- **`GraphLoader`** `func(ctx, workflowName string) (*workflow.Graph, error)` - fetches a workflow graph by name.
-  Called once at `Create`; the graph JSON is then frozen on the flow row. The flow's opaque baggage rides on ctx
-  (`workflow.BaggageFrom(ctx)`) for identity-dependent loading (authz, per-actor graphs).
-- **`TaskExecutor`** `func(ctx, taskName string, flow *workflow.Flow) error` - executes one task. Receives the flow
+The graph/task/notify/peer seam is a single **`Host`** interface, registered once via `WithHost`; the
+observability providers below are injected separately. A host must implement `LoadGraph` and `ExecuteTask`;
+`FlowStopped` and `SignalPeers` may be no-ops. The interface methods:
+
+- **`LoadGraph(ctx, workflowName string) (*workflow.Graph, error)`** - fetches a workflow graph by name.
+  Called at `Create` (and on subgraph spawn); the graph JSON is then frozen on the flow row. The flow's opaque
+  baggage rides on ctx (`workflow.BaggageFrom(ctx)`) for identity-dependent loading (authz, per-actor graphs).
+- **`ExecuteTask(ctx, taskName string, flow *workflow.Flow) error`** - executes one task. Receives the flow
   carrier with state pre-populated; writes its changes back onto the flow. The engine never knows *how* the task is
   reached (local call, RPC, message bus). The flow's baggage rides on ctx (`workflow.BaggageFrom(ctx)`). To engage an
   adaptive mechanism, wrap the returned error with `workflow.ErrBackpressure(err, cause)` (rate-limit the task) or
   `workflow.ErrBreakerTrip(err, cause)` (trip the task's breaker); an undecorated error is an ordinary failure. The
   engine never sniffs status codes - the host owns the mapping (see "Per-Task Breaker → Error classification").
-- **`FlowStoppedCallback`** `func(ctx, hostname string, outcome *workflow.FlowOutcome)` - fired when a flow stops
+- **`FlowStopped(ctx, hostname string, outcome *workflow.FlowOutcome)`** - fired when a flow stops
   (completed/failed/cancelled/interrupted) for a flow started via `StartNotify`. The hostname is whatever was passed
-  to `StartNotify`.
-- **`PeerNotifier`** - cross-replica coordination, all fire-and-forget: `Enqueue` (work doorbell), `SyncValve` (valve
-  gossip), `TripBreaker` (breaker gossip), `NotifyStatusChange` (wake cross-replica `Await` waiters). The host
-  publishes these to peers; inbound signals from peers are delivered back into the engine via `HandleEnqueue`,
-  `HandleSyncValve`, `HandleTripBreaker`, `HandleNotifyStatusChange`. In a single-replica deployment the notifier is
-  nil and none of this runs.
+  to `StartNotify`. Optional: a host with no stop-notification need does nothing here.
+- **`SignalPeers(ctx, op string, payload []byte)`** - delivers one cross-replica coordination signal to the
+  other replicas, all fire-and-forget. `op` is an opaque routing key (usable as a topic); `payload` is opaque bytes
+  the engine already serialized. The host ships `(op, payload)` to peers and, on the receiving side, hands them back
+  via `Engine.DeliverSignal(ctx, op, payload)`, which parses `op` and applies the effect: a work doorbell, valve-rate
+  gossip, breaker trip, or cross-replica `Await` wake. All signal kinds funnel through this one method, so adding a
+  new kind needs no host change; the host never branches on `op` or inspects `payload`. A single-replica host does
+  nothing here and none of this runs.
 - **`*slog.Logger`** - structured logging sink (`WithLogger`); defaults to a **discard** logger (the engine and
   its sequel DB layer stay silent until a logger is injected, rather than writing to the application-owned
   `slog.Default()` - the library convention). A nil logger resets to that silent default. The engine logs through
@@ -48,8 +54,8 @@ adapter," it means that wrapping layer.
   span code.
 
 The **baggage** is opaque to the engine: set once at `Create` via `FlowOptions.Baggage` (an `any`, like
-`initialState`), stored on the flow row (the `baggage` column), and delivered to every `GraphLoader` and
-`TaskExecutor` call for the flow's lifetime on the dispatch **context** - the host reads it with
+`initialState`), stored on the flow row (the `baggage` column), and delivered to every `LoadGraph` and
+`ExecuteTask` call for the flow's lifetime on the dispatch **context** - the host reads it with
 `workflow.BaggageFrom(ctx)`. It is authored in one visible, typed place (`FlowOptions`) and observed ambiently
 where used; most callbacks ignore it. The engine never interprets it; a host carries actor claims / tenant
 identity there. `BaggageFrom` lives in the `workflow` package so task code can read baggage without importing
@@ -78,7 +84,7 @@ conditions. Built in code with the `workflow.Graph` API. Each graph has a name, 
 and optional reducers for fan-in state merging.
 
 **Task** - A named unit of work within a workflow, identified by a task name/URL and executed via the injected
-`TaskExecutor`. Tasks receive state via a `workflow.Flow` carrier, read input from state fields, perform work, and
+`ExecuteTask`. Tasks receive state via a `workflow.Flow` carrier, read input from state fields, perform work, and
 write output back to state fields. Tasks are reusable across workflows.
 
 **Flow** - A single execution of a workflow graph. Each flow has a unique ID, tracks its current position, and
@@ -131,7 +137,7 @@ Create --> created --> Start --> running --> completed
 
 These are methods on `*engine.Engine`.
 
-**Create** - Creates a flow without starting it. Calls the `GraphLoader` to fetch the graph, creates the flow row, and
+**Create** - Creates a flow without starting it. Calls the `LoadGraph` to fetch the graph, creates the flow row, and
 inserts the entry-point step - both in `created` status. The graph JSON is frozen at creation. `CreateTask` wraps a
 single task name in a trivial graph.
 
@@ -139,7 +145,7 @@ single task name in a trivial graph.
 flow to `running` in one transaction, then rings the doorbell for the current step. Sets up no notifications.
 
 **StartNotify** - Like `Start`, but stores a `notify_hostname`. When the flow stops, the engine invokes the
-`FlowStoppedCallback` with that hostname and a `*workflow.FlowOutcome`.
+`FlowStopped` with that hostname and a `*workflow.FlowOutcome`.
 
 **Snapshot** - Returns a `*workflow.FlowOutcome` for a flow at the current moment. For terminal statuses
 (`completed`/`failed`/`cancelled`) it returns the flow's `final_state` (plus `Error`/`CancelReason`); for
@@ -215,17 +221,18 @@ fresh defaults, not the prior flow's.
 
 **HistoryMermaid** - Writes the execution DAG as a Mermaid diagram to an `io.StringWriter`.
 
-**The peer signals (`HandleEnqueue`, `HandleSyncValve`, `HandleTripBreaker`, `HandleNotifyStatusChange`)** are the
-inbound side of cross-replica coordination: the host adapter calls them when it receives the corresponding signal from
-a peer. The outbound side is the injected `PeerNotifier`. The **Enqueue doorbell** is the most frequent: it signals
-that a step is pending. The receiving replica does one PK lookup for the announced step's `priority` and `not_before`.
+**The inbound peer entry point `DeliverSignal(ctx, op, payload)`** is the receiving side of cross-replica
+coordination: the host adapter calls it with the `(op, payload)` it received from a peer, and the engine parses `op`
+and applies the effect. The outbound side is the host's `SignalPeers`. The **enqueue doorbell** (op `enqueue`) is the
+most frequent: it signals that a step is pending. The receiving replica does one PK lookup for the announced step's
+`priority` and `not_before`.
 If `not_before` is in the future the doorbell defers to the poll timer (`shortenNextPoll(not_before)`); if due, the
 priority drives the cache offer (refill or head-insert; see "Execution Model"). It does not enqueue a specific step
 into a queue. Fire-and-forget - a missed doorbell is recovered by `pollPendingSteps`.
 
 ### FlowOutcome and side-channel signals
 
-`Snapshot`, `Await`, and `Run` return a single `*workflow.FlowOutcome`. The same struct is the `FlowStoppedCallback`
+`Snapshot`, `Await`, and `Run` return a single `*workflow.FlowOutcome`. The same struct is the `FlowStopped`
 payload. The shape:
 
 ```go
@@ -251,7 +258,7 @@ the merged view call `workflow.MergeState(out.State, out.InterruptPayload, graph
 ### Flow Stop Notifications
 
 When a flow is started via `StartNotify(flowKey, notifyHostname)`, the engine stores the hostname and invokes the
-`FlowStoppedCallback` with a `*workflow.FlowOutcome` when the flow stops - terminal (`completed`/`failed`/`cancelled`)
+`FlowStopped` with a `*workflow.FlowOutcome` when the flow stops - terminal (`completed`/`failed`/`cancelled`)
 or `interrupted`. This matches the statuses `Await` returns on. The outcome carries the same fields as a `Snapshot`/
 `Await` return at the stop point. Delivery is fire-and-forget; flow execution never blocks on it. `notify_hostname`
 is set only on the root flow; subgraph flows do not notify directly (interrupt notifications query the root's
@@ -267,7 +274,7 @@ worker pops a candidate and calls `processStep`:
    not_before<=NOW AND lease_expires<=NOW`).
 2. Check for terminal flow status (abort if cancelled/failed/completed).
 3. Load the flow's graph, config, and baggage.
-4. Execute the task via the injected `TaskExecutor` with a time budget on the call context.
+4. Execute the task via the host's `ExecuteTask` with a time budget on the call context.
 5. Persist changes, evaluate transitions, create next steps (in a transaction), ring the doorbell.
 
 Acquisition is the atomic CAS, so a stale or duplicated candidate is harmless: the CAS loser gets zero rows and pops
@@ -297,7 +304,7 @@ Same-age ties break by `(shard, step_id)` for determinism. The pick is re-rolled
 is proportional to weight and independent of backlog depth or shard layout. Strict priority means no aging: a fed
 higher-priority band starves lower bands by design.
 
-**Queue-as-cache, doorbell, single-slot refiller.** `Enqueue` carries no step to a queue; it is a **doorbell**
+**Queue-as-cache, doorbell, single-slot refiller.** The enqueue signal carries no step to a queue; it is a **doorbell**
 (`candidateCache.offer`). It resolves the announced step's priority *and* `not_before` in one PK lookup (off the
 selection path). If `not_before` is in the future the doorbell short-circuits into `shortenNextPoll(not_before)` -
 the work is not due, nothing to preempt, the cache stays untouched; the local poll timer wakes at the right moment.
@@ -474,9 +481,9 @@ step completed. An empty map is returned for a flow with no steps.
 
 ### Time Budgets
 
-Each step has a `time_budget_ms` that bounds the `TaskExecutor` call's context deadline. It is the engine's single
+Each step has a `time_budget_ms` that bounds the `ExecuteTask` call's context deadline. It is the engine's single
 `WithTimeBudget` config (default 2m), applied uniformly to every step - the graph carries no per-task timing. A host
-that wants a tighter per-task bound enforces it inside its `TaskExecutor` (or the task itself), shortening the call
+that wants a tighter per-task bound enforces it inside its `ExecuteTask` (or the task itself), shortening the call
 context; the engine's budget is the outer ceiling.
 
 The worker lease duration is the current `TimeBudget` config + `leaseMargin` (30s), read from in-memory config rather
@@ -538,7 +545,7 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   to `target`, if registered. Goto transitions are never taken during normal evaluation.
 - **`flow.Interrupt(payload)`** - pause and park the flow. The payload is stored in `interrupt_payload` and propagated
   up the surgraph chain. The task should return normally after. The engine sets the flow `interrupted` and fires the
-  `FlowStoppedCallback` on the root's `notify_hostname`.
+  `FlowStopped` on the root's `notify_hostname`.
 
 **Single-park guard.** A step parks at most once - interrupt XOR subgraph, never both and never the other kind on
 re-entry. `processStep` enforces this after the task returns: a competing-signals check fails the step if more than
@@ -610,9 +617,9 @@ only when no interrupted steps remain at any level.
 ### Identity / baggage propagation
 
 The opaque baggage set in `FlowOptions.Baggage` at `Create` (stored in the `baggage` column) is delivered on the
-dispatch **context** to every `GraphLoader` and `TaskExecutor` call for the flow's lifetime, including dispatches
+dispatch **context** to every `LoadGraph` and `ExecuteTask` call for the flow's lifetime, including dispatches
 long after creation - the host reads it with `workflow.BaggageFrom(ctx)`. The engine never interprets it; a host
-uses it to carry the original caller's identity (e.g. mint a fresh token inside its `TaskExecutor`). It is
+uses it to carry the original caller's identity (e.g. mint a fresh token inside its `ExecuteTask`). It is
 **inherited** by subgraph flows (`createSubgraphFlow` copies the parent's `baggage`) and by `Continue` (the next
 turn reads the prior flow's `baggage` column and carries it forward, unless the `Continue` call sets
 `opts.Baggage` to override), so a multi-turn conversation keeps the caller's identity across turns. A turn wanting
@@ -621,7 +628,7 @@ narrower context scrubs it in an entry adapter task.
 **Delivery is context, authoring is `FlowOptions`.** Baggage is *set* explicitly and visibly (a typed
 `FlowOptions` field on `Create`/`CreateTask`/`Run`) but *read* ambiently (off ctx), so the value the engine never
 interprets is not a parameter on every callback and task handler. The engine injects it into the ctx it hands the
-callbacks (in `processStep` for the per-step executor, and at the create-time `GraphLoader` call); the
+callbacks (in `processStep` for the per-step executor, and at the create-time `LoadGraph` call); the
 `ContextWithBaggage`/`BaggageFrom` helpers live in the `workflow` package so task-defining code reads baggage
 without importing `engine`. The create-time injection round-trips the value through JSON (`baggageMap`) so the
 loader sees the same decoded shape every dispatch will.
@@ -635,8 +642,8 @@ only on a notification or ctx. Non-terminal notifications (e.g. `running` from `
 returning early.
 
 **Cross-replica `Await`.** A flow created on one replica but completed on another wakes a local `Await` only via the
-`PeerNotifier.NotifyStatusChange` broadcast. Every flow-stop site calls an internal `signalStop` helper that does the
-local waiter wake *and* the peer broadcast; the receiving replica routes it to `HandleNotifyStatusChange`, which wakes
+`SignalPeers` broadcast (op `statusChange`). Every flow-stop site calls an internal `signalStop` helper that does the
+local waiter wake *and* the peer broadcast; the receiving replica's `DeliverSignal` routes it to `notifyStatusChange`, which wakes
 its local waiters. Without this wiring, an `Await` on the replica that did not run the final step blocks until its
 context deadline (there is no poll fallback). Non-terminal (`running`) transitions are notified locally only,
 matching the broadcast-only-on-terminal-stops policy.
@@ -722,7 +729,7 @@ Rough sizing:
 new shards; existing flows stay on their original shard.
 
 **Connection pool sizing (`WithMaxOpenConns`, default 8 per shard, MaxIdle == MaxOpen).** Workers spend most of their
-time waiting on the `TaskExecutor` call, not holding a SQL connection - the DB-only segments of `processStep` are
+time waiting on the `ExecuteTask` call, not holding a SQL connection - the DB-only segments of `processStep` are
 short. So the per-shard pool needs only a small absolute number of connections. `MaxIdle == MaxOpen` matters more
 than the absolute number: under bursty load the close/reopen churn (TCP+TLS+auth per cycle) dominates over query
 time. Empirically pool=8 is a good default; pool=32 regresses (pool-mutex contention with no usable extra
@@ -755,7 +762,7 @@ fan-out).
 - **Fairness weight is denormalized at `Create`, never resolved on the selection path** (a resolver hook would put
   synchronous I/O on the hot critical section). When a key's steps carry inconsistent weights, the oldest candidate
   step's weight is used; keeping weights consistent for a key is the caller's responsibility.
-- **`Workers` is a generous static cap, not the backpressure mechanism.** A worker blocked on a `TaskExecutor` call is
+- **`Workers` is a generous static cap, not the backpressure mechanism.** A worker blocked on a `ExecuteTask` call is
   just a goroutine stack plus a socket, so over-provisioning is cheap; throttling a pressured downstream is the
   adaptive per-task dispatch-rate control, not pool size.
 - **Completion writes are deliberately not gated by the refiller slot.** That slot bounds selection only; finishing
@@ -801,7 +808,7 @@ effective rate above the last cut's `wCong` while the task ran cleanly.
 downstream oscillate. Resolution: make the increase a pure function of `(wCong, tCong)` and wall-clock. Every replica
 computes the same value from the same anchor; "doing the increase" is not an action anyone performs.
 
-**The convergent register.** The only shared mutable state is `(wCong, tCong)` per task, gossiped over `SyncValve`.
+**The convergent register.** The only shared mutable state is `(wCong, tCong)` per task, gossiped via `SignalPeers` (op `syncValve`).
 The merge is "latest `tCong` wins, smaller `wCong` on tie" - associative, commutative, idempotent, tolerating
 reorder, duplication, and loss. A missed cut self-heals: the over-admitting replica eats its own 429 and re-cuts.
 
@@ -897,7 +904,7 @@ of the selection index entirely. They operate independently; a task with both si
 its backlog parked.
 
 **Error classification is host-owned, via error wrappers (no status-code sniffing).** The engine never
-inspects a `TaskExecutor` error's status code or text. Instead the host wraps the error its transport
+inspects a `ExecuteTask` error's status code or text. Instead the host wraps the error its transport
 returned with one of two `workflow` constructors, and the engine classifies by `errors.As` on the
 unexported wrapper:
 
@@ -918,7 +925,7 @@ no backpressure metric consumes it today). The wrappers preserve the inner error
 (Open Question #1 resolved): the engine stays transport-agnostic, and the **foreman adapter** owns the
 mapping - `429 → ErrBackpressure`, `404+"ack timeout:" → ErrBreakerTrip(…, "ack_timeout")`,
 `503 → ErrBreakerTrip(…, "unavailable")`, `529 → ErrBreakerTrip(…, "overloaded")` - defining those cause
-constants on its own side. `GraphLoader` keeps plain `error` semantics (graph load has no breaker). The
+constants on its own side. `LoadGraph` keeps plain `error` semantics (graph load has no breaker). The
 engine's internal `breakerCause*` constants (`breaker.go`) are only its own default labels for internally
 originated trips (reconstitution); the dispatch path uses the host-supplied cause. The `Disposition` enum
 itself is unexported - the whole API surface is the two constructors plus the two accessors.
@@ -974,7 +981,7 @@ lock contention, and a per-task in-process lock (`breakerParkLocks`) serializes 
 a burst of trips doesn't issue overlapping `task_name` UPDATEs that deadlock under pessimistic locking. A probe
 always survives a trip.
 
-**`TripBreaker` gossips only the trip event, payload-free.** The wire is just `(taskName)`. Each peer stamps
+**The breaker-trip signal (op `tripBreaker`) gossips only the trip event.** The payload is just `(taskName)`. Each peer stamps
 `time.Now()` on receipt, seeds its local probe schedule from that moment, AND runs `breakerBulkPark` so its view of
 the task's pending set converges with the originator's. `breakerBulkPark` is idempotent SQL. A trip received while
 already tripped is a no-op (re-parking would reset `probeAttempt` and undo accumulated backoff).
@@ -1062,7 +1069,7 @@ metrics: spans need cross-replica continuity, metrics don't).
   turn - roots its own fresh trace rather than nesting under the request that created it.
 - **Per-step span in `processStep`**, named by the task. The stored `trace_parent` is reconstructed
   (`injectTraceParent`) as the parent, the span is started with `workflow.id`=flowKey and `workflow.name`
-  attributes, and the span's context is **placed on the `TaskExecutor`'s ctx** so the task's own
+  attributes, and the span's context is **placed on the `ExecuteTask`'s ctx** so the task's own
   downstream spans nest under it automatically. The span records the dispatch error
   (`recordSpanError` → `RecordError`+`SetStatus(codes.Error)`) when the executor returns one.
 
@@ -1103,9 +1110,9 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 |---|---|
 | `flow_id` | Per-shard auto-increment primary key. The external flowKey is `{shard}-{flow_id}-{flow_token}` |
 | `flow_token` | Random token component of the flowKey, guards against id guessing |
-| `workflow_name` | Name of the workflow graph this flow runs (the name passed to the `GraphLoader`) |
+| `workflow_name` | Name of the workflow graph this flow runs (the name passed to the `LoadGraph`) |
 | `graph` | JSON of the workflow graph, frozen at `Create` time |
-| `baggage` | JSON of the opaque `baggage` map captured at `Create` and passed to every `GraphLoader`/`TaskExecutor` call. Flow-scoped and frozen at `Create`; the engine does not interpret it |
+| `baggage` | JSON of the opaque `baggage` map captured at `Create` and passed to every `LoadGraph`/`ExecuteTask` call. Flow-scoped and frozen at `Create`; the engine does not interpret it |
 | `status` | Flow lifecycle: `created`/`running`/`interrupted`/`completed`/`failed`/`cancelled` |
 | `step_id` | The flow's current step; `0` during fan-out (multiple steps active at one depth) |
 | `surgraph_flow_id` | Parent (surgraph) flow id if this is a subgraph flow; `0` otherwise |
@@ -1114,7 +1121,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `thread_id` | Groups flows in a `Continue` thread; defaults to `flow_id` (each flow its own thread) |
 | `thread_token` | Token component of the thread's flowKey |
 | `trace_parent` | W3C `traceparent` of the flow's root "workflow" span, minted at `Create` (or, for a subgraph, parented to the caller step's span). Reconstructed as the parent of every per-step span. Inherited by `Continue` only as a fresh trace (a new root span is minted per turn); a subgraph inherits the caller step's context, not this column. See "Tracing" |
-| `notify_hostname` | Set by `StartNotify`; the `FlowStoppedCallback` fires with this hostname when the flow stops. `''` = no notification |
+| `notify_hostname` | Set by `StartNotify`; the `FlowStopped` fires with this hostname when the flow stops. `''` = no notification |
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
 | `breakpoints` | JSON `map[taskName]string` of `BreakBefore` breakpoints |
 | `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. Reset by `Restart` (a fresh attempt); NOT by `RestartFrom` (a surgical rewind) |
@@ -1146,7 +1153,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `status` | Step lifecycle: `created`/`pending`/`running`/`interrupted`/`completed`/`failed`/`cancelled` |
 | `goto_next` | Task-requested `flow.Goto` target; `''` = none |
 | `error` | Error text when `failed`; `''` otherwise |
-| `time_budget_ms` | Execution budget; the deadline on the `TaskExecutor` call context |
+| `time_budget_ms` | Execution budget; the deadline on the `ExecuteTask` call context |
 | `breakpoint_hit` | `1` once a breakpoint on this step has fired, so it does not re-trigger on resume |
 | `attempt` | `flow.Retry` attempt counter, drives the backoff |
 | `not_before` | Earliest UTC time the step may execute (`flow.Sleep` / retry backoff / breaker probe) |
@@ -1232,15 +1239,15 @@ The engine uses SQL transactions for multi-statement operations and `lease_expir
 Workers, the timer, and the refiller share the engine's lifetime context (`e.lifetimeCtx`), created at Startup and
 cancelled only after `Shutdown` drains all three. So by the time the lifetime ctx is cancelled, every DB operation
 has committed - in-flight writes are never interrupted by ctx cancellation. The only *cancellable*, time-bounded ctx
-is the `TaskExecutor` call: `executeTask` derives it from the lifetime ctx with the step's `time_budget_ms`.
+is the `ExecuteTask` call: `executeTask` derives it from the lifetime ctx with the step's `time_budget_ms`.
 
 ### Shutdown ordering: drain workers, then timer, then refiller
 
-`signalTimer` (the sender behind `shortenNextPoll` and `refreshNextProbeLocked`) nudges the timer via
+`nudgeTimer` (the sender behind `shortenNextPoll` and `refreshNextProbeLocked`) nudges the timer via
 `select { case wakeTimer <- struct{}{}: default: }`. The `default` only guards a *full* channel - a send on a
 *closed* channel still panics, even inside a `select`. The senders are not just worker goroutines (`processStep` and
-its retry/sleep/recovery paths): the breaker subsystem (`refreshNextProbeLocked`, including from the inbound
-`HandleTripBreaker` signal) also signals the timer, so there is no drain point after which a `wakeTimer` send is
+its retry/sleep/recovery paths): the breaker subsystem (`refreshNextProbeLocked`, including from an inbound
+breaker-trip signal via `DeliverSignal`) also nudges the timer, so there is no drain point after which a `wakeTimer` send is
 guaranteed impossible. `wakeTimer` is therefore **never closed** (the same rationale as `refillTrigger`); `timerLoop`
 is terminated by a dedicated `timerStop` channel it selects on. So Shutdown drains the worker pool, then stops the
 timer, then the refiller:
@@ -1271,7 +1278,7 @@ closing `wakeTimer` before draining the workers let a worker mid-`processStep` r
 
 ### Lease-Based Crash Recovery
 
-Transactions don't help when a worker crashes during the `TaskExecutor` call (outside any transaction). The
+Transactions don't help when a worker crashes during the `ExecuteTask` call (outside any transaction). The
 `lease_expires` column is a crash-recovery lease: a worker reserving a step sets `lease_expires` to
 `NOW + TimeBudget + leaseMargin`. If the worker crashes, the lease expires and `pollPendingSteps` resets the step to
 `pending` for re-execution.

@@ -103,9 +103,8 @@ eyeballing what ran in what order.
 ## Multi-replica tests
 
 To test cross-replica behavior, stand up two engines sharing nothing but a relay that forwards each engine's
-host peer-signal calls to the other's `Handle*` methods. The usual pattern is a `peerBridge` struct that
-embeds `*engine.TestProxy` and overrides the four peer methods
-(`Enqueue`/`SyncValve`/`TripBreaker`/`NotifyStatusChange`) to relay to the peer engine, then
+`SignalPeers` calls to the other's `DeliverSignal`. The usual pattern is a `peerBridge` struct that
+embeds `*engine.TestProxy` and overrides `SignalPeers` to relay `(op, payload)` to the peer engine, then
 `WithHost(bridge)`. This is how the engine's own cross-replica `Await`
 and distributed-backpressure tests are written — see the `fixtures` package in the repository for worked
 examples.

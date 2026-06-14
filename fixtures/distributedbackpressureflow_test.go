@@ -16,9 +16,9 @@ limitations under the License.
 
 /*
 Multi-replica testing: two Engine instances sharing the same in-memory SQLite databases. A peerBridge
-wires each engine's PeerNotifier to the other's Handle* methods, standing in for the bus so a doorbell,
+relays each engine's SignalPeers to the other's DeliverSignal, standing in for the bus so a doorbell,
 valve cut, or breaker trip on one replica reaches the other. SUM(running) aggregation across every shard
-produces cluster-wide saturation; a 429 on one replica propagates via SyncValve gossip so both converge.
+produces cluster-wide saturation; a 429 on one replica propagates via valve gossip so both converge.
 */
 package fixtures
 
@@ -36,42 +36,19 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// peerBridge relays cross-replica coordination signals to a peer engine, standing in for the bus in a
-// single-process multi-replica test. All three signals are fire-and-forget; the bridge dispatches them
-// asynchronously to mirror bus semantics and avoid synchronous reentrancy into a peer mid-processStep.
 // peerBridge wraps a TestProxy (for LoadGraph/ExecuteTask) and relays the engine's cross-replica signals
-// to a peer engine's Handle* methods. Its own peer methods shadow the embedded proxy's single-replica
-// no-ops, so the bridge is a complete Host.
+// to a peer engine's DeliverSignal, standing in for the bus. Its SignalPeers shadows the embedded
+// proxy's single-replica no-op, so the bridge is a complete Host. The relay is async to mirror bus
+// semantics and avoid synchronous reentrancy into a peer mid-processStep.
 type peerBridge struct {
 	*engine.TestProxy
 	peer *engine.Engine
 }
 
-func (b *peerBridge) Enqueue(ctx context.Context, shard, stepID int) {
+func (b *peerBridge) SignalPeers(ctx context.Context, op string, payload []byte) {
 	p := b.peer
 	if p != nil {
-		go p.HandleEnqueue(context.WithoutCancel(ctx), shard, stepID)
-	}
-}
-
-func (b *peerBridge) SyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time) {
-	p := b.peer
-	if p != nil {
-		go p.HandleSyncValve(context.WithoutCancel(ctx), taskName, wCong, tCong)
-	}
-}
-
-func (b *peerBridge) TripBreaker(ctx context.Context, taskName string) {
-	p := b.peer
-	if p != nil {
-		go p.HandleTripBreaker(context.WithoutCancel(ctx), taskName)
-	}
-}
-
-func (b *peerBridge) NotifyStatusChange(ctx context.Context, flowKey string, status string) {
-	p := b.peer
-	if p != nil {
-		go p.HandleNotifyStatusChange(context.WithoutCancel(ctx), flowKey, status)
+		go p.DeliverSignal(context.WithoutCancel(ctx), op, payload)
 	}
 }
 

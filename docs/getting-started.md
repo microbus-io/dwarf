@@ -105,10 +105,7 @@ func (h *myHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.F
 
 // Optional methods (no-ops for a single-replica host with no stop-notification need):
 func (h *myHost) FlowStopped(context.Context, string, *workflow.FlowOutcome) {}
-func (h *myHost) Enqueue(context.Context, int, int)                          {}
-func (h *myHost) SyncValve(context.Context, string, int, time.Time)          {}
-func (h *myHost) TripBreaker(context.Context, string)                        {}
-func (h *myHost) NotifyStatusChange(context.Context, string, string)         {}
+func (h *myHost) SignalPeers(context.Context, string, []byte)                {}
 
 eng := dwarf.NewEngine().
 	WithDSN("postgres://user:pass@db:5432/dwarf").

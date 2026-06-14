@@ -783,7 +783,7 @@ func (e *Engine) valveRegulate(ctx context.Context, taskName string) {
 	// tCong was just set to now under the lock, so pass now for both.
 	v.throttle.SetLimit(recoverRate(newW, now, now))
 	e.metricTaskRateCut(ctx, taskName)
-	e.host.SyncValve(ctx, taskName, newW, now)
+	e.signalSyncValve(ctx, taskName, newW, now)
 }
 
 // handleBreakerTrip bounces a step and trips the breaker.
@@ -793,7 +793,7 @@ func (e *Engine) handleBreakerTrip(ctx context.Context, shardNum, stepID int, ta
 	e.metricBreakerProbe(ctx, taskName, "failure", cause)
 	if fresh {
 		e.metricBreakerTrip(ctx, taskName, cause)
-		e.host.TripBreaker(ctx, taskName)
+		e.signalTripBreaker(ctx, taskName)
 	}
 	e.logger.DebugContext(ctx, "Task breaker tripped", "task", taskName, "step", stepID, "cause", cause, "fresh", fresh)
 	// Serialize bulk-park for this task within the replica: a burst of trips on the same down task would

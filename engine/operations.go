@@ -363,7 +363,7 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 // cancelled, interrupted); non-terminal transitions (running) need only the local notifyStatusChange.
 func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) {
 	e.notifyStatusChange(flowKey, status)
-	e.host.NotifyStatusChange(ctx, flowKey, status)
+	e.signalStatusChange(ctx, flowKey, status)
 }
 
 // notifyStatusChange wakes up all Await callers waiting on the given flow.
@@ -386,13 +386,13 @@ func (e *Engine) notifyStatusChange(flowKey string, status string) {
 // step-origination site (start, restart, resume, retry, fan-out, fan-in, surgraph re-dispatch), so a
 // replica without spare capacity does not strand a freshly-pending step until a peer's backstop poll
 // (up to maxPollInterval away). This mirrors foreman, where a single self-inclusive multicast doorbell
-// reached both the local replica and its peers. PeerNotifier is self-excluded (see its contract), so
-// the local ring is done directly here. Do NOT call this from HandleEnqueue (the inbound peer-signal
-// path): re-broadcasting an inbound doorbell would echo back to the sender and storm. That path uses
-// the local-only handleEnqueue primitive.
+// reached both the local replica and its peers. SignalPeers is self-excluded (see its contract), so
+// the local ring is done directly here. Do NOT call this from DeliverSignal's enqueue path (the
+// inbound peer signal): re-broadcasting an inbound doorbell would echo back to the sender and storm.
+// That path uses the local-only handleEnqueue primitive.
 func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	e.handleEnqueue(ctx, shard, stepID)
-	e.host.Enqueue(ctx, shard, stepID)
+	e.signalEnqueue(ctx, shard, stepID)
 }
 
 // handleEnqueue processes a doorbell signal on the local replica only.

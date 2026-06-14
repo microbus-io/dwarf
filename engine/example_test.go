@@ -41,10 +41,7 @@ func (h exampleHost) ExecuteTask(ctx context.Context, taskName string, f *workfl
 	return nil
 }
 func (exampleHost) FlowStopped(context.Context, string, *workflow.FlowOutcome) {}
-func (exampleHost) Enqueue(context.Context, int, int)                          {}
-func (exampleHost) SyncValve(context.Context, string, int, time.Time)          {}
-func (exampleHost) TripBreaker(context.Context, string)                        {}
-func (exampleHost) NotifyStatusChange(context.Context, string, string)         {}
+func (exampleHost) SignalPeers(context.Context, string, []byte)                {}
 
 // Wire an engine to a host, then create, start, and await a flow.
 func Example() {

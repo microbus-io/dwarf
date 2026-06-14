@@ -235,7 +235,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		})
 	}
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
-	e.host.Enqueue(ctx, 0, 0) // Wake peers
+	e.signalEnqueue(ctx, 0, 0) // Wake peers
 
 	// Propagate to surgraph
 	var surgraphFlowID, surgraphStepDepth, surgraphStepID int

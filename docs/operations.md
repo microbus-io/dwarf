@@ -57,7 +57,7 @@ outcome, err := eng.Await(ctx, flowKey)
 
 Blocks until the flow stops — `completed`, `failed`, `cancelled`, or `interrupted` — and returns the
 outcome. It wakes on a status-change notification or context cancellation; there is no polling. Across
-replicas, `Await` relies on the host's `NotifyStatusChange` broadcast (see [Deployment](deployment.md)).
+replicas, `Await` relies on the host's `SignalPeers` broadcast (see [Deployment](deployment.md)).
 
 ## The outcome
 
@@ -176,9 +176,9 @@ tripped := eng.BreakerTripped(taskName) // is this task's breaker open right now
 
 ## Cross-replica inbound signals
 
-When running multiple replicas, your host's peer-signal methods publish coordination signals; the receiving replica
-feeds them back in via `HandleEnqueue`, `HandleSyncValve`, `HandleTripBreaker`, and
-`HandleNotifyStatusChange`. These are the inbound half of multi-replica coordination, not part of the
-day-to-day API — see [Deployment → Running multiple replicas](deployment.md#running-multiple-replicas).
+When running multiple replicas, your host's `SignalPeers` publishes coordination signals; the receiving replica
+feeds them back in via `DeliverSignal(ctx, op, payload)`. This is the inbound half of multi-replica
+coordination, not part of the day-to-day API — see
+[Deployment → Running multiple replicas](deployment.md#running-multiple-replicas).
 
 Next: [Fan-out & subgraphs](fan-out-and-subgraphs.md).

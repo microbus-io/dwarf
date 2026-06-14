@@ -94,36 +94,35 @@ dispatches work independently; the database (via an atomic claim) arbitrates, so
 same step. Most coordination is recovered automatically by each replica's background poll, but for low
 latency replicas exchange **fire-and-forget peer signals**.
 
-Implement your host's peer-signal methods to publish those signals to your other replicas (over whatever
-transport you have), and feed inbound signals back in with the matching `Handle*` method. These are the
-optional methods on the `Host` interface:
+Implement your host's `SignalPeers` to publish those signals to your other replicas (over whatever
+transport you have), and feed inbound signals back in with `DeliverSignal`. All signal kinds funnel
+through this one method on the `Host` interface — the engine pre-serializes the body, so your host is a
+pure pipe that never inspects `op` or `payload`:
 
 ```go
 type Host interface {
     // ... required LoadGraph / ExecuteTask, plus optional FlowStopped ...
-    Enqueue(ctx context.Context, shard, stepID int)                          // a step is pending
-    SyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time) // rate-controller gossip
-    TripBreaker(ctx context.Context, taskName string)                        // breaker gossip
-    NotifyStatusChange(ctx context.Context, flowKey string, status string)   // wake cross-replica Await
+
+    // op is a routing key (usable as a topic); payload is opaque bytes. Ship (op, payload) to OTHER
+    // replicas; on receipt call eng.DeliverSignal(ctx, op, payload).
+    SignalPeers(ctx context.Context, op string, payload []byte)
 }
 ```
 
-| Outbound (you publish) | Inbound (you call on receipt) |
-|---|---|
-| `Enqueue` | `HandleEnqueue(ctx, shard, stepID)` |
-| `SyncValve` | `HandleSyncValve(ctx, taskName, wCong, tCong)` |
-| `TripBreaker` | `HandleTripBreaker(ctx, taskName)` |
-| `NotifyStatusChange` | `HandleNotifyStatusChange(ctx, flowKey, status)` |
+```
+Outbound:  eng emits → host.SignalPeers(ctx, op, payload) → your transport → peers
+Inbound:   peer transport → host → eng.DeliverSignal(ctx, op, payload)
+```
 
 Two delivery rules:
 
 - **Deliver to other replicas only.** The engine applies each signal locally *before* publishing it, so a
   signal echoed back to the sender is processed twice. If your transport delivers to the publisher, filter
   out self-delivery.
-- **`NotifyStatusChange` is what wakes a cross-replica `Await`.** A flow created on replica A but completed
+- **The flow-stop signal is what wakes a cross-replica `Await`.** A flow created on replica A but completed
   on replica B wakes A's `Await` only via this broadcast — without it, A blocks until its context deadline.
 
-In a single-replica deployment, leave the host's peer methods as no-ops; none of this runs, and the
+In a single-replica deployment, leave `SignalPeers` a no-op; none of this runs, and the
 background poll is the only (and sufficient) recovery path.
 
 ## Crash recovery

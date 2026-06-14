@@ -94,11 +94,10 @@ type Host interface {
     // Optional. Fired when a flow stops, for flows started via StartNotify.
     FlowStopped(ctx context.Context, hostname string, outcome *workflow.FlowOutcome)
 
-    // Optional. Cross-replica coordination signals (no-ops for single-replica).
-    Enqueue(ctx context.Context, shard, stepID int)
-    SyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time)
-    TripBreaker(ctx context.Context, taskName string)
-    NotifyStatusChange(ctx context.Context, flowKey string, status string)
+    // Optional. Ship one cross-replica coordination signal to the other replicas (no-op for
+    // single-replica). op is a routing key; payload is opaque bytes. Peers hand it back via
+    // eng.DeliverSignal(ctx, op, payload).
+    SignalPeers(ctx context.Context, op string, payload []byte)
 }
 ```
 

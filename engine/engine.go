@@ -390,11 +390,11 @@ func (e *Engine) shortenNextPoll(tm time.Time) {
 		e.nextPoll = tm
 	}
 	e.nextPollLock.Unlock()
-	e.signalTimer()
+	e.nudgeTimer()
 }
 
-// signalTimer nudges the timer goroutine to re-evaluate its deadline.
-func (e *Engine) signalTimer() {
+// nudgeTimer nudges the timer goroutine to re-evaluate its deadline.
+func (e *Engine) nudgeTimer() {
 	select {
 	case e.wakeTimer <- struct{}{}:
 	default:
@@ -459,7 +459,7 @@ func (e *Engine) refreshNextProbeLocked() {
 		}
 	}
 	e.nextProbe.Store(soonest)
-	e.signalTimer()
+	e.nudgeTimer()
 }
 
 // valvePeek reports whether the task is currently admissible without consuming a slot.
@@ -620,62 +620,6 @@ func (e *Engine) HistoryMermaid(ctx context.Context, flowKey string, w io.String
 	}
 	_, err = w.WriteString(mmd)
 	return errors.Trace(err)
-}
-
-// --- Handle methods (for foreman adapter to wire bus endpoints) ---
-
-// HandleEnqueue processes an inbound doorbell signal from another replica.
-func (e *Engine) HandleEnqueue(ctx context.Context, shard, stepID int) error {
-	e.handleEnqueue(ctx, shard, stepID)
-	return nil
-}
-
-// HandleSyncValve processes an inbound valve gossip signal from another replica.
-func (e *Engine) HandleSyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time) error {
-	if taskName == "" {
-		return nil
-	}
-	e.valvesLock.Lock()
-	defer e.valvesLock.Unlock()
-	cur, ok := e.valves[taskName]
-	if !ok {
-		e.valves[taskName] = &taskValve{
-			wCong:    wCong,
-			tCong:    tCong,
-			throttle: throttle.New(time.Second, math.MaxInt32),
-		}
-		return nil
-	}
-	if tCong.After(cur.tCong) || (tCong.Equal(cur.tCong) && wCong < cur.wCong) {
-		cur.wCong = wCong
-		cur.tCong = tCong
-	}
-	return nil
-}
-
-// HandleTripBreaker processes an inbound breaker trip signal from another replica.
-func (e *Engine) HandleTripBreaker(ctx context.Context, taskName string) error {
-	if taskName == "" {
-		return nil
-	}
-	// Stamp the local clock and drive bulk-park exactly as a local trip does so this replica's view
-	// of the task's pending steps converges with the originating replica's. Closures are not gossiped;
-	// each peer closes locally when its own probe succeeds.
-	fresh, nextProbeAt := e.breakerTrip(taskName, breakerCauseAckTimeout)
-	if !fresh {
-		return nil // already tripped here too; no fresh bulk-park needed
-	}
-	err := e.breakerBulkPark(ctx, taskName, nextProbeAt, 0, 0)
-	if err != nil {
-		e.logger.ErrorContext(ctx, "Bulk-park on gossip trip", "task", taskName, "error", err)
-	}
-	return nil
-}
-
-// HandleNotifyStatusChange processes an inbound status change notification.
-func (e *Engine) HandleNotifyStatusChange(ctx context.Context, flowKey string, status string) error {
-	e.notifyStatusChange(flowKey, status)
-	return nil
 }
 
 // breakerTrip records a trip in the local in-memory breaker map.

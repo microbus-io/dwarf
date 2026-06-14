@@ -45,8 +45,8 @@ limitations under the License.
 //   - ExecuteTask executes one task, given the Flow carrier with its state pre-populated.
 //   - FlowStopped is fired when a flow stops, for flows started via StartNotify; a host with no
 //     notification need does nothing here.
-//   - Enqueue/SyncValve/TripBreaker/NotifyStatusChange carry cross-replica coordination signals; a
-//     single-replica host does nothing in them.
+//   - SignalPeers ships a cross-replica coordination signal (op + opaque payload bytes) to the other
+//     replicas, which hand it back via Engine.DeliverSignal; a single-replica host does nothing.
 //
 // The flow's opaque baggage (host identity/tenant/context, set in workflow.FlowOptions) rides on the
 // dispatch context of every LoadGraph and ExecuteTask call; read it with workflow.BaggageFrom(ctx).
