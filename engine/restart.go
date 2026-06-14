@@ -359,9 +359,7 @@ type sweptMember struct {
 	status    string
 }
 
-func (e *Engine) collectDAGSubtree(ctx context.Context, db interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}, flowID, startStepID int) ([]sweptMember, error) {
+func (e *Engine) collectDAGSubtree(ctx context.Context, db sequel.Executor, flowID, startStepID int) ([]sweptMember, error) {
 	visited := map[int]bool{startStepID: true}
 	var collected []sweptMember
 	frontier := []any{startStepID}
@@ -394,9 +392,7 @@ func (e *Engine) collectDAGSubtree(ctx context.Context, db interface {
 	return collected, nil
 }
 
-func (e *Engine) allDescendantSubgraphFlows(ctx context.Context, db interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}, flowID int) ([]int, error) {
+func (e *Engine) allDescendantSubgraphFlows(ctx context.Context, db sequel.Executor, flowID int) ([]int, error) {
 	var collected []int
 	current := []any{flowID}
 	for len(current) > 0 {
@@ -417,10 +413,7 @@ func (e *Engine) allDescendantSubgraphFlows(ctx context.Context, db interface {
 	return collected, nil
 }
 
-func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}, surgraphStepID int) error {
+func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx sequel.Executor, surgraphStepID int) error {
 	var rootChildren []int
 	rows, err := tx.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?", surgraphStepID)
 	if err != nil {
@@ -465,10 +458,7 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx interface {
 	return nil
 }
 
-func (e *Engine) undoCohortBumps(ctx context.Context, tx interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sequel.Row
-}, spawnID int, arrivalsDelta int, failuresDelta int) error {
+func (e *Engine) undoCohortBumps(ctx context.Context, tx sequel.Executor, spawnID int, arrivalsDelta int, failuresDelta int) error {
 	if spawnID == 0 || (arrivalsDelta == 0 && failuresDelta == 0) {
 		return nil
 	}
