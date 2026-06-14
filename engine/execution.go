@@ -706,8 +706,17 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 			payloadJSON, _ := json.Marshal(interruptPayload)
 			payloadArgs := []any{string(payloadJSON)}
 			payloadArgs = append(payloadArgs, allStepIDs...)
+			// Guard: write the payload only to chain steps still at the default empty object, so a
+			// concurrent fan-out interrupt does not clobber a payload already set on a shared ancestor
+			// (first-writer-wins). MySQL's JSON column does not match a bare string literal with '=',
+			// so interrupt_payload='{}' silently matches nothing there; compare its textual form. The
+			// TEXT/JSONB/NVARCHAR columns on the other dialects match the literal directly.
+			emptyGuard := "interrupt_payload='{}'"
+			if db.DriverName() == "mysql" {
+				emptyGuard = "CAST(interrupt_payload AS CHAR)='{}'"
+			}
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+stepPlaceholders+") AND interrupt_payload='{}'",
+				"UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+stepPlaceholders+") AND "+emptyGuard,
 				payloadArgs...,
 			)
 		}
