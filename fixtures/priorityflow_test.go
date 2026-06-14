@@ -35,9 +35,9 @@ func TestPriorityflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("priorityflow.verify:428/priority")
-	graph.AddTask("record", "priorityflow.verify:428/record")
-	graph.AddTransition("record", workflow.END)
+	graph := workflow.NewGraph("Priority", "priorityflow.verify:428/priority")
+	graph.AddTask("Record", "priorityflow.verify:428/record")
+	graph.AddTransition("Record", workflow.END)
 	proxy.HandleGraph("priorityflow.verify:428/priority", graph)
 
 	var mu sync.Mutex

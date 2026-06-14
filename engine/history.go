@@ -98,36 +98,38 @@ func (e *Engine) scanHistorySteps(ctx context.Context, shardNum int, rows *sql.R
 		return nil, errors.Trace(err)
 	}
 	for i := range steps {
-		subWorkflowURL, subHistory, err := e.subgraphHistory(ctx, shardNum, steps[i].StepID)
+		subWorkflowURL, subWorkflowName, subHistory, err := e.subgraphHistory(ctx, shardNum, steps[i].StepID)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		if len(subHistory) > 0 {
 			steps[i].Subgraph = true
 			steps[i].SubWorkflowURL = subWorkflowURL
+			steps[i].SubWorkflowName = subWorkflowName
 			steps[i].SubHistory = subHistory
 		}
 	}
 	return steps, nil
 }
 
-func (e *Engine) subgraphHistory(ctx context.Context, shardNum int, surgraphStepID int) (string, []workflow.FlowStep, error) {
+func (e *Engine) subgraphHistory(ctx context.Context, shardNum int, surgraphStepID int) (string, string, []workflow.FlowStep, error) {
 	db, err := e.shard(shardNum)
 	if err != nil {
-		return "", nil, errors.Trace(err)
+		return "", "", nil, errors.Trace(err)
 	}
 	var subFlowID int
-	var subWorkflowURL string
-	err = db.QueryRowContext(ctx, "SELECT flow_id, workflow_url FROM dwarf_flows WHERE surgraph_step_id=?", surgraphStepID).Scan(&subFlowID, &subWorkflowURL)
+	var subWorkflowURL, subWorkflowName string
+	err = db.QueryRowContext(ctx, "SELECT flow_id, workflow_url, workflow_name FROM dwarf_flows WHERE surgraph_step_id=?", surgraphStepID).Scan(&subFlowID, &subWorkflowURL, &subWorkflowName)
 	if err == sql.ErrNoRows {
-		return "", nil, nil
+		return "", "", nil, nil
 	}
 	if err != nil {
-		return "", nil, errors.Trace(err)
+		return "", "", nil, errors.Trace(err)
 	}
 	subWorkflowURL = strings.TrimSpace(subWorkflowURL)
+	subWorkflowName = strings.TrimSpace(subWorkflowName)
 	steps, err := e.historyBeforeStep(ctx, shardNum, subFlowID, 0)
-	return subWorkflowURL, steps, errors.Trace(err)
+	return subWorkflowURL, subWorkflowName, steps, errors.Trace(err)
 }
 
 func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, error) {
@@ -471,7 +473,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			args = append(args, scArgs...)
 		}
 		args = append(args, perShardLimit)
-		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_url, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key" +
+		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_url, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key" +
 			" FROM dwarf_flows f" + joinSQL +
 			" WHERE " + strings.Join(conditions, " AND ") +
 			" ORDER BY f.flow_id DESC LIMIT_OFFSET(?, 0)"
@@ -486,7 +488,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			var flowToken, threadToken, flowError, cancelReason string
 			var threadID int
 			var taskName sql.NullString
-			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowURL, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey)
+			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowURL, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey)
 			if err != nil {
 				return errors.Trace(err)
 			}

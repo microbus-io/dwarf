@@ -40,9 +40,9 @@ func TestBreakerstartparkflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("breakerstartparkflow.verify:428/flow")
-	graph.AddTask("work", "breakerstartparkflow.verify:428/work")
-	graph.AddTransition("work", workflow.END)
+	graph := workflow.NewGraph("Flow", "breakerstartparkflow.verify:428/flow")
+	graph.AddTask("Work", "breakerstartparkflow.verify:428/work")
+	graph.AddTransition("Work", workflow.END)
 	proxy.HandleGraph("breakerstartparkflow.verify:428/flow", graph)
 
 	// The task records each flow's marker, then always fails with an ack-timeout 404 so the breaker

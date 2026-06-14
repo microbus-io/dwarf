@@ -32,13 +32,13 @@ func TestRetryflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("retryflow.verify:428/retry")
-	graph.AddTask("taskA", "retryflow.verify:428/task-a")
-	graph.AddTask("flaky", "retryflow.verify:428/flaky")
-	graph.AddTask("taskB", "retryflow.verify:428/task-b")
-	graph.AddTransition("taskA", "flaky")
-	graph.AddTransition("flaky", "taskB")
-	graph.AddTransition("taskB", workflow.END)
+	graph := workflow.NewGraph("Retry", "retryflow.verify:428/retry")
+	graph.AddTask("TaskA", "retryflow.verify:428/task-a")
+	graph.AddTask("Flaky", "retryflow.verify:428/flaky")
+	graph.AddTask("TaskB", "retryflow.verify:428/task-b")
+	graph.AddTransition("TaskA", "Flaky")
+	graph.AddTransition("Flaky", "TaskB")
+	graph.AddTransition("TaskB", workflow.END)
 	proxy.HandleGraph("retryflow.verify:428/retry", graph)
 
 	proxy.HandleTask("retryflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

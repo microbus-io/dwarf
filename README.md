@@ -16,9 +16,9 @@ interfaces, and it handles scheduling, state, durability, and recovery.
 ```go
 proxy := engine.NewTestProxy()
 
-g := workflow.NewGraph("greet")
-g.AddTask("hello", "hello")
-g.AddTransition("hello", workflow.END)
+g := workflow.NewGraph("Greet", "greet")
+g.AddTask("Hello", "hello")
+g.AddTransition("Hello", workflow.END)
 proxy.HandleGraph("greet", g)
 
 proxy.HandleTask("hello", func(ctx context.Context, f *workflow.Flow) error {
@@ -33,6 +33,9 @@ eng.RunInTest(t) // SQLite in-memory, auto-cleanup
 out, _ := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
 fmt.Println(out.State["greeting"]) // hello ada
 ```
+
+> By convention, graph and task names are PascalCase (`Greet`, `Hello`) — topology identifiers kept distinct
+> from the lowercased dispatch URLs and the camelCase state fields. The engine imposes no casing.
 
 ## Why dwarf
 

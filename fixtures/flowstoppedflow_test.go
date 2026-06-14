@@ -46,9 +46,9 @@ func TestFlowstoppedflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("flowstoppedflow.verify:428/flow")
-	graph.AddTask("gate", "flowstoppedflow.verify:428/gate")
-	graph.AddTransition("gate", workflow.END)
+	graph := workflow.NewGraph("Flow", "flowstoppedflow.verify:428/flow")
+	graph.AddTask("Gate", "flowstoppedflow.verify:428/gate")
+	graph.AddTransition("Gate", workflow.END)
 	proxy.HandleGraph("flowstoppedflow.verify:428/flow", graph)
 
 	proxy.HandleTask("flowstoppedflow.verify:428/gate", func(ctx context.Context, f *workflow.Flow) error {

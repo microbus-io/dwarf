@@ -35,6 +35,7 @@ type FlowStep struct {
 	NextKey          string         `json:"nextKey,omitzero"`
 	Subgraph         bool           `json:"subgraph,omitzero"`
 	SubWorkflowURL   string         `json:"subWorkflowURL,omitzero"`
+	SubWorkflowName  string         `json:"subWorkflowName,omitzero"`
 	SubHistory       []FlowStep     `json:"subHistory,omitzero"`
 	State            map[string]any `json:"state,omitzero"`
 	Changes          map[string]any `json:"changes,omitzero"`

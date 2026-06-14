@@ -88,7 +88,8 @@ func (r *GraphRenderer) WithLeftRight() *GraphRenderer {
 	return r
 }
 
-// WithTitleLabel toggles the title tile that precedes the start marker.
+// WithTitleLabel toggles the Mermaid frontmatter title (the graph's display name) rendered as a
+// caption above the chart.
 func (r *GraphRenderer) WithTitleLabel(show bool) *GraphRenderer {
 	r.titleLabel = show
 	return r
@@ -103,6 +104,14 @@ func (r *GraphRenderer) WithLinks(paramName string) *GraphRenderer {
 // Render returns a fully-styled Mermaid flowchart representation of the graph.
 func (r *GraphRenderer) Render() (string, error) {
 	var b strings.Builder
+	if r.titleLabel {
+		// Mermaid frontmatter: title and themeCSS are quoted YAML scalars so names/CSS with
+		// colons, braces, and '#' stay valid. The built-in themes ignore titleColor on the
+		// flowchart caption, so paint .flowchartTitleText directly with the theme cyan (primary)
+		// - it reads on light and dark backgrounds (and tracks the CSS var in var() mode).
+		titleCSS := fmt.Sprintf(".flowchartTitleText { fill: %s; }", r.primaryFill)
+		fmt.Fprintf(&b, "---\ntitle: %q\nconfig:\n  themeCSS: %q\n---\n", r.g.name, titleCSS)
+	}
 	fmt.Fprintf(&b, "graph %s\n", r.direction)
 	fmt.Fprintf(&b, "    classDef task fill:%s,color:%s,stroke:%s\n", r.primaryFill, r.primaryText, r.primaryFill)
 	fmt.Fprintf(&b, "    classDef term fill:%s,color:%s,stroke:%s\n", r.secondaryFill, r.secondaryText, r.primaryFill)
@@ -113,11 +122,6 @@ func (r *GraphRenderer) Render() (string, error) {
 	fmt.Fprintf(&b, "    classDef note fill:none,stroke:none,color:%s,font-size:0.8em\n", annoColor)
 	fmt.Fprintf(&b, "    linkStyle default stroke:%s\n", r.primaryFill)
 	b.WriteString("\n")
-
-	if r.titleLabel {
-		graphLabel := stripHostPort(r.g.url, "")
-		fmt.Fprintf(&b, "    _title{{%q}}:::term -.-> _start\n", graphLabel)
-	}
 
 	heads, endEdges := r.renderBody(&b, "    ", "")
 

@@ -12,15 +12,15 @@ A fan-out runs several branches concurrently from one task. There are two kinds.
 When more than one outgoing transition matches, all matching targets run in parallel:
 
 ```go
-g.AddTransition("ingest", "validate")    // both fire after ingest -> parallel
-g.AddTransition("ingest", "index")
+g.AddTransition("Ingest", "Validate")    // both fire after Ingest -> parallel
+g.AddTransition("Ingest", "Index")
 ```
 
 Or with conditions — every matching `when` fires:
 
 ```go
-g.AddTransitionWhen("triage", "notifyOps", "severity >= 3")
-g.AddTransitionWhen("triage", "logIncident", "severity >= 1")
+g.AddTransitionWhen("Triage", "NotifyOps", "severity >= 3")
+g.AddTransitionWhen("Triage", "LogIncident", "severity >= 1")
 ```
 
 (Contrast `AddTransitionSwitch`, where only the first match fires — see
@@ -31,8 +31,8 @@ g.AddTransitionWhen("triage", "logIncident", "severity >= 1")
 `forEach` spawns one instance of a task per element of a state array — the count is data-driven:
 
 ```go
-// state["lineItems"] = [ {...}, {...}, {...} ]  -> three parallel "process" branches
-g.AddTransitionForEach("split", "process", "lineItems", "item")
+// state["lineItems"] = [ {...}, {...}, {...} ]  -> three parallel "Process" branches
+g.AddTransitionForEach("Split", "Process", "lineItems", "item")
 ```
 
 Each branch receives:
@@ -55,9 +55,9 @@ sibling, merges their `changes` field-by-field, and runs the target once. Mark t
 `SetFanIn` and wire each non-default field with a reducer:
 
 ```go
-g.AddTransitionForEach("split", "process", "lineItems", "item")
-g.AddTransition("process", "summarize")
-g.SetFanIn("summarize")
+g.AddTransitionForEach("Split", "Process", "lineItems", "item")
+g.AddTransition("Process", "Summarize")
+g.SetFanIn("Summarize")
 
 g.SetReducer("results", workflow.ReducerAppend)  // each branch contributes one result
 g.SetReducer("subtotal", workflow.ReducerAdd)    // summed across branches

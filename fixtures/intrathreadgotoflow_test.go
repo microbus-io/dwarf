@@ -32,18 +32,18 @@ func TestIntrathreadgotoflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("intrathreadgotoflow.verify:428/intra-thread-goto")
-	graph.AddTask("taskA", "intrathreadgotoflow.verify:428/task-a")
-	graph.AddTask("loopTask", "intrathreadgotoflow.verify:428/loop-task")
-	graph.AddTask("normalC", "intrathreadgotoflow.verify:428/normal-c")
-	graph.AddTask("taskD", "intrathreadgotoflow.verify:428/task-d")
-	graph.SetFanIn("taskD")
-	graph.AddTransition("taskA", "loopTask")
-	graph.AddTransition("taskA", "normalC")
-	graph.AddTransitionGoto("loopTask", "loopTask")
-	graph.AddTransition("loopTask", "taskD")
-	graph.AddTransition("normalC", "taskD")
-	graph.AddTransition("taskD", workflow.END)
+	graph := workflow.NewGraph("IntraThreadGoto", "intrathreadgotoflow.verify:428/intra-thread-goto")
+	graph.AddTask("TaskA", "intrathreadgotoflow.verify:428/task-a")
+	graph.AddTask("LoopTask", "intrathreadgotoflow.verify:428/loop-task")
+	graph.AddTask("NormalC", "intrathreadgotoflow.verify:428/normal-c")
+	graph.AddTask("TaskD", "intrathreadgotoflow.verify:428/task-d")
+	graph.SetFanIn("TaskD")
+	graph.AddTransition("TaskA", "LoopTask")
+	graph.AddTransition("TaskA", "NormalC")
+	graph.AddTransitionGoto("LoopTask", "LoopTask")
+	graph.AddTransition("LoopTask", "TaskD")
+	graph.AddTransition("NormalC", "TaskD")
+	graph.AddTransition("TaskD", workflow.END)
 	proxy.HandleGraph("intrathreadgotoflow.verify:428/intra-thread-goto", graph)
 
 	proxy.HandleTask("intrathreadgotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
@@ -53,7 +53,7 @@ func TestIntrathreadgotoflow(t *testing.T) {
 		loops := f.GetInt("loops") + 1
 		f.SetInt("loops", loops)
 		if loops < f.GetInt("target") {
-			f.Goto("intrathreadgotoflow.verify:428/loop-task")
+			f.Goto("LoopTask")
 		}
 		return nil
 	})

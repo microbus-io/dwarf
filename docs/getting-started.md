@@ -46,12 +46,12 @@ func TestGreeting(t *testing.T) {
 	ctx := context.Background()
 	proxy := engine.NewTestProxy()
 
-	// 1. Define a two-task graph: greet -> shout -> END.
-	g := workflow.NewGraph("greet")
-	g.AddTask("greet", "greet")
-	g.AddTask("shout", "shout")
-	g.AddTransition("greet", "shout")
-	g.AddTransition("shout", workflow.END)
+	// 1. Define a two-task graph: Greet -> Shout -> END.
+	g := workflow.NewGraph("Greet", "greet")
+	g.AddTask("Greet", "greet")
+	g.AddTask("Shout", "shout")
+	g.AddTransition("Greet", "Shout")
+	g.AddTransition("Shout", workflow.END)
 	proxy.HandleGraph("greet", g)
 
 	// 2. Register the tasks.

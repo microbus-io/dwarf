@@ -39,23 +39,23 @@ func TestSubgraphinterruptflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Parent: A -> runInner -> Z
-	parent := workflow.NewGraph("subgraphinterruptflow.verify:428/parent")
-	parent.AddTask("taskA", "subgraphinterruptflow.verify:428/task-a")
-	parent.AddTask("runInner", "subgraphinterruptflow.verify:428/run-inner")
-	parent.AddTask("taskZ", "subgraphinterruptflow.verify:428/task-z")
-	parent.AddTransition("taskA", "runInner")
-	parent.AddTransition("runInner", "taskZ")
-	parent.AddTransition("taskZ", workflow.END)
+	parent := workflow.NewGraph("Parent", "subgraphinterruptflow.verify:428/parent")
+	parent.AddTask("TaskA", "subgraphinterruptflow.verify:428/task-a")
+	parent.AddTask("RunInner", "subgraphinterruptflow.verify:428/run-inner")
+	parent.AddTask("TaskZ", "subgraphinterruptflow.verify:428/task-z")
+	parent.AddTransition("TaskA", "RunInner")
+	parent.AddTransition("RunInner", "TaskZ")
+	parent.AddTransition("TaskZ", workflow.END)
 	proxy.HandleGraph("subgraphinterruptflow.verify:428/parent", parent)
 
 	// Inner: X -> pause (interrupts) -> Y
-	inner := workflow.NewGraph("subgraphinterruptflow.verify:428/inner")
-	inner.AddTask("taskX", "subgraphinterruptflow.verify:428/task-x")
-	inner.AddTask("pause", "subgraphinterruptflow.verify:428/pause")
-	inner.AddTask("taskY", "subgraphinterruptflow.verify:428/task-y")
-	inner.AddTransition("taskX", "pause")
-	inner.AddTransition("pause", "taskY")
-	inner.AddTransition("taskY", workflow.END)
+	inner := workflow.NewGraph("Inner", "subgraphinterruptflow.verify:428/inner")
+	inner.AddTask("TaskX", "subgraphinterruptflow.verify:428/task-x")
+	inner.AddTask("Pause", "subgraphinterruptflow.verify:428/pause")
+	inner.AddTask("TaskY", "subgraphinterruptflow.verify:428/task-y")
+	inner.AddTransition("TaskX", "Pause")
+	inner.AddTransition("Pause", "TaskY")
+	inner.AddTransition("TaskY", workflow.END)
 	proxy.HandleGraph("subgraphinterruptflow.verify:428/inner", inner)
 
 	proxy.HandleTask("subgraphinterruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

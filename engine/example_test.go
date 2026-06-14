@@ -48,9 +48,9 @@ func Example() {
 	ctx := context.Background()
 
 	graphs := map[string]*workflow.Graph{}
-	g := workflow.NewGraph("greet")
-	g.AddTask("hello", "hello")
-	g.AddTransition("hello", workflow.END)
+	g := workflow.NewGraph("Greet", "greet")
+	g.AddTask("Hello", "Hello")
+	g.AddTransition("Hello", workflow.END)
 	graphs["greet"] = g
 
 	eng := engine.NewEngine().

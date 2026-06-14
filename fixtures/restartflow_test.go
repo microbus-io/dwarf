@@ -41,11 +41,11 @@ func TestRestartflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("restartflow.verify:428/restart")
-	graph.AddTask("taskA", "restartflow.verify:428/task-a")
-	graph.AddTask("taskB", "restartflow.verify:428/task-b")
-	graph.AddTransition("taskA", "taskB")
-	graph.AddTransition("taskB", workflow.END)
+	graph := workflow.NewGraph("Restart", "restartflow.verify:428/restart")
+	graph.AddTask("TaskA", "restartflow.verify:428/task-a")
+	graph.AddTask("TaskB", "restartflow.verify:428/task-b")
+	graph.AddTransition("TaskA", "TaskB")
+	graph.AddTransition("TaskB", workflow.END)
 	proxy.HandleGraph("restartflow.verify:428/restart", graph)
 
 	// Counts how many times the entry task body runs across the whole flow lifetime.

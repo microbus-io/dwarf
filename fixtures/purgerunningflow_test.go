@@ -36,9 +36,9 @@ func TestPurgerunningflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("purgerunningflow.verify:428/flow")
-	graph.AddTask("work", "purgerunningflow.verify:428/work")
-	graph.AddTransition("work", workflow.END)
+	graph := workflow.NewGraph("Flow", "purgerunningflow.verify:428/flow")
+	graph.AddTask("Work", "purgerunningflow.verify:428/work")
+	graph.AddTransition("Work", workflow.END)
 	proxy.HandleGraph("purgerunningflow.verify:428/flow", graph)
 
 	// The task blocks until the test releases it, so the flow stays running across the Purge call.

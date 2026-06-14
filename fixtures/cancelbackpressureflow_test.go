@@ -39,9 +39,9 @@ func TestCancelbackpressureflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("cancelbackpressureflow.verify:428/cancel-backpressure")
-	graph.AddTask("bounceAndCancel", "cancelbackpressureflow.verify:428/bounce-and-cancel")
-	graph.AddTransition("bounceAndCancel", workflow.END)
+	graph := workflow.NewGraph("CancelBackpressure", "cancelbackpressureflow.verify:428/cancel-backpressure")
+	graph.AddTask("BounceAndCancel", "cancelbackpressureflow.verify:428/bounce-and-cancel")
+	graph.AddTransition("BounceAndCancel", workflow.END)
 	proxy.HandleGraph("cancelbackpressureflow.verify:428/cancel-backpressure", graph)
 
 	var readyOnce sync.Once
@@ -97,7 +97,7 @@ func TestCancelbackpressureflow(t *testing.T) {
 			return
 		}
 		for _, s := range steps {
-			if s.TaskName == "bounceAndCancel" {
+			if s.TaskName == "BounceAndCancel" {
 				assert.Equal(workflow.StatusCancelled, s.Status)
 			}
 		}

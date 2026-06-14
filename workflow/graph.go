@@ -53,6 +53,7 @@ type Transition struct {
 // Graph is the definition of a workflow. It describes the tasks, transitions between them,
 // and reducers for merging state during fan-in.
 type Graph struct {
+	name          string
 	url           string
 	entryPoint    string
 	nodes         []Node
@@ -64,11 +65,21 @@ type Graph struct {
 }
 
 // NewGraph creates a new workflow graph identified by the given URL - the resolve key the host's
-// LoadGraph fetches it by, and the value passed to Create.
-func NewGraph(graphURL string) *Graph {
-	return &Graph{
-		url: graphURL,
+// LoadGraph fetches it by, and the value passed to Create. The name is a human-friendly display
+// label (surfaced in rendering); an empty name defaults to the URL.
+func NewGraph(name, graphURL string) *Graph {
+	if name == "" {
+		name = graphURL
 	}
+	return &Graph{
+		name: name,
+		url:  graphURL,
+	}
+}
+
+// Name returns the graph's display name (defaults to the URL when not set).
+func (g *Graph) Name() string {
+	return g.name
 }
 
 // URL returns the graph's URL (its resolve key).
@@ -539,6 +550,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		jsonTasks[i] = jsonTask{Name: t.Name, URL: t.URL, FanIn: g.fanInNodes[t.Name]}
 	}
 	type jsonGraph struct {
+		Name          string             `json:"name,omitzero"`
 		URL           string             `json:"url"`
 		EntryPoint    string             `json:"entryPoint"`
 		Tasks         []jsonTask         `json:"tasks"`
@@ -547,6 +559,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		FanOutToFanIn map[string]string  `json:"fanOutToFanIn,omitzero"`
 	}
 	jg := jsonGraph{
+		Name:          g.name,
 		URL:           g.url,
 		EntryPoint:    g.entryPoint,
 		Tasks:         jsonTasks,

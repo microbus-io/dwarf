@@ -79,7 +79,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
 	proxy := NewTestProxy()
-	g := workflow.NewGraph("metricsflow.verify:428/g")
+	g := workflow.NewGraph("G", "metricsflow.verify:428/g")
 	g.AddTask("taskA", "metricsflow.verify:428/a")
 	g.AddTask("taskB", "metricsflow.verify:428/b")
 	g.AddTransition("taskA", "taskB")

@@ -32,16 +32,16 @@ func TestRetryloopflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("retryloopflow.verify:428/retry-loop")
-	graph.AddTask("taskA", "retryloopflow.verify:428/task-a")
-	graph.AddTask("taskB", "retryloopflow.verify:428/task-b")
-	graph.AddTask("handler", "retryloopflow.verify:428/handler")
-	graph.AddTask("taskC", "retryloopflow.verify:428/task-c")
-	graph.AddTransition("taskA", "taskB")
-	graph.AddTransitionOnError("taskB", "handler")
-	graph.AddTransition("taskB", "taskC")
-	graph.AddTransition("handler", "taskB")
-	graph.AddTransition("taskC", workflow.END)
+	graph := workflow.NewGraph("RetryLoop", "retryloopflow.verify:428/retry-loop")
+	graph.AddTask("TaskA", "retryloopflow.verify:428/task-a")
+	graph.AddTask("TaskB", "retryloopflow.verify:428/task-b")
+	graph.AddTask("Handler", "retryloopflow.verify:428/handler")
+	graph.AddTask("TaskC", "retryloopflow.verify:428/task-c")
+	graph.AddTransition("TaskA", "TaskB")
+	graph.AddTransitionOnError("TaskB", "Handler")
+	graph.AddTransition("TaskB", "TaskC")
+	graph.AddTransition("Handler", "TaskB")
+	graph.AddTransition("TaskC", workflow.END)
 	proxy.HandleGraph("retryloopflow.verify:428/retry-loop", graph)
 
 	proxy.HandleTask("retryloopflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

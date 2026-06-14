@@ -32,23 +32,23 @@ func TestSubgraphentryflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Outer graph: RunInner -> RunTail -> END
-	outer := workflow.NewGraph("subgraphentryflow.verify:428/outer")
-	outer.AddTask("runInner", "subgraphentryflow.verify:428/run-inner")
-	outer.AddTask("runTail", "subgraphentryflow.verify:428/run-tail")
-	outer.AddTransition("runInner", "runTail")
-	outer.AddTransition("runTail", workflow.END)
+	outer := workflow.NewGraph("Outer", "subgraphentryflow.verify:428/outer")
+	outer.AddTask("RunInner", "subgraphentryflow.verify:428/run-inner")
+	outer.AddTask("RunTail", "subgraphentryflow.verify:428/run-tail")
+	outer.AddTransition("RunInner", "RunTail")
+	outer.AddTransition("RunTail", workflow.END)
 	proxy.HandleGraph("subgraphentryflow.verify:428/outer", outer)
 
 	// Inner subgraph: TaskInner -> END
-	inner := workflow.NewGraph("subgraphentryflow.verify:428/inner")
-	inner.AddTask("taskInner", "subgraphentryflow.verify:428/task-inner")
-	inner.AddTransition("taskInner", workflow.END)
+	inner := workflow.NewGraph("Inner", "subgraphentryflow.verify:428/inner")
+	inner.AddTask("TaskInner", "subgraphentryflow.verify:428/task-inner")
+	inner.AddTransition("TaskInner", workflow.END)
 	proxy.HandleGraph("subgraphentryflow.verify:428/inner", inner)
 
 	// Tail subgraph: TaskTail -> END
-	tail := workflow.NewGraph("subgraphentryflow.verify:428/tail")
-	tail.AddTask("taskTail", "subgraphentryflow.verify:428/task-tail")
-	tail.AddTransition("taskTail", workflow.END)
+	tail := workflow.NewGraph("Tail", "subgraphentryflow.verify:428/tail")
+	tail.AddTask("TaskTail", "subgraphentryflow.verify:428/task-tail")
+	tail.AddTransition("TaskTail", workflow.END)
 	proxy.HandleGraph("subgraphentryflow.verify:428/tail", tail)
 
 	proxy.HandleTask("subgraphentryflow.verify:428/task-inner", func(ctx context.Context, f *workflow.Flow) error {

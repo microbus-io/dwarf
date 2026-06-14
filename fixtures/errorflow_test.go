@@ -33,16 +33,16 @@ func TestErrorflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("errorflow.verify:428/error")
-	graph.AddTask("taskA", "errorflow.verify:428/task-a")
-	graph.AddTask("taskB", "errorflow.verify:428/task-b")
-	graph.AddTask("handler", "errorflow.verify:428/handler")
-	graph.AddTask("taskC", "errorflow.verify:428/task-c")
-	graph.AddTransition("taskA", "taskB")
-	graph.AddTransitionOnError("taskB", "handler")
-	graph.AddTransition("taskB", "taskC")
-	graph.AddTransition("handler", "taskC")
-	graph.AddTransition("taskC", workflow.END)
+	graph := workflow.NewGraph("Error", "errorflow.verify:428/error")
+	graph.AddTask("TaskA", "errorflow.verify:428/task-a")
+	graph.AddTask("TaskB", "errorflow.verify:428/task-b")
+	graph.AddTask("Handler", "errorflow.verify:428/handler")
+	graph.AddTask("TaskC", "errorflow.verify:428/task-c")
+	graph.AddTransition("TaskA", "TaskB")
+	graph.AddTransitionOnError("TaskB", "Handler")
+	graph.AddTransition("TaskB", "TaskC")
+	graph.AddTransition("Handler", "TaskC")
+	graph.AddTransition("TaskC", workflow.END)
 	proxy.HandleGraph("errorflow.verify:428/error", graph)
 
 	proxy.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

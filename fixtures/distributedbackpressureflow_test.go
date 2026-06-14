@@ -43,9 +43,9 @@ func TestDistributedbackpressureflow(t *testing.T) {
 	proxy1 := engine.NewTestProxy()
 	proxy2 := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("distributedbackpressureflow.verify:428/distributed-backpressure")
-	graph.AddTask("bounded", "distributedbackpressureflow.verify:428/bounded")
-	graph.AddTransition("bounded", workflow.END)
+	graph := workflow.NewGraph("DistributedBackpressure", "distributedbackpressureflow.verify:428/distributed-backpressure")
+	graph.AddTask("Bounded", "distributedbackpressureflow.verify:428/bounded")
+	graph.AddTransition("Bounded", workflow.END)
 	proxy1.HandleGraph("distributedbackpressureflow.verify:428/distributed-backpressure", graph)
 	proxy2.HandleGraph("distributedbackpressureflow.verify:428/distributed-backpressure", graph)
 

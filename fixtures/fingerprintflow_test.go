@@ -37,13 +37,13 @@ func TestFingerprintflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("fingerprintflow.verify:428/fingerprint")
-	graph.AddTask("taskA", "fingerprintflow.verify:428/task-a")
-	graph.AddTask("pause", "fingerprintflow.verify:428/pause")
-	graph.AddTask("done", "fingerprintflow.verify:428/done")
-	graph.AddTransition("taskA", "pause")
-	graph.AddTransition("pause", "done")
-	graph.AddTransition("done", workflow.END)
+	graph := workflow.NewGraph("Fingerprint", "fingerprintflow.verify:428/fingerprint")
+	graph.AddTask("TaskA", "fingerprintflow.verify:428/task-a")
+	graph.AddTask("Pause", "fingerprintflow.verify:428/pause")
+	graph.AddTask("Done", "fingerprintflow.verify:428/done")
+	graph.AddTransition("TaskA", "Pause")
+	graph.AddTransition("Pause", "Done")
+	graph.AddTransition("Done", workflow.END)
 	proxy.HandleGraph("fingerprintflow.verify:428/fingerprint", graph)
 
 	proxy.HandleTask("fingerprintflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

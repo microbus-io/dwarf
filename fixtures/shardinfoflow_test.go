@@ -37,9 +37,9 @@ func TestShardinfoflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("shardinfoflow.verify:428/flow")
-	graph.AddTask("only", "shardinfoflow.verify:428/only")
-	graph.AddTransition("only", workflow.END)
+	graph := workflow.NewGraph("Flow", "shardinfoflow.verify:428/flow")
+	graph.AddTask("Only", "shardinfoflow.verify:428/only")
+	graph.AddTransition("Only", workflow.END)
 	proxy.HandleGraph("shardinfoflow.verify:428/flow", graph)
 
 	proxy.HandleTask("shardinfoflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {

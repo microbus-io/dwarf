@@ -37,15 +37,15 @@ func TestRetryfanoutflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("retryfanoutflow.verify:428/retry-fan-out")
-	graph.AddTask("enter", "retryfanoutflow.verify:428/enter")
-	graph.AddTask("increment", "retryfanoutflow.verify:428/increment")
-	graph.AddTask("join", "retryfanoutflow.verify:428/join")
-	graph.SetFanIn("join")
+	graph := workflow.NewGraph("RetryFanOut", "retryfanoutflow.verify:428/retry-fan-out")
+	graph.AddTask("Enter", "retryfanoutflow.verify:428/enter")
+	graph.AddTask("Increment", "retryfanoutflow.verify:428/increment")
+	graph.AddTask("Join", "retryfanoutflow.verify:428/join")
+	graph.SetFanIn("Join")
 	graph.SetReducer("results", workflow.ReducerAppend)
-	graph.AddTransitionForEach("enter", "increment", "elements", "element")
-	graph.AddTransition("increment", "join")
-	graph.AddTransition("join", workflow.END)
+	graph.AddTransitionForEach("Enter", "Increment", "elements", "element")
+	graph.AddTransition("Increment", "Join")
+	graph.AddTransition("Join", workflow.END)
 	proxy.HandleGraph("retryfanoutflow.verify:428/retry-fan-out", graph)
 
 	proxy.HandleTask("retryfanoutflow.verify:428/enter", func(ctx context.Context, f *workflow.Flow) error {

@@ -31,14 +31,14 @@ func TestGotoflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("gotoflow.verify:428/goto")
-	graph.AddTask("taskA", "gotoflow.verify:428/task-a")
-	graph.AddTask("taskB", "gotoflow.verify:428/task-b")
-	graph.AddTask("taskC", "gotoflow.verify:428/task-c")
-	graph.AddTransition("taskA", "taskB")
-	graph.AddTransitionGoto("taskB", "taskA")
-	graph.AddTransition("taskB", "taskC")
-	graph.AddTransition("taskC", workflow.END)
+	graph := workflow.NewGraph("Goto", "gotoflow.verify:428/goto")
+	graph.AddTask("TaskA", "gotoflow.verify:428/task-a")
+	graph.AddTask("TaskB", "gotoflow.verify:428/task-b")
+	graph.AddTask("TaskC", "gotoflow.verify:428/task-c")
+	graph.AddTransition("TaskA", "TaskB")
+	graph.AddTransitionGoto("TaskB", "TaskA")
+	graph.AddTransition("TaskB", "TaskC")
+	graph.AddTransition("TaskC", workflow.END)
 	proxy.HandleGraph("gotoflow.verify:428/goto", graph)
 
 	proxy.HandleTask("gotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
@@ -47,7 +47,7 @@ func TestGotoflow(t *testing.T) {
 	})
 	proxy.HandleTask("gotoflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("loops") < f.GetInt("target") {
-			f.Goto("gotoflow.verify:428/task-a")
+			f.Goto("TaskA")
 		}
 		f.SetBool("visited", true)
 		return nil
@@ -88,13 +88,13 @@ func TestGotoflow_BadGoto(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("gotoflow.verify:428/bad-goto")
-	graph.AddTask("badGotoer", "gotoflow.verify:428/bad-gotoer")
-	graph.AddTransition("badGotoer", workflow.END)
+	graph := workflow.NewGraph("BadGoto", "gotoflow.verify:428/bad-goto")
+	graph.AddTask("BadGotoer", "gotoflow.verify:428/bad-gotoer")
+	graph.AddTransition("BadGotoer", workflow.END)
 	proxy.HandleGraph("gotoflow.verify:428/bad-goto", graph)
 
 	proxy.HandleTask("gotoflow.verify:428/bad-gotoer", func(ctx context.Context, f *workflow.Flow) error {
-		f.Goto("https://gotoflow.verify:428/no-such-task")
+		f.Goto("NoSuchTask")
 		f.SetBool("stamp", true)
 		return nil
 	})

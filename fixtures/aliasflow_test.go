@@ -31,25 +31,25 @@ func TestAliasflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("aliasflow.verify:428/alias")
-	graph.AddTask("s", "aliasflow.verify:428/task-s")
-	graph.AddTask("a", "aliasflow.verify:428/task-a")
-	graph.AddTask("b", "aliasflow.verify:428/task-b")
-	graph.AddTask("c", "aliasflow.verify:428/task-c")
-	graph.AddTask("bPrime", "aliasflow.verify:428/task-b") // same URL as "b"
-	graph.AddTask("d", "aliasflow.verify:428/task-d")
-	graph.AddTransition("s", "a")
-	graph.AddTransitionGoto("s", "bPrime")
-	graph.AddTransition("a", "b")
-	graph.AddTransition("b", "c")
-	graph.AddTransition("c", workflow.END)
-	graph.AddTransition("bPrime", "d")
-	graph.AddTransition("d", workflow.END)
+	graph := workflow.NewGraph("Alias", "aliasflow.verify:428/alias")
+	graph.AddTask("S", "aliasflow.verify:428/task-s")
+	graph.AddTask("A", "aliasflow.verify:428/task-a")
+	graph.AddTask("B", "aliasflow.verify:428/task-b")
+	graph.AddTask("C", "aliasflow.verify:428/task-c")
+	graph.AddTask("BPrime", "aliasflow.verify:428/task-b") // same URL as "B"
+	graph.AddTask("D", "aliasflow.verify:428/task-d")
+	graph.AddTransition("S", "A")
+	graph.AddTransitionGoto("S", "BPrime")
+	graph.AddTransition("A", "B")
+	graph.AddTransition("B", "C")
+	graph.AddTransition("C", workflow.END)
+	graph.AddTransition("BPrime", "D")
+	graph.AddTransition("D", workflow.END)
 	proxy.HandleGraph("aliasflow.verify:428/alias", graph)
 
 	proxy.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("branch") == "alt" {
-			f.Goto("bPrime")
+			f.Goto("BPrime")
 		}
 		return nil
 	})
@@ -97,7 +97,7 @@ func TestAliasflow(t *testing.T) {
 	t.Run("history_distinguishes_b_and_bPrime_by_node_name", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		// Default path: history should include "b" but not "bPrime".
+		// Default path: history should include "B" but not "BPrime".
 		flowKey, err := eng.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": ""}, nil)
 		if !assert.NoError(err) {
 			return
@@ -120,14 +120,14 @@ func TestAliasflow(t *testing.T) {
 		for _, s := range history {
 			nodeNames[s.TaskName]++
 		}
-		assert.Equal(1, nodeNames["s"])
-		assert.Equal(1, nodeNames["a"])
-		assert.Equal(1, nodeNames["b"])
-		assert.Equal(1, nodeNames["c"])
-		assert.Equal(0, nodeNames["bPrime"])
-		assert.Equal(0, nodeNames["d"])
+		assert.Equal(1, nodeNames["S"])
+		assert.Equal(1, nodeNames["A"])
+		assert.Equal(1, nodeNames["B"])
+		assert.Equal(1, nodeNames["C"])
+		assert.Equal(0, nodeNames["BPrime"])
+		assert.Equal(0, nodeNames["D"])
 
-		// Alt path: history should include "bPrime" but not "b".
+		// Alt path: history should include "BPrime" but not "B".
 		flowKey, err = eng.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": "alt"}, nil)
 		if !assert.NoError(err) {
 			return
@@ -150,11 +150,11 @@ func TestAliasflow(t *testing.T) {
 		for _, s := range history {
 			nodeNames[s.TaskName]++
 		}
-		assert.Equal(1, nodeNames["s"])
-		assert.Equal(1, nodeNames["bPrime"])
-		assert.Equal(1, nodeNames["d"])
-		assert.Equal(0, nodeNames["a"])
-		assert.Equal(0, nodeNames["b"])
-		assert.Equal(0, nodeNames["c"])
+		assert.Equal(1, nodeNames["S"])
+		assert.Equal(1, nodeNames["BPrime"])
+		assert.Equal(1, nodeNames["D"])
+		assert.Equal(0, nodeNames["A"])
+		assert.Equal(0, nodeNames["B"])
+		assert.Equal(0, nodeNames["C"])
 	})
 }

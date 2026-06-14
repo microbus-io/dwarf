@@ -33,21 +33,21 @@ func TestSubgraphflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Parent graph: A -> RunInner -> Z
-	parent := workflow.NewGraph("subgraphflow.verify:428/parent")
-	parent.AddTask("taskA", "subgraphflow.verify:428/task-a")
-	parent.AddTask("runInner", "subgraphflow.verify:428/run-inner")
-	parent.AddTask("taskZ", "subgraphflow.verify:428/task-z")
-	parent.AddTransition("taskA", "runInner")
-	parent.AddTransition("runInner", "taskZ")
-	parent.AddTransition("taskZ", workflow.END)
+	parent := workflow.NewGraph("Parent", "subgraphflow.verify:428/parent")
+	parent.AddTask("TaskA", "subgraphflow.verify:428/task-a")
+	parent.AddTask("RunInner", "subgraphflow.verify:428/run-inner")
+	parent.AddTask("TaskZ", "subgraphflow.verify:428/task-z")
+	parent.AddTransition("TaskA", "RunInner")
+	parent.AddTransition("RunInner", "TaskZ")
+	parent.AddTransition("TaskZ", workflow.END)
 	proxy.HandleGraph("subgraphflow.verify:428/parent", parent)
 
 	// Inner graph: X -> Y
-	inner := workflow.NewGraph("subgraphflow.verify:428/inner")
-	inner.AddTask("taskX", "subgraphflow.verify:428/task-x")
-	inner.AddTask("taskY", "subgraphflow.verify:428/task-y")
-	inner.AddTransition("taskX", "taskY")
-	inner.AddTransition("taskY", workflow.END)
+	inner := workflow.NewGraph("Inner", "subgraphflow.verify:428/inner")
+	inner.AddTask("TaskX", "subgraphflow.verify:428/task-x")
+	inner.AddTask("TaskY", "subgraphflow.verify:428/task-y")
+	inner.AddTransition("TaskX", "TaskY")
+	inner.AddTransition("TaskY", workflow.END)
 	proxy.HandleGraph("subgraphflow.verify:428/inner", inner)
 
 	proxy.HandleTask("subgraphflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

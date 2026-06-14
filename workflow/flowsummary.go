@@ -23,6 +23,7 @@ type FlowSummary struct {
 	FlowKey      string    `json:"flowKey,omitzero"`
 	ThreadKey    string    `json:"threadKey,omitzero"`
 	WorkflowURL  string    `json:"workflowURL,omitzero"`
+	WorkflowName string    `json:"workflowName,omitzero"`
 	Status       string    `json:"status,omitzero"`
 	TaskName     string    `json:"taskName,omitzero"`
 	Error        string    `json:"error,omitzero"`

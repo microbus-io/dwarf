@@ -9,17 +9,22 @@ A graph is a set of tasks connected by transitions. Add a task with a **node nam
 graph) and a **URL** (the address your host's `ExecuteTask` resolves to reach it):
 
 ```go
-g := workflow.NewGraph("checkout")
-g.AddTask("reserve", "inventory.reserve")
-g.AddTask("charge", "billing.charge")
-g.AddTask("ship", "fulfillment.ship")
+g := workflow.NewGraph("Checkout", "checkout")
+g.AddTask("Reserve", "inventory.reserve")
+g.AddTask("Charge", "billing.charge")
+g.AddTask("Ship", "fulfillment.ship")
 ```
 
 The node name and URL can differ, which lets the same task URL appear at several positions under
 different names. The engine passes the URL to your executor; your executor decides what that address means
 (a function key, an HTTP endpoint, a message topic).
 
-The **entry point** defaults to the first task added. Override it with `g.SetEntryPoint("reserve")`.
+By convention, **graph and task (node) names are PascalCase** (`Reserve`, `Charge`) — they are
+graph-topology identifiers, distinct from the lowercased URLs they dispatch to and from the camelCase
+**state fields** tasks read and write (`lineItems`, `loopsLeft`). Keeping the three namespaces visually
+distinct makes graphs easier to read; the engine itself imposes no casing.
+
+The **entry point** defaults to the first task added. Override it with `g.SetEntryPoint("Reserve")`.
 
 `workflow.END` is the sentinel terminal target — a transition to `END` ends the flow.
 
@@ -31,8 +36,8 @@ what runs next.
 ### Unconditional
 
 ```go
-g.AddTransition("reserve", "charge")   // reserve always -> charge
-g.AddTransition("ship", workflow.END)  // ship ends the flow
+g.AddTransition("Reserve", "Charge")   // Reserve always -> Charge
+g.AddTransition("Ship", workflow.END)  // Ship ends the flow
 ```
 
 ### Conditional (`when`)
@@ -42,8 +47,8 @@ g.AddTransition("ship", workflow.END)  // ship ends the flow
 state fields:
 
 ```go
-g.AddTransitionWhen("triage", "escalate", "severity >= 3")
-g.AddTransitionWhen("triage", "autoResolve", "severity < 3")
+g.AddTransitionWhen("Triage", "Escalate", "severity >= 3")
+g.AddTransitionWhen("Triage", "AutoResolve", "severity < 3")
 ```
 
 If **several** `when` transitions match, **all** of them fire in parallel — that's a fan-out (see
@@ -56,9 +61,9 @@ source are evaluated in registration order; only the **first** whose expression 
 are skipped:
 
 ```go
-g.AddTransitionSwitch("router", "handleHigh", "amount >= 10000")
-g.AddTransitionSwitch("router", "handleMid", "amount >= 1000")
-g.AddTransitionSwitch("router", "handleLow", "true") // catch-all
+g.AddTransitionSwitch("Router", "HandleHigh", "amount >= 10000")
+g.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
+g.AddTransitionSwitch("Router", "HandleLow", "true") // catch-all
 ```
 
 Because only one branch ever runs, switch branches need no fan-in. A node that uses switch transitions must
@@ -71,8 +76,8 @@ when/plain/forEach/goto from the same source. (Error transitions are orthogonal 
 element, each receiving its element under the `as` key:
 
 ```go
-// For each element of state["lineItems"], run "process" with the element bound to state["item"].
-g.AddTransitionForEach("split", "process", "lineItems", "item")
+// For each element of state["lineItems"], run "Process" with the element bound to state["item"].
+g.AddTransitionForEach("Split", "Process", "lineItems", "item")
 ```
 
 Each branch also gets `<as>Index` (its position) and `<as>Count` (the cohort size) injected. An empty
@@ -84,8 +89,8 @@ A `goto` transition is taken only when a task calls `flow.Goto(target)` — neve
 Use it for loops and computed routing:
 
 ```go
-g.AddTransitionGoto("evaluate", "retry")   // taken only if a task calls flow.Goto("retry")
-g.AddTransitionGoto("evaluate", "finish")
+g.AddTransitionGoto("Evaluate", "Retry")   // taken only if a task calls flow.Goto("Retry")
+g.AddTransitionGoto("Evaluate", "Finish")
 ```
 
 See [`flow.Goto`](tasks.md#goto).
@@ -96,10 +101,10 @@ When a task returns an ordinary error, the engine routes to an `onError` handler
 before failing the flow:
 
 ```go
-g.AddTransitionOnError("charge", "refund") // any error from charge -> refund
+g.AddTransitionOnError("Charge", "Refund") // any error from Charge -> Refund
 ```
 
-The error from `charge` routes to `refund` rather than failing the flow. The error is serialized into the
+The error from `Charge` routes to `Refund` rather than failing the flow. The error is serialized into the
 state field `onErr` (as a structured error the handler can read), the failed step is marked completed with
 its changes preserved, and the handler runs next. If no `onError` handler is declared, the flow fails. An
 `onError` transition can't combine with `forEach`, `goto`, or `switch`. If the failing task was part of a
@@ -120,9 +125,9 @@ is a **fan-in**: the engine waits for all siblings, merges their `changes` field
 target once. Mark the convergence node and wire non-default merges:
 
 ```go
-g.AddTransitionForEach("split", "process", "lineItems", "item")
-g.AddTransition("process", "summarize")
-g.SetFanIn("summarize")                          // opts into fan-in validation
+g.AddTransitionForEach("Split", "Process", "lineItems", "item")
+g.AddTransition("Process", "Summarize")
+g.SetFanIn("Summarize")                          // opts into fan-in validation
 g.SetReducer("results", workflow.ReducerAppend)  // each branch appends its result
 g.SetReducer("total", workflow.ReducerAdd)       // each branch adds its subtotal
 ```

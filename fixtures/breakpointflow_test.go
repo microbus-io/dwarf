@@ -31,20 +31,20 @@ func TestBreakpointflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("breakpointflow.verify:428/breakpoint")
-	graph.AddTask("taskA", "breakpointflow.verify:428/task-a")
-	graph.AddTask("taskB", "taskB")
-	graph.AddTask("taskC", "breakpointflow.verify:428/task-c")
-	graph.AddTransition("taskA", "taskB")
-	graph.AddTransition("taskB", "taskC")
-	graph.AddTransition("taskC", workflow.END)
+	graph := workflow.NewGraph("Breakpoint", "breakpointflow.verify:428/breakpoint")
+	graph.AddTask("TaskA", "breakpointflow.verify:428/task-a")
+	graph.AddTask("TaskB", "TaskB")
+	graph.AddTask("TaskC", "breakpointflow.verify:428/task-c")
+	graph.AddTransition("TaskA", "TaskB")
+	graph.AddTransition("TaskB", "TaskC")
+	graph.AddTransition("TaskC", workflow.END)
 	proxy.HandleGraph("breakpointflow.verify:428/breakpoint", graph)
 
 	proxy.HandleTask("breakpointflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("stepA", true)
 		return nil
 	})
-	proxy.HandleTask("taskB", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("TaskB", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("stepB", f.GetBool("stepA"))
 		return nil
 	})
@@ -64,7 +64,7 @@ func TestBreakpointflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		err = eng.BreakBefore(ctx, flowKey, "taskB", true)
+		err = eng.BreakBefore(ctx, flowKey, "TaskB", true)
 		if !assert.NoError(err) {
 			return
 		}

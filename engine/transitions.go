@@ -43,7 +43,7 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 			if tr.From != currentTask || !tr.WithGoto {
 				continue
 			}
-			if tr.To == gotoTarget || graph.URLOf(tr.To) == gotoTarget {
+			if tr.To == gotoTarget {
 				return []nextStep{{taskName: tr.To}}, nil
 			}
 		}

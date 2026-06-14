@@ -37,11 +37,11 @@ func TestBreakpointnotifyflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("breakpointnotifyflow.verify:428/flow")
-	graph.AddTask("taskA", "breakpointnotifyflow.verify:428/task-a")
-	graph.AddTask("taskB", "breakpointnotifyflow.verify:428/task-b")
-	graph.AddTransition("taskA", "taskB")
-	graph.AddTransition("taskB", workflow.END)
+	graph := workflow.NewGraph("Flow", "breakpointnotifyflow.verify:428/flow")
+	graph.AddTask("TaskA", "breakpointnotifyflow.verify:428/task-a")
+	graph.AddTask("TaskB", "breakpointnotifyflow.verify:428/task-b")
+	graph.AddTransition("TaskA", "TaskB")
+	graph.AddTransition("TaskB", workflow.END)
 	proxy.HandleGraph("breakpointnotifyflow.verify:428/flow", graph)
 	proxy.HandleTask("breakpointnotifyflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
@@ -71,7 +71,7 @@ func TestBreakpointnotifyflow(t *testing.T) {
 		return
 	}
 	// Breakpoint before taskB so the flow pauses (interrupted) after taskA.
-	if !assert.NoError(eng.BreakBefore(ctx, flowKey, "taskB", true)) {
+	if !assert.NoError(eng.BreakBefore(ctx, flowKey, "TaskB", true)) {
 		return
 	}
 	if !assert.NoError(eng.StartNotify(ctx, flowKey, "host-breakpoint")) {

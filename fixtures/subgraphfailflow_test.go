@@ -43,11 +43,11 @@ func TestSubgraphfailflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Inner: X -> boom (fails)
-	inner := workflow.NewGraph("subgraphfailflow.verify:428/inner")
-	inner.AddTask("taskX", "subgraphfailflow.verify:428/task-x")
-	inner.AddTask("boom", "subgraphfailflow.verify:428/boom")
-	inner.AddTransition("taskX", "boom")
-	inner.AddTransition("boom", workflow.END)
+	inner := workflow.NewGraph("Inner", "subgraphfailflow.verify:428/inner")
+	inner.AddTask("TaskX", "subgraphfailflow.verify:428/task-x")
+	inner.AddTask("Boom", "subgraphfailflow.verify:428/boom")
+	inner.AddTransition("TaskX", "Boom")
+	inner.AddTransition("Boom", workflow.END)
 	proxy.HandleGraph("subgraphfailflow.verify:428/inner", inner)
 
 	proxy.HandleTask("subgraphfailflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
@@ -65,16 +65,16 @@ func TestSubgraphfailflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		// Parent: A -> runInner -> Z, with runInner --onError--> recover.
-		parent := workflow.NewGraph("subgraphfailflow.verify:428/recoverparent")
-		parent.AddTask("taskA", "subgraphfailflow.verify:428/task-a")
-		parent.AddTask("runInner", "subgraphfailflow.verify:428/run-inner-recover")
-		parent.AddTask("taskZ", "subgraphfailflow.verify:428/task-z")
-		parent.AddTask("recover", "subgraphfailflow.verify:428/recover")
-		parent.AddTransition("taskA", "runInner")
-		parent.AddTransition("runInner", "taskZ")
-		parent.AddTransition("taskZ", workflow.END)
-		parent.AddTransitionOnError("runInner", "recover")
-		parent.AddTransition("recover", workflow.END)
+		parent := workflow.NewGraph("Recoverparent", "subgraphfailflow.verify:428/recoverparent")
+		parent.AddTask("TaskA", "subgraphfailflow.verify:428/task-a")
+		parent.AddTask("RunInner", "subgraphfailflow.verify:428/run-inner-recover")
+		parent.AddTask("TaskZ", "subgraphfailflow.verify:428/task-z")
+		parent.AddTask("Recover", "subgraphfailflow.verify:428/recover")
+		parent.AddTransition("TaskA", "RunInner")
+		parent.AddTransition("RunInner", "TaskZ")
+		parent.AddTransition("TaskZ", workflow.END)
+		parent.AddTransitionOnError("RunInner", "Recover")
+		parent.AddTransition("Recover", workflow.END)
 		proxy.HandleGraph("subgraphfailflow.verify:428/recoverparent", parent)
 
 		proxy.HandleTask("subgraphfailflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
@@ -125,13 +125,13 @@ func TestSubgraphfailflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		// Parent: A -> runInner -> Z, no onError handler.
-		parent := workflow.NewGraph("subgraphfailflow.verify:428/failparent")
-		parent.AddTask("taskA", "subgraphfailflow.verify:428/task-a2")
-		parent.AddTask("runInner", "subgraphfailflow.verify:428/run-inner-fail")
-		parent.AddTask("taskZ", "subgraphfailflow.verify:428/task-z2")
-		parent.AddTransition("taskA", "runInner")
-		parent.AddTransition("runInner", "taskZ")
-		parent.AddTransition("taskZ", workflow.END)
+		parent := workflow.NewGraph("Failparent", "subgraphfailflow.verify:428/failparent")
+		parent.AddTask("TaskA", "subgraphfailflow.verify:428/task-a2")
+		parent.AddTask("RunInner", "subgraphfailflow.verify:428/run-inner-fail")
+		parent.AddTask("TaskZ", "subgraphfailflow.verify:428/task-z2")
+		parent.AddTransition("TaskA", "RunInner")
+		parent.AddTransition("RunInner", "TaskZ")
+		parent.AddTransition("TaskZ", workflow.END)
 		proxy.HandleGraph("subgraphfailflow.verify:428/failparent", parent)
 
 		proxy.HandleTask("subgraphfailflow.verify:428/task-a2", func(ctx context.Context, f *workflow.Flow) error {

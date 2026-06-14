@@ -50,12 +50,12 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 }
 
 // createTask creates a flow that executes a single task and then terminates. taskURL is the task's
-// dispatch URL; the synthesized one-node graph uses it as both the node name and the dispatch target.
+// dispatch URL; the synthesized one-node graph uses it as the display name, node name, and dispatch target.
 func (e *Engine) createTask(ctx context.Context, taskURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	if taskURL == "" {
 		return "", errors.New("task URL is required", http.StatusBadRequest)
 	}
-	graph := workflow.NewGraph(taskURL)
+	graph := workflow.NewGraph(taskURL, taskURL)
 	graph.AddTransition(taskURL, workflow.END)
 	shardNum := rand.IntN(e.numDBShards()) + 1
 	flowKey, err = e.createWithGraph(ctx, shardNum, taskURL, graph, initialState, 0, "", "", e.resolveFlowOptions(opts))
@@ -117,7 +117,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	}
 
 	entryURL := dispatchURLOf(graph, entryPoint)
-	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowURL, graphJSON, baggageJSON, traceParent, threadID, threadToken, entryPoint, entryURL, stateJSON, stepToken, timeBudget, opts)
+	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowURL, graph.Name(), graphJSON, baggageJSON, traceParent, threadID, threadToken, entryPoint, entryURL, stateJSON, stepToken, timeBudget, opts)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -126,14 +126,14 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 }
 
 // createWithGraphTx inserts a flow and its entry step in one retryable transaction.
-func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowURL string, graphJSON, baggageJSON []byte, traceParent string, threadID int, threadToken, entryPoint, entryURL string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
+func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowURL, workflowName string, graphJSON, baggageJSON []byte, traceParent string, threadID int, threadToken, entryPoint, entryURL string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
 	var newFlowID int64
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
 		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, graph, baggage, trace_parent, status, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			flowToken, workflowURL, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, priority, fairness_key, fairness_weight)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			flowToken, workflowURL, workflowName, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)

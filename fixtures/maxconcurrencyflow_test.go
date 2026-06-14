@@ -36,9 +36,9 @@ func TestMaxconcurrencyflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("maxconcurrencyflow.verify:428/max-concurrency")
-	graph.AddTask("bounded", "maxconcurrencyflow.verify:428/bounded")
-	graph.AddTransition("bounded", workflow.END)
+	graph := workflow.NewGraph("MaxConcurrency", "maxconcurrencyflow.verify:428/max-concurrency")
+	graph.AddTask("Bounded", "maxconcurrencyflow.verify:428/bounded")
+	graph.AddTransition("Bounded", workflow.END)
 	proxy.HandleGraph("maxconcurrencyflow.verify:428/max-concurrency", graph)
 
 	const cap = 3

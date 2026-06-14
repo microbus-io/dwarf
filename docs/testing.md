@@ -17,11 +17,11 @@ func TestCheckout(t *testing.T) {
     ctx := context.Background()
     proxy := engine.NewTestProxy()
 
-    g := workflow.NewGraph("checkout")
-    g.AddTask("reserve", "inventory.reserve")
-    g.AddTask("charge", "billing.charge")
-    g.AddTransition("reserve", "charge")
-    g.AddTransition("charge", workflow.END)
+    g := workflow.NewGraph("Checkout", "checkout")
+    g.AddTask("Reserve", "inventory.reserve")
+    g.AddTask("Charge", "billing.charge")
+    g.AddTransition("Reserve", "Charge")
+    g.AddTransition("Charge", workflow.END)
     proxy.HandleGraph("checkout", g)
 
     proxy.HandleTask("inventory.reserve", func(ctx context.Context, f *workflow.Flow) error {

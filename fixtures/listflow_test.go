@@ -36,9 +36,9 @@ func TestListflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("listflow.verify:428/list")
-	graph.AddTask("only", "listflow.verify:428/only")
-	graph.AddTransition("only", workflow.END)
+	graph := workflow.NewGraph("List", "listflow.verify:428/list")
+	graph.AddTask("Only", "listflow.verify:428/only")
+	graph.AddTransition("Only", workflow.END)
 	proxy.HandleGraph("listflow.verify:428/list", graph)
 
 	proxy.HandleTask("listflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
@@ -73,7 +73,7 @@ func TestListflow(t *testing.T) {
 		for _, fs := range flows {
 			assert.Equal("listflow.verify:428/list", fs.WorkflowURL)
 			assert.Equal(workflow.StatusCompleted, fs.Status)
-			assert.Equal("only", fs.TaskName)
+			assert.Equal("Only", fs.TaskName)
 			assert.True(created[fs.FlowKey])
 			assert.False(fs.CreatedAt.IsZero())
 		}

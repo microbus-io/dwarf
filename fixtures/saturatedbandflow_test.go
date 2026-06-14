@@ -37,14 +37,14 @@ func TestSaturatedbandflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Two workflows: SaturatedBand (bounded) and OpenBand (open).
-	satGraph := workflow.NewGraph("saturatedbandflow.verify:428/saturated-band")
-	satGraph.AddTask("bounded", "saturatedbandflow.verify:428/bounded")
-	satGraph.AddTransition("bounded", workflow.END)
+	satGraph := workflow.NewGraph("SaturatedBand", "saturatedbandflow.verify:428/saturated-band")
+	satGraph.AddTask("Bounded", "saturatedbandflow.verify:428/bounded")
+	satGraph.AddTransition("Bounded", workflow.END)
 	proxy.HandleGraph("saturatedbandflow.verify:428/saturated-band", satGraph)
 
-	openGraph := workflow.NewGraph("saturatedbandflow.verify:428/open-band")
-	openGraph.AddTask("open", "saturatedbandflow.verify:428/open")
-	openGraph.AddTransition("open", workflow.END)
+	openGraph := workflow.NewGraph("OpenBand", "saturatedbandflow.verify:428/open-band")
+	openGraph.AddTask("Open", "saturatedbandflow.verify:428/open")
+	openGraph.AddTransition("Open", workflow.END)
 	proxy.HandleGraph("saturatedbandflow.verify:428/open-band", openGraph)
 
 	const boundedCap = 2
@@ -80,7 +80,7 @@ func TestSaturatedbandflow(t *testing.T) {
 	proxy.HandleTask("saturatedbandflow.verify:428/open", func(ctx context.Context, f *workflow.Flow) error {
 		time.Sleep(40 * time.Millisecond)
 		mu.Lock()
-		completions = append(completions, completion{tag: "open", at: time.Now()})
+		completions = append(completions, completion{tag: "Open", at: time.Now()})
 		mu.Unlock()
 		return nil
 	})
@@ -124,7 +124,7 @@ func TestSaturatedbandflow(t *testing.T) {
 
 		var firstOpenAt, lastSatAt time.Time
 		for _, c := range cs {
-			if c.tag == "open" && (firstOpenAt.IsZero() || c.at.Before(firstOpenAt)) {
+			if c.tag == "Open" && (firstOpenAt.IsZero() || c.at.Before(firstOpenAt)) {
 				firstOpenAt = c.at
 			}
 			if c.tag == "sat" && c.at.After(lastSatAt) {

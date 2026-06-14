@@ -36,9 +36,9 @@ func TestAdaptiveconcurrencyflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("adaptiveconcurrencyflow.verify:428/adaptive-concurrency")
-	graph.AddTask("adaptive", "adaptiveconcurrencyflow.verify:428/adaptive")
-	graph.AddTransition("adaptive", workflow.END)
+	graph := workflow.NewGraph("AdaptiveConcurrency", "adaptiveconcurrencyflow.verify:428/adaptive-concurrency")
+	graph.AddTask("Adaptive", "adaptiveconcurrencyflow.verify:428/adaptive")
+	graph.AddTransition("Adaptive", workflow.END)
 	proxy.HandleGraph("adaptiveconcurrencyflow.verify:428/adaptive-concurrency", graph)
 
 	rate := throttle.New(time.Second, 7)

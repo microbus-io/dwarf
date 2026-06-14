@@ -19,10 +19,10 @@ The per-task breaker must key on the dispatch URL (the real downstream), not the
 graphs can use the SAME node name for tasks pointing at DIFFERENT URLs; a breaker tripped for the down
 endpoint must NOT park flows whose same-named node points at a healthy endpoint.
 
-This fixture builds exactly that collision: both graphs name their node "shared", but one dispatches to a
+This fixture builds exactly that collision: both graphs name their node "Shared", but one dispatches to a
 down URL (always trips the breaker) and the other to a healthy URL. We trip the down breaker, then run a
 flow on the healthy graph and assert it completes. With a name-keyed breaker (the bug) the healthy flow's
-"shared" step is parked under the down endpoint's breaker and never runs; with a URL-keyed breaker it has
+"Shared" step is parked under the down endpoint's breaker and never runs; with a URL-keyed breaker it has
 its own untripped breaker and completes.
 */
 package fixtures
@@ -47,15 +47,15 @@ func TestBreakerurlisolationflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	// Two graphs, SAME node name "shared", DIFFERENT dispatch URLs.
-	downGraph := workflow.NewGraph("breakerurlisolationflow.verify:428/down-flow")
-	downGraph.AddTask("shared", "breakerurlisolationflow.verify:428/down")
-	downGraph.AddTransition("shared", workflow.END)
+	// Two graphs, SAME node name "Shared", DIFFERENT dispatch URLs.
+	downGraph := workflow.NewGraph("DownFlow", "breakerurlisolationflow.verify:428/down-flow")
+	downGraph.AddTask("Shared", "breakerurlisolationflow.verify:428/down")
+	downGraph.AddTransition("Shared", workflow.END)
 	proxy.HandleGraph("breakerurlisolationflow.verify:428/down-flow", downGraph)
 
-	upGraph := workflow.NewGraph("breakerurlisolationflow.verify:428/up-flow")
-	upGraph.AddTask("shared", "breakerurlisolationflow.verify:428/up")
-	upGraph.AddTransition("shared", workflow.END)
+	upGraph := workflow.NewGraph("UpFlow", "breakerurlisolationflow.verify:428/up-flow")
+	upGraph.AddTask("Shared", "breakerurlisolationflow.verify:428/up")
+	upGraph.AddTransition("Shared", workflow.END)
 	proxy.HandleGraph("breakerurlisolationflow.verify:428/up-flow", upGraph)
 
 	var downCalled atomic.Bool
@@ -73,7 +73,7 @@ func TestBreakerurlisolationflow(t *testing.T) {
 	eng.RunInTest(t)
 
 	// 1. Start a flow on the down graph. Its task trips the breaker; the step parks (and, being created
-	//    first, stays the oldest parked step for node name "shared", so a name-keyed breaker keeps electing
+	//    first, stays the oldest parked step for node name "Shared", so a name-keyed breaker keeps electing
 	//    it as the probe).
 	downKey, err := eng.Create(ctx, "breakerurlisolationflow.verify:428/down-flow", nil, nil)
 	if !assert.NoError(err) {
@@ -83,17 +83,17 @@ func TestBreakerurlisolationflow(t *testing.T) {
 		return
 	}
 
-	// 2. Wait until the breaker has tripped. The key differs by implementation (node name "shared" in the
+	// 2. Wait until the breaker has tripped. The key differs by implementation (node name "Shared" in the
 	//    buggy version, URL "...down" once fixed), so accept either.
 	tripped := waitUntil(2*time.Second, func() bool {
 		return downCalled.Load() &&
-			(eng.BreakerTripped("shared") || eng.BreakerTripped("breakerurlisolationflow.verify:428/down"))
+			(eng.BreakerTripped("Shared") || eng.BreakerTripped("breakerurlisolationflow.verify:428/down"))
 	})
 	if !assert.True(tripped, "down breaker should have tripped") {
 		return
 	}
 
-	// 3. Run a flow on the healthy graph. Its node is also named "shared" but dispatches to the healthy
+	// 3. Run a flow on the healthy graph. Its node is also named "Shared" but dispatches to the healthy
 	//    URL. With a URL-keyed breaker it completes immediately; with a name-keyed breaker it is parked
 	//    behind the down endpoint's breaker and never runs.
 	upKey, err := eng.Create(ctx, "breakerurlisolationflow.verify:428/up-flow", nil, nil)

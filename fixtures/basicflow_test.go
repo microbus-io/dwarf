@@ -31,13 +31,13 @@ func TestBasicflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("basicflow.verify:428/basic")
-	graph.AddTask("taskA", "basicflow.verify:428/task-a")
-	graph.AddTask("taskB", "basicflow.verify:428/task-b")
-	graph.AddTask("taskC", "basicflow.verify:428/task-c")
-	graph.AddTransition("taskA", "taskB")
-	graph.AddTransition("taskB", "taskC")
-	graph.AddTransition("taskC", workflow.END)
+	graph := workflow.NewGraph("Basic", "basicflow.verify:428/basic")
+	graph.AddTask("TaskA", "basicflow.verify:428/task-a")
+	graph.AddTask("TaskB", "basicflow.verify:428/task-b")
+	graph.AddTask("TaskC", "basicflow.verify:428/task-c")
+	graph.AddTransition("TaskA", "TaskB")
+	graph.AddTransition("TaskB", "TaskC")
+	graph.AddTransition("TaskC", workflow.END)
 	proxy.HandleGraph("basicflow.verify:428/basic", graph)
 
 	proxy.HandleTask("basicflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

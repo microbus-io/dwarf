@@ -36,11 +36,11 @@ limitations under the License.
 // A 30-second taste, using the in-process test harness:
 //
 //	proxy := engine.NewTestProxy()
-//	g := workflow.NewGraph("greet")
-//	g.AddTask("hello", "hello")
-//	g.AddTransition("hello", workflow.END)
+//	g := workflow.NewGraph("Greet", "greet")
+//	g.AddTask("Hello", "Hello")
+//	g.AddTransition("Hello", workflow.END)
 //	proxy.HandleGraph("greet", g)
-//	proxy.HandleTask("hello", func(ctx context.Context, f *workflow.Flow) error {
+//	proxy.HandleTask("Hello", func(ctx context.Context, f *workflow.Flow) error {
 //		f.SetString("greeting", "hello "+f.GetString("name"))
 //		return nil
 //	})

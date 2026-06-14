@@ -80,8 +80,14 @@ that does not arise in practice.
 ### Core Concepts
 
 **Workflow graph** - A directed graph defining a workflow's structure: which tasks run, in what order, under what
-conditions. Built in code with the `workflow.Graph` API. Each graph has a name, an entry point, tasks, transitions,
-and optional reducers for fan-in state merging.
+conditions. Built in code with the `workflow.Graph` API via `NewGraph(name, url)`. Each graph has a URL (its
+resolve key, passed to `Create`/`LoadGraph`), a human-friendly display name (defaults to the URL when empty;
+surfaced in rendering and denormalized onto the flow row), an entry point, tasks, transitions, and optional
+reducers for fan-in state merging.
+
+**Naming convention.** Graph and task (node) names are PascalCase (`Reserve`, `Charge`) - graph-topology
+identifiers, kept visually distinct from the lowercased dispatch URLs and the camelCase state fields. The engine
+imposes no casing; this is a fixture/example convention only.
 
 **Task** - A named unit of work within a workflow, identified by a task name/URL and executed via the injected
 `ExecuteTask`. Tasks receive state via a `workflow.Flow` carrier, read input from state fields, perform work, and

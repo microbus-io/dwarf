@@ -32,11 +32,11 @@ func TestTimebudgetflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("timebudgetflow.verify:428/time-budget")
-	graph.AddTask("taskA", "timebudgetflow.verify:428/task-a")
-	graph.AddTask("slow", "timebudgetflow.verify:428/slow")
-	graph.AddTransition("taskA", "slow")
-	graph.AddTransition("slow", workflow.END)
+	graph := workflow.NewGraph("TimeBudget", "timebudgetflow.verify:428/time-budget")
+	graph.AddTask("TaskA", "timebudgetflow.verify:428/task-a")
+	graph.AddTask("Slow", "timebudgetflow.verify:428/slow")
+	graph.AddTransition("TaskA", "Slow")
+	graph.AddTransition("Slow", workflow.END)
 	proxy.HandleGraph("timebudgetflow.verify:428/time-budget", graph)
 
 	proxy.HandleTask("timebudgetflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

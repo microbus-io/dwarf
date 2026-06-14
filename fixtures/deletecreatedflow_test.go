@@ -35,9 +35,9 @@ func TestDeletecreatedflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("deletecreatedflow.verify:428/flow")
-	graph.AddTask("work", "deletecreatedflow.verify:428/work")
-	graph.AddTransition("work", workflow.END)
+	graph := workflow.NewGraph("Flow", "deletecreatedflow.verify:428/flow")
+	graph.AddTask("Work", "deletecreatedflow.verify:428/work")
+	graph.AddTransition("Work", workflow.END)
 	proxy.HandleGraph("deletecreatedflow.verify:428/flow", graph)
 	proxy.HandleTask("deletecreatedflow.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {
 		return nil

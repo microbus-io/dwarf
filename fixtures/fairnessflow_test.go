@@ -33,9 +33,9 @@ func TestFairnessflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("fairnessflow.verify:428/fairness")
-	graph.AddTask("tally", "fairnessflow.verify:428/tally")
-	graph.AddTransition("tally", workflow.END)
+	graph := workflow.NewGraph("Fairness", "fairnessflow.verify:428/fairness")
+	graph.AddTask("Tally", "fairnessflow.verify:428/tally")
+	graph.AddTransition("Tally", workflow.END)
 	proxy.HandleGraph("fairnessflow.verify:428/fairness", graph)
 
 	var mu sync.Mutex

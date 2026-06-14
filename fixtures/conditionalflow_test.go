@@ -31,17 +31,17 @@ func TestConditionalflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("conditionalflow.verify:428/conditional")
-	graph.AddTask("taskA", "conditionalflow.verify:428/task-a")
-	graph.AddTask("taskHigh", "conditionalflow.verify:428/task-high")
-	graph.AddTask("taskLow", "conditionalflow.verify:428/task-low")
-	graph.AddTask("taskC", "conditionalflow.verify:428/task-c")
-	graph.SetFanIn("taskC")
-	graph.AddTransitionWhen("taskA", "taskHigh", "score >= 50")
-	graph.AddTransitionWhen("taskA", "taskLow", "score < 50")
-	graph.AddTransition("taskHigh", "taskC")
-	graph.AddTransition("taskLow", "taskC")
-	graph.AddTransition("taskC", workflow.END)
+	graph := workflow.NewGraph("Conditional", "conditionalflow.verify:428/conditional")
+	graph.AddTask("TaskA", "conditionalflow.verify:428/task-a")
+	graph.AddTask("TaskHigh", "conditionalflow.verify:428/task-high")
+	graph.AddTask("TaskLow", "conditionalflow.verify:428/task-low")
+	graph.AddTask("TaskC", "conditionalflow.verify:428/task-c")
+	graph.SetFanIn("TaskC")
+	graph.AddTransitionWhen("TaskA", "TaskHigh", "score >= 50")
+	graph.AddTransitionWhen("TaskA", "TaskLow", "score < 50")
+	graph.AddTransition("TaskHigh", "TaskC")
+	graph.AddTransition("TaskLow", "TaskC")
+	graph.AddTransition("TaskC", workflow.END)
 	proxy.HandleGraph("conditionalflow.verify:428/conditional", graph)
 
 	proxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

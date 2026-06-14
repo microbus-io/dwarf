@@ -33,17 +33,17 @@ func TestDynamicsubgraphflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Parent graph: single task
-	parent := workflow.NewGraph("dynamicsubgraphflow.verify:428/dynamic-subgraph")
-	parent.AddTask("parent", "dynamicsubgraphflow.verify:428/parent")
-	parent.AddTransition("parent", workflow.END)
+	parent := workflow.NewGraph("DynamicSubgraph", "dynamicsubgraphflow.verify:428/dynamic-subgraph")
+	parent.AddTask("Parent", "dynamicsubgraphflow.verify:428/parent")
+	parent.AddTransition("Parent", workflow.END)
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/dynamic-subgraph", parent)
 
 	// Inner graph: InnerA -> InnerB
-	inner := workflow.NewGraph("dynamicsubgraphflow.verify:428/inner")
-	inner.AddTask("innerA", "dynamicsubgraphflow.verify:428/inner-a")
-	inner.AddTask("innerB", "dynamicsubgraphflow.verify:428/inner-b")
-	inner.AddTransition("innerA", "innerB")
-	inner.AddTransition("innerB", workflow.END)
+	inner := workflow.NewGraph("Inner", "dynamicsubgraphflow.verify:428/inner")
+	inner.AddTask("InnerA", "dynamicsubgraphflow.verify:428/inner-a")
+	inner.AddTask("InnerB", "dynamicsubgraphflow.verify:428/inner-b")
+	inner.AddTransition("InnerA", "InnerB")
+	inner.AddTransition("InnerB", workflow.END)
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/inner", inner)
 
 	proxy.HandleTask("dynamicsubgraphflow.verify:428/parent", func(ctx context.Context, f *workflow.Flow) error {

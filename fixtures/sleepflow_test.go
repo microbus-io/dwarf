@@ -32,13 +32,13 @@ func TestSleepflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("sleepflow.verify:428/delay")
-	graph.AddTask("taskA", "sleepflow.verify:428/task-a")
-	graph.AddTask("taskB", "sleepflow.verify:428/task-b")
-	graph.AddTask("taskC", "sleepflow.verify:428/task-c")
-	graph.AddTransition("taskA", "taskB")
-	graph.AddTransition("taskB", "taskC")
-	graph.AddTransition("taskC", workflow.END)
+	graph := workflow.NewGraph("Delay", "sleepflow.verify:428/delay")
+	graph.AddTask("TaskA", "sleepflow.verify:428/task-a")
+	graph.AddTask("TaskB", "sleepflow.verify:428/task-b")
+	graph.AddTask("TaskC", "sleepflow.verify:428/task-c")
+	graph.AddTransition("TaskA", "TaskB")
+	graph.AddTransition("TaskB", "TaskC")
+	graph.AddTransition("TaskC", workflow.END)
 	proxy.HandleGraph("sleepflow.verify:428/delay", graph)
 
 	proxy.HandleTask("sleepflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

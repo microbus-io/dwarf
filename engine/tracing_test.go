@@ -48,7 +48,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 
 	proxy := NewTestProxy()
 
-	parent := workflow.NewGraph("tracingflow.verify:428/parent")
+	parent := workflow.NewGraph("Parent", "tracingflow.verify:428/parent")
 	parent.AddTask("taskA", "tracingflow.verify:428/task-a")
 	parent.AddTask("runInner", "tracingflow.verify:428/run-inner")
 	parent.AddTask("done", "tracingflow.verify:428/done")
@@ -57,7 +57,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	parent.AddTransition("done", workflow.END)
 	proxy.HandleGraph("tracingflow.verify:428/parent", parent)
 
-	inner := workflow.NewGraph("tracingflow.verify:428/inner")
+	inner := workflow.NewGraph("Inner", "tracingflow.verify:428/inner")
 	inner.AddTask("taskX", "tracingflow.verify:428/task-x")
 	inner.AddTransition("taskX", workflow.END)
 	proxy.HandleGraph("tracingflow.verify:428/inner", inner)

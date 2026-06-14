@@ -35,13 +35,13 @@ func TestStepnavflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("stepnavflow.verify:428/flow")
-	graph.AddTask("taskA", "stepnavflow.verify:428/task-a")
-	graph.AddTask("taskB", "stepnavflow.verify:428/task-b")
-	graph.AddTask("taskC", "stepnavflow.verify:428/task-c")
-	graph.AddTransition("taskA", "taskB")
-	graph.AddTransition("taskB", "taskC")
-	graph.AddTransition("taskC", workflow.END)
+	graph := workflow.NewGraph("Flow", "stepnavflow.verify:428/flow")
+	graph.AddTask("TaskA", "stepnavflow.verify:428/task-a")
+	graph.AddTask("TaskB", "stepnavflow.verify:428/task-b")
+	graph.AddTask("TaskC", "stepnavflow.verify:428/task-c")
+	graph.AddTransition("TaskA", "TaskB")
+	graph.AddTransition("TaskB", "TaskC")
+	graph.AddTransition("TaskC", workflow.END)
 	proxy.HandleGraph("stepnavflow.verify:428/flow", graph)
 	noop := func(ctx context.Context, f *workflow.Flow) error { return nil }
 	proxy.HandleTask("stepnavflow.verify:428/task-a", noop)
