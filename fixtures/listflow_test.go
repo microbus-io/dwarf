@@ -62,16 +62,16 @@ func TestListflow(t *testing.T) {
 		created[flowKey] = true
 	}
 
-	t.Run("list_by_workflow_name_returns_all", func(t *testing.T) {
+	t.Run("list_by_workflow_url_returns_all", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flows, _, err := eng.List(ctx, workflow.Query{WorkflowName: "listflow.verify:428/list"})
+		flows, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "listflow.verify:428/list"})
 		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(total, len(flows))
 		for _, fs := range flows {
-			assert.Equal("listflow.verify:428/list", fs.WorkflowName)
+			assert.Equal("listflow.verify:428/list", fs.WorkflowURL)
 			assert.Equal(workflow.StatusCompleted, fs.Status)
 			assert.Equal("only", fs.TaskName)
 			assert.True(created[fs.FlowKey])
@@ -83,7 +83,7 @@ func TestListflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		flows, _, err := eng.List(ctx, workflow.Query{
-			WorkflowName: "listflow.verify:428/list",
+			WorkflowURL: "listflow.verify:428/list",
 			Status:       workflow.StatusCompleted,
 		})
 		if !assert.NoError(err) {
@@ -100,7 +100,7 @@ func TestListflow(t *testing.T) {
 		pages := 0
 		for {
 			flows, next, err := eng.List(ctx, workflow.Query{
-				WorkflowName: "listflow.verify:428/list",
+				WorkflowURL: "listflow.verify:428/list",
 				Limit:        2,
 				Cursor:       cursor,
 			})

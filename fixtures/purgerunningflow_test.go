@@ -75,7 +75,7 @@ func TestPurgerunningflow(t *testing.T) {
 	}
 
 	// Purge everything for this workflow. The running flow must be skipped.
-	deleted, err := eng.Purge(ctx, workflow.Query{WorkflowName: "purgerunningflow.verify:428/flow"})
+	deleted, err := eng.Purge(ctx, workflow.Query{WorkflowURL: "purgerunningflow.verify:428/flow"})
 	assert.NoError(err)
 	assert.Equal(0, deleted)
 

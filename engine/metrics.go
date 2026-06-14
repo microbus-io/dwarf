@@ -302,19 +302,19 @@ func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error)
 
 // --- Inline counter helpers (no-op until initMetrics has run). ---
 
-func (e *Engine) metricFlowStarted(ctx context.Context, workflowName string) {
+func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string) {
 	if e.metrics == nil {
 		return
 	}
-	e.metrics.flowsStarted.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow", workflowName)))
+	e.metrics.flowsStarted.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow", workflowURL)))
 }
 
-func (e *Engine) metricFlowTerminated(ctx context.Context, workflowName, status string) {
+func (e *Engine) metricFlowTerminated(ctx context.Context, workflowURL, status string) {
 	if e.metrics == nil {
 		return
 	}
 	e.metrics.flowsTerminated.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("workflow", workflowName), attribute.String("status", status)))
+		attribute.String("workflow", workflowURL), attribute.String("status", status)))
 }
 
 func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string) {

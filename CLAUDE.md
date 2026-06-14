@@ -19,7 +19,7 @@ The graph/task/notify/peer seam is a single **`Host`** interface, registered onc
 observability providers below are injected separately. A host must implement `LoadGraph` and `ExecuteTask`;
 `FlowStopped` and `SignalPeers` may be no-ops. The interface methods:
 
-- **`LoadGraph(ctx, workflowName string) (*workflow.Graph, error)`** - fetches a workflow graph by name.
+- **`LoadGraph(ctx, workflowURL string) (*workflow.Graph, error)`** - fetches a workflow graph by name.
   Called at `Create` (and on subgraph spawn); the graph JSON is then frozen on the flow row. The flow's opaque
   baggage rides on ctx (`workflow.BaggageFrom(ctx)`) for identity-dependent loading (authz, per-actor graphs).
 - **`ExecuteTask(ctx, taskName string, flow *workflow.Flow) error`** - executes one task. Receives the flow
@@ -194,7 +194,7 @@ timestamps. Both re-zero `parked` on the target step (see "Step Parking").
 task name, state, changes, status, error, timestamp. Subgraph-executing steps have `Subgraph=true` with nested
 `SubHistory`. `Step` returns one step by key.
 
-**List** - Queries flows by status, workflow name, or thread key, with cursor pagination (newest first, default 100).
+**List** - Queries flows by status, workflow URL, or thread key, with cursor pagination (newest first, default 100).
 Returns `ThreadKey` in each `workflow.FlowSummary`.
 
 **BreakBefore** - Sets/clears a breakpoint that pauses before the named task. Breakpoints live in a `breakpoints` JSON
@@ -1110,7 +1110,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 |---|---|
 | `flow_id` | Per-shard auto-increment primary key. The external flowKey is `{shard}-{flow_id}-{flow_token}` |
 | `flow_token` | Random token component of the flowKey, guards against id guessing |
-| `workflow_name` | Name of the workflow graph this flow runs (the name passed to the `LoadGraph`) |
+| `workflow_url` | URL of the workflow graph this flow runs (the resolve key passed to `Create` and the host's `LoadGraph`) |
 | `graph` | JSON of the workflow graph, frozen at `Create` time |
 | `baggage` | JSON of the opaque `baggage` map captured at `Create` and passed to every `LoadGraph`/`ExecuteTask` call. Flow-scoped and frozen at `Create`; the engine does not interpret it |
 | `status` | Flow lifecycle: `created`/`running`/`interrupted`/`completed`/`failed`/`cancelled` |
@@ -1195,7 +1195,7 @@ without fragmentation or excessive write amplification.
 |---|---|---|
 | PK | `(flow_id)` | Row lookups by flow ID |
 | `idx_dwarf_flows_status` | `(status, updated_at)` | `List` by status |
-| `idx_dwarf_flows_workflow_name` | `(workflow_name)` | `List` by workflow name |
+| `idx_dwarf_flows_workflow_url` | `(workflow_url)` | `List` by workflow URL |
 | `idx_dwarf_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
 | `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite | Walking the subgraph chain |
 | `idx_dwarf_flows_created_at` | `(created_at)` | Time-window queries; append-only/monotonic |
@@ -1220,7 +1220,7 @@ and no single policy fits both a 1-hour batch and a 30-day approval workflow. Fo
 - **`Delete(flowKey)`** removes one flow and its steps in a transaction. Refuses a running flow (409). Subgraph
   children and thread descendants are left dangling.
 - **`Purge(Query)`** bulk-deletes flows matching the query, except running. Same `Query` shape as `List` (Status,
-  WorkflowName, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit). Capped at 10000 per call;
+  WorkflowURL, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit). Capped at 10000 per call;
   returns the count deleted. The non-running guard is enforced inside the DELETE.
 
 Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the current

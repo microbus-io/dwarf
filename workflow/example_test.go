@@ -32,7 +32,7 @@ func ExampleGraph() {
 	g.AddTransition("reserve", "charge")
 	g.AddTransition("charge", workflow.END)
 
-	fmt.Println("name:", g.Name())
+	fmt.Println("name:", g.URL())
 	fmt.Println("entry:", g.EntryPoint())
 	fmt.Println("valid:", g.Validate() == nil)
 	// Output:

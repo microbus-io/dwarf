@@ -16,7 +16,7 @@
 CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              BIGINT       NOT NULL AUTO_INCREMENT,
     flow_token           CHAR(16)     NOT NULL,
-    workflow_name        VARCHAR(512) NOT NULL,
+    workflow_url        VARCHAR(512) NOT NULL,
     graph                JSON         NOT NULL,
     baggage         JSON         NOT NULL DEFAULT ('{}'),
     status               CHAR(16)     NOT NULL,
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     updated_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (flow_id),
     INDEX idx_dwarf_flows_status (status, updated_at),
-    INDEX idx_dwarf_flows_workflow_name (workflow_name),
+    INDEX idx_dwarf_flows_workflow_url (workflow_url),
     INDEX idx_dwarf_flows_surgraph (surgraph_flow_id),
     INDEX idx_dwarf_flows_thread (thread_id, flow_id),
     INDEX idx_dwarf_flows_created_at (created_at)
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
 CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              BIGSERIAL    NOT NULL,
     flow_token           CHAR(16)     NOT NULL,
-    workflow_name        VARCHAR(512) NOT NULL,
+    workflow_url        VARCHAR(512) NOT NULL,
     graph                JSONB        NOT NULL,
     baggage         JSONB        NOT NULL DEFAULT '{}',
     status               CHAR(16)     NOT NULL,
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
 CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_workflow_name ON dwarf_flows (workflow_name);
+CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
@@ -94,7 +94,7 @@ CREATE INDEX idx_dwarf_flows_created_at ON dwarf_flows (created_at);
 CREATE TABLE dwarf_flows (
     flow_id              BIGINT        NOT NULL IDENTITY(1,1),
     flow_token           NCHAR(16)     NOT NULL,
-    workflow_name        NVARCHAR(512) NOT NULL,
+    workflow_url        NVARCHAR(512) NOT NULL,
     graph                NVARCHAR(MAX) NOT NULL,
     baggage         NVARCHAR(MAX) NOT NULL DEFAULT '{}',
     status               NCHAR(16)     NOT NULL,
@@ -123,7 +123,7 @@ CREATE TABLE dwarf_flows (
 CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_workflow_name ON dwarf_flows (workflow_name);
+CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 
 -- DRIVER: mssql
 CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
@@ -138,7 +138,7 @@ CREATE INDEX idx_dwarf_flows_created_at ON dwarf_flows (created_at);
 CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              INTEGER      NOT NULL PRIMARY KEY AUTOINCREMENT,
     flow_token           TEXT         NOT NULL,
-    workflow_name        TEXT         NOT NULL,
+    workflow_url        TEXT         NOT NULL,
     graph                TEXT         NOT NULL,
     baggage         TEXT         NOT NULL DEFAULT '{}',
     status               TEXT         NOT NULL,
@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
 CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_workflow_name ON dwarf_flows (workflow_name);
+CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;

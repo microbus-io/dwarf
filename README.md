@@ -86,7 +86,7 @@ has no stop-notification need or runs single-replica.
 type Host interface {
     // Required. Fetch a workflow graph by name (called at Create; the graph is then frozen on the flow,
     // and on subgraph spawn).
-    LoadGraph(ctx context.Context, workflowName string) (*workflow.Graph, error)
+    LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error)
 
     // Required. Execute one task. The Flow carrier arrives with its input state populated; write outputs.
     ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error

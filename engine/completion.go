@@ -30,7 +30,7 @@ import (
 )
 
 // createSubgraphFlow creates a subgraph flow for a dynamic subgraph transition.
-func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepDepth int, surgraphStepID int, subgraphWorkflowName string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, callerTraceParent string, breakpointsJSON string) (string, error) {
+func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, callerTraceParent string, breakpointsJSON string) (string, error) {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
@@ -47,7 +47,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 
 	// The subgraph gets its own "workflow" span parented to the caller step's span (callerTraceParent),
 	// so its whole subtree nests under the task that launched it rather than starting a detached trace.
-	subgraphFlowKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowName, subgraphGraph, childState, 0, "", callerTraceParent, &inherited)
+	subgraphFlowKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, 0, "", callerTraceParent, &inherited)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -68,8 +68,8 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 }
 
 // completeFlowSequential marks a flow completed when no successor exists.
-func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID int, notifyHostname, workflowName string) error {
-	e.logger.DebugContext(ctx, "Flow completed", "flow", workflowName)
+func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID int, notifyHostname, workflowURL string) error {
+	e.logger.DebugContext(ctx, "Flow completed", "flow", workflowURL)
 	_, err := e.completeFlow(ctx, shardNum, flowID, flowToken, notifyHostname)
 	if err != nil {
 		return errors.Trace(err)
@@ -159,11 +159,11 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 
 // computeFinalState computes the merged state for a flow.
 func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, flowID int) (string, string, error) {
-	var graphJSON, workflowName string
+	var graphJSON, workflowURL string
 	err := db.QueryRowContext(ctx,
-		"SELECT graph, workflow_name FROM dwarf_flows WHERE flow_id=?",
+		"SELECT graph, workflow_url FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&graphJSON, &workflowName)
+	).Scan(&graphJSON, &workflowURL)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
@@ -182,7 +182,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, flow
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
-	return string(data), workflowName, nil
+	return string(data), workflowURL, nil
 }
 
 // completeFlow transitions a flow to completed and propagates to surgraph.
@@ -191,7 +191,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	var finalStateJSON, workflowName string
+	var finalStateJSON, workflowURL string
 	completed := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
@@ -200,7 +200,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 			return errors.Trace(err)
 		}
 		finalStateJSON = fs
-		workflowName = wf
+		workflowURL = wf
 		res, err := tx.ExecContext(ctx,
 			"UPDATE dwarf_flows SET status=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
 			workflow.StatusCompleted, finalStateJSON, flowID,
@@ -222,7 +222,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusCompleted)
-	e.metricFlowTerminated(ctx, workflowName, workflow.StatusCompleted)
+	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 	notifyHostname = strings.TrimSpace(notifyHostname)
 	if notifyHostname != "" {
@@ -661,7 +661,7 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 		var surgraphFlowID, surgraphStepDepth, surgraphStepID int
 		var wfName string
 		err = db.QueryRowContext(ctx,
-			"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id, workflow_name FROM dwarf_flows WHERE flow_id=?",
+			"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id, workflow_url FROM dwarf_flows WHERE flow_id=?",
 			currentFlowID,
 		).Scan(&surgraphFlowID, &surgraphStepDepth, &surgraphStepID, &wfName)
 		if err != nil {

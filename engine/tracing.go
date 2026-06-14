@@ -56,7 +56,7 @@ func (e *Engine) initTracer() {
 // context (the caller step's span), so the subgraph's entire subtree appears nested under the task that
 // launched it: workflow → caller-step → workflow(subgraph) → subgraph-steps. Returns "" under the no-op
 // tracer.
-func (e *Engine) mintWorkflowSpan(ctx context.Context, workflowName, parentTraceParent string) string {
+func (e *Engine) mintWorkflowSpan(ctx context.Context, workflowURL, parentTraceParent string) string {
 	if parentTraceParent == "" {
 		ctx = trace.ContextWithSpan(ctx, nil)
 	} else {
@@ -64,7 +64,7 @@ func (e *Engine) mintWorkflowSpan(ctx context.Context, workflowName, parentTrace
 	}
 	flowCtx, span := e.tracer.Start(ctx, "workflow",
 		trace.WithSpanKind(trace.SpanKindInternal),
-		trace.WithAttributes(attribute.String("workflow.name", workflowName)),
+		trace.WithAttributes(attribute.String("workflow.name", workflowURL)),
 	)
 	span.End()
 	return extractTraceParent(flowCtx)

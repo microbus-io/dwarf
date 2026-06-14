@@ -22,7 +22,7 @@ import "time"
 type FlowSummary struct {
 	FlowKey      string    `json:"flowKey,omitzero"`
 	ThreadKey    string    `json:"threadKey,omitzero"`
-	WorkflowName string    `json:"workflowName,omitzero"`
+	WorkflowURL  string    `json:"workflowURL,omitzero"`
 	Status       string    `json:"status,omitzero"`
 	TaskName     string    `json:"taskName,omitzero"`
 	Error        string    `json:"error,omitzero"`

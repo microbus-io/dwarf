@@ -115,7 +115,7 @@ func (r *GraphRenderer) Render() (string, error) {
 	b.WriteString("\n")
 
 	if r.titleLabel {
-		graphLabel := stripHostPort(r.g.name, "")
+		graphLabel := stripHostPort(r.g.url, "")
 		fmt.Fprintf(&b, "    _title{{%q}}:::term -.-> _start\n", graphLabel)
 	}
 
@@ -146,7 +146,7 @@ type endEdge struct {
 
 func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix string) (heads []string, endEdges []endEdge) {
 	g := r.g
-	ownHost := hostOf(g.name)
+	ownHost := hostOf(g.url)
 	ids := make(map[string]string, len(g.nodes))
 	labels := make(map[string]string, len(g.nodes))
 	for i, t := range g.nodes {

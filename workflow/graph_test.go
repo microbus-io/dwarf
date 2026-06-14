@@ -39,7 +39,7 @@ func TestGraph_BuilderAndMarshal(t *testing.T) {
 	g.AddTransitionWhen("order.service/validate", "order.service/reject", "valid != true")
 	g.SetReducer("messages", ReducerAppend)
 
-	assert.Equal("create-order", g.Name())
+	assert.Equal("create-order", g.URL())
 	assert.Equal("order.service/validate", g.EntryPoint())
 	assert.Equal(3, len(g.Nodes()))
 
@@ -50,7 +50,7 @@ func TestGraph_BuilderAndMarshal(t *testing.T) {
 	err = json.Unmarshal(data, &restored)
 	assert.NoError(err)
 
-	assert.Equal("create-order", restored.Name())
+	assert.Equal("create-order", restored.URL())
 	assert.Equal("order.service/validate", restored.EntryPoint())
 	assert.Equal(3, len(restored.Nodes()))
 	assert.Equal(2, len(restored.Transitions()))

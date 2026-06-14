@@ -452,4 +452,3 @@ func TestFlow_MarshalUnmarshal(t *testing.T) {
 	assert.Equal(2.0, restored.backoffDelayMultiplier)
 	assert.Equal(30*time.Second, restored.backoffMaxDelay)
 }
-

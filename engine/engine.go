@@ -503,14 +503,14 @@ func (e *Engine) valveCommit(taskName string, now time.Time) {
 
 // Create creates a new flow for a workflow without starting it. opts carries the flow's scheduling
 // (priority/fairness/start-at) and its opaque host Baggage; nil opts uses defaults.
-func (e *Engine) Create(ctx context.Context, workflowName string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
-	return e.create(ctx, workflowName, initialState, opts)
+func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
+	return e.create(ctx, workflowURL, initialState, opts)
 }
 
-// CreateTask creates a flow for a single task without starting it. opts carries scheduling and the
-// opaque host Baggage (see Create); nil opts uses defaults.
-func (e *Engine) CreateTask(ctx context.Context, taskName string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
-	return e.createTask(ctx, taskName, initialState, opts)
+// CreateTask creates a flow for a single task (addressed by its dispatch URL) without starting it. opts
+// carries scheduling and the opaque host Baggage (see Create); nil opts uses defaults.
+func (e *Engine) CreateTask(ctx context.Context, taskURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
+	return e.createTask(ctx, taskURL, initialState, opts)
 }
 
 // Start transitions a created flow to running.
@@ -595,8 +595,8 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 
 // Run creates, starts, and awaits a flow in one call. opts carries scheduling and the opaque host
 // Baggage; nil opts uses defaults.
-func (e *Engine) Run(ctx context.Context, workflowName string, initialState any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
-	return e.run(ctx, workflowName, initialState, opts)
+func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
+	return e.run(ctx, workflowURL, initialState, opts)
 }
 
 // Continue creates a new flow from the latest completed flow in a thread.

@@ -98,13 +98,13 @@ func (e *Engine) scanHistorySteps(ctx context.Context, shardNum int, rows *sql.R
 		return nil, errors.Trace(err)
 	}
 	for i := range steps {
-		subWorkflowName, subHistory, err := e.subgraphHistory(ctx, shardNum, steps[i].StepID)
+		subWorkflowURL, subHistory, err := e.subgraphHistory(ctx, shardNum, steps[i].StepID)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		if len(subHistory) > 0 {
 			steps[i].Subgraph = true
-			steps[i].SubWorkflowName = subWorkflowName
+			steps[i].SubWorkflowURL = subWorkflowURL
 			steps[i].SubHistory = subHistory
 		}
 	}
@@ -117,17 +117,17 @@ func (e *Engine) subgraphHistory(ctx context.Context, shardNum int, surgraphStep
 		return "", nil, errors.Trace(err)
 	}
 	var subFlowID int
-	var subWorkflowName string
-	err = db.QueryRowContext(ctx, "SELECT flow_id, workflow_name FROM dwarf_flows WHERE surgraph_step_id=?", surgraphStepID).Scan(&subFlowID, &subWorkflowName)
+	var subWorkflowURL string
+	err = db.QueryRowContext(ctx, "SELECT flow_id, workflow_url FROM dwarf_flows WHERE surgraph_step_id=?", surgraphStepID).Scan(&subFlowID, &subWorkflowURL)
 	if err == sql.ErrNoRows {
 		return "", nil, nil
 	}
 	if err != nil {
 		return "", nil, errors.Trace(err)
 	}
-	subWorkflowName = strings.TrimSpace(subWorkflowName)
+	subWorkflowURL = strings.TrimSpace(subWorkflowURL)
 	steps, err := e.historyBeforeStep(ctx, shardNum, subFlowID, 0)
-	return subWorkflowName, steps, errors.Trace(err)
+	return subWorkflowURL, steps, errors.Trace(err)
 }
 
 func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, error) {
@@ -471,7 +471,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			args = append(args, scArgs...)
 		}
 		args = append(args, perShardLimit)
-		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key" +
+		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_url, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key" +
 			" FROM dwarf_flows f" + joinSQL +
 			" WHERE " + strings.Join(conditions, " AND ") +
 			" ORDER BY f.flow_id DESC LIMIT_OFFSET(?, 0)"
@@ -486,7 +486,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			var flowToken, threadToken, flowError, cancelReason string
 			var threadID int
 			var taskName sql.NullString
-			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey)
+			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowURL, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -560,7 +560,7 @@ func searchClause(driverName string, shardIdx int, search string) (string, []any
 	default:
 		flowKeyExpr = fmt.Sprintf("'%d-' || f.flow_id || '-' || TRIM(f.flow_token)", shardIdx)
 	}
-	sql := "(LOWER(f.workflow_name) LIKE ? OR LOWER(s.task_name) LIKE ? OR LOWER(f.error) LIKE ? OR LOWER(f.cancel_reason) LIKE ? OR LOWER(" + flowKeyExpr + ") LIKE ?)"
+	sql := "(LOWER(f.workflow_url) LIKE ? OR LOWER(s.task_name) LIKE ? OR LOWER(f.error) LIKE ? OR LOWER(f.cancel_reason) LIKE ? OR LOWER(" + flowKeyExpr + ") LIKE ?)"
 	return sql, []any{pattern, pattern, pattern, pattern, pattern}
 }
 
@@ -577,9 +577,9 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string
 		conditions = append(conditions, "f.status=?")
 		args = append(args, query.Status)
 	}
-	if query.WorkflowName != "" {
-		conditions = append(conditions, "f.workflow_name=?")
-		args = append(args, query.WorkflowName)
+	if query.WorkflowURL != "" {
+		conditions = append(conditions, "f.workflow_url=?")
+		args = append(args, query.WorkflowURL)
 	}
 	if query.ThreadKey != "" {
 		threadShardNum, threadFlowID, threadFlowToken, parseErr := parseFlowKey(query.ThreadKey)
@@ -626,8 +626,8 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string
 }
 
 func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
-	if query.Status == "" && query.WorkflowName == "" && query.OlderThan == 0 {
-		return 0, errors.New("purge requires at least one filter (status, workflowName, or olderThan)", http.StatusBadRequest)
+	if query.Status == "" && query.WorkflowURL == "" && query.OlderThan == 0 {
+		return 0, errors.New("purge requires at least one filter (status, workflowURL, or olderThan)", http.StatusBadRequest)
 	}
 	const purgeCap = 10000
 	limit := query.Limit
@@ -759,11 +759,11 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	}
 	threadToken = strings.TrimSpace(threadToken)
 
-	var flowStatus, finalStateJSON, graphJSON, workflowName, baggageJSON string
+	var flowStatus, finalStateJSON, graphJSON, workflowURL, baggageJSON string
 	err = db.QueryRowContext(ctx,
-		"SELECT status, final_state, graph, workflow_name, baggage FROM dwarf_flows WHERE thread_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+		"SELECT status, final_state, graph, workflow_url, baggage FROM dwarf_flows WHERE thread_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 		threadID,
-	).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowName, &baggageJSON)
+	).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON)
 	if err != nil {
 		return "", errors.New("no flows found in thread", http.StatusNotFound)
 	}
@@ -797,7 +797,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	}
 
 	// A Continue turn starts its own trace (fresh root span), so pass an empty trace_parent.
-	return e.createWithGraph(ctx, shardNum, workflowName, &graph, mergedState, threadID, threadToken, "", opts)
+	return e.createWithGraph(ctx, shardNum, workflowURL, &graph, mergedState, threadID, threadToken, "", opts)
 }
 
 func (e *Engine) setBreakpoint(ctx context.Context, flowKey string, key string, enabled bool) error {

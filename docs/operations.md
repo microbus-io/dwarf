@@ -10,8 +10,8 @@ key**.
 ### Create and Run
 
 ```go
-flowKey, err := eng.Create(ctx, workflowName, initialState, opts) // makes a flow in "created"
-outcome,  err := eng.Run(ctx, workflowName, initialState, opts)   // Create + Start + Await
+flowKey, err := eng.Create(ctx, workflowURL, initialState, opts) // makes a flow in "created"
+outcome,  err := eng.Run(ctx, workflowURL, initialState, opts)   // Create + Start + Await
 ```
 
 `Create` calls your host's `LoadGraph`, inserts the flow and its entry step, and freezes the graph — but does

@@ -197,7 +197,7 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 			var body strings.Builder
 			subHeads, subTails := r.renderSteps(&body, subPrefix, s.SubHistory)
 			blockID := fmt.Sprintf("%ss%d_sg", prefix, s.StepID)
-			label := flowStripProto(s.SubWorkflowName)
+			label := flowStripProto(s.SubWorkflowURL)
 			if label == "" {
 				label = "subgraph"
 			}

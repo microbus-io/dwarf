@@ -20,9 +20,9 @@ import "time"
 
 // Query specifies filtering and pagination options for listing or purging flows.
 type Query struct {
-	Status       string `json:"status,omitzero"`
-	WorkflowName string `json:"workflowName,omitzero"`
-	ThreadKey    string `json:"threadKey,omitzero"`
+	Status      string `json:"status,omitzero"`
+	WorkflowURL string `json:"workflowURL,omitzero"`
+	ThreadKey   string `json:"threadKey,omitzero"`
 	// TaskName filters to flows whose current step is on the named task.
 	TaskName string `json:"taskName,omitzero"`
 	// FairnessKey filters to flows with this scheduling fairness key. The host typically sets the
@@ -42,7 +42,7 @@ type Query struct {
 	Shard int `json:"shard,omitzero"`
 	// Cursor is the opaque pagination cursor returned as NextCursor by the previous List call.
 	Cursor string `json:"cursor,omitzero"`
-	// Search is a case-insensitive substring matched against workflow_name, current task_name,
+	// Search is a case-insensitive substring matched against workflow_url, current task_name,
 	// error, and cancel_reason. SQL LIKE wildcards (%, _) in the value are honored.
 	Search string `json:"search,omitzero"`
 	Limit  int    `json:"limit,omitzero"`

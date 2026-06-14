@@ -53,7 +53,7 @@ type Transition struct {
 // Graph is the definition of a workflow. It describes the tasks, transitions between them,
 // and reducers for merging state during fan-in.
 type Graph struct {
-	name          string
+	url           string
 	entryPoint    string
 	nodes         []Node
 	transitions   []Transition
@@ -63,16 +63,17 @@ type Graph struct {
 	annotations   map[string]string // node name -> annotation text rendered as a note under the node
 }
 
-// NewGraph creates a new workflow graph with the given name.
-func NewGraph(name string) *Graph {
+// NewGraph creates a new workflow graph identified by the given URL - the resolve key the host's
+// LoadGraph fetches it by, and the value passed to Create.
+func NewGraph(graphURL string) *Graph {
 	return &Graph{
-		name: name,
+		url: graphURL,
 	}
 }
 
-// Name returns the name of the graph.
-func (g *Graph) Name() string {
-	return g.name
+// URL returns the graph's URL (its resolve key).
+func (g *Graph) URL() string {
+	return g.url
 }
 
 // EntryPoint returns the node name of the entry point of the graph.
@@ -140,15 +141,15 @@ func (g *Graph) SetEntryPoint(name string) {
 // AddTransition adds an unconditional transition between two nodes. Both endpoints are
 // auto-registered as tasks if not already present (see autoRegister).
 func (g *Graph) AddTransition(from, to string) {
-	from = g.autoRegister(from)
-	to = g.autoRegister(to)
+	g.autoRegister(from)
+	g.autoRegister(to)
 	g.transitions = append(g.transitions, Transition{From: from, To: to})
 }
 
 // AddTransitionWhen adds a conditional transition between two nodes.
 func (g *Graph) AddTransitionWhen(from, to string, when string) {
-	from = g.autoRegister(from)
-	to = g.autoRegister(to)
+	g.autoRegister(from)
+	g.autoRegister(to)
 	g.transitions = append(g.transitions, Transition{From: from, To: to, When: when})
 }
 
@@ -163,23 +164,23 @@ func (g *Graph) AddTransitionWhen(from, to string, when string) {
 // transition as Switch (the validator rejects mixing Switch with When/plain/ForEach/Goto
 // from the same source). OnError transitions are orthogonal and remain allowed.
 func (g *Graph) AddTransitionSwitch(from, to string, when string) {
-	from = g.autoRegister(from)
-	to = g.autoRegister(to)
+	g.autoRegister(from)
+	g.autoRegister(to)
 	g.transitions = append(g.transitions, Transition{From: from, To: to, When: when, Switch: true})
 }
 
 // AddTransitionGoto adds a transition that is only taken when the source task calls
 // flow.Goto with a target that resolves to this transition's destination.
 func (g *Graph) AddTransitionGoto(from, to string) {
-	from = g.autoRegister(from)
-	to = g.autoRegister(to)
+	g.autoRegister(from)
+	g.autoRegister(to)
 	g.transitions = append(g.transitions, Transition{From: from, To: to, WithGoto: true})
 }
 
 // AddTransitionForEach adds a dynamic fan-out transition.
 func (g *Graph) AddTransitionForEach(from, to string, forEach string, as string) {
-	from = g.autoRegister(from)
-	to = g.autoRegister(to)
+	g.autoRegister(from)
+	g.autoRegister(to)
 	if as == "" {
 		as = "item"
 	}
@@ -188,25 +189,22 @@ func (g *Graph) AddTransitionForEach(from, to string, forEach string, as string)
 
 // AddTransitionOnError adds a transition that is taken when the source task returns an error.
 func (g *Graph) AddTransitionOnError(from, to string) {
-	from = g.autoRegister(from)
-	to = g.autoRegister(to)
+	g.autoRegister(from)
+	g.autoRegister(to)
 	g.transitions = append(g.transitions, Transition{From: from, To: to, OnError: true})
 }
 
-// autoRegister resolves a transition endpoint string to a node name, registering a new
-// node if needed. Endpoints are keyed by node name only; an unknown string registers a new
-// node (name == url == s).
-func (g *Graph) autoRegister(s string) string {
-	if s == END {
-		return END
+// autoRegister registers a new node if one does not exist for the name.
+func (g *Graph) autoRegister(name string) {
+	if name == END {
+		return
 	}
 	for _, n := range g.nodes {
-		if n.Name == s {
-			return n.Name
+		if n.Name == name {
+			return
 		}
 	}
-	g.AddTask(s, s)
-	return s
+	g.AddTask(name, name)
 }
 
 // ErrorTransition returns the error transition from the given node name, if one exists.
@@ -296,63 +294,63 @@ func (g *Graph) Annotation(name string) string {
 
 // Validate checks the graph for structural errors.
 func (g *Graph) Validate() error {
-	if g.name == "" {
+	if g.url == "" {
 		return errors.New("graph name is required")
 	}
 	if len(g.nodes) == 0 {
-		return errors.New("graph '%s' has no tasks", g.name)
+		return errors.New("graph '%s' has no tasks", g.url)
 	}
 	nodeSet := make(map[string]bool, len(g.nodes)+1)
 	nodeSet[END] = true
 	for _, t := range g.nodes {
 		if nodeSet[t.Name] {
-			return errors.New("duplicate node '%s' in graph '%s'", t.Name, g.name)
+			return errors.New("duplicate node '%s' in graph '%s'", t.Name, g.url)
 		}
 		nodeSet[t.Name] = true
 		if t.URL == "" {
-			return errors.New("node '%s' in graph '%s' has no URL", t.Name, g.name)
+			return errors.New("node '%s' in graph '%s' has no URL", t.Name, g.url)
 		}
 	}
 	if !nodeSet[g.entryPoint] {
-		return errors.New("entry point '%s' is not a registered node in graph '%s'", g.entryPoint, g.name)
+		return errors.New("entry point '%s' is not a registered node in graph '%s'", g.entryPoint, g.url)
 	}
 	for fanInName := range g.fanInNodes {
 		if !nodeSet[fanInName] {
-			return errors.New("SetFanIn references unknown node '%s' in graph '%s'", fanInName, g.name)
+			return errors.New("SetFanIn references unknown node '%s' in graph '%s'", fanInName, g.url)
 		}
 		if fanInName == END {
-			return errors.New("SetFanIn cannot mark END in graph '%s'", g.name)
+			return errors.New("SetFanIn cannot mark END in graph '%s'", g.url)
 		}
 	}
 	for _, tr := range g.transitions {
 		if !nodeSet[tr.From] {
-			return errors.New("transition from unknown node '%s' to '%s' in graph '%s'", tr.From, tr.To, g.name)
+			return errors.New("transition from unknown node '%s' to '%s' in graph '%s'", tr.From, tr.To, g.url)
 		}
 		if !nodeSet[tr.To] {
-			return errors.New("transition from '%s' to unknown node '%s' in graph '%s'", tr.From, tr.To, g.name)
+			return errors.New("transition from '%s' to unknown node '%s' in graph '%s'", tr.From, tr.To, g.url)
 		}
 		if tr.ForEach != "" && tr.WithGoto {
-			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine forEach and withGoto", tr.From, tr.To, g.name)
+			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine forEach and withGoto", tr.From, tr.To, g.url)
 		}
 		if tr.As != "" && tr.ForEach == "" {
-			return errors.New("transition from '%s' to '%s' in graph '%s' has 'as' without 'forEach'", tr.From, tr.To, g.name)
+			return errors.New("transition from '%s' to '%s' in graph '%s' has 'as' without 'forEach'", tr.From, tr.To, g.url)
 		}
 		if tr.OnError && (tr.ForEach != "" || tr.WithGoto) {
-			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine onError with forEach or withGoto", tr.From, tr.To, g.name)
+			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine onError with forEach or withGoto", tr.From, tr.To, g.url)
 		}
 		if tr.Switch && (tr.ForEach != "" || tr.WithGoto || tr.OnError) {
-			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine switch with forEach, withGoto, or onError", stripProto(tr.From), stripProto(tr.To), g.name)
+			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine switch with forEach, withGoto, or onError", stripProto(tr.From), stripProto(tr.To), g.url)
 		}
 		if tr.Switch && tr.When == "" {
-			return errors.New("switch transition from '%s' to '%s' in graph '%s' requires a 'when' expression (use \"true\" for the default branch)", stripProto(tr.From), stripProto(tr.To), g.name)
+			return errors.New("switch transition from '%s' to '%s' in graph '%s' requires a 'when' expression (use \"true\" for the default branch)", stripProto(tr.From), stripProto(tr.To), g.url)
 		}
 		if tr.OnError && tr.From == tr.To {
-			return errors.New("transition from '%s' to itself in graph '%s' would loop unboundedly; use flow.Retry in the task body for bounded retries with backoff", stripProto(tr.From), g.name)
+			return errors.New("transition from '%s' to itself in graph '%s' would loop unboundedly; use flow.Retry in the task body for bounded retries with backoff", stripProto(tr.From), g.url)
 		}
 		if tr.When != "" {
 			err := boolexp.Validate(tr.When)
 			if err != nil {
-				return errors.New("transition from '%s' to '%s' in graph '%s' has invalid 'when' expression: %v", stripProto(tr.From), stripProto(tr.To), g.name, err)
+				return errors.New("transition from '%s' to '%s' in graph '%s' has invalid 'when' expression: %v", stripProto(tr.From), stripProto(tr.To), g.url, err)
 			}
 		}
 	}
@@ -367,7 +365,7 @@ func (g *Graph) Validate() error {
 		if !hasSwitchFrom[tr.From] || tr.Switch || tr.OnError || tr.WithGoto {
 			continue
 		}
-		return errors.New("node '%s' in graph '%s' mixes a switch transition with a non-switch success-path transition to '%s'; convert all outgoing success-path transitions to switch (use when=\"true\" for the default), or use withGoto for explicit overrides", stripProto(tr.From), g.name, stripProto(tr.To))
+		return errors.New("node '%s' in graph '%s' mixes a switch transition with a non-switch success-path transition to '%s'; convert all outgoing success-path transitions to switch (use when=\"true\" for the default), or use withGoto for explicit overrides", stripProto(tr.From), g.url, stripProto(tr.To))
 	}
 
 	reachable := make(map[string]bool)
@@ -385,7 +383,7 @@ func (g *Graph) Validate() error {
 	}
 	for _, t := range g.nodes {
 		if !reachable[t.Name] {
-			return errors.New("node '%s' is not reachable from entry point '%s' in graph '%s'", t.Name, g.entryPoint, g.name)
+			return errors.New("node '%s' is not reachable from entry point '%s' in graph '%s'", t.Name, g.entryPoint, g.url)
 		}
 	}
 
@@ -397,7 +395,7 @@ func (g *Graph) Validate() error {
 		}
 	}
 	if !hasEnd {
-		return errors.New("graph '%s' has no transition to END", g.name)
+		return errors.New("graph '%s' has no transition to END", g.url)
 	}
 
 	return g.validateLineage()
@@ -472,7 +470,7 @@ func (g *Graph) validateLineage() error {
 					if len(fromStack) == 0 {
 						return errors.New(
 							"transition from '%s' to fan-in node '%s' in graph '%s' has no fan-out frame to pop",
-							stripProto(from), stripProto(tr.To), g.name,
+							stripProto(from), stripProto(tr.To), g.url,
 						)
 					}
 					nextStack = stackCopy(fromStack[:len(fromStack)-1])
@@ -488,7 +486,7 @@ func (g *Graph) validateLineage() error {
 				if len(nextStack) != 0 {
 					return errors.New(
 						"transition from '%s' to END in graph '%s' has unpopped fan-out frames %v; every branch must pass through a fan-in node before reaching END",
-						stripProto(from), g.name, nextStack,
+						stripProto(from), g.url, nextStack,
 					)
 				}
 				continue
@@ -498,7 +496,7 @@ func (g *Graph) validateLineage() error {
 				if !stackEqual(prior, nextStack) {
 					return errors.New(
 						"node '%s' in graph '%s' is reachable with two different lineage stacks (%v and %v); register a separate alias node via AddTask to disambiguate",
-						stripProto(tr.To), g.name, prior, nextStack,
+						stripProto(tr.To), g.url, prior, nextStack,
 					)
 				}
 				continue
@@ -512,7 +510,7 @@ func (g *Graph) validateLineage() error {
 		if _, ok := g.fanOutToFanIn[source]; !ok {
 			return errors.New(
 				"fan-out source '%s' in graph '%s' has no fan-in node downstream; mark the convergence node with SetFanIn",
-				stripProto(source), g.name,
+				stripProto(source), g.url,
 			)
 		}
 	}
@@ -541,7 +539,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		jsonTasks[i] = jsonTask{Name: t.Name, URL: t.URL, FanIn: g.fanInNodes[t.Name]}
 	}
 	type jsonGraph struct {
-		Name          string             `json:"name"`
+		URL           string             `json:"url"`
 		EntryPoint    string             `json:"entryPoint"`
 		Tasks         []jsonTask         `json:"tasks"`
 		Transitions   []Transition       `json:"transitions"`
@@ -549,7 +547,7 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		FanOutToFanIn map[string]string  `json:"fanOutToFanIn,omitzero"`
 	}
 	jg := jsonGraph{
-		Name:          g.name,
+		URL:           g.url,
 		EntryPoint:    g.entryPoint,
 		Tasks:         jsonTasks,
 		Transitions:   g.transitions,
@@ -573,7 +571,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 		FanIn bool   `json:"fanIn,omitzero"`
 	}
 	type jsonGraph struct {
-		Name          string             `json:"name"`
+		URL           string             `json:"url"`
 		EntryPoint    string             `json:"entryPoint"`
 		Tasks         []jsonTask         `json:"tasks"`
 		Transitions   []Transition       `json:"transitions"`
@@ -585,7 +583,7 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
-	g.name = jg.Name
+	g.url = jg.URL
 	g.entryPoint = jg.EntryPoint
 	g.nodes = make([]Node, len(jg.Tasks))
 	g.fanInNodes = nil

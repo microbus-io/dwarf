@@ -143,16 +143,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 
 	// Read flow data
-	var flowToken, flowStatus, workflowName, graphJSON, baggageJSON, traceParent string
+	var flowToken, flowStatus, workflowURL, graphJSON, baggageJSON, traceParent string
 	var notifyHostname, breakpointsJSON string
 	var flowCreatedAt, flowUpdatedAt time.Time
 	var flowPriority int
 	var flowFairnessKey string
 	var flowFairnessWeight float64
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_token, status, workflow_name, graph, baggage, trace_parent, notify_hostname, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
+		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, notify_hostname, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&flowToken, &flowStatus, &workflowName, &graphJSON, &baggageJSON, &traceParent, &notifyHostname, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight)
+	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &notifyHostname, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -216,7 +216,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 		breakpointMatch := breakpoints[taskName] == "b"
 		if len(breakpoints) > 0 && breakpointMatch {
-			e.logger.DebugContext(ctx, "Breakpoint hit", "task", taskName, "step", stepDepth, "flow", workflowName)
+			e.logger.DebugContext(ctx, "Breakpoint hit", "task", taskName, "step", stepDepth, "flow", workflowURL)
 			e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
 			return e.handleBreakpoint(ctx, shardNum, db, stepID, flowID, flowToken)
 		}
@@ -224,7 +224,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Execute the task. The step's time_budget_ms bounds the executor call's context deadline; the
 	// surrounding DB work keeps using the undeadlined ctx so persistence is never cut short.
-	e.logger.DebugContext(ctx, "Executing task", "task", taskName, "flow", workflowName)
+	e.logger.DebugContext(ctx, "Executing task", "task", taskName, "flow", workflowURL)
 	dispatchURL := dispatchURLOf(graph, taskName)
 	// The adaptive mechanisms (breaker, valve) key on the dispatch URL - the real downstream - not the
 	// graph node name, so two graphs naming a node identically but pointing at different URLs don't share
@@ -241,7 +241,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
 			attribute.String("workflow.id", flowKey),
-			attribute.String("workflow.name", workflowName),
+			attribute.String("workflow.name", workflowURL),
 		),
 	)
 	defer taskSpan.End()
@@ -262,7 +262,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// engine never inspects status codes or error text itself. Backpressure bounces the step and cuts
 		// the rate; a breaker trip parks the task's backlog and probes. cause is an opaque metric label.
 		if cause, ok := workflow.IsBackpressure(execErr); ok {
-			e.logger.DebugContext(ctx, "Task backpressure", "task", taskName, "flow", workflowName, "cause", cause)
+			e.logger.DebugContext(ctx, "Task backpressure", "task", taskName, "flow", workflowURL, "cause", cause)
 			return e.handleBackpressure(ctx, shardNum, stepID, dispatchURL)
 		}
 		if cause, ok := workflow.IsBreakerTrip(execErr); ok {
@@ -270,7 +270,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 
 		if _, ok := graph.ErrorTransition(taskName); ok {
-			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowName, "error", execErr)
+			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowURL, "error", execErr)
 			tracedErr := errors.Convert(execErr)
 			resultFlow = workflow.NewRawFlow()
 			resultFlow.SetRawState(state)
@@ -334,14 +334,14 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Handle interrupt
 	if interruptPayload, interrupted := resultFlow.InterruptRequested(); interrupted {
-		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "flow", workflowName)
+		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "flow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
 		return e.handleInterrupt(ctx, shardNum, db, stepID, flowID, flowToken, changesJSON, interruptPayload)
 	}
 
 	// Handle subgraph
 	if subgraphWorkflow, subgraphInput, subgraphRequested := resultFlow.SubgraphRequested(); subgraphRequested {
-		e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "flow", workflowName, "subgraph", subgraphWorkflow)
+		e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "flow", workflowURL, "subgraph", subgraphWorkflow)
 		db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
 			string(changesJSON), stepID, workflow.StatusRunning,
@@ -380,7 +380,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Handle retry
 	if maxAttempts, initialDelay, multiplier, maxDelay, retryRequested := resultFlow.RetryRequested(); retryRequested {
-		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "flow", workflowName, "step", stepID, "attempt", attempt)
+		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "flow", workflowURL, "step", stepID, "attempt", attempt)
 		retrySleepMs := sleepDur.Milliseconds()
 		if maxAttempts > 0 {
 			delay := float64(initialDelay)
@@ -409,10 +409,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Complete the step
 	if errorRouted {
-		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowName)
+		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, "error_routed")
 	} else {
-		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "flow", workflowName)
+		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "flow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted)
 	}
 	gotoTarget := resultFlow.GotoRequested()
@@ -452,13 +452,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if isPushTransition && cohortSize == 0 {
 		fanInTarget := graph.FanInFor(taskName)
 		if fanInTarget == "" {
-			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, strings.TrimSpace(notifyHostname), workflowName)
+			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, strings.TrimSpace(notifyHostname), workflowURL)
 		}
 		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight)
 	}
 
 	if cohortSize == 0 {
-		return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, strings.TrimSpace(notifyHostname), workflowName)
+		return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, strings.TrimSpace(notifyHostname), workflowURL)
 	}
 
 	cohortSpawnID := lineageID
