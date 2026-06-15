@@ -466,6 +466,15 @@ func (e *Engine) BreakerTripped(taskURL string) bool {
 	return !b.trippedAt.IsZero()
 }
 
+// ValveCount returns the number of tasks that currently have an adaptive-rate valve allocated. Intended
+// for tests/fixtures that assert backpressure engaged; not a hot-path metric (use the dwarf_task_rate_limit
+// gauge for monitoring).
+func (e *Engine) ValveCount() int {
+	e.valvesLock.RLock()
+	defer e.valvesLock.RUnlock()
+	return len(e.valves)
+}
+
 // refreshNextProbeLocked recomputes the soonest probe across all tripped breakers.
 // Caller must hold breakersLock.
 func (e *Engine) refreshNextProbeLocked() {
