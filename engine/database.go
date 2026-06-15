@@ -25,7 +25,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"testing"
 
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -189,9 +188,12 @@ func (e *Engine) closeDatabase() {
 	e.dbs = nil
 }
 
-// openTestDatabase opens per-test SQLite databases for all shards.
-func (e *Engine) openTestDatabase(t *testing.T) error {
-	t.Helper()
+// openTestDatabaseWithID opens per-test isolated databases for all shards, keyed by a caller-supplied
+// testID. It is the *testing.T-free core shared by RunInTest (testID = t.Name()) and StartupInTest
+// (testID = a host-supplied key shared by every replica of one test run, e.g. a Microbus plane) — so a host
+// that is itself under test can convey "use a throwaway, isolated database" down to sequel without a
+// *testing.T.
+func (e *Engine) openTestDatabaseWithID(testID string) error {
 	dataSourceName := e.dsn.Load().(string)
 	// Allow the whole fixture suite to run against a real server database without changing any test:
 	// when no DSN was set explicitly, fall back to SEQUEL_TESTING_DSN — the same variable sequel itself
@@ -203,13 +205,16 @@ func (e *Engine) openTestDatabase(t *testing.T) error {
 	}
 	numShards := int(e.numShards.Load())
 	// sequel.CreateTestingDatabase derives the throwaway database name as testing_<hour>_<base>_<testID>,
-	// which must fit the strictest SQL identifier limit (Postgres 63, MySQL 64 chars). Hash the test name
-	// to a fixed 16 hex chars so the derived name is always bounded, regardless of how long or deeply
-	// nested the Go (sub)test name is. 16 hex chars (64 bits) is collision-free across a test suite.
-	sum := sha256.Sum256([]byte(t.Name()))
-	testID := hex.EncodeToString(sum[:])[:16]
+	// which must fit the strictest SQL identifier limit (Postgres 63, MySQL 64 chars). Hash the caller's
+	// testID to a fixed 16 hex chars so the derived name is always bounded, regardless of how long the id
+	// is (a deeply nested Go subtest name, or an opaque host key). 16 hex chars (64 bits) is collision-free
+	// across a test suite. Hashing is deterministic, so two callers sharing a testID (e.g. peer replicas in
+	// one test app passing the same plane) resolve to the same isolated database — exactly what shared-state
+	// multi-replica fixtures need.
+	sum := sha256.Sum256([]byte(testID))
+	hashedID := hex.EncodeToString(sum[:])[:16]
 	for i := 1; i <= numShards; i++ {
-		db, err := e.openDatabaseShardForTest(context.Background(), dataSourceName, i, testID)
+		db, err := e.openDatabaseShardForTest(context.Background(), dataSourceName, i, hashedID)
 		if err != nil {
 			return errors.Trace(err)
 		}

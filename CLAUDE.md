@@ -661,6 +661,15 @@ selects SQLite in-memory; each shard is routed through `sequel.CreateTestingData
 shards are isolated databases (folding the shard index into the test ID is what keeps a multi-shard `RunInTest` from
 collapsing every shard onto one shared in-memory DB). Key SQLite differences from server databases:
 
+`engine.StartupInTest(ctx, testID)` is the `*testing.T`-free sibling, for a **host that is itself under test** and so
+has no `*testing.T` to hand `RunInTest` (e.g. a Microbus microservice running under `app.RunInTest`, whose lifecycle
+is driven by the connector, not by `t`). Both share the `openTestDatabaseWithID` core: the engine never learns the
+host's notion of "test mode" - it only receives a concrete `testID` and opens isolated throwaway databases keyed by it.
+The id is hashed to a bounded 16 hex chars (SQL identifier limits) and is **deterministic**, so peer replicas that pass
+the *same* id (e.g. the shared per-test Microbus plane) resolve to the *same* isolated databases - exactly what
+shared-state multi-replica fixtures need - while a different id is isolated. Unlike `RunInTest` it registers no cleanup;
+the host drives teardown by calling `Shutdown`.
+
 - **Write-first transactions** - `advanceFlow` does an `UPDATE` as the first operation to immediately acquire a write
   lock. On MySQL/Postgres this serializes concurrent workers (like `SELECT ... FOR UPDATE`). On SQLite with
   `cache=shared`, starting with a write avoids the deadlock where two read-first deferred transactions both hold

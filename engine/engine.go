@@ -270,6 +270,26 @@ func (e *Engine) Startup(ctx context.Context) error {
 	return nil
 }
 
+// StartupInTest initializes the engine against isolated, throwaway test databases - one per shard, keyed by
+// testID - instead of opening the configured DSN. It is for a host that is itself running under test (so it
+// has no *testing.T to hand RunInTest) but must still convey "use a disposable, isolated database" down to
+// sequel. The testID must be stable for the test run and shared by every replica that should see the same
+// database (e.g. a Microbus plane, which all services in one test app share); distinct test runs pass
+// distinct ids for isolation. The engine never learns the host's notion of "test mode" - it only receives
+// this concrete instruction. Unlike RunInTest there is no cleanup hook; the host drives teardown by calling
+// Shutdown (e.g. from its own shutdown lifecycle).
+func (e *Engine) StartupInTest(ctx context.Context, testID string) error {
+	if e.host == nil {
+		return errors.New("host is required")
+	}
+	err := e.openTestDatabaseWithID(testID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	e.initRuntime()
+	return nil
+}
+
 // Shutdown stops all worker goroutines and closes database connections.
 func (e *Engine) Shutdown(ctx context.Context) error {
 	e.drainRuntime()
@@ -281,7 +301,7 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 // and registers cleanup via t.Cleanup.
 func (e *Engine) RunInTest(t *testing.T) {
 	t.Helper()
-	err := e.openTestDatabase(t)
+	err := e.openTestDatabaseWithID(t.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
