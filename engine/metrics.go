@@ -43,6 +43,7 @@ type engineMetrics struct {
 	flowsTerminated       metric.Int64Counter
 	stepsExecuted         metric.Int64Counter
 	stepsRecovered        metric.Int64Counter
+	stepsUnwedged         metric.Int64Counter
 	stepsSkippedSaturated metric.Int64Counter
 	taskRateCuts          metric.Int64Counter
 	taskBreakerTrips      metric.Int64Counter
@@ -76,6 +77,7 @@ func (e *Engine) initMetrics() error {
 	m.flowsTerminated = ctr("dwarf_flows_terminated_total", "Counts flows that have reached a terminal status.")
 	m.stepsExecuted = ctr("dwarf_steps_executed_total", "Counts steps that have been executed.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered_total", "Counts steps recovered by pollPendingSteps after lease expiry.")
+	m.stepsUnwedged = ctr("dwarf_steps_unwedged_total", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
 	m.stepsSkippedSaturated = ctr("dwarf_steps_skipped_saturated_total", "Counts step admissions skipped because the task was at its current rate-limit ceiling.")
 	m.taskRateCuts = ctr("dwarf_task_rate_cuts_total", "Counts additive-decrease cuts to the per-task rate ceiling triggered by a 429.")
 	m.taskBreakerTrips = ctr("dwarf_task_breaker_trips_total", "Counts per-task circuit-breaker trips, labelled by cause.")
@@ -332,6 +334,13 @@ func (e *Engine) metricStepsRecovered(ctx context.Context, n int) {
 		return
 	}
 	e.metrics.stepsRecovered.Add(ctx, int64(n))
+}
+
+func (e *Engine) metricStepUnwedged(ctx context.Context, parkType string) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.stepsUnwedged.Add(ctx, 1, metric.WithAttributes(attribute.String("park_type", parkType)))
 }
 
 func (e *Engine) metricStepSkippedSaturated(ctx context.Context, taskURL string) {

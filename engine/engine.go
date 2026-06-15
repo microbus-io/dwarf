@@ -50,6 +50,14 @@ const (
 	leaseMargin         = 30 * time.Second
 	backlogPollInterval = 1 * time.Minute
 
+	// wedgeSweepInterval is the cadence of the dedicated recovery goroutine that runs the defense-in-depth
+	// parked-step wedge sweep. It is kept off the frequently-nudged poll path because the sweep's scans are
+	// heavy and latency-tolerant. parkWedgeThreshold is the minimum age a parked step must reach before the
+	// sweep treats it as wedged - comfortably beyond normal subgraph-completion latency and the 1-minute max
+	// breaker-probe interval, so steady-state operation never trips a false positive.
+	wedgeSweepInterval = 5 * time.Minute
+	parkWedgeThreshold = 5 * time.Minute
+
 	parkedNone     = 0
 	parkedSubgraph = 1
 	parkedBreaker  = 2
@@ -67,7 +75,7 @@ type Engine struct {
 	// Dependencies (set before Startup)
 	host           Host
 	logger         *slog.Logger
-	loggerSet      bool // true once WithLogger received a non-nil logger; gates whether sequel logs
+	loggerSet      bool // true once SetLogger received a non-nil logger; gates whether sequel logs
 	meterProvider  metric.MeterProvider
 	metrics        *engineMetrics
 	tracerProvider trace.TracerProvider
@@ -117,6 +125,11 @@ type Engine struct {
 	timerStop    chan struct{}
 	timerWorker  sync.WaitGroup
 
+	// Recovery goroutine: runs the defense-in-depth parked-step wedge sweep on its own slow cadence,
+	// off the hot poll path.
+	recoveryStop   chan struct{}
+	recoveryWorker sync.WaitGroup
+
 	// Wait registry for Await
 	waitersLock sync.Mutex
 	waiters     map[string][]chan string
@@ -148,7 +161,7 @@ type Engine struct {
 func NewEngine() *Engine {
 	e := &Engine{
 		// Default to a discard logger: a library stays silent until the host opts in by injecting one
-		// (WithLogger), rather than writing unbidden to the application-owned slog.Default(). Non-nil so
+		// (SetLogger), rather than writing unbidden to the application-owned slog.Default(). Non-nil so
 		// the engine's e.logger.*Context call sites are nil-safe; produces no output until configured.
 		logger:         slog.New(slog.DiscardHandler),
 		lastRefillBand: -1,
@@ -383,6 +396,7 @@ func (e *Engine) initRuntime() {
 	e.refillStop = make(chan struct{})
 	e.wakeTimer = make(chan struct{}, 1)
 	e.timerStop = make(chan struct{})
+	e.recoveryStop = make(chan struct{})
 	e.nextPoll = time.Now()
 	e.valves = map[string]*taskValve{}
 	e.breakers = map[string]*taskBreaker{}
@@ -424,6 +438,11 @@ func (e *Engine) initRuntime() {
 		defer e.refiller.Done()
 		e.refillerLoop(e.lifetimeCtx)
 	}()
+	e.recoveryWorker.Add(1)
+	go func() {
+		defer e.recoveryWorker.Done()
+		e.recoveryLoop(e.lifetimeCtx)
+	}()
 	e.requestRefill()
 }
 
@@ -439,6 +458,12 @@ func (e *Engine) drainRuntime() {
 		close(e.timerStop)
 	}
 	e.timerWorker.Wait()
+	// The recovery loop can requestRefill (re-electing a wedged breaker probe), so drain it before the
+	// refiller, mirroring the timer.
+	if e.recoveryStop != nil {
+		close(e.recoveryStop)
+	}
+	e.recoveryWorker.Wait()
 	if e.refillStop != nil {
 		close(e.refillStop)
 	}

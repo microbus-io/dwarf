@@ -1051,19 +1051,20 @@ transition, or propagate as flow failure). The breaker is specifically for "I ca
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 15 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 16 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - the no-op provider unless the host
 configures the SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in
 `initMetrics` (called from `initRuntime`, so both `Startup` and `RunInTest` get them) from
 `mp.Meter("github.com/microbus-io/dwarf")` - that scope distinguishes dwarf's metrics; **service identity lives
 in the provider's Resource, not in per-metric attributes** (no `service.name` on data points - that would
 explode cardinality and is off-spec). The only attributes the engine attaches are the metric-specific labels:
-`workflow`, `status`, `task`, `cause`, `outcome`, `priority`.
+`workflow`, `status`, `task`, `cause`, `outcome`, `priority`, `park_type`.
 
-**8 counters, incremented inline** at the same logical event sites the foreman used: `dwarf_flows_started_total`
+**9 counters, incremented inline** at the same logical event sites the foreman used: `dwarf_flows_started_total`
 (start path), `dwarf_flows_terminated_total` (completeFlow), `dwarf_steps_executed_total` (every terminal step
 disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered_total`
-(pollPendingSteps lease recovery), `dwarf_steps_skipped_saturated_total` (refill admission skips),
+(pollPendingSteps lease recovery), `dwarf_steps_unwedged_total{park_type}` (the parked-step wedge sweep; a
+nonzero value flags a latent bug), `dwarf_steps_skipped_saturated_total` (refill admission skips),
 `dwarf_task_rate_cuts_total` (valveRegulate), `dwarf_task_breaker_trips_total` /
 `dwarf_task_breaker_probes_total` (handleBreakerTrip + breakerClose). The inline helpers no-op when
 `e.metrics == nil` (before Startup).
@@ -1331,6 +1332,34 @@ Transactions don't help when a worker crashes during the `ExecuteTask` call (out
 3. **Orphan flow detection** in `pollPendingSteps` - logs an error for any `running` flow with no non-terminal steps
    whose `updated_at` is older than 5 minutes. A bug signal; auto-recovery is intentionally not implemented (it would
    duplicate the transition logic and could double-advance on a false positive).
+4. **Parked-step wedge sweep** (`sweepWedgedParks`, `wedge.go`) - defense in depth for the two park kinds, whose
+   releasing condition could in principle never fire (a parked step is invisible to selection, and `parkedSubgraph`
+   is invisible to lease recovery too). Runs on a **dedicated recovery goroutine** (`recoveryLoop`) on a plain
+   `wedgeSweepInterval` (5m) ticker - kept *off* `pollPendingSteps` because that poll is nudged sub-second under load
+   while the sweep's `NOT EXISTS`/`GROUP BY` scans are heavy and the wedge it guards against is latency-tolerant; the
+   recovery loop is drained before the refiller in `drainRuntime` since breaker recovery can `requestRefill`. Every
+   detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a false
+   positive (the guard sits comfortably beyond normal subgraph-completion latency and the 1m max breaker-probe
+   interval). Unlike orphan-flow detection this **does** auto-recover, because each recovery re-invokes the *normal*
+   release mechanism - which is guarded by a CAS on the park state - rather than duplicating transition logic, so it
+   is idempotent and harmless under a concurrent resolution, a false positive, or a peer replica sweeping the same
+   shard:
+   - **`parkedSubgraph`** (`recoverWedgedSubgraphParks`): a caller step `running`+`parkedSubgraph` with **no
+     non-terminal child** (`surgraph_step_id = step_id`, status created/running/interrupted) is wedged - the child
+     reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
+     latest child (`flow_id DESC`): `completeSurgraphFlow` for a completed child, `deliverSubgraphError` for a
+     failed/cancelled/absent one. (A fan-out has several caller steps, each its own `surgraph_step_id`, checked
+     independently; `flow.Retry` leaves older terminal children whose latest sibling is still active - handled by
+     the `NOT EXISTS` + latest-child logic.)
+   - **`parkedBreaker`** (`recoverWedgedBreakerParks`): a task with `parked=2` pending backlog but **no
+     dispatchable probe** (no `parkedNone` pending and no `running` step for the task on that shard) is wedged - the
+     elected probe was lost, so nothing would ever dispatch to re-trip or close the breaker. A *scheduled* probe is
+     itself a `parkedNone` pending row (future `not_before`), so a task mid-probe-schedule is never flagged. The
+     sweep re-arms the in-memory breaker (`breakerTrip`, idempotent; required because `breakerClose` only unparks a
+     tripped breaker) and elevates the oldest `parked=2` step to a due probe; the normal cycle then resumes.
+   Each unwedge increments `dwarf_steps_unwedged_total{park_type}` (the always-on alarm; a nonzero value means a
+   latent bug let a step wedge) and logs at error level (silent under the default discard logger, surfaced once a
+   host injects one).
 
 ### Per-Function Crash Analysis
 
