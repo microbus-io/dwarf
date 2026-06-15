@@ -342,14 +342,30 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Handle subgraph
 	if subgraphWorkflow, subgraphInput, subgraphRequested := resultFlow.SubgraphRequested(); subgraphRequested {
 		e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "flow", workflowURL, "subgraph", subgraphWorkflow)
-		db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-			string(changesJSON), stepID, workflow.StatusRunning,
-		)
 		subgraphGraph, err := e.host.LoadGraph(workflow.ContextWithBaggage(ctx, baggage), subgraphWorkflow)
 		if err != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
+		}
+		// Persist the task's changes AND park the caller step in one UPDATE, BEFORE the child flow is made
+		// dispatchable by startNotify below. The ordering is load-bearing: completeSurgraphFlow revives this
+		// caller only WHERE parked=parkedSubgraph, and a parkedSubgraph step is excluded from lease recovery,
+		// so if the child completes and runs that revive before a later park lands, the no-op revive loses
+		// the wakeup and the caller is stranded permanently - its fan-in then never fires and the flow hangs.
+		// Observed deterministically when the caller is one of several fan-out siblings (the workers stay busy
+		// so the child wins the race), e.g. examples/creditflow's identity-verification branch. The
+		// status=running guard parks no row (n==0) if the step was concurrently cancelled; the error is
+		// checked so a lost park fails the step rather than stranding it.
+		parkRes, err := db.ExecContext(ctx,
+			"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+			string(changesJSON), parkedSubgraph, stepID, workflow.StatusRunning,
+		)
+		if err != nil {
+			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			return errors.Trace(err)
+		}
+		if n, _ := parkRes.RowsAffected(); n == 0 {
+			return nil
 		}
 		childInputState := subgraphInput
 		if childInputState == nil {
@@ -368,10 +384,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
-		db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-			parkedSubgraph, stepID, workflow.StatusRunning,
-		)
 		e.metricStepExecuted(ctx, taskName, "subgraph")
 		return nil
 	}
