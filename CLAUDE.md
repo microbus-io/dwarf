@@ -28,9 +28,10 @@ observability providers below are injected separately. A host must implement `Lo
   adaptive mechanism, wrap the returned error with `workflow.ErrRateLimited(err, cause)` (rate-limit the task) or
   `workflow.ErrUnavailable(err, cause)` (trip the task's breaker); an undecorated error is an ordinary failure. The
   engine never sniffs status codes - the host owns the mapping (see "Per-Task Breaker → Error classification").
-- **`FlowStopped(ctx, hostname string, outcome *workflow.FlowOutcome)`** - fired when a flow stops
-  (completed/failed/cancelled/interrupted) for a flow started via `StartNotify`. The hostname is whatever was passed
-  to `StartNotify`. Optional: a host with no stop-notification need does nothing here.
+- **`FlowStopped(ctx, outcome *workflow.FlowOutcome)`** - fired when a flow stops
+  (completed/failed/cancelled/interrupted) for a flow created with `FlowOptions.NotifyOnStop=true`. The engine
+  traffics in no delivery address: the flow's opaque baggage rides on `ctx` (`workflow.BaggageFrom(ctx)`) and the
+  host resolves where/how to deliver from it. Optional: a host with no stop-notification need does nothing here.
 - **`SignalPeers(ctx, op string, payload []byte)`** - delivers one cross-replica coordination signal to the
   other replicas, all fire-and-forget. `op` is an opaque routing key (usable as a topic); `payload` is opaque bytes
   the engine already serialized. The host ships `(op, payload)` to peers and, on the receiving side, hands them back
@@ -158,10 +159,8 @@ inserts the entry-point step - both in `created` status. The graph JSON is froze
 single task name in a trivial graph.
 
 **Start** - Transitions a `created` flow to `running`. Atomically updates all `created` steps to `pending` and the
-flow to `running` in one transaction, then rings the doorbell for the current step. Sets up no notifications.
-
-**StartNotify** - Like `Start`, but stores a `notify_hostname`. When the flow stops, the engine invokes the
-`FlowStopped` with that hostname and a `*workflow.FlowOutcome`.
+flow to `running` in one transaction, then rings the doorbell for the current step. Whether the flow notifies the
+host on stop is a Create-time property (`FlowOptions.NotifyOnStop`).
 
 **Snapshot** - Returns a `*workflow.FlowOutcome` for a flow at the current moment. For terminal statuses
 (`completed`/`failed`/`cancelled`) it returns the flow's `final_state` (plus `Error`/`CancelReason`); for
@@ -273,12 +272,18 @@ the merged view call `workflow.MergeState(out.State, out.InterruptPayload, graph
 
 ### Flow Stop Notifications
 
-When a flow is started via `StartNotify(flowKey, notifyHostname)`, the engine stores the hostname and invokes the
-`FlowStopped` with a `*workflow.FlowOutcome` when the flow stops - terminal (`completed`/`failed`/`cancelled`)
-or `interrupted`. This matches the statuses `Await` returns on. The outcome carries the same fields as a `Snapshot`/
-`Await` return at the stop point. Delivery is fire-and-forget; flow execution never blocks on it. `notify_hostname`
-is set only on the root flow; subgraph flows do not notify directly (interrupt notifications query the root's
-hostname via the surgraph chain).
+When a flow is created with `FlowOptions.NotifyOnStop=true`, the engine invokes the `FlowStopped` callback with a
+`*workflow.FlowOutcome` when the flow stops - terminal (`completed`/`failed`/`cancelled`) or `interrupted`. This
+matches the statuses `Await` returns on. The outcome carries the same fields as a `Snapshot`/`Await` return at the
+stop point. Delivery is fire-and-forget; flow execution never blocks on it.
+
+The engine carries **no delivery address** - that is a transport concern owned by the host. Instead the flow's
+opaque baggage rides on the `FlowStopped` ctx (`workflow.BaggageFrom(ctx)`), and the host resolves where to deliver
+from it (e.g. a Microbus adapter stuffs the caller's hostname into baggage at `Create` and reads it back here). The
+persisted gate is a single `notify_on_stop` flag on the flow row; `notify_on_stop` is honored on the **root** flow
+only (subgraph flows do not notify directly - interrupt/cancel notifications query the root's flag + baggage via the
+surgraph chain). Keeping the delivery address out of the engine is deliberate: a hostname the engine merely stored
+and handed back verbatim is exactly what baggage already carries, so the engine stays transport-agnostic.
 
 ### Execution Model
 
@@ -561,7 +566,7 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   to `target`, if registered. Goto transitions are never taken during normal evaluation.
 - **`flow.Interrupt(payload)`** - pause and park the flow. The payload is stored in `interrupt_payload` and propagated
   up the surgraph chain. The task should return normally after. The engine sets the flow `interrupted` and fires the
-  `FlowStopped` on the root's `notify_hostname`.
+  `FlowStopped` callback when the root flow's `notify_on_stop` is set.
 
 **Single-park guard.** A step parks at most once - interrupt XOR subgraph, never both and never the other kind on
 re-entry. `processStep` enforces this after the task returns: a competing-signals check fails the step if more than
@@ -1154,7 +1159,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `thread_id` | Groups flows in a `Continue` thread; defaults to `flow_id` (each flow its own thread) |
 | `thread_token` | Token component of the thread's flowKey |
 | `trace_parent` | W3C `traceparent` of the flow's root "workflow" span, minted at `Create` (or, for a subgraph, parented to the caller step's span). Reconstructed as the parent of every per-step span. Inherited by `Continue` only as a fresh trace (a new root span is minted per turn); a subgraph inherits the caller step's context, not this column. See "Tracing" |
-| `notify_hostname` | Set by `StartNotify`; the `FlowStopped` fires with this hostname when the flow stops. `''` = no notification |
+| `notify_on_stop` | Set from `FlowOptions.NotifyOnStop` at `Create`; `1` fires the `FlowStopped` callback (with the flow's baggage on ctx) when the flow stops, `0` = no notification. The host resolves the delivery target from baggage - the engine stores no address |
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
 | `breakpoints` | JSON `map[taskName]string` of `BreakBefore` breakpoints |
 | `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. Reset by `Restart` (a fresh attempt); NOT by `RestartFrom` (a surgical rewind) |

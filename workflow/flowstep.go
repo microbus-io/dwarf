@@ -43,9 +43,9 @@ type FlowStep struct {
 	Status           string         `json:"status,omitzero"`
 	// Parked reports whether the step is currently held out of the selection band (a subgraph caller
 	// waiting on its child, or a breaker-parked backlog step). A terminal step is never parked.
-	Parked           bool           `json:"parked,omitzero"`
-	Error            string         `json:"error,omitzero"`
-	CreatedAt        time.Time      `json:"createdAt,omitzero"`
+	Parked    bool      `json:"parked,omitzero"`
+	Error     string    `json:"error,omitzero"`
+	CreatedAt time.Time `json:"createdAt,omitzero"`
 	// StartedAt is when the worker first dispatched the current attempt of this step.
 	// Use HasStarted to gate reads; on a not-yet-leased row it carries the INSERT-time default.
 	StartedAt time.Time `json:"startedAt,omitzero"`

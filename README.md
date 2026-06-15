@@ -94,8 +94,9 @@ type Host interface {
     // Required. Execute one task. The Flow carrier arrives with its input state populated; write outputs.
     ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error
 
-    // Optional. Fired when a flow stops, for flows started via StartNotify.
-    FlowStopped(ctx context.Context, hostname string, outcome *workflow.FlowOutcome)
+    // Optional. Fired when a flow stops, for flows created with FlowOptions.NotifyOnStop.
+    // The flow's baggage is on ctx; resolve where to deliver from it (the engine carries no address).
+    FlowStopped(ctx context.Context, outcome *workflow.FlowOutcome)
 
     // Optional. Ship one cross-replica coordination signal to the other replicas (no-op for
     // single-replica). op is a routing key; payload is opaque bytes. Peers hand it back via

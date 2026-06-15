@@ -67,10 +67,18 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	return subgraphFlowKey, nil
 }
 
+// fireFlowStopped invokes the host's FlowStopped callback with the flow's baggage on the context, so the
+// host can resolve the notification target from it. Callers guard on the flow's notify_on_stop opt-in.
+func (e *Engine) fireFlowStopped(ctx context.Context, baggageJSON string, outcome *workflow.FlowOutcome) {
+	var baggage map[string]any
+	unmarshalJSONMap(baggageJSON, &baggage)
+	e.host.FlowStopped(workflow.ContextWithBaggage(ctx, baggage), outcome)
+}
+
 // completeFlowSequential marks a flow completed when no successor exists.
-func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID int, notifyHostname, workflowURL string) error {
+func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID int, notifyOnStop bool, baggageJSON, workflowURL string) error {
 	e.logger.DebugContext(ctx, "Flow completed", "flow", workflowURL)
-	_, err := e.completeFlow(ctx, shardNum, flowID, flowToken, notifyHostname)
+	_, err := e.completeFlow(ctx, shardNum, flowID, flowToken, notifyOnStop, baggageJSON)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -186,7 +194,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, flow
 }
 
 // completeFlow transitions a flow to completed and propagates to surgraph.
-func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flowToken string, notifyHostname string) (bool, error) {
+func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flowToken string, notifyOnStop bool, baggageJSON string) (bool, error) {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -234,11 +242,10 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusCompleted)
 	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
-	notifyHostname = strings.TrimSpace(notifyHostname)
-	if notifyHostname != "" {
+	if notifyOnStop {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStateJSON), &finalState)
-		e.host.FlowStopped(ctx, notifyHostname, &workflow.FlowOutcome{
+		e.fireFlowStopped(ctx, baggageJSON, &workflow.FlowOutcome{
 			FlowKey: compositeID,
 			Status:  workflow.StatusCompleted,
 			State:   finalState,
@@ -374,13 +381,13 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusFailed)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))
-	var notifyHostname string
-	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&notifyHostname)
-	notifyHostname = strings.TrimSpace(notifyHostname)
-	if notifyHostname != "" {
+	var notifyOnStop bool
+	var baggageJSON string
+	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&notifyOnStop, &baggageJSON)
+	if notifyOnStop {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStateJSON), &finalState)
-		e.host.FlowStopped(ctx, notifyHostname, &workflow.FlowOutcome{
+		e.fireFlowStopped(ctx, baggageJSON, &workflow.FlowOutcome{
 			FlowKey: compositeID,
 			Status:  workflow.StatusFailed,
 			State:   finalState,

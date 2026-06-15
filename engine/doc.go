@@ -45,8 +45,8 @@ limitations under the License.
 //   - LoadGraph fetches a workflow graph by name (called at Create; the graph JSON is then frozen on the
 //     flow), and on subgraph spawn.
 //   - ExecuteTask executes one task, given the Flow carrier with its state pre-populated.
-//   - FlowStopped is fired when a flow stops, for flows started via StartNotify; a host with no
-//     notification need does nothing here.
+//   - FlowStopped is fired when a flow stops, for flows created with FlowOptions.NotifyOnStop; the flow's
+//     baggage is on the ctx so the host resolves delivery itself. A host with no notification need does nothing.
 //   - SignalPeers ships a cross-replica coordination signal (op + opaque payload bytes) to the other
 //     replicas, which hand it back via Engine.DeliverSignal; a single-replica host does nothing.
 //
@@ -55,7 +55,7 @@ limitations under the License.
 //
 // # Operations
 //
-// Create or CreateTask makes a flow; Start (or StartNotify) runs it; Await blocks until it stops; Run is
+// Create or CreateTask makes a flow; Start runs it; Await blocks until it stops; Run is
 // Create+Start+Await in one call. Snapshot/History/Step/List inspect; Resume/ResumeBreak continue a
 // paused flow; Cancel/Restart/RestartFrom/Continue manage lifecycle; Delete/Purge retain. See the
 // repository's docs/ directory for guides.

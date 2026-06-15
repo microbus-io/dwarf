@@ -37,6 +37,12 @@ type FlowOptions struct {
 	// entry step's not_before column; the flow can still be created and started
 	// immediately, but no worker will pick the step up before StartAt.
 	StartAt time.Time `json:"startAt,omitzero"`
+	// NotifyOnStop requests that the host's FlowStopped callback fire when this flow stops
+	// (completed/failed/cancelled/interrupted). The engine persists the intent and, at stop time,
+	// invokes FlowStopped with the flow's Baggage on the context - the host decides where/how to deliver
+	// the notification from that baggage. When false (the default) FlowStopped is never called for the
+	// flow. Set at Create; plain Start then runs the flow.
+	NotifyOnStop bool `json:"notifyOnStop,omitzero"`
 	// Baggage is opaque, host-defined context (identity/claims, tenant, locale, ...) carried with the
 	// flow. The engine never interprets it: it is set once here, stored on the flow, inherited by
 	// subgraphs and Continue, and delivered to every Host LoadGraph/ExecuteTask call via the dispatch

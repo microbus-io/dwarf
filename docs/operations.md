@@ -37,17 +37,21 @@ handy for running one unit of work with the engine's durability and scheduling.
 > failure surfaces as `outcome.Status == "failed"` with `outcome.Error` set — so you never have to
 > disambiguate "the workflow rejected my input" from "the engine is down."
 
-### Start and StartNotify
+### Start and stop notifications
 
 ```go
-err := eng.Start(ctx, flowKey)                       // created -> running
-err := eng.StartNotify(ctx, flowKey, "my-hostname")  // also fire the host's FlowStopped on stop
+err := eng.Start(ctx, flowKey) // created -> running
+
+// To be notified on stop instead of blocking on Await, opt in at Create:
+flowKey, _ := eng.Create(ctx, workflowURL, state, &workflow.FlowOptions{NotifyOnStop: true})
+_ = eng.Start(ctx, flowKey)
 ```
 
-`Start` transitions a created flow to running and signals the workers to pick it up. `StartNotify`
-additionally
-records a hostname; when the flow stops, the engine invokes your host's `FlowStopped` with that
-hostname and the outcome — useful for push notification instead of blocking on `Await`.
+`Start` transitions a created flow to running and signals the workers to pick it up. When a flow is
+created with `FlowOptions.NotifyOnStop`, the engine invokes your host's `FlowStopped(ctx, outcome)` when
+the flow stops — useful for push notification instead of blocking on `Await`. The engine carries no
+delivery address: the flow's baggage rides on the callback's `ctx` (`workflow.BaggageFrom(ctx)`), so your
+host decides where to deliver (e.g. read a target you stored in baggage at `Create`).
 
 ### Await
 

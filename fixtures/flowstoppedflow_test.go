@@ -15,11 +15,11 @@ limitations under the License.
 */
 
 /*
-A flow started via StartNotify fires the FlowStoppedCallback with the registered
-hostname and a FlowOutcome when it stops. The existing fixtures only exercise the
-interrupted/breakpoint stop paths; this covers the three terminal stops —
-completed (State populated), failed (Error populated), and cancelled (CancelReason
-populated) — and asserts the hostname is echoed back.
+A flow created with FlowOptions.NotifyOnStop fires the host's FlowStopped callback with a FlowOutcome when
+it stops, and the flow's baggage rides on the callback's context so the host can resolve where to deliver
+the notification. This covers the three terminal stops — completed (State populated), failed (Error
+populated), and cancelled (CancelReason populated) — and asserts the notify target carried in baggage is
+delivered on the ctx.
 */
 package fixtures
 
@@ -67,10 +67,12 @@ func TestFlowstoppedflow(t *testing.T) {
 		}
 	})
 
-	// The callback is fire-and-forget; capture events on a buffered channel.
+	// The callback is fire-and-forget; capture events on a buffered channel. The notify target rides in
+	// baggage on the ctx (the engine carries no delivery address), so the host reads it from there.
 	events := make(chan stopEvent, 16)
-	cb := func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome) {
-		events <- stopEvent{hostname: hostname, outcome: outcome}
+	cb := func(ctx context.Context, outcome *workflow.FlowOutcome) {
+		host, _ := workflow.BaggageFrom(ctx).(map[string]any)["host"].(string)
+		events <- stopEvent{hostname: host, outcome: outcome}
 	}
 	proxy.OnFlowStopped(cb)
 
@@ -98,11 +100,12 @@ func TestFlowstoppedflow(t *testing.T) {
 	t.Run("completed_fires_callback_with_state", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "complete"}, nil)
+		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "complete"},
+			&workflow.FlowOptions{NotifyOnStop: true, Baggage: map[string]any{"host": "host-complete"}})
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.StartNotify(ctx, flowKey, "host-complete")) {
+		if !assert.NoError(eng.Start(ctx, flowKey)) {
 			return
 		}
 		ev := waitStop(t, flowKey)
@@ -114,11 +117,12 @@ func TestFlowstoppedflow(t *testing.T) {
 	t.Run("failed_fires_callback_with_error", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "fail"}, nil)
+		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "fail"},
+			&workflow.FlowOptions{NotifyOnStop: true, Baggage: map[string]any{"host": "host-fail"}})
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.StartNotify(ctx, flowKey, "host-fail")) {
+		if !assert.NoError(eng.Start(ctx, flowKey)) {
 			return
 		}
 		ev := waitStop(t, flowKey)
@@ -130,11 +134,12 @@ func TestFlowstoppedflow(t *testing.T) {
 	t.Run("cancelled_fires_callback_with_reason", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "interrupt"}, nil)
+		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "interrupt"},
+			&workflow.FlowOptions{NotifyOnStop: true, Baggage: map[string]any{"host": "host-cancel"}})
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.StartNotify(ctx, flowKey, "host-cancel")) {
+		if !assert.NoError(eng.Start(ctx, flowKey)) {
 			return
 		}
 		// First stop is the interrupt; drain it before cancelling.

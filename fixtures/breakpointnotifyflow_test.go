@@ -27,9 +27,10 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestBreakpointnotifyflow verifies that a flow started with StartNotify fires the FlowStoppedCallback
-// when it pauses at a breakpoint, exactly as it does for a flow.Interrupt pause. A breakpoint produces
-// the interrupted status, which is a stop status StartNotify subscribers must be told about.
+// TestBreakpointnotifyflow verifies that a flow created with FlowOptions.NotifyOnStop fires the host's
+// FlowStopped callback when it pauses at a breakpoint, exactly as it does for a flow.Interrupt pause. A
+// breakpoint produces the interrupted status, which is a stop status NotifyOnStop subscribers must be told
+// about. The notify target rides in baggage on the callback ctx.
 func TestBreakpointnotifyflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -54,8 +55,9 @@ func TestBreakpointnotifyflow(t *testing.T) {
 	var notifiedStatus atomic.Value
 	notified := make(chan struct{}, 1)
 
-	proxy.OnFlowStopped(func(ctx context.Context, hostname string, outcome *workflow.FlowOutcome) {
-		notifiedHost.Store(hostname)
+	proxy.OnFlowStopped(func(ctx context.Context, outcome *workflow.FlowOutcome) {
+		host, _ := workflow.BaggageFrom(ctx).(map[string]any)["host"].(string)
+		notifiedHost.Store(host)
 		notifiedStatus.Store(outcome.Status)
 		select {
 		case notified <- struct{}{}:
@@ -67,7 +69,8 @@ func TestBreakpointnotifyflow(t *testing.T) {
 	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
-	flowKey, err := eng.Create(ctx, "breakpointnotifyflow.verify:428/flow", nil, nil)
+	flowKey, err := eng.Create(ctx, "breakpointnotifyflow.verify:428/flow", nil,
+		&workflow.FlowOptions{NotifyOnStop: true, Baggage: map[string]any{"host": "host-breakpoint"}})
 	if !assert.NoError(err) {
 		return
 	}
@@ -75,7 +78,7 @@ func TestBreakpointnotifyflow(t *testing.T) {
 	if !assert.NoError(eng.BreakBefore(ctx, flowKey, "TaskB", true)) {
 		return
 	}
-	if !assert.NoError(eng.StartNotify(ctx, flowKey, "host-breakpoint")) {
+	if !assert.NoError(eng.Start(ctx, flowKey)) {
 		return
 	}
 

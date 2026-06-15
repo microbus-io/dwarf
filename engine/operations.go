@@ -128,12 +128,16 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 // createWithGraphTx inserts a flow and its entry step in one retryable transaction.
 func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowURL, workflowName string, graphJSON, baggageJSON []byte, traceParent string, threadID int, threadToken, entryPoint, entryURL string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
 	var newFlowID int64
+	notifyOnStop := 0
+	if opts.NotifyOnStop {
+		notifyOnStop = 1
+	}
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
 		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			flowToken, workflowURL, workflowName, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, notify_on_stop, priority, fairness_key, fairness_weight)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			flowToken, workflowURL, workflowName, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, notifyOnStop, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -170,8 +174,8 @@ func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken
 	return newFlowID, errors.Trace(err)
 }
 
-// startNotify transitions a created flow to running.
-func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname string) error {
+// start transitions a created flow to running, ringing the doorbell for its entry step.
+func (e *Engine) start(ctx context.Context, flowKey string) error {
 	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
@@ -198,7 +202,6 @@ func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname
 		return errors.New("flow is not in created status (status: %s)", flowStatus, http.StatusConflict)
 	}
 
-	notifyHostname = strings.TrimSpace(notifyHostname)
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
@@ -213,8 +216,8 @@ func (e *Engine) startNotify(ctx context.Context, flowKey string, notifyHostname
 			return errors.Trace(err)
 		}
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, notify_hostname=?, started_at=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
-			workflow.StatusRunning, notifyHostname, flowID, workflow.StatusCreated,
+			"UPDATE dwarf_flows SET status=?, started_at=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
+			workflow.StatusRunning, flowID, workflow.StatusCreated,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -518,13 +521,13 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 
 	rootIdx := len(surgraphFlowIDs) - 1
 	rootCompositeID := surgraphCompositeIDs[rootIdx]
-	var rootNotifyHostname string
-	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", surgraphFlowIDs[rootIdx]).Scan(&rootNotifyHostname)
-	rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
-	if rootNotifyHostname != "" {
+	var rootNotifyOnStop bool
+	var rootBaggageJSON string
+	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", surgraphFlowIDs[rootIdx]).Scan(&rootNotifyOnStop, &rootBaggageJSON)
+	if rootNotifyOnStop {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStates[rootIdx]), &finalState)
-		e.host.FlowStopped(ctx, rootNotifyHostname, &workflow.FlowOutcome{
+		e.fireFlowStopped(ctx, rootBaggageJSON, &workflow.FlowOutcome{
 			FlowKey:      rootCompositeID,
 			Status:       workflow.StatusCancelled,
 			State:        finalState,
@@ -579,7 +582,7 @@ func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	err = e.startNotify(ctx, flowKey, "")
+	err = e.start(ctx, flowKey)
 	if err != nil {
 		e.cancel(ctx, flowKey, "")
 		return nil, errors.Trace(err)

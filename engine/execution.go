@@ -144,15 +144,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Read flow data
 	var flowToken, flowStatus, workflowURL, graphJSON, baggageJSON, traceParent string
-	var notifyHostname, breakpointsJSON string
+	var breakpointsJSON string
+	var notifyOnStop bool
 	var flowCreatedAt, flowUpdatedAt time.Time
 	var flowPriority int
 	var flowFairnessKey string
 	var flowFairnessWeight float64
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, notify_hostname, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
+		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, notify_on_stop, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &notifyHostname, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight)
+	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &notifyOnStop, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -348,7 +349,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			return errors.Trace(err)
 		}
 		// Persist the task's changes AND park the caller step in one UPDATE, BEFORE the child flow is made
-		// dispatchable by startNotify below. The ordering is load-bearing: completeSurgraphFlow revives this
+		// dispatchable by start below. The ordering is load-bearing: completeSurgraphFlow revives this
 		// caller only WHERE parked=parkedSubgraph, and a parkedSubgraph step is excluded from lease recovery,
 		// so if the child completes and runs that revive before a later park lands, the no-op revive loses
 		// the wakeup and the caller is stranded permanently - its fan-in then never fires and the flow hangs.
@@ -379,7 +380,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
-		err = e.startNotify(ctx, subgraphFlowKey, "")
+		err = e.start(ctx, subgraphFlowKey)
 		if err != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
@@ -464,13 +465,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if isPushTransition && cohortSize == 0 {
 		fanInTarget := graph.FanInFor(taskName)
 		if fanInTarget == "" {
-			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, strings.TrimSpace(notifyHostname), workflowURL)
+			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, notifyOnStop, baggageJSON, workflowURL)
 		}
 		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight)
 	}
 
 	if cohortSize == 0 {
-		return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, strings.TrimSpace(notifyHostname), workflowURL)
+		return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, notifyOnStop, baggageJSON, workflowURL)
 	}
 
 	cohortSpawnID := lineageID
@@ -613,11 +614,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	if flowFailed {
 		compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
-		notifyHostnameTrimmed := strings.TrimSpace(notifyHostname)
-		if notifyHostnameTrimmed != "" {
+		if notifyOnStop {
 			var finalState map[string]any
 			json.Unmarshal([]byte(flowFailedFinalState), &finalState)
-			e.host.FlowStopped(ctx, notifyHostnameTrimmed, &workflow.FlowOutcome{
+			e.fireFlowStopped(ctx, baggageJSON, &workflow.FlowOutcome{
 				FlowKey: compositeID,
 				Status:  workflow.StatusFailed,
 				State:   finalState,
@@ -673,11 +673,11 @@ func (e *Engine) handleBreakpoint(ctx context.Context, shardNum int, db *sequel.
 
 	rootCompositeID := chainCompositeIDs[len(chainCompositeIDs)-1]
 	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1]
-	var rootNotifyHostname string
-	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
-	rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
-	if rootNotifyHostname != "" {
-		e.host.FlowStopped(ctx, rootNotifyHostname, &workflow.FlowOutcome{
+	var rootNotifyOnStop bool
+	var rootBaggageJSON string
+	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyOnStop, &rootBaggageJSON)
+	if rootNotifyOnStop {
+		e.fireFlowStopped(ctx, rootBaggageJSON, &workflow.FlowOutcome{
 			FlowKey: rootCompositeID,
 			Status:  workflow.StatusInterrupted,
 		})
@@ -741,11 +741,11 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 
 	rootCompositeID := chainCompositeIDs[len(chainCompositeIDs)-1]
 	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1]
-	var rootNotifyHostname string
-	db.QueryRowContext(ctx, "SELECT notify_hostname FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyHostname)
-	rootNotifyHostname = strings.TrimSpace(rootNotifyHostname)
-	if rootNotifyHostname != "" {
-		e.host.FlowStopped(ctx, rootNotifyHostname, &workflow.FlowOutcome{
+	var rootNotifyOnStop bool
+	var rootBaggageJSON string
+	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyOnStop, &rootBaggageJSON)
+	if rootNotifyOnStop {
+		e.fireFlowStopped(ctx, rootBaggageJSON, &workflow.FlowOutcome{
 			FlowKey:          rootCompositeID,
 			Status:           workflow.StatusInterrupted,
 			InterruptPayload: interruptPayload,

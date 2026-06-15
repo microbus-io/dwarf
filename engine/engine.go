@@ -505,6 +505,7 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 		resolved.FairnessKey = opts.FairnessKey
 		resolved.StartAt = opts.StartAt
 		resolved.Baggage = opts.Baggage
+		resolved.NotifyOnStop = opts.NotifyOnStop
 	}
 	return resolved
 }
@@ -605,14 +606,10 @@ func (e *Engine) CreateTask(ctx context.Context, taskURL string, initialState an
 	return e.createTask(ctx, taskURL, initialState, opts)
 }
 
-// Start transitions a created flow to running.
+// Start transitions a created flow to running. Whether the flow notifies the host on stop is set at
+// Create via FlowOptions.NotifyOnStop.
 func (e *Engine) Start(ctx context.Context, flowKey string) error {
-	return e.startNotify(ctx, flowKey, "")
-}
-
-// StartNotify starts a flow and registers a hostname for stop notifications.
-func (e *Engine) StartNotify(ctx context.Context, flowKey string, notifyHostname string) error {
-	return e.startNotify(ctx, flowKey, notifyHostname)
+	return e.start(ctx, flowKey)
 }
 
 // Snapshot returns the current state and status of a flow.
