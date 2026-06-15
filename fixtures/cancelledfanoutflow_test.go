@@ -74,9 +74,9 @@ func TestCancelledfanoutflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy).
-		WithWorkers(1)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.SetWorkers(1)
 	eng.RunInTest(t)
 
 	t.Run("cancel_mid_fan_out", func(t *testing.T) {

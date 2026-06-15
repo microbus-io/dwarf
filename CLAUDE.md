@@ -15,7 +15,7 @@ observability. Where this doc refers to "the host" or "the adapter," it means th
 
 ### The Host interface (how the engine reaches the outside world)
 
-The graph/task/notify/peer seam is a single **`Host`** interface, registered once via `WithHost`; the
+The graph/task/notify/peer seam is a single **`Host`** interface, registered once via `SetHost`; the
 observability providers below are injected separately. A host must implement `LoadGraph` and `ExecuteTask`;
 `FlowStopped` and `SignalPeers` may be no-ops. The interface methods:
 
@@ -38,16 +38,16 @@ observability providers below are injected separately. A host must implement `Lo
   gossip, breaker trip, or cross-replica `Await` wake. All signal kinds funnel through this one method, so adding a
   new kind needs no host change; the host never branches on `op` or inspects `payload`. A single-replica host does
   nothing here and none of this runs.
-- **`*slog.Logger`** - structured logging sink (`WithLogger`); defaults to a **discard** logger (the engine and
+- **`*slog.Logger`** - structured logging sink (`SetLogger`); defaults to a **discard** logger (the engine and
   its sequel DB layer stay silent until a logger is injected, rather than writing to the application-owned
   `slog.Default()` - the library convention). A nil logger resets to that silent default. The engine logs through
   the `…Context` variants so a context-aware handler (e.g. the `otelslog` bridge) can correlate records with the
   active step span. The injected logger is also handed to sequel (only when explicitly set), so the SQL layer's
   migration logs flow through the same sink.
-- **`metric.MeterProvider`** - OTEL meter provider (`WithMeterProvider`); defaults to the global
+- **`metric.MeterProvider`** - OTEL meter provider (`SetMeterProvider`); defaults to the global
   `otel.GetMeterProvider()` (no-op unless the host configures the SDK). The engine builds its `dwarf_*`
   instruments under the `github.com/microbus-io/dwarf` scope (see "Metrics" below).
-- **`trace.TracerProvider`** - OTEL tracer provider (`WithTracerProvider`); defaults to the global
+- **`trace.TracerProvider`** - OTEL tracer provider (`SetTracerProvider`); defaults to the global
   `otel.GetTracerProvider()` (no-op unless the host configures the SDK). The engine mints the root
   "workflow" span at `Create` and a per-step span in `processStep`, both under the
   `github.com/microbus-io/dwarf` scope (see "Tracing" below). The host injects only the provider - no
@@ -63,19 +63,29 @@ identity there. `BaggageFrom` lives in the `workflow` package so task code can r
 (Unlike W3C/OTEL request baggage this is *flow*-scoped and frozen at `Create`, not per-request mutable - a host
 adapter bridging to a bus maps between the two at the seam.)
 
-### Configuration (builder methods, callable before and after Startup)
+### Configuration (`Set*` methods)
 
-`WithDSN`, `WithNumShards`, `WithWorkers`, `WithTimeBudget`, `WithDefaultPriority`, `WithMaxOpenConns`. They are
-atomically applied, so they double as hot-reconfiguration knobs after `Startup`.
+Configuration is applied through `Set*` methods, each returning an `error` (the engine deliberately has **no**
+fluent `With*` builder - dropping the chained `*Engine` return is what lets every setter surface an error). They
+split into two groups by whether the knob can change safely on a running engine:
 
-The observability builders - `WithLogger`, `WithMeterProvider`, `WithTracerProvider` - are by contrast
-**construction-time only**: each guards on `e.started` and is a no-op once `Startup` has run. The engine resolves
-the logger/tracer/meter once at startup (the logger feeds the worker hot path and is read lock-free; the meter
-registers an async gauge callback) and wires all three into every shard's sequel DB in `configureDBTelemetry`.
-Hot-swapping a provider on a live engine is deliberately unsupported: a half-hot version that only re-pointed the
-DBs (sequel's setters are atomic/hot) but left the engine's own logger/tracer/metrics frozen would be inconsistent,
-and a full-hot version (atomic logger + tracer re-resolve + meter rebuild/Unregister) is real complexity for a need
-that does not arise in practice.
+- **Live** (take effect immediately, callable any time): `SetNumShards`, `SetMaxOpenConns`, `SetTimeBudget`,
+  `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh on each use; `SetMaxOpenConns`
+  re-applies the pool size to every live shard (sequel's pool setters are hot/atomic); `SetNumShards`
+  opens+migrates the added shards (see "Database Sharding" - grow-only at runtime).
+- **Construction-time only** (return an error if called after `Startup`): `SetDSN`, `SetWorkers`, `SetHost`,
+  `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying these on a
+  running engine would mean reopening live connections (`SetDSN`), resizing the worker pool + candidate cache
+  (`SetWorkers`), or re-resolving a frozen provider - so the setter **rejects** it with an explicit error rather
+  than silently no-op'ing. The error wording is `"<what> cannot be changed after Startup"`.
+
+For the observability providers specifically (`SetLogger`/`SetMeterProvider`/`SetTracerProvider`): the engine
+resolves the logger/tracer/meter once at startup (the logger feeds the worker hot path and is read lock-free; the
+meter registers an async gauge callback) and wires all three into every shard's sequel DB in
+`configureDBTelemetry`. Hot-swapping a provider on a live engine is deliberately unsupported: a half-hot version
+that only re-pointed the DBs (sequel's setters are atomic/hot) but left the engine's own logger/tracer/metrics
+frozen would be inconsistent, and a full-hot version (atomic logger + tracer re-resolve + meter rebuild/Unregister)
+is real complexity for a need that does not arise in practice.
 
 ### Core Concepts
 
@@ -272,7 +282,7 @@ hostname via the surgraph chain).
 
 ### Execution Model
 
-The engine uses a **queue-as-cache execution model** with a configurable worker pool (`WithWorkers`) and a single
+The engine uses a **queue-as-cache execution model** with a configurable worker pool (`SetWorkers`) and a single
 refiller goroutine per replica. The in-memory `candidateCache` is bounded and holds *hints*, not ownership. Each
 worker pops a candidate and calls `processStep`:
 
@@ -488,7 +498,7 @@ step completed. An empty map is returned for a flow with no steps.
 ### Time Budgets
 
 Each step has a `time_budget_ms` that bounds the `ExecuteTask` call's context deadline. It is the engine's single
-`WithTimeBudget` config (default 2m), applied uniformly to every step - the graph carries no per-task timing. A host
+`SetTimeBudget` config (default 2m), applied uniformly to every step - the graph carries no per-task timing. A host
 that wants a tighter per-task bound enforces it inside its `ExecuteTask` (or the task itself), shortening the call
 context; the engine's budget is the outer ceiling.
 
@@ -726,7 +736,7 @@ on every secondary-index touch; two concurrent flow creations on a shard can dea
 `createWithGraph` retries on `sequel.IsLockContentionError`, hiding most, but a sustained deadlock rate degrades
 throughput. To minimize: `transaction-isolation = READ-COMMITTED` (drops gap locks; the largest single reduction);
 `innodb_autoinc_lock_mode = 2` with `binlog_format = ROW`; `innodb_lock_wait_timeout` 5-10s; keep
-`innodb_deadlock_detect = ON`. Per-shard databases: `WithDSN` must contain `%d` when `NumShards > 1` and every shard
+`innodb_deadlock_detect = ON`. Per-shard databases: `SetDSN` must contain `%d` when `NumShards > 1` and every shard
 DB must exist before startup (the engine migrates schema but does not `CREATE DATABASE`). MariaDB 10.5+ for `JSON`.
 
 **SQL Server.** Enable `READ_COMMITTED_SNAPSHOT ON` per shard database for Postgres-like non-blocking reads and
@@ -737,7 +747,7 @@ serialize) but throughput tops out at one transaction at a time. Used automatica
 The injected `busy_timeout` keeps workers from immediately failing on `SQLITE_BUSY` during fan-out; do not remove it.
 Do not run SQLite in production.
 
-**Sharding guidance.** `WithNumShards` partitions flows across databases (or schemas). Shard count should equal or
+**Sharding guidance.** `SetNumShards` partitions flows across databases (or schemas). Shard count should equal or
 exceed steady-state concurrent flow-creating threads divided by the per-shard write contention the engine tolerates.
 Rough sizing:
 
@@ -748,10 +758,10 @@ Rough sizing:
 | MariaDB/MySQL (RC) | 200-500 | 4-8 |
 | MariaDB/MySQL (RR) | 50-200 | 8-16 |
 
-`NumShards` can grow at runtime via `WithNumShards`; it cannot shrink (old shards drain naturally). New flows land on
+`NumShards` can grow at runtime via `SetNumShards`; it cannot shrink (old shards drain naturally). New flows land on
 new shards; existing flows stay on their original shard.
 
-**Connection pool sizing (`WithMaxOpenConns`, default 8 per shard, MaxIdle == MaxOpen).** Workers spend most of their
+**Connection pool sizing (`SetMaxOpenConns`, default 8 per shard, MaxIdle == MaxOpen).** Workers spend most of their
 time waiting on the `ExecuteTask` call, not holding a SQL connection - the DB-only segments of `processStep` are
 short. So the per-shard pool needs only a small absolute number of connections. `MaxIdle == MaxOpen` matters more
 than the absolute number: under bursty load the close/reopen churn (TCP+TLS+auth per cycle) dominates over query
@@ -765,7 +775,7 @@ The schema carries `priority`, `fairness_key`, `fairness_weight` on **both** `dw
 split used for `time_budget_ms`/`baggage`.
 
 `resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to
-`WithDefaultPriority`, the fairness key falls back to the host-supplied key (or `""`), the weight to `1`. The three
+`SetDefaultPriority`, the fairness key falls back to the host-supplied key (or `""`), the weight to `1`. The three
 values are immutable for the flow's life (switching a flow's fairness key mid-run would be a self-promotion abuse
 vector). `Create`/`CreateTask` resolve from options; `Continue` and `createSubgraphFlow` **inherit** the parent/thread
 flow's values, so a high-priority parent never silently spawns default-priority descendants.
@@ -1036,7 +1046,7 @@ transition, or propagate as flow failure). The breaker is specifically for "I ca
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 15 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `WithMeterProvider`
+The engine emits 15 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - the no-op provider unless the host
 configures the SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in
 `initMetrics` (called from `initRuntime`, so both `Startup` and `RunInTest` get them) from
@@ -1073,7 +1083,7 @@ in-memory SDK `ManualReader`.
 
 ## Tracing (`engine/tracing.go`)
 
-The engine is OTEL-native for tracing, symmetric with metrics: `WithTracerProvider(tp)` overrides the
+The engine is OTEL-native for tracing, symmetric with metrics: `SetTracerProvider(tp)` overrides the
 global `otel.GetTracerProvider()` (the no-op provider unless the host configures the SDK), and the engine
 creates spans from `tp.Tracer("github.com/microbus-io/dwarf")` (same scope as the metrics; service
 identity lives in the provider's Resource, not in span attributes). The host injects **only** the
@@ -1150,7 +1160,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. Reset by `Restart` (a fresh attempt); NOT by `RestartFrom` (a surgical rewind) |
 | `started_at` | UTC time this attempt began dispatching. Stamped by `Start` on `created` -> `running`. Reset by `Restart`, not `RestartFrom`. Distinct from `created_at` because a flow can sit `created` indefinitely or be parked behind a tripped breaker before its entry dispatches. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
 | `updated_at` | UTC time of the last status transition. Surfaced to tasks via `Flow.UpdatedAt()` |
-| `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `WithDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
+| `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `SetDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
 | `fairness_key` | Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable |
 | `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
 | `error` | Task error string for `failed` flows. Written by `failStep` to every flow in the surgraph chain in the same UPDATE that sets `status='failed'`; the `WHERE status NOT IN (terminal)` clause makes the write first-failure-wins. Surfaced as `FlowOutcome.Error` |
@@ -1339,7 +1349,7 @@ Transactions don't help when a worker crashes during the `ExecuteTask` call (out
 
 ### Database Sharding
 
-`WithNumShards` (default 1) distributes flows across databases to scale write throughput and reduce index contention.
+`SetNumShards` (default 1) distributes flows across databases to scale write throughput and reduce index contention.
 
 **Shards are 1-indexed.** Valid indices are `1..NumShards`; `0` is a sentinel meaning "no shard / all shards" (used by
 `Query.Shard`). The DSN's `%d`, the leading number in flow keys (`{shard}-{flowID}-{token}`), the `Query.Shard`
@@ -1370,7 +1380,7 @@ different servers' clocks, and by `flow_id` alone is broken (a shard with fewer 
 an opaque cursor encoding each shard's smallest-returned `flow_id`. `List` is strict by design: any shard error fails
 the whole call (the per-shard debug path is `ShardInfo` + `List(Shard=N)`).
 
-**Dynamic expansion:** `WithNumShards` can increase at runtime - new shards are opened, migrated, and immediately
+**Dynamic expansion:** `SetNumShards` can increase at runtime - new shards are opened, migrated, and immediately
 available. Shrinking is rejected (old shards drain naturally).
 
 **DSN format:** when `NumShards > 1`, the DSN must contain `%d` (replaced with the shard index). In test mode each

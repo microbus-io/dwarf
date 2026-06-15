@@ -69,7 +69,8 @@ func TestBreakerurlisolationflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	// 1. Start a flow on the down graph. Its task trips the breaker; the step parks (and, being created

@@ -58,8 +58,8 @@ func TestCancelbackpressureflow(t *testing.T) {
 		return workflow.ErrBackpressure(errors.New("saturated", http.StatusTooManyRequests), "")
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("status_guard_race", func(t *testing.T) {

@@ -54,9 +54,9 @@ func TestPriorityflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy).
-		WithWorkers(1)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.SetWorkers(1)
 	eng.RunInTest(t)
 
 	t.Run("strict_priority_ordering", func(t *testing.T) {

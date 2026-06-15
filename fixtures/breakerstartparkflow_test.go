@@ -56,9 +56,9 @@ func TestBreakerstartparkflow(t *testing.T) {
 		return workflow.ErrBreakerTrip(errors.New("ack timeout: breakerstartparkflow.verify:428/work", http.StatusNotFound), "ack_timeout")
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy).
-		WithWorkers(4)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.SetWorkers(4)
 	eng.RunInTest(t)
 
 	// Trip the breaker with a batch of older flows.

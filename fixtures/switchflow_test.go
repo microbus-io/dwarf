@@ -71,8 +71,8 @@ func TestSwitchflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("amount_above_high_threshold_takes_high_branch", func(t *testing.T) {
@@ -149,8 +149,8 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("no_match_completes_flow_without_branching", func(t *testing.T) {

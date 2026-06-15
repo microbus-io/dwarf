@@ -98,8 +98,8 @@ func TestNestedfanoutflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("nested_fan_out_via_subgraph", func(t *testing.T) {

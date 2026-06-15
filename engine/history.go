@@ -564,8 +564,8 @@ func searchClause(driverName string, shardIdx int, search string) (string, []any
 	default:
 		flowKeyExpr = fmt.Sprintf("'%d-' || f.flow_id || '-' || TRIM(f.flow_token)", shardIdx)
 	}
-	sql := "(LOWER(f.workflow_url) LIKE ? OR LOWER(s.task_name) LIKE ? OR LOWER(f.error) LIKE ? OR LOWER(f.cancel_reason) LIKE ? OR LOWER(" + flowKeyExpr + ") LIKE ?)"
-	return sql, []any{pattern, pattern, pattern, pattern, pattern}
+	sql := "(LOWER(f.workflow_url) LIKE ? OR LOWER(f.workflow_name) LIKE ? OR LOWER(s.task_name) LIKE ? OR LOWER(f.error) LIKE ? OR LOWER(f.cancel_reason) LIKE ? OR LOWER(" + flowKeyExpr + ") LIKE ?)"
+	return sql, []any{pattern, pattern, pattern, pattern, pattern, pattern}
 }
 
 func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string, string, []any, int, error) {
@@ -584,6 +584,10 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string
 	if query.WorkflowURL != "" {
 		conditions = append(conditions, "f.workflow_url=?")
 		args = append(args, query.WorkflowURL)
+	}
+	if query.WorkflowName != "" {
+		conditions = append(conditions, "f.workflow_name=?")
+		args = append(args, query.WorkflowName)
 	}
 	if query.ThreadKey != "" {
 		threadShardNum, threadFlowID, threadFlowToken, parseErr := parseFlowKey(query.ThreadKey)
@@ -630,8 +634,8 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string
 }
 
 func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
-	if query.Status == "" && query.WorkflowURL == "" && query.OlderThan == 0 {
-		return 0, errors.New("purge requires at least one filter (status, workflowURL, or olderThan)", http.StatusBadRequest)
+	if query.Status == "" && query.WorkflowURL == "" && query.WorkflowName == "" && query.OlderThan == 0 {
+		return 0, errors.New("purge requires at least one filter (status, workflowURL, workflowName, or olderThan)", http.StatusBadRequest)
 	}
 	const purgeCap = 10000
 	limit := query.Limit

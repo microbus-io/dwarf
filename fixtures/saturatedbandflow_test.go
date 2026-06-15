@@ -85,9 +85,9 @@ func TestSaturatedbandflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy).
-		WithWorkers(6)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.SetWorkers(6)
 	eng.RunInTest(t)
 
 	t.Run("low_priority_advances_while_high_priority_saturated", func(t *testing.T) {

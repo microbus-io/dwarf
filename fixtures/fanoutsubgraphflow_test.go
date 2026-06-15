@@ -79,9 +79,9 @@ func TestFanoutSubgraphflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy).
-		WithWorkers(4)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.SetWorkers(4)
 	eng.RunInTest(t)
 
 	t.Run("every_flow_terminates", func(t *testing.T) {

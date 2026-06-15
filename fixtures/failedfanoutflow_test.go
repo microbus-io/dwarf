@@ -67,8 +67,8 @@ func TestFailedfanoutflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("failing_branch_fails_the_flow", func(t *testing.T) {

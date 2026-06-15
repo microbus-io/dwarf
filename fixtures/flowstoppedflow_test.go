@@ -74,7 +74,8 @@ func TestFlowstoppedflow(t *testing.T) {
 	}
 	proxy.OnFlowStopped(cb)
 
-	eng := engine.NewEngine().WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	// waitStop drains the channel for the stop event of a specific flow.

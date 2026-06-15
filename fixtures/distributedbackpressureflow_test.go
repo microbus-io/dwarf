@@ -83,16 +83,16 @@ func TestDistributedbackpressureflow(t *testing.T) {
 	// Two replicas sharing the same shards. cache=shared keeps the named in-memory DB alive and visible
 	// to both engines' connection pools.
 	dsn := "file:dbpf%d?mode=memory&cache=shared"
-	eng1 := engine.NewEngine().
-		WithHost(proxy1).
-		WithDSN(dsn).
-		WithNumShards(2).
-		WithWorkers(2)
-	eng2 := engine.NewEngine().
-		WithHost(proxy2).
-		WithDSN(dsn).
-		WithNumShards(2).
-		WithWorkers(2)
+	eng1 := engine.NewEngine()
+	eng1.SetHost(proxy1)
+	eng1.SetDSN(dsn)
+	eng1.SetNumShards(2)
+	eng1.SetWorkers(2)
+	eng2 := engine.NewEngine()
+	eng2.SetHost(proxy2)
+	eng2.SetDSN(dsn)
+	eng2.SetNumShards(2)
+	eng2.SetWorkers(2)
 	proxy1.AddPeer(eng2)
 	proxy2.AddPeer(eng1)
 

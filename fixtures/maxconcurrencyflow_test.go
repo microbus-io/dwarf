@@ -69,9 +69,9 @@ func TestMaxconcurrencyflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy).
-		WithWorkers(6)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.SetWorkers(6)
 	eng.RunInTest(t)
 
 	t.Run("backpressure_bounds_max_concurrency", func(t *testing.T) {

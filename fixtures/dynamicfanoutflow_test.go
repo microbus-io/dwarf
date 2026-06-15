@@ -61,8 +61,8 @@ func TestDynamicfanoutflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("three_elements", func(t *testing.T) {

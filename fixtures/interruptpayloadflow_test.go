@@ -60,8 +60,8 @@ func TestInterruptpayloadflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("payload_is_separate_from_state", func(t *testing.T) {

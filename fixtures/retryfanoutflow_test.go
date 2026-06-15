@@ -63,8 +63,8 @@ func TestRetryfanoutflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("ordered_despite_random_retries", func(t *testing.T) {

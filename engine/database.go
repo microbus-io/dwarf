@@ -104,6 +104,62 @@ func (e *Engine) openDatabase(ctx context.Context) error {
 	return nil
 }
 
+// expandShards reconciles the open shards up to the current numShards target, opening+migrating any that
+// are not yet live. It is the internal primitive behind SetNumShards; new top-level flows then land on
+// the new shards (selection, polling, and the cross-shard fan-outs all read the current len(e.dbs)),
+// while existing flows stay on their original shard.
+//
+// It only ever appends - shrinking is unsupported (old shards drain naturally), so a target below the
+// live count is a no-op, as is a target equal to it. Concurrency-safe: expandLock serializes callers, the
+// open+migrate I/O runs outside dbsLock, and each freshly-migrated shard is appended under dbsLock.Lock,
+// so the hot path (dbsLock.RLock) only ever sees fully-ready shards. Before Startup it is a no-op (shards
+// open at Startup). In test mode (RunInTest / StartupInTest) new shards are opened as isolated test
+// databases keyed by the same testID, matching the shards opened at startup.
+func (e *Engine) expandShards() error {
+	if !e.started.Load() {
+		return nil
+	}
+	e.expandLock.Lock()
+	defer e.expandLock.Unlock()
+
+	target := int(e.numShards.Load())
+	e.dbsLock.RLock()
+	current := len(e.dbs)
+	e.dbsLock.RUnlock()
+	if target <= current {
+		return nil
+	}
+
+	dataSourceName := e.dsn.Load().(string)
+	testMode := e.testHashedID != ""
+	if testMode && dataSourceName == "" {
+		// Mirror openTestDatabaseWithID's fallback so expansion resolves the same base DSN as startup.
+		dataSourceName = os.Getenv("SEQUEL_TESTING_DSN")
+	}
+	// The %d requirement applies only to a real DSN; the test path folds the shard index into the
+	// testID when the DSN has no placeholder, so a multi-shard test DSN need not carry %d.
+	if !testMode && target > 1 && !strings.Contains(dataSourceName, "%d") {
+		return errors.New("DSN must contain %%d when NumShards > 1")
+	}
+
+	for i := current + 1; i <= target; i++ {
+		var db *sequel.DB
+		var err error
+		if testMode {
+			db, err = e.openDatabaseShardForTest(context.Background(), dataSourceName, i, e.testHashedID)
+		} else {
+			db, err = e.openDatabaseShard(context.Background(), dataSourceName, i)
+		}
+		if err != nil {
+			return errors.Trace(err)
+		}
+		e.dbsLock.Lock()
+		e.dbs = append(e.dbs, db)
+		e.dbsLock.Unlock()
+	}
+	return nil
+}
+
 // openDatabaseShardForTest opens a single shard using sequel.CreateTestingDatabase
 // for per-test isolation.
 func (e *Engine) openDatabaseShardForTest(ctx context.Context, dataSourceName string, shardIndex int, testID string) (*sequel.DB, error) {
@@ -213,6 +269,10 @@ func (e *Engine) openTestDatabaseWithID(testID string) error {
 	// multi-replica fixtures need.
 	sum := sha256.Sum256([]byte(testID))
 	hashedID := hex.EncodeToString(sum[:])[:16]
+	// Remember the hashed id so a later ExpandShards routes new shards through the isolated-test open
+	// path (openDatabaseShardForTest) rather than opening a real DSN. Set before initRuntime flips
+	// started, so it is safely published to ExpandShards's post-started read.
+	e.testHashedID = hashedID
 	for i := 1; i <= numShards; i++ {
 		db, err := e.openDatabaseShardForTest(context.Background(), dataSourceName, i, hashedID)
 		if err != nil {

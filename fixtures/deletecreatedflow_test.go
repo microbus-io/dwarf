@@ -43,8 +43,8 @@ func TestDeletecreatedflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	// Create but never Start: the flow is in created status.

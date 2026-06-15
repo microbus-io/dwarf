@@ -88,9 +88,9 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	proxy.HandleTask("metricsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("metricsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngine().
-		WithHost(proxy).
-		WithMeterProvider(mp)
+	eng := NewEngine()
+	eng.SetHost(proxy)
+	eng.SetMeterProvider(mp)
 	eng.RunInTest(t)
 
 	outcome, err := eng.Run(ctx, "metricsflow.verify:428/g", nil, nil)

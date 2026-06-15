@@ -107,7 +107,8 @@ func TestBaggageflow(t *testing.T) {
 		},
 	}
 
-	eng := engine.NewEngine().WithHost(host)
+	eng := engine.NewEngine()
+	eng.SetHost(host)
 	eng.RunInTest(t)
 
 	t.Run("baggage_reaches_loader_and_every_task_including_subgraph", func(t *testing.T) {

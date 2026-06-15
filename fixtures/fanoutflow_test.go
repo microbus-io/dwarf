@@ -68,8 +68,8 @@ func TestFanoutflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("static_fan_out_and_fan_in", func(t *testing.T) {

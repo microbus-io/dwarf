@@ -66,10 +66,10 @@ func TestCompletionRaceflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy).
-		WithNumShards(2).
-		WithWorkers(4)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.SetNumShards(2)
+	eng.SetWorkers(4)
 	eng.RunInTest(t)
 
 	t.Run("every_flow_terminates", func(t *testing.T) {

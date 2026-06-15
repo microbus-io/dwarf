@@ -73,9 +73,9 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngine().
-		WithHost(proxy).
-		WithTracerProvider(tp)
+	eng := NewEngine()
+	eng.SetHost(proxy)
+	eng.SetTracerProvider(tp)
 	eng.RunInTest(t)
 
 	outcome, err := eng.Run(ctx, "tracingflow.verify:428/parent", nil, nil)

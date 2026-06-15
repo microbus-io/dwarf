@@ -94,8 +94,8 @@ func TestSubgraphinterruptflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("inner_interrupt_surfaces_and_resumes_at_root", func(t *testing.T) {

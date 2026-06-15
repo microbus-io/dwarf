@@ -105,9 +105,9 @@ func TestDocextractionflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy).
-		WithWorkers(4)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.SetWorkers(4)
 	eng.RunInTest(t)
 
 	t.Run("extracts_every_page", func(t *testing.T) {

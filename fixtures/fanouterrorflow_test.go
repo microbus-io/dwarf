@@ -74,8 +74,8 @@ func TestFanouterrorflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("flow_does_not_fail", func(t *testing.T) {

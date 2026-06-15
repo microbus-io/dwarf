@@ -23,22 +23,24 @@ limitations under the License.
 //
 // # Lifecycle
 //
-// Build an engine with NewEngine and the With* builder methods, register a Host (see WithHost), then
-// Startup (opens the database, runs migrations, starts workers). Shutdown drains the workers and closes
-// the database. In tests, RunInTest replaces Startup/Shutdown with per-test SQLite databases and
-// t.Cleanup.
+// Build an engine with NewEngine and the Set* methods, register a Host (see SetHost), then Startup (opens
+// the database, runs migrations, starts workers). Shutdown drains the workers and closes the database. In
+// tests, RunInTest replaces Startup/Shutdown with per-test SQLite databases and t.Cleanup.
 //
-//	eng := engine.NewEngine().
-//		WithDSN("postgres://user:pass@host:5432/dwarf").
-//		WithHost(host)
+//	eng := engine.NewEngine()
+//	eng.SetDSN("postgres://user:pass@host:5432/dwarf")
+//	eng.SetHost(host)
 //	if err := eng.Startup(ctx); err != nil { ... }
 //	defer eng.Shutdown(ctx)
 //
-// The configuration With* methods are atomic and may be called after Startup for hot reconfiguration.
+// Each Set* method returns an error. The live ones (SetNumShards, SetMaxOpenConns, SetTimeBudget,
+// SetDefaultPriority) take effect immediately on a running engine; the construction-time-only ones (SetDSN,
+// SetWorkers, SetHost, SetLogger, SetMeterProvider, SetTracerProvider) return an error if called after
+// Startup.
 //
 // # Host
 //
-// The engine reaches the outside world through a single injected Host interface (see WithHost):
+// The engine reaches the outside world through a single injected Host interface (see SetHost):
 //
 //   - LoadGraph fetches a workflow graph by name (called at Create; the graph JSON is then frozen on the
 //     flow), and on subgraph spawn.

@@ -52,9 +52,9 @@ func TestFairnessflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy).
-		WithWorkers(1)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.SetWorkers(1)
 	eng.RunInTest(t)
 
 	t.Run("weighted_share_and_liveness", func(t *testing.T) {

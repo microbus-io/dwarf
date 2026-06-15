@@ -70,8 +70,8 @@ func TestAliasflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("default_path_runs_s_a_b_c", func(t *testing.T) {

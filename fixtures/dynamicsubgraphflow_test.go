@@ -63,8 +63,8 @@ func TestDynamicsubgraphflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("parent_re_runs_after_dynamic_subgraph_completes", func(t *testing.T) {

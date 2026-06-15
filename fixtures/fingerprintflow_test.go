@@ -61,8 +61,8 @@ func TestFingerprintflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("fingerprint_stable_then_changes_on_progress", func(t *testing.T) {

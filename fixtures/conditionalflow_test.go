@@ -59,8 +59,8 @@ func TestConditionalflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("score_high_takes_high_branch", func(t *testing.T) {

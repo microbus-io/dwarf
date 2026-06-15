@@ -57,8 +57,8 @@ func TestSubgraphfailflow(t *testing.T) {
 		return errors.New("inner exploded", http.StatusInternalServerError)
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("parent_recovers_from_subgraph_error_via_on_error", func(t *testing.T) {

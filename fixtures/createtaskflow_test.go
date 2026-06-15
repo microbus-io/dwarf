@@ -44,8 +44,8 @@ func TestCreatetaskflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("runs_with_baggage_and_options", func(t *testing.T) {

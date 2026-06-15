@@ -58,10 +58,10 @@ func TestBreakerreconstituteflow(t *testing.T) {
 	// A persistent (file-backed) database so state survives the engine restart.
 	dsn := "file:" + filepath.Join(t.TempDir(), "reconstitute.db")
 
-	eng1 := engine.NewEngine().
-		WithHost(proxy).
-		WithDSN(dsn).
-		WithWorkers(4)
+	eng1 := engine.NewEngine()
+	eng1.SetHost(proxy)
+	eng1.SetDSN(dsn)
+	eng1.SetWorkers(4)
 	if !assert.NoError(eng1.Startup(ctx)) {
 		return
 	}
@@ -96,10 +96,10 @@ func TestBreakerreconstituteflow(t *testing.T) {
 
 	// Downstream recovers, then a fresh engine boots on the same database.
 	broken.Store(false)
-	eng2 := engine.NewEngine().
-		WithHost(proxy).
-		WithDSN(dsn).
-		WithWorkers(4)
+	eng2 := engine.NewEngine()
+	eng2.SetHost(proxy)
+	eng2.SetDSN(dsn)
+	eng2.SetWorkers(4)
 	if !assert.NoError(eng2.Startup(ctx)) {
 		return
 	}

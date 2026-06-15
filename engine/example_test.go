@@ -53,9 +53,9 @@ func Example() {
 	g.AddTransition("Hello", workflow.END)
 	graphs["greet"] = g
 
-	eng := engine.NewEngine().
-		WithDSN("postgres://user:pass@localhost:5432/dwarf").
-		WithHost(exampleHost{graphs: graphs})
+	eng := engine.NewEngine()
+	eng.SetDSN("postgres://user:pass@localhost:5432/dwarf")
+	eng.SetHost(exampleHost{graphs: graphs})
 
 	if err := eng.Startup(ctx); err != nil {
 		panic(err)

@@ -83,8 +83,8 @@ func TestReducerflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("sum_list_and_set_reducers_apply", func(t *testing.T) {

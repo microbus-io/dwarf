@@ -63,7 +63,8 @@ func TestBreakpointnotifyflow(t *testing.T) {
 		}
 	})
 
-	eng := engine.NewEngine().WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	flowKey, err := eng.Create(ctx, "breakpointnotifyflow.verify:428/flow", nil, nil)

@@ -46,8 +46,8 @@ func TestListflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	const total = 5
@@ -84,7 +84,7 @@ func TestListflow(t *testing.T) {
 
 		flows, _, err := eng.List(ctx, workflow.Query{
 			WorkflowURL: "listflow.verify:428/list",
-			Status:       workflow.StatusCompleted,
+			Status:      workflow.StatusCompleted,
 		})
 		if !assert.NoError(err) {
 			return
@@ -101,8 +101,8 @@ func TestListflow(t *testing.T) {
 		for {
 			flows, next, err := eng.List(ctx, workflow.Query{
 				WorkflowURL: "listflow.verify:428/list",
-				Limit:        2,
-				Cursor:       cursor,
+				Limit:       2,
+				Cursor:      cursor,
 			})
 			if !assert.NoError(err) {
 				return

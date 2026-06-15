@@ -57,8 +57,8 @@ func TestGotoflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("loops_one_then_falls_through", func(t *testing.T) {
@@ -99,8 +99,8 @@ func TestGotoflow_BadGoto(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("goto_to_unregistered_target_fails_flow", func(t *testing.T) {

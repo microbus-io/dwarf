@@ -77,8 +77,8 @@ func TestOnerrorsiblingsflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("flow_completes_with_handler_and_siblings", func(t *testing.T) {

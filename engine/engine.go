@@ -20,6 +20,7 @@ import (
 	"context"
 	"io"
 	"math"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -83,6 +84,15 @@ type Engine struct {
 	// Database
 	dbs     []*sequel.DB
 	dbsLock sync.RWMutex
+	// expandLock serializes ExpandShards so two concurrent calls cannot both observe the same shard
+	// count and each open the same new shard. The slow open+migrate I/O runs under this lock but
+	// outside dbsLock, so it never blocks the hot path (which only takes dbsLock).
+	expandLock sync.Mutex
+	// testHashedID is the hashed test database id when the engine was started in test mode (RunInTest /
+	// StartupInTest), empty in production. ExpandShards reads it to route new shards through the
+	// isolated-test open path. Written once during single-threaded startup before started.Store(true),
+	// read only after started.Load()==true, so the atomic started flag is the happens-before barrier.
+	testHashedID string
 
 	// Candidate cache and worker pool
 	cache      candidateCache
@@ -152,97 +162,139 @@ func NewEngine() *Engine {
 	return e
 }
 
-// --- Builder methods (callable before AND after Startup) ---
-
-// WithDSN sets the SQL data source name. Use "%d" for sharded DSNs.
-// An empty DSN in test mode uses SQLite in-memory.
-func (e *Engine) WithDSN(dsn string) *Engine {
-	e.dsn.Store(dsn)
-	return e
+// --- Configuration setters ---
+//
+// These replace the old fluent WithX builder so each can return an error. They fall in two groups by
+// whether the knob can be changed safely on a running engine:
+//
+//   - Live (take effect immediately, callable any time): SetNumShards, SetMaxOpenConns, SetTimeBudget,
+//     SetDefaultPriority. SetTimeBudget/SetDefaultPriority are read fresh on each use; SetMaxOpenConns
+//     re-applies to the live pools; SetNumShards opens+migrates the added shards.
+//   - Construction-time-only (return an error if called after Startup): SetDSN, SetWorkers, SetHost,
+//     SetLogger, SetDebugLogger, SetMeterProvider, SetTracerProvider. Applying these on a running engine
+//     would mean reopening live connections, resizing the worker pool, or re-resolving a frozen provider -
+//     deliberately unsupported, so the setter rejects it rather than silently no-op'ing.
+//
+// errSetAfterStartup is the error the construction-time-only setters return on a running engine.
+func errSetAfterStartup(what string) error {
+	return errors.New(what + " cannot be changed after Startup")
 }
 
-// WithNumShards sets the number of database shards.
-func (e *Engine) WithNumShards(n int) *Engine {
-	e.numShards.Store(int32(n))
-	return e
-}
-
-// WithWorkers sets the number of worker goroutines.
-func (e *Engine) WithWorkers(n int) *Engine {
-	e.workers.Store(int32(n))
-	return e
-}
-
-// WithTimeBudget sets the maximum duration for a single task execution.
-func (e *Engine) WithTimeBudget(d time.Duration) *Engine {
-	e.timeBudgetMs.Store(int64(d / time.Millisecond))
-	return e
-}
-
-// WithDefaultPriority sets the default priority for new flows.
-func (e *Engine) WithDefaultPriority(p int) *Engine {
-	e.defaultPriority.Store(int32(p))
-	return e
-}
-
-// WithMaxOpenConns sets the maximum number of open SQL connections per shard.
-func (e *Engine) WithMaxOpenConns(n int) *Engine {
-	e.maxOpenConns.Store(int32(n))
-	return e
-}
-
-// --- Dependency injection (must be set before Startup) ---
-
-// WithHost registers the host the engine reaches the outside world through: it loads graphs, executes
-// tasks, and (optionally) receives flow-stop notifications and carries cross-replica coordination
-// signals. A host must implement LoadGraph and ExecuteTask; the remaining Host methods may be no-ops.
-// Must be set before Startup.
-func (e *Engine) WithHost(h Host) *Engine {
-	e.host = h
-	return e
-}
-
-// WithMeterProvider sets the OpenTelemetry MeterProvider the engine builds its dwarf_* instruments
-// from. Defaults to the global otel.GetMeterProvider() (the no-op provider unless the host configures
-// the OTEL SDK). The engine creates instruments under the "github.com/microbus-io/dwarf" scope; the
-// provider's Resource carries the host service's identity. Must be set before Startup; the engine
-// resolves the meter once at startup, so a call after Startup is a no-op.
-func (e *Engine) WithMeterProvider(mp metric.MeterProvider) *Engine {
+// SetDSN sets the SQL data source name. Use "%d" for sharded DSNs; an empty DSN in test mode uses SQLite
+// in-memory. Construction-time only - the shards are opened against the DSN at Startup, so changing it on
+// a running engine (which would require reopening live connections) is rejected.
+func (e *Engine) SetDSN(dsn string) error {
 	if e.started.Load() {
-		return e
+		return errSetAfterStartup("DSN")
+	}
+	e.dsn.Store(dsn)
+	return nil
+}
+
+// SetNumShards sets the number of database shards and, on a running engine, brings any added shards online
+// (open + migrate) in one call, returning any error from opening/migrating them. New flows spread onto the
+// added shards immediately; existing flows stay on their original shard.
+//
+// The count may only grow at runtime: a value at or below the current live shard count records the new
+// target but removes nothing (old shards drain naturally; an actual reduction takes effect only on a
+// restart, where Startup opens just numShards shards). Concurrency-safe - the open+migrate work is
+// serialized internally and runs off the hot path. Before Startup it simply records the target (no shards
+// are open yet). It takes no ctx because the underlying open+migrate path is not ctx-cancellable.
+func (e *Engine) SetNumShards(num int) error {
+	e.numShards.Store(int32(num))
+	return e.expandShards()
+}
+
+// SetWorkers sets the number of worker goroutines. Construction-time only: the pool is spawned at Startup
+// at this count, and live resizing (spawning/retiring workers and resizing the candidate cache) is not
+// supported, so a call on a running engine is rejected.
+func (e *Engine) SetWorkers(n int) error {
+	if e.started.Load() {
+		return errSetAfterStartup("workers")
+	}
+	e.workers.Store(int32(n))
+	return nil
+}
+
+// SetTimeBudget sets the maximum duration for a single task execution. Live: read fresh on each dispatch,
+// so it takes effect on a running engine immediately.
+func (e *Engine) SetTimeBudget(d time.Duration) error {
+	e.timeBudgetMs.Store(int64(d / time.Millisecond))
+	return nil
+}
+
+// SetDefaultPriority sets the default priority for new flows. Live: read fresh on each Create, so it takes
+// effect on a running engine immediately.
+func (e *Engine) SetDefaultPriority(p int) error {
+	e.defaultPriority.Store(int32(p))
+	return nil
+}
+
+// SetMaxOpenConns sets the maximum number of open SQL connections per shard and re-applies it to every
+// live shard pool, so it takes effect on a running engine immediately. (sequel's pool setters are
+// hot/atomic.) Before Startup it records the value, applied as each shard opens.
+func (e *Engine) SetMaxOpenConns(n int) error {
+	e.maxOpenConns.Store(int32(n))
+	e.dbsLock.RLock()
+	defer e.dbsLock.RUnlock()
+	for _, db := range e.dbs {
+		db.SetMaxOpenConns(n)
+		db.SetMaxIdleConns(n)
+	}
+	return nil
+}
+
+// SetHost registers the host the engine reaches the outside world through: it loads graphs, executes
+// tasks, and (optionally) receives flow-stop notifications and carries cross-replica coordination signals.
+// A host must implement LoadGraph and ExecuteTask; the remaining Host methods may be no-ops.
+// Construction-time only.
+func (e *Engine) SetHost(h Host) error {
+	if e.started.Load() {
+		return errSetAfterStartup("host")
+	}
+	e.host = h
+	return nil
+}
+
+// SetMeterProvider sets the OpenTelemetry MeterProvider the engine builds its dwarf_* instruments from.
+// Defaults to the global otel.GetMeterProvider() (the no-op provider unless the host configures the OTEL
+// SDK). The engine creates instruments under the "github.com/microbus-io/dwarf" scope; the provider's
+// Resource carries the host service's identity. Construction-time only - the engine resolves the meter
+// once at Startup.
+func (e *Engine) SetMeterProvider(mp metric.MeterProvider) error {
+	if e.started.Load() {
+		return errSetAfterStartup("meter provider")
 	}
 	e.meterProvider = mp
-	return e
+	return nil
 }
 
-// WithTracerProvider sets the OpenTelemetry TracerProvider the engine builds its spans from. Defaults
-// to the global otel.GetTracerProvider() (the no-op provider unless the host configures the OTEL SDK).
-// The engine mints the root "workflow" span at Create (persisted to the dwarf-owned trace_parent
-// column) and a per-step span in processStep, parented to the reconstructed root and placed on the
-// TaskExecutor's context so the task's downstream spans nest under it. The host injects only the
-// provider - no span code, no trace_parent handling. Spans are created under the
-// "github.com/microbus-io/dwarf" scope; the provider's Resource carries the host's identity. Must be
-// set before Startup; the engine resolves the tracer once at startup, so a call after Startup is a no-op.
-func (e *Engine) WithTracerProvider(tp trace.TracerProvider) *Engine {
+// SetTracerProvider sets the OpenTelemetry TracerProvider the engine builds its spans from. Defaults to
+// the global otel.GetTracerProvider() (the no-op provider unless the host configures the OTEL SDK). The
+// engine mints the root "workflow" span at Create (persisted to the dwarf-owned trace_parent column) and a
+// per-step span in processStep, parented to the reconstructed root and placed on the TaskExecutor's
+// context so the task's downstream spans nest under it. The host injects only the provider - no span code,
+// no trace_parent handling. Spans are created under the "github.com/microbus-io/dwarf" scope; the
+// provider's Resource carries the host's identity. Construction-time only - the engine resolves the tracer
+// once at Startup.
+func (e *Engine) SetTracerProvider(tp trace.TracerProvider) error {
 	if e.started.Load() {
-		return e
+		return errSetAfterStartup("tracer provider")
 	}
 	e.tracerProvider = tp
-	return e
+	return nil
 }
 
-// WithLogger sets the structured logger. The engine logs through the *Context variants
-// (DebugContext/InfoContext/WarnContext/ErrorContext) so a handler that reads the context -
-// e.g. the otelslog bridge - can correlate each record with the active step span. A host
-// routes logs to OTEL by passing a logger whose handler bridges there. Defaults to a discard
-// logger: until a logger is injected the engine (and its sequel DB layer) stay silent rather
-// than writing to the application-owned slog.Default(). A nil logger resets to that silent
-// default. Must be set before Startup; the engine wires the logger into the worker hot path and
-// the shard DBs at startup, so a call after Startup is a no-op (keeping the hot-path read of the
-// logger lock-free).
-func (e *Engine) WithLogger(l *slog.Logger) *Engine {
+// SetLogger sets the structured logger. The engine logs through the *Context variants
+// (DebugContext/InfoContext/WarnContext/ErrorContext) so a handler that reads the context - e.g. the
+// otelslog bridge - can correlate each record with the active step span. A host routes logs to OTEL by
+// passing a logger whose handler bridges there. Defaults to a discard logger: until a logger is injected
+// the engine (and its sequel DB layer) stay silent rather than writing to the application-owned
+// slog.Default(). A nil logger resets to that silent default. Construction-time only - the engine wires
+// the logger into the worker hot path and the shard DBs at Startup, and reads it lock-free thereafter.
+func (e *Engine) SetLogger(l *slog.Logger) error {
 	if e.started.Load() {
-		return e
+		return errSetAfterStartup("logger")
 	}
 	if l == nil {
 		l = slog.New(slog.DiscardHandler)
@@ -251,7 +303,18 @@ func (e *Engine) WithLogger(l *slog.Logger) *Engine {
 		e.loggerSet = true
 	}
 	e.logger = l
-	return e
+	return nil
+}
+
+// SetDebugLogger is a convenience that wires a human-readable text logger to stderr at debug level -
+// shorthand for SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level:
+// slog.LevelDebug}))). It is meant for development and test runs where you want to see the engine's (and
+// its sequel DB layer's) internal logging without standing up an OTEL pipeline. Output goes to stderr, not
+// stdout, so it never mixes with a program's data stream - the standard convention for diagnostic logs.
+// Because it routes through SetLogger, it counts as an explicitly-set logger, so it also reaches sequel via
+// the engine's existing SetLogger wiring (sequel's migration logs appear too). Construction-time only.
+func (e *Engine) SetDebugLogger() error {
+	return e.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 }
 
 // --- Lifecycle ---

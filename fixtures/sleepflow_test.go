@@ -53,8 +53,8 @@ func TestSleepflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine().
-		WithHost(proxy)
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	t.Run("flow_sleeps_for_configured_duration", func(t *testing.T) {

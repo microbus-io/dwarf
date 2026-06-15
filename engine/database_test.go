@@ -28,8 +28,8 @@ func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngine().
-		WithHost(noopHost{})
+	e := NewEngine()
+	e.SetHost(noopHost{})
 	e.RunInTest(t)
 
 	// Verify the schema was created by querying the flows table.
@@ -50,8 +50,8 @@ func TestDatabase_StartupInTestCreatesSchema(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngine().
-		WithHost(noopHost{})
+	e := NewEngine()
+	e.SetHost(noopHost{})
 	err := e.StartupInTest(context.Background(), t.Name())
 	assert.NoError(err)
 	defer e.Shutdown(context.Background())
@@ -82,13 +82,16 @@ func TestDatabase_StartupInTestSharesByID(t *testing.T) {
 	ctx := context.Background()
 	sharedID := t.Name() + "/shared"
 
-	a := NewEngine().WithHost(noopHost{})
+	a := NewEngine()
+	a.SetHost(noopHost{})
 	assert.NoError(a.StartupInTest(ctx, sharedID))
 	defer a.Shutdown(ctx)
-	b := NewEngine().WithHost(noopHost{})
+	b := NewEngine()
+	b.SetHost(noopHost{})
 	assert.NoError(b.StartupInTest(ctx, sharedID))
 	defer b.Shutdown(ctx)
-	c := NewEngine().WithHost(noopHost{})
+	c := NewEngine()
+	c.SetHost(noopHost{})
 	assert.NoError(c.StartupInTest(ctx, t.Name()+"/other"))
 	defer c.Shutdown(ctx)
 
@@ -113,12 +116,56 @@ func TestDatabase_StartupInTestSharesByID(t *testing.T) {
 	assert.Error(err) // isolated database: no such table
 }
 
+// TestSetNumShards covers runtime shard expansion (R7): before Startup SetNumShards just records the
+// target (applied when the shards open), and on a running engine it opens+migrates the added shards. It
+// also asserts the guards: idempotent at the same target, and shrink (a lower target) leaves the live
+// shards in place rather than dropping them.
+func TestSetNumShards(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	// Before Startup, SetNumShards just records the target (shards open at Startup).
+	pre := NewEngine()
+	pre.SetHost(noopHost{})
+	assert.NoError(pre.SetNumShards(2))
+	assert.Equal(0, pre.numDBShards())
+
+	e := NewEngine()
+	e.SetHost(noopHost{})
+	assert.NoError(e.SetNumShards(2)) // recorded now, applied by RunInTest
+	e.RunInTest(t)
+	assert.Equal(2, e.numDBShards())
+
+	// On a running engine, SetNumShards opens+migrates the added shards.
+	assert.NoError(e.SetNumShards(4))
+	assert.Equal(4, e.numDBShards())
+
+	// The freshly-opened shards are migrated and usable in isolation.
+	for _, n := range []int{3, 4} {
+		db, err := e.shard(n)
+		assert.NoError(err)
+		var count int
+		err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&count)
+		assert.NoError(err, "shard %d has no schema", n)
+		assert.Equal(0, count)
+	}
+
+	// Idempotent: re-setting the same target adds nothing.
+	assert.NoError(e.SetNumShards(4))
+	assert.Equal(4, e.numDBShards())
+
+	// Shrink is unsupported: a lower target leaves the live shards in place.
+	assert.NoError(e.SetNumShards(2))
+	assert.Equal(4, e.numDBShards())
+}
+
 func TestDatabase_ShardOutOfRange(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngine().
-		WithHost(noopHost{})
+	e := NewEngine()
+	e.SetHost(noopHost{})
 	e.RunInTest(t)
 
 	_, err := e.shard(0)
@@ -133,8 +180,8 @@ func TestDatabase_EachShardSingleShard(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngine().
-		WithHost(noopHost{})
+	e := NewEngine()
+	e.SetHost(noopHost{})
 	e.RunInTest(t)
 
 	var visited []int
