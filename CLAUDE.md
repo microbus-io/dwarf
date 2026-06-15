@@ -25,8 +25,8 @@ observability providers below are injected separately. A host must implement `Lo
 - **`ExecuteTask(ctx, taskName string, flow *workflow.Flow) error`** - executes one task. Receives the flow
   carrier with state pre-populated; writes its changes back onto the flow. The engine never knows *how* the task is
   reached (local call, RPC, message bus). The flow's baggage rides on ctx (`workflow.BaggageFrom(ctx)`). To engage an
-  adaptive mechanism, wrap the returned error with `workflow.ErrBackpressure(err, cause)` (rate-limit the task) or
-  `workflow.ErrBreakerTrip(err, cause)` (trip the task's breaker); an undecorated error is an ordinary failure. The
+  adaptive mechanism, wrap the returned error with `workflow.ErrRateLimited(err, cause)` (rate-limit the task) or
+  `workflow.ErrUnavailable(err, cause)` (trip the task's breaker); an undecorated error is an ordinary failure. The
   engine never sniffs status codes - the host owns the mapping (see "Per-Task Breaker → Error classification").
 - **`FlowStopped(ctx, hostname string, outcome *workflow.FlowOutcome)`** - fired when a flow stops
   (completed/failed/cancelled/interrupted) for a flow started via `StartNotify`. The hostname is whatever was passed
@@ -941,23 +941,23 @@ inspects a `ExecuteTask` error's status code or text. Instead the host wraps the
 returned with one of two `workflow` constructors, and the engine classifies by `errors.As` on the
 unexported wrapper:
 
-- `workflow.ErrBackpressure(err, cause)` → the valve (bounce + rate cut). For "you're going too fast"
+- `workflow.ErrRateLimited(err, cause)` → the valve (bounce + rate cut). For "you're going too fast"
   (e.g. HTTP 429).
-- `workflow.ErrBreakerTrip(err, cause)` → the breaker (park + probe). For "I cannot serve right now"
+- `workflow.ErrUnavailable(err, cause)` → the breaker (park + probe). For "I cannot serve right now"
   (downstream unreachable / unavailable / overloaded - e.g. an ack timeout, HTTP 503, HTTP 529).
 
-The engine extracts these in `processStep`'s dispatch-error path with `workflow.IsBackpressure(err)` /
-`workflow.IsBreakerTrip(err)`, each returning `(cause, ok)`. An **undecorated** error is an ordinary
+The engine extracts these in `processStep`'s dispatch-error path with `workflow.IsRateLimited(err)` /
+`workflow.IsUnavailable(err)`, each returning `(cause, ok)`. An **undecorated** error is an ordinary
 failure: the engine takes the task's `onError` transition if one matches, else `failStep`s. There are
 **exactly two** dispositions because the engine has exactly two adaptive mechanisms (valve, breaker); the
 three breaker *causes* (`ack_timeout` / `unavailable` / `overloaded`) are not separate dispositions but an
-**opaque cause string** carried on `ErrBreakerTrip` purely as a metric label (`dwarf_task_breaker_*{cause}`)
-- the engine never branches on it. `cause` is symmetric on `ErrBackpressure` too (forwarded to a debug log;
+**opaque cause string** carried on `ErrUnavailable` purely as a metric label (`dwarf_task_breaker_*{cause}`)
+- the engine never branches on it. `cause` is symmetric on `ErrRateLimited` too (forwarded to a debug log;
 no backpressure metric consumes it today). The wrappers preserve the inner error (`Unwrap`), so
 `errors.Is`/`As` and any status-code extraction still see through. This is the Phase-7 boundary contract
 (Open Question #1 resolved): the engine stays transport-agnostic, and the **foreman adapter** owns the
-mapping - `429 → ErrBackpressure`, `404+"ack timeout:" → ErrBreakerTrip(…, "ack_timeout")`,
-`503 → ErrBreakerTrip(…, "unavailable")`, `529 → ErrBreakerTrip(…, "overloaded")` - defining those cause
+mapping - `429 → ErrRateLimited`, `404+"ack timeout:" → ErrUnavailable(…, "ack_timeout")`,
+`503 → ErrUnavailable(…, "unavailable")`, `529 → ErrUnavailable(…, "overloaded")` - defining those cause
 constants on its own side. `LoadGraph` keeps plain `error` semantics (graph load has no breaker). The
 engine's internal `breakerCause*` constants (`breaker.go`) are only its own default labels for internally
 originated trips (reconstitution); the dispatch path uses the host-supplied cause. The `Disposition` enum

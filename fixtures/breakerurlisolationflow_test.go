@@ -62,7 +62,7 @@ func TestBreakerurlisolationflow(t *testing.T) {
 	proxy.HandleTask("breakerurlisolationflow.verify:428/down", func(ctx context.Context, f *workflow.Flow) error {
 		downCalled.Store(true)
 		// "I cannot serve right now" - trips the breaker for this URL.
-		return workflow.ErrBreakerTrip(errors.New("down", http.StatusServiceUnavailable), "unavailable")
+		return workflow.ErrUnavailable(errors.New("down", http.StatusServiceUnavailable), "unavailable")
 	})
 	proxy.HandleTask("breakerurlisolationflow.verify:428/up", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", "ok")

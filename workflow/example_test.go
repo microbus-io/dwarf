@@ -59,11 +59,11 @@ func ExampleMergeState() {
 }
 
 // A host's ExecuteTask wraps its transport's "can't serve" signal so the engine trips the task's breaker
-// instead of failing the flow. The engine classifies with IsBreakerTrip.
-func ExampleErrBreakerTrip() {
-	err := workflow.ErrBreakerTrip(errors.New("503 from billing"), "unavailable")
+// instead of failing the flow. The engine classifies with IsUnavailable.
+func ExampleErrUnavailable() {
+	err := workflow.ErrUnavailable(errors.New("503 from billing"), "unavailable")
 
-	if cause, ok := workflow.IsBreakerTrip(err); ok {
+	if cause, ok := workflow.IsUnavailable(err); ok {
 		fmt.Println("trip breaker, cause:", cause)
 	}
 	// The wrapped error is preserved.

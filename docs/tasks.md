@@ -208,20 +208,20 @@ the error from your transport:
 err := callDownstream(ctx)
 switch {
 case isRateLimited(err): // e.g. HTTP 429
-    return workflow.ErrBackpressure(err, "")
+    return workflow.ErrRateLimited(err, "")
 case isUnavailable(err): // e.g. HTTP 503 / unreachable
-    return workflow.ErrBreakerTrip(err, "unavailable")
+    return workflow.ErrUnavailable(err, "unavailable")
 default:
     return err // ordinary failure: onError or fail
 }
 ```
 
-- `ErrBackpressure` → the engine bounces the step back to pending and cuts the task's adaptive dispatch
+- `ErrRateLimited` → the engine bounces the step back to pending and cuts the task's adaptive dispatch
   rate (the *valve*). For "you're going too fast."
-- `ErrBreakerTrip` → the engine parks the task's whole backlog and probes on an exponential schedule (the
+- `ErrUnavailable` → the engine parks the task's whole backlog and probes on an exponential schedule (the
   *breaker*). For "this downstream can't serve right now." The `cause` string is an opaque metric label.
 
-The engine classifies via `IsBackpressure` / `IsBreakerTrip`; it never inspects status codes itself, so
+The engine classifies via `IsRateLimited` / `IsUnavailable`; it never inspects status codes itself, so
 your host owns the mapping. See
 [Scheduling & reliability](scheduling-and-reliability.md#backpressure-the-valve).
 

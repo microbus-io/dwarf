@@ -261,11 +261,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// The host classifies its transport's "can't take more work" signals by wrapping the error; the
 		// engine never inspects status codes or error text itself. Backpressure bounces the step and cuts
 		// the rate; a breaker trip parks the task's backlog and probes. cause is an opaque metric label.
-		if cause, ok := workflow.IsBackpressure(execErr); ok {
+		if cause, ok := workflow.IsRateLimited(execErr); ok {
 			e.logger.DebugContext(ctx, "Task backpressure", "task", taskName, "flow", workflowURL, "cause", cause)
 			return e.handleBackpressure(ctx, shardNum, stepID, dispatchURL)
 		}
-		if cause, ok := workflow.IsBreakerTrip(execErr); ok {
+		if cause, ok := workflow.IsUnavailable(execErr); ok {
 			return e.handleBreakerTrip(ctx, shardNum, stepID, dispatchURL, cause)
 		}
 

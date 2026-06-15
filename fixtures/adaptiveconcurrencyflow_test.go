@@ -49,7 +49,7 @@ func TestAdaptiveconcurrencyflow(t *testing.T) {
 		if admit, _ := rate.Allow(); !admit {
 			rejections.Add(1)
 			// Wrap the transport's 429 as backpressure; the engine bounces the step and cuts the rate.
-			return workflow.ErrBackpressure(errors.New("rate limited", http.StatusTooManyRequests), "")
+			return workflow.ErrRateLimited(errors.New("rate limited", http.StatusTooManyRequests), "")
 		}
 		time.Sleep(10 * time.Millisecond)
 		completions.Add(1)

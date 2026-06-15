@@ -21,9 +21,9 @@ import "errors"
 // The engine has exactly two adaptive responses to a downstream that cannot take more work, and a host
 // signals which one by wrapping the error its transport returned:
 //
-//   - ErrBackpressure  → the valve: the step is bounced back to pending and the task's adaptive dispatch
+//   - ErrRateLimited  → the valve: the step is bounced back to pending and the task's adaptive dispatch
 //     rate is cut (CUBIC recovery). For "you're going too fast" signals (e.g. HTTP 429).
-//   - ErrBreakerTrip   → the breaker: the task's pending backlog is parked and probed on an exponential
+//   - ErrUnavailable   → the breaker: the task's pending backlog is parked and probed on an exponential
 //     schedule. For "I cannot serve right now" signals (downstream unreachable / unavailable / overloaded,
 //     e.g. an ack timeout, HTTP 503, HTTP 529).
 //
@@ -38,8 +38,8 @@ import "errors"
 type dispositionKind int
 
 const (
-	dispositionBackpressure dispositionKind = iota + 1
-	dispositionBreakerTrip
+	dispositionRateLimited dispositionKind = iota + 1
+	dispositionUnavailable
 )
 
 // dispositionError wraps a transport error with an engine disposition and an opaque cause label.
@@ -53,45 +53,46 @@ func (d *dispositionError) Error() string {
 	if d.err != nil {
 		return d.err.Error()
 	}
-	if d.kind == dispositionBackpressure {
-		return "backpressure"
+	if d.kind == dispositionRateLimited {
+		return "rate limited"
 	}
-	return "breaker trip"
+	return "unavailable"
 }
 
 func (d *dispositionError) Unwrap() error { return d.err }
 
-// ErrBackpressure marks err as a backpressure signal: the downstream is rate-limiting this task. The
-// engine bounces the step back to pending and cuts the task's adaptive dispatch rate rather than failing
-// the flow. cause is an opaque label forwarded to logging/metrics (pass "" if none). A nil err is allowed
-// (e.g. a host self-throttling with no underlying transport error).
-func ErrBackpressure(err error, cause string) error {
-	return &dispositionError{err: err, kind: dispositionBackpressure, cause: cause}
+// ErrRateLimited marks err as a rate-limit signal: the downstream is rate-limiting this task ("you're
+// going too fast", e.g. HTTP 429). The engine engages the valve - bouncing the step back to pending and
+// cutting the task's adaptive dispatch rate (CUBIC recovery) - rather than failing the flow. cause is an
+// opaque label forwarded to logging/metrics (pass "" if none). A nil err is allowed (e.g. a host
+// self-throttling with no underlying transport error).
+func ErrRateLimited(err error, cause string) error {
+	return &dispositionError{err: err, kind: dispositionRateLimited, cause: cause}
 }
 
-// ErrBreakerTrip marks err as an "I cannot serve right now" signal: the downstream is unreachable,
+// ErrUnavailable marks err as an "I cannot serve right now" signal: the downstream is unreachable,
 // unavailable, or overloaded. The engine trips the task's circuit breaker - parking its backlog and
 // probing on an exponential schedule - rather than failing the flow. cause is an opaque label forwarded
 // to the breaker trip/probe metrics (pass "" if none). A nil err is allowed.
-func ErrBreakerTrip(err error, cause string) error {
-	return &dispositionError{err: err, kind: dispositionBreakerTrip, cause: cause}
+func ErrUnavailable(err error, cause string) error {
+	return &dispositionError{err: err, kind: dispositionUnavailable, cause: cause}
 }
 
-// IsBackpressure reports whether err (or anything it wraps) was marked by ErrBackpressure, returning the
+// IsRateLimited reports whether err (or anything it wraps) was marked by ErrRateLimited, returning the
 // cause label.
-func IsBackpressure(err error) (cause string, ok bool) {
+func IsRateLimited(err error) (cause string, ok bool) {
 	var d *dispositionError
-	if errors.As(err, &d) && d.kind == dispositionBackpressure {
+	if errors.As(err, &d) && d.kind == dispositionRateLimited {
 		return d.cause, true
 	}
 	return "", false
 }
 
-// IsBreakerTrip reports whether err (or anything it wraps) was marked by ErrBreakerTrip, returning the
+// IsUnavailable reports whether err (or anything it wraps) was marked by ErrUnavailable, returning the
 // cause label.
-func IsBreakerTrip(err error) (cause string, ok bool) {
+func IsUnavailable(err error) (cause string, ok bool) {
 	var d *dispositionError
-	if errors.As(err, &d) && d.kind == dispositionBreakerTrip {
+	if errors.As(err, &d) && d.kind == dispositionUnavailable {
 		return d.cause, true
 	}
 	return "", false

@@ -86,7 +86,7 @@ testarossa.Equal(t, workflow.StatusCompleted, out.Status)
 ```go
 proxy.HandleTask("flaky", func(ctx context.Context, f *workflow.Flow) error {
     if firstFewCalls() {
-        return workflow.ErrBreakerTrip(errors.New("unreachable"), "ack_timeout")
+        return workflow.ErrUnavailable(errors.New("unreachable"), "ack_timeout")
     }
     return nil
 })

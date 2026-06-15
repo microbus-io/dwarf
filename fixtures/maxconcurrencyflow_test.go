@@ -60,7 +60,7 @@ func TestMaxconcurrencyflow(t *testing.T) {
 		}
 		mu.Unlock()
 		if over {
-			return workflow.ErrBackpressure(errors.New("saturated", http.StatusTooManyRequests), "")
+			return workflow.ErrRateLimited(errors.New("saturated", http.StatusTooManyRequests), "")
 		}
 		time.Sleep(dwell)
 		mu.Lock()

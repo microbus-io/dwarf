@@ -27,52 +27,52 @@ import (
 func TestDisposition(t *testing.T) {
 	assert := testarossa.For(t)
 
-	t.Run("backpressure classifies and carries its cause", func(t *testing.T) {
-		err := ErrBackpressure(errors.New("rate limited"), "quota")
-		cause, ok := IsBackpressure(err)
+	t.Run("rate-limited classifies and carries its cause", func(t *testing.T) {
+		err := ErrRateLimited(errors.New("rate limited"), "quota")
+		cause, ok := IsRateLimited(err)
 		assert.True(ok)
 		assert.Equal("quota", cause)
-		_, ok = IsBreakerTrip(err)
-		assert.False(ok, "a backpressure error is not a breaker trip")
+		_, ok = IsUnavailable(err)
+		assert.False(ok, "a rate-limited error is not unavailable")
 	})
 
-	t.Run("breaker trip classifies and carries its cause", func(t *testing.T) {
-		err := ErrBreakerTrip(errors.New("down"), "unavailable")
-		cause, ok := IsBreakerTrip(err)
+	t.Run("unavailable classifies and carries its cause", func(t *testing.T) {
+		err := ErrUnavailable(errors.New("down"), "unavailable")
+		cause, ok := IsUnavailable(err)
 		assert.True(ok)
 		assert.Equal("unavailable", cause)
-		_, ok = IsBackpressure(err)
-		assert.False(ok, "a breaker trip is not backpressure")
+		_, ok = IsRateLimited(err)
+		assert.False(ok, "an unavailable error is not rate-limited")
 	})
 
 	t.Run("undecorated error is neither", func(t *testing.T) {
 		err := errors.New("ordinary failure")
-		_, ok := IsBackpressure(err)
+		_, ok := IsRateLimited(err)
 		assert.False(ok)
-		_, ok = IsBreakerTrip(err)
+		_, ok = IsUnavailable(err)
 		assert.False(ok)
 	})
 
 	t.Run("nil error is allowed and still classifies", func(t *testing.T) {
-		err := ErrBackpressure(nil, "self")
-		cause, ok := IsBackpressure(err)
+		err := ErrRateLimited(nil, "self")
+		cause, ok := IsRateLimited(err)
 		assert.True(ok)
 		assert.Equal("self", cause)
-		assert.Equal("backpressure", err.Error())
+		assert.Equal("rate limited", err.Error())
 	})
 
 	t.Run("the wrapped error is preserved through Unwrap", func(t *testing.T) {
 		sentinel := errors.New("sentinel")
-		err := ErrBreakerTrip(fmt.Errorf("context: %w", sentinel), "overloaded")
+		err := ErrUnavailable(fmt.Errorf("context: %w", sentinel), "overloaded")
 		assert.True(errors.Is(err, sentinel), "errors.Is should see through the disposition wrapper")
-		cause, ok := IsBreakerTrip(err)
+		cause, ok := IsUnavailable(err)
 		assert.True(ok)
 		assert.Equal("overloaded", cause)
 	})
 
 	t.Run("classification sees through an outer wrap", func(t *testing.T) {
-		err := fmt.Errorf("outer: %w", ErrBackpressure(errors.New("inner"), "c"))
-		cause, ok := IsBackpressure(err)
+		err := fmt.Errorf("outer: %w", ErrRateLimited(errors.New("inner"), "c"))
+		cause, ok := IsRateLimited(err)
 		assert.True(ok)
 		assert.Equal("c", cause)
 	})

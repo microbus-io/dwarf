@@ -44,7 +44,7 @@ backpressure by wrapping the error:
 
 ```go
 if isRateLimited(err) { // e.g. HTTP 429
-    return workflow.ErrBackpressure(err, "")
+    return workflow.ErrRateLimited(err, "")
 }
 ```
 
@@ -69,9 +69,9 @@ unreachable, in maintenance, or collapsed. Signal it by wrapping the error, with
 
 ```go
 switch {
-case isUnreachable(err):  return workflow.ErrBreakerTrip(err, "ack_timeout")
-case isUnavailable(err):  return workflow.ErrBreakerTrip(err, "unavailable") // HTTP 503
-case isOverloaded(err):   return workflow.ErrBreakerTrip(err, "overloaded")  // HTTP 529
+case isUnreachable(err):  return workflow.ErrUnavailable(err, "ack_timeout")
+case isUnavailable(err):  return workflow.ErrUnavailable(err, "unavailable") // HTTP 503
+case isOverloaded(err):   return workflow.ErrUnavailable(err, "overloaded")  // HTTP 529
 }
 ```
 
@@ -98,7 +98,7 @@ throughput unnecessarily. They operate independently — a task can have both en
 ## What the engine does *not* classify
 
 The engine never inspects status codes or error text. A plain returned error is an ordinary failure
-(`onError` route, or fail the flow). `ErrBackpressure` and `ErrBreakerTrip` are the *only* way to engage
+(`onError` route, or fail the flow). `ErrRateLimited` and `ErrUnavailable` are the *only* way to engage
 the valve and breaker, and your host owns the mapping from its transport's signals to them. This keeps the
 engine transport-agnostic. See [Writing tasks](tasks.md#signaling-backpressure-and-breakers).
 
