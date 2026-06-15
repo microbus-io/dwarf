@@ -62,12 +62,12 @@ func (e *Engine) historyBeforeStep(ctx context.Context, shardNum int, flowID int
 	var rows *sql.Rows
 	if beforeStepDepth > 0 {
 		rows, err = db.QueryContext(ctx,
-			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id FROM dwarf_steps WHERE flow_id=? AND step_depth<? ORDER BY step_depth, step_id",
+			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked FROM dwarf_steps WHERE flow_id=? AND step_depth<? ORDER BY step_depth, step_id",
 			flowID, beforeStepDepth,
 		)
 	} else {
 		rows, err = db.QueryContext(ctx,
-			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id FROM dwarf_steps WHERE flow_id=? ORDER BY step_depth, step_id",
+			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked FROM dwarf_steps WHERE flow_id=? ORDER BY step_depth, step_id",
 			flowID,
 		)
 	}
@@ -84,11 +84,13 @@ func (e *Engine) scanHistorySteps(ctx context.Context, shardNum int, rows *sql.R
 		var step workflow.FlowStep
 		var stepID int
 		var stepToken, errMsg string
-		err := rows.Scan(&stepID, &stepToken, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &step.PredecessorID, &step.SuccessorID)
+		var parked int
+		err := rows.Scan(&stepID, &stepToken, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &step.PredecessorID, &step.SuccessorID, &parked)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		step.StepID = stepID
+		step.Parked = parked != 0
 		step.StepKey = fmt.Sprintf("%d-%d-%s", shardNum, stepID, strings.TrimSpace(stepToken))
 		step.Status = strings.TrimSpace(step.Status)
 		step.Error = strings.TrimSpace(errMsg)

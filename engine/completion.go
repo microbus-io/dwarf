@@ -195,6 +195,16 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	completed := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
+		// Write-first: take the flow row's write lock before computeFinalState's reads. Without this the
+		// transaction is read-first (SELECT graph + terminal steps, then UPDATE), and on SQLite with
+		// cache=shared two concurrent completions both hold SHARED locks and deadlock on the upgrade to
+		// write - which under load exhausts Transact's retries and errors. Because the terminal step is
+		// already marked completed by processStep, the lease recovery (which only resets running rows)
+		// cannot re-dispatch it, leaving the flow stranded 'running' with all steps terminal (an orphan
+		// flow). Mirrors advanceFlow and the fan-in transaction, which write first for the same reason.
+		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID); err != nil {
+			return errors.Trace(err)
+		}
 		fs, wf, err := e.computeFinalState(ctx, tx, flowID)
 		if err != nil {
 			return errors.Trace(err)

@@ -673,7 +673,15 @@ the host drives teardown by calling `Shutdown`.
 - **Write-first transactions** - `advanceFlow` does an `UPDATE` as the first operation to immediately acquire a write
   lock. On MySQL/Postgres this serializes concurrent workers (like `SELECT ... FOR UPDATE`). On SQLite with
   `cache=shared`, starting with a write avoids the deadlock where two read-first deferred transactions both hold
-  SHARED locks and neither can upgrade.
+  SHARED locks and neither can upgrade. **Every flow-terminating transaction must be write-first for the same
+  reason**, and the failure mode is worse than a transient error: the terminal step is marked `completed` by
+  `processStep` *before* the disposition runs, so once the disposition's `Transact` exhausts its lock-contention
+  retries and errors, the lease recovery (which only resets `running` rows) can't re-dispatch the now-`completed`
+  step, and the flow is stranded `running` with every step terminal — a permanent orphan flow. `failStep` and the
+  fan-in transaction write first (the failed-step / `updated_at` UPDATE); `completeFlow` was the one read-first
+  holdout (`computeFinalState`'s SELECTs before the status UPDATE) and now takes the flow row's write lock first.
+  A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go` reproduce the wedge
+  without the fix.
 - **Busy timeout** - `sequel` applies `_pragma=busy_timeout(1000)` to SQLite DSNs without one, so concurrent workers
   hitting a write lock wait up to 1s instead of failing immediately with `SQLITE_BUSY`. Essential during fan-out.
 - **Lock contention recovery** - `processStep` defers a check: on a lock-contention error
