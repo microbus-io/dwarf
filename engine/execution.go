@@ -912,6 +912,11 @@ func (e *Engine) breakerBulkUnpark(ctx context.Context, taskURL string, shardNum
 		"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE task_url=? AND parked=?",
 		parkedNone, taskURL, parkedBreaker,
 	)
+	// Ring the doorbell: the just-unparked steps are now selectable but were invisible to any refill scan
+	// that ran before this UPDATE committed. Without this, a freshly-unparked backlog waits for the probe's
+	// incidental post-completion refill (which can coalesce into a stale in-flight scan) or, failing that,
+	// the next backlogPollInterval sweep - up to a minute of idle latency after the breaker recovers.
+	e.requestRefill()
 }
 
 // fireFanInDirect creates the fan-in step immediately for an empty-cohort case.

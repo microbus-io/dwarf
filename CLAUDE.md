@@ -726,6 +726,30 @@ empty. It now branches on `db.DriverName()` to use `CAST(interrupt_payload AS CH
 JSON column in a `WHERE`/`CASE` need the cast. Any new query comparing a JSON/JSONB column to a literal must apply the
 same per-driver treatment.
 
+### Timestamps come from the database clock, never from Go
+
+**Every timestamp column is written with a SQL expression (`NOW_UTC()`, `DATE_ADD_MILLIS(NOW_UTC(), ?)`), never a
+bound Go `time.Time`.** Two reasons, both load-bearing:
+
+1. **Clock source / skew.** `created_at` ordering, lease expiry, `not_before`, the fairness `ageMs`, and the breaker
+   probe schedule all compare a stored timestamp against the database's own `NOW_UTC()`. If some rows were stamped by
+   the *application* clock and others by the *database* clock, every such comparison would carry the app↔DB skew (and,
+   across shards, the inter-node skew the scheduling design is careful to cancel - see "Selection", where both terms
+   of `ageMs` come from one shard clock so per-shard offset cancels exactly). Writing only via `NOW_UTC()` keeps a
+   single clock per shard authoritative.
+
+2. **Native string format.** Each driver's `NOW_UTC()` emits that engine's *native* datetime text, and the same
+   engine's date functions consume it without conversion. SQLite is the sharp edge: its native form is
+   **space-separated** (`2026-06-16 01:18:14.596`, from `STRFTIME`/`datetime()`), and that is what `NOW_UTC()`
+   produces. A bound Go `time.Time`, by contrast, is serialized by the modernc-sqlite driver as **RFC3339**
+   (`2000-01-01T00:00:00Z`) - which `JULIANDAY`/`DATE_DIFF_MILLIS` then fails to parse (returning NULL → a silent
+   `0`), so an age guard like `DATE_DIFF_MILLIS(NOW_UTC(), updated_at) > ?` quietly never matches. (The reverse is a
+   *read*-only artifact and harmless: modernc reformats a `DATETIME` *column* back to RFC3339 when marshaling to Go,
+   but the value stored on disk and compared in SQL is still the native space form, so engine-internal `WHERE`
+   comparisons are unaffected.) The lesson surfaced in a test that backdated `updated_at` with `time.Date(...)`; the
+   fix was to backdate with `DATE_ADD_MILLIS(NOW_UTC(), -ms)` - DB clock, native format. Never round-trip a timestamp
+   out to Go and back into a `WHERE`/`SET`; recompute it in SQL.
+
 ### Database Choice and Configuration
 
 The engine speaks four SQL dialects via `sequel`: SQLite, MySQL/MariaDB, PostgreSQL, SQL Server. They behave very

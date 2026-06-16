@@ -18,12 +18,10 @@ package engine
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
-	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -85,19 +83,25 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 		return
 	}
 
-	// Wait until P has armed the subgraph and parked.
+	// Wait until the subgraph child is fully started (status=running), not merely until the caller parks.
+	// The launch is three sequential steps - park the caller (parkedSubgraph), create the child (created),
+	// then start the child (running) - and the park commits and is visible before the child is started. If
+	// the test forged the child to completed in that window, the engine's start(child) would find it
+	// non-created and fail the caller with "flow is already started". A running child implies start(child)
+	// has run and the caller is parked. (SQLite serializes these writes so the window never opens; MySQL and
+	// Postgres expose it.)
 	var parentStepID int
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if db.QueryRowContext(ctx,
-			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND parked=? AND status=?",
-			parentFlowID, parkedSubgraph, workflow.StatusRunning,
-		).Scan(&parentStepID) == nil {
+			"SELECT surgraph_step_id FROM dwarf_flows WHERE surgraph_flow_id=? AND status=?",
+			parentFlowID, workflow.StatusRunning,
+		).Scan(&parentStepID) == nil && parentStepID != 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !assert.NotEqual(0, parentStepID, "caller never parked on the subgraph") {
+	if !assert.NotEqual(0, parentStepID, "subgraph child never started") {
 		return
 	}
 
@@ -121,27 +125,27 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 }
 
 // TestWedgeSweep_BreakerProbeReElected manufactures a breaker backlog that has lost its probe (all steps
-// parked=2, none dispatchable) and asserts the sweep re-elects a probe so the backlog recovers. The
-// downstream is made healthy just before recovery, so the re-elected probe succeeds, breakerClose unparks
-// the shard, and every flow completes.
+// parked=2, none dispatchable) and asserts the sweep re-elects a probe so the backlog recovers. The wedge is
+// built without ever running a live breaker cycle: the breaker is tripped in-memory first, so Start parks
+// every entry step to parked=2 and elects no probe (parkTrippedSteps). That is deterministic - there is no
+// concurrent breaker churn to race a forge against, hence no need to quiesce the engine. The task always
+// succeeds, so once the sweep elevates a probe it closes the breaker, breakerClose unparks the rest, and
+// every flow completes.
 func TestWedgeSweep_BreakerProbeReElected(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
 	const taskURL = "wedgebrk.verify:0/task"
-	var down atomic.Bool
-	down.Store(true)
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Down", "wedgebrk.verify:0/down")
 	g.AddTask("Down", taskURL)
 	g.AddTransition("Down", workflow.END)
 	proxy.HandleGraph("wedgebrk.verify:0/down", g)
+	// The task itself always succeeds; the breaker is tripped directly below, not by a failure, so no probe
+	// dispatch ever fails and the only way out of the backlog is the sweep re-electing a probe.
 	proxy.HandleTask(taskURL, func(ctx context.Context, f *workflow.Flow) error {
-		if down.Load() {
-			return workflow.ErrUnavailable(errors.New("downstream unavailable"), "unavailable")
-		}
 		return nil
 	})
 
@@ -149,7 +153,11 @@ func TestWedgeSweep_BreakerProbeReElected(t *testing.T) {
 	e.SetHost(proxy)
 	e.RunInTest(t)
 
-	// Several flows for the same task, so the breaker trips with a backlog beyond the single probe.
+	// Trip the breaker in-memory before starting any flow. With the breaker tripped, Start's parkTrippedSteps
+	// parks each entry step straight to parked=2 (and elects no probe), so the backlog is born wedged without
+	// a single dispatch.
+	e.breakerTrip(taskURL, breakerCauseAckTimeout)
+
 	const n = 4
 	keys := make([]string, 0, n)
 	for range n {
@@ -168,34 +176,29 @@ func TestWedgeSweep_BreakerProbeReElected(t *testing.T) {
 		return
 	}
 
-	// Wait until the breaker has tripped (at least one step parked=2 for the task).
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		var parked int
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE task_url=? AND parked=?", taskURL, parkedBreaker).Scan(&parked)
-		if parked >= 1 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	// Forge the lost-probe wedge: force every step of the task to parked=2 pending (no probe). Leave
-	// updated_at at its existing (past) value so the minAge=0 sweep flags it.
+	// Normalize the steps' timing columns using the DB clock (NOW_UTC()) only - never a bound Go time, which
+	// the engine itself avoids (clock skew) and which SQLite would store as RFC3339 that its date functions
+	// misparse. All on the quiescent (tripped-but-idle) backlog, so no concurrent writer races this UPDATE:
+	//   - updated_at backdated an hour so the sweep's age guard (minAge=0 here) matches regardless of how
+	//     recently the steps parked (a freshly-parked step can be sub-millisecond young at recovery's age check).
+	//   - lease_expires pulled to NOW so the re-elected probe is immediately leasable: a step parked at Start
+	//     was never dispatched, so its lease still sits at insert-time + leaseMargin (future).
 	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET parked=?, status=?, lease_expires=NOW_UTC() WHERE task_url=?",
-		parkedBreaker, workflow.StatusPending, taskURL,
+		"UPDATE dwarf_steps SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?), not_before=NOW_UTC(), lease_expires=NOW_UTC() WHERE task_url=?",
+		-int64(time.Hour/time.Millisecond), taskURL,
 	)
 	assert.NoError(err)
-	var probes int
+
+	// Confirm the wedge: n steps parked=2, no dispatchable probe.
+	var parked, probes int
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE task_url=? AND parked=?", taskURL, parkedBreaker).Scan(&parked)
 	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE task_url=? AND parked=? AND status IN (?,?)",
 		taskURL, parkedNone, workflow.StatusPending, workflow.StatusRunning).Scan(&probes)
-	if !assert.Equal(0, probes, "test setup should leave no probe") {
+	if !assert.Equal(n, parked, "all steps should be breaker-parked") || !assert.Equal(0, probes, "wedge should leave no probe") {
 		return
 	}
 
-	// Downstream recovers, then the sweep re-elects a probe; the probe succeeds, breakerClose unparks the
-	// rest, and all flows complete.
-	down.Store(false)
+	// Run the sweep: it re-elects a probe, the probe succeeds, breakerClose unparks the rest, all complete.
 	e.recoverWedgedBreakerParks(ctx, db, 1, 0)
 
 	for _, k := range keys {
