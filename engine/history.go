@@ -121,7 +121,12 @@ func (e *Engine) subgraphHistory(ctx context.Context, shardNum int, surgraphStep
 	}
 	var subFlowID int
 	var subWorkflowURL, subWorkflowName string
-	err = db.QueryRowContext(ctx, "SELECT flow_id, workflow_url, workflow_name FROM dwarf_flows WHERE surgraph_step_id=?", surgraphStepID).Scan(&subFlowID, &subWorkflowURL, &subWorkflowName)
+	// A surgraph step can have more than one child flow: flow.Retry rewinds the caller in place and
+	// re-spawns a fresh child each attempt. Pick the latest (flow_id DESC), matching completeSurgraphFlow,
+	// the wedge recovery, and Continue - so history renders the child whose value the caller actually used,
+	// never a discarded prior attempt. (flow.Retry now reaps the prior child, so normally only one exists;
+	// this ordering is the defense-in-depth invariant if a dangling child ever appears for any other reason.)
+	err = db.QueryRowContext(ctx, "SELECT flow_id, workflow_url, workflow_name FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)", surgraphStepID).Scan(&subFlowID, &subWorkflowURL, &subWorkflowName)
 	if err == sql.ErrNoRows {
 		return "", "", nil, nil
 	}

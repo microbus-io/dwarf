@@ -567,6 +567,37 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		if strings.TrimSpace(flowStatus) == workflow.StatusRunning {
 			return errors.New("cannot delete a running flow; cancel it first", http.StatusConflict)
 		}
+
+		// Delete cascades to the flow's subgraph descendants, recursively, so deleting a flow does not
+		// strand its children (whose only inbound reference is the now-deleted surgraph step). Subgraph
+		// children have parent-shard affinity, so all descendants live on this same shard/transaction.
+		descendants, err := e.allDescendantSubgraphFlows(ctx, tx, flowID)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if len(descendants) > 0 {
+			ph := strings.Repeat("?,", len(descendants)-1) + "?"
+			args := make([]any, 0, len(descendants))
+			for _, id := range descendants {
+				args = append(args, id)
+			}
+			// Refuse the whole cascade if any descendant is still running, mirroring the root guard -
+			// no partial delete that would orphan a live child's parent.
+			var runningChildren int
+			err = tx.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM dwarf_flows WHERE flow_id IN ("+ph+") AND status=?",
+				append(append([]any{}, args...), workflow.StatusRunning)...,
+			).Scan(&runningChildren)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if runningChildren > 0 {
+				return errors.New("cannot delete a flow with a running subgraph descendant; cancel it first", http.StatusConflict)
+			}
+			tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN ("+ph+")", args...)
+			tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id IN ("+ph+")", args...)
+		}
+
 		tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id=?", flowID)
 		tx.ExecContext(ctx,
 			"DELETE FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND status<>?",

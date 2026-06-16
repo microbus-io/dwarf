@@ -94,6 +94,18 @@ func (f *RawFlow) SetTimestamps(createdAt, updatedAt time.Time) {
 	f.updatedAt = updatedAt
 }
 
+// SetFlowKey records the external key of the flow being dispatched, so the task can read it via
+// Flow.FlowKey(). Called by the orchestrator before dispatching a task.
+func (f *RawFlow) SetFlowKey(flowKey string) {
+	f.flowKey = flowKey
+}
+
+// SetStepKey records the external key of the step being dispatched, so the task can read it via
+// Flow.StepKey(). Called by the orchestrator before dispatching a task.
+func (f *RawFlow) SetStepKey(stepKey string) {
+	f.stepKey = stepKey
+}
+
 // SetInterruptResolution records that an interrupt park has resolved, with the resume data
 // materialized from the step row's resume_data column, so flow.Interrupt returns it (with yield=false)
 // on re-entry instead of re-arming. The orchestrator calls this only when the step row's interrupt_done

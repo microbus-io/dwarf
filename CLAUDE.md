@@ -524,6 +524,16 @@ elapsed; a `flow.Retry` loop that exhausts after a chosen bound; an `OnError`/ti
 caller scheduling a `Cancel`. `Flow.CreatedAt()` and `Flow.UpdatedAt()` are populated on every dispatch, so the
 elapsed-time guard is one call away inside any task.
 
+### Task self-identity on the carrier
+
+`Flow.FlowKey()` and `Flow.StepKey()` return the task's own flow/step keys (`{shard}-{id}-{token}`), populated by the
+orchestrator on every dispatch alongside the timestamps. They let a task correlate logs/traces or call back into the
+engine (`History`, `Step`, `Snapshot`) for its own flow without the host threading identity through baggage. `step_token`
+is read alongside the claim/read in `processStep` (added to the RETURNING/OUTPUT/SELECT of all three driver branches);
+`flow_token` already rides the flow-row load. Both keys also survive the `Flow` JSON round-trip (the `flowJSON` wire
+format carries them), so a remote task reached over a transport sees the same identity as an in-process one. Empty when
+read outside a dispatched task.
+
 ### State Model
 
 Each step has three JSON columns: `state` (input snapshot), `changes` (output delta), `interrupt_payload` (from
@@ -555,7 +565,16 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   overrides, for operator-driven recovery after a flow has already terminated. **A retry clears the park
   slot** (`interrupt_done`/`subgraph_done` -> 0, `resume_data`/`subgraph_result` -> `'{}'`, `subgraph_error` -> `''`),
   so a retry after a resolved `flow.Subgraph` re-runs the child and after a resolved `flow.Interrupt` re-interrupts.
-  `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`
+  **A retry of a step that launched a subgraph reaps the prior attempt's child flow, recursively, in the same
+  transaction as the rewind** (`deleteSubgraphFlowsRootedAt(stepID)`). The child is always *terminal* at retry time
+  (the park resolves only on a terminal child), so this is a delete of inert rows, not a cascade-cancel of live work.
+  Leaving it would make the execution DAG claim two paths (`X -> iter1 -> iter2 -> Y`) when the model is single-path,
+  and let `subgraphHistory` attach the discarded child's subtree to the caller. This mirrors `RestartFrom`, which
+  likewise reaps the rewound step's own child (its `collectDAGSubtree` seeds `visited` with the target but never
+  *collects* it, so the target's child needs an explicit reap alongside the subtree sweep) - the reap is **step-scoped**
+  (only this caller's children) unlike `Restart`'s flow-scoped `allDescendantSubgraphFlows`. Defense in depth:
+  `subgraphHistory` selects the latest child (`ORDER BY flow_id DESC`), matching `completeSurgraphFlow`/wedge/`Continue`,
+  so even a stray dangling child never renders. `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`
   (retry-on-any-error is usually wrong). To retry only on a timeout, gate on
   `errors.StatusCode(err) == http.StatusRequestTimeout`.
 - **No jitter on retry backoff:** the worker pool already throttles per-replica concurrency, so simultaneous retries
@@ -1280,11 +1299,20 @@ The engine does not auto-purge flows: every row remains potentially-resurrectabl
 `Resume`, a `completed` flow via `Continue`, a `failed` flow via `Restart`/`RestartFrom`. A fixed timer would silently break these,
 and no single policy fits both a 1-hour batch and a 30-day approval workflow. For operator-driven retention:
 
-- **`Delete(flowKey)`** removes one flow and its steps in a transaction. Refuses a running flow (409). Subgraph
-  children and thread descendants are left dangling.
+- **`Delete(flowKey)`** removes one flow and its steps in a transaction, **cascading into the flow's subgraph
+  descendants recursively** (`allDescendantSubgraphFlows`, same-shard via parent-shard affinity) - a subgraph child's
+  only inbound reference is its now-deleted surgraph step, so leaving it would strand it. Refuses a running flow (409),
+  and likewise refuses the whole cascade if any descendant is still running (no partial delete that orphans a live
+  child's parent). Thread descendants (separate `Continue` flows) are *not* swept - they are independent resurrectable
+  flows, not children. (In practice a non-running root has no running descendant - subgraph children are terminal when
+  the parent is - so the descendant guard is defense against a race.)
 - **`Purge(Query)`** bulk-deletes flows matching the query, except running. Same `Query` shape as `List` (Status,
   WorkflowURL, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit). Capped at 10000 per call;
-  returns the count deleted. The non-running guard is enforced inside the DELETE.
+  returns the count deleted. The non-running guard is enforced inside the DELETE. **Purge deliberately does *not*
+  cascade into subgraph descendants** - that would require a per-row recursive SELECT-then-DELETE descent, defeating
+  the single bulk-DELETE that makes Purge a mass trim. A subgraph child orphaned by a purged parent is itself a
+  terminal flow matching the same age/status filters, so the next Purge sweeps it; the dangling window is bounded and
+  self-healing, acceptable for a retention sweep in a way it is not for a targeted `Delete`.
 
 Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the current
 step's `task_name` (excludes fan-out flows, `step_id=0`). `Query.OlderThan`/`NewerThan` are database-anchored

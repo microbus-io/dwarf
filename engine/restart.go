@@ -241,6 +241,11 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 				e.deleteSubgraphFlowsRootedAt(ctx, tx, m.stepID)
 			}
 		}
+		// The rewind below clears subgraph_done on the target step, so if it was a subgraph caller it
+		// re-spawns a fresh child on re-dispatch. collectDAGSubtree only returns the target's
+		// descendants (it seeds visited with startStepID but never collects it), so reap the target's
+		// own child here too - otherwise the prior attempt's child dangles, exactly the flow.Retry case.
+		e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID)
 		sweepAll(subtree)
 		for _, p := range parents {
 			sweepAll(p.subtree)

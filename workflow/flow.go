@@ -64,6 +64,11 @@ type Flow struct {
 	// Useful to a task implementing its own elapsed-time / lifetime guard.
 	createdAt time.Time
 	updatedAt time.Time
+
+	// Identity of the dispatch, populated by the orchestrator. The task's own flow and step keys,
+	// for correlating logs/traces or calling back into the engine (History/Step) with its own keys.
+	flowKey string
+	stepKey string
 }
 
 // NewFlow creates a new Flow with initialized maps.
@@ -149,6 +154,20 @@ func (f *Flow) CreatedAt() time.Time {
 // a dispatched task or when the orchestrator has not populated it.
 func (f *Flow) UpdatedAt() time.Time {
 	return f.updatedAt
+}
+
+// FlowKey returns the external key of the flow this task is executing in, in the form
+// "{shard}-{flowID}-{token}". Useful for correlating logs/traces or calling back into the engine
+// (e.g. History, Snapshot) for the task's own flow. Empty when called outside a dispatched task.
+func (f *Flow) FlowKey() string {
+	return f.flowKey
+}
+
+// StepKey returns the external key of the step this task is executing, in the form
+// "{shard}-{stepID}-{token}". Useful for correlating logs/traces or calling back into the engine
+// (e.g. Step) for the task's own step. Empty when called outside a dispatched task.
+func (f *Flow) StepKey() string {
+	return f.stepKey
 }
 
 // --- State mutation ---
@@ -558,7 +577,8 @@ func (f *Flow) diffAndApply(source any, snapshot, state, changes map[string]any)
 
 // flowJSON is the wire format for Flow.
 type flowJSON struct {
-	FlowKey                string         `json:"flowKey"`
+	FlowKey                string         `json:"flowKey,omitzero"`
+	StepKey                string         `json:"stepKey,omitzero"`
 	WorkflowURL            string         `json:"workflowURL"`
 	TaskName               string         `json:"taskName"`
 	StepNum                int            `json:"stepNum"`
@@ -588,6 +608,8 @@ type flowJSON struct {
 // MarshalJSON serializes the Flow including private fields.
 func (f *Flow) MarshalJSON() ([]byte, error) {
 	return json.Marshal(flowJSON{
+		FlowKey:                f.flowKey,
+		StepKey:                f.stepKey,
 		State:                  f.state,
 		Changes:                f.changes,
 		Goto:                   f.gotoNext,
@@ -618,6 +640,8 @@ func (f *Flow) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
+	f.flowKey = wire.FlowKey
+	f.stepKey = wire.StepKey
 	f.state = wire.State
 	f.changes = wire.Changes
 	f.gotoNext = wire.Goto
