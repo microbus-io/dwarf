@@ -50,10 +50,10 @@ func TestInterruptpayloadflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("interruptpayloadflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Interrupt(map[string]any{
+		yield, err := f.Interrupt(map[string]any{
 			"question": "pick one",
 			"options":  []string{"a", "b"},
-		})
+		}, nil)
 		if yield || err != nil {
 			return err
 		}

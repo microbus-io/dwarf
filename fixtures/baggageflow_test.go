@@ -78,7 +78,7 @@ func TestBaggageflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("baggageflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Subgraph("baggageflow.verify:428/inner", nil)
+		yield, err := f.Subgraph("baggageflow.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
 		}

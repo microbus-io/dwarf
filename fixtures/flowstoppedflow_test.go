@@ -56,7 +56,7 @@ func TestFlowstoppedflow(t *testing.T) {
 		case "fail":
 			return errors.New("gate refused", http.StatusInternalServerError)
 		case "interrupt":
-			_, yield, err := f.Interrupt(map[string]any{"need": "input"})
+			yield, err := f.Interrupt(map[string]any{"need": "input"}, nil)
 			if yield || err != nil {
 				return err
 			}

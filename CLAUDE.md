@@ -618,18 +618,22 @@ to complete - differing transitions would make the result depend on which finish
 
 ### State Across Subgraphs
 
-**Subgraph is a function call.** Only the explicit `input` map passed to `flow.Subgraph(url, input)` crosses into the
-child as its initial state; only the explicit `out` map (the child's `final_state`) crosses back. The parent's state
-and accumulated changes do NOT auto-cross either direction.
+**Subgraph is a function call.** The signature is `flow.Subgraph(url string, input any, out any) (yield bool, err
+error)`. Only the explicit `input` passed in crosses into the child as its initial state; only the explicit `out`
+target (the child's `final_state`) crosses back. The parent's state and accumulated changes do NOT auto-cross either
+direction. `input` is any JSON-marshalable value (a struct or a `map[string]any`), normalized to a state map via
+`toStateMap` (nil → "no arguments"); `out` is a pointer (a `*struct` or `*map[string]any`) the child's `final_state`
+is unmarshaled into by JSON tag (`parseMapInto`), or nil to ignore the result. A typed struct on either side gives
+field-level type safety without manual `map[string]any` casts.
 
-**Into the child:** `SubgraphRequested` passes `subgraphInput` directly to `createSubgraphFlow` as the child's
-initial state (nil normalized to `{}`). No merge with parent state. A caller wanting the parent's full state passes
-`flow.Snapshot()` as `input` - explicit opt-in.
+**Into the child:** `SubgraphRequested` passes `subgraphInput` (the `toStateMap`-normalized `input`) directly to
+`createSubgraphFlow` as the child's initial state (nil normalized to `{}`). No merge with parent state. A caller
+wanting the parent's full state passes `flow.Snapshot()` as `input` - explicit opt-in.
 
 **Back to the parent:** `completeSurgraphFlow` writes the child's `final_state` to the surgraph step's
-`subgraph_result` column, sets `subgraph_done=1`, and re-dispatches the parent task. The task's `flow.Subgraph` call
-returns that `final_state` as `out` (yield=false), and the task adopts the fields it wants. The child output is
-**not** merged into the parent's `changes`.
+`subgraph_result` column, sets `subgraph_done=1`, and re-dispatches the parent task. On re-entry `flow.Subgraph`
+unmarshals that `final_state` into the caller's `out` (yield=false), and the task reads the fields it wants. The
+child output is **not** merged into the parent's `changes`.
 
 ### Surgraph Step Identification
 

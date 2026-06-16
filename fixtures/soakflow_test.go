@@ -114,7 +114,7 @@ func TestSoakflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("soakflow.verify:428/sub", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Subgraph("soakflow.verify:428/inner", nil)
+		yield, err := f.Subgraph("soakflow.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
 		}

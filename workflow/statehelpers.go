@@ -94,6 +94,27 @@ func parseMapInto(m map[string]any, target any) error {
 	return nil
 }
 
+// toStateMap converts an arbitrary JSON-marshalable value into a state map. A nil value yields a
+// nil map ("no arguments"); a map[string]any passes through unchanged; anything else (typically a
+// struct) is round-tripped through JSON so its tagged fields become map entries.
+func toStateMap(v any) (map[string]any, error) {
+	if v == nil {
+		return nil, nil
+	}
+	if m, ok := v.(map[string]any); ok {
+		return m, nil
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, errors.Trace(err)
+	}
+	return m, nil
+}
+
 // jsonTagName extracts the JSON tag name from a struct field.
 func jsonTagName(field reflect.StructField) string {
 	tag := field.Tag.Get("json")

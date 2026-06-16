@@ -351,62 +351,66 @@ On the first call (not yet resumed) it records the interrupt request with the gi
 the surgraph chain and surfaced to the awaiting caller so it can see what data the task needs - and returns
 yield=true. The task must return immediately.
 
-On re-entry after Resume it returns the resume data with yield=false and does not re-arm; the task proceeds.
-The returned err is non-nil only if the payload fails to marshal; interrupt itself has no failure mode, so
-err is otherwise always nil. The three returns let Interrupt, Subgraph, and Retry share one convention.
+On re-entry after Resume it unmarshals the resume data into out with yield=false and does not re-arm; the task
+proceeds. The payload is any JSON-marshalable value (a struct or a map[string]any); out is a pointer (a *struct or
+*map[string]any) the resume data is unmarshaled into by JSON tag, or nil to ignore it. The returned err is non-nil
+only if the payload fails to marshal (or out fails to unmarshal); interrupt itself has no failure mode, so err is
+otherwise always nil. Symmetric with Subgraph: any in, pointer out.
 
-	resumeData, yield, err := flow.Interrupt(map[string]any{"request": "userInput"})
+	var resume ResumeData
+	yield, err := flow.Interrupt(map[string]any{"request": "userInput"}, &resume)
 	if yield {
 	    return nil // parked, awaiting Resume
 	}
-	// proceed with resumeData
+	// proceed with resume
 */
-func (f *Flow) Interrupt(payload any) (resumeData map[string]any, yield bool, err error) {
+func (f *Flow) Interrupt(payload any, out any) (yield bool, err error) {
 	if f.interruptDone {
-		return f.resumeData, false, nil
+		if out != nil {
+			if err := parseMapInto(f.resumeData, out); err != nil {
+				return false, errors.Trace(err)
+			}
+		}
+		return false, nil
 	}
 	// Single-park guard: a step parks at most once - interrupt XOR subgraph, and at most once per kind.
 	// Reject arming an interrupt when this step already parked for a subgraph (resolved subgraphDone, or
 	// armed earlier in this same dispatch via subgraphWorkflow)...
 	if f.subgraphDone || f.subgraphWorkflow != "" {
-		return nil, false, errors.New("cannot interrupt: step already parked for a subgraph")
+		return false, errors.New("cannot interrupt: step already parked for a subgraph")
 	}
 	// ...or when an interrupt was already armed earlier in this same dispatch: a second flow.Interrupt
 	// call before the task returns would otherwise silently overwrite the payload.
 	if f.interrupt {
-		return nil, false, errors.New("cannot interrupt: step already armed an interrupt this dispatch")
+		return false, errors.New("cannot interrupt: step already armed an interrupt this dispatch")
 	}
-	var payloadMap map[string]any
-	if payload != nil {
-		payloadJSON, err := json.Marshal(payload)
-		if err != nil {
-			return nil, false, errors.Trace(err)
-		}
-		err = json.Unmarshal(payloadJSON, &payloadMap)
-		if err != nil {
-			return nil, false, errors.Trace(err)
-		}
+	payloadMap, err := toStateMap(payload)
+	if err != nil {
+		return false, errors.Trace(err)
 	}
 	f.interrupt = true
 	f.interruptPayload = payloadMap
-	return nil, true, nil
+	return true, nil
 }
 
 /*
-Subgraph runs a child workflow and returns its result once it completes, parking the step in between.
+Subgraph runs a child workflow and unmarshals its result once it completes, parking the step in between.
 
-Semantically a function call: only the explicit input map crosses the boundary into the child, and only the explicit
-out map crosses back. The parent's state does NOT auto-cross either direction. A nil input means "no arguments" (the
-child starts with empty state). A caller that wants the parent's full state to cross can pass flow.Snapshot() (or a
-derived map) as input.
+Semantically a function call: only the explicit input crosses the boundary into the child, and only the explicit out
+crosses back. The parent's state does NOT auto-cross either direction. The input is any JSON-marshalable value (a
+struct or a map[string]any) and becomes the child's initial state field-by-field; a nil input means "no arguments"
+(the child starts with empty state). A caller that wants the parent's full state to cross can pass flow.Snapshot() as
+input. The out argument is a pointer (a *struct or *map[string]any) into which the child's final_state is unmarshaled
+by JSON tag; pass nil to ignore the result. Using a typed struct reads only the fields you declare, with type safety.
 
-On the first call (child not yet run) it arms the subgraph park with the child workflow URL and the explicit input
-map and returns yield=true; the task must return immediately.
+On the first call (child not yet run) it arms the subgraph park with the child workflow URL and the input and returns
+yield=true; the task must return immediately.
 
-On re-entry after the child terminates it returns the child's final_state as out with yield=false, and err set if the
-child failed. The task adopts the fields it wants from out. Does not re-arm on re-entry.
+On re-entry after the child terminates it unmarshals the child's final_state into out, returns yield=false, and sets
+err if the child failed. Does not re-arm on re-entry.
 
-	out, yield, err := flow.Subgraph(childURL, map[string]any{"value": value})
+	var out ChildOut
+	yield, err := flow.Subgraph(childURL, ChildIn{Value: value}, &out)
 	if yield {
 	    return nil // parked, child running
 	}
@@ -416,29 +420,38 @@ child failed. The task adopts the fields it wants from out. Does not re-arm on r
 	    }
 	    return errors.Trace(err)
 	}
-	// adopt fields from out
+	// read fields from out
 */
-func (f *Flow) Subgraph(workflowURL string, input map[string]any) (out map[string]any, yield bool, err error) {
+func (f *Flow) Subgraph(workflowURL string, input any, out any) (yield bool, err error) {
 	if f.subgraphDone {
-		if f.subgraphError != "" {
-			return f.subgraphResult, false, errors.New(f.subgraphError)
+		if out != nil {
+			if err := parseMapInto(f.subgraphResult, out); err != nil {
+				return false, errors.Trace(err)
+			}
 		}
-		return f.subgraphResult, false, nil
+		if f.subgraphError != "" {
+			return false, errors.New(f.subgraphError)
+		}
+		return false, nil
 	}
 	// Single-park guard: a step parks at most once - interrupt XOR subgraph, and at most once per kind.
 	// Reject arming a subgraph when this step already parked for an interrupt (resolved interruptDone, or
 	// armed earlier in this same dispatch via interrupt)...
 	if f.interruptDone || f.interrupt {
-		return nil, false, errors.New("cannot start subgraph: step already parked for an interrupt")
+		return false, errors.New("cannot start subgraph: step already parked for an interrupt")
 	}
 	// ...or when a subgraph was already armed earlier in this same dispatch: a second flow.Subgraph call
 	// before the task returns would otherwise silently overwrite the child workflow/input.
 	if f.subgraphWorkflow != "" {
-		return nil, false, errors.New("cannot start subgraph: step already armed a subgraph this dispatch")
+		return false, errors.New("cannot start subgraph: step already armed a subgraph this dispatch")
+	}
+	inputMap, err := toStateMap(input)
+	if err != nil {
+		return false, errors.Trace(err)
 	}
 	f.subgraphWorkflow = workflowURL
-	f.subgraphInput = input
-	return nil, true, nil
+	f.subgraphInput = inputMap
+	return true, nil
 }
 
 /*

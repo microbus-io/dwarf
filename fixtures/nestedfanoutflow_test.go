@@ -84,7 +84,8 @@ func TestNestedfanoutflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("nestedfanoutflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
-		out, yield, err := f.Subgraph("nestedfanoutflow.verify:428/inner", nil)
+		var out map[string]any
+		yield, err := f.Subgraph("nestedfanoutflow.verify:428/inner", nil, &out)
 		if yield || err != nil {
 			return err
 		}

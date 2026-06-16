@@ -81,7 +81,8 @@ func TestSubgraphfailflow(t *testing.T) {
 			return nil
 		})
 		proxy.HandleTask("subgraphfailflow.verify:428/run-inner-recover", func(ctx context.Context, f *workflow.Flow) error {
-			out, yield, err := f.Subgraph("subgraphfailflow.verify:428/inner", nil)
+			var out map[string]any
+			yield, err := f.Subgraph("subgraphfailflow.verify:428/inner", nil, &out)
 			if yield {
 				return nil
 			}
@@ -138,7 +139,7 @@ func TestSubgraphfailflow(t *testing.T) {
 			return nil
 		})
 		proxy.HandleTask("subgraphfailflow.verify:428/run-inner-fail", func(ctx context.Context, f *workflow.Flow) error {
-			_, yield, err := f.Subgraph("subgraphfailflow.verify:428/inner", nil)
+			yield, err := f.Subgraph("subgraphfailflow.verify:428/inner", nil, nil)
 			if yield {
 				return nil
 			}

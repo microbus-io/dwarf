@@ -117,7 +117,7 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 		})
 	}
 	proxy.HandleTask("superflow.verify:428/super-sub-call", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Subgraph("superflow.verify:428/super-sub", nil)
+		yield, err := f.Subgraph("superflow.verify:428/super-sub", nil, nil)
 		if yield || err != nil {
 			return err
 		}

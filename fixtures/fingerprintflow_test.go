@@ -50,7 +50,7 @@ func TestFingerprintflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("fingerprintflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Interrupt(map[string]any{"need": "input"})
+		yield, err := f.Interrupt(map[string]any{"need": "input"}, nil)
 		if yield || err != nil {
 			return err
 		}

@@ -66,7 +66,8 @@ func TestSubgraphinterruptflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("subgraphinterruptflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
-		resumeData, yield, err := f.Interrupt(map[string]any{"need": "input"})
+		var resumeData map[string]any
+		yield, err := f.Interrupt(map[string]any{"need": "input"}, &resumeData)
 		if yield || err != nil {
 			return err
 		}
@@ -80,7 +81,8 @@ func TestSubgraphinterruptflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("subgraphinterruptflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
-		out, yield, err := f.Subgraph("subgraphinterruptflow.verify:428/inner", nil)
+		var out map[string]any
+		yield, err := f.Subgraph("subgraphinterruptflow.verify:428/inner", nil, &out)
 		if yield || err != nil {
 			return err
 		}

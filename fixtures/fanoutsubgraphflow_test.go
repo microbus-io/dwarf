@@ -72,7 +72,7 @@ func TestFanoutSubgraphflow(t *testing.T) {
 	proxy.HandleTask("fanoutsub.verify:428/join", noop)
 	proxy.HandleTask("fanoutsub.verify:428/inner-entry", noop)
 	proxy.HandleTask("fanoutsub.verify:428/sub", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Subgraph("fanoutsub.verify:428/inner", nil)
+		yield, err := f.Subgraph("fanoutsub.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
 		}

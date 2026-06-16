@@ -56,7 +56,7 @@ func TestInterruptedfanoutflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("interruptedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Interrupt(map[string]any{"branch": "B"})
+		yield, err := f.Interrupt(map[string]any{"branch": "B"}, nil)
 		if yield || err != nil {
 			return err
 		}

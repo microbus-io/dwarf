@@ -44,7 +44,8 @@ func TestInterruptflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("interruptflow.verify:428/await-input", func(ctx context.Context, f *workflow.Flow) error {
-		resumeData, yield, err := f.Interrupt(map[string]any{"requestedInput": "userInput"})
+		var resumeData map[string]any
+		yield, err := f.Interrupt(map[string]any{"requestedInput": "userInput"}, &resumeData)
 		if yield || err != nil {
 			return err
 		}

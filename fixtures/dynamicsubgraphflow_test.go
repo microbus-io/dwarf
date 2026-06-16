@@ -47,7 +47,8 @@ func TestDynamicsubgraphflow(t *testing.T) {
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/inner", inner)
 
 	proxy.HandleTask("dynamicsubgraphflow.verify:428/parent", func(ctx context.Context, f *workflow.Flow) error {
-		out, yield, err := f.Subgraph("dynamicsubgraphflow.verify:428/inner", map[string]any{"value": f.GetInt("value")})
+		var out map[string]any
+		yield, err := f.Subgraph("dynamicsubgraphflow.verify:428/inner", map[string]any{"value": f.GetInt("value")}, &out)
 		if yield || err != nil {
 			return err
 		}

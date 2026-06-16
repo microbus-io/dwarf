@@ -78,7 +78,7 @@ func TestDeletecascadeflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("deletecascadeflow.verify:428/run-child", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Subgraph("deletecascadeflow.verify:428/child", nil)
+		yield, err := f.Subgraph("deletecascadeflow.verify:428/child", nil, nil)
 		if yield || err != nil {
 			return err
 		}
@@ -89,7 +89,7 @@ func TestDeletecascadeflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("deletecascadeflow.verify:428/run-grandchild", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Subgraph("deletecascadeflow.verify:428/grandchild", nil)
+		yield, err := f.Subgraph("deletecascadeflow.verify:428/grandchild", nil, nil)
 		if yield || err != nil {
 			return err
 		}

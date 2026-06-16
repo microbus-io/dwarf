@@ -56,7 +56,7 @@ func TestCompletionRaceflow(t *testing.T) {
 	proxy.HandleGraph("completionrace.verify:428/inner", inner)
 
 	proxy.HandleTask("completionrace.verify:428/caller", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Subgraph("completionrace.verify:428/inner", nil)
+		yield, err := f.Subgraph("completionrace.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
 		}

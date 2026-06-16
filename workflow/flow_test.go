@@ -316,7 +316,7 @@ func TestFlow_Interrupt(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
-	f.Interrupt(map[string]any{"request": "ssn"})
+	f.Interrupt(map[string]any{"request": "ssn"}, nil)
 	assert.True(f.interrupt)
 	assert.Equal("ssn", f.interruptPayload["request"])
 }
@@ -327,20 +327,20 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 
 	// Subgraph armed this dispatch blocks a subsequent interrupt.
 	f := NewFlow()
-	_, yield, err := f.Subgraph("https://x/wf", nil)
+	yield, err := f.Subgraph("https://x/wf", nil, nil)
 	assert.True(yield)
 	assert.NoError(err)
-	_, yield, err = f.Interrupt(map[string]any{"request": "ssn"})
+	yield, err = f.Interrupt(map[string]any{"request": "ssn"}, nil)
 	assert.False(yield)
 	assert.Error(err)
 	assert.False(f.interrupt)
 
 	// Interrupt armed this dispatch blocks a subsequent subgraph.
 	f = NewFlow()
-	_, yield, err = f.Interrupt(map[string]any{"request": "ssn"})
+	yield, err = f.Interrupt(map[string]any{"request": "ssn"}, nil)
 	assert.True(yield)
 	assert.NoError(err)
-	_, yield, err = f.Subgraph("https://x/wf", nil)
+	yield, err = f.Subgraph("https://x/wf", nil, nil)
 	assert.False(yield)
 	assert.Error(err)
 	assert.Equal("", f.subgraphWorkflow)
@@ -348,7 +348,7 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 	// A resolved interrupt slot blocks arming a subgraph on re-entry.
 	f = NewFlow()
 	f.interruptDone = true
-	_, yield, err = f.Subgraph("https://x/wf", nil)
+	yield, err = f.Subgraph("https://x/wf", nil, nil)
 	assert.False(yield)
 	assert.Error(err)
 	assert.Equal("", f.subgraphWorkflow)
@@ -356,27 +356,27 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 	// A resolved subgraph slot blocks arming an interrupt on re-entry.
 	f = NewFlow()
 	f.subgraphDone = true
-	_, yield, err = f.Interrupt(map[string]any{"request": "ssn"})
+	yield, err = f.Interrupt(map[string]any{"request": "ssn"}, nil)
 	assert.False(yield)
 	assert.Error(err)
 	assert.False(f.interrupt)
 
 	// A second interrupt this dispatch is rejected and does not overwrite the first payload.
 	f = NewFlow()
-	_, yield, err = f.Interrupt(map[string]any{"request": "first"})
+	yield, err = f.Interrupt(map[string]any{"request": "first"}, nil)
 	assert.True(yield)
 	assert.NoError(err)
-	_, yield, err = f.Interrupt(map[string]any{"request": "second"})
+	yield, err = f.Interrupt(map[string]any{"request": "second"}, nil)
 	assert.False(yield)
 	assert.Error(err)
 	assert.Equal("first", f.interruptPayload["request"])
 
 	// A second subgraph this dispatch is rejected and does not overwrite the first workflow URL.
 	f = NewFlow()
-	_, yield, err = f.Subgraph("https://x/first", nil)
+	yield, err = f.Subgraph("https://x/first", nil, nil)
 	assert.True(yield)
 	assert.NoError(err)
-	_, yield, err = f.Subgraph("https://x/second", nil)
+	yield, err = f.Subgraph("https://x/second", nil, nil)
 	assert.False(yield)
 	assert.Error(err)
 	assert.Equal("https://x/first", f.subgraphWorkflow)
@@ -430,7 +430,7 @@ func TestFlow_MarshalUnmarshal(t *testing.T) {
 	original.Goto("next")
 	original.Retry(5, time.Second, 2.0, 30*time.Second)
 	original.Sleep(5 * time.Second)
-	original.Interrupt(map[string]any{"request": "ssn"})
+	original.Interrupt(map[string]any{"request": "ssn"}, nil)
 	original.attempt = 2
 
 	data, err := json.Marshal(original)

@@ -66,7 +66,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	proxy.HandleTask("tracingflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("tracingflow.verify:428/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("tracingflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
-		_, yield, err := f.Subgraph("tracingflow.verify:428/inner", nil)
+		yield, err := f.Subgraph("tracingflow.verify:428/inner", nil, nil)
 		if yield || err != nil {
 			return err
 		}

@@ -93,7 +93,8 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 	// RunInner launches the subgraph, then retries exactly once (maxAttempts=1: true at attempt 0,
 	// false at attempt 1), re-spawning a fresh child on the retry.
 	proxy.HandleTask("retrysubgraphreapflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
-		out, yield, err := f.Subgraph("retrysubgraphreapflow.verify:428/inner", map[string]any{"seed": f.GetString("seed")})
+		var out map[string]any
+		yield, err := f.Subgraph("retrysubgraphreapflow.verify:428/inner", map[string]any{"seed": f.GetString("seed")}, &out)
 		if yield || err != nil {
 			return err
 		}
@@ -188,7 +189,8 @@ func TestRestartFromSubgraphReapflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("restartfromsubgraphreapflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
-		out, yield, err := f.Subgraph("restartfromsubgraphreapflow.verify:428/inner", map[string]any{"seed": f.GetString("seed")})
+		var out map[string]any
+		yield, err := f.Subgraph("restartfromsubgraphreapflow.verify:428/inner", map[string]any{"seed": f.GetString("seed")}, &out)
 		if yield || err != nil {
 			return err
 		}

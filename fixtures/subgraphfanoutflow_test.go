@@ -77,7 +77,8 @@ func TestSubgraphfanoutflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("subgraphfanoutflow.verify:428/run-sub", func(ctx context.Context, f *workflow.Flow) error {
-		out, yield, err := f.Subgraph("subgraphfanoutflow.verify:428/sub", nil)
+		var out map[string]any
+		yield, err := f.Subgraph("subgraphfanoutflow.verify:428/sub", nil, &out)
 		if yield || err != nil {
 			return err
 		}

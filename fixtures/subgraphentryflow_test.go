@@ -56,7 +56,8 @@ func TestSubgraphentryflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("subgraphentryflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
-		out, yield, err := f.Subgraph("subgraphentryflow.verify:428/inner", nil)
+		var out map[string]any
+		yield, err := f.Subgraph("subgraphentryflow.verify:428/inner", nil, &out)
 		if yield || err != nil {
 			return err
 		}
@@ -70,7 +71,8 @@ func TestSubgraphentryflow(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("subgraphentryflow.verify:428/run-tail", func(ctx context.Context, f *workflow.Flow) error {
-		out, yield, err := f.Subgraph("subgraphentryflow.verify:428/tail", map[string]any{"innerResult": f.GetString("innerResult")})
+		var out map[string]any
+		yield, err := f.Subgraph("subgraphentryflow.verify:428/tail", map[string]any{"innerResult": f.GetString("innerResult")}, &out)
 		if yield || err != nil {
 			return err
 		}

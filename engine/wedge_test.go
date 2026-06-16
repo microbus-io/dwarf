@@ -48,7 +48,8 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	proxy.HandleGraph("wedgesub.verify:0/child", child)
 
 	proxy.HandleTask("wedgesub.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
-		out, yield, err := f.Subgraph("wedgesub.verify:0/child", nil)
+		var out map[string]any
+		yield, err := f.Subgraph("wedgesub.verify:0/child", nil, &out)
 		if yield || err != nil {
 			return err
 		}
