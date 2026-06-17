@@ -267,8 +267,8 @@ type FlowOutcome struct {
 }
 ```
 
-The flow key is deliberately **not** a field: it is identity, not outcome. Every consumer already has it - the
-caller passed it to `Snapshot`/`Await`, `Run` returns it, and `FlowStopped` receives it as an argument.
+The flow key is delivered separately, not on the outcome: the caller passed it to `Snapshot`/`Await`, `Run`
+returns it, and `FlowStopped` receives it as an argument.
 
 Side-channel fields are populated only for the matching status. `Run`'s Go-level `error` return is reserved for
 infrastructure failures (DB, timeout); a *workflow failure* surfaces as `Status == "failed"` with `Error` set, so
