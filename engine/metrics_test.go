@@ -79,9 +79,9 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
 	proxy := NewTestProxy()
-	g := workflow.NewGraph("G", "metricsflow.verify:428/g")
-	g.AddTask("taskA", "metricsflow.verify:428/a")
-	g.AddTask("taskB", "metricsflow.verify:428/b")
+	g := workflow.NewGraph("G")
+	g.SetEndpoint("taskA", "metricsflow.verify:428/a")
+	g.SetEndpoint("taskB", "metricsflow.verify:428/b")
 	g.AddTransition("taskA", "taskB")
 	g.AddTransition("taskB", workflow.END)
 	proxy.HandleGraph("metricsflow.verify:428/g", g)
@@ -93,7 +93,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	eng.SetMeterProvider(mp)
 	eng.RunInTest(t)
 
-	outcome, err := eng.Run(ctx, "metricsflow.verify:428/g", nil, nil)
+	_, outcome, err := eng.Run(ctx, "metricsflow.verify:428/g", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}

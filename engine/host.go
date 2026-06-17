@@ -55,10 +55,11 @@ type Host interface {
 	ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error
 
 	// FlowStopped is fired when a flow stops (completed, failed, cancelled, interrupted), but only for a
-	// flow created with FlowOptions.NotifyOnStop=true. The flow's opaque baggage rides on ctx (read it
-	// with workflow.BaggageFrom(ctx)); the host decides where/how to deliver the notification from it -
-	// the engine traffics in no delivery address. Optional: a host with no notification need does nothing.
-	FlowStopped(ctx context.Context, outcome *workflow.FlowOutcome)
+	// flow created with FlowOptions.NotifyOnStop=true. flowKey identifies the stopped flow (it is not part
+	// of the outcome). The flow's opaque baggage rides on ctx (read it with workflow.BaggageFrom(ctx)); the
+	// host decides where/how to deliver the notification from it - the engine traffics in no delivery
+	// address. Optional: a host with no notification need does nothing.
+	FlowStopped(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome)
 
 	// SignalPeers delivers a cross-replica coordination signal to the other replicas. op is an opaque
 	// routing key (usable as a topic); payload is opaque bytes the engine already serialized. The host
@@ -75,5 +76,5 @@ func (noopHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, er
 func (noopHost) ExecuteTask(ctx context.Context, name string, flow *workflow.Flow) error {
 	return nil
 }
-func (noopHost) FlowStopped(context.Context, *workflow.FlowOutcome) {}
-func (noopHost) SignalPeers(context.Context, string, []byte)        {}
+func (noopHost) FlowStopped(context.Context, string, *workflow.FlowOutcome) {}
+func (noopHost) SignalPeers(context.Context, string, []byte)                {}

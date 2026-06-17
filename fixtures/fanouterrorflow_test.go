@@ -32,13 +32,13 @@ func TestFanouterrorflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("FanOutError", "fanouterrorflow.verify:428/fan-out-error")
-	graph.AddTask("TaskA", "fanouterrorflow.verify:428/task-a")
-	graph.AddTask("TaskB", "fanouterrorflow.verify:428/task-b")
-	graph.AddTask("TaskC", "fanouterrorflow.verify:428/task-c")
-	graph.AddTask("TaskD", "fanouterrorflow.verify:428/task-d")
-	graph.AddTask("Handler", "fanouterrorflow.verify:428/handler")
-	graph.AddTask("TaskE", "fanouterrorflow.verify:428/task-e")
+	graph := workflow.NewGraph("FanOutError")
+	graph.SetEndpoint("TaskA", "fanouterrorflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "fanouterrorflow.verify:428/task-b")
+	graph.SetEndpoint("TaskC", "fanouterrorflow.verify:428/task-c")
+	graph.SetEndpoint("TaskD", "fanouterrorflow.verify:428/task-d")
+	graph.SetEndpoint("Handler", "fanouterrorflow.verify:428/handler")
+	graph.SetEndpoint("TaskE", "fanouterrorflow.verify:428/task-e")
 	graph.SetFanIn("TaskE")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransition("TaskA", "TaskC")
@@ -81,7 +81,7 @@ func TestFanouterrorflow(t *testing.T) {
 	t.Run("flow_does_not_fail", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "fanouterrorflow.verify:428/fan-out-error", nil, nil)
+		_, outcome, err := eng.Run(ctx, "fanouterrorflow.verify:428/fan-out-error", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 	})
@@ -89,7 +89,7 @@ func TestFanouterrorflow(t *testing.T) {
 	t.Run("handler_runs_and_state_reaches_taskE", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "fanouterrorflow.verify:428/fan-out-error", nil, nil)
+		_, outcome, err := eng.Run(ctx, "fanouterrorflow.verify:428/fan-out-error", nil, nil)
 		assert.NoError(err)
 		assert.Equal(true, outcome.State["recovered"])
 	})

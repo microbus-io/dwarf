@@ -24,9 +24,9 @@ limitations under the License.
 //
 // A Graph is a directed graph of tasks and transitions. Build one with NewGraph and the Add* methods:
 //
-//	g := workflow.NewGraph("Checkout", "checkout")
-//	g.AddTask("Reserve", "inventory.reserve")
-//	g.AddTask("Charge", "billing.charge")
+//	g := workflow.NewGraph("Checkout")
+//	g.SetEndpoint("Reserve", "inventory.reserve")
+//	g.SetEndpoint("Charge", "billing.charge")
 //	g.AddTransition("Reserve", "Charge")
 //	g.AddTransition("Charge", workflow.END)
 //

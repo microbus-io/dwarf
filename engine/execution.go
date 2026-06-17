@@ -641,11 +641,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if notifyOnStop {
 			var finalState map[string]any
 			json.Unmarshal([]byte(flowFailedFinalState), &finalState)
-			e.fireFlowStopped(ctx, baggageJSON, &workflow.FlowOutcome{
-				FlowKey: compositeID,
-				Status:  workflow.StatusFailed,
-				State:   finalState,
-				Error:   flowFailedErr,
+			e.fireFlowStopped(ctx, compositeID, baggageJSON, &workflow.FlowOutcome{
+				Status: workflow.StatusFailed,
+				State:  finalState,
+				Error:  flowFailedErr,
 			})
 		}
 		e.signalStop(ctx, compositeID, workflow.StatusFailed)
@@ -701,9 +700,8 @@ func (e *Engine) handleBreakpoint(ctx context.Context, shardNum int, db *sequel.
 	var rootBaggageJSON string
 	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyOnStop, &rootBaggageJSON)
 	if rootNotifyOnStop {
-		e.fireFlowStopped(ctx, rootBaggageJSON, &workflow.FlowOutcome{
-			FlowKey: rootCompositeID,
-			Status:  workflow.StatusInterrupted,
+		e.fireFlowStopped(ctx, rootCompositeID, rootBaggageJSON, &workflow.FlowOutcome{
+			Status: workflow.StatusInterrupted,
 		})
 	}
 	return nil
@@ -769,8 +767,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 	var rootBaggageJSON string
 	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyOnStop, &rootBaggageJSON)
 	if rootNotifyOnStop {
-		e.fireFlowStopped(ctx, rootBaggageJSON, &workflow.FlowOutcome{
-			FlowKey:          rootCompositeID,
+		e.fireFlowStopped(ctx, rootCompositeID, rootBaggageJSON, &workflow.FlowOutcome{
 			Status:           workflow.StatusInterrupted,
 			InterruptPayload: interruptPayload,
 		})

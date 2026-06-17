@@ -34,12 +34,12 @@ func TestCancelledfanoutflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("CancelledFanOut", "cancelledfanoutflow.verify:428/cancelled-fan-out")
-	graph.AddTask("Source", "cancelledfanoutflow.verify:428/source")
-	graph.AddTask("A", "cancelledfanoutflow.verify:428/a")
-	graph.AddTask("B", "cancelledfanoutflow.verify:428/b")
-	graph.AddTask("C", "cancelledfanoutflow.verify:428/c")
-	graph.AddTask("J", "cancelledfanoutflow.verify:428/j")
+	graph := workflow.NewGraph("CancelledFanOut")
+	graph.SetEndpoint("Source", "cancelledfanoutflow.verify:428/source")
+	graph.SetEndpoint("A", "cancelledfanoutflow.verify:428/a")
+	graph.SetEndpoint("B", "cancelledfanoutflow.verify:428/b")
+	graph.SetEndpoint("C", "cancelledfanoutflow.verify:428/c")
+	graph.SetEndpoint("J", "cancelledfanoutflow.verify:428/j")
 	graph.SetFanIn("J")
 	graph.SetReducer("executed", workflow.ReducerAdd)
 	graph.AddTransition("Source", "A")

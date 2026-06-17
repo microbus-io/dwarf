@@ -43,8 +43,8 @@ func TestTaskdeadlineflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Flow", "taskdeadlineflow.verify:428/flow")
-	graph.AddTask("Work", "taskdeadlineflow.verify:428/work")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("Work", "taskdeadlineflow.verify:428/work")
 	graph.AddTransition("Work", workflow.END)
 	proxy.HandleGraph("taskdeadlineflow.verify:428/flow", graph)
 
@@ -73,7 +73,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	start := time.Now()
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	outcome, err := eng.Run(timeoutCtx, "taskdeadlineflow.verify:428/flow", nil, nil)
+	_, outcome, err := eng.Run(timeoutCtx, "taskdeadlineflow.verify:428/flow", nil, nil)
 	elapsed := time.Since(start)
 	if !assert.NoError(err) {
 		return

@@ -31,8 +31,8 @@ func TestContinueflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Counting", "continueflow.verify:428/counting")
-	graph.AddTask("Increment", "continueflow.verify:428/increment")
+	graph := workflow.NewGraph("Counting")
+	graph.SetEndpoint("Increment", "continueflow.verify:428/increment")
 	graph.AddTransition("Increment", workflow.END)
 	proxy.HandleGraph("continueflow.verify:428/counting", graph)
 

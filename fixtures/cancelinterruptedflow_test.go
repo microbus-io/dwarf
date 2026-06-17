@@ -37,10 +37,10 @@ func TestCancelinterruptedflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Flow", "cancelinterruptedflow.verify:428/flow")
-	graph.AddTask("TaskA", "cancelinterruptedflow.verify:428/task-a")
-	graph.AddTask("Pause", "cancelinterruptedflow.verify:428/pause")
-	graph.AddTask("TaskB", "cancelinterruptedflow.verify:428/task-b")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("TaskA", "cancelinterruptedflow.verify:428/task-a")
+	graph.SetEndpoint("Pause", "cancelinterruptedflow.verify:428/pause")
+	graph.SetEndpoint("TaskB", "cancelinterruptedflow.verify:428/task-b")
 	graph.AddTransition("TaskA", "Pause")
 	graph.AddTransition("Pause", "TaskB")
 	graph.AddTransition("TaskB", workflow.END)

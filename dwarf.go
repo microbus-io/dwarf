@@ -36,11 +36,11 @@ limitations under the License.
 // A 30-second taste, using the in-process test harness:
 //
 //	proxy := engine.NewTestProxy()
-//	g := workflow.NewGraph("Greet", "greet")
-//	g.AddTask("Hello", "Hello")
+//	g := workflow.NewGraph("Greet")
+//	g.SetEndpoint("Hello", "http://example/hello") // node "Hello" dispatches to this endpoint URL
 //	g.AddTransition("Hello", workflow.END)
-//	proxy.HandleGraph("greet", g)
-//	proxy.HandleTask("Hello", func(ctx context.Context, f *workflow.Flow) error {
+//	proxy.HandleGraph("http://example/greet", g)
+//	proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
 //		f.SetString("greeting", "hello "+f.GetString("name"))
 //		return nil
 //	})
@@ -49,7 +49,7 @@ limitations under the License.
 //	eng.SetHost(proxy)
 //	eng.RunInTest(t) // SQLite in-memory, auto cleanup
 //
-//	out, _ := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
+//	_, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil)
 //	fmt.Println(out.State["greeting"]) // hello ada
 //
 // See the docs/ directory in the repository for guides on graphs, tasks, scheduling, observability, and

@@ -32,9 +32,9 @@ func TestTimebudgetflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("TimeBudget", "timebudgetflow.verify:428/time-budget")
-	graph.AddTask("TaskA", "timebudgetflow.verify:428/task-a")
-	graph.AddTask("Slow", "timebudgetflow.verify:428/slow")
+	graph := workflow.NewGraph("TimeBudget")
+	graph.SetEndpoint("TaskA", "timebudgetflow.verify:428/task-a")
+	graph.SetEndpoint("Slow", "timebudgetflow.verify:428/slow")
 	graph.AddTransition("TaskA", "Slow")
 	graph.AddTransition("Slow", workflow.END)
 	proxy.HandleGraph("timebudgetflow.verify:428/time-budget", graph)
@@ -63,7 +63,7 @@ func TestTimebudgetflow(t *testing.T) {
 	t.Run("slow_task_exceeds_budget_and_fails_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "timebudgetflow.verify:428/time-budget", nil, nil)
+		_, outcome, err := eng.Run(ctx, "timebudgetflow.verify:428/time-budget", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 	})

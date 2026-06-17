@@ -36,8 +36,8 @@ func TestCrossReplicaAwait(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	graph := workflow.NewGraph("Flow", "crossreplica.verify:428/flow")
-	graph.AddTask("Work", "crossreplica.verify:428/work")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("Work", "crossreplica.verify:428/work")
 	graph.AddTransition("Work", workflow.END)
 
 	// eng1: pure awaiter. Its task handler must never run (zero workers).

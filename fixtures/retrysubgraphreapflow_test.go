@@ -60,19 +60,19 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 	captured := &childCapture{}
 
 	// Parent graph: TaskA -> RunInner -> TaskZ
-	parent := workflow.NewGraph("Parent", "retrysubgraphreapflow.verify:428/parent")
-	parent.AddTask("TaskA", "retrysubgraphreapflow.verify:428/task-a")
-	parent.AddTask("RunInner", "retrysubgraphreapflow.verify:428/run-inner")
-	parent.AddTask("TaskZ", "retrysubgraphreapflow.verify:428/task-z")
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("TaskA", "retrysubgraphreapflow.verify:428/task-a")
+	parent.SetEndpoint("RunInner", "retrysubgraphreapflow.verify:428/run-inner")
+	parent.SetEndpoint("TaskZ", "retrysubgraphreapflow.verify:428/task-z")
 	parent.AddTransition("TaskA", "RunInner")
 	parent.AddTransition("RunInner", "TaskZ")
 	parent.AddTransition("TaskZ", workflow.END)
 	proxy.HandleGraph("retrysubgraphreapflow.verify:428/parent", parent)
 
 	// Inner graph: TaskX -> TaskY
-	inner := workflow.NewGraph("Inner", "retrysubgraphreapflow.verify:428/inner")
-	inner.AddTask("TaskX", "retrysubgraphreapflow.verify:428/task-x")
-	inner.AddTask("TaskY", "retrysubgraphreapflow.verify:428/task-y")
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("TaskX", "retrysubgraphreapflow.verify:428/task-x")
+	inner.SetEndpoint("TaskY", "retrysubgraphreapflow.verify:428/task-y")
 	inner.AddTransition("TaskX", "TaskY")
 	inner.AddTransition("TaskY", workflow.END)
 	proxy.HandleGraph("retrysubgraphreapflow.verify:428/inner", inner)
@@ -115,7 +115,7 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 
 	assert := testarossa.For(t)
 
-	outcome, err := eng.Run(ctx, "retrysubgraphreapflow.verify:428/parent", map[string]any{"seed": "s"}, nil)
+	flowKey, outcome, err := eng.Run(ctx, "retrysubgraphreapflow.verify:428/parent", map[string]any{"seed": "s"}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 	assert.Equal("Z(Y(X))", outcome.State["result"])
@@ -136,7 +136,7 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 
 	// And the parent's history renders the survivor's subtree, not the reaped iteration-1 subtree, so
 	// the DAG is single-path. The survivor's step key appears in SubHistory; the reaped one does not.
-	hist, err := eng.History(ctx, outcome.FlowKey)
+	hist, err := eng.History(ctx, flowKey)
 	assert.NoError(err)
 	var subKeys []string
 	for _, step := range hist {
@@ -160,18 +160,18 @@ func TestRestartFromSubgraphReapflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	captured := &childCapture{}
 
-	parent := workflow.NewGraph("Parent", "restartfromsubgraphreapflow.verify:428/parent")
-	parent.AddTask("TaskA", "restartfromsubgraphreapflow.verify:428/task-a")
-	parent.AddTask("RunInner", "restartfromsubgraphreapflow.verify:428/run-inner")
-	parent.AddTask("TaskZ", "restartfromsubgraphreapflow.verify:428/task-z")
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("TaskA", "restartfromsubgraphreapflow.verify:428/task-a")
+	parent.SetEndpoint("RunInner", "restartfromsubgraphreapflow.verify:428/run-inner")
+	parent.SetEndpoint("TaskZ", "restartfromsubgraphreapflow.verify:428/task-z")
 	parent.AddTransition("TaskA", "RunInner")
 	parent.AddTransition("RunInner", "TaskZ")
 	parent.AddTransition("TaskZ", workflow.END)
 	proxy.HandleGraph("restartfromsubgraphreapflow.verify:428/parent", parent)
 
-	inner := workflow.NewGraph("Inner", "restartfromsubgraphreapflow.verify:428/inner")
-	inner.AddTask("TaskX", "restartfromsubgraphreapflow.verify:428/task-x")
-	inner.AddTask("TaskY", "restartfromsubgraphreapflow.verify:428/task-y")
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("TaskX", "restartfromsubgraphreapflow.verify:428/task-x")
+	inner.SetEndpoint("TaskY", "restartfromsubgraphreapflow.verify:428/task-y")
 	inner.AddTransition("TaskX", "TaskY")
 	inner.AddTransition("TaskY", workflow.END)
 	proxy.HandleGraph("restartfromsubgraphreapflow.verify:428/inner", inner)
@@ -211,7 +211,7 @@ func TestRestartFromSubgraphReapflow(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// First run to completion - one subgraph child created.
-	outcome, err := eng.Run(ctx, "restartfromsubgraphreapflow.verify:428/parent", map[string]any{"seed": "s"}, nil)
+	flowKey, outcome, err := eng.Run(ctx, "restartfromsubgraphreapflow.verify:428/parent", map[string]any{"seed": "s"}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
@@ -220,7 +220,7 @@ func TestRestartFromSubgraphReapflow(t *testing.T) {
 	child1Key := keys[0]
 
 	// Find the RunInner caller step key from the parent's history.
-	hist, err := eng.History(ctx, outcome.FlowKey)
+	hist, err := eng.History(ctx, flowKey)
 	assert.NoError(err)
 	var runInnerKey string
 	for _, step := range hist {
@@ -234,7 +234,7 @@ func TestRestartFromSubgraphReapflow(t *testing.T) {
 	err = eng.RestartFrom(ctx, runInnerKey, nil)
 	assert.NoError(err)
 
-	final, err := eng.Await(ctx, outcome.FlowKey)
+	final, err := eng.Await(ctx, flowKey)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, final.Status)
 

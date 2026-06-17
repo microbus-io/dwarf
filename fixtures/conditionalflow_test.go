@@ -31,11 +31,11 @@ func TestConditionalflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Conditional", "conditionalflow.verify:428/conditional")
-	graph.AddTask("TaskA", "conditionalflow.verify:428/task-a")
-	graph.AddTask("TaskHigh", "conditionalflow.verify:428/task-high")
-	graph.AddTask("TaskLow", "conditionalflow.verify:428/task-low")
-	graph.AddTask("TaskC", "conditionalflow.verify:428/task-c")
+	graph := workflow.NewGraph("Conditional")
+	graph.SetEndpoint("TaskA", "conditionalflow.verify:428/task-a")
+	graph.SetEndpoint("TaskHigh", "conditionalflow.verify:428/task-high")
+	graph.SetEndpoint("TaskLow", "conditionalflow.verify:428/task-low")
+	graph.SetEndpoint("TaskC", "conditionalflow.verify:428/task-c")
 	graph.SetFanIn("TaskC")
 	graph.AddTransitionWhen("TaskA", "TaskHigh", "score >= 50")
 	graph.AddTransitionWhen("TaskA", "TaskLow", "score < 50")
@@ -67,7 +67,7 @@ func TestConditionalflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"score": 80}
-		outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])
@@ -77,7 +77,7 @@ func TestConditionalflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"score": 20}
-		outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("low", outcome.State["branch"])
@@ -87,7 +87,7 @@ func TestConditionalflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"score": 50}
-		outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])

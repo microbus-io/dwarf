@@ -48,26 +48,26 @@ func TestDeletecascadeflow(t *testing.T) {
 	}
 
 	// Root: TaskA -> RunChild -> TaskZ
-	root := workflow.NewGraph("Root", "deletecascadeflow.verify:428/root")
-	root.AddTask("TaskA", "deletecascadeflow.verify:428/task-a")
-	root.AddTask("RunChild", "deletecascadeflow.verify:428/run-child")
-	root.AddTask("TaskZ", "deletecascadeflow.verify:428/task-z")
+	root := workflow.NewGraph("Root")
+	root.SetEndpoint("TaskA", "deletecascadeflow.verify:428/task-a")
+	root.SetEndpoint("RunChild", "deletecascadeflow.verify:428/run-child")
+	root.SetEndpoint("TaskZ", "deletecascadeflow.verify:428/task-z")
 	root.AddTransition("TaskA", "RunChild")
 	root.AddTransition("RunChild", "TaskZ")
 	root.AddTransition("TaskZ", workflow.END)
 	proxy.HandleGraph("deletecascadeflow.verify:428/root", root)
 
 	// Child: ChildWork -> RunGrandchild
-	child := workflow.NewGraph("Child", "deletecascadeflow.verify:428/child")
-	child.AddTask("ChildWork", "deletecascadeflow.verify:428/child-work")
-	child.AddTask("RunGrandchild", "deletecascadeflow.verify:428/run-grandchild")
+	child := workflow.NewGraph("Child")
+	child.SetEndpoint("ChildWork", "deletecascadeflow.verify:428/child-work")
+	child.SetEndpoint("RunGrandchild", "deletecascadeflow.verify:428/run-grandchild")
 	child.AddTransition("ChildWork", "RunGrandchild")
 	child.AddTransition("RunGrandchild", workflow.END)
 	proxy.HandleGraph("deletecascadeflow.verify:428/child", child)
 
 	// Grandchild: GrandchildWork
-	grandchild := workflow.NewGraph("Grandchild", "deletecascadeflow.verify:428/grandchild")
-	grandchild.AddTask("GrandchildWork", "deletecascadeflow.verify:428/grandchild-work")
+	grandchild := workflow.NewGraph("Grandchild")
+	grandchild.SetEndpoint("GrandchildWork", "deletecascadeflow.verify:428/grandchild-work")
 	grandchild.AddTransition("GrandchildWork", workflow.END)
 	proxy.HandleGraph("deletecascadeflow.verify:428/grandchild", grandchild)
 
@@ -104,7 +104,7 @@ func TestDeletecascadeflow(t *testing.T) {
 	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
-	outcome, err := eng.Run(ctx, "deletecascadeflow.verify:428/root", nil, nil)
+	flowKey, outcome, err := eng.Run(ctx, "deletecascadeflow.verify:428/root", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
@@ -124,11 +124,11 @@ func TestDeletecascadeflow(t *testing.T) {
 	assert.NoError(err)
 
 	// Delete the root flow.
-	err = eng.Delete(ctx, outcome.FlowKey)
+	err = eng.Delete(ctx, flowKey)
 	assert.NoError(err)
 
 	// The root and every subgraph descendant are gone.
-	_, err = eng.Snapshot(ctx, outcome.FlowKey)
+	_, err = eng.Snapshot(ctx, flowKey)
 	assert.Error(err)
 	_, err = eng.Step(ctx, childKey)
 	assert.Error(err)

@@ -32,22 +32,22 @@ func TestSubgraphentryflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Outer graph: RunInner -> RunTail -> END
-	outer := workflow.NewGraph("Outer", "subgraphentryflow.verify:428/outer")
-	outer.AddTask("RunInner", "subgraphentryflow.verify:428/run-inner")
-	outer.AddTask("RunTail", "subgraphentryflow.verify:428/run-tail")
+	outer := workflow.NewGraph("Outer")
+	outer.SetEndpoint("RunInner", "subgraphentryflow.verify:428/run-inner")
+	outer.SetEndpoint("RunTail", "subgraphentryflow.verify:428/run-tail")
 	outer.AddTransition("RunInner", "RunTail")
 	outer.AddTransition("RunTail", workflow.END)
 	proxy.HandleGraph("subgraphentryflow.verify:428/outer", outer)
 
 	// Inner subgraph: TaskInner -> END
-	inner := workflow.NewGraph("Inner", "subgraphentryflow.verify:428/inner")
-	inner.AddTask("TaskInner", "subgraphentryflow.verify:428/task-inner")
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("TaskInner", "subgraphentryflow.verify:428/task-inner")
 	inner.AddTransition("TaskInner", workflow.END)
 	proxy.HandleGraph("subgraphentryflow.verify:428/inner", inner)
 
 	// Tail subgraph: TaskTail -> END
-	tail := workflow.NewGraph("Tail", "subgraphentryflow.verify:428/tail")
-	tail.AddTask("TaskTail", "subgraphentryflow.verify:428/task-tail")
+	tail := workflow.NewGraph("Tail")
+	tail.SetEndpoint("TaskTail", "subgraphentryflow.verify:428/task-tail")
 	tail.AddTransition("TaskTail", workflow.END)
 	proxy.HandleGraph("subgraphentryflow.verify:428/tail", tail)
 
@@ -89,7 +89,7 @@ func TestSubgraphentryflow(t *testing.T) {
 	t.Run("subgraph_as_first_and_last_node", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "subgraphentryflow.verify:428/outer", nil, nil)
+		_, outcome, err := eng.Run(ctx, "subgraphentryflow.verify:428/outer", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("inner/tail", outcome.State["finalResult"])

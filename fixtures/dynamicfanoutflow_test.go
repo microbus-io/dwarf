@@ -31,10 +31,10 @@ func TestDynamicfanoutflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("DynamicFanOut", "dynamicfanoutflow.verify:428/dynamic-fan-out")
-	graph.AddTask("TaskA", "dynamicfanoutflow.verify:428/task-a")
-	graph.AddTask("TaskB", "dynamicfanoutflow.verify:428/task-b")
-	graph.AddTask("TaskC", "dynamicfanoutflow.verify:428/task-c")
+	graph := workflow.NewGraph("DynamicFanOut")
+	graph.SetEndpoint("TaskA", "dynamicfanoutflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "dynamicfanoutflow.verify:428/task-b")
+	graph.SetEndpoint("TaskC", "dynamicfanoutflow.verify:428/task-c")
 	graph.SetFanIn("TaskC")
 	graph.SetReducer("processed", workflow.ReducerAdd)
 	graph.SetReducer("seenIndices", workflow.ReducerAppend)
@@ -69,7 +69,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{"x", "y", "z"}}
-		outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3.0, outcome.State["processedCount"])
@@ -79,7 +79,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{"only"}}
-		outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(1.0, outcome.State["processedCount"])
@@ -89,7 +89,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{}}
-		outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 	})

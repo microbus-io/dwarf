@@ -48,13 +48,13 @@ func TestBreakerurlisolationflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Two graphs, SAME node name "Shared", DIFFERENT dispatch URLs.
-	downGraph := workflow.NewGraph("DownFlow", "breakerurlisolationflow.verify:428/down-flow")
-	downGraph.AddTask("Shared", "breakerurlisolationflow.verify:428/down")
+	downGraph := workflow.NewGraph("DownFlow")
+	downGraph.SetEndpoint("Shared", "breakerurlisolationflow.verify:428/down")
 	downGraph.AddTransition("Shared", workflow.END)
 	proxy.HandleGraph("breakerurlisolationflow.verify:428/down-flow", downGraph)
 
-	upGraph := workflow.NewGraph("UpFlow", "breakerurlisolationflow.verify:428/up-flow")
-	upGraph.AddTask("Shared", "breakerurlisolationflow.verify:428/up")
+	upGraph := workflow.NewGraph("UpFlow")
+	upGraph.SetEndpoint("Shared", "breakerurlisolationflow.verify:428/up")
 	upGraph.AddTransition("Shared", workflow.END)
 	proxy.HandleGraph("breakerurlisolationflow.verify:428/up-flow", upGraph)
 

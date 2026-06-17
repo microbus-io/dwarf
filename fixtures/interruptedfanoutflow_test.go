@@ -31,12 +31,12 @@ func TestInterruptedfanoutflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("InterruptedFanOut", "interruptedfanoutflow.verify:428/interrupted-fan-out")
-	graph.AddTask("Src", "interruptedfanoutflow.verify:428/src")
-	graph.AddTask("A", "interruptedfanoutflow.verify:428/a")
-	graph.AddTask("B", "interruptedfanoutflow.verify:428/b")
-	graph.AddTask("C", "interruptedfanoutflow.verify:428/c")
-	graph.AddTask("J", "interruptedfanoutflow.verify:428/j")
+	graph := workflow.NewGraph("InterruptedFanOut")
+	graph.SetEndpoint("Src", "interruptedfanoutflow.verify:428/src")
+	graph.SetEndpoint("A", "interruptedfanoutflow.verify:428/a")
+	graph.SetEndpoint("B", "interruptedfanoutflow.verify:428/b")
+	graph.SetEndpoint("C", "interruptedfanoutflow.verify:428/c")
+	graph.SetEndpoint("J", "interruptedfanoutflow.verify:428/j")
 	graph.SetFanIn("J")
 	graph.SetReducer("executed", workflow.ReducerAdd)
 	graph.AddTransition("Src", "A")

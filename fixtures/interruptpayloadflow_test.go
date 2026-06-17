@@ -38,9 +38,9 @@ func TestInterruptpayloadflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Interrupt", "interruptpayloadflow.verify:428/interrupt")
-	graph.AddTask("Setup", "interruptpayloadflow.verify:428/setup")
-	graph.AddTask("Ask", "interruptpayloadflow.verify:428/ask")
+	graph := workflow.NewGraph("Interrupt")
+	graph.SetEndpoint("Setup", "interruptpayloadflow.verify:428/setup")
+	graph.SetEndpoint("Ask", "interruptpayloadflow.verify:428/ask")
 	graph.AddTransition("Setup", "Ask")
 	graph.AddTransition("Ask", workflow.END)
 	proxy.HandleGraph("interruptpayloadflow.verify:428/interrupt", graph)

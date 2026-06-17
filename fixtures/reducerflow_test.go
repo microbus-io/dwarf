@@ -36,12 +36,12 @@ func TestReducerflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Reducer", "reducerflow.verify:428/reducer")
-	graph.AddTask("TaskA", "reducerflow.verify:428/task-a")
-	graph.AddTask("TaskB", "reducerflow.verify:428/task-b")
-	graph.AddTask("TaskC", "reducerflow.verify:428/task-c")
-	graph.AddTask("TaskD", "reducerflow.verify:428/task-d")
-	graph.AddTask("TaskE", "reducerflow.verify:428/task-e")
+	graph := workflow.NewGraph("Reducer")
+	graph.SetEndpoint("TaskA", "reducerflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "reducerflow.verify:428/task-b")
+	graph.SetEndpoint("TaskC", "reducerflow.verify:428/task-c")
+	graph.SetEndpoint("TaskD", "reducerflow.verify:428/task-d")
+	graph.SetEndpoint("TaskE", "reducerflow.verify:428/task-e")
 	graph.SetFanIn("TaskE")
 	graph.SetReducer("total", workflow.ReducerAdd)
 	graph.SetReducer("tags", workflow.ReducerAppend)
@@ -90,7 +90,7 @@ func TestReducerflow(t *testing.T) {
 	t.Run("sum_list_and_set_reducers_apply", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "reducerflow.verify:428/reducer", nil, nil)
+		_, outcome, err := eng.Run(ctx, "reducerflow.verify:428/reducer", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(60.0, outcome.State["finalSum"])

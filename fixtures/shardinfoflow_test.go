@@ -37,8 +37,8 @@ func TestShardinfoflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Flow", "shardinfoflow.verify:428/flow")
-	graph.AddTask("Only", "shardinfoflow.verify:428/only")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("Only", "shardinfoflow.verify:428/only")
 	graph.AddTransition("Only", workflow.END)
 	proxy.HandleGraph("shardinfoflow.verify:428/flow", graph)
 
@@ -55,7 +55,7 @@ func TestShardinfoflow(t *testing.T) {
 
 	const total = 30
 	for range total {
-		outcome, err := eng.Run(ctx, "shardinfoflow.verify:428/flow", nil, nil)
+		_, outcome, err := eng.Run(ctx, "shardinfoflow.verify:428/flow", nil, nil)
 		testarossa.NoError(t, err)
 		testarossa.Equal(t, workflow.StatusCompleted, outcome.Status)
 	}

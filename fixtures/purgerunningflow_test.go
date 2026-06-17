@@ -36,8 +36,8 @@ func TestPurgerunningflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Flow", "purgerunningflow.verify:428/flow")
-	graph.AddTask("Work", "purgerunningflow.verify:428/work")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("Work", "purgerunningflow.verify:428/work")
 	graph.AddTransition("Work", workflow.END)
 	proxy.HandleGraph("purgerunningflow.verify:428/flow", graph)
 

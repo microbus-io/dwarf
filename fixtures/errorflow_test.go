@@ -33,11 +33,11 @@ func TestErrorflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Error", "errorflow.verify:428/error")
-	graph.AddTask("TaskA", "errorflow.verify:428/task-a")
-	graph.AddTask("TaskB", "errorflow.verify:428/task-b")
-	graph.AddTask("Handler", "errorflow.verify:428/handler")
-	graph.AddTask("TaskC", "errorflow.verify:428/task-c")
+	graph := workflow.NewGraph("Error")
+	graph.SetEndpoint("TaskA", "errorflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "errorflow.verify:428/task-b")
+	graph.SetEndpoint("Handler", "errorflow.verify:428/handler")
+	graph.SetEndpoint("TaskC", "errorflow.verify:428/task-c")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransitionOnError("TaskB", "Handler")
 	graph.AddTransition("TaskB", "TaskC")
@@ -78,7 +78,7 @@ func TestErrorflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"trigger": "ok"}
-		outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("final:normal", outcome.State["finalResult"])
@@ -88,7 +88,7 @@ func TestErrorflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"trigger": "fail"}
-		outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		finalResult, _ := outcome.State["finalResult"].(string)

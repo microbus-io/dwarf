@@ -43,12 +43,12 @@ func TestFanoutSubgraphflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Parent: Entry fans out to {A, B, Sub}, all converging at the Join fan-in, then END.
-	parent := workflow.NewGraph("Parent", "fanoutsub.verify:428/parent")
-	parent.AddTask("Entry", "fanoutsub.verify:428/entry")
-	parent.AddTask("A", "fanoutsub.verify:428/a")
-	parent.AddTask("B", "fanoutsub.verify:428/b")
-	parent.AddTask("Sub", "fanoutsub.verify:428/sub")
-	parent.AddTask("Join", "fanoutsub.verify:428/join")
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("Entry", "fanoutsub.verify:428/entry")
+	parent.SetEndpoint("A", "fanoutsub.verify:428/a")
+	parent.SetEndpoint("B", "fanoutsub.verify:428/b")
+	parent.SetEndpoint("Sub", "fanoutsub.verify:428/sub")
+	parent.SetEndpoint("Join", "fanoutsub.verify:428/join")
 	parent.SetFanIn("Join")
 	parent.AddTransition("Entry", "A")
 	parent.AddTransition("Entry", "B")
@@ -60,8 +60,8 @@ func TestFanoutSubgraphflow(t *testing.T) {
 	proxy.HandleGraph("fanoutsub.verify:428/parent", parent)
 
 	// Inner: a single trivial task, so the child completes as fast as possible to race the caller's park.
-	inner := workflow.NewGraph("Inner", "fanoutsub.verify:428/inner")
-	inner.AddTask("InnerEntry", "fanoutsub.verify:428/inner-entry")
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("InnerEntry", "fanoutsub.verify:428/inner-entry")
 	inner.AddTransition("InnerEntry", workflow.END)
 	proxy.HandleGraph("fanoutsub.verify:428/inner", inner)
 

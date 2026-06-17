@@ -36,8 +36,8 @@ func TestShardedflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Sharded", "shardedflow.verify:428/sharded")
-	graph.AddTask("Record", "shardedflow.verify:428/record")
+	graph := workflow.NewGraph("Sharded")
+	graph.SetEndpoint("Record", "shardedflow.verify:428/record")
 	graph.AddTransition("Record", workflow.END)
 	proxy.HandleGraph("shardedflow.verify:428/sharded", graph)
 

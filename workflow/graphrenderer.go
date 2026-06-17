@@ -150,7 +150,9 @@ type endEdge struct {
 
 func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix string) (heads []string, endEdges []endEdge) {
 	g := r.g
-	ownHost := hostOf(g.url)
+	// The graph no longer carries its own URL; use the entry node's endpoint host as the "own host"
+	// for stripping the local host:port from node labels (cosmetic). Bare keys (no "://") yield "".
+	ownHost := hostOf(g.URLOf(g.entryPoint))
 	ids := make(map[string]string, len(g.nodes))
 	labels := make(map[string]string, len(g.nodes))
 	for i, t := range g.nodes {

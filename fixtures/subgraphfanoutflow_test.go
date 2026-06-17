@@ -33,12 +33,12 @@ func TestSubgraphfanoutflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Outer graph: A -> {NormalB, RunSub, NormalD} -> E
-	outer := workflow.NewGraph("SubFanOut", "subgraphfanoutflow.verify:428/sub-fan-out")
-	outer.AddTask("TaskA", "subgraphfanoutflow.verify:428/task-a")
-	outer.AddTask("NormalB", "subgraphfanoutflow.verify:428/normal-b")
-	outer.AddTask("RunSub", "subgraphfanoutflow.verify:428/run-sub")
-	outer.AddTask("NormalD", "subgraphfanoutflow.verify:428/normal-d")
-	outer.AddTask("TaskE", "subgraphfanoutflow.verify:428/task-e")
+	outer := workflow.NewGraph("SubFanOut")
+	outer.SetEndpoint("TaskA", "subgraphfanoutflow.verify:428/task-a")
+	outer.SetEndpoint("NormalB", "subgraphfanoutflow.verify:428/normal-b")
+	outer.SetEndpoint("RunSub", "subgraphfanoutflow.verify:428/run-sub")
+	outer.SetEndpoint("NormalD", "subgraphfanoutflow.verify:428/normal-d")
+	outer.SetEndpoint("TaskE", "subgraphfanoutflow.verify:428/task-e")
 	outer.SetFanIn("TaskE")
 	outer.AddTransition("TaskA", "NormalB")
 	outer.AddTransition("TaskA", "RunSub")
@@ -50,9 +50,9 @@ func TestSubgraphfanoutflow(t *testing.T) {
 	proxy.HandleGraph("subgraphfanoutflow.verify:428/sub-fan-out", outer)
 
 	// Sub graph: X -> Y
-	sub := workflow.NewGraph("Sub", "subgraphfanoutflow.verify:428/sub")
-	sub.AddTask("TaskX", "subgraphfanoutflow.verify:428/task-x")
-	sub.AddTask("TaskY", "subgraphfanoutflow.verify:428/task-y")
+	sub := workflow.NewGraph("Sub")
+	sub.SetEndpoint("TaskX", "subgraphfanoutflow.verify:428/task-x")
+	sub.SetEndpoint("TaskY", "subgraphfanoutflow.verify:428/task-y")
 	sub.AddTransition("TaskX", "TaskY")
 	sub.AddTransition("TaskY", workflow.END)
 	proxy.HandleGraph("subgraphfanoutflow.verify:428/sub", sub)
@@ -103,7 +103,7 @@ func TestSubgraphfanoutflow(t *testing.T) {
 	t.Run("subgraph_as_sibling_in_fan_out", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "subgraphfanoutflow.verify:428/sub-fan-out", nil, nil)
+		_, outcome, err := eng.Run(ctx, "subgraphfanoutflow.verify:428/sub-fan-out", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("b/sub/d", outcome.State["result"])

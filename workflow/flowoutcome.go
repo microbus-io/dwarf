@@ -21,8 +21,6 @@ package workflow
 // Side-channel fields are populated only for the matching Status; for example InterruptPayload
 // is populated only when Status is "interrupted".
 type FlowOutcome struct {
-	// FlowKey is the public composite key of the flow.
-	FlowKey string `json:"flowKey,omitzero"`
 	// Status is the flow's current lifecycle status: created, running, interrupted, completed, failed, or cancelled.
 	Status string `json:"status,omitzero"`
 	// State is the flow's accumulated state. For terminal statuses this is the final_state;

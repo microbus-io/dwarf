@@ -31,10 +31,10 @@ func TestBreakpointflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Breakpoint", "breakpointflow.verify:428/breakpoint")
-	graph.AddTask("TaskA", "breakpointflow.verify:428/task-a")
-	graph.AddTask("TaskB", "TaskB")
-	graph.AddTask("TaskC", "breakpointflow.verify:428/task-c")
+	graph := workflow.NewGraph("Breakpoint")
+	graph.SetEndpoint("TaskA", "breakpointflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "TaskB")
+	graph.SetEndpoint("TaskC", "breakpointflow.verify:428/task-c")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransition("TaskB", "TaskC")
 	graph.AddTransition("TaskC", workflow.END)

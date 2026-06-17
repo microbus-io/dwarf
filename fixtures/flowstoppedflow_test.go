@@ -37,6 +37,7 @@ import (
 
 type stopEvent struct {
 	hostname string
+	flowKey  string
 	outcome  *workflow.FlowOutcome
 }
 
@@ -46,8 +47,8 @@ func TestFlowstoppedflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Flow", "flowstoppedflow.verify:428/flow")
-	graph.AddTask("Gate", "flowstoppedflow.verify:428/gate")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("Gate", "flowstoppedflow.verify:428/gate")
 	graph.AddTransition("Gate", workflow.END)
 	proxy.HandleGraph("flowstoppedflow.verify:428/flow", graph)
 
@@ -70,9 +71,9 @@ func TestFlowstoppedflow(t *testing.T) {
 	// The callback is fire-and-forget; capture events on a buffered channel. The notify target rides in
 	// baggage on the ctx (the engine carries no delivery address), so the host reads it from there.
 	events := make(chan stopEvent, 16)
-	cb := func(ctx context.Context, outcome *workflow.FlowOutcome) {
+	cb := func(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome) {
 		host, _ := workflow.BaggageFrom(ctx).(map[string]any)["host"].(string)
-		events <- stopEvent{hostname: host, outcome: outcome}
+		events <- stopEvent{hostname: host, flowKey: flowKey, outcome: outcome}
 	}
 	proxy.OnFlowStopped(cb)
 
@@ -87,7 +88,7 @@ func TestFlowstoppedflow(t *testing.T) {
 		for {
 			select {
 			case ev := <-events:
-				if ev.outcome.FlowKey == flowKey {
+				if ev.flowKey == flowKey {
 					return ev
 				}
 			case <-deadline:

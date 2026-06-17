@@ -16,12 +16,12 @@ interfaces, and it handles scheduling, state, durability, and recovery.
 ```go
 proxy := engine.NewTestProxy()
 
-g := workflow.NewGraph("Greet", "greet")
-g.AddTask("Hello", "hello")
+g := workflow.NewGraph("Greet")
+g.SetEndpoint("Hello", "http://example/hello") // node "Hello" dispatches to this endpoint URL
 g.AddTransition("Hello", workflow.END)
-proxy.HandleGraph("greet", g)
+proxy.HandleGraph("http://example/greet", g)
 
-proxy.HandleTask("hello", func(ctx context.Context, f *workflow.Flow) error {
+proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
     f.SetString("greeting", "hello "+f.GetString("name"))
     return nil
 })
@@ -30,7 +30,7 @@ eng := dwarf.NewEngine()
 eng.SetHost(proxy) // TestProxy implements the Host interface
 eng.RunInTest(t)   // SQLite in-memory, auto-cleanup
 
-out, _ := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
+_, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil) // Run returns (flowKey, outcome, err)
 fmt.Println(out.State["greeting"]) // hello ada
 ```
 
@@ -96,7 +96,7 @@ type Host interface {
 
     // Optional. Fired when a flow stops, for flows created with FlowOptions.NotifyOnStop.
     // The flow's baggage is on ctx; resolve where to deliver from it (the engine carries no address).
-    FlowStopped(ctx context.Context, outcome *workflow.FlowOutcome)
+    FlowStopped(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome)
 
     // Optional. Ship one cross-replica coordination signal to the other replicas (no-op for
     // single-replica). op is a routing key; payload is opaque bytes. Peers hand it back via

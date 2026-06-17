@@ -707,9 +707,10 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 	return e.await(ctx, flowKey)
 }
 
-// Run creates, starts, and awaits a flow in one call. opts carries scheduling and the opaque host
-// Baggage; nil opts uses defaults.
-func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
+// Run creates, starts, and awaits a flow in one call, returning the new flow's key alongside its outcome
+// (the key is the flow's identity, not part of the outcome). opts carries scheduling and the opaque host
+// Baggage; nil opts uses defaults. On error, flowKey is "" and outcome is nil.
+func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
 	return e.run(ctx, workflowURL, initialState, opts)
 }
 

@@ -38,9 +38,9 @@ func TestBreakpointnotifyflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Flow", "breakpointnotifyflow.verify:428/flow")
-	graph.AddTask("TaskA", "breakpointnotifyflow.verify:428/task-a")
-	graph.AddTask("TaskB", "breakpointnotifyflow.verify:428/task-b")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("TaskA", "breakpointnotifyflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "breakpointnotifyflow.verify:428/task-b")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransition("TaskB", workflow.END)
 	proxy.HandleGraph("breakpointnotifyflow.verify:428/flow", graph)
@@ -55,7 +55,7 @@ func TestBreakpointnotifyflow(t *testing.T) {
 	var notifiedStatus atomic.Value
 	notified := make(chan struct{}, 1)
 
-	proxy.OnFlowStopped(func(ctx context.Context, outcome *workflow.FlowOutcome) {
+	proxy.OnFlowStopped(func(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome) {
 		host, _ := workflow.BaggageFrom(ctx).(map[string]any)["host"].(string)
 		notifiedHost.Store(host)
 		notifiedStatus.Store(outcome.Status)

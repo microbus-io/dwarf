@@ -32,10 +32,10 @@ func TestSleepflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Delay", "sleepflow.verify:428/delay")
-	graph.AddTask("TaskA", "sleepflow.verify:428/task-a")
-	graph.AddTask("TaskB", "sleepflow.verify:428/task-b")
-	graph.AddTask("TaskC", "sleepflow.verify:428/task-c")
+	graph := workflow.NewGraph("Delay")
+	graph.SetEndpoint("TaskA", "sleepflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "sleepflow.verify:428/task-b")
+	graph.SetEndpoint("TaskC", "sleepflow.verify:428/task-c")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransition("TaskB", "TaskC")
 	graph.AddTransition("TaskC", workflow.END)
@@ -63,7 +63,7 @@ func TestSleepflow(t *testing.T) {
 		sleepFor := 100 * time.Millisecond
 		initialState := map[string]any{"sleepFor": sleepFor}
 		start := time.Now()
-		outcome, err := eng.Run(ctx, "sleepflow.verify:428/delay", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "sleepflow.verify:428/delay", initialState, nil)
 		elapsed := time.Since(start)
 
 		assert.NoError(err)

@@ -37,13 +37,13 @@ func TestSaturatedbandflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Two workflows: SaturatedBand (bounded) and OpenBand (open).
-	satGraph := workflow.NewGraph("SaturatedBand", "saturatedbandflow.verify:428/saturated-band")
-	satGraph.AddTask("Bounded", "saturatedbandflow.verify:428/bounded")
+	satGraph := workflow.NewGraph("SaturatedBand")
+	satGraph.SetEndpoint("Bounded", "saturatedbandflow.verify:428/bounded")
 	satGraph.AddTransition("Bounded", workflow.END)
 	proxy.HandleGraph("saturatedbandflow.verify:428/saturated-band", satGraph)
 
-	openGraph := workflow.NewGraph("OpenBand", "saturatedbandflow.verify:428/open-band")
-	openGraph.AddTask("Open", "saturatedbandflow.verify:428/open")
+	openGraph := workflow.NewGraph("OpenBand")
+	openGraph.SetEndpoint("Open", "saturatedbandflow.verify:428/open")
 	openGraph.AddTransition("Open", workflow.END)
 	proxy.HandleGraph("saturatedbandflow.verify:428/open-band", openGraph)
 

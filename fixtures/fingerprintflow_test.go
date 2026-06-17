@@ -37,10 +37,10 @@ func TestFingerprintflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Fingerprint", "fingerprintflow.verify:428/fingerprint")
-	graph.AddTask("TaskA", "fingerprintflow.verify:428/task-a")
-	graph.AddTask("Pause", "fingerprintflow.verify:428/pause")
-	graph.AddTask("Done", "fingerprintflow.verify:428/done")
+	graph := workflow.NewGraph("Fingerprint")
+	graph.SetEndpoint("TaskA", "fingerprintflow.verify:428/task-a")
+	graph.SetEndpoint("Pause", "fingerprintflow.verify:428/pause")
+	graph.SetEndpoint("Done", "fingerprintflow.verify:428/done")
 	graph.AddTransition("TaskA", "Pause")
 	graph.AddTransition("Pause", "Done")
 	graph.AddTransition("Done", workflow.END)

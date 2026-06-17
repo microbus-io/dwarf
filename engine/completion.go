@@ -69,10 +69,10 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 
 // fireFlowStopped invokes the host's FlowStopped callback with the flow's baggage on the context, so the
 // host can resolve the notification target from it. Callers guard on the flow's notify_on_stop opt-in.
-func (e *Engine) fireFlowStopped(ctx context.Context, baggageJSON string, outcome *workflow.FlowOutcome) {
+func (e *Engine) fireFlowStopped(ctx context.Context, flowKey string, baggageJSON string, outcome *workflow.FlowOutcome) {
 	var baggage map[string]any
 	unmarshalJSONMap(baggageJSON, &baggage)
-	e.host.FlowStopped(workflow.ContextWithBaggage(ctx, baggage), outcome)
+	e.host.FlowStopped(workflow.ContextWithBaggage(ctx, baggage), flowKey, outcome)
 }
 
 // completeFlowSequential marks a flow completed when no successor exists.
@@ -245,10 +245,9 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	if notifyOnStop {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStateJSON), &finalState)
-		e.fireFlowStopped(ctx, baggageJSON, &workflow.FlowOutcome{
-			FlowKey: compositeID,
-			Status:  workflow.StatusCompleted,
-			State:   finalState,
+		e.fireFlowStopped(ctx, compositeID, baggageJSON, &workflow.FlowOutcome{
+			Status: workflow.StatusCompleted,
+			State:  finalState,
 		})
 	}
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
@@ -387,11 +386,10 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 	if notifyOnStop {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStateJSON), &finalState)
-		e.fireFlowStopped(ctx, baggageJSON, &workflow.FlowOutcome{
-			FlowKey: compositeID,
-			Status:  workflow.StatusFailed,
-			State:   finalState,
-			Error:   errMsg,
+		e.fireFlowStopped(ctx, compositeID, baggageJSON, &workflow.FlowOutcome{
+			Status: workflow.StatusFailed,
+			State:  finalState,
+			Error:  errMsg,
 		})
 	}
 	e.signalStop(ctx, compositeID, workflow.StatusFailed)

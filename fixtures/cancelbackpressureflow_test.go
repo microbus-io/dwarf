@@ -39,8 +39,8 @@ func TestCancelbackpressureflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("CancelBackpressure", "cancelbackpressureflow.verify:428/cancel-backpressure")
-	graph.AddTask("BounceAndCancel", "cancelbackpressureflow.verify:428/bounce-and-cancel")
+	graph := workflow.NewGraph("CancelBackpressure")
+	graph.SetEndpoint("BounceAndCancel", "cancelbackpressureflow.verify:428/bounce-and-cancel")
 	graph.AddTransition("BounceAndCancel", workflow.END)
 	proxy.HandleGraph("cancelbackpressureflow.verify:428/cancel-backpressure", graph)
 

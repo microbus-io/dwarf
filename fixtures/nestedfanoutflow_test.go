@@ -33,11 +33,11 @@ func TestNestedfanoutflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Outer graph: A -> {NormalB, RunInner} -> J
-	outer := workflow.NewGraph("Nested", "nestedfanoutflow.verify:428/nested")
-	outer.AddTask("TaskA", "nestedfanoutflow.verify:428/task-a")
-	outer.AddTask("NormalB", "nestedfanoutflow.verify:428/normal-b")
-	outer.AddTask("RunInner", "nestedfanoutflow.verify:428/run-inner")
-	outer.AddTask("TaskJ", "nestedfanoutflow.verify:428/task-j")
+	outer := workflow.NewGraph("Nested")
+	outer.SetEndpoint("TaskA", "nestedfanoutflow.verify:428/task-a")
+	outer.SetEndpoint("NormalB", "nestedfanoutflow.verify:428/normal-b")
+	outer.SetEndpoint("RunInner", "nestedfanoutflow.verify:428/run-inner")
+	outer.SetEndpoint("TaskJ", "nestedfanoutflow.verify:428/task-j")
 	outer.SetFanIn("TaskJ")
 	outer.AddTransition("TaskA", "NormalB")
 	outer.AddTransition("TaskA", "RunInner")
@@ -47,11 +47,11 @@ func TestNestedfanoutflow(t *testing.T) {
 	proxy.HandleGraph("nestedfanoutflow.verify:428/nested", outer)
 
 	// Inner subgraph: X -> {Y, Z} -> W with ReducerAdd on "inner"
-	inner := workflow.NewGraph("Inner", "nestedfanoutflow.verify:428/inner")
-	inner.AddTask("TaskX", "nestedfanoutflow.verify:428/task-x")
-	inner.AddTask("TaskY", "nestedfanoutflow.verify:428/task-y")
-	inner.AddTask("TaskZ", "nestedfanoutflow.verify:428/task-z")
-	inner.AddTask("TaskW", "nestedfanoutflow.verify:428/task-w")
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("TaskX", "nestedfanoutflow.verify:428/task-x")
+	inner.SetEndpoint("TaskY", "nestedfanoutflow.verify:428/task-y")
+	inner.SetEndpoint("TaskZ", "nestedfanoutflow.verify:428/task-z")
+	inner.SetEndpoint("TaskW", "nestedfanoutflow.verify:428/task-w")
 	inner.SetFanIn("TaskW")
 	inner.SetReducer("inner", workflow.ReducerAdd)
 	inner.AddTransition("TaskX", "TaskY")
@@ -106,7 +106,7 @@ func TestNestedfanoutflow(t *testing.T) {
 	t.Run("nested_fan_out_via_subgraph", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "nestedfanoutflow.verify:428/nested", nil, nil)
+		_, outcome, err := eng.Run(ctx, "nestedfanoutflow.verify:428/nested", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("normal/30", outcome.State["result"])

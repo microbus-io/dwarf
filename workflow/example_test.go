@@ -26,17 +26,17 @@ import (
 
 // Build a linear workflow graph and validate it.
 func ExampleGraph() {
-	g := workflow.NewGraph("Checkout", "checkout")
-	g.AddTask("Reserve", "inventory.reserve")
-	g.AddTask("Charge", "billing.charge")
+	g := workflow.NewGraph("Checkout")
+	g.SetEndpoint("Reserve", "inventory.reserve")
+	g.SetEndpoint("Charge", "billing.charge")
 	g.AddTransition("Reserve", "Charge")
 	g.AddTransition("Charge", workflow.END)
 
-	fmt.Println("name:", g.URL())
+	fmt.Println("name:", g.Name())
 	fmt.Println("entry:", g.EntryPoint())
 	fmt.Println("valid:", g.Validate() == nil)
 	// Output:
-	// name: checkout
+	// name: Checkout
 	// entry: Reserve
 	// valid: true
 }

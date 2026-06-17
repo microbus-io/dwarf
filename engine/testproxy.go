@@ -38,7 +38,7 @@ type TestProxy struct {
 	mu          sync.RWMutex
 	graphs      map[string]*workflow.Graph
 	tasks       map[string]TaskHandler
-	flowStopped func(ctx context.Context, outcome *workflow.FlowOutcome)
+	flowStopped func(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome)
 	peers       []*Engine
 }
 
@@ -59,7 +59,7 @@ func (p *TestProxy) HandleGraph(name string, graph *workflow.Graph) {
 }
 
 // HandleTask registers a task handler under the given name.
-// The name should match the task URL registered via graph.AddTask.
+// The name should match the task URL registered via graph.SetEndpoint.
 func (p *TestProxy) HandleTask(name string, handler TaskHandler) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -68,7 +68,7 @@ func (p *TestProxy) HandleTask(name string, handler TaskHandler) {
 
 // OnFlowStopped registers a callback invoked by FlowStopped (only for flows created with
 // FlowOptions.NotifyOnStop). Nil (the default) makes FlowStopped a no-op. The flow's baggage is on the ctx.
-func (p *TestProxy) OnFlowStopped(cb func(ctx context.Context, outcome *workflow.FlowOutcome)) {
+func (p *TestProxy) OnFlowStopped(cb func(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.flowStopped = cb
@@ -97,12 +97,12 @@ func (p *TestProxy) ExecuteTask(ctx context.Context, taskURL string, flow *workf
 }
 
 // FlowStopped implements Host; it invokes the callback set via OnFlowStopped, if any.
-func (p *TestProxy) FlowStopped(ctx context.Context, outcome *workflow.FlowOutcome) {
+func (p *TestProxy) FlowStopped(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome) {
 	p.mu.RLock()
 	cb := p.flowStopped
 	p.mu.RUnlock()
 	if cb != nil {
-		cb(ctx, outcome)
+		cb(ctx, flowKey, outcome)
 	}
 }
 

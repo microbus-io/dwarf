@@ -32,11 +32,11 @@ func TestIntrathreadgotoflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("IntraThreadGoto", "intrathreadgotoflow.verify:428/intra-thread-goto")
-	graph.AddTask("TaskA", "intrathreadgotoflow.verify:428/task-a")
-	graph.AddTask("LoopTask", "intrathreadgotoflow.verify:428/loop-task")
-	graph.AddTask("NormalC", "intrathreadgotoflow.verify:428/normal-c")
-	graph.AddTask("TaskD", "intrathreadgotoflow.verify:428/task-d")
+	graph := workflow.NewGraph("IntraThreadGoto")
+	graph.SetEndpoint("TaskA", "intrathreadgotoflow.verify:428/task-a")
+	graph.SetEndpoint("LoopTask", "intrathreadgotoflow.verify:428/loop-task")
+	graph.SetEndpoint("NormalC", "intrathreadgotoflow.verify:428/normal-c")
+	graph.SetEndpoint("TaskD", "intrathreadgotoflow.verify:428/task-d")
 	graph.SetFanIn("TaskD")
 	graph.AddTransition("TaskA", "LoopTask")
 	graph.AddTransition("TaskA", "NormalC")
@@ -74,7 +74,7 @@ func TestIntrathreadgotoflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"target": 3}
-		outcome, err := eng.Run(ctx, "intrathreadgotoflow.verify:428/intra-thread-goto", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "intrathreadgotoflow.verify:428/intra-thread-goto", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("stamped/3", outcome.State["result"])

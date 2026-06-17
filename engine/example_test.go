@@ -40,16 +40,16 @@ func (h exampleHost) ExecuteTask(ctx context.Context, taskName string, f *workfl
 	f.SetString("greeting", "hello "+f.GetString("name"))
 	return nil
 }
-func (exampleHost) FlowStopped(context.Context, *workflow.FlowOutcome) {}
-func (exampleHost) SignalPeers(context.Context, string, []byte)        {}
+func (exampleHost) FlowStopped(context.Context, string, *workflow.FlowOutcome) {}
+func (exampleHost) SignalPeers(context.Context, string, []byte)                {}
 
 // Wire an engine to a host, then create, start, and await a flow.
 func Example() {
 	ctx := context.Background()
 
 	graphs := map[string]*workflow.Graph{}
-	g := workflow.NewGraph("Greet", "greet")
-	g.AddTask("Hello", "Hello")
+	g := workflow.NewGraph("Greet")
+	g.SetEndpoint("Hello", "Hello")
 	g.AddTransition("Hello", workflow.END)
 	graphs["greet"] = g
 
@@ -63,7 +63,7 @@ func Example() {
 	defer eng.Shutdown(ctx)
 
 	// Run is Create + Start + Await in one call.
-	out, err := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
+	_, out, err := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
 	if err != nil {
 		panic(err)
 	}

@@ -31,10 +31,10 @@ func TestGotoflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Goto", "gotoflow.verify:428/goto")
-	graph.AddTask("TaskA", "gotoflow.verify:428/task-a")
-	graph.AddTask("TaskB", "gotoflow.verify:428/task-b")
-	graph.AddTask("TaskC", "gotoflow.verify:428/task-c")
+	graph := workflow.NewGraph("Goto")
+	graph.SetEndpoint("TaskA", "gotoflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "gotoflow.verify:428/task-b")
+	graph.SetEndpoint("TaskC", "gotoflow.verify:428/task-c")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransitionGoto("TaskB", "TaskA")
 	graph.AddTransition("TaskB", "TaskC")
@@ -65,7 +65,7 @@ func TestGotoflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"target": 1}
-		outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(1.0, outcome.State["finalLoops"])
@@ -75,7 +75,7 @@ func TestGotoflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"target": 3}
-		outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3.0, outcome.State["finalLoops"])
@@ -88,8 +88,8 @@ func TestGotoflow_BadGoto(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("BadGoto", "gotoflow.verify:428/bad-goto")
-	graph.AddTask("BadGotoer", "gotoflow.verify:428/bad-gotoer")
+	graph := workflow.NewGraph("BadGoto")
+	graph.SetEndpoint("BadGotoer", "gotoflow.verify:428/bad-gotoer")
 	graph.AddTransition("BadGotoer", workflow.END)
 	proxy.HandleGraph("gotoflow.verify:428/bad-goto", graph)
 
@@ -106,7 +106,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 	t.Run("goto_to_unregistered_target_fails_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "gotoflow.verify:428/bad-goto", nil, nil)
+		_, outcome, err := eng.Run(ctx, "gotoflow.verify:428/bad-goto", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 	})

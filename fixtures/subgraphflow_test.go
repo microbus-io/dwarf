@@ -33,19 +33,19 @@ func TestSubgraphflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Parent graph: A -> RunInner -> Z
-	parent := workflow.NewGraph("Parent", "subgraphflow.verify:428/parent")
-	parent.AddTask("TaskA", "subgraphflow.verify:428/task-a")
-	parent.AddTask("RunInner", "subgraphflow.verify:428/run-inner")
-	parent.AddTask("TaskZ", "subgraphflow.verify:428/task-z")
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("TaskA", "subgraphflow.verify:428/task-a")
+	parent.SetEndpoint("RunInner", "subgraphflow.verify:428/run-inner")
+	parent.SetEndpoint("TaskZ", "subgraphflow.verify:428/task-z")
 	parent.AddTransition("TaskA", "RunInner")
 	parent.AddTransition("RunInner", "TaskZ")
 	parent.AddTransition("TaskZ", workflow.END)
 	proxy.HandleGraph("subgraphflow.verify:428/parent", parent)
 
 	// Inner graph: X -> Y
-	inner := workflow.NewGraph("Inner", "subgraphflow.verify:428/inner")
-	inner.AddTask("TaskX", "subgraphflow.verify:428/task-x")
-	inner.AddTask("TaskY", "subgraphflow.verify:428/task-y")
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("TaskX", "subgraphflow.verify:428/task-x")
+	inner.SetEndpoint("TaskY", "subgraphflow.verify:428/task-y")
 	inner.AddTransition("TaskX", "TaskY")
 	inner.AddTransition("TaskY", workflow.END)
 	proxy.HandleGraph("subgraphflow.verify:428/inner", inner)
@@ -85,7 +85,7 @@ func TestSubgraphflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"seed": "seed1"}
-		outcome, err := eng.Run(ctx, "subgraphflow.verify:428/parent", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "subgraphflow.verify:428/parent", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("Z(Y(X(seed1)))", outcome.State["result"])

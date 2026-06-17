@@ -31,10 +31,10 @@ func TestBasicflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Basic", "basicflow.verify:428/basic")
-	graph.AddTask("TaskA", "basicflow.verify:428/task-a")
-	graph.AddTask("TaskB", "basicflow.verify:428/task-b")
-	graph.AddTask("TaskC", "basicflow.verify:428/task-c")
+	graph := workflow.NewGraph("Basic")
+	graph.SetEndpoint("TaskA", "basicflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "basicflow.verify:428/task-b")
+	graph.SetEndpoint("TaskC", "basicflow.verify:428/task-c")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransition("TaskB", "TaskC")
 	graph.AddTransition("TaskC", workflow.END)
@@ -60,7 +60,7 @@ func TestBasicflow(t *testing.T) {
 	t.Run("sequential_a_b_c", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "basicflow.verify:428/basic", nil, nil)
+		_, outcome, err := eng.Run(ctx, "basicflow.verify:428/basic", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("ABC", outcome.State["path"])

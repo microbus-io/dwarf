@@ -31,13 +31,13 @@ func TestAliasflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Alias", "aliasflow.verify:428/alias")
-	graph.AddTask("S", "aliasflow.verify:428/task-s")
-	graph.AddTask("A", "aliasflow.verify:428/task-a")
-	graph.AddTask("B", "aliasflow.verify:428/task-b")
-	graph.AddTask("C", "aliasflow.verify:428/task-c")
-	graph.AddTask("BPrime", "aliasflow.verify:428/task-b") // same URL as "B"
-	graph.AddTask("D", "aliasflow.verify:428/task-d")
+	graph := workflow.NewGraph("Alias")
+	graph.SetEndpoint("S", "aliasflow.verify:428/task-s")
+	graph.SetEndpoint("A", "aliasflow.verify:428/task-a")
+	graph.SetEndpoint("B", "aliasflow.verify:428/task-b")
+	graph.SetEndpoint("C", "aliasflow.verify:428/task-c")
+	graph.SetEndpoint("BPrime", "aliasflow.verify:428/task-b") // same URL as "B"
+	graph.SetEndpoint("D", "aliasflow.verify:428/task-d")
 	graph.AddTransition("S", "A")
 	graph.AddTransitionGoto("S", "BPrime")
 	graph.AddTransition("A", "B")
@@ -78,7 +78,7 @@ func TestAliasflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"branch": ""}
-		outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("ABC", outcome.State["path"])
@@ -88,7 +88,7 @@ func TestAliasflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"branch": "alt"}
-		outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("BD", outcome.State["path"])

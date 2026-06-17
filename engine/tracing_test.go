@@ -48,17 +48,17 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 
 	proxy := NewTestProxy()
 
-	parent := workflow.NewGraph("Parent", "tracingflow.verify:428/parent")
-	parent.AddTask("taskA", "tracingflow.verify:428/task-a")
-	parent.AddTask("runInner", "tracingflow.verify:428/run-inner")
-	parent.AddTask("done", "tracingflow.verify:428/done")
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("taskA", "tracingflow.verify:428/task-a")
+	parent.SetEndpoint("runInner", "tracingflow.verify:428/run-inner")
+	parent.SetEndpoint("done", "tracingflow.verify:428/done")
 	parent.AddTransition("taskA", "runInner")
 	parent.AddTransition("runInner", "done")
 	parent.AddTransition("done", workflow.END)
 	proxy.HandleGraph("tracingflow.verify:428/parent", parent)
 
-	inner := workflow.NewGraph("Inner", "tracingflow.verify:428/inner")
-	inner.AddTask("taskX", "tracingflow.verify:428/task-x")
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("taskX", "tracingflow.verify:428/task-x")
 	inner.AddTransition("taskX", workflow.END)
 	proxy.HandleGraph("tracingflow.verify:428/inner", inner)
 
@@ -78,7 +78,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	eng.SetTracerProvider(tp)
 	eng.RunInTest(t)
 
-	outcome, err := eng.Run(ctx, "tracingflow.verify:428/parent", nil, nil)
+	_, outcome, err := eng.Run(ctx, "tracingflow.verify:428/parent", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}

@@ -31,10 +31,10 @@ func TestInterruptflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Interrupt", "interruptflow.verify:428/interrupt")
-	graph.AddTask("TaskA", "interruptflow.verify:428/task-a")
-	graph.AddTask("AwaitInput", "interruptflow.verify:428/await-input")
-	graph.AddTask("Compose", "interruptflow.verify:428/compose")
+	graph := workflow.NewGraph("Interrupt")
+	graph.SetEndpoint("TaskA", "interruptflow.verify:428/task-a")
+	graph.SetEndpoint("AwaitInput", "interruptflow.verify:428/await-input")
+	graph.SetEndpoint("Compose", "interruptflow.verify:428/compose")
 	graph.AddTransition("TaskA", "AwaitInput")
 	graph.AddTransition("AwaitInput", "Compose")
 	graph.AddTransition("Compose", workflow.END)

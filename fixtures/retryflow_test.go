@@ -32,10 +32,10 @@ func TestRetryflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Retry", "retryflow.verify:428/retry")
-	graph.AddTask("TaskA", "retryflow.verify:428/task-a")
-	graph.AddTask("Flaky", "retryflow.verify:428/flaky")
-	graph.AddTask("TaskB", "retryflow.verify:428/task-b")
+	graph := workflow.NewGraph("Retry")
+	graph.SetEndpoint("TaskA", "retryflow.verify:428/task-a")
+	graph.SetEndpoint("Flaky", "retryflow.verify:428/flaky")
+	graph.SetEndpoint("TaskB", "retryflow.verify:428/task-b")
 	graph.AddTransition("TaskA", "Flaky")
 	graph.AddTransition("Flaky", "TaskB")
 	graph.AddTransition("TaskB", workflow.END)
@@ -68,7 +68,7 @@ func TestRetryflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"target": 3}
-		outcome, err := eng.Run(ctx, "retryflow.verify:428/retry", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "retryflow.verify:428/retry", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3.0, outcome.State["finalAttempts"])
@@ -78,7 +78,7 @@ func TestRetryflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"target": 10}
-		outcome, err := eng.Run(ctx, "retryflow.verify:428/retry", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "retryflow.verify:428/retry", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 	})

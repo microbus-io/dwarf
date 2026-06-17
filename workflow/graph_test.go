@@ -34,12 +34,12 @@ func TestGraph_BuilderAndMarshal(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("CreateOrder", "create-order")
+	g := NewGraph("CreateOrder")
 	g.AddTransitionWhen("order.service/validate", "payment.service/charge", "valid == true")
 	g.AddTransitionWhen("order.service/validate", "order.service/reject", "valid != true")
 	g.SetReducer("messages", ReducerAppend)
 
-	assert.Equal("create-order", g.URL())
+	assert.Equal("CreateOrder", g.Name())
 	assert.Equal("order.service/validate", g.EntryPoint())
 	assert.Equal(3, len(g.Nodes()))
 
@@ -50,7 +50,7 @@ func TestGraph_BuilderAndMarshal(t *testing.T) {
 	err = json.Unmarshal(data, &restored)
 	assert.NoError(err)
 
-	assert.Equal("create-order", restored.URL())
+	assert.Equal("CreateOrder", restored.Name())
 	assert.Equal("order.service/validate", restored.EntryPoint())
 	assert.Equal(3, len(restored.Nodes()))
 	assert.Equal(2, len(restored.Transitions()))
@@ -62,7 +62,7 @@ func TestGraph_EmptyReducers(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Simple", "simple")
+	g := NewGraph("Simple")
 	g.AddTransition("svc/start", "svc/end")
 
 	data, err := json.Marshal(g)
@@ -80,9 +80,9 @@ func TestGraph_DefaultEntryPoint(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
-	g.AddTask("svc/first", "svc/first")
-	g.AddTask("svc/second", "svc/second")
+	g := NewGraph("Test")
+	g.SetEndpoint("svc/first", "svc/first")
+	g.SetEndpoint("svc/second", "svc/second")
 
 	assert.Equal("svc/first", g.EntryPoint())
 }
@@ -91,9 +91,9 @@ func TestGraph_ExplicitEntryPoint(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
-	g.AddTask("svc/first", "svc/first")
-	g.AddTask("svc/second", "svc/second")
+	g := NewGraph("Test")
+	g.SetEndpoint("svc/first", "svc/first")
+	g.SetEndpoint("svc/second", "svc/second")
 	g.SetEntryPoint("svc/second")
 
 	assert.Equal("svc/second", g.EntryPoint())
@@ -103,7 +103,7 @@ func TestGraph_AutoRegisterTasks(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("svc/a", "svc/b")
 	g.AddTransitionWhen("svc/b", "svc/c", "done == true")
 
@@ -118,9 +118,9 @@ func TestGraph_DuplicateTaskIgnored(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
-	g.AddTask("svc/a", "svc/a")
-	g.AddTask("svc/a", "svc/a")
+	g := NewGraph("Test")
+	g.SetEndpoint("svc/a", "svc/a")
+	g.SetEndpoint("svc/a", "svc/a")
 	g.AddTransition("svc/a", "svc/b")
 
 	assert.Equal(2, len(g.Nodes()))
@@ -131,34 +131,34 @@ func TestGraph_Validate(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// Valid graph
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("svc/a", "svc/b")
 	g.AddTransition("svc/b", END)
 	assert.NoError(g.Validate())
 
 	// Empty name
-	g2 := NewGraph("", "")
-	g2.AddTask("svc/a", "svc/a")
+	g2 := NewGraph("")
+	g2.SetEndpoint("svc/a", "svc/a")
 	assert.Error(g2.Validate())
 
 	// No tasks
-	g3 := NewGraph("Test", "test")
+	g3 := NewGraph("Test")
 	assert.Error(g3.Validate())
 
 	// Entry point not in task list
-	g4 := NewGraph("Test", "test")
-	g4.AddTask("svc/a", "svc/a")
+	g4 := NewGraph("Test")
+	g4.SetEndpoint("svc/a", "svc/a")
 	g4.SetEntryPoint("svc/missing")
 	assert.Error(g4.Validate())
 
 	// Unreachable task
-	g5 := NewGraph("Test", "test")
+	g5 := NewGraph("Test")
 	g5.AddTransition("svc/a", "svc/b")
-	g5.AddTask("svc/c", "svc/c")
+	g5.SetEndpoint("svc/c", "svc/c")
 	assert.Error(g5.Validate())
 
 	// Reachable via goto
-	g6 := NewGraph("Test", "test")
+	g6 := NewGraph("Test")
 	g6.AddTransition("svc/a", "svc/b")
 	g6.AddTransition("svc/b", END)
 	g6.AddTransitionGoto("svc/a", "svc/c")
@@ -166,7 +166,7 @@ func TestGraph_Validate(t *testing.T) {
 	assert.NoError(g6.Validate())
 
 	// No END transition
-	g7 := NewGraph("Test", "test")
+	g7 := NewGraph("Test")
 	g7.AddTransition("svc/a", "svc/b")
 	g7.AddTransition("svc/b", "svc/a")
 	assert.Error(g7.Validate())
@@ -176,7 +176,7 @@ func TestGraph_END(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("svc/a", "svc/b")
 	g.AddTransitionGoto("svc/b", END)
 	g.AddTransition("svc/b", "svc/c")
@@ -205,7 +205,7 @@ func TestGraph_Mermaid(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("CreateOrder", "create-order")
+	g := NewGraph("CreateOrder")
 	g.AddTransitionWhen("order.service/validate", "payment.service/charge", "valid == true")
 	g.AddTransitionWhen("order.service/validate", "order.service/reject", "valid != true")
 	g.AddTransition("payment.service/charge", END)
@@ -226,7 +226,7 @@ func TestGraph_GotoTransition(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("svc/a", "svc/b")
 	g.AddTransition("svc/b", END)
 	g.AddTransitionGoto("svc/a", "svc/c")
@@ -259,7 +259,7 @@ func TestGraph_TransitionNoWhen(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("a", "b")
 
 	data, err := json.Marshal(g)
@@ -281,7 +281,7 @@ func TestGraph_ValidateWhenExpression(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// Valid expression
-	g1 := NewGraph("Test", "test")
+	g1 := NewGraph("Test")
 	g1.AddTransitionWhen("svc/a", "svc/b", "valid == true")
 	g1.AddTransitionWhen("svc/a", "svc/c", "score > 5 && !guest")
 	g1.AddTransition("svc/b", "svc/join")
@@ -291,7 +291,7 @@ func TestGraph_ValidateWhenExpression(t *testing.T) {
 	assert.NoError(g1.Validate())
 
 	// Invalid expression
-	g2 := NewGraph("Test", "test")
+	g2 := NewGraph("Test")
 	g2.AddTransitionWhen("svc/a", "svc/b", "(((")
 	g2.AddTransition("svc/b", END)
 	err := g2.Validate()
@@ -303,7 +303,7 @@ func TestGraph_AddTransitionOnError(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("svc/a", "svc/b")
 	g.AddTransition("svc/b", END)
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
@@ -322,7 +322,7 @@ func TestGraph_OnErrorJSONRoundTrip(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("svc/a", END)
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
 	g.AddTransition("svc/errHandler", END)
@@ -350,7 +350,7 @@ func TestGraph_MermaidForEachShape(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransitionForEach("svc/start", "svc/worker", "items", "item")
 	g.AddTransition("svc/worker", END)
 
@@ -368,7 +368,7 @@ func TestGraph_MermaidFanInShape(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("a", "b")
 	g.AddTransition("a", "c")
 	g.AddTransition("b", "join")
@@ -390,7 +390,7 @@ func TestGraph_MermaidForEachFanInLabel(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransitionForEach("svc/start", "svc/worker", "items", "item")
 	g.AddTransition("svc/worker", "svc/join")
 	g.AddTransition("svc/join", END)
@@ -410,7 +410,7 @@ func TestGraph_MermaidNestedForEachLabels(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransitionForEach("svc/outer", "svc/inner", "tenants", "tenant")
 	g.AddTransitionForEach("svc/inner", "svc/leaf", "docs", "doc")
 	g.AddTransition("svc/leaf", "svc/innerJoin")
@@ -431,7 +431,7 @@ func TestGraph_MermaidLabelsOnError(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("svc/a", END)
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
 	g.AddTransition("svc/errHandler", END)
@@ -444,7 +444,7 @@ func TestGraph_SelfLoopOnErrorRejected(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransition("svc/a", END)
 	g.AddTransitionOnError("svc/a", "svc/a")
 
@@ -462,7 +462,7 @@ func TestGraph_GotoSelfLoopAllowed(t *testing.T) {
 	// A goto-driven self-loop is not restricted by the no-error-self-loop rule.
 	// (A normal-edge self-loop wouldn't validate under the lineage stack rules anyway,
 	// since the source becomes a fan-out source whose only fan-in is itself.)
-	g := NewGraph("Test", "test")
+	g := NewGraph("Test")
 	g.AddTransitionGoto("svc/a", "svc/a")
 	g.AddTransition("svc/a", END)
 	assert.NoError(g.Validate())
@@ -477,7 +477,7 @@ func TestLineage_SequentialNoFanOut(t *testing.T) {
 	// SetFanIn opts the graph into the lineage validator. With no fan-out, the validator
 	// has nothing to check beyond the structural rules; the FanIn marker on a sequentially
 	// reached node is ill-formed (no scope to pop) and must be rejected.
-	g := NewGraph("Seq", "seq")
+	g := NewGraph("Seq")
 	g.AddTransition("a", "b")
 	g.AddTransition("b", END)
 	g.SetFanIn("b")
@@ -490,7 +490,7 @@ func TestLineage_SimpleFanOutFanIn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("SimpleFanin", "simple-fanin")
+	g := NewGraph("SimpleFanin")
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
@@ -505,7 +505,7 @@ func TestLineage_NestedFanOutFanIn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Nested", "nested")
+	g := NewGraph("Nested")
 	g.AddTransition("s", "outer1")
 	g.AddTransition("s", "outer2")
 	// outer1 has its own inner fan-out
@@ -528,7 +528,7 @@ func TestLineage_ForEachThenFanIn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("ForeachFanin", "foreach-fanin")
+	g := NewGraph("ForeachFanin")
 	g.AddTransitionForEach("s", "a", "items", "item")
 	g.AddTransition("a", "join")
 	g.AddTransition("join", END)
@@ -541,7 +541,7 @@ func TestLineage_ConditionalWhenFanIn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("WhenFanin", "when-fanin")
+	g := NewGraph("WhenFanin")
 	g.AddTransitionWhen("s", "a", "x > 0")
 	g.AddTransitionWhen("s", "b", "x <= 0")
 	g.AddTransition("a", "join")
@@ -558,11 +558,11 @@ func TestLineage_AliasedNodesInDifferentScopes(t *testing.T) {
 
 	// The same task URL is registered under two distinct names so that one copy lives
 	// inside a fan-out scope (per element) and a second copy lives at the outer scope.
-	g := NewGraph("Alias", "alias")
-	g.AddTask("s", "host/s")
-	g.AddTask("inner", "host/work") // inside fan-out
-	g.AddTask("outer", "host/work") // outside fan-out
-	g.AddTask("join", "host/join")
+	g := NewGraph("Alias")
+	g.SetEndpoint("s", "host/s")
+	g.SetEndpoint("inner", "host/work") // inside fan-out
+	g.SetEndpoint("outer", "host/work") // outside fan-out
+	g.SetEndpoint("join", "host/join")
 	g.AddTransitionForEach("s", "inner", "items", "item")
 	g.AddTransition("inner", "join")
 	g.AddTransition("join", "outer")
@@ -577,7 +577,7 @@ func TestLineage_GotoStaysInScope(t *testing.T) {
 
 	// Goto from inside a fan-out branch back to the same branch is fine: the target stays
 	// in the same scope.
-	g := NewGraph("GotoInScope", "goto-in-scope")
+	g := NewGraph("GotoInScope")
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
@@ -592,7 +592,7 @@ func TestLineage_OnErrorHandlerConvergesToFanIn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("OnerrorFanin", "onerror-fanin")
+	g := NewGraph("OnerrorFanin")
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransitionOnError("a", "handler")
@@ -609,7 +609,7 @@ func TestLineage_EndWithUnpoppedFrame(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// Branch from fan-out reaches END without passing through the FanIn.
-	g := NewGraph("EndUnpopped", "end-unpopped")
+	g := NewGraph("EndUnpopped")
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
@@ -627,7 +627,7 @@ func TestLineage_DivergentStacksAtSameNode(t *testing.T) {
 
 	// "shared" is first visited with stack [s] (via a). Then a goto from join (stack [])
 	// targets it again, this time with stack []. The validator rejects.
-	g := NewGraph("DivergentStacks", "divergent-stacks")
+	g := NewGraph("DivergentStacks")
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "shared")
@@ -645,7 +645,7 @@ func TestLineage_FanInOutsideAnyScope(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("FaninNoScope", "fanin-no-scope")
+	g := NewGraph("FaninNoScope")
 	g.AddTransition("a", "b")
 	g.AddTransition("b", END)
 	g.SetFanIn("b")
@@ -660,7 +660,7 @@ func TestLineage_GotoCrossingScopeRejected(t *testing.T) {
 
 	// goto from inside the fan-out scope to a node in the parent scope (downstream of
 	// the fan-in) is rejected: the source's stack and target's stack differ.
-	g := NewGraph("GotoCrossScope", "goto-cross-scope")
+	g := NewGraph("GotoCrossScope")
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
@@ -679,7 +679,7 @@ func TestLineage_FanOutSourceMissingFanIn(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// Two parallel branches both reach END without converging at any FanIn.
-	g := NewGraph("MissingFanin", "missing-fanin")
+	g := NewGraph("MissingFanin")
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join") // a converges
@@ -698,7 +698,7 @@ func TestLineage_FanOutDirectlyToFanIn(t *testing.T) {
 
 	// Some siblings go through intermediate work; one sibling goes directly to the join.
 	// Both arrive at "join" with the same scope (push-then-pop on the direct edge cancels).
-	g := NewGraph("DirectFanin", "direct-fanin")
+	g := NewGraph("DirectFanin")
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "join") // direct
 	g.AddTransition("a", "join")
@@ -712,7 +712,7 @@ func TestLineage_SetFanInOnUnknownNodeRejected(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("BadFaninName", "bad-fanin-name")
+	g := NewGraph("BadFaninName")
 	g.AddTransition("a", "b")
 	g.AddTransition("b", END)
 	g.SetFanIn("c")
@@ -725,7 +725,7 @@ func TestLineage_FanInFlagSurvivesJSONRoundTrip(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Roundtrip", "roundtrip")
+	g := NewGraph("Roundtrip")
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
@@ -750,7 +750,7 @@ func TestGraph_SwitchValid(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("SwitchRouting", "switch-routing")
+	g := NewGraph("SwitchRouting")
 	g.AddTransition("entry", "router")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "i==2")
@@ -767,7 +767,7 @@ func TestGraph_SwitchRejectsEmptyWhen(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("SwitchNoWhen", "switch-no-when")
+	g := NewGraph("SwitchNoWhen")
 	g.AddTransitionSwitch("router", "a", "")
 	g.AddTransition("a", END)
 	err := g.Validate()
@@ -779,7 +779,7 @@ func TestGraph_SwitchRejectsMixWithPlain(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("SwitchMixed", "switch-mixed")
+	g := NewGraph("SwitchMixed")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransition("router", "b")
 	g.AddTransition("a", END)
@@ -793,7 +793,7 @@ func TestGraph_SwitchRejectsMixWithWhen(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("SwitchVsWhen", "switch-vs-when")
+	g := NewGraph("SwitchVsWhen")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionWhen("router", "b", "i==2")
 	g.AddTransition("a", END)
@@ -809,7 +809,7 @@ func TestGraph_SwitchAllowedWithGoto(t *testing.T) {
 
 	// WithGoto is an explicit task-requested override; it preempts Switch
 	// evaluation at runtime, so the two kinds can coexist from one source.
-	g := NewGraph("SwitchWithGoto", "switch-with-goto")
+	g := NewGraph("SwitchWithGoto")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "true")
 	g.AddTransitionGoto("router", "c")
@@ -823,7 +823,7 @@ func TestGraph_SwitchAllowedWithOnError(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("SwitchWithOnerror", "switch-with-onerror")
+	g := NewGraph("SwitchWithOnerror")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "true")
 	g.AddTransitionOnError("router", "handler")
@@ -838,7 +838,7 @@ func TestGraph_SwitchNoFanInRequired(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// Three Switch branches from one node, no SetFanIn anywhere: validator must accept.
-	g := NewGraph("SwitchNoFanin", "switch-no-fanin")
+	g := NewGraph("SwitchNoFanin")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "i==2")
 	g.AddTransitionSwitch("router", "c", "true")
@@ -854,7 +854,7 @@ func TestGraph_SwitchRejectsForEach(t *testing.T) {
 
 	// A switch transition with ForEach set is constructed directly to bypass the
 	// constructor; the validator must reject it.
-	g := NewGraph("SwitchForeach", "switch-foreach")
+	g := NewGraph("SwitchForeach")
 	g.AddTransition("router", "a")
 	g.AddTransition("a", END)
 	g.transitions = append(g.transitions, Transition{From: "router", To: "a", When: "true", Switch: true, ForEach: "items", As: "item"})
@@ -867,7 +867,7 @@ func TestGraph_SwitchMermaidDiamond(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("SwitchRender", "switch-render")
+	g := NewGraph("SwitchRender")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "true")
 	g.AddTransition("a", END)
@@ -890,7 +890,7 @@ func TestGraph_MermaidReduceCircle(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// Classic two-branch fan-out converging on a SetFanIn node.
-	g := NewGraph("ReduceRender", "reduce-render")
+	g := NewGraph("ReduceRender")
 	g.AddTransition("split", "a")
 	g.AddTransition("split", "b")
 	g.AddTransition("a", "join")
@@ -917,7 +917,7 @@ func TestGraph_MermaidAnnotation(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("Annotated", "annotated")
+	g := NewGraph("Annotated")
 	g.AddTransition("a", "b")
 	g.AddTransition("b", END)
 	g.Annotate("a", "kicks off the loop")
@@ -945,7 +945,7 @@ func TestGraph_WhenMermaidDiamond(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	g := NewGraph("WhenRender", "when-render")
+	g := NewGraph("WhenRender")
 	g.AddTransitionWhen("router", "a", "i==1")
 	g.AddTransitionWhen("router", "b", "i==2")
 	g.AddTransition("a", "join")

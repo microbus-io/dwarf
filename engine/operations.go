@@ -55,8 +55,8 @@ func (e *Engine) createTask(ctx context.Context, taskURL string, initialState an
 	if taskURL == "" {
 		return "", errors.New("task URL is required", http.StatusBadRequest)
 	}
-	graph := workflow.NewGraph(taskURL, taskURL)
-	graph.AddTask(taskURL, taskURL)
+	graph := workflow.NewGraph(taskURL)
+	graph.SetEndpoint(taskURL, taskURL)
 	graph.AddTransition(taskURL, workflow.END)
 	shardNum := rand.IntN(e.numDBShards()) + 1
 	flowKey, err = e.createWithGraph(ctx, shardNum, taskURL, graph, initialState, 0, "", "", e.resolveFlowOptions(opts))
@@ -271,8 +271,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	flowCancelReason = strings.TrimSpace(flowCancelReason)
 
 	out := &workflow.FlowOutcome{
-		FlowKey: flowKey,
-		Status:  flowStatus,
+		Status: flowStatus,
 	}
 
 	switch flowStatus {
@@ -528,8 +527,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if rootNotifyOnStop {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStates[rootIdx]), &finalState)
-		e.fireFlowStopped(ctx, rootBaggageJSON, &workflow.FlowOutcome{
-			FlowKey:      rootCompositeID,
+		e.fireFlowStopped(ctx, rootCompositeID, rootBaggageJSON, &workflow.FlowOutcome{
 			Status:       workflow.StatusCancelled,
 			State:        finalState,
 			CancelReason: reason,
@@ -609,20 +607,20 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 }
 
 // run creates, starts, and awaits a flow in one call.
-func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (*workflow.FlowOutcome, error) {
-	flowKey, err := e.create(ctx, workflowURL, initialState, opts)
+func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
+	flowKey, err = e.create(ctx, workflowURL, initialState, opts)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return "", nil, errors.Trace(err)
 	}
 	err = e.start(ctx, flowKey)
 	if err != nil {
 		e.cancel(ctx, flowKey, "")
-		return nil, errors.Trace(err)
+		return "", nil, errors.Trace(err)
 	}
-	outcome, err := e.await(ctx, flowKey)
+	outcome, err = e.await(ctx, flowKey)
 	if err != nil {
 		e.cancel(ctx, flowKey, "")
-		return nil, errors.Trace(err)
+		return "", nil, errors.Trace(err)
 	}
-	return outcome, nil
+	return flowKey, outcome, nil
 }

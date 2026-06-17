@@ -33,13 +33,13 @@ func TestPerelementpipelineflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// S -> forEach(items) -> H -> {A, B} -> M -> L
-	graph := workflow.NewGraph("PerElementPipeline", "perelementpipelineflow.verify:428/per-element-pipeline")
-	graph.AddTask("TaskS", "perelementpipelineflow.verify:428/task-s")
-	graph.AddTask("TaskH", "perelementpipelineflow.verify:428/task-h")
-	graph.AddTask("TaskA", "perelementpipelineflow.verify:428/task-a")
-	graph.AddTask("TaskB", "perelementpipelineflow.verify:428/task-b")
-	graph.AddTask("TaskM", "perelementpipelineflow.verify:428/task-m")
-	graph.AddTask("TaskL", "perelementpipelineflow.verify:428/task-l")
+	graph := workflow.NewGraph("PerElementPipeline")
+	graph.SetEndpoint("TaskS", "perelementpipelineflow.verify:428/task-s")
+	graph.SetEndpoint("TaskH", "perelementpipelineflow.verify:428/task-h")
+	graph.SetEndpoint("TaskA", "perelementpipelineflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "perelementpipelineflow.verify:428/task-b")
+	graph.SetEndpoint("TaskM", "perelementpipelineflow.verify:428/task-m")
+	graph.SetEndpoint("TaskL", "perelementpipelineflow.verify:428/task-l")
 	graph.SetFanIn("TaskM")
 	graph.SetFanIn("TaskL")
 	graph.SetReducer("mergedItems", workflow.ReducerUnion)
@@ -86,7 +86,7 @@ func TestPerelementpipelineflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{"x", "y", "z"}}
-		outcome, err := eng.Run(ctx, "perelementpipelineflow.verify:428/per-element-pipeline", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "perelementpipelineflow.verify:428/per-element-pipeline", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3.0, outcome.State["finalCount"])

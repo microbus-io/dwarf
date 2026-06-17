@@ -31,11 +31,11 @@ func TestSwitchflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Switch", "switchflow.verify:428/switch")
-	graph.AddTask("Router", "switchflow.verify:428/router")
-	graph.AddTask("HandleHigh", "switchflow.verify:428/handle-high")
-	graph.AddTask("HandleMid", "switchflow.verify:428/handle-mid")
-	graph.AddTask("HandleLow", "switchflow.verify:428/handle-low")
+	graph := workflow.NewGraph("Switch")
+	graph.SetEndpoint("Router", "switchflow.verify:428/router")
+	graph.SetEndpoint("HandleHigh", "switchflow.verify:428/handle-high")
+	graph.SetEndpoint("HandleMid", "switchflow.verify:428/handle-mid")
+	graph.SetEndpoint("HandleLow", "switchflow.verify:428/handle-low")
 	graph.AddTransitionSwitch("Router", "HandleHigh", "amount >= 10000")
 	graph.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
 	graph.AddTransitionSwitch("Router", "HandleLow", "true")
@@ -45,10 +45,10 @@ func TestSwitchflow(t *testing.T) {
 	proxy.HandleGraph("switchflow.verify:428/switch", graph)
 
 	// No-match graph: same router but no default arm.
-	noMatchGraph := workflow.NewGraph("SwitchNoMatch", "switchflow.verify:428/switch-no-match")
-	noMatchGraph.AddTask("Router", "switchflow.verify:428/router")
-	noMatchGraph.AddTask("HandleHigh", "switchflow.verify:428/handle-high")
-	noMatchGraph.AddTask("HandleMid", "switchflow.verify:428/handle-mid")
+	noMatchGraph := workflow.NewGraph("SwitchNoMatch")
+	noMatchGraph.SetEndpoint("Router", "switchflow.verify:428/router")
+	noMatchGraph.SetEndpoint("HandleHigh", "switchflow.verify:428/handle-high")
+	noMatchGraph.SetEndpoint("HandleMid", "switchflow.verify:428/handle-mid")
 	noMatchGraph.AddTransitionSwitch("Router", "HandleHigh", "amount >= 10000")
 	noMatchGraph.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
 	noMatchGraph.AddTransition("HandleHigh", workflow.END)
@@ -78,7 +78,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("amount_above_high_threshold_takes_high_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 50000}, nil)
+		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 50000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])
@@ -87,7 +87,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("amount_in_mid_band_takes_mid_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 5000}, nil)
+		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 5000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("mid", outcome.State["branch"])
@@ -96,7 +96,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("amount_below_thresholds_takes_default_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 100}, nil)
+		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 100}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("low", outcome.State["branch"])
@@ -105,7 +105,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("boundary_10000_takes_high_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 10000}, nil)
+		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 10000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])
@@ -114,7 +114,7 @@ func TestSwitchflow(t *testing.T) {
 	t.Run("boundary_1000_takes_mid_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 1000}, nil)
+		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 1000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("mid", outcome.State["branch"])
@@ -127,10 +127,10 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("SwitchNoMatch", "switchflow.verify:428/switch-no-match")
-	graph.AddTask("Router", "switchflow.verify:428/router")
-	graph.AddTask("HandleHigh", "switchflow.verify:428/handle-high")
-	graph.AddTask("HandleMid", "switchflow.verify:428/handle-mid")
+	graph := workflow.NewGraph("SwitchNoMatch")
+	graph.SetEndpoint("Router", "switchflow.verify:428/router")
+	graph.SetEndpoint("HandleHigh", "switchflow.verify:428/handle-high")
+	graph.SetEndpoint("HandleMid", "switchflow.verify:428/handle-mid")
 	graph.AddTransitionSwitch("Router", "HandleHigh", "amount >= 10000")
 	graph.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
 	graph.AddTransition("HandleHigh", workflow.END)
@@ -156,7 +156,7 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 	t.Run("no_match_completes_flow_without_branching", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 100}, nil)
+		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 100}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(nil, outcome.State["branch"])
@@ -165,7 +165,7 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 	t.Run("matching_input_still_routes_normally", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 5000}, nil)
+		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 5000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("mid", outcome.State["branch"])

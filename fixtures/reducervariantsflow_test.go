@@ -37,12 +37,12 @@ func TestReducervariantsflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Reducer", "reducervariantsflow.verify:428/reducer")
-	graph.AddTask("TaskA", "reducervariantsflow.verify:428/task-a")
-	graph.AddTask("TaskB", "reducervariantsflow.verify:428/task-b")
-	graph.AddTask("TaskC", "reducervariantsflow.verify:428/task-c")
-	graph.AddTask("TaskD", "reducervariantsflow.verify:428/task-d")
-	graph.AddTask("Join", "reducervariantsflow.verify:428/join")
+	graph := workflow.NewGraph("Reducer")
+	graph.SetEndpoint("TaskA", "reducervariantsflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "reducervariantsflow.verify:428/task-b")
+	graph.SetEndpoint("TaskC", "reducervariantsflow.verify:428/task-c")
+	graph.SetEndpoint("TaskD", "reducervariantsflow.verify:428/task-d")
+	graph.SetEndpoint("Join", "reducervariantsflow.verify:428/join")
 	graph.SetFanIn("Join")
 	graph.SetReducer("lo", workflow.ReducerMin)
 	graph.SetReducer("hi", workflow.ReducerMax)
@@ -109,7 +109,7 @@ func TestReducervariantsflow(t *testing.T) {
 	t.Run("min_max_and_or_concat_merge", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "reducervariantsflow.verify:428/reducer", nil, nil)
+		_, outcome, err := eng.Run(ctx, "reducervariantsflow.verify:428/reducer", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

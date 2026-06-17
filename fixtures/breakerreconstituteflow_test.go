@@ -41,8 +41,8 @@ func TestBreakerreconstituteflow(t *testing.T) {
 	assert := testarossa.For(t)
 
 	proxy := engine.NewTestProxy()
-	graph := workflow.NewGraph("Flow", "breakerreconstituteflow.verify:428/flow")
-	graph.AddTask("Work", "breakerreconstituteflow.verify:428/work")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("Work", "breakerreconstituteflow.verify:428/work")
 	graph.AddTransition("Work", workflow.END)
 	proxy.HandleGraph("breakerreconstituteflow.verify:428/flow", graph)
 

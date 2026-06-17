@@ -41,9 +41,9 @@ func TestRestartflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Restart", "restartflow.verify:428/restart")
-	graph.AddTask("TaskA", "restartflow.verify:428/task-a")
-	graph.AddTask("TaskB", "restartflow.verify:428/task-b")
+	graph := workflow.NewGraph("Restart")
+	graph.SetEndpoint("TaskA", "restartflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "restartflow.verify:428/task-b")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransition("TaskB", workflow.END)
 	proxy.HandleGraph("restartflow.verify:428/restart", graph)

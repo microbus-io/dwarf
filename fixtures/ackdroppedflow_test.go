@@ -35,13 +35,13 @@ func TestAckdroppedflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	ackGraph := workflow.NewGraph("AckDropped", "ackdroppedflow.verify:428/ack-dropped")
-	ackGraph.AddTask("Park", "ackdroppedflow.verify:428/park")
+	ackGraph := workflow.NewGraph("AckDropped")
+	ackGraph.SetEndpoint("Park", "ackdroppedflow.verify:428/park")
 	ackGraph.AddTransition("Park", workflow.END)
 	proxy.HandleGraph("ackdroppedflow.verify:428/ack-dropped", ackGraph)
 
-	echoGraph := workflow.NewGraph("Echo", "ackdroppedflow.verify:428/echo")
-	echoGraph.AddTask("Ping", "ackdroppedflow.verify:428/ping")
+	echoGraph := workflow.NewGraph("Echo")
+	echoGraph.SetEndpoint("Ping", "ackdroppedflow.verify:428/ping")
 	echoGraph.AddTransition("Ping", workflow.END)
 	proxy.HandleGraph("ackdroppedflow.verify:428/echo", echoGraph)
 

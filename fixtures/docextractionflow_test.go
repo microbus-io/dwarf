@@ -35,12 +35,12 @@ func TestDocextractionflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("DocExtraction", "docextractionflow.verify:428/doc-extraction")
-	graph.AddTask("ScanPDF", "docextractionflow.verify:428/scan-pdf")
-	graph.AddTask("IdentifyChunks", "docextractionflow.verify:428/identify-chunks")
-	graph.AddTask("TranscribeChunk", "docextractionflow.verify:428/transcribe-chunk")
-	graph.AddTask("JoinPageTranscriptions", "docextractionflow.verify:428/join-page-transcriptions")
-	graph.AddTask("JoinDocTranscriptions", "docextractionflow.verify:428/join-doc-transcriptions")
+	graph := workflow.NewGraph("DocExtraction")
+	graph.SetEndpoint("ScanPDF", "docextractionflow.verify:428/scan-pdf")
+	graph.SetEndpoint("IdentifyChunks", "docextractionflow.verify:428/identify-chunks")
+	graph.SetEndpoint("TranscribeChunk", "docextractionflow.verify:428/transcribe-chunk")
+	graph.SetEndpoint("JoinPageTranscriptions", "docextractionflow.verify:428/join-page-transcriptions")
+	graph.SetEndpoint("JoinDocTranscriptions", "docextractionflow.verify:428/join-doc-transcriptions")
 	graph.SetFanIn("JoinPageTranscriptions")
 	graph.SetFanIn("JoinDocTranscriptions")
 	graph.SetReducer("transcriptions", workflow.ReducerAppend)
@@ -113,7 +113,7 @@ func TestDocextractionflow(t *testing.T) {
 	t.Run("extracts_every_page", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "docextractionflow.verify:428/doc-extraction",
+		_, outcome, err := eng.Run(ctx, "docextractionflow.verify:428/doc-extraction",
 			map[string]any{"pdf": "mock-pdf-bytes"}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)

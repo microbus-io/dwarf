@@ -28,10 +28,11 @@ observability providers below are injected separately. A host must implement `Lo
   adaptive mechanism, wrap the returned error with `workflow.ErrRateLimited(err, cause)` (rate-limit the task) or
   `workflow.ErrUnavailable(err, cause)` (trip the task's breaker); an undecorated error is an ordinary failure. The
   engine never sniffs status codes - the host owns the mapping (see "Per-Task Breaker → Error classification").
-- **`FlowStopped(ctx, outcome *workflow.FlowOutcome)`** - fired when a flow stops
-  (completed/failed/cancelled/interrupted) for a flow created with `FlowOptions.NotifyOnStop=true`. The engine
-  traffics in no delivery address: the flow's opaque baggage rides on `ctx` (`workflow.BaggageFrom(ctx)`) and the
-  host resolves where/how to deliver from it. Optional: a host with no stop-notification need does nothing here.
+- **`FlowStopped(ctx, flowKey string, outcome *workflow.FlowOutcome)`** - fired when a flow stops
+  (completed/failed/cancelled/interrupted) for a flow created with `FlowOptions.NotifyOnStop=true`. `flowKey`
+  identifies the stopped flow (it is *not* part of the outcome). The engine traffics in no delivery address:
+  the flow's opaque baggage rides on `ctx` (`workflow.BaggageFrom(ctx)`) and the host resolves where/how to
+  deliver from it. Optional: a host with no stop-notification need does nothing here.
 - **`SignalPeers(ctx, op string, payload []byte)`** - delivers one cross-replica coordination signal to the
   other replicas, all fire-and-forget. `op` is an opaque routing key (usable as a topic); `payload` is opaque bytes
   the engine already serialized. The host ships `(op, payload)` to peers and, on the receiving side, hands them back
@@ -91,10 +92,13 @@ is real complexity for a need that does not arise in practice.
 ### Core Concepts
 
 **Workflow graph** - A directed graph defining a workflow's structure: which tasks run, in what order, under what
-conditions. Built in code with the `workflow.Graph` API via `NewGraph(name, url)`. Each graph has a URL (its
-resolve key, passed to `Create`/`LoadGraph`), a human-friendly display name (defaults to the URL when empty;
-surfaced in rendering and denormalized onto the flow row), an entry point, tasks, transitions, and optional
-reducers for fan-in state merging.
+conditions. Built in code with the `workflow.Graph` API via `NewGraph(name)`. Each graph has a human-friendly
+display name (surfaced in rendering and denormalized onto the flow row as `workflow_name`), an entry point,
+tasks, transitions, and optional reducers for fan-in state merging. The graph does **not** carry its own
+resolve URL: the resolve key is a separate opaque `workflowURL` passed to `Create`/`Run`/`LoadGraph` and stored
+on the flow (`workflow_url`); the engine never keeps it on the graph. Each node is bound to its dispatch
+endpoint with `graph.SetEndpoint(nodeName, url)` (create-or-update); the same endpoint may be bound under
+multiple node names.
 
 **Naming convention.** Graph and task (node) names are PascalCase (`Reserve`, `Charge`) - graph-topology
 identifiers, kept visually distinct from the lowercased dispatch URLs and the camelCase state fields. The engine
@@ -226,7 +230,9 @@ flow's initial state; a workflow author wanting narrower carryover scrubs with a
 `flow.Delete`/`Transform`. Scheduling (priority, fairness) comes from caller-supplied `FlowOptions`; nil opts uses
 fresh defaults, not the prior flow's.
 
-**Run** - Create + Start + Await in one call, returning the `*workflow.FlowOutcome`.
+**Run** - Create + Start + Await in one call, returning `(flowKey string, *workflow.FlowOutcome, error)` -
+the new flow's key alongside its outcome (the key is the flow's identity, not part of the outcome; callers
+need it for later `History`/`Resume`/`Restart`). On error, `flowKey` is `""` and the outcome is nil.
 
 **Await** - Blocks until the flow stops (see "Await" below).
 
@@ -247,12 +253,12 @@ into a queue. Fire-and-forget - a missed doorbell is recovered by `pollPendingSt
 
 ### FlowOutcome and side-channel signals
 
-`Snapshot`, `Await`, and `Run` return a single `*workflow.FlowOutcome`. The same struct is the `FlowStopped`
-payload. The shape:
+`Snapshot`, `Await`, and `Run` return a `*workflow.FlowOutcome` (`Run` also returns the `flowKey` separately;
+`Snapshot`/`Await` callers already hold it). The same struct is the `FlowStopped` payload (with `flowKey` as a
+separate callback arg). The shape:
 
 ```go
 type FlowOutcome struct {
-    FlowKey          string
     Status           string
     State            map[string]any
     Error            string         // populated when Status == "failed"
@@ -260,6 +266,9 @@ type FlowOutcome struct {
     CancelReason     string         // populated when Status == "cancelled"
 }
 ```
+
+The flow key is deliberately **not** a field: it is identity, not outcome. Every consumer already has it - the
+caller passed it to `Snapshot`/`Await`, `Run` returns it, and `FlowStopped` receives it as an argument.
 
 Side-channel fields are populated only for the matching status. `Run`'s Go-level `error` return is reserved for
 infrastructure failures (DB, timeout); a *workflow failure* surfaces as `Status == "failed"` with `Error` set, so

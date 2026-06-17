@@ -52,15 +52,15 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 	proxy := engine.NewTestProxy()
 
 	// Main graph: A -> B -> forEach(items) -> C -> {onError -> ErrorHandler} -> D -> {when} -> superSubCall or E -> {goto} -> Z
-	superGraph := workflow.NewGraph("Super", "superflow.verify:428/super")
-	superGraph.AddTask("TaskA", "superflow.verify:428/task-a")
-	superGraph.AddTask("TaskB", "superflow.verify:428/task-b")
-	superGraph.AddTask("TaskC", "superflow.verify:428/task-c")
-	superGraph.AddTask("ErrorHandler", "superflow.verify:428/error-handler")
-	superGraph.AddTask("TaskD", "superflow.verify:428/task-d")
-	superGraph.AddTask("SuperSubCall", "superflow.verify:428/super-sub-call")
-	superGraph.AddTask("TaskE", "superflow.verify:428/task-e")
-	superGraph.AddTask("TaskZ", "superflow.verify:428/task-z")
+	superGraph := workflow.NewGraph("Super")
+	superGraph.SetEndpoint("TaskA", "superflow.verify:428/task-a")
+	superGraph.SetEndpoint("TaskB", "superflow.verify:428/task-b")
+	superGraph.SetEndpoint("TaskC", "superflow.verify:428/task-c")
+	superGraph.SetEndpoint("ErrorHandler", "superflow.verify:428/error-handler")
+	superGraph.SetEndpoint("TaskD", "superflow.verify:428/task-d")
+	superGraph.SetEndpoint("SuperSubCall", "superflow.verify:428/super-sub-call")
+	superGraph.SetEndpoint("TaskE", "superflow.verify:428/task-e")
+	superGraph.SetEndpoint("TaskZ", "superflow.verify:428/task-z")
 	superGraph.SetFanIn("TaskD")
 	superGraph.SetFanIn("TaskE")
 	superGraph.AddTransition("TaskA", "TaskB")
@@ -77,9 +77,9 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 	proxy.HandleGraph("superflow.verify:428/super", superGraph)
 
 	// Sub graph: SubTaskA -> SubTaskB -> END
-	subGraph := workflow.NewGraph("SuperSub", "superflow.verify:428/super-sub")
-	subGraph.AddTask("SubTaskA", "superflow.verify:428/sub-task-a")
-	subGraph.AddTask("SubTaskB", "superflow.verify:428/sub-task-b")
+	subGraph := workflow.NewGraph("SuperSub")
+	subGraph.SetEndpoint("SubTaskA", "superflow.verify:428/sub-task-a")
+	subGraph.SetEndpoint("SubTaskB", "superflow.verify:428/sub-task-b")
 	subGraph.AddTransition("SubTaskA", "SubTaskB")
 	subGraph.AddTransition("SubTaskB", workflow.END)
 	proxy.HandleGraph("superflow.verify:428/super-sub", subGraph)
@@ -157,7 +157,7 @@ func TestSuperflow_Sequential(t *testing.T) {
 			eng, _, visits := superflowSetup(t, shards)
 
 			state := map[string]any{"items": []string{"x", "y", "z"}, "behaviors": map[string]any{}}
-			outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
+			_, outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 			assert.NoError(err)
 			assert.Equal(workflow.StatusCompleted, outcome.Status)
 			assert.Equal(1, visits.get("TaskA"))
@@ -181,7 +181,7 @@ func TestSuperflow_Subgraph(t *testing.T) {
 			eng, _, visits := superflowSetup(t, shards)
 
 			state := map[string]any{"items": []string{"x"}, "useSubgraph": true, "behaviors": map[string]any{}}
-			outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
+			_, outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 			assert.NoError(err)
 			assert.Equal(workflow.StatusCompleted, outcome.Status)
 			assert.Equal(1, visits.get("SubTaskA"))
@@ -204,7 +204,7 @@ func TestSuperflow_Goto(t *testing.T) {
 			"items":     []string{"x"},
 			"behaviors": map[string]any{"TaskE": map[string]any{"Goto": "TaskZ"}},
 		}
-		outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
+		_, outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(1, visits.get("TaskE"))
@@ -225,7 +225,7 @@ func TestSuperflow_OnError(t *testing.T) {
 				"items":     []string{"x", "y"},
 				"behaviors": map[string]any{"TaskC": map[string]any{"ErrorStatus": 500.0}},
 			}
-			outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
+			_, outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 			assert.NoError(err)
 			assert.Equal(workflow.StatusCompleted, outcome.Status)
 			assert.True(visits.get("ErrorHandler") >= 1)
@@ -248,7 +248,7 @@ func TestSuperflow_Sleep(t *testing.T) {
 			"items":     []string{"x", "y", "z"},
 			"behaviors": map[string]any{"TaskC": map[string]any{"SleepMs": 50.0}},
 		}
-		outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
+		_, outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3, visits.get("TaskC"))

@@ -33,15 +33,15 @@ func TestDynamicsubgraphflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Parent graph: single task
-	parent := workflow.NewGraph("DynamicSubgraph", "dynamicsubgraphflow.verify:428/dynamic-subgraph")
-	parent.AddTask("Parent", "dynamicsubgraphflow.verify:428/parent")
+	parent := workflow.NewGraph("DynamicSubgraph")
+	parent.SetEndpoint("Parent", "dynamicsubgraphflow.verify:428/parent")
 	parent.AddTransition("Parent", workflow.END)
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/dynamic-subgraph", parent)
 
 	// Inner graph: InnerA -> InnerB
-	inner := workflow.NewGraph("Inner", "dynamicsubgraphflow.verify:428/inner")
-	inner.AddTask("InnerA", "dynamicsubgraphflow.verify:428/inner-a")
-	inner.AddTask("InnerB", "dynamicsubgraphflow.verify:428/inner-b")
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("InnerA", "dynamicsubgraphflow.verify:428/inner-a")
+	inner.SetEndpoint("InnerB", "dynamicsubgraphflow.verify:428/inner-b")
 	inner.AddTransition("InnerA", "InnerB")
 	inner.AddTransition("InnerB", workflow.END)
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/inner", inner)
@@ -72,7 +72,7 @@ func TestDynamicsubgraphflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"value": 5}
-		outcome, err := eng.Run(ctx, "dynamicsubgraphflow.verify:428/dynamic-subgraph", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "dynamicsubgraphflow.verify:428/dynamic-subgraph", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		// InnerA: 5*2=10, InnerB: 10+3=13, Parent: "parent:13"

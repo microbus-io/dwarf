@@ -40,8 +40,8 @@ func TestBreakerstartparkflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Flow", "breakerstartparkflow.verify:428/flow")
-	graph.AddTask("Work", "breakerstartparkflow.verify:428/work")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("Work", "breakerstartparkflow.verify:428/work")
 	graph.AddTransition("Work", workflow.END)
 	proxy.HandleGraph("breakerstartparkflow.verify:428/flow", graph)
 

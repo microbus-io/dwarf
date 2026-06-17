@@ -44,14 +44,14 @@ func TestCompletionRaceflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// Parent graph: a single subgraph-caller task, then END.
-	parent := workflow.NewGraph("Parent", "completionrace.verify:428/parent")
-	parent.AddTask("Caller", "completionrace.verify:428/caller")
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("Caller", "completionrace.verify:428/caller")
 	parent.AddTransition("Caller", workflow.END)
 	proxy.HandleGraph("completionrace.verify:428/parent", parent)
 
 	// Inner graph: a single no-op task, then END - completes as fast as possible to race the caller's park.
-	inner := workflow.NewGraph("Inner", "completionrace.verify:428/inner")
-	inner.AddTask("InnerEntry", "completionrace.verify:428/inner-entry")
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("InnerEntry", "completionrace.verify:428/inner-entry")
 	inner.AddTransition("InnerEntry", workflow.END)
 	proxy.HandleGraph("completionrace.verify:428/inner", inner)
 

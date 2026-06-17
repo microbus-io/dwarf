@@ -35,10 +35,10 @@ func TestStepnavflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("Flow", "stepnavflow.verify:428/flow")
-	graph.AddTask("TaskA", "stepnavflow.verify:428/task-a")
-	graph.AddTask("TaskB", "stepnavflow.verify:428/task-b")
-	graph.AddTask("TaskC", "stepnavflow.verify:428/task-c")
+	graph := workflow.NewGraph("Flow")
+	graph.SetEndpoint("TaskA", "stepnavflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "stepnavflow.verify:428/task-b")
+	graph.SetEndpoint("TaskC", "stepnavflow.verify:428/task-c")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransition("TaskB", "TaskC")
 	graph.AddTransition("TaskC", workflow.END)
@@ -52,13 +52,13 @@ func TestStepnavflow(t *testing.T) {
 	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
-	outcome, err := eng.Run(ctx, "stepnavflow.verify:428/flow", nil, nil)
+	flowKey, outcome, err := eng.Run(ctx, "stepnavflow.verify:428/flow", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-	steps, err := eng.History(ctx, outcome.FlowKey)
+	steps, err := eng.History(ctx, flowKey)
 	if !assert.NoError(err) {
 		return
 	}

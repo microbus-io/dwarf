@@ -38,12 +38,12 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	proxy := NewTestProxy()
 	release := make(chan struct{})
 
-	parent := workflow.NewGraph("Parent", "wedgesub.verify:0/parent")
-	parent.AddTask("P", "wedgesub.verify:0/p")
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("P", "wedgesub.verify:0/p")
 	parent.AddTransition("P", workflow.END)
 	proxy.HandleGraph("wedgesub.verify:0/parent", parent)
-	child := workflow.NewGraph("Child", "wedgesub.verify:0/child")
-	child.AddTask("K", "wedgesub.verify:0/k")
+	child := workflow.NewGraph("Child")
+	child.SetEndpoint("K", "wedgesub.verify:0/k")
 	child.AddTransition("K", workflow.END)
 	proxy.HandleGraph("wedgesub.verify:0/child", child)
 
@@ -140,8 +140,8 @@ func TestWedgeSweep_BreakerProbeReElected(t *testing.T) {
 	const taskURL = "wedgebrk.verify:0/task"
 
 	proxy := NewTestProxy()
-	g := workflow.NewGraph("Down", "wedgebrk.verify:0/down")
-	g.AddTask("Down", taskURL)
+	g := workflow.NewGraph("Down")
+	g.SetEndpoint("Down", taskURL)
 	g.AddTransition("Down", workflow.END)
 	proxy.HandleGraph("wedgebrk.verify:0/down", g)
 	// The task itself always succeeds; the breaker is tripped directly below, not by a failure, so no probe

@@ -32,12 +32,12 @@ func TestFailedfanoutflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("FailedFanOut", "failedfanoutflow.verify:428/failed-fan-out")
-	graph.AddTask("Src", "failedfanoutflow.verify:428/src")
-	graph.AddTask("A", "failedfanoutflow.verify:428/a")
-	graph.AddTask("B", "failedfanoutflow.verify:428/b")
-	graph.AddTask("C", "failedfanoutflow.verify:428/c")
-	graph.AddTask("J", "failedfanoutflow.verify:428/j")
+	graph := workflow.NewGraph("FailedFanOut")
+	graph.SetEndpoint("Src", "failedfanoutflow.verify:428/src")
+	graph.SetEndpoint("A", "failedfanoutflow.verify:428/a")
+	graph.SetEndpoint("B", "failedfanoutflow.verify:428/b")
+	graph.SetEndpoint("C", "failedfanoutflow.verify:428/c")
+	graph.SetEndpoint("J", "failedfanoutflow.verify:428/j")
 	graph.SetFanIn("J")
 	graph.SetReducer("executed", workflow.ReducerAdd)
 	graph.AddTransition("Src", "A")
@@ -74,7 +74,7 @@ func TestFailedfanoutflow(t *testing.T) {
 	t.Run("failing_branch_fails_the_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "failedfanoutflow.verify:428/failed-fan-out", nil, nil)
+		_, outcome, err := eng.Run(ctx, "failedfanoutflow.verify:428/failed-fan-out", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 	})

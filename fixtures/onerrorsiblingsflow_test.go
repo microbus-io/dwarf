@@ -32,13 +32,13 @@ func TestOnerrorsiblingsflow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 
-	graph := workflow.NewGraph("FanOutError", "onerrorsiblingsflow.verify:428/fan-out-error")
-	graph.AddTask("TaskA", "onerrorsiblingsflow.verify:428/task-a")
-	graph.AddTask("TaskB", "onerrorsiblingsflow.verify:428/task-b")
-	graph.AddTask("TaskC", "onerrorsiblingsflow.verify:428/task-c")
-	graph.AddTask("TaskD", "onerrorsiblingsflow.verify:428/task-d")
-	graph.AddTask("Handler", "onerrorsiblingsflow.verify:428/handler")
-	graph.AddTask("TaskE", "onerrorsiblingsflow.verify:428/task-e")
+	graph := workflow.NewGraph("FanOutError")
+	graph.SetEndpoint("TaskA", "onerrorsiblingsflow.verify:428/task-a")
+	graph.SetEndpoint("TaskB", "onerrorsiblingsflow.verify:428/task-b")
+	graph.SetEndpoint("TaskC", "onerrorsiblingsflow.verify:428/task-c")
+	graph.SetEndpoint("TaskD", "onerrorsiblingsflow.verify:428/task-d")
+	graph.SetEndpoint("Handler", "onerrorsiblingsflow.verify:428/handler")
+	graph.SetEndpoint("TaskE", "onerrorsiblingsflow.verify:428/task-e")
 	graph.SetFanIn("TaskE")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransition("TaskA", "TaskC")
@@ -84,7 +84,7 @@ func TestOnerrorsiblingsflow(t *testing.T) {
 	t.Run("flow_completes_with_handler_and_siblings", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		outcome, err := eng.Run(ctx, "onerrorsiblingsflow.verify:428/fan-out-error", nil, nil)
+		_, outcome, err := eng.Run(ctx, "onerrorsiblingsflow.verify:428/fan-out-error", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(true, outcome.State["recovered"])
