@@ -35,8 +35,7 @@ func TestTimebudgetflow(t *testing.T) {
 	graph := workflow.NewGraph("TimeBudget")
 	graph.SetEndpoint("TaskA", "timebudgetflow.verify:428/task-a")
 	graph.SetEndpoint("Slow", "timebudgetflow.verify:428/slow")
-	graph.AddTransition("TaskA", "Slow")
-	graph.AddTransition("Slow", workflow.END)
+	graph.AddTransitionChain("TaskA", "Slow", workflow.END)
 	proxy.HandleGraph("timebudgetflow.verify:428/time-budget", graph)
 
 	proxy.HandleTask("timebudgetflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

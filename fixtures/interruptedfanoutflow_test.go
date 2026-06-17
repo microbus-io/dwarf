@@ -44,8 +44,7 @@ func TestInterruptedfanoutflow(t *testing.T) {
 	graph.AddTransition("Src", "C")
 	graph.AddTransition("A", "J")
 	graph.AddTransition("B", "J")
-	graph.AddTransition("C", "J")
-	graph.AddTransition("J", workflow.END)
+	graph.AddTransitionChain("C", "J", workflow.END)
 	proxy.HandleGraph("interruptedfanoutflow.verify:428/interrupted-fan-out", graph)
 
 	proxy.HandleTask("interruptedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {

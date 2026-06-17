@@ -64,17 +64,14 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 	parent.SetEndpoint("TaskA", "retrysubgraphreapflow.verify:428/task-a")
 	parent.SetEndpoint("RunInner", "retrysubgraphreapflow.verify:428/run-inner")
 	parent.SetEndpoint("TaskZ", "retrysubgraphreapflow.verify:428/task-z")
-	parent.AddTransition("TaskA", "RunInner")
-	parent.AddTransition("RunInner", "TaskZ")
-	parent.AddTransition("TaskZ", workflow.END)
+	parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.END)
 	proxy.HandleGraph("retrysubgraphreapflow.verify:428/parent", parent)
 
 	// Inner graph: TaskX -> TaskY
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("TaskX", "retrysubgraphreapflow.verify:428/task-x")
 	inner.SetEndpoint("TaskY", "retrysubgraphreapflow.verify:428/task-y")
-	inner.AddTransition("TaskX", "TaskY")
-	inner.AddTransition("TaskY", workflow.END)
+	inner.AddTransitionChain("TaskX", "TaskY", workflow.END)
 	proxy.HandleGraph("retrysubgraphreapflow.verify:428/inner", inner)
 
 	proxy.HandleTask("retrysubgraphreapflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
@@ -164,16 +161,13 @@ func TestRestartFromSubgraphReapflow(t *testing.T) {
 	parent.SetEndpoint("TaskA", "restartfromsubgraphreapflow.verify:428/task-a")
 	parent.SetEndpoint("RunInner", "restartfromsubgraphreapflow.verify:428/run-inner")
 	parent.SetEndpoint("TaskZ", "restartfromsubgraphreapflow.verify:428/task-z")
-	parent.AddTransition("TaskA", "RunInner")
-	parent.AddTransition("RunInner", "TaskZ")
-	parent.AddTransition("TaskZ", workflow.END)
+	parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.END)
 	proxy.HandleGraph("restartfromsubgraphreapflow.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("TaskX", "restartfromsubgraphreapflow.verify:428/task-x")
 	inner.SetEndpoint("TaskY", "restartfromsubgraphreapflow.verify:428/task-y")
-	inner.AddTransition("TaskX", "TaskY")
-	inner.AddTransition("TaskY", workflow.END)
+	inner.AddTransitionChain("TaskX", "TaskY", workflow.END)
 	proxy.HandleGraph("restartfromsubgraphreapflow.verify:428/inner", inner)
 
 	proxy.HandleTask("restartfromsubgraphreapflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

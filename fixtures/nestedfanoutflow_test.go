@@ -42,8 +42,7 @@ func TestNestedfanoutflow(t *testing.T) {
 	outer.AddTransition("TaskA", "NormalB")
 	outer.AddTransition("TaskA", "RunInner")
 	outer.AddTransition("NormalB", "TaskJ")
-	outer.AddTransition("RunInner", "TaskJ")
-	outer.AddTransition("TaskJ", workflow.END)
+	outer.AddTransitionChain("RunInner", "TaskJ", workflow.END)
 	proxy.HandleGraph("nestedfanoutflow.verify:428/nested", outer)
 
 	// Inner subgraph: X -> {Y, Z} -> W with ReducerAdd on "inner"
@@ -57,8 +56,7 @@ func TestNestedfanoutflow(t *testing.T) {
 	inner.AddTransition("TaskX", "TaskY")
 	inner.AddTransition("TaskX", "TaskZ")
 	inner.AddTransition("TaskY", "TaskW")
-	inner.AddTransition("TaskZ", "TaskW")
-	inner.AddTransition("TaskW", workflow.END)
+	inner.AddTransitionChain("TaskZ", "TaskW", workflow.END)
 	proxy.HandleGraph("nestedfanoutflow.verify:428/inner", inner)
 
 	proxy.HandleTask("nestedfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

@@ -41,8 +41,7 @@ func TestBreakpointnotifyflow(t *testing.T) {
 	graph := workflow.NewGraph("Flow")
 	graph.SetEndpoint("TaskA", "breakpointnotifyflow.verify:428/task-a")
 	graph.SetEndpoint("TaskB", "breakpointnotifyflow.verify:428/task-b")
-	graph.AddTransition("TaskA", "TaskB")
-	graph.AddTransition("TaskB", workflow.END)
+	graph.AddTransitionChain("TaskA", "TaskB", workflow.END)
 	proxy.HandleGraph("breakpointnotifyflow.verify:428/flow", graph)
 	proxy.HandleTask("breakpointnotifyflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil

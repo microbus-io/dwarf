@@ -80,8 +80,7 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 	subGraph := workflow.NewGraph("SuperSub")
 	subGraph.SetEndpoint("SubTaskA", "superflow.verify:428/sub-task-a")
 	subGraph.SetEndpoint("SubTaskB", "superflow.verify:428/sub-task-b")
-	subGraph.AddTransition("SubTaskA", "SubTaskB")
-	subGraph.AddTransition("SubTaskB", workflow.END)
+	subGraph.AddTransitionChain("SubTaskA", "SubTaskB", workflow.END)
 	proxy.HandleGraph("superflow.verify:428/super-sub", subGraph)
 
 	// Per-task visit counters. Fan-out branches (e.g. taskC over a forEach) run concurrently across

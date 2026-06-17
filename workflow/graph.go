@@ -198,6 +198,17 @@ func (g *Graph) AddTransitionOnError(from, to string) {
 	g.transitions = append(g.transitions, Transition{From: from, To: to, OnError: true})
 }
 
+// AddTransitionChain wires an unconditional transition between each consecutive pair of names:
+// AddTransitionChain("A", "B", "C") is AddTransition("A", "B") followed by AddTransition("B", "C").
+// It is a convenience for linear segments; fewer than two names is a no-op. END belongs last (a node
+// after END would produce an invalid transition out of END). Mix with the other AddTransition* methods
+// for branching, conditions, and loops.
+func (g *Graph) AddTransitionChain(names ...string) {
+	for i := 0; i+1 < len(names); i++ {
+		g.AddTransition(names[i], names[i+1])
+	}
+}
+
 // autoRegister registers a new node if one does not exist for the name.
 func (g *Graph) autoRegister(name string) {
 	if name == END {
@@ -327,6 +338,9 @@ func (g *Graph) Validate() error {
 		}
 	}
 	for _, tr := range g.transitions {
+		if tr.From == END {
+			return errors.New("transition out of END to '%s' in graph '%s'; END is terminal and has no outgoing transitions", tr.To, g.name)
+		}
 		if !nodeSet[tr.From] {
 			return errors.New("transition from unknown node '%s' to '%s' in graph '%s'", tr.From, tr.To, g.name)
 		}

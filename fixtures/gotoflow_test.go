@@ -37,8 +37,7 @@ func TestGotoflow(t *testing.T) {
 	graph.SetEndpoint("TaskC", "gotoflow.verify:428/task-c")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransitionGoto("TaskB", "TaskA")
-	graph.AddTransition("TaskB", "TaskC")
-	graph.AddTransition("TaskC", workflow.END)
+	graph.AddTransitionChain("TaskB", "TaskC", workflow.END)
 	proxy.HandleGraph("gotoflow.verify:428/goto", graph)
 
 	proxy.HandleTask("gotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

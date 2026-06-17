@@ -172,6 +172,45 @@ func TestGraph_Validate(t *testing.T) {
 	assert.Error(g7.Validate())
 }
 
+func TestGraph_AddTransitionChain(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	g := NewGraph("Chain")
+	g.AddTransitionChain("a", "b", "c", END)
+
+	trs := g.Transitions()
+	assert.Equal(3, len(trs))
+	assert.Equal("a", trs[0].From)
+	assert.Equal("b", trs[0].To)
+	assert.Equal("b", trs[1].From)
+	assert.Equal("c", trs[1].To)
+	assert.Equal("c", trs[2].From)
+	assert.Equal(END, trs[2].To)
+	// Chain wires plain unconditional edges, so it validates like the equivalent AddTransition calls.
+	assert.NoError(g.Validate())
+	// First node in the chain is the default entry point.
+	assert.Equal("a", g.EntryPoint())
+
+	// Fewer than two names is a no-op.
+	g2 := NewGraph("One")
+	g2.AddTransitionChain("solo")
+	assert.Equal(0, len(g2.Transitions()))
+}
+
+func TestGraph_TransitionOutOfENDRejected(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	g := NewGraph("BadEnd")
+	g.AddTransition("a", END)
+	g.AddTransition(END, "b") // END is terminal; an outgoing transition is invalid
+	err := g.Validate()
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "out of END")
+	}
+}
+
 func TestGraph_END(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

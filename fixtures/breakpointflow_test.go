@@ -35,9 +35,7 @@ func TestBreakpointflow(t *testing.T) {
 	graph.SetEndpoint("TaskA", "breakpointflow.verify:428/task-a")
 	graph.SetEndpoint("TaskB", "TaskB")
 	graph.SetEndpoint("TaskC", "breakpointflow.verify:428/task-c")
-	graph.AddTransition("TaskA", "TaskB")
-	graph.AddTransition("TaskB", "TaskC")
-	graph.AddTransition("TaskC", workflow.END)
+	graph.AddTransitionChain("TaskA", "TaskB", "TaskC", workflow.END)
 	proxy.HandleGraph("breakpointflow.verify:428/breakpoint", graph)
 
 	proxy.HandleTask("breakpointflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

@@ -37,17 +37,14 @@ func TestSubgraphflow(t *testing.T) {
 	parent.SetEndpoint("TaskA", "subgraphflow.verify:428/task-a")
 	parent.SetEndpoint("RunInner", "subgraphflow.verify:428/run-inner")
 	parent.SetEndpoint("TaskZ", "subgraphflow.verify:428/task-z")
-	parent.AddTransition("TaskA", "RunInner")
-	parent.AddTransition("RunInner", "TaskZ")
-	parent.AddTransition("TaskZ", workflow.END)
+	parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.END)
 	proxy.HandleGraph("subgraphflow.verify:428/parent", parent)
 
 	// Inner graph: X -> Y
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("TaskX", "subgraphflow.verify:428/task-x")
 	inner.SetEndpoint("TaskY", "subgraphflow.verify:428/task-y")
-	inner.AddTransition("TaskX", "TaskY")
-	inner.AddTransition("TaskY", workflow.END)
+	inner.AddTransitionChain("TaskX", "TaskY", workflow.END)
 	proxy.HandleGraph("subgraphflow.verify:428/inner", inner)
 
 	proxy.HandleTask("subgraphflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

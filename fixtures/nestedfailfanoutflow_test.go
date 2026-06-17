@@ -45,9 +45,7 @@ func TestNestedfailfanoutflow(t *testing.T) {
 	graph.SetFanIn("JoinO")
 	graph.AddTransitionForEach("TaskA", "TaskO", "outers", "outerItem")
 	graph.AddTransitionForEach("TaskO", "TaskI", "inners", "innerItem")
-	graph.AddTransition("TaskI", "JoinI")
-	graph.AddTransition("JoinI", "JoinO")
-	graph.AddTransition("JoinO", workflow.END)
+	graph.AddTransitionChain("TaskI", "JoinI", "JoinO", workflow.END)
 	proxy.HandleGraph("nestedfailfanoutflow.verify:428/nested", graph)
 
 	// Shared test state

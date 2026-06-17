@@ -40,11 +40,8 @@ func TestAliasflow(t *testing.T) {
 	graph.SetEndpoint("D", "aliasflow.verify:428/task-d")
 	graph.AddTransition("S", "A")
 	graph.AddTransitionGoto("S", "BPrime")
-	graph.AddTransition("A", "B")
-	graph.AddTransition("B", "C")
-	graph.AddTransition("C", workflow.END)
-	graph.AddTransition("BPrime", "D")
-	graph.AddTransition("D", workflow.END)
+	graph.AddTransitionChain("A", "B", "C", workflow.END)
+	graph.AddTransitionChain("BPrime", "D", workflow.END)
 	proxy.HandleGraph("aliasflow.verify:428/alias", graph)
 
 	proxy.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {

@@ -47,9 +47,7 @@ func TestPerelementpipelineflow(t *testing.T) {
 	graph.AddTransition("TaskH", "TaskA")
 	graph.AddTransition("TaskH", "TaskB")
 	graph.AddTransition("TaskA", "TaskM")
-	graph.AddTransition("TaskB", "TaskM")
-	graph.AddTransition("TaskM", "TaskL")
-	graph.AddTransition("TaskL", workflow.END)
+	graph.AddTransitionChain("TaskB", "TaskM", "TaskL", workflow.END)
 	proxy.HandleGraph("perelementpipelineflow.verify:428/per-element-pipeline", graph)
 
 	proxy.HandleTask("perelementpipelineflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {

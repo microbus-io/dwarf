@@ -55,8 +55,7 @@ func TestFanoutSubgraphflow(t *testing.T) {
 	parent.AddTransition("Entry", "Sub")
 	parent.AddTransition("A", "Join")
 	parent.AddTransition("B", "Join")
-	parent.AddTransition("Sub", "Join")
-	parent.AddTransition("Join", workflow.END)
+	parent.AddTransitionChain("Sub", "Join", workflow.END)
 	proxy.HandleGraph("fanoutsub.verify:428/parent", parent)
 
 	// Inner: a single trivial task, so the child completes as fast as possible to race the caller's park.

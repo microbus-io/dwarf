@@ -35,8 +35,7 @@ func TestSubgraphentryflow(t *testing.T) {
 	outer := workflow.NewGraph("Outer")
 	outer.SetEndpoint("RunInner", "subgraphentryflow.verify:428/run-inner")
 	outer.SetEndpoint("RunTail", "subgraphentryflow.verify:428/run-tail")
-	outer.AddTransition("RunInner", "RunTail")
-	outer.AddTransition("RunTail", workflow.END)
+	outer.AddTransitionChain("RunInner", "RunTail", workflow.END)
 	proxy.HandleGraph("subgraphentryflow.verify:428/outer", outer)
 
 	// Inner subgraph: TaskInner -> END

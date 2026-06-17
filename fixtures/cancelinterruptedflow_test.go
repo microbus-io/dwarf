@@ -41,9 +41,7 @@ func TestCancelinterruptedflow(t *testing.T) {
 	graph.SetEndpoint("TaskA", "cancelinterruptedflow.verify:428/task-a")
 	graph.SetEndpoint("Pause", "cancelinterruptedflow.verify:428/pause")
 	graph.SetEndpoint("TaskB", "cancelinterruptedflow.verify:428/task-b")
-	graph.AddTransition("TaskA", "Pause")
-	graph.AddTransition("Pause", "TaskB")
-	graph.AddTransition("TaskB", workflow.END)
+	graph.AddTransitionChain("TaskA", "Pause", "TaskB", workflow.END)
 	proxy.HandleGraph("cancelinterruptedflow.verify:428/flow", graph)
 
 	proxy.HandleTask("cancelinterruptedflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

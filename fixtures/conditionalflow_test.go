@@ -40,8 +40,7 @@ func TestConditionalflow(t *testing.T) {
 	graph.AddTransitionWhen("TaskA", "TaskHigh", "score >= 50")
 	graph.AddTransitionWhen("TaskA", "TaskLow", "score < 50")
 	graph.AddTransition("TaskHigh", "TaskC")
-	graph.AddTransition("TaskLow", "TaskC")
-	graph.AddTransition("TaskC", workflow.END)
+	graph.AddTransitionChain("TaskLow", "TaskC", workflow.END)
 	proxy.HandleGraph("conditionalflow.verify:428/conditional", graph)
 
 	proxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

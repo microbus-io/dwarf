@@ -42,8 +42,7 @@ func TestIntrathreadgotoflow(t *testing.T) {
 	graph.AddTransition("TaskA", "NormalC")
 	graph.AddTransitionGoto("LoopTask", "LoopTask")
 	graph.AddTransition("LoopTask", "TaskD")
-	graph.AddTransition("NormalC", "TaskD")
-	graph.AddTransition("TaskD", workflow.END)
+	graph.AddTransitionChain("NormalC", "TaskD", workflow.END)
 	proxy.HandleGraph("intrathreadgotoflow.verify:428/intra-thread-goto", graph)
 
 	proxy.HandleTask("intrathreadgotoflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

@@ -42,8 +42,7 @@ func TestDynamicsubgraphflow(t *testing.T) {
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("InnerA", "dynamicsubgraphflow.verify:428/inner-a")
 	inner.SetEndpoint("InnerB", "dynamicsubgraphflow.verify:428/inner-b")
-	inner.AddTransition("InnerA", "InnerB")
-	inner.AddTransition("InnerB", workflow.END)
+	inner.AddTransitionChain("InnerA", "InnerB", workflow.END)
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/inner", inner)
 
 	proxy.HandleTask("dynamicsubgraphflow.verify:428/parent", func(ctx context.Context, f *workflow.Flow) error {

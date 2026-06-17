@@ -41,8 +41,7 @@ func TestErrorflow(t *testing.T) {
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransitionOnError("TaskB", "Handler")
 	graph.AddTransition("TaskB", "TaskC")
-	graph.AddTransition("Handler", "TaskC")
-	graph.AddTransition("TaskC", workflow.END)
+	graph.AddTransitionChain("Handler", "TaskC", workflow.END)
 	proxy.HandleGraph("errorflow.verify:428/error", graph)
 
 	proxy.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

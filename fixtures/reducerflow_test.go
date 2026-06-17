@@ -51,8 +51,7 @@ func TestReducerflow(t *testing.T) {
 	graph.AddTransition("TaskA", "TaskD")
 	graph.AddTransition("TaskB", "TaskE")
 	graph.AddTransition("TaskC", "TaskE")
-	graph.AddTransition("TaskD", "TaskE")
-	graph.AddTransition("TaskE", workflow.END)
+	graph.AddTransitionChain("TaskD", "TaskE", workflow.END)
 	proxy.HandleGraph("reducerflow.verify:428/reducer", graph)
 
 	proxy.HandleTask("reducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

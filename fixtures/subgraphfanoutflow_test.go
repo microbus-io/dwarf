@@ -45,16 +45,14 @@ func TestSubgraphfanoutflow(t *testing.T) {
 	outer.AddTransition("TaskA", "NormalD")
 	outer.AddTransition("NormalB", "TaskE")
 	outer.AddTransition("RunSub", "TaskE")
-	outer.AddTransition("NormalD", "TaskE")
-	outer.AddTransition("TaskE", workflow.END)
+	outer.AddTransitionChain("NormalD", "TaskE", workflow.END)
 	proxy.HandleGraph("subgraphfanoutflow.verify:428/sub-fan-out", outer)
 
 	// Sub graph: X -> Y
 	sub := workflow.NewGraph("Sub")
 	sub.SetEndpoint("TaskX", "subgraphfanoutflow.verify:428/task-x")
 	sub.SetEndpoint("TaskY", "subgraphfanoutflow.verify:428/task-y")
-	sub.AddTransition("TaskX", "TaskY")
-	sub.AddTransition("TaskY", workflow.END)
+	sub.AddTransitionChain("TaskX", "TaskY", workflow.END)
 	proxy.HandleGraph("subgraphfanoutflow.verify:428/sub", sub)
 
 	proxy.HandleTask("subgraphfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

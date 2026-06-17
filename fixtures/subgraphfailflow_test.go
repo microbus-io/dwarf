@@ -46,8 +46,7 @@ func TestSubgraphfailflow(t *testing.T) {
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("TaskX", "subgraphfailflow.verify:428/task-x")
 	inner.SetEndpoint("Boom", "subgraphfailflow.verify:428/boom")
-	inner.AddTransition("TaskX", "Boom")
-	inner.AddTransition("Boom", workflow.END)
+	inner.AddTransitionChain("TaskX", "Boom", workflow.END)
 	proxy.HandleGraph("subgraphfailflow.verify:428/inner", inner)
 
 	proxy.HandleTask("subgraphfailflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
@@ -70,9 +69,7 @@ func TestSubgraphfailflow(t *testing.T) {
 		parent.SetEndpoint("RunInner", "subgraphfailflow.verify:428/run-inner-recover")
 		parent.SetEndpoint("TaskZ", "subgraphfailflow.verify:428/task-z")
 		parent.SetEndpoint("Recover", "subgraphfailflow.verify:428/recover")
-		parent.AddTransition("TaskA", "RunInner")
-		parent.AddTransition("RunInner", "TaskZ")
-		parent.AddTransition("TaskZ", workflow.END)
+		parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.END)
 		parent.AddTransitionOnError("RunInner", "Recover")
 		parent.AddTransition("Recover", workflow.END)
 		proxy.HandleGraph("subgraphfailflow.verify:428/recoverparent", parent)
@@ -130,9 +127,7 @@ func TestSubgraphfailflow(t *testing.T) {
 		parent.SetEndpoint("TaskA", "subgraphfailflow.verify:428/task-a2")
 		parent.SetEndpoint("RunInner", "subgraphfailflow.verify:428/run-inner-fail")
 		parent.SetEndpoint("TaskZ", "subgraphfailflow.verify:428/task-z2")
-		parent.AddTransition("TaskA", "RunInner")
-		parent.AddTransition("RunInner", "TaskZ")
-		parent.AddTransition("TaskZ", workflow.END)
+		parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.END)
 		proxy.HandleGraph("subgraphfailflow.verify:428/failparent", parent)
 
 		proxy.HandleTask("subgraphfailflow.verify:428/task-a2", func(ctx context.Context, f *workflow.Flow) error {

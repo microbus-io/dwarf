@@ -47,9 +47,7 @@ func TestDocextractionflow(t *testing.T) {
 	graph.SetReducer("pageTexts", workflow.ReducerAppend)
 	graph.AddTransitionForEach("ScanPDF", "IdentifyChunks", "pageImages", "page")
 	graph.AddTransitionForEach("IdentifyChunks", "TranscribeChunk", "chunks", "chunk")
-	graph.AddTransition("TranscribeChunk", "JoinPageTranscriptions")
-	graph.AddTransition("JoinPageTranscriptions", "JoinDocTranscriptions")
-	graph.AddTransition("JoinDocTranscriptions", workflow.END)
+	graph.AddTransitionChain("TranscribeChunk", "JoinPageTranscriptions", "JoinDocTranscriptions", workflow.END)
 	proxy.HandleGraph("docextractionflow.verify:428/doc-extraction", graph)
 
 	words := []string{"the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "a", "and"}

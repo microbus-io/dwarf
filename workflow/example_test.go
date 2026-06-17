@@ -29,8 +29,7 @@ func ExampleGraph() {
 	g := workflow.NewGraph("Checkout")
 	g.SetEndpoint("Reserve", "inventory.reserve")
 	g.SetEndpoint("Charge", "billing.charge")
-	g.AddTransition("Reserve", "Charge")
-	g.AddTransition("Charge", workflow.END)
+	g.AddTransitionChain("Reserve", "Charge", workflow.END)
 
 	fmt.Println("name:", g.Name())
 	fmt.Println("entry:", g.EntryPoint())
