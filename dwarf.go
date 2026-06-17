@@ -45,8 +45,8 @@ limitations under the License.
 //		return nil
 //	})
 //
-//	eng := dwarf.NewEngine().
-//		WithHost(proxy)
+//	eng := dwarf.NewEngine()
+//	eng.SetHost(proxy)
 //	eng.RunInTest(t) // SQLite in-memory, auto cleanup
 //
 //	out, _ := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)

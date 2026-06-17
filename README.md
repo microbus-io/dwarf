@@ -26,9 +26,9 @@ proxy.HandleTask("hello", func(ctx context.Context, f *workflow.Flow) error {
     return nil
 })
 
-eng := dwarf.NewEngine().
-    WithHost(proxy) // TestProxy implements the Host interface
-eng.RunInTest(t) // SQLite in-memory, auto-cleanup
+eng := dwarf.NewEngine()
+eng.SetHost(proxy) // TestProxy implements the Host interface
+eng.RunInTest(t)   // SQLite in-memory, auto-cleanup
 
 out, _ := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
 fmt.Println(out.State["greeting"]) // hello ada
@@ -82,7 +82,7 @@ scheduler) stay out of those builds.
 ## The host model
 
 The engine reaches the outside world through a single `Host` interface, registered once with
-`WithHost`. Only the first two methods are required; an implementation does nothing in the rest when it
+`SetHost`. Only the first two methods are required; an implementation does nothing in the rest when it
 has no stop-notification need or runs single-replica.
 
 ```go
@@ -111,15 +111,23 @@ them to its transport. The engine never learns how tasks are reached.
 
 ## Production wiring
 
+Each `Set*` returns an `error` (there is no fluent `With*` builder — dropping the chained return is what
+lets every setter surface its error, so misconfiguration fails loudly at wiring time):
+
 ```go
-eng := dwarf.NewEngine().
-    WithDSN("postgres://user:pass@db:5432/dwarf").
-    WithNumShards(2).
-    WithWorkers(64).
-    WithHost(host).
-    WithLogger(slog.Default()).
-    WithMeterProvider(otel.GetMeterProvider()).
-    WithTracerProvider(otel.GetTracerProvider())
+eng := dwarf.NewEngine()
+check := func(err error) {
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+check(eng.SetDSN("postgres://user:pass@db:5432/dwarf"))
+check(eng.SetNumShards(2))
+check(eng.SetWorkers(64))
+check(eng.SetHost(host))
+check(eng.SetLogger(slog.Default()))
+check(eng.SetMeterProvider(otel.GetMeterProvider()))
+check(eng.SetTracerProvider(otel.GetTracerProvider()))
 
 if err := eng.Startup(ctx); err != nil {
     log.Fatal(err)

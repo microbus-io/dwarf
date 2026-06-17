@@ -25,7 +25,7 @@ import (
 // Host is the contract between the dwarf engine and the surrounding host application (the "foreman"
 // adapter). The engine owns no transport of its own; it reaches workflow graphs and tasks, reports flow
 // stops, and carries cross-replica coordination signals exclusively through the host. Register it once
-// via Engine.WithHost.
+// via Engine.SetHost.
 //
 // A host MUST implement LoadGraph and ExecuteTask. The remaining five methods are optional: an
 // implementation may do nothing in them when it has no flow-stop notification need (FlowStopped) or runs

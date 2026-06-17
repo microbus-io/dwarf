@@ -30,7 +30,7 @@ import (
 type TaskHandler func(ctx context.Context, flow *workflow.Flow) error
 
 // TestProxy routes graph fetches and task dispatches to registered handlers. It implements the Host
-// interface for use with Engine.WithHost / Engine.RunInTest: LoadGraph and ExecuteTask dispatch to the
+// interface for use with Engine.SetHost / Engine.RunInTest: LoadGraph and ExecuteTask dispatch to the
 // registered handlers, FlowStopped invokes an optional callback set via OnFlowStopped, and SignalPeers
 // relays to the peer engines registered with AddPeer (none by default, i.e. single-replica). For a
 // multi-replica test, give each replica its own proxy and AddPeer the other engines.

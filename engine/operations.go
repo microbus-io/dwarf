@@ -56,6 +56,7 @@ func (e *Engine) createTask(ctx context.Context, taskURL string, initialState an
 		return "", errors.New("task URL is required", http.StatusBadRequest)
 	}
 	graph := workflow.NewGraph(taskURL, taskURL)
+	graph.AddTask(taskURL, taskURL)
 	graph.AddTransition(taskURL, workflow.END)
 	shardNum := rand.IntN(e.numDBShards()) + 1
 	flowKey, err = e.createWithGraph(ctx, shardNum, taskURL, graph, initialState, 0, "", "", e.resolveFlowOptions(opts))
