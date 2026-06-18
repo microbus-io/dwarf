@@ -629,15 +629,15 @@ to complete - differing transitions would make the result depend on which finish
 
 ### State Across Subgraphs
 
-**Subgraph is a function call.** The signature is `flow.Subgraph(url string, input any, out any) (yield bool, err
-error)`. Only the explicit `input` passed in crosses into the child as its initial state; only the explicit `out`
+**Subgraph is a function call.** The signature is `flow.Subgraph(url string, in any, out any) (yield bool, err
+error)`. Only the explicit `in` passed in crosses into the child as its initial state; only the explicit `out`
 target (the child's `final_state`) crosses back. The parent's state and accumulated changes do NOT auto-cross either
-direction. `input` is any JSON-marshalable value (a struct or a `map[string]any`), normalized to a state map via
+direction. `in` is any JSON-marshalable value (a struct or a `map[string]any`), normalized to a state map via
 `toStateMap` (nil → "no arguments"); `out` is a pointer (a `*struct` or `*map[string]any`) the child's `final_state`
 is unmarshaled into by JSON tag (`parseMapInto`), or nil to ignore the result. A typed struct on either side gives
 field-level type safety without manual `map[string]any` casts.
 
-**Subtask is the single-task front door.** `flow.Subtask(name, url string, input any, out any) (yield bool, err
+**Subtask is the single-task front door.** `flow.Subtask(name, url string, in any, out any) (yield bool, err
 error)` runs one task as an isolated child flow, the task-level sibling of `Subgraph`. The *only* difference is at
 launch: instead of calling the host's `LoadGraph`, the engine synthesizes a trivial one-node graph around `url`
 (`singleTaskGraph(name, url)` - the same wrap `CreateTask` uses), named `name`, dispatching to `url`. So any task
@@ -651,9 +651,9 @@ it: non-empty → `singleTaskGraph`, empty → `LoadGraph`. The launch dispositi
 `"subgraph"`. (`Subtask`/`Subgraph` are the two mechanisms; "subflow" is the umbrella for any child flow and is the
 name of the typed host client, not an engine primitive.)
 
-**Into the child:** `SubgraphRequested` passes `subgraphInput` (the `toStateMap`-normalized `input`) directly to
+**Into the child:** `SubgraphRequested` passes `subgraphInput` (the `toStateMap`-normalized `in`) directly to
 `createSubgraphFlow` as the child's initial state (nil normalized to `{}`). No merge with parent state. A caller
-wanting the parent's full state passes `flow.Snapshot()` as `input` - explicit opt-in.
+wanting the parent's full state passes `flow.Snapshot()` as `in` - explicit opt-in.
 
 **Back to the parent:** `completeSurgraphFlow` writes the child's `final_state` to the surgraph step's
 `subgraph_result` column, sets `subgraph_done=1`, and re-dispatches the parent task. On re-entry `flow.Subgraph`

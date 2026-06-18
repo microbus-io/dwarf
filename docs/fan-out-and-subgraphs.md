@@ -91,7 +91,7 @@ A few rules worth knowing:
 
 A subgraph runs another workflow as a child and returns its result — composition and reuse for workflows.
 A task launches one with `flow.Subgraph`, which is **semantically a function call**: only the explicit
-`input` crosses into the child, and only the child's final state crosses back. The parent's state does not
+`in` crosses into the child, and only the child's final state crosses back. The parent's state does not
 auto-cross either direction.
 
 ```go
@@ -118,7 +118,7 @@ child and parks the parent step (`yield == true` — return immediately); when t
 re-runs and the call returns `yield == false` with the child's final state unmarshaled into the trailing
 `out` pointer (`*struct`, `*map[string]any`, or `nil` to ignore).
 
-**Subtask** is the single-task sibling: `f.Subtask(name, taskURL, input, &out)` runs **one task** as an
+**Subtask** is the single-task sibling: `f.Subtask(name, taskURL, in, &out)` runs **one task** as an
 isolated child flow with no graph definition — the engine synthesizes a one-node graph named `name`.
 Everything after launch (park, re-entry, out-pointer, cancel/interrupt propagation) is identical to
 `Subgraph`. Use `Subgraph` for a whole workflow, `Subtask` for a single task.

@@ -159,7 +159,7 @@ pointer. The resume data is delivered through that pointer — it is **not** mer
 ### Subgraph
 
 Call another workflow as a child and get its result back. Like `Interrupt`, it's a two-call,
-park-and-resume pattern — and semantically a function call: only the explicit `input` crosses into the
+park-and-resume pattern — and semantically a function call: only the explicit `in` crosses into the
 child, only the child's final state (`out`) crosses back.
 
 ```go

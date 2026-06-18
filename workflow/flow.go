@@ -400,14 +400,14 @@ func (f *Flow) Interrupt(payload any, out any) (yield bool, err error) {
 /*
 Subgraph runs a child workflow and unmarshals its result once it completes, parking the step in between.
 
-Semantically a function call: only the explicit input crosses the boundary into the child, and only the explicit out
-crosses back. The parent's state does NOT auto-cross either direction. The input is any JSON-marshalable value (a
-struct or a map[string]any) and becomes the child's initial state field-by-field; a nil input means "no arguments"
+Semantically a function call: only the explicit in argument crosses the boundary into the child, and only the explicit
+out crosses back. The parent's state does NOT auto-cross either direction. in is any JSON-marshalable value (a
+struct or a map[string]any) and becomes the child's initial state field-by-field; a nil in means "no arguments"
 (the child starts with empty state). A caller that wants the parent's full state to cross can pass flow.Snapshot() as
-input. The out argument is a pointer (a *struct or *map[string]any) into which the child's final_state is unmarshaled
+in. The out argument is a pointer (a *struct or *map[string]any) into which the child's final_state is unmarshaled
 by JSON tag; pass nil to ignore the result. Using a typed struct reads only the fields you declare, with type safety.
 
-On the first call (child not yet run) it arms the subgraph park with the child workflow URL and the input and returns
+On the first call (child not yet run) it arms the subgraph park with the child workflow URL and in and returns
 yield=true; the task must return immediately.
 
 On re-entry after the child terminates it unmarshals the child's final_state into out, returns yield=false, and sets
@@ -426,7 +426,7 @@ err if the child failed. Does not re-arm on re-entry.
 	}
 	// read fields from out
 */
-func (f *Flow) Subgraph(workflowURL string, input any, out any) (yield bool, err error) {
+func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err error) {
 	if f.subgraphDone {
 		if out != nil {
 			if err := parseMapInto(f.subgraphResult, out); err != nil {
@@ -449,7 +449,7 @@ func (f *Flow) Subgraph(workflowURL string, input any, out any) (yield bool, err
 	if f.subgraphURL != "" {
 		return false, errors.New("cannot start subgraph: step already armed a subgraph this dispatch")
 	}
-	inputMap, err := toStateMap(input)
+	inputMap, err := toStateMap(in)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
@@ -469,11 +469,11 @@ func (f *Flow) Subgraph(workflowURL string, input any, out any) (yield bool, err
 // Pass a task URL, not a graph URL: a graph URL would be wrapped as a one-node graph and dispatched as
 // a task, failing at dispatch. (Symmetrically, Subgraph with a task URL fails in LoadGraph.) The typed
 // per-service client makes this mistake impossible; the raw primitives are the dynamic-only escape hatch.
-func (f *Flow) Subtask(name, taskURL string, input any, out any) (yield bool, err error) {
+func (f *Flow) Subtask(name, taskURL string, in any, out any) (yield bool, err error) {
 	if name == "" {
 		return false, errors.New("subtask name is required")
 	}
-	yield, err = f.Subgraph(taskURL, input, out)
+	yield, err = f.Subgraph(taskURL, in, out)
 	if yield && err == nil {
 		// A fresh request was armed this dispatch; mark it a subtask. (On re-entry Subgraph returns
 		// yield=false and nothing is armed, so this is correctly skipped.)
