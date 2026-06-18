@@ -134,9 +134,10 @@ follows a two-call pattern within the same task body:
 
 ```go
 func approve(ctx context.Context, f *workflow.Flow) error {
-    resume, yield, err := f.Interrupt(map[string]any{
+    var resume map[string]any
+    yield, err := f.Interrupt(map[string]any{
         "question": "Approve refund of $" + f.GetString("amount") + "?",
-    })
+    }, &resume)
     if err != nil {
         return err
     }
@@ -151,8 +152,9 @@ func approve(ctx context.Context, f *workflow.Flow) error {
 
 On the first call the flow goes to `interrupted`, the payload is surfaced to whoever is awaiting it, and
 the engine fires the stop notification. When the operator calls `eng.Resume(flowKey, data)`, the task
-re-runs and `Interrupt` returns `(data, false, nil)`. The resume data is delivered as the return value —
-it is **not** merged into state. See [Engine operations → Resume](operations.md#resume).
+re-runs and `Interrupt` returns `(false, nil)` with the caller's data unmarshaled into your `&resume`
+pointer. The resume data is delivered through that pointer — it is **not** merged into state. See
+[Engine operations → Resume](operations.md#resume).
 
 ### Subgraph
 
@@ -162,22 +164,50 @@ child, only the child's final state (`out`) crosses back.
 
 ```go
 func enrich(ctx context.Context, f *workflow.Flow) error {
-    out, yield, err := f.Subgraph("enrichment.workflow", map[string]any{
+    var out struct {
+        Profile map[string]any `json:"profile"`
+    } // or: var out map[string]any
+    yield, err := f.Subgraph("enrichment.workflow", map[string]any{
         "id": f.GetString("customerID"),
-    })
+    }, &out)
     if err != nil {
         return err
     }
     if yield {
         return nil // child launched; this step parks until it completes
     }
-    f.Set("profile", out["profile"]) // adopt the fields you want
+    f.Set("profile", out.Profile) // adopt the fields you want
     return nil
 }
 ```
 
-Pass `nil` input for "no arguments," or `f.Snapshot()` to forward the parent's whole state. See
-[Fan-out & subgraphs → Subgraphs](fan-out-and-subgraphs.md#subgraphs).
+The result is unmarshaled into the trailing `out` pointer (a `*struct` for type safety, a `*map[string]any`
+for dynamic access, or `nil` to ignore it). Pass `nil` input for "no arguments," or `f.Snapshot()` to forward
+the parent's whole state. See [Fan-out & subgraphs → Subgraphs](fan-out-and-subgraphs.md#subgraphs).
+
+### Subtask
+
+Run a **single task** as an isolated child flow — the task-level sibling of `Subgraph`. There is no graph
+for the child: the engine synthesizes a one-node graph named by the first argument (shown in diagrams and
+history). Same park-and-resume, out-pointer shape; only the explicit input and output cross the boundary.
+
+```go
+func score(ctx context.Context, f *workflow.Flow) error {
+    var out struct {
+        Score int `json:"score"`
+    }
+    yield, err := f.Subtask("Score", "risk.score", map[string]any{
+        "id": f.GetString("customerID"),
+    }, &out)
+    if yield || err != nil {
+        return err
+    }
+    f.SetInt("riskScore", out.Score)
+    return nil
+}
+```
+
+Use `Subgraph` to invoke a whole workflow; use `Subtask` to invoke one task without defining a graph for it.
 
 ## Baggage (host context)
 

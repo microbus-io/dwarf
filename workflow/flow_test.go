@@ -343,7 +343,7 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 	yield, err = f.Subgraph("https://x/wf", nil, nil)
 	assert.False(yield)
 	assert.Error(err)
-	assert.Equal("", f.subgraphWorkflow)
+	assert.Equal("", f.subgraphURL)
 
 	// A resolved interrupt slot blocks arming a subgraph on re-entry.
 	f = NewFlow()
@@ -351,7 +351,7 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 	yield, err = f.Subgraph("https://x/wf", nil, nil)
 	assert.False(yield)
 	assert.Error(err)
-	assert.Equal("", f.subgraphWorkflow)
+	assert.Equal("", f.subgraphURL)
 
 	// A resolved subgraph slot blocks arming an interrupt on re-entry.
 	f = NewFlow()
@@ -379,7 +379,58 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 	yield, err = f.Subgraph("https://x/second", nil, nil)
 	assert.False(yield)
 	assert.Error(err)
-	assert.Equal("https://x/first", f.subgraphWorkflow)
+	assert.Equal("https://x/first", f.subgraphURL)
+}
+
+func TestFlow_Subtask(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	// Subtask arms a subgraph-style request whose non-empty name marks it a subtask.
+	f := NewFlow()
+	yield, err := f.Subtask("Double", "https://x/double", map[string]any{"v": 21}, nil)
+	assert.True(yield)
+	assert.NoError(err)
+	url, input, taskName, ok := f.SubgraphRequested()
+	assert.True(ok)
+	assert.Equal("https://x/double", url)
+	assert.Equal("Double", taskName)
+	assert.Equal(21, input["v"]) // a map input is passed through as-is
+
+	// The discriminator survives the wire round-trip.
+	data, err := json.Marshal(f)
+	assert.NoError(err)
+	var restored Flow
+	assert.NoError(json.Unmarshal(data, &restored))
+	_, _, rTaskName, rOK := restored.SubgraphRequested()
+	assert.True(rOK)
+	assert.Equal("Double", rTaskName)
+
+	// An empty name is rejected and arms nothing.
+	f = NewFlow()
+	yield, err = f.Subtask("", "https://x/double", nil, nil)
+	assert.False(yield)
+	assert.Error(err)
+	assert.Equal("", f.subgraphURL)
+
+	// Subtask inherits Subgraph's single-park guard: a subgraph armed first blocks a subtask.
+	f = NewFlow()
+	yield, err = f.Subgraph("https://x/wf", nil, nil)
+	assert.True(yield)
+	assert.NoError(err)
+	yield, err = f.Subtask("Double", "https://x/double", nil, nil)
+	assert.False(yield)
+	assert.Error(err)
+	assert.Equal("", f.subgraphTaskName) // not marked, since the second arm was rejected
+
+	// And an armed interrupt blocks a subtask (same guard, via Subgraph delegation).
+	f = NewFlow()
+	yield, err = f.Interrupt(map[string]any{"request": "x"}, nil)
+	assert.True(yield)
+	assert.NoError(err)
+	yield, err = f.Subtask("Double", "https://x/double", nil, nil)
+	assert.False(yield)
+	assert.Error(err)
 }
 
 func TestFlow_Retry(t *testing.T) {

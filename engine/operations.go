@@ -49,15 +49,28 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	return flowKey, errors.Trace(err)
 }
 
-// createTask creates a flow that executes a single task and then terminates. taskURL is the task's
-// dispatch URL; the synthesized one-node graph uses it as the display name, node name, and dispatch target.
-func (e *Engine) createTask(ctx context.Context, taskURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
+// singleTaskGraph synthesizes the trivial one-node graph used to run a single task as its own flow:
+// a node named name that dispatches to taskURL, transitioning straight to END. name is the node's
+// display name (shown in diagrams/history); taskURL is the dispatch target. Shared by createTask and
+// the Subtask dispatch path in processStep, so the wrap lives in one place.
+func singleTaskGraph(name, taskURL string) *workflow.Graph {
+	g := workflow.NewGraph(name)
+	g.SetEndpoint(name, taskURL) // node Name=name (display), dispatch URL=taskURL
+	g.AddTransition(name, workflow.END)
+	return g
+}
+
+// createTask creates a flow that executes a single task and then terminates. name is the node's display
+// name (shown in diagrams/history); taskURL is the dispatch target. The synthesized one-node graph is
+// named name and dispatches to taskURL.
+func (e *Engine) createTask(ctx context.Context, name, taskURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
+	if name == "" {
+		return "", errors.New("task name is required", http.StatusBadRequest)
+	}
 	if taskURL == "" {
 		return "", errors.New("task URL is required", http.StatusBadRequest)
 	}
-	graph := workflow.NewGraph(taskURL)
-	graph.SetEndpoint(taskURL, taskURL)
-	graph.AddTransition(taskURL, workflow.END)
+	graph := singleTaskGraph(name, taskURL)
 	shardNum := rand.IntN(e.numDBShards()) + 1
 	flowKey, err = e.createWithGraph(ctx, shardNum, taskURL, graph, initialState, 0, "", "", e.resolveFlowOptions(opts))
 	return flowKey, errors.Trace(err)

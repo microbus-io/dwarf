@@ -30,8 +30,10 @@ not start it. `Run` does the whole round-trip and returns the final `*workflow.F
 }
 ```
 
-`CreateTask(ctx, taskName, initialState, opts)` is a shortcut that wraps a single task in a trivial graph —
-handy for running one unit of work with the engine's durability and scheduling.
+`CreateTask(ctx, name, taskURL, initialState, opts)` is a shortcut that wraps a single task in a trivial
+one-node graph — handy for running one unit of work with the engine's durability and scheduling. `name` is
+the node's display name (shown in diagrams/history); `taskURL` is its dispatch target. (Inside a task body,
+the equivalent is `flow.Subtask(name, taskURL, input, &out)`, which runs the task as an isolated child flow.)
 
 > `Run`'s Go `error` is reserved for infrastructure failures (database, context deadline). A *workflow*
 > failure surfaces as `outcome.Status == "failed"` with `outcome.Error` set — so you never have to

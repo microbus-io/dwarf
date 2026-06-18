@@ -625,10 +625,12 @@ func (e *Engine) Create(ctx context.Context, workflowURL string, initialState an
 	return e.create(ctx, workflowURL, initialState, opts)
 }
 
-// CreateTask creates a flow for a single task (addressed by its dispatch URL) without starting it. opts
-// carries scheduling and the opaque host Baggage (see Create); nil opts uses defaults.
-func (e *Engine) CreateTask(ctx context.Context, taskURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
-	return e.createTask(ctx, taskURL, initialState, opts)
+// CreateTask creates a flow for a single task without starting it. name is the node's display name
+// (shown in diagrams/history; required, non-empty), placed before taskURL to match
+// NewGraph(name)/graph.SetEndpoint(name, url)/flow.Subtask(name, url). taskURL is the task's dispatch
+// URL. opts carries scheduling and the opaque host Baggage (see Create); nil opts uses defaults.
+func (e *Engine) CreateTask(ctx context.Context, name, taskURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
+	return e.createTask(ctx, name, taskURL, initialState, opts)
 }
 
 // Start transitions a created flow to running. Whether the flow notifies the host on stop is set at

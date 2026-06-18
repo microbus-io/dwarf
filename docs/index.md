@@ -15,7 +15,7 @@ If you're new, read in this order:
 3. **[Building graphs](graphs.md)** — the `workflow.Graph` API: tasks, transitions, conditions, fan-out,
    error handling, and reducers.
 4. **[Writing tasks](tasks.md)** — the `workflow.Flow` carrier: reading and writing state, the control
-   signals (retry, sleep, goto, interrupt, subgraph), baggage, and signaling backpressure / breakers.
+   signals (retry, sleep, goto, interrupt, subgraph, subtask), baggage, and signaling backpressure / breakers.
 
 Then dip into the topic guides as you need them:
 

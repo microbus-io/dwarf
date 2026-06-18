@@ -51,7 +51,7 @@ func TestCreatetaskflow(t *testing.T) {
 	t.Run("runs_with_baggage_and_options", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.CreateTask(ctx, "createtaskflow.verify:428/only",
+		flowKey, err := eng.CreateTask(ctx, "Only", "createtaskflow.verify:428/only",
 			map[string]any{"in": 1},
 			&workflow.FlowOptions{Priority: 3, FairnessKey: "tk1", Baggage: map[string]any{"actor": "alice"}},
 		)
@@ -95,7 +95,7 @@ func TestCreatetaskflow(t *testing.T) {
 	t.Run("nil_options_use_defaults", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.CreateTask(ctx, "createtaskflow.verify:428/only", nil, nil)
+		flowKey, err := eng.CreateTask(ctx, "Only", "createtaskflow.verify:428/only", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

@@ -39,9 +39,13 @@ type Flow struct {
 	interrupt        bool
 	interruptPayload map[string]any
 
-	// Dynamic subgraph
-	subgraphWorkflow string
+	// Dynamic subgraph / subtask request. subgraphURL holds the URL (a graph URL for Subgraph, a task
+	// URL for Subtask); subgraphTaskName is both the discriminator and the synthesized graph's name:
+	// non-empty => subtask (the engine builds a single-task graph named subgraphTaskName), empty =>
+	// regular subgraph (the engine LoadGraph's the URL).
+	subgraphURL      string
 	subgraphInput    map[string]any
+	subgraphTaskName string
 
 	// Park resolution (inbound), set by the orchestrator on dispatch from the step row.
 	// interruptDone/resumeData resolve an Interrupt park; subgraphDone/subgraphResult/
@@ -375,8 +379,8 @@ func (f *Flow) Interrupt(payload any, out any) (yield bool, err error) {
 	}
 	// Single-park guard: a step parks at most once - interrupt XOR subgraph, and at most once per kind.
 	// Reject arming an interrupt when this step already parked for a subgraph (resolved subgraphDone, or
-	// armed earlier in this same dispatch via subgraphWorkflow)...
-	if f.subgraphDone || f.subgraphWorkflow != "" {
+	// armed earlier in this same dispatch via subgraphURL)...
+	if f.subgraphDone || f.subgraphURL != "" {
 		return false, errors.New("cannot interrupt: step already parked for a subgraph")
 	}
 	// ...or when an interrupt was already armed earlier in this same dispatch: a second flow.Interrupt
@@ -442,16 +446,40 @@ func (f *Flow) Subgraph(workflowURL string, input any, out any) (yield bool, err
 	}
 	// ...or when a subgraph was already armed earlier in this same dispatch: a second flow.Subgraph call
 	// before the task returns would otherwise silently overwrite the child workflow/input.
-	if f.subgraphWorkflow != "" {
+	if f.subgraphURL != "" {
 		return false, errors.New("cannot start subgraph: step already armed a subgraph this dispatch")
 	}
 	inputMap, err := toStateMap(input)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	f.subgraphWorkflow = workflowURL
+	f.subgraphURL = workflowURL
 	f.subgraphInput = inputMap
 	return true, nil
+}
+
+// Subtask launches a single task as an isolated child flow, the task-level sibling of Subgraph. The
+// engine synthesizes a trivial one-node graph (named name) around taskURL instead of loading a graph,
+// so any task endpoint can be invoked without a graph definition; everything after launch - parking,
+// re-entry, the out-pointer result, cancel/interrupt propagation - is identical to Subgraph. name is
+// required (it is the node's display name in diagrams/history) and must be non-empty. It is a thin
+// wrapper over Subgraph: the request, single-park guard, input normalization, and re-entry all flow
+// through Subgraph; the non-empty name is what marks the pending request as a subtask.
+//
+// Pass a task URL, not a graph URL: a graph URL would be wrapped as a one-node graph and dispatched as
+// a task, failing at dispatch. (Symmetrically, Subgraph with a task URL fails in LoadGraph.) The typed
+// per-service client makes this mistake impossible; the raw primitives are the dynamic-only escape hatch.
+func (f *Flow) Subtask(name, taskURL string, input any, out any) (yield bool, err error) {
+	if name == "" {
+		return false, errors.New("subtask name is required")
+	}
+	yield, err = f.Subgraph(taskURL, input, out)
+	if yield && err == nil {
+		// A fresh request was armed this dispatch; mark it a subtask. (On re-entry Subgraph returns
+		// yield=false and nothing is armed, so this is correctly skipped.)
+		f.subgraphTaskName = name
+	}
+	return yield, err
 }
 
 /*
@@ -520,12 +548,14 @@ func (f *Flow) InterruptRequested() (map[string]any, bool) {
 	return f.interruptPayload, f.interrupt
 }
 
-// SubgraphRequested returns the workflow URL, input state, and true if Subgraph was called.
-func (f *Flow) SubgraphRequested() (workflowURL string, input map[string]any, ok bool) {
-	if f.subgraphWorkflow == "" {
-		return "", nil, false
+// SubgraphRequested returns the request URL, input state, the subtask name, and true if Subgraph or
+// Subtask was called. taskName discriminates: non-empty means Subtask (the engine synthesizes a
+// single-task graph named taskName), empty means a regular Subgraph (the engine loads the graph by URL).
+func (f *Flow) SubgraphRequested() (url string, input map[string]any, taskName string, ok bool) {
+	if f.subgraphURL == "" {
+		return "", nil, "", false
 	}
-	return f.subgraphWorkflow, f.subgraphInput, true
+	return f.subgraphURL, f.subgraphInput, f.subgraphTaskName, true
 }
 
 // --- Internal helpers ---
@@ -602,8 +632,9 @@ type flowJSON struct {
 	SleepDuration          time.Duration  `json:"sleepDuration,omitzero"`
 	Interrupt              bool           `json:"interrupt,omitzero"`
 	InterruptPayload       map[string]any `json:"interruptPayload,omitzero"`
-	SubgraphWorkflow       string         `json:"subgraphWorkflow,omitzero"`
+	SubgraphURL            string         `json:"subgraphURL,omitzero"`
 	SubgraphInput          map[string]any `json:"subgraphInput,omitzero"`
+	SubgraphTaskName       string         `json:"subgraphTaskName,omitzero"`
 	InterruptDone          bool           `json:"interruptDone,omitzero"`
 	ResumeData             map[string]any `json:"resumeData,omitzero"`
 	SubgraphDone           bool           `json:"subgraphDone,omitzero"`
@@ -630,8 +661,9 @@ func (f *Flow) MarshalJSON() ([]byte, error) {
 		SleepDuration:          f.sleepDuration,
 		Interrupt:              f.interrupt,
 		InterruptPayload:       f.interruptPayload,
-		SubgraphWorkflow:       f.subgraphWorkflow,
+		SubgraphURL:            f.subgraphURL,
 		SubgraphInput:          f.subgraphInput,
+		SubgraphTaskName:       f.subgraphTaskName,
 		InterruptDone:          f.interruptDone,
 		ResumeData:             f.resumeData,
 		SubgraphDone:           f.subgraphDone,
@@ -662,8 +694,9 @@ func (f *Flow) UnmarshalJSON(data []byte) error {
 	f.sleepDuration = wire.SleepDuration
 	f.interrupt = wire.Interrupt
 	f.interruptPayload = wire.InterruptPayload
-	f.subgraphWorkflow = wire.SubgraphWorkflow
+	f.subgraphURL = wire.SubgraphURL
 	f.subgraphInput = wire.SubgraphInput
+	f.subgraphTaskName = wire.SubgraphTaskName
 	f.interruptDone = wire.InterruptDone
 	f.resumeData = wire.ResumeData
 	f.subgraphDone = wire.SubgraphDone

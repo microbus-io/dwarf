@@ -96,23 +96,32 @@ auto-cross either direction.
 
 ```go
 func enrich(ctx context.Context, f *workflow.Flow) error {
-    out, yield, err := f.Subgraph("enrichment.workflow", map[string]any{
+    var out struct {
+        Profile map[string]any `json:"profile"`
+    } // or: var out map[string]any
+    yield, err := f.Subgraph("enrichment.workflow", map[string]any{
         "id": f.GetString("customerID"),
-    })
+    }, &out)
     if err != nil {
         return err
     }
     if yield {
         return nil // child launched; this step parks until the child completes
     }
-    f.Set("profile", out["profile"]) // adopt the fields you want from the child's result
+    f.Set("profile", out.Profile) // adopt the fields you want from the child's result
     return nil
 }
 ```
 
 The two-call shape mirrors [`Interrupt`](tasks.md#interrupt-human-in-the-loop): the first call launches the
 child and parks the parent step (`yield == true` — return immediately); when the child completes the parent
-re-runs and the call returns the child's final state (`yield == false`).
+re-runs and the call returns `yield == false` with the child's final state unmarshaled into the trailing
+`out` pointer (`*struct`, `*map[string]any`, or `nil` to ignore).
+
+**Subtask** is the single-task sibling: `f.Subtask(name, taskURL, input, &out)` runs **one task** as an
+isolated child flow with no graph definition — the engine synthesizes a one-node graph named `name`.
+Everything after launch (park, re-entry, out-pointer, cancel/interrupt propagation) is identical to
+`Subgraph`. Use `Subgraph` for a whole workflow, `Subtask` for a single task.
 
 - Pass `nil` input for "no arguments"; pass `f.Snapshot()` to forward the parent's entire state.
 - A small upstream adapter task using `f.Transform(newKey, oldKey, …)` is a clean way to reshape parent

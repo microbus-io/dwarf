@@ -159,8 +159,10 @@ Create --> created --> Start --> running --> completed
 These are methods on `*engine.Engine`.
 
 **Create** - Creates a flow without starting it. Calls the `LoadGraph` to fetch the graph, creates the flow row, and
-inserts the entry-point step - both in `created` status. The graph JSON is frozen at creation. `CreateTask` wraps a
-single task name in a trivial graph.
+inserts the entry-point step - both in `created` status. The graph JSON is frozen at creation. `CreateTask(ctx,
+name, taskURL, …)` wraps a single task in a trivial one-node graph (via `singleTaskGraph`) - `name` is the node's
+display name (required, non-empty, placed before `taskURL` to match `NewGraph`/`SetEndpoint`/`flow.Subtask`),
+`taskURL` the dispatch target.
 
 **Start** - Transitions a `created` flow to `running`. Atomically updates all `created` steps to `pending` and the
 flow to `running` in one transaction, then rings the doorbell for the current step. Whether the flow notifies the
@@ -634,6 +636,20 @@ direction. `input` is any JSON-marshalable value (a struct or a `map[string]any`
 `toStateMap` (nil → "no arguments"); `out` is a pointer (a `*struct` or `*map[string]any`) the child's `final_state`
 is unmarshaled into by JSON tag (`parseMapInto`), or nil to ignore the result. A typed struct on either side gives
 field-level type safety without manual `map[string]any` casts.
+
+**Subtask is the single-task front door.** `flow.Subtask(name, url string, input any, out any) (yield bool, err
+error)` runs one task as an isolated child flow, the task-level sibling of `Subgraph`. The *only* difference is at
+launch: instead of calling the host's `LoadGraph`, the engine synthesizes a trivial one-node graph around `url`
+(`singleTaskGraph(name, url)` - the same wrap `CreateTask` uses), named `name`, dispatching to `url`. So any task
+endpoint runs as a child flow with no graph definition. Everything after launch is **identical** to `Subgraph` - it
+is *not* a new park kind: same `parked=parkedSubgraph`, same `subgraph_done`/`subgraph_result`/`subgraph_error`,
+same `surgraph_*` chain, re-entry, history, cancel/interrupt propagation, and wedge recovery. Mechanically `Subtask`
+is a thin wrapper over `Subgraph` that records the (required, non-empty) `name`; the carrier holds the request in
+`subgraphURL` + `subgraphInput`, and `subgraphTaskName` is both the discriminator and the synthesized graph's name
+(non-empty ⟹ subtask; empty ⟹ subgraph). `SubgraphRequested` returns that `taskName`, and `processStep` branches on
+it: non-empty → `singleTaskGraph`, empty → `LoadGraph`. The launch disposition metric is `status="subtask"` vs
+`"subgraph"`. (`Subtask`/`Subgraph` are the two mechanisms; "subflow" is the umbrella for any child flow and is the
+name of the typed host client, not an engine primitive.)
 
 **Into the child:** `SubgraphRequested` passes `subgraphInput` (the `toStateMap`-normalized `input`) directly to
 `createSubgraphFlow` as the child's initial state (nil normalized to `{}`). No merge with parent state. A caller
