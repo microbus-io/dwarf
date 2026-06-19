@@ -1,4 +1,5 @@
-# Dwarf
+<img src="dwarf-banner.jpg" width=600>
+<p></p>
 
 [![License Apache 2](https://img.shields.io/badge/License-Apache2-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -19,13 +20,12 @@ RPC, a message bus) or where your graphs live. You wire it to your world through
 interfaces, and it handles scheduling, state, durability, and recovery.
 
 ```go
-proxy := engine.NewTestProxy()
-
 g := workflow.NewGraph("Greet")
 g.SetEndpoint("Hello", "http://example/hello") // node "Hello" dispatches to this endpoint URL
 g.AddTransition("Hello", workflow.END)
-proxy.HandleGraph("http://example/greet", g)
 
+proxy := engine.NewTestProxy()
+proxy.HandleGraph("http://example/greet", g)
 proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
     f.SetString("greeting", "hello "+f.GetString("name"))
     return nil
@@ -38,9 +38,6 @@ eng.RunInTest(t)   // SQLite in-memory, auto-cleanup
 _, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil) // Run returns (flowKey, outcome, err)
 fmt.Println(out.State["greeting"]) // hello ada
 ```
-
-> By convention, graph and task names are PascalCase (`Greet`, `Hello`) — topology identifiers kept distinct
-> from the lowercased dispatch URLs and the camelCase state fields. The engine imposes no casing.
 
 ## Why dwarf
 
