@@ -1,6 +1,11 @@
 # Dwarf
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/microbus-io/dwarf.svg)](https://pkg.go.dev/github.com/microbus-io/dwarf)
+[![License Apache 2](https://img.shields.io/badge/License-Apache2-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Reference](https://pkg.go.dev/badge/github.com/microbus-io/dwarf)](https://pkg.go.dev/github.com/microbus-io/dwarf)
+[![Test](https://github.com/microbus-io/dwarf/actions/workflows/test.yaml/badge.svg?branch=main&event=push)](https://github.com/microbus-io/dwarf/actions/workflows/test.yaml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/microbus-io/dwarf)](https://goreportcard.com/report/github.com/microbus-io/dwarf)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/FAJHnGkNqJ)
 
 **Dwarf is a standalone, embeddable workflow-orchestration engine for Go.**
 
