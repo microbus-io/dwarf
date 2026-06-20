@@ -411,6 +411,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Handle retry
 	if maxAttempts, initialDelay, multiplier, maxDelay, retryRequested := resultFlow.RetryRequested(); retryRequested {
 		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "flow", workflowURL, "step", stepID, "attempt", attempt)
+		// Sleep is the floor and the backoff adds on top: total = Sleep + min(backoff, maxDelay). This lets a
+		// task set a precise wait (e.g. a downstream's Retry-After via Sleep) and still get exponential backoff
+		// on repeated attempts. maxDelay caps the backoff component, not the total.
 		retrySleepMs := sleepDur.Milliseconds()
 		if maxAttempts > 0 {
 			delay := float64(initialDelay)
@@ -422,7 +425,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			if maxDelay > 0 && time.Duration(delay) > maxDelay {
 				delay = float64(maxDelay)
 			}
-			retrySleepMs = time.Duration(delay).Milliseconds()
+			retrySleepMs += time.Duration(delay).Milliseconds()
 		}
 		// A retry rewinds this step in place and clears its subgraph park slot, so on
 		// re-dispatch flow.Subgraph re-arms and spawns a *fresh* child. The prior attempt's
