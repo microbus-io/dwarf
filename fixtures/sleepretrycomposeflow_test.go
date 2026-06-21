@@ -24,7 +24,6 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
-	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -60,9 +59,7 @@ func TestSleepRetryComposeflow(t *testing.T) {
 		}
 		// Sleep is the floor; Retry adds a constant backoff on top (multiplier 1.0).
 		f.Sleep(sleep)
-		if !f.Retry(5, backoff, 1.0, time.Second) {
-			return errors.New("exhausted retries at attempt %d", n)
-		}
+		f.Retry(backoff, 1.0, time.Second, 0)
 		return nil
 	})
 

@@ -75,7 +75,6 @@ func (f *RawFlow) ClearControl() {
 	f.interrupt = false
 	f.interruptPayload = nil
 	f.attempt = 0
-	f.backoffMaxAttempts = 0
 	f.backoffInitialDelay = 0
 	f.backoffDelayMultiplier = 0
 	f.backoffMaxDelay = 0
@@ -87,11 +86,23 @@ func (f *RawFlow) SetAttempt(attempt int) {
 	f.attempt = attempt
 }
 
-// SetTimestamps records the flow row's createdAt and updatedAt. Called by the orchestrator
-// before dispatching a task so the task can read them via Flow.CreatedAt() and Flow.UpdatedAt().
-func (f *RawFlow) SetTimestamps(createdAt, updatedAt time.Time) {
+// SetCreatedAt records the flow row's createdAt. Called by the orchestrator before dispatching a
+// task so the task can read it via Flow.CreatedAt().
+func (f *RawFlow) SetCreatedAt(createdAt time.Time) {
 	f.createdAt = createdAt
+}
+
+// SetUpdatedAt records the flow row's updatedAt. Called by the orchestrator before dispatching a
+// task so the task can read it via Flow.UpdatedAt().
+func (f *RawFlow) SetUpdatedAt(updatedAt time.Time) {
 	f.updatedAt = updatedAt
+}
+
+// SetStepCreatedAt records the step row's createdAt, preserved across retries. Called by the
+// orchestrator before dispatching a task so Retry can measure its giveUpAfter horizon and the task
+// can read it via Flow.StepCreatedAt().
+func (f *RawFlow) SetStepCreatedAt(stepCreatedAt time.Time) {
+	f.stepCreatedAt = stepCreatedAt
 }
 
 // SetFlowKey records the external key of the flow being dispatched, so the task can read it via

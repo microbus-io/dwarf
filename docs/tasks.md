@@ -84,21 +84,23 @@ calling one, the task should return as instructed.
 
 ### Retry
 
-Re-execute this task with exponential backoff. `Retry` returns `true` while attempts remain (return `nil`)
-and `false` once exhausted (return your error). It carries no condition of its own — you decide what's
-retryable:
+Re-execute this task with exponential backoff. The bound is wall-clock, not a count: `Retry` returns `true`
+(return `nil`) until `giveUpAfter` has elapsed since the step was first created, then `false` (return your
+error). It carries no condition of its own — you decide what's retryable:
 
 ```go
 if err := callFlaky(ctx); err != nil {
-    if isTransient(err) && f.Retry(5, 100*time.Millisecond, 2.0, 10*time.Second) {
+    if isTransient(err) && f.Retry(100*time.Millisecond, 2.0, 10*time.Second, time.Hour) {
         return nil // will re-run after backoff
     }
-    return err // not retryable, or attempts exhausted
+    return err // not retryable, or horizon exceeded
 }
 ```
 
-The delay for attempt N is `min(initialDelay * multiplier^N, maxDelay)`. Pass zero delays for immediate
-retry; pass `math.MaxInt32` as `maxAttempts` for unlimited. On retry the engine merges the task's prior
+The delay before attempt N is `min(initialDelay * delayMultiplier^N, maxIntervalDelay)`. Pass a zero
+`initialDelay` for immediate retries, a zero `maxIntervalDelay` for no per-interval cap, and `delayMultiplier`
+`1.0` to hold the delay constant. Pass `giveUpAfter <= 0` for unlimited retry. To bound by count instead, pass
+`giveUpAfter` `0` and gate on `f.Attempt()` at the call site. On retry the engine merges the task's prior
 output back into its input, so the next attempt sees what the last one wrote.
 
 ### Sleep

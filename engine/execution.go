@@ -71,6 +71,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	var resumeDataJSON string
 	var subgraphDone bool
 	var subgraphResultJSON, subgraphErrorStr string
+	var stepCreatedAt time.Time
 
 	switch db.DriverName() {
 	case "pgx", "sqlite":
@@ -78,9 +79,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
-				" RETURNING step_depth, task_name, step_token, state, changes, breakpoint_hit, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error",
+				" RETURNING step_depth, task_name, step_token, state, changes, breakpoint_hit, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at",
 			workflow.StatusRunning, leaseMs, stepID, workflow.StatusPending, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -90,10 +91,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		err = db.QueryRowContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
-				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.breakpoint_hit, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error"+
+				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.breakpoint_hit, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at"+
 				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
 			workflow.StatusRunning, leaseMs, stepID, workflow.StatusPending, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -121,9 +122,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		go func() {
 			defer wg.Done()
 			e := db.QueryRowContext(ctx,
-				"SELECT step_depth, task_name, step_token, state, changes, breakpoint_hit, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error FROM dwarf_steps WHERE step_id=?",
+				"SELECT step_depth, task_name, step_token, state, changes, breakpoint_hit, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at FROM dwarf_steps WHERE step_id=?",
 				stepID,
-			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr)
+			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
 			if e != nil && e != sql.ErrNoRows {
 				readErr = e
 			}
@@ -192,7 +193,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	flow.SetRawState(mergedInputState)
 	flow.SetRawChanges(priorChanges)
 	flow.SetAttempt(attempt)
-	flow.SetTimestamps(flowCreatedAt, flowUpdatedAt)
+	flow.SetCreatedAt(flowCreatedAt)
+	flow.SetUpdatedAt(flowUpdatedAt)
+	flow.SetStepCreatedAt(stepCreatedAt)
 	// The task's own identity, so it can correlate logs/traces or call back into the engine
 	// (e.g. History/Step) with its own keys. flow_token is loaded with the flow row, step_token
 	// alongside the claim - both available here.
@@ -311,7 +314,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if _, interrupted := resultFlow.InterruptRequested(); interrupted {
 			signalCount++
 		}
-		if _, _, _, _, retryRequested := resultFlow.RetryRequested(); retryRequested {
+		if _, _, _, retryRequested := resultFlow.RetryRequested(); retryRequested {
 			signalCount++
 		}
 		if resultFlow.GotoRequested() != "" {
@@ -409,13 +412,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	sleepDur := resultFlow.SleepRequested()
 
 	// Handle retry
-	if maxAttempts, initialDelay, multiplier, maxDelay, retryRequested := resultFlow.RetryRequested(); retryRequested {
+	if initialDelay, multiplier, maxDelay, retryRequested := resultFlow.RetryRequested(); retryRequested {
 		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "flow", workflowURL, "step", stepID, "attempt", attempt)
 		// Sleep is the floor and the backoff adds on top: total = Sleep + min(backoff, maxDelay). This lets a
 		// task set a precise wait (e.g. a downstream's Retry-After via Sleep) and still get exponential backoff
 		// on repeated attempts. maxDelay caps the backoff component, not the total.
 		retrySleepMs := sleepDur.Milliseconds()
-		if maxAttempts > 0 {
+		{
 			delay := float64(initialDelay)
 			if multiplier > 0 {
 				for range attempt {

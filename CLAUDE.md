@@ -567,11 +567,14 @@ available to the task but does not participate in fan-in merge.
 
 Tasks signal the engine via control methods on the `Flow` carrier (distinct from the operations above):
 
-- **`flow.Retry(maxAttempts, initialDelay, multiplier, maxDelay) bool`** - re-execute this task with exponential
-  backoff. Returns `true` while attempts remain (task should return `nil`), `false` at `maxAttempts` (task should
-  return its error). Pass zero delays for immediate retry, `math.MaxInt32` for unlimited. The step row is reused. The
-  engine tracks `attempt` and computes `min(initialDelay * multiplier^attempt, maxDelay)`, merging `state + changes`
-  back into `state` so the task sees its prior output. Both `flow.Retry` and the operator-facing `RestartFrom` rewind
+- **`flow.Retry(initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter) bool`** - re-execute this task with
+  exponential backoff. The bound is wall-clock, not a count: returns `true` (task should return `nil`) until
+  `giveUpAfter` has elapsed since the step was first created, then `false` (task should return its error). The give-up
+  check is made client-side in `Retry` against `flow.StepCreatedAt()`; the engine only consumes the backoff shape.
+  Pass `giveUpAfter <= 0` for unlimited; to bound by count instead, pass `0` and gate on `flow.Attempt()`. The step row
+  is reused. The engine tracks `attempt` and computes the re-dispatch delay `min(initialDelay * delayMultiplier^attempt,
+  maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. Both `flow.Retry`
+  and the operator-facing `RestartFrom` rewind
   a step row in place; `RestartFrom` additionally sweeps the step's downstream subtree and merges optional state
   overrides, for operator-driven recovery after a flow has already terminated. **A retry clears the park
   slot** (`interrupt_done`/`subgraph_done` -> 0, `resume_data`/`subgraph_result` -> `'{}'`, `subgraph_error` -> `''`),

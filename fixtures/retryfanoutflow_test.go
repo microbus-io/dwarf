@@ -22,7 +22,6 @@ package fixtures
 
 import (
 	"context"
-	"math"
 	"math/rand/v2"
 	"testing"
 
@@ -52,7 +51,7 @@ func TestRetryfanoutflow(t *testing.T) {
 	})
 	proxy.HandleTask("retryfanoutflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
 		if rand.Float64() < 0.10 {
-			f.Retry(math.MaxInt32, 0, 0, 0)
+			f.Retry(0, 0, 0, 0)
 			return nil
 		}
 		f.Set("results", []int{f.GetInt("element") + 1})

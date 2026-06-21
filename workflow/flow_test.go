@@ -437,30 +437,29 @@ func TestFlow_Retry(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	// Attempt 0: should retry
+	// Within the horizon: should retry, and the backoff shape is recorded.
 	f := NewFlow()
-	f.attempt = 0
-	ok := f.Retry(3, time.Second, 2.0, 10*time.Second)
+	f.stepCreatedAt = time.Now()
+	ok := f.Retry(time.Second, 2.0, 10*time.Second, time.Hour)
 	assert.True(ok)
 	assert.True(f.retry)
-	maxAttempts, initialDelay, multiplier, maxDelay, requested := f.RetryRequested()
+	initialDelay, multiplier, maxDelay, requested := f.RetryRequested()
 	assert.True(requested)
-	assert.Equal(3, maxAttempts)
 	assert.Equal(time.Second, initialDelay)
 	assert.Equal(2.0, multiplier)
 	assert.Equal(10*time.Second, maxDelay)
 
-	// Attempt 2: should retry (still under max of 3)
+	// giveUpAfter <= 0 means unlimited: retries regardless of how old the step is.
 	f2 := NewFlow()
-	f2.attempt = 2
-	ok = f2.Retry(3, time.Second, 2.0, 10*time.Second)
+	f2.stepCreatedAt = time.Now().Add(-72 * time.Hour)
+	ok = f2.Retry(time.Second, 2.0, 10*time.Second, 0)
 	assert.True(ok)
 	assert.True(f2.retry)
 
-	// Attempt 3: exhausted
+	// Past the horizon: give up.
 	f3 := NewFlow()
-	f3.attempt = 3
-	ok = f3.Retry(3, time.Second, 2.0, 10*time.Second)
+	f3.stepCreatedAt = time.Now().Add(-2 * time.Hour)
+	ok = f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour)
 	assert.False(ok)
 	assert.False(f3.retry)
 }
@@ -479,7 +478,7 @@ func TestFlow_MarshalUnmarshal(t *testing.T) {
 	original := NewFlow()
 	original.Set("name", "Alice")
 	original.Goto("next")
-	original.Retry(5, time.Second, 2.0, 30*time.Second)
+	original.Retry(time.Second, 2.0, 30*time.Second, 0)
 	original.Sleep(5 * time.Second)
 	original.Interrupt(map[string]any{"request": "ssn"}, nil)
 	original.attempt = 2
@@ -498,7 +497,6 @@ func TestFlow_MarshalUnmarshal(t *testing.T) {
 	assert.True(restored.interrupt)
 	assert.Equal("ssn", restored.interruptPayload["request"])
 	assert.Equal(2, restored.attempt)
-	assert.Equal(5, restored.backoffMaxAttempts)
 	assert.Equal(time.Second, restored.backoffInitialDelay)
 	assert.Equal(2.0, restored.backoffDelayMultiplier)
 	assert.Equal(30*time.Second, restored.backoffMaxDelay)

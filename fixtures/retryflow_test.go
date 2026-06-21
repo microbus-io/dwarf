@@ -48,9 +48,11 @@ func TestRetryflow(t *testing.T) {
 		if attempts >= f.GetInt("target") {
 			return nil
 		}
-		if !f.Retry(5, 0, 0, 0) {
+		// Bound by count via Attempt(): up to 5 retries (attempts 0..4), then give up.
+		if f.Attempt() >= 5 {
 			return errors.New("flaky exhausted retries at attempt %d", attempts)
 		}
+		f.Retry(0, 0, 0, 0)
 		return nil
 	})
 	proxy.HandleTask("retryflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {

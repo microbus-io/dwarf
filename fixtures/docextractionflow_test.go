@@ -26,7 +26,6 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
-	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -77,10 +76,8 @@ func TestDocextractionflow(t *testing.T) {
 		f.Set("page", nil)
 		time.Sleep(time.Duration(50+rand.IntN(100)) * time.Millisecond)
 		if rand.Float64() < 0.05 {
-			if f.Retry(100, 500*time.Millisecond, 1.0, 500*time.Millisecond) {
-				return nil
-			}
-			return errors.New("transcription failed")
+			f.Retry(500*time.Millisecond, 1.0, 500*time.Millisecond, 0)
+			return nil
 		}
 		wordCount := 8 + rand.IntN(13)
 		sentence := make([]string, wordCount)

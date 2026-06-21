@@ -59,15 +59,15 @@ type Flow struct {
 
 	// Backoff retry
 	attempt                int
-	backoffMaxAttempts     int
 	backoffInitialDelay    time.Duration
 	backoffDelayMultiplier float64
 	backoffMaxDelay        time.Duration
 
 	// Flow lifecycle timestamps, populated by the orchestrator on dispatch.
 	// Useful to a task implementing its own elapsed-time / lifetime guard.
-	createdAt time.Time
-	updatedAt time.Time
+	createdAt     time.Time
+	updatedAt     time.Time
+	stepCreatedAt time.Time
 
 	// Identity of the dispatch, populated by the orchestrator. The task's own flow and step keys,
 	// for correlating logs/traces or calling back into the engine (History/Step) with its own keys.
@@ -158,6 +158,20 @@ func (f *Flow) CreatedAt() time.Time {
 // a dispatched task or when the orchestrator has not populated it.
 func (f *Flow) UpdatedAt() time.Time {
 	return f.updatedAt
+}
+
+// StepCreatedAt returns the wall-clock time at which this step was first created, preserved across
+// retries of the step. It anchors Retry's giveUpAfter horizon, and a task can read it directly to
+// implement a custom elapsed-time guard. Zero when called outside a dispatched task.
+func (f *Flow) StepCreatedAt() time.Time {
+	return f.stepCreatedAt
+}
+
+// Attempt returns the zero-based retry attempt counter for the current step: 0 on the first
+// execution, incremented by the orchestrator on each Retry. A task can gate on it to bound retries
+// by count (e.g. "if flow.Attempt() < 3") instead of, or alongside, Retry's time-based horizon.
+func (f *Flow) Attempt() int {
+	return f.attempt
 }
 
 // FlowKey returns the external key of the flow this task is executing in, in the form
@@ -419,7 +433,7 @@ err if the child failed. Does not re-arm on re-entry.
 	    return nil // parked, child running
 	}
 	if err != nil {
-	    if flow.Retry(5, time.Second, 2.0, 30*time.Second) {
+	    if flow.Retry(time.Second, 2.0, 30*time.Second, time.Hour) {
 	        return nil
 	    }
 	    return errors.Trace(err)
@@ -483,11 +497,15 @@ func (f *Flow) Subtask(name, taskURL string, in any, out any) (yield bool, err e
 }
 
 /*
-Retry requests the orchestrator to re-execute this task with exponential backoff.
-Returns true while attempts remain (the caller should return nil); false once maxAttempts is
-reached (the caller should return its error). The delay for attempt N is
-min(initialDelay * multiplier^N, maxDelay); pass zero delays for an immediate retry. For genuine
-unlimited retry pass math.MaxInt32 as maxAttempts.
+Retry requests the orchestrator to re-execute this task with exponential backoff. The bound is
+wall-clock, not a count: Retry returns true (the caller should return nil) until giveUpAfter has
+elapsed since the step was first created, then false (the caller should return its error). Pass
+giveUpAfter <= 0 for unlimited retry.
+
+The delay before attempt N is min(initialDelay * delayMultiplier^N, maxIntervalDelay); pass a zero
+initialDelay for immediate retries, and a zero maxIntervalDelay for no per-interval cap. To hold the
+delay constant (e.g. honoring a provider's Retry-After carried in initialDelay), pass delayMultiplier
+1.0. Sleep, if also set, is added on top as a floor.
 
 Retry carries no condition of its own - it is the single retry primitive, called inside whatever
 error branch the task decides is retryable. Keeping the condition explicit at the call site avoids
@@ -496,22 +514,24 @@ not be retried). Gate it on whatever your task considers transient:
 
 	result, err := callExternalAPI(ctx)
 	if err != nil {
-	    if isTransient(err) && flow.Retry(5, 1*time.Second, 2.0, 30*time.Second) {
+	    if isTransient(err) && flow.Retry(1*time.Second, 2.0, 30*time.Second, 1*time.Hour) {
 	        return result, nil // transient failure: retry scheduled, don't report error
 	    }
-	    return result, err // non-retryable, or attempts exhausted
+	    return result, err // non-retryable, or horizon exceeded
 	}
+
+To bound by count instead of (or in addition to) time, gate on Attempt: pass giveUpAfter 0 and check
+flow.Attempt() at the call site.
 */
-func (f *Flow) Retry(maxAttempts int, initialDelay time.Duration, multiplier float64, maxDelay time.Duration) bool {
-	if f.attempt >= maxAttempts {
+func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxIntervalDelay time.Duration, giveUpAfter time.Duration) bool {
+	if giveUpAfter > 0 && !f.stepCreatedAt.IsZero() && time.Since(f.stepCreatedAt) >= giveUpAfter {
 		f.retry = false
 		return false
 	}
 	f.retry = true
-	f.backoffMaxAttempts = maxAttempts
 	f.backoffInitialDelay = initialDelay
-	f.backoffDelayMultiplier = multiplier
-	f.backoffMaxDelay = maxDelay
+	f.backoffDelayMultiplier = delayMultiplier
+	f.backoffMaxDelay = maxIntervalDelay
 	return true
 }
 
@@ -530,12 +550,13 @@ func (f *Flow) GotoRequested() string {
 }
 
 // RetryRequested returns the backoff parameters and true if Retry was called.
-// The foreman uses these to compute the sleep delay and check the attempt limit.
-func (f *Flow) RetryRequested() (maxAttempts int, initialDelay time.Duration, multiplier float64, maxDelay time.Duration, ok bool) {
+// The orchestrator uses these to compute the re-dispatch delay; the give-up decision is made
+// client-side in Retry, so only the backoff shape crosses this boundary.
+func (f *Flow) RetryRequested() (initialDelay time.Duration, multiplier float64, maxDelay time.Duration, ok bool) {
 	if !f.retry {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, false
 	}
-	return f.backoffMaxAttempts, f.backoffInitialDelay, f.backoffDelayMultiplier, f.backoffMaxDelay, true
+	return f.backoffInitialDelay, f.backoffDelayMultiplier, f.backoffMaxDelay, true
 }
 
 // SleepRequested returns the duration set by Sleep, or zero if not set.
@@ -641,12 +662,12 @@ type flowJSON struct {
 	SubgraphResult         map[string]any `json:"subgraphResult,omitzero"`
 	SubgraphError          string         `json:"subgraphError,omitzero"`
 	Attempt                int            `json:"attempt,omitzero"`
-	BackoffMaxAttempts     int            `json:"backoffMaxAttempts,omitzero"`
 	BackoffInitialDelay    time.Duration  `json:"backoffInitialDelay,omitzero"`
 	BackoffDelayMultiplier float64        `json:"backoffDelayMultiplier,omitzero"`
 	BackoffMaxDelay        time.Duration  `json:"backoffMaxDelay,omitzero"`
 	CreatedAt              time.Time      `json:"createdAt,omitzero"`
 	UpdatedAt              time.Time      `json:"updatedAt,omitzero"`
+	StepCreatedAt          time.Time      `json:"stepCreatedAt,omitzero"`
 }
 
 // MarshalJSON serializes the Flow including private fields.
@@ -670,12 +691,12 @@ func (f *Flow) MarshalJSON() ([]byte, error) {
 		SubgraphResult:         f.subgraphResult,
 		SubgraphError:          f.subgraphError,
 		Attempt:                f.attempt,
-		BackoffMaxAttempts:     f.backoffMaxAttempts,
 		BackoffInitialDelay:    f.backoffInitialDelay,
 		BackoffDelayMultiplier: f.backoffDelayMultiplier,
 		BackoffMaxDelay:        f.backoffMaxDelay,
 		CreatedAt:              f.createdAt,
 		UpdatedAt:              f.updatedAt,
+		StepCreatedAt:          f.stepCreatedAt,
 	})
 }
 
@@ -703,11 +724,11 @@ func (f *Flow) UnmarshalJSON(data []byte) error {
 	f.subgraphResult = wire.SubgraphResult
 	f.subgraphError = wire.SubgraphError
 	f.attempt = wire.Attempt
-	f.backoffMaxAttempts = wire.BackoffMaxAttempts
 	f.backoffInitialDelay = wire.BackoffInitialDelay
 	f.backoffDelayMultiplier = wire.BackoffDelayMultiplier
 	f.backoffMaxDelay = wire.BackoffMaxDelay
 	f.createdAt = wire.CreatedAt
 	f.updatedAt = wire.UpdatedAt
+	f.stepCreatedAt = wire.StepCreatedAt
 	return nil
 }
