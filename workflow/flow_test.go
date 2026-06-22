@@ -462,6 +462,14 @@ func TestFlow_Retry(t *testing.T) {
 	ok = f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour)
 	assert.False(ok)
 	assert.False(f3.retry)
+
+	// Within elapsed but the next delay alone overshoots the horizon: give up now rather than park a doomed
+	// wait. Step is fresh (elapsed ~0) but the single delay (1h) exceeds the 1m horizon.
+	f4 := NewFlow()
+	f4.stepCreatedAt = time.Now()
+	ok = f4.Retry(time.Hour, 1.0, 0, time.Minute)
+	assert.False(ok)
+	assert.False(f4.retry)
 }
 
 func TestFlow_Sleep(t *testing.T) {

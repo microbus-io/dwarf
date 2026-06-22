@@ -571,9 +571,11 @@ available to the task but does not participate in fan-in merge.
 Tasks signal the engine via control methods on the `Flow` carrier (distinct from the operations above):
 
 - **`flow.Retry(initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter) bool`** - re-execute this task with
-  exponential backoff. The bound is wall-clock, not a count: returns `true` (task should return `nil`) until
-  `giveUpAfter` has elapsed since the step was first created, then `false` (task should return its error). The give-up
-  check is made client-side in `Retry` against `flow.StepCreatedAt()`; the engine only consumes the backoff shape.
+  exponential backoff. The bound is wall-clock, not a count: returns `true` (task should return `nil`) while the next
+  attempt would still land within `giveUpAfter` of the step's first creation, else `false` (task should return its
+  error) - including when the next backoff delay alone would overshoot the horizon, so a doomed wait is never parked
+  before failing. The give-up check is made client-side in `Retry` against `flow.StepCreatedAt()`; the engine only
+  consumes the backoff shape.
   Pass `giveUpAfter <= 0` for unlimited; to bound by count instead, pass `0` and gate on `flow.Attempt()`. The step row
   is reused. The engine tracks `attempt` and computes the re-dispatch delay `min(initialDelay * delayMultiplier^attempt,
   maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. Both `flow.Retry`

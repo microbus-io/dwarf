@@ -498,9 +498,10 @@ func (f *Flow) Subtask(name, taskURL string, in any, out any) (yield bool, err e
 
 /*
 Retry requests the orchestrator to re-execute this task with exponential backoff. The bound is
-wall-clock, not a count: Retry returns true (the caller should return nil) until giveUpAfter has
-elapsed since the step was first created, then false (the caller should return its error). Pass
-giveUpAfter <= 0 for unlimited retry.
+wall-clock, not a count: Retry returns true (the caller should return nil) while the next attempt would
+still land within giveUpAfter of the step's first creation, and false (the caller should return its
+error) once the horizon is reached - including when the next backoff delay alone would overshoot it, so
+a wait we already know is doomed is not parked before failing. Pass giveUpAfter <= 0 for unlimited retry.
 
 The delay before attempt N is min(initialDelay * delayMultiplier^N, maxIntervalDelay); pass a zero
 initialDelay for immediate retries, and a zero maxIntervalDelay for no per-interval cap. To hold the
@@ -524,9 +525,23 @@ To bound by count instead of (or in addition to) time, gate on Attempt: pass giv
 flow.Attempt() at the call site.
 */
 func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxIntervalDelay time.Duration, giveUpAfter time.Duration) bool {
-	if giveUpAfter > 0 && !f.stepCreatedAt.IsZero() && time.Since(f.stepCreatedAt) >= giveUpAfter {
-		f.retry = false
-		return false
+	if giveUpAfter > 0 && !f.stepCreatedAt.IsZero() {
+		// Give up if we've crossed the horizon, or if the next attempt's delay alone would overshoot it -
+		// no point parking for a wait we already know lands past the deadline. nextDelay mirrors the delay
+		// the engine computes for this attempt (min(initialDelay * delayMultiplier^attempt, maxIntervalDelay)).
+		nextDelay := float64(initialDelay)
+		if delayMultiplier > 0 {
+			for range f.attempt {
+				nextDelay *= delayMultiplier
+			}
+		}
+		if maxIntervalDelay > 0 && time.Duration(nextDelay) > maxIntervalDelay {
+			nextDelay = float64(maxIntervalDelay)
+		}
+		if time.Since(f.stepCreatedAt)+time.Duration(nextDelay) >= giveUpAfter {
+			f.retry = false
+			return false
+		}
 	}
 	f.retry = true
 	f.backoffInitialDelay = initialDelay

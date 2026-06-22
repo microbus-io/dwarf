@@ -85,8 +85,10 @@ calling one, the task should return as instructed.
 ### Retry
 
 Re-execute this task with exponential backoff. The bound is wall-clock, not a count: `Retry` returns `true`
-(return `nil`) until `giveUpAfter` has elapsed since the step was first created, then `false` (return your
-error). It carries no condition of its own — you decide what's retryable:
+(return `nil`) while the next attempt would still land within `giveUpAfter` of the step's first creation, and
+`false` (return your error) once the horizon is reached — including when the next backoff delay alone would
+overshoot it, so a wait already known to be doomed is not parked before failing. It carries no condition of its
+own — you decide what's retryable:
 
 ```go
 if err := callFlaky(ctx); err != nil {
