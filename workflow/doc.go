@@ -30,10 +30,11 @@ limitations under the License.
 //	g.AddTransition("Reserve", "Charge")
 //	g.AddTransition("Charge", workflow.END)
 //
-// Transitions can be unconditional, conditional (AddTransitionWhen / AddTransitionSwitch), dynamic
-// fan-out over an array (AddTransitionForEach), an error handler (AddTransitionOnError), or an explicit
-// jump target (AddTransitionGoto). When parallel branches converge at a fan-in, per-field reducers
-// (SetReducer, see the Reducer constants) merge their changes.
+// Transitions can be unconditional, conditional (AddTransitionWhen / AddTransitionSwitch), static
+// fan-out across named tasks (AddTransitionFanOut), dynamic fan-out over an array (AddTransitionForEach),
+// an error handler (AddTransitionOnError), or an explicit jump target (AddTransitionGoto). The linear
+// AddTransitionChain wires a run of tasks. When parallel branches converge at a fan-in, per-field
+// reducers (SetReducer, see the Reducer constants) merge their changes.
 //
 // # Running a task
 //

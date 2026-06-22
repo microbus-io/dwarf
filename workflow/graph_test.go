@@ -198,6 +198,28 @@ func TestGraph_AddTransitionChain(t *testing.T) {
 	assert.Equal(0, len(g2.Transitions()))
 }
 
+func TestGraph_AddTransitionFanOut(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	g := NewGraph("FanOut")
+	g.AddTransitionFanOut("a", "b", "c", "d")
+
+	trs := g.Transitions()
+	assert.Equal(3, len(trs))
+	for i, dest := range []string{"b", "c", "d"} {
+		assert.Equal("a", trs[i].From)
+		assert.Equal(dest, trs[i].To)
+	}
+	// First (source) node is the default entry point.
+	assert.Equal("a", g.EntryPoint())
+
+	// No destinations is a no-op.
+	g2 := NewGraph("None")
+	g2.AddTransitionFanOut("solo")
+	assert.Equal(0, len(g2.Transitions()))
+}
+
 func TestGraph_TransitionOutOfENDRejected(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

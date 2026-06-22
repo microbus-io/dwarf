@@ -70,6 +70,22 @@ Because only one branch ever runs, switch branches need no fan-in. A node that u
 declare *every* success-path outgoing edge as switch — the validator rejects mixing switch with
 when/plain/forEach/goto from the same source. (Error transitions are orthogonal and still allowed.)
 
+### Static fan-out (`fanOut`)
+
+When several **statically named** tasks should run in parallel off one source, `AddTransitionFanOut` wires
+an unconditional edge from the source to each destination — the convenience form of repeated
+`AddTransition` calls:
+
+```go
+// Verify, ScoreCredit, and FraudCheck all fire after Intake and run in parallel.
+g.AddTransitionFanOut("Intake", "Verify", "ScoreCredit", "FraudCheck")
+```
+
+It creates only the outgoing edges; if the branches rejoin, the join node still needs `SetFanIn` (and
+usually a reducer). Its linear sibling is `AddTransitionChain("A", "B", "C")`, which wires consecutive
+pairs (`A -> B -> C`). Use `AddTransitionForEach` below instead when the parallel branches are *dynamic* —
+one instance of a single task per runtime array element.
+
 ### Dynamic fan-out (`forEach`)
 
 `AddTransitionForEach` iterates an array field in the state and spawns one instance of the target task per

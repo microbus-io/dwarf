@@ -209,6 +209,18 @@ func (g *Graph) AddTransitionChain(names ...string) {
 	}
 }
 
+// AddTransitionFanOut wires an unconditional transition from one source to each of several destinations:
+// AddTransitionFanOut("A", "B", "C") is AddTransition("A", "B") followed by AddTransition("A", "C"), so B
+// and C both fire and run in parallel. It is a convenience for static fan-out; no destinations is a no-op.
+// It creates only the outgoing edges - if the branches later rejoin at a node, that node still needs
+// SetFanIn (and usually a reducer) wired separately. Distinct from AddTransitionForEach, which fans out
+// dynamically over a runtime collection rather than across statically-named nodes.
+func (g *Graph) AddTransitionFanOut(from string, to ...string) {
+	for _, dest := range to {
+		g.AddTransition(from, dest)
+	}
+}
+
 // autoRegister registers a new node if one does not exist for the name.
 func (g *Graph) autoRegister(name string) {
 	if name == END {
