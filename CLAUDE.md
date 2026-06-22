@@ -4,14 +4,21 @@
 
 Dwarf is a standalone workflow-orchestration engine (`github.com/microbus-io/dwarf`). It executes workflow graphs by
 dispatching tasks through an injected executor, managing state between steps, and handling fan-out/fan-in, interrupts,
-retries, subgraphs, backpressure, breakers, and failure recovery. It depends only on `sequel` (SQL) and `throttle`
-(rate limiting), plus the pure-types sub-package `dwarf/workflow`.
+retries, subgraphs, and failure recovery. It depends only on `sequel` (SQL), plus the pure-types sub-package
+`dwarf/workflow`.
 
 This document captures the engine's internal design rationale - the *why* behind the mechanics, which godoc does not
 record. The engine is library code: it reaches tasks, fetches graphs, signals peers, and reports stops through a
 single **injected `Host` interface** (plus separately injected observability providers) rather than a built-in
 transport. A host application (for example a microservice) wires that interface to its own transport, identity, and
 observability. Where this doc refers to "the host" or "the adapter," it means that wrapping layer.
+
+> **Documentation convention.** Dwarf is a standalone package, published and consumed independently; in this repo's
+> wider context it sits *downstream* of the Microbus Fabric framework, but it must never depend on or assume that
+> particular host. Documentation and code comments in this module must therefore stay host-agnostic: do **not** name
+> the Fabric, the Foreman, or any other specific host (or its types, like `sub.TimeBudget` or a "plane"). Use the
+> generic term **"host"** for the upstream layer that embeds the dwarf engine, and describe what that host *does*
+> (mints a token, enforces a per-call deadline, shares a per-test isolation key) rather than which product does it.
 
 ### The Host interface (how the engine reaches the outside world)
 
@@ -24,10 +31,10 @@ observability providers below are injected separately. A host must implement `Lo
   baggage rides on ctx (`workflow.BaggageFrom(ctx)`) for identity-dependent loading (authz, per-actor graphs).
 - **`ExecuteTask(ctx, taskName string, flow *workflow.Flow) error`** - executes one task. Receives the flow
   carrier with state pre-populated; writes its changes back onto the flow. The engine never knows *how* the task is
-  reached (local call, RPC, message bus). The flow's baggage rides on ctx (`workflow.BaggageFrom(ctx)`). To engage an
-  adaptive mechanism, wrap the returned error with `workflow.ErrRateLimited(err, cause)` (rate-limit the task) or
-  `workflow.ErrUnavailable(err, cause)` (trip the task's breaker); an undecorated error is an ordinary failure. The
-  engine never sniffs status codes - the host owns the mapping (see "Per-Task Breaker → Error classification").
+  reached (local call, RPC, message bus). The flow's baggage rides on ctx (`workflow.BaggageFrom(ctx)`). Any error the
+  task returns is terminal for that attempt: the engine routes it via the graph's `onError` transition if one exists,
+  else it fails the step. The engine never sniffs status codes or error text; a task that wants to back off on a
+  transient failure detects that itself and arms `flow.Retry`.
 - **`FlowStopped(ctx, flowKey string, outcome *workflow.FlowOutcome)`** - fired when a flow stops
   (completed/failed/cancelled/interrupted) for a flow created with `FlowOptions.NotifyOnStop=true`. `flowKey`
   identifies the stopped flow (it is *not* part of the outcome). The engine traffics in no delivery address:
@@ -36,10 +43,10 @@ observability providers below are injected separately. A host must implement `Lo
 - **`SignalPeers(ctx, op string, payload []byte)`** - delivers one cross-replica coordination signal to the
   other replicas, all fire-and-forget. `op` is an opaque routing key (usable as a topic); `payload` is opaque bytes
   the engine already serialized. The host ships `(op, payload)` to peers and, on the receiving side, hands them back
-  via `Engine.DeliverSignal(ctx, op, payload)`, which parses `op` and applies the effect: a work doorbell, valve-rate
-  gossip, breaker trip, or cross-replica `Await` wake. All signal kinds funnel through this one method, so adding a
-  new kind needs no host change; the host never branches on `op` or inspects `payload`. A single-replica host does
-  nothing here and none of this runs.
+  via `Engine.DeliverSignal(ctx, op, payload)`, which parses `op` and applies the effect: a work doorbell (`enqueue`)
+  or a cross-replica `Await`/status-change wake (`statusChange`). All signal kinds funnel through this one method, so
+  adding a new kind needs no host change; the host never branches on `op` or inspects `payload`. A single-replica host
+  does nothing here and none of this runs.
 - **`*slog.Logger`** - structured logging sink (`SetLogger`); defaults to a **discard** logger (the engine and
   its sequel DB layer stay silent until a logger is injected, rather than writing to the application-owned
   `slog.Default()` - the library convention). A nil logger resets to that silent default. The engine logs through
@@ -172,9 +179,9 @@ host on stop is a Create-time property (`FlowOptions.NotifyOnStop`).
 (`completed`/`failed`/`cancelled`) it returns the flow's `final_state` (plus `Error`/`CancelReason`); for
 `interrupted` it returns the leaf interrupted step's merged `state+changes` and its `interrupt_payload`.
 For a `running` or `created` flow it returns the status with an **empty `State`** - dwarf does not
-currently reconstruct the live in-flight merged state (including the fan-out `step_id=0` case). Porting the
-foreman's live fan-out snapshot is a deliberately-deferred behavioral decision (it returns work-in-progress
-state that no other path exposes); confirm against product intent before implementing.
+currently reconstruct the live in-flight merged state (including the fan-out `step_id=0` case). Exposing a
+live fan-out snapshot is a deliberately-deferred behavioral decision (it returns work-in-progress state
+that no other path exposes); confirm against product intent before implementing.
 
 **Resume** - Continues a flow paused by `flow.Interrupt`. Walks up the surgraph chain (`surgraphChain`) and down the
 interrupted subgraph chain (`interruptedSubgraphChain`) to the leaf interrupted step. Records resume data on the
@@ -290,7 +297,7 @@ stop point. Delivery is fire-and-forget; flow execution never blocks on it.
 
 The engine carries **no delivery address** - that is a transport concern owned by the host. Instead the flow's
 opaque baggage rides on the `FlowStopped` ctx (`workflow.BaggageFrom(ctx)`), and the host resolves where to deliver
-from it (e.g. a Microbus adapter stuffs the caller's hostname into baggage at `Create` and reads it back here). The
+from it (e.g. a host adapter stuffs the caller's address into baggage at `Create` and reads it back here). The
 persisted gate is a single `notify_on_stop` flag on the flow row; `notify_on_stop` is honored on the **root** flow
 only (subgraph flows do not notify directly - interrupt/cancel notifications query the root's flag + baggage via the
 surgraph chain). Keeping the delivery address out of the engine is deliberate: a hostname the engine merely stored
@@ -311,7 +318,7 @@ worker pops a candidate and calls `processStep`:
 
 Acquisition is the atomic CAS, so a stale or duplicated candidate is harmless: the CAS loser gets zero rows and pops
 the next. The cache holds hints, never ownership; only the CAS grants a step. **The CAS predicate includes
-`parked=parkedNone`**: a step that was offered to the cache and then parked (subgraph or breaker) is rejected at
+`parked=parkedNone`**: a step that was offered to the cache and then parked (waiting on a subgraph) is rejected at
 claim time rather than dispatched, so a parked step in a stale cache entry never runs.
 
 **Selection (two-level priority + fairness).** The refiller, not the worker, decides *what* runs. (1) Each shard is
@@ -391,13 +398,9 @@ due-pending backlog exists it caps `nextPoll` at `backlogPollInterval` (1 minute
 doorbell still re-scans. This is a coarse safety net, not the primary wake path: due work is normally picked up
 immediately by the completion doorbell, and `nextPoll` is shortened to anything sooner.
 
-The timer waits on **two independent deadlines**, `nextPoll` and `nextProbe`, waking on whichever is sooner.
-`nextProbe` is the soonest tripped-breaker probe time, owned by the breaker subsystem (`refreshNextProbeLocked`,
-recomputed only on breaker trip/commit/close transitions, read by the timer as a lock-free atomic). Keeping it
-separate is load-bearing: an earlier design folded the breaker probe into `nextPoll`, but `pollPendingSteps` resets
-`nextPoll` to the backlog cadence every cycle, which clobbered the probe wake whenever a poll landed as the probe came
-due - collapsing the breaker's 100ms..1m exponential schedule to the 1-minute cadence. The timer loop (`timerLoop`)
-runs `pollPendingSteps` on the adaptive interval.
+The timer waits on the `nextPoll` deadline, shortened to the nearest future `not_before` (`flow.Sleep` / retry
+backoff) so a due step wakes the replica even when no doorbell arrives. The timer loop (`timerLoop`) runs
+`pollPendingSteps` on the adaptive interval.
 
 ### Query Parallelism
 
@@ -728,13 +731,12 @@ shards are isolated databases (folding the shard index into the test ID is what 
 collapsing every shard onto one shared in-memory DB). Key SQLite differences from server databases:
 
 `engine.StartupInTest(ctx, testID)` is the `*testing.T`-free sibling, for a **host that is itself under test** and so
-has no `*testing.T` to hand `RunInTest` (e.g. a Microbus microservice running under `app.RunInTest`, whose lifecycle
-is driven by the connector, not by `t`). Both share the `openTestDatabaseWithID` core: the engine never learns the
-host's notion of "test mode" - it only receives a concrete `testID` and opens isolated throwaway databases keyed by it.
-The id is hashed to a bounded 16 hex chars (SQL identifier limits) and is **deterministic**, so peer replicas that pass
-the *same* id (e.g. the shared per-test Microbus plane) resolve to the *same* isolated databases - exactly what
-shared-state multi-replica fixtures need - while a different id is isolated. Unlike `RunInTest` it registers no cleanup;
-the host drives teardown by calling `Shutdown`.
+has no `*testing.T` to hand `RunInTest` (e.g. a host whose lifecycle is driven by its own harness, not by `t`). Both
+share the `openTestDatabaseWithID` core: the engine never learns the host's notion of "test mode" - it only receives a
+concrete `testID` and opens isolated throwaway databases keyed by it. The id is hashed to a bounded 16 hex chars (SQL
+identifier limits) and is **deterministic**, so peer replicas that pass the *same* id (e.g. a shared per-test isolation
+key) resolve to the *same* isolated databases - exactly what shared-state multi-replica fixtures need - while a
+different id is isolated. Unlike `RunInTest` it registers no cleanup; the host drives teardown by calling `Shutdown`.
 
 - **Write-first transactions** - `advanceFlow` does an `UPDATE` as the first operation to immediately acquire a write
   lock. On MySQL/Postgres this serializes concurrent workers (like `SELECT ... FOR UPDATE`). On SQLite with
@@ -782,8 +784,8 @@ same per-driver treatment.
 **Every timestamp column is written with a SQL expression (`NOW_UTC()`, `DATE_ADD_MILLIS(NOW_UTC(), ?)`), never a
 bound Go `time.Time`.** Two reasons, both load-bearing:
 
-1. **Clock source / skew.** `created_at` ordering, lease expiry, `not_before`, the fairness `ageMs`, and the breaker
-   probe schedule all compare a stored timestamp against the database's own `NOW_UTC()`. If some rows were stamped by
+1. **Clock source / skew.** `created_at` ordering, lease expiry, `not_before`, and the fairness `ageMs` all compare a
+   stored timestamp against the database's own `NOW_UTC()`. If some rows were stamped by
    the *application* clock and others by the *database* clock, every such comparison would carry the app↔DB skew (and,
    across shards, the inter-node skew the scheduling design is careful to cancel - see "Selection", where both terms
    of `ageMs` come from one shard clock so per-shard offset cancels exactly). Writing only via `NOW_UTC()` keeps a
@@ -875,96 +877,14 @@ fan-out).
 - **Fairness weight is denormalized at `Create`, never resolved on the selection path** (a resolver hook would put
   synchronous I/O on the hot critical section). When a key's steps carry inconsistent weights, the oldest candidate
   step's weight is used; keeping weights consistent for a key is the caller's responsibility.
-- **`Workers` is a generous static cap, not the backpressure mechanism.** A worker blocked on a `ExecuteTask` call is
-  just a goroutine stack plus a socket, so over-provisioning is cheap; throttling a pressured downstream is the
-  adaptive per-task dispatch-rate control, not pool size.
+- **`Workers` is a generous static cap.** A worker blocked on a `ExecuteTask` call is just a goroutine stack plus a
+  socket, so over-provisioning is cheap.
 - **Completion writes are deliberately not gated by the refiller slot.** That slot bounds selection only; finishing
   in-flight work must outrank starting new work, so the post-execution advance is never serialized behind selection.
 
 > Observability note: per-priority backlog/age and distinct-fairness-key counts are aggregate-only metrics by design
 > (per-key labels would be unbounded cardinality). Metric emission is deferred in the engine and is a host concern;
 > the engine exposes the underlying data through logging and return values.
-
-### Adaptive Per-Task Concurrency
-
-A soft, cluster-wide cap on per-task **dispatch rate** (ops/sec), discovered from observed backpressure rather than
-configured. Lives in `backpressure.go`; the `runRefill` integration in `scheduling.go`; the 429 ingestion in the
-dispatch error path of `execution.go`. The controller controls *rate*; concurrent in-flight count is incidental (the
-worker pool sets a separate hard ceiling, and concurrency for a given rate is Little's Law: `c = rate * latency`).
-
-**Why a controller and not a config.** A static per-task cap is wrong the moment the downstream autoscales: too low
-underutilizes, too high overwhelms, and a hardcoded value defeats the controller it would feed (the downstream emits
-429 at exactly that count forever, so the controller never discovers grown capacity). A host that wants to self-limit
-does so internally, emitting 429 above its threshold; from the engine's side that is any other organic 429.
-
-**Why rate and not concurrent count.** Most 429-emitting backends are rate-bounded (third-party APIs publishing
-"100 req/sec"), not concurrency-bounded. A concurrent-count controller has a floor problem with short tasks against
-tight budgets: at rate budget `R` and latency `L`, the matching concurrent cap is `c = R*L`; for `R=10`, `L=10ms`,
-`c=0.1`, below the `minLimit=1` floor, so the controller pins at 1 concurrent and issues 100 req/sec - ten times the
-budget. A rate controller pushes the floor into ops/sec, matching the typical lower bound on real APIs (1 RPS). The
-symmetric failure mode (variable-latency concurrency-bounded backends) still recovers via 429 feedback; we accept
-that trade.
-
-**The throttle library does the per-call gating.** Each task has its own `throttle.Throttle` (sliding-window counter,
-1s window, ~64 bytes per task). It counts emitted dispatches (so a 429 can be anchored to the actual emission rate)
-and gates further dispatches when the rate exceeds the controller's current opinion. Created lazily at first dispatch;
-the gating limit is set lazily from the CUBIC curve's current value at each peek/commit. Allows are at commit time;
-peeks gate the filter pass in `runRefill`.
-
-**Additive-decrease per 429, re-anchored at burst start.** `valveRegulate` decrements `wCong` by exactly 1 on each
-observed 429, so a burst of N 429s compounds linearly to a cut of N - the exact overage the downstream just rejected.
-Only the *first* 429 of a fresh burst (tCong older than one throttle window) re-anchors `wCong` upward to the actual
-emission rate; subsequent 429s just decrement. The re-anchor matters because the CUBIC curve has been growing the
-effective rate above the last cut's `wCong` while the task ran cleanly.
-
-**The increase is a pure function, not an action.** N replicas running independent additive-increase loops over one
-downstream oscillate. Resolution: make the increase a pure function of `(wCong, tCong)` and wall-clock. Every replica
-computes the same value from the same anchor; "doing the increase" is not an action anyone performs.
-
-**The convergent register.** The only shared mutable state is `(wCong, tCong)` per task, gossiped via `SignalPeers` (op `syncValve`).
-The merge is "latest `tCong` wins, smaller `wCong` on tie" - associative, commutative, idempotent, tolerating
-reorder, duplication, and loss. A missed cut self-heals: the over-admitting replica eats its own 429 and re-cuts.
-
-**Sender-stamps `tCong`, not receiver.** The whole design rests on every replica computing the same
-`recover(wCong, tCong, now)`. Receiver-local stamping would make each replica's curve advance by a different
-`now - tCong`. Cross-replica clock skew (same datacenter, NTP-synced) is milliseconds; the curve operates over
-seconds.
-
-**Cross-task priority inversion is accepted.** When a high-priority flow's next task is rate-limited, that flow is
-delayed (step stays pending) while lower-priority flows whose next task is unconstrained proceed. The `runRefill`
-multi-band loop walks past a wholly-saturated band rather than idling the cluster. The flow is delayed, not failed -
-the 429 path bounces the step to `pending` with `not_before = NOW_UTC()`, never `failed`.
-
-**Each replica is independent; no peer count, no rate division.** With the per-replica throttle, each replica sees
-only its own dispatches and 429s, so the `wCong` it cuts to is *already* the per-replica rate. The cluster aggregate
-is the sum of independent per-replica controllers, each converging to its own share via its own 429 feedback.
-Asymmetric load produces asymmetric `wCong`, which is correct.
-
-**The recovery curve is TCP CUBIC** (RFC 9438). `recoverRate` evaluates `w(t) = cubicC*(t-K)^3 + wMax`, where
-`K = cbrt(wMax * cubicBeta / cubicC)` and `wMax = wCong / (1 - cubicBeta)`. Below `K` concave (fast reclaim toward
-the known-good `wMax`); above `K` convex (gentle probing above the pre-cut estimate). At `t=0` it equals `wCong`; at
-`t=K`, `wMax`. The recovered rate is clamped to `[1, MaxInt]`: the floor prevents recovery deadlock (at rate zero no
-step dispatches, no 429 fires, the cube term never lifts the curve); the ceiling is overflow insurance only.
-`cubicBeta` (0.01) and `cubicC` (0.05) are package-level constants; the cut depth is a fixed 1 op/sec per 429 and the
-throttle window a fixed 1 second - the controller converges on whatever rate the downstream tolerates regardless of
-the downstream's stated unit.
-
-**The bounced step has no added `not_before` delay.** A 429 returns the step to `pending` with `not_before = NOW`.
-The throttle is the gate, not the row: the re-attempt hits `valvePeek` and waits unless the throttle has room.
-
-**`runRefill`'s band loop is unbounded.** It walks priority bands ascending until admittable work is found or
-`scanBand` returns `MaxInt` (no pending work anywhere). An earlier `BandFallthroughLimit` cap was removed because
-giving up early just deferred the scan and introduced a stall when more than the cap's worth of bands were
-simultaneously saturated.
-
-**Fairness within a key is FIFO among admissible steps, not absolute FIFO.** Within a fairness key, the refiller walks
-oldest-first but skips any step whose task's throttle currently refuses; the skipped step is re-considered next refill
-once the throttle has room. This preserves strict-FIFO for the admissible subset while preventing head-of-line
-blocking: one rate-limited task does not freeze the tenant's other admissible work. The key's weight follows the same
-rule - taken from the oldest *admissible* step.
-
-> Observability note: the rate-limit state per task would be a useful operator gauge (log y-axis spanning the cut
-> state and the unbounded ceiling), but metric emission is deferred; the engine exposes the data via logging.
 
 ### Step Parking (`parked` column)
 
@@ -980,14 +900,6 @@ hot-path scan - no in-memory filter at refill time. The `parked` value labels *w
   lease deadline - the row sits until `completeSurgraphFlow` flips it back to `(pending, parked=0)`. This replaced an
   earlier `lease_expires = NOW + 7 days` "park" indicator that broke for subgraphs running longer than 7 days
   (the lease lapsed, the parent recovered, the task re-ran, launching a duplicate child).
-- `parked=2` (`parkedBreaker`) - the task has a tripped breaker and this step is on the held-back backlog.
-  `breakerBulkPark` parks every pending step for the task to parked=2 in a single UPDATE, then elevates the oldest per
-  shard back to parked=0 as the probe. Both UPDATEs run in one per-shard tx, so the elevated probe is guaranteed
-  `pending` at commit (the park UPDATE's row locks block concurrent Cancel/Fail). The probe's `not_before` carries the
-  exponential schedule. New steps inserted while tripped are born parked=2 (via `initialParkedFor` at INSERT) so they
-  join the backlog without burning a dispatch. On probe success `breakerClose` runs `breakerBulkUnpark` scoped to
-  *that shard only* - other shards stay held until their own probes succeed (rolling-wave recovery, not a unison
-  flood).
 
 **Terminal status implies `parked=parkedNone`.** The park value is meaningful only while a step is actively waiting.
 Once terminal (`completed`/`failed`/`cancelled`), the park slot is gone, and the column must read `parkedNone`. Every
@@ -997,167 +909,35 @@ when its flow was cancelled would sit terminal with non-zero `parked` - invisibl
 re-leased, stranding any subsequent `Restart`/`RestartFrom` (which sets `status=pending` but the partitioned index
 still excludes a `parked != 0` row). `Restart`/`RestartFrom` also re-zero `parked` as defense-in-depth.
 
-**Insert paths consult the in-memory breaker map** via `initialParkedFor(taskName)` and bind the result into `parked`,
-so a new pending step for a tripped task is born parked=2. The CREATED-inserting entry step leaves `parked=0` (not yet
-selectable); `Start` runs `parkTrippedSteps` inside its transition transaction to honor the breaker at the moment
-CREATED becomes PENDING.
-
-**No stale-dispatch race during trip.** `handleBreakerTrip` bounces the failed step to `parkedBreaker` (not
-`parkedNone`), so the refiller's `parked=0` filter cannot pick up the just-bounced row before `breakerBulkPark` runs.
-The bulk-park tx holds row locks across the SELECT and elevate UPDATE, so the chosen probe is guaranteed `pending`
-at commit.
-
-### Per-Task Breaker (404 ack-timeouts, 503 unavailable, 529 overloaded)
-
-A per-task circuit breaker rides alongside the valve. The valve handles 429 backpressure ("the downstream is
-rate-limiting"); the breaker handles "I cannot serve right now" signals: a 404 ack-timeout ("no one is home"), 503
-Service Unavailable ("downstream not ready / in maintenance"), and 529 overloaded ("the downstream is collapsed"). The
-valve gates via `valvePeek` in `runRefill`; the breaker gates via the `parked` column, which takes blocked rows out
-of the selection index entirely. They operate independently; a task with both signals tripped has its rate cut AND
-its backlog parked.
-
-**Error classification is host-owned, via error wrappers (no status-code sniffing).** The engine never
-inspects a `ExecuteTask` error's status code or text. Instead the host wraps the error its transport
-returned with one of two `workflow` constructors, and the engine classifies by `errors.As` on the
-unexported wrapper:
-
-- `workflow.ErrRateLimited(err, cause)` → the valve (bounce + rate cut). For "you're going too fast"
-  (e.g. HTTP 429).
-- `workflow.ErrUnavailable(err, cause)` → the breaker (park + probe). For "I cannot serve right now"
-  (downstream unreachable / unavailable / overloaded - e.g. an ack timeout, HTTP 503, HTTP 529).
-
-The engine extracts these in `processStep`'s dispatch-error path with `workflow.IsRateLimited(err)` /
-`workflow.IsUnavailable(err)`, each returning `(cause, ok)`. An **undecorated** error is an ordinary
-failure: the engine takes the task's `onError` transition if one matches, else `failStep`s. There are
-**exactly two** dispositions because the engine has exactly two adaptive mechanisms (valve, breaker); the
-three breaker *causes* (`ack_timeout` / `unavailable` / `overloaded`) are not separate dispositions but an
-**opaque cause string** carried on `ErrUnavailable` purely as a metric label (`dwarf_task_breaker_*{cause}`)
-- the engine never branches on it. `cause` is symmetric on `ErrRateLimited` too (forwarded to a debug log;
-no backpressure metric consumes it today). The wrappers preserve the inner error (`Unwrap`), so
-`errors.Is`/`As` and any status-code extraction still see through. This is the Phase-7 boundary contract
-(Open Question #1 resolved): the engine stays transport-agnostic, and the **foreman adapter** owns the
-mapping - `429 → ErrRateLimited`, `404+"ack timeout:" → ErrUnavailable(…, "ack_timeout")`,
-`503 → ErrUnavailable(…, "unavailable")`, `529 → ErrUnavailable(…, "overloaded")` - defining those cause
-constants on its own side. `LoadGraph` keeps plain `error` semantics (graph load has no breaker). The
-engine's internal `breakerCause*` constants (`breaker.go`) are only its own default labels for internally
-originated trips (reconstitution); the dispatch path uses the host-supplied cause. The `Disposition` enum
-itself is unexported - the whole API surface is the two constructors plus the two accessors.
-
-**Why 503 and 529 go to the breaker, not the valve.** Both mean the downstream is unavailable, not serving at a
-reduced rate. The valve's additive-decrease-with-CUBIC-recovery is designed for the latter; applied to a downed
-downstream, every dispatch keeps tripping, the rate drives toward zero, and the recovery curve then re-floods the
-still-down service. The breaker's trip + exponential probe schedule (100ms, 200ms, 400ms, ..., capped at 1m) lets the
-downstream actually recover before the next request. A handler-emitted 503 is a deliberate "back off and try later."
-
-**Why per-task and not per-step.** A per-step exponential backoff scales with backlog depth: with 100 flows blocked
-on a 404'ing task, every refill cycle would dispatch and bounce all 100 on individual schedules - an avalanche
-displacing healthy tasks. The schedule lives at the *task name* level so one schedule governs all blocked flows.
-
-**The parked column is the gate; the probe rides on `not_before`.** On trip, `breakerBulkPark` parks every pending
-step to `parked=2`, then SELECTs the oldest and elevates it back to `parked=0` as the probe. The selection index is
-partitioned on parked, so the refill never sees the held-back backlog. The probe's `not_before` is set to
-`nextProbeAt`, so the existing selection machinery (which already honors `not_before` for `flow.Sleep` and retry
-backoff) schedules the probe at the exponential cadence. On probe success, `breakerClose` runs `breakerBulkUnpark`
-on the success shard only.
-
-**Trip on the first signal.** Any single ack-timeout 404, 503, or 529 flips the breaker tripped - no consecutive-nack
-counter, no threshold. The cost of an over-trip is one `breakerInitialProbeDelay` (100ms) on the next dispatch: trip
--> 100ms wait -> probe -> success (when transient) -> close. The cost of an under-trip is the avalanche. Matches TCP,
-where one loss event triggers congestion response.
-
-**Probe schedule is local, exponential, capped.** When tripped, exactly one step per shard is left unparked as the
-probe, gated on `not_before <= NOW`. The schedule advances on each probe DISPATCH, not on failure: `processStep`
-calls `breakerCommit(taskName)` just before executing any step whose task has a tripped breaker. **`breakerCommit`
-advances only when the scheduled probe is due (`now >= nextProbeAt`), not unconditionally.** This is load-bearing: a
-burst of in-flight dispatches admitted just before the trip stays in flight and returns 404s after the trip, and the
-candidate cache can still hand a worker a step that was parked after being offered (the claim CAS rejects it, but
-only after a pop). Advancing for every such call would ramp `probeAttempt` straight to the backoff cap in one window
-and stall recovery; the probe-time gate keeps the schedule to one bump per real probe. The four constants
-(`breakerInitialProbeDelay` = 100ms, `breakerProbeMultiplier` = 2.0, `breakerMaxProbeDelay` = 1m, trip-after-first)
-are package constants. Sequence: 100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s, 6.4s, 12.8s, 25.6s, 51.2s, 60s, 60s, ...;
-full convergence to the cap takes ~2 minutes of continuous failure. `nextProbeAt` and `probeAttempt` are not gossiped
-- each replica advances its own state on observed admissions, and the probe's `not_before` is a last-writer-wins
-UPDATE across replicas.
-
-**`breakerTrip` arms the schedule; `breakerCommit` advances it; `refreshNextProbeLocked` syncs the timer.**
-`breakerTrip` is called for every observed signal - on a fresh trip it arms the first probe (`probeAttempt = 0`,
-`nextProbeAt = now + 100ms`); on a repeat it is a no-op so concurrent in-flight 404s do not ratchet the schedule.
-All three transitions call `refreshNextProbeLocked`, which recomputes the soonest probe into the timer's `nextProbe`
-deadline. `nextProbe` is a *separate* deadline from `nextPoll` so `pollPendingSteps`' per-cycle `nextPoll` reset
-cannot clobber the probe wake.
-
-**`handleBreakerTrip` serializes bulk-park per task and runs it transactionally.** The failed probe is demoted to
-`parkedBreaker` and a replacement probe is re-elected within one `sequel.Transact` per shard, so a rollback can never
-leave the task with the probe demoted but no replacement elevated - which would wedge recovery permanently (no probe
-dispatches, so no further 404 re-trips, and nothing re-runs bulk-park). `Transact` retries the park-and-elevate on
-lock contention, and a per-task in-process lock (`breakerParkLocks`) serializes concurrent trips for the same task so
-a burst of trips doesn't issue overlapping `task_name` UPDATEs that deadlock under pessimistic locking. A probe
-always survives a trip.
-
-**The breaker-trip signal (op `tripBreaker`) gossips only the trip event.** The payload is just `(taskName)`. Each peer stamps
-`time.Now()` on receipt, seeds its local probe schedule from that moment, AND runs `breakerBulkPark` so its view of
-the task's pending set converges with the originator's. `breakerBulkPark` is idempotent SQL. A trip received while
-already tripped is a no-op (re-parking would reset `probeAttempt` and undo accumulated backoff).
-
-**Closures are deliberately NOT gossiped, and the unpark UPDATE is shard-scoped.** A replica that probes successfully
-drops its local `trippedAt` to zero and unparks the success shard only; other shards stay parked=2 until their own
-probes succeed (rolling-wave recovery). If downstream 404s again after a shard recovers, the next dispatch on that
-shard re-trips. Small consistency window: when R1's probe on shard X succeeds and unparks shard X, R2's in-memory
-breaker is still tripped until R2 also probes successfully (which happens when R2 picks up one of the newly-unparked
-rows) - a one-dispatch-per-replica bounded window. The state is a single `trippedAt time.Time` (zero = closed).
-
-**Reconstitution on startup.** A restarting replica's in-memory breaker map is empty, but `parked=parkedBreaker` rows
-survive in the DB and are invisible to selection. `reconstituteBreakers` (called inside Startup between the
-breakers-map init and the worker goroutines starting) scans each shard for `SELECT DISTINCT task_name FROM
-dwarf_steps WHERE parked=parkedBreaker AND status=pending` and calls `breakerTrip(taskName)` for each. The schedule
-starts fresh on this replica (first probe at `now+100ms`), independent of peers. No gossip - sending our `time.Now()`
-would clobber peers' accumulated `probeAttempt`. The DB-side state is already what `breakerBulkPark` would produce,
-so no SQL writes are issued. If the task was fixed during downtime, the first reconstituted probe succeeds and
-`breakerClose` un-parks normally. The rejected alternative - a blanket `UPDATE parked=0` at startup - would mass-
-unpark every replica's backlog in a multi-replica deployment, flooding a known-broken endpoint.
-
-**No auto-give-up on a forever-tripped breaker.** Same argument as flow lifetime: a breaker tripped for hours might be
-a long maintenance window, and the workflow's own elapsed-time guard is the right arbiter. Bulk remediation (cancel
-everything blocked on task X) is operator surface area, out of scope for the breaker.
-
-**Other 5xx (500, 502, 504, ...) are not the breaker's business.** A 5xx other than 503/529 means the downstream
-exists, served the request, and answered with a server error - a task-level decision (`flow.Retry`, an `onError`
-transition, or propagate as flow failure). The breaker is specifically for "I cannot serve right now" signals.
-
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 16 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 10 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - the no-op provider unless the host
 configures the SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in
 `initMetrics` (called from `initRuntime`, so both `Startup` and `RunInTest` get them) from
 `mp.Meter("github.com/microbus-io/dwarf")` - that scope distinguishes dwarf's metrics; **service identity lives
 in the provider's Resource, not in per-metric attributes** (no `service.name` on data points - that would
 explode cardinality and is off-spec). The only attributes the engine attaches are the metric-specific labels:
-`workflow`, `status`, `task`, `cause`, `outcome`, `priority`, `park_type`.
+`workflow`, `status`, `task`, `priority`, `park_type`.
 
-**9 counters, incremented inline** at the same logical event sites the foreman used: `dwarf_flows_started_total`
+**5 counters, incremented inline** at their logical event sites: `dwarf_flows_started_total`
 (start path), `dwarf_flows_terminated_total` (completeFlow), `dwarf_steps_executed_total` (every terminal step
 disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered_total`
-(pollPendingSteps lease recovery), `dwarf_steps_unwedged_total{park_type}` (the parked-step wedge sweep; a
-nonzero value flags a latent bug), `dwarf_steps_skipped_saturated_total` (refill admission skips),
-`dwarf_task_rate_cuts_total` (valveRegulate), `dwarf_task_breaker_trips_total` /
-`dwarf_task_breaker_probes_total` (handleBreakerTrip + breakerClose). The inline helpers no-op when
-`e.metrics == nil` (before Startup).
+(pollPendingSteps lease recovery), and `dwarf_steps_unwedged_total{park_type}` (the parked-step wedge sweep; a
+nonzero value flags a latent bug). The inline helpers no-op when `e.metrics == nil` (before Startup).
 
-**7 gauges, observable (async)** via a single `RegisterCallback`, replacing the foreman's `OnObserve*`
-endpoints. The callback runs at metric-collection time and reads engine state: in-memory for
-`dwarf_steps_queue_depth` (cache length), `dwarf_task_rate_limit` (valves with an anchored `wCong`),
-`dwarf_task_breaker_state` (breaker map), and `dwarf_steps_fairness_keys` (the last refill's selected band +
+**5 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
+time and reads engine state: in-memory for
+`dwarf_steps_queue_depth` (cache length) and `dwarf_steps_fairness_keys` (the last refill's selected band +
 distinct-key count, stashed under `lastRefillLock` by the refiller); shard queries for `dwarf_steps_pending`
 and `dwarf_steps_oldest_pending_age_seconds` (per priority band) and `dwarf_task_concurrency_running` (running
 steps per task). Gauges emit **per replica**; cluster-wide aggregates are summed at the backend. The callback is
 `Unregister`ed first thing in `drainRuntime` so the OTEL reader can't query a closing database.
 
-**Fidelity choices vs. the foreman:** `flows_terminated` fires only on `completed` (the foreman never counted
-failed/cancelled; `steps_executed{status=failed}` still covers the failed-step case). Subgraph flows are counted
-like the foreman - the start path and `completeFlow` run for them too - so no `surgraph_flow_id` filter; the
-`workflow` label lets dashboards slice root-vs-subgraph. `TestMetrics_EmittedOnRun` pins emission with an
-in-memory SDK `ManualReader`.
+**Fidelity choices:** `flows_terminated` fires only on `completed` (failed/cancelled are not counted here;
+`steps_executed{status=failed}` still covers the failed-step case). Subgraph flows are counted too - the start
+path and `completeFlow` run for them - so no `surgraph_flow_id` filter; the `workflow` label lets dashboards
+slice root-vs-subgraph. `TestMetrics_EmittedOnRun` pins emission with an in-memory SDK `ManualReader`.
 
 > Observability note: the per-priority/per-task gauges are aggregate-only by design - no
 > per-`fairness_key` labels (unbounded cardinality).
@@ -1201,8 +981,7 @@ span instead); baggage is still inherited via its post-insert UPDATE.
 
 **Reentrancy → one span per dispatch.** The per-step span is created inside each `processStep` call, so a
 step that yields (`flow.Subgraph`/`flow.Interrupt`) and later re-dispatches produces **two** spans - one
-per real execution attempt, each capturing that attempt's queue wait and body. This is intentional and
-matches the foreman.
+per real execution attempt, each capturing that attempt's queue wait and body. This is intentional.
 
 `TestTracing_SpansEmittedOnRun` pins all of the above (root detached, steps parented to root, subgraph
 "workflow" parented to the caller step, subgraph step parented to the subgraph span, two `runInner` spans
@@ -1239,7 +1018,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
 | `breakpoints` | JSON `map[taskName]string` of `BreakBefore` breakpoints |
 | `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. Reset by `Restart` (a fresh attempt); NOT by `RestartFrom` (a surgical rewind) |
-| `started_at` | UTC time this attempt began dispatching. Stamped by `Start` on `created` -> `running`. Reset by `Restart`, not `RestartFrom`. Distinct from `created_at` because a flow can sit `created` indefinitely or be parked behind a tripped breaker before its entry dispatches. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
+| `started_at` | UTC time this attempt began dispatching. Stamped by `Start` on `created` -> `running`. Reset by `Restart`, not `RestartFrom`. Distinct from `created_at` because a flow can sit `created` indefinitely before its entry dispatches. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
 | `updated_at` | UTC time of the last status transition. Surfaced to tasks via `Flow.UpdatedAt()` |
 | `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `SetDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
 | `fairness_key` | Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable |
@@ -1270,7 +1049,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `time_budget_ms` | Execution budget; the deadline on the `ExecuteTask` call context |
 | `breakpoint_hit` | `1` once a breakpoint on this step has fired, so it does not re-trigger on resume |
 | `attempt` | `flow.Retry` attempt counter, drives the backoff |
-| `not_before` | Earliest UTC time the step may execute (`flow.Sleep` / retry backoff / breaker probe) |
+| `not_before` | Earliest UTC time the step may execute (`flow.Sleep` / retry backoff) |
 | `lease_expires` | Crash-recovery lease; `pollPendingSteps` reclaims `running` steps past this |
 | `created_at` | UTC creation time |
 | `started_at` | UTC time the *current attempt* first dispatched. The lease UPDATE stamps it via CASE only on a fresh attempt's first dispatch (`attempt=0 AND subgraph_done=0 AND interrupt_done=0`) and **preserves** it on a continuation (subgraph re-dispatch, interrupt/ResumeBreak re-dispatch, retry re-dispatch). A retried step's duration includes every attempt. Drives per-step body duration and inter-step wait labels in `FlowRenderer` |
@@ -1284,7 +1063,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `priority` | Denormalized copy of the flow's `priority` for the hot selection path |
 | `fairness_key` | Denormalized copy of the flow's `fairness_key` |
 | `fairness_weight` | Denormalized copy of the flow's `fairness_weight` |
-| `parked` | Selection discriminator. `0` = active; `1` = surgraph park; `2` = breaker park. The selection and saturation indexes lead with `(status, parked)` and the claim CAS requires `parked=parkedNone`, so non-zero rows are excluded from the hot path. See "Step Parking" |
+| `parked` | Selection discriminator. `0` = active; `1` = surgraph park. The selection and saturation indexes lead with `(status, parked)` and the claim CAS requires `parked=parkedNone`, so non-zero rows are excluded from the hot path. See "Step Parking" |
 
 ## Database Indexing Strategy
 
@@ -1366,11 +1145,10 @@ is the `ExecuteTask` call: `executeTask` derives it from the lifetime ctx with t
 
 ### Shutdown ordering: drain workers, then timer, then refiller
 
-`nudgeTimer` (the sender behind `shortenNextPoll` and `refreshNextProbeLocked`) nudges the timer via
+`nudgeTimer` (the sender behind `shortenNextPoll`) nudges the timer via
 `select { case wakeTimer <- struct{}{}: default: }`. The `default` only guards a *full* channel - a send on a
-*closed* channel still panics, even inside a `select`. The senders are not just worker goroutines (`processStep` and
-its retry/sleep/recovery paths): the breaker subsystem (`refreshNextProbeLocked`, including from an inbound
-breaker-trip signal via `DeliverSignal`) also nudges the timer, so there is no drain point after which a `wakeTimer` send is
+*closed* channel still panics, even inside a `select`. The senders are worker goroutines (`processStep` and
+its retry/sleep/recovery paths), so there is no drain point after which a `wakeTimer` send is
 guaranteed impossible. `wakeTimer` is therefore **never closed** (the same rationale as `refillTrigger`); `timerLoop`
 is terminated by a dedicated `timerStop` channel it selects on. So Shutdown drains the worker pool, then stops the
 timer, then the refiller:
@@ -1416,18 +1194,17 @@ Transactions don't help when a worker crashes during the `ExecuteTask` call (out
 3. **Orphan flow detection** in `pollPendingSteps` - logs an error for any `running` flow with no non-terminal steps
    whose `updated_at` is older than 5 minutes. A bug signal; auto-recovery is intentionally not implemented (it would
    duplicate the transition logic and could double-advance on a false positive).
-4. **Parked-step wedge sweep** (`sweepWedgedParks`, `wedge.go`) - defense in depth for the two park kinds, whose
-   releasing condition could in principle never fire (a parked step is invisible to selection, and `parkedSubgraph`
-   is invisible to lease recovery too). Runs on a **dedicated recovery goroutine** (`recoveryLoop`) on a plain
-   `wedgeSweepInterval` (5m) ticker - kept *off* `pollPendingSteps` because that poll is nudged sub-second under load
-   while the sweep's `NOT EXISTS`/`GROUP BY` scans are heavy and the wedge it guards against is latency-tolerant; the
-   recovery loop is drained before the refiller in `drainRuntime` since breaker recovery can `requestRefill`. Every
-   detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a false
-   positive (the guard sits comfortably beyond normal subgraph-completion latency and the 1m max breaker-probe
-   interval). Unlike orphan-flow detection this **does** auto-recover, because each recovery re-invokes the *normal*
-   release mechanism - which is guarded by a CAS on the park state - rather than duplicating transition logic, so it
-   is idempotent and harmless under a concurrent resolution, a false positive, or a peer replica sweeping the same
-   shard:
+4. **Parked-step wedge sweep** (`sweepWedgedParks`, `wedge.go`) - defense in depth for the `parkedSubgraph` park,
+   whose releasing condition could in principle never fire (a parked step is invisible to selection, and
+   `parkedSubgraph` is invisible to lease recovery too). Runs on a **dedicated recovery goroutine** (`recoveryLoop`)
+   on a plain `wedgeSweepInterval` (5m) ticker - kept *off* `pollPendingSteps` because that poll is nudged sub-second
+   under load while the sweep's `NOT EXISTS`/`GROUP BY` scans are heavy and the wedge it guards against is
+   latency-tolerant; the recovery loop is drained before the refiller in `drainRuntime` since a recovered park can
+   `requestRefill`. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a
+   false positive (the guard sits comfortably beyond normal subgraph-completion latency). Unlike orphan-flow detection
+   this **does** auto-recover, because each recovery re-invokes the *normal* release mechanism - which is guarded by a
+   CAS on the park state - rather than duplicating transition logic, so it is idempotent and harmless under a
+   concurrent resolution, a false positive, or a peer replica sweeping the same shard:
    - **`parkedSubgraph`** (`recoverWedgedSubgraphParks`): a caller step `running`+`parkedSubgraph` with **no
      non-terminal child** (`surgraph_step_id = step_id`, status created/running/interrupted) is wedged - the child
      reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
@@ -1435,12 +1212,6 @@ Transactions don't help when a worker crashes during the `ExecuteTask` call (out
      failed/cancelled/absent one. (A fan-out has several caller steps, each its own `surgraph_step_id`, checked
      independently; `flow.Retry` leaves older terminal children whose latest sibling is still active - handled by
      the `NOT EXISTS` + latest-child logic.)
-   - **`parkedBreaker`** (`recoverWedgedBreakerParks`): a task with `parked=2` pending backlog but **no
-     dispatchable probe** (no `parkedNone` pending and no `running` step for the task on that shard) is wedged - the
-     elected probe was lost, so nothing would ever dispatch to re-trip or close the breaker. A *scheduled* probe is
-     itself a `parkedNone` pending row (future `not_before`), so a task mid-probe-schedule is never flagged. The
-     sweep re-arms the in-memory breaker (`breakerTrip`, idempotent; required because `breakerClose` only unparks a
-     tripped breaker) and elevates the oldest `parked=2` step to a due probe; the normal cycle then resumes.
    Each unwedge increments `dwarf_steps_unwedged_total{park_type}` (the always-on alarm; a nonzero value means a
    latent bug let a step wedge) and logs at error level (silent under the default discard logger, surfaced once a
    host injects one).

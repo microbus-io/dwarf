@@ -13,7 +13,7 @@
 You describe a workflow as a graph of tasks; dwarf runs it — dispatching one task at a time per step,
 persisting state between steps in a SQL database, and handling the hard parts of durable orchestration:
 parallel fan-out/fan-in, conditional routing, retries with backoff, timed sleeps, subgraphs,
-human-in-the-loop pauses, adaptive backpressure, and circuit breakers.
+and human-in-the-loop pauses.
 
 Dwarf has **no built-in transport**. It doesn't know how your tasks are reached (a local function call, an
 RPC, a message bus) or where your graphs live. You wire it to your world through a few small dependency
@@ -47,19 +47,15 @@ fmt.Println(out.State["greeting"]) // hello ada
   fan-in merges their state with per-field reducers (append, add, union, merge, …).
 - **Human-in-the-loop.** A task can `Interrupt` to park the flow for external input and `Resume` later —
   approvals, manual review, async callbacks.
-- **Adaptive under load.** A per-task valve discovers each downstream's safe dispatch rate from observed
-  `429`s (TCP CUBIC recovery); a per-task circuit breaker parks and probes a downstream that's
-  unreachable, in maintenance, or overloaded.
 - **Fair and prioritized.** Two-level scheduling: strict priority bands across the cluster, weighted
   fairness within a band so one tenant can't starve another.
 - **Scales horizontally.** Run many replicas against sharded databases; replicas coordinate through
   fire-and-forget peer signals you publish however you like.
-- **OTEL-native observability.** Structured logs (`slog`), 15 `dwarf_*` metrics, and distributed tracing,
+- **OTEL-native observability.** Structured logs (`slog`), 10 `dwarf_*` metrics, and distributed tracing,
   all through standard providers you inject.
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
 
-Dwarf depends only on [`sequel`](https://github.com/microbus-io/sequel) (SQL) and
-[`throttle`](https://github.com/microbus-io/throttle) (rate limiting), plus the OpenTelemetry API.
+Dwarf depends only on [`sequel`](https://github.com/microbus-io/sequel) (SQL), plus the OpenTelemetry API.
 
 ## Install
 
@@ -165,10 +161,10 @@ Full guides live in [`docs/`](docs/):
 - [Getting started](docs/getting-started.md) — install, wiring, your first flow
 - [Concepts](docs/concepts.md) — graph, task, flow, step, thread, reducer, lifecycle
 - [Building graphs](docs/graphs.md) — transitions, conditions, fan-out, error handling, reducers
-- [Writing tasks](docs/tasks.md) — the Flow carrier, state, control signals, baggage, error dispositions
+- [Writing tasks](docs/tasks.md) — the Flow carrier, state, control signals, baggage, error handling
 - [Engine operations](docs/operations.md) — create, run, inspect, resume, cancel, restart, continue, retain
 - [Fan-out & subgraphs](docs/fan-out-and-subgraphs.md) — parallelism, dynamic `forEach`, calling sub-workflows
-- [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, backpressure, breakers
+- [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, retries, recovery
 - [Observability](docs/observability.md) — logs, metrics, tracing
 - [Deployment](docs/deployment.md) — database choice, sharding, config, multi-replica
 - [Testing](docs/testing.md) — `RunInTest` and `TestProxy`

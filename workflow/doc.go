@@ -51,11 +51,10 @@ limitations under the License.
 //		return nil
 //	}
 //
-// # Signaling backpressure and breakers
-//
-// To engage the engine's adaptive mechanisms from a host's ExecuteTask, wrap the returned error with
-// ErrRateLimited (rate-limit the task) or ErrUnavailable (trip the task's circuit breaker). The engine
-// classifies via IsRateLimited / IsUnavailable; it never inspects status codes itself.
+// The engine never inspects an error's status code or text: a task that wants to back off (rate limit,
+// transient unavailability) reads its own signal and arms Retry. An error returned to the engine is
+// terminal for that attempt - routed via the graph's onError transition if one exists, else it fails the
+// step.
 //
 // FlowOutcome, FlowStep, FlowSummary, and Query are the read-side result types returned by the engine's
 // inspection operations.

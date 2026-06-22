@@ -235,10 +235,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// surrounding DB work keeps using the undeadlined ctx so persistence is never cut short.
 	e.logger.DebugContext(ctx, "Executing task", "task", taskName, "flow", workflowURL)
 	dispatchURL := dispatchURLOf(graph, taskName)
-	// The adaptive mechanisms (breaker, valve) key on the dispatch URL - the real downstream - not the
-	// graph node name, so two graphs naming a node identically but pointing at different URLs don't share
-	// one breaker/valve.
-	e.breakerCommit(dispatchURL)
 	taskCtx := workflow.ContextWithBaggage(ctx, baggage)
 
 	// Open a per-step span parented to the flow's root "workflow" span (reconstructed from the stored
@@ -267,17 +263,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	errorRouted := false
 
 	if execErr != nil {
-		// The host classifies its transport's "can't take more work" signals by wrapping the error; the
-		// engine never inspects status codes or error text itself. Backpressure bounces the step and cuts
-		// the rate; a breaker trip parks the task's backlog and probes. cause is an opaque metric label.
-		if cause, ok := workflow.IsRateLimited(execErr); ok {
-			e.logger.DebugContext(ctx, "Task backpressure", "task", taskName, "flow", workflowURL, "cause", cause)
-			return e.handleBackpressure(ctx, shardNum, stepID, dispatchURL)
-		}
-		if cause, ok := workflow.IsUnavailable(execErr); ok {
-			return e.handleBreakerTrip(ctx, shardNum, stepID, dispatchURL, cause)
-		}
-
+		// The engine never inspects status codes or error text: a task that wants to back off (rate limit,
+		// transient unavailability) reads its own signal and arms flow.Retry. Any error that reaches here is
+		// terminal for this attempt - routed via the graph's onError transition if one exists, else it fails
+		// the step.
 		if _, ok := graph.ErrorTransition(taskName); ok {
 			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowURL, "error", execErr)
 			tracedErr := errors.Convert(execErr)
@@ -293,7 +282,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// Re-read the flow's changes after execution: the task executor wrote to the Flow
 		// directly (it receives *workflow.Flow, which is the embedded Flow inside our RawFlow).
 		resultFlow = flow
-		e.breakerClose(ctx, dispatchURL, shardNum)
 	}
 
 	// Accumulate changes
@@ -577,7 +565,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			newStepID, err := tx.InsertReturnID(ctx, "step_id",
 				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-				flowID, nextStepDepth, randomIdentifier(16), next.taskName, nextURL, string(stepStateJSON), workflow.StatusPending, e.initialParkedFor(nextURL), nextTimeBudget.Milliseconds(), childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
+				flowID, nextStepDepth, randomIdentifier(16), next.taskName, nextURL, string(stepStateJSON), workflow.StatusPending, parkedNone, nextTimeBudget.Milliseconds(), childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
 			)
 			if err != nil {
 				return errors.Trace(err)
@@ -793,171 +781,6 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 	return nil
 }
 
-// handleBackpressure bounces a step back to pending after a 429.
-func (e *Engine) handleBackpressure(ctx context.Context, shardNum, stepID int, taskURL string) error {
-	e.valveRegulate(ctx, taskURL)
-	db, err := e.shard(shardNum)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	res, err := db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-		workflow.StatusPending, stepID, workflow.StatusRunning,
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil // step was cancelled / failed / completed by a concurrent path
-	}
-	e.logger.DebugContext(ctx, "Task backpressured (429)", "task", taskURL, "step", stepID)
-	e.shortenNextPoll(time.Now())
-	return nil
-}
-
-// valveRegulate cuts wCong by 1 and gossips the new point.
-func (e *Engine) valveRegulate(ctx context.Context, taskURL string) {
-	now := time.Now()
-	e.valvesLock.Lock()
-	v := e.valves[taskURL]
-	_, observed := v.throttle.Peek()
-	if v.tCong.IsZero() || now.Sub(v.tCong) > time.Second {
-		if observed > v.wCong {
-			v.wCong = observed
-		}
-	}
-	v.wCong = max(v.wCong-1, 1)
-	v.tCong = now
-	newW := v.wCong
-	e.valvesLock.Unlock()
-	// tCong was just set to now under the lock, so pass now for both.
-	v.throttle.SetLimit(recoverRate(newW, now, now))
-	e.metricTaskRateCut(ctx, taskURL)
-	e.signalSyncValve(ctx, taskURL, newW, now)
-}
-
-// handleBreakerTrip bounces a step and trips the breaker.
-func (e *Engine) handleBreakerTrip(ctx context.Context, shardNum, stepID int, taskURL, cause string) error {
-	fresh, nextProbeAt := e.breakerTrip(taskURL, cause)
-	// Every breaker-tripping dispatch is a failed probe; the trip itself counts only on the fresh transition.
-	e.metricBreakerProbe(ctx, taskURL, "failure", cause)
-	if fresh {
-		e.metricBreakerTrip(ctx, taskURL, cause)
-		e.signalTripBreaker(ctx, taskURL)
-	}
-	e.logger.DebugContext(ctx, "Task breaker tripped", "task", taskURL, "step", stepID, "cause", cause, "fresh", fresh)
-	// Serialize bulk-park for this task within the replica: a burst of trips on the same down task would
-	// otherwise issue concurrent UPDATEs over the same task_url rows and deadlock under pessimistic
-	// locking. The bulk-park SQL is idempotent, so the queued-behind callers re-park cheaply.
-	parkMu, _ := e.breakerParkLocks.LoadOrStore(taskURL, &sync.Mutex{})
-	mu := parkMu.(*sync.Mutex)
-	mu.Lock()
-	defer mu.Unlock()
-	// Demote the just-failed probe and re-elect a probe within one transaction (per shard), so a rollback
-	// can never leave the task with the probe demoted but no replacement elevated — which would wedge
-	// recovery. breakerBulkPark runs each shard's work through Transact, retrying on lock contention so a
-	// probe is re-elected before we return.
-	return errors.Trace(e.breakerBulkPark(ctx, taskURL, nextProbeAt, shardNum, stepID))
-}
-
-// breakerCommit advances the probe schedule when the genuinely-scheduled probe is dispatched.
-func (e *Engine) breakerCommit(taskURL string) {
-	now := time.Now()
-	e.breakersLock.Lock()
-	defer e.breakersLock.Unlock()
-	b, ok := e.breakers[taskURL]
-	if !ok || b.trippedAt.IsZero() {
-		return
-	}
-	// Only advance when this dispatch is the scheduled probe (its probe time has arrived). A burst of
-	// concurrent in-flight dispatches admitted just before the breaker tripped would otherwise each bump
-	// probeAttempt, ramping the backoff straight to the cap and stalling recovery; those are not probes.
-	if now.Before(b.nextProbeAt) {
-		return
-	}
-	b.probeAttempt++
-	b.nextProbeAt = now.Add(breakerProbeBackoff(b.probeAttempt))
-	e.refreshNextProbeLocked()
-}
-
-// breakerClose flips a tripped breaker back to closed.
-func (e *Engine) breakerClose(ctx context.Context, taskURL string, shardNum int) {
-	e.breakersLock.Lock()
-	b, ok := e.breakers[taskURL]
-	if !ok || b.trippedAt.IsZero() {
-		e.breakersLock.Unlock()
-		return
-	}
-	cause := b.cause // capture before clearing, for the probe-success metric
-	b.trippedAt = time.Time{}
-	b.probeAttempt = 0
-	b.nextProbeAt = time.Time{}
-	b.cause = ""
-	e.refreshNextProbeLocked()
-	e.breakersLock.Unlock()
-	// This dispatch was the probe that closed the breaker.
-	e.metricBreakerProbe(ctx, taskURL, "success", cause)
-	e.breakerBulkUnpark(ctx, taskURL, shardNum)
-}
-
-// breakerBulkPark parks all pending steps for a tripped task and designates one probe per shard. The
-// just-failed probe (failedStepID on failedShard, may be 0 when no step triggered the trip) is demoted
-// from running into the held-back set inside the same transaction as the re-election, so a rollback can
-// never leave the task with the probe demoted but no replacement elevated.
-func (e *Engine) breakerBulkPark(ctx context.Context, taskURL string, nextProbeAt time.Time, failedShard, failedStepID int) error {
-	probeBackoffMs := time.Until(nextProbeAt).Milliseconds()
-	if probeBackoffMs < 0 {
-		probeBackoffMs = 0
-	}
-	return e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		return db.Transact(ctx, func(tx *sequel.Tx) error {
-			if shard == failedShard && failedStepID != 0 {
-				tx.ExecContext(ctx,
-					"UPDATE dwarf_steps SET status=?, parked=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-					workflow.StatusPending, parkedBreaker, failedStepID, workflow.StatusRunning,
-				)
-			}
-			tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE task_url=? AND status=? AND parked IN (?,?)",
-				parkedBreaker, taskURL, workflow.StatusPending, parkedNone, parkedBreaker,
-			)
-			var probeID int
-			err := tx.QueryRowContext(ctx,
-				"SELECT step_id FROM dwarf_steps WHERE task_url=? AND status=? AND parked=? ORDER BY created_at ASC, step_id ASC LIMIT_OFFSET(1, 0)",
-				taskURL, workflow.StatusPending, parkedBreaker,
-			).Scan(&probeID)
-			if err == sql.ErrNoRows {
-				return nil // nothing parked on this shard to elevate as a probe
-			}
-			if err != nil {
-				return errors.Trace(err)
-			}
-			tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET parked=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-				parkedNone, probeBackoffMs, probeID, workflow.StatusPending,
-			)
-			return nil
-		})
-	})
-}
-
-// breakerBulkUnpark releases breaker-parked steps for a task on a single shard.
-func (e *Engine) breakerBulkUnpark(ctx context.Context, taskURL string, shardNum int) {
-	db, err := e.shard(shardNum)
-	if err != nil {
-		return
-	}
-	db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET parked=?, updated_at=NOW_UTC() WHERE task_url=? AND parked=?",
-		parkedNone, taskURL, parkedBreaker,
-	)
-	// Ring the doorbell: the just-unparked steps are now selectable but were invisible to any refill scan
-	// that ran before this UPDATE committed. Without this, a freshly-unparked backlog waits for the probe's
-	// incidental post-completion refill (which can coalesce into a stale in-flight scan) or, failing that,
-	// the next backlogPollInterval sweep - up to a minute of idle latency after the breaker recovers.
-	e.requestRefill()
-}
-
 // fireFanInDirect creates the fan-in step immediately for an empty-cohort case.
 func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget, fanInURL string, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64) error {
 	var fanInStepID int64
@@ -980,7 +803,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id",
 			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-			flowID, nextStepDepth, randomIdentifier(16), fanInTarget, fanInURL, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInURL), nextTimeBudget.Milliseconds(), lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
+			flowID, nextStepDepth, randomIdentifier(16), fanInTarget, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, nextTimeBudget.Milliseconds(), lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -1051,7 +874,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
 		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-		flowID, nextStepDepth, randomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, e.initialParkedFor(fanInURL), nextTimeBudget.Milliseconds(), spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
+		flowID, nextStepDepth, randomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, nextTimeBudget.Milliseconds(), spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
 	)
 	if err != nil {
 		return 0, errors.Trace(err)

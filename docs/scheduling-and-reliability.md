@@ -1,8 +1,7 @@
 # Scheduling & reliability
 
-Dwarf decides *which* pending step runs next (scheduling) and protects downstreams from overload (adaptive
-backpressure and circuit breakers). Most of this is automatic; this guide explains the knobs you control
-and the signals you send.
+Dwarf decides *which* pending step runs next (scheduling) and recovers steps that a crashed worker left
+behind. Most of this is automatic; this guide explains the knobs you control and how errors are handled.
 
 ## Priority
 
@@ -37,70 +36,31 @@ key gets ~4x the share of a weight-1 key, independent of how much backlog each h
 dispatch is oldest-first (FIFO). Both `FairnessKey` and `FairnessWeight` are immutable for the flow's life
 (changing them mid-run would be a self-promotion vector).
 
-## Backpressure (the valve)
+## Error handling
 
-When a task's downstream is rate-limiting, you don't want the engine to keep hammering it. Signal
-backpressure by wrapping the error:
+The engine never inspects status codes or error text. Any error a task returns is **terminal for that
+attempt**: the engine routes it via the graph's `onError` transition if one is declared, otherwise it fails
+the step. This keeps the engine transport-agnostic — there is no rate-limit or unavailability signal to
+wrap an error with.
 
-```go
-if isRateLimited(err) { // e.g. HTTP 429
-    return workflow.ErrRateLimited(err, "")
-}
-```
-
-The engine then:
-
-- **bounces** the step back to `pending` (it is *not* failed — the task never "saw" the rejection), and
-- **cuts** the task's adaptive dispatch-rate ceiling.
-
-Each task has its own rate controller that *discovers* the downstream's safe rate from observed
-backpressure, using TCP CUBIC recovery: each signal cuts the rate by a small fixed amount; between signals
-the rate probes back up toward the last known-good level and then gently beyond it, so it tracks a
-downstream that autoscales. You configure nothing — there's no per-task rate to set. A host that wants to
-self-limit simply emits backpressure above its own threshold.
-
-This is per-replica: each replica converges its own rate from its own feedback, and the cluster total is
-the sum.
-
-## Circuit breakers
-
-Backpressure is for "slow down." A breaker is for "this downstream can't serve right now at all" —
-unreachable, in maintenance, or collapsed. Signal it by wrapping the error, with a cause label:
+Backpressure belongs to the layer that owns the downstream's resource identity, not the engine. A task that
+wants to back off on a transient failure (a `429`, a momentarily unavailable downstream) detects that
+condition itself and arms `flow.Retry`, whose bound is wall-clock rather than a count:
 
 ```go
+err := callDownstream(ctx)
 switch {
-case isUnreachable(err):  return workflow.ErrUnavailable(err, "ack_timeout")
-case isUnavailable(err):  return workflow.ErrUnavailable(err, "unavailable") // HTTP 503
-case isOverloaded(err):   return workflow.ErrUnavailable(err, "overloaded")  // HTTP 529
+case isRateLimited(err), isUnavailable(err): // e.g. HTTP 429 / 503
+    if f.Retry(100*time.Millisecond, 2.0, 10*time.Second, time.Hour) {
+        return nil // re-run after backoff
+    }
+    return err // horizon exceeded
+default:
+    return err // ordinary failure
 }
 ```
 
-On the first such signal the task's breaker **trips**: every pending step for that task is parked out of
-the scheduler, and exactly one probe step is allowed through on an exponential schedule (100ms, 200ms,
-400ms, … capped at 1 minute). When a probe succeeds the breaker **closes** and the backlog resumes. This
-lets a downed downstream actually recover instead of being re-flooded.
-
-- The breaker is **per task name**, so one schedule governs all flows blocked on that task — no avalanche.
-- New steps created while tripped are born parked, so they join the backlog without burning a probe.
-- The breaker survives restarts: parked rows in the database re-arm the breaker on startup.
-- Query the live state with `eng.BreakerTripped(taskName)`.
-
-The `cause` string is opaque to the engine — it's forwarded only as a metric label
-(`dwarf_task_breaker_trips_total{cause=…}`). You choose the vocabulary.
-
-### Why two mechanisms
-
-The valve drives the rate toward a sustainable level for a downstream that's *up but busy*. The breaker
-backs off entirely for a downstream that's *down*. Applying rate-cutting to a downed service would drive
-the rate to zero and then re-flood on recovery; applying a breaker to a merely-busy service would stall
-throughput unnecessarily. They operate independently — a task can have both engaged at once.
-
-## What the engine does *not* classify
-
-The engine never inspects status codes or error text. A plain returned error is an ordinary failure
-(`onError` route, or fail the flow). `ErrRateLimited` and `ErrUnavailable` are the *only* way to engage
-the valve and breaker, and your host owns the mapping from its transport's signals to them. This keeps the
-engine transport-agnostic. See [Writing tasks](tasks.md#signaling-backpressure-and-breakers).
+See [Writing tasks → Handling transient failures](tasks.md#handling-transient-failures).
 
 ## Time budgets
 
@@ -112,8 +72,7 @@ is no engine-imposed *flow* deadline — implement one in author space with a `C
 
 ## Workers
 
-`WithWorkers` (default 64) caps per-replica concurrency. It's a generous static ceiling, not the
-backpressure mechanism — a worker blocked on an `ExecuteTask` call is just a goroutine and a socket, so
-over-provisioning is cheap. The adaptive valve, not the pool size, is what throttles a pressured downstream.
+`WithWorkers` (default 64) caps per-replica concurrency. It's a generous static ceiling — a worker blocked
+on an `ExecuteTask` call is just a goroutine and a socket, so over-provisioning is cheap.
 
 Next: [Observability](observability.md).

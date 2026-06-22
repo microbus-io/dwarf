@@ -30,7 +30,7 @@ type graphCacheKey struct {
 
 // lruCache is a small thread-safe LRU with a per-entry TTL. It exists so processStep can reuse the
 // parsed *workflow.Graph across the many steps of one flow instead of re-unmarshalling the frozen
-// graph JSON every step. Mirrors the bounded-entries + TTL semantics of the lru.Cache the foreman used.
+// graph JSON every step.
 type lruCache[K comparable, V any] struct {
 	mu         sync.Mutex
 	maxEntries int

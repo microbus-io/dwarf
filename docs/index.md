@@ -15,7 +15,7 @@ If you're new, read in this order:
 3. **[Building graphs](graphs.md)** — the `workflow.Graph` API: tasks, transitions, conditions, fan-out,
    error handling, and reducers.
 4. **[Writing tasks](tasks.md)** — the `workflow.Flow` carrier: reading and writing state, the control
-   signals (retry, sleep, goto, interrupt, subgraph, subtask), baggage, and signaling backpressure / breakers.
+   signals (retry, sleep, goto, interrupt, subgraph, subtask), baggage, and handling transient failures.
 
 Then dip into the topic guides as you need them:
 
@@ -23,8 +23,8 @@ Then dip into the topic guides as you need them:
   pausing/resuming, cancelling, restarting, continuing a thread, and retention.
 - **[Fan-out & subgraphs](fan-out-and-subgraphs.md)** — running work in parallel and calling
   sub-workflows.
-- **[Scheduling & reliability](scheduling-and-reliability.md)** — priority, fairness, adaptive
-  backpressure, and circuit breakers.
+- **[Scheduling & reliability](scheduling-and-reliability.md)** — priority, fairness, retries, and
+  crash recovery.
 - **[Observability](observability.md)** — structured logs, OpenTelemetry metrics, and distributed tracing.
 - **[Deployment](deployment.md)** — choosing and tuning a database, sharding, connection pools, and
   running multiple replicas.

@@ -34,8 +34,8 @@ import (
 // park lands, the caller is stranded permanently and its fan-in never fires. This is a functional check that
 // the fan-out-sibling subgraph path completes; note it does NOT deterministically reproduce the strand
 // in-process (the TestProxy dispatch is too synchronous for the child to win the race) - the deterministic
-// repro is bus-timing-specific (creditflow over the Microbus bus), tracked separately. The short drain bound
-// makes a stranded flow fail rather than hang.
+// repro is transport-timing-specific (observed over a real bus transport), tracked separately. The short
+// drain bound makes a stranded flow fail rather than hang.
 func TestFanoutSubgraphflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

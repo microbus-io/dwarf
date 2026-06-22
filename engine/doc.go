@@ -18,8 +18,8 @@ limitations under the License.
 //
 // The engine executes workflow graphs against a SQL database, scheduling and dispatching one task at a
 // time per step, persisting state between steps, and driving fan-out/fan-in, retries, sleeps, subgraphs,
-// interrupts, backpressure, and circuit breakers. It owns no transport of its own; a host wires it to
-// the outside world through injected dependency interfaces and calls its operations.
+// and interrupts. It owns no transport of its own; a host wires it to the outside world through injected
+// dependency interfaces and calls its operations.
 //
 // # Lifecycle
 //

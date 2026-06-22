@@ -22,26 +22,24 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 )
 
-// Host is the contract between the dwarf engine and the surrounding host application (the "foreman"
-// adapter). The engine owns no transport of its own; it reaches workflow graphs and tasks, reports flow
-// stops, and carries cross-replica coordination signals exclusively through the host. Register it once
-// via Engine.SetHost.
+// Host is the contract between the dwarf engine and the surrounding host application. The engine owns no
+// transport of its own; it reaches workflow graphs and tasks, reports flow stops, and carries
+// cross-replica coordination signals exclusively through the host. Register it once via Engine.SetHost.
 //
-// A host MUST implement LoadGraph and ExecuteTask. The remaining five methods are optional: an
+// A host MUST implement LoadGraph and ExecuteTask. The remaining two methods are optional: an
 // implementation may do nothing in them when it has no flow-stop notification need (FlowStopped) or runs
-// single-replica with no cross-replica gossip (Enqueue, SyncValve, TripBreaker, NotifyStatusChange).
+// single-replica with no cross-replica coordination (SignalPeers).
 //
 // Cross-replica signal contract (SignalPeers): the engine funnels all of its coordination signals
-// (work doorbells, valve-rate gossip, breaker trips, flow-stop wakes) through this one method. op is a
-// routing key the host may use as a topic/subject; payload is opaque bytes the engine already serialized.
-// The host delivers (op, payload) to OTHER replicas, EXCLUDING the calling replica, and on the receiving
-// side hands them back via Engine.DeliverSignal(ctx, op, payload) - it is a pure pipe that never
-// inspects either. The engine always applies a signal's effect locally before calling SignalPeers, so an
-// implementation that echoes the signal back to the sender would cause it to be processed twice on the
-// originating replica (a doubled enqueue, valve cut, breaker trip, or status-change wake); if the
-// transport delivers published messages to the publisher, the implementation must filter out
-// self-delivery. Because the host never branches on op or inspects payload, adding a new engine signal
-// kind requires no host change.
+// (work doorbells, flow-stop wakes) through this one method. op is a routing key the host may use as a
+// topic/subject; payload is opaque bytes the engine already serialized. The host delivers (op, payload)
+// to OTHER replicas, EXCLUDING the calling replica, and on the receiving side hands them back via
+// Engine.DeliverSignal(ctx, op, payload) - it is a pure pipe that never inspects either. The engine
+// always applies a signal's effect locally before calling SignalPeers, so an implementation that echoes
+// the signal back to the sender would cause it to be processed twice on the originating replica (a
+// doubled enqueue or status-change wake); if the transport delivers published messages to the publisher,
+// the implementation must filter out self-delivery. Because the host never branches on op or inspects
+// payload, adding a new engine signal kind requires no host change.
 type Host interface {
 	// LoadGraph fetches a workflow graph definition by its URL (the addressable resolve key passed to
 	// Create). The flow's opaque baggage rides on ctx; read it with workflow.BaggageFrom(ctx) if loading

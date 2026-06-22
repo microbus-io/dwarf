@@ -30,8 +30,7 @@ import (
 // recoveryLoop runs the parked-step wedge sweep on its own slow cadence, kept off the frequently-nudged
 // poll path (pollPendingSteps can fire sub-second under load) because the sweep's NOT EXISTS / DISTINCT
 // scans are heavy and the wedge condition it guards against is latency-tolerant. A plain ticker - no
-// nudging - so the sweep runs at most once per wedgeSweepInterval. Drained before the refiller in
-// drainRuntime, since recoverWedgedBreakerParks can requestRefill.
+// nudging - so the sweep runs at most once per wedgeSweepInterval.
 func (e *Engine) recoveryLoop(ctx context.Context) {
 	ticker := time.NewTicker(wedgeSweepInterval)
 	defer ticker.Stop()
@@ -58,7 +57,6 @@ func (e *Engine) recoveryLoop(ctx context.Context) {
 // - the sweep papered over the effect but the cause is worth finding.
 func (e *Engine) sweepWedgedParks(ctx context.Context, db *sequel.DB, shard int) {
 	e.recoverWedgedSubgraphParks(ctx, db, shard, parkWedgeThreshold)
-	e.recoverWedgedBreakerParks(ctx, db, shard, parkWedgeThreshold)
 }
 
 // recoverWedgedSubgraphParks finds parkedSubgraph caller steps whose child flow can no longer revive them -
@@ -134,80 +132,6 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 				continue
 			}
 			e.metricStepUnwedged(ctx, "subgraph")
-		}
-	}
-}
-
-// recoverWedgedBreakerParks re-establishes a probe for any task whose breaker backlog (parked=2) has lost
-// its probe: no parkedNone pending step and no running step for the task on this shard, so nothing would
-// ever dispatch to re-trip or close the breaker. A scheduled probe is itself a parkedNone pending row (with
-// a future not_before), so a task mid-probe-schedule has a live probe and is not flagged. Recovery re-arms
-// the in-memory breaker (idempotent if already tripped; necessary because breakerClose only unparks a
-// tripped breaker) and elevates the oldest parked step to a due probe; the normal cycle then resumes - a
-// 404 re-parks it and elects the next probe, a success runs breakerClose to unpark the shard.
-func (e *Engine) recoverWedgedBreakerParks(ctx context.Context, db *sequel.DB, shard int, minAge time.Duration) {
-	rows, err := db.QueryContext(ctx,
-		"SELECT DISTINCT s.task_url FROM dwarf_steps s"+
-			" WHERE s.status=? AND s.parked=? AND s.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
-			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps p WHERE p.task_url=s.task_url AND p.parked=? AND p.status IN (?, ?))",
-		workflow.StatusPending, parkedBreaker, -minAge.Milliseconds(),
-		parkedNone, workflow.StatusPending, workflow.StatusRunning,
-	)
-	if err != nil {
-		e.logger.ErrorContext(ctx, "Wedge sweep: querying breaker-parked steps", "shard", shard, "error", err)
-		return
-	}
-	var tasks []string
-	for rows.Next() {
-		var taskURL string
-		if err := rows.Scan(&taskURL); err != nil {
-			rows.Close()
-			e.logger.ErrorContext(ctx, "Wedge sweep: scanning breaker-parked task", "shard", shard, "error", err)
-			return
-		}
-		tasks = append(tasks, taskURL)
-	}
-	rows.Close()
-
-	for _, taskURL := range tasks {
-		// Re-arm the in-memory breaker so breakerClose can unpark the backlog when the probe succeeds.
-		e.breakerTrip(taskURL, breakerCauseAckTimeout)
-		// Elevate the oldest parked step as the probe. SELECT-then-UPDATE in a tx (a single
-		// UPDATE-with-self-subquery is rejected by MySQL), mirroring breakerBulkPark's election.
-		elevated := false
-		terr := db.Transact(ctx, func(tx *sequel.Tx) error {
-			elevated = false
-			var probeID int
-			err := tx.QueryRowContext(ctx,
-				"SELECT step_id FROM dwarf_steps WHERE task_url=? AND status=? AND parked=? ORDER BY created_at ASC, step_id ASC LIMIT_OFFSET(1, 0)",
-				taskURL, workflow.StatusPending, parkedBreaker,
-			).Scan(&probeID)
-			if err == sql.ErrNoRows {
-				return nil
-			}
-			if err != nil {
-				return errors.Trace(err)
-			}
-			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET parked=?, not_before=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
-				parkedNone, probeID, workflow.StatusPending, parkedBreaker,
-			)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if n, _ := res.RowsAffected(); n > 0 {
-				elevated = true
-			}
-			return nil
-		})
-		if terr != nil {
-			e.logger.ErrorContext(ctx, "Wedge sweep: electing breaker probe", "shard", shard, "task", taskURL, "error", terr)
-			continue
-		}
-		if elevated {
-			e.logger.ErrorContext(ctx, "Wedge sweep: re-elected lost breaker probe", "shard", shard, "task", taskURL)
-			e.metricStepUnwedged(ctx, "breaker")
-			e.requestRefill()
 		}
 	}
 }

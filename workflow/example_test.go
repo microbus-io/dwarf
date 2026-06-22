@@ -18,7 +18,6 @@ package workflow_test
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/microbus-io/dwarf/workflow"
@@ -55,21 +54,6 @@ func ExampleMergeState() {
 	out, _ := json.Marshal(merged)
 	fmt.Println(string(out))
 	// Output: {"items":["a","b"],"total":3}
-}
-
-// A host's ExecuteTask wraps its transport's "can't serve" signal so the engine trips the task's breaker
-// instead of failing the flow. The engine classifies with IsUnavailable.
-func ExampleErrUnavailable() {
-	err := workflow.ErrUnavailable(errors.New("503 from billing"), "unavailable")
-
-	if cause, ok := workflow.IsUnavailable(err); ok {
-		fmt.Println("trip breaker, cause:", cause)
-	}
-	// The wrapped error is preserved.
-	fmt.Println("underlying:", err.Error())
-	// Output:
-	// trip breaker, cause: unavailable
-	// underlying: 503 from billing
 }
 
 // A Flow carries state to and from a task. Tasks read inputs and write outputs with typed accessors.

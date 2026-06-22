@@ -19,11 +19,8 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"math"
-	"time"
 
 	"github.com/microbus-io/errors"
-	"github.com/microbus-io/throttle"
 )
 
 // Cross-replica coordination is funneled through a single host method, Host.SignalPeers, and a single
@@ -38,21 +35,13 @@ type signalOp string
 
 const (
 	signalOpEnqueue      signalOp = "enqueue"
-	signalOpSyncValve    signalOp = "syncValve"
-	signalOpTripBreaker  signalOp = "tripBreaker"
 	signalOpStatusChange signalOp = "statusChange"
 )
 
 // Per-op payload bodies. The engine marshals these in emitSignal and unmarshals the received bytes in
 // DeliverSignal.
 type (
-	enqueuePayload   struct{ Shard, StepID int }
-	syncValvePayload struct {
-		TaskName string
-		WCong    int
-		TCong    time.Time
-	}
-	tripBreakerPayload  struct{ TaskName string }
+	enqueuePayload      struct{ Shard, StepID int }
 	statusChangePayload struct{ FlowKey, Status string }
 )
 
@@ -68,14 +57,6 @@ func (e *Engine) emitSignal(ctx context.Context, op signalOp, payload any) {
 
 func (e *Engine) signalEnqueue(ctx context.Context, shard, stepID int) {
 	e.emitSignal(ctx, signalOpEnqueue, enqueuePayload{Shard: shard, StepID: stepID})
-}
-
-func (e *Engine) signalSyncValve(ctx context.Context, taskName string, wCong int, tCong time.Time) {
-	e.emitSignal(ctx, signalOpSyncValve, syncValvePayload{TaskName: taskName, WCong: wCong, TCong: tCong})
-}
-
-func (e *Engine) signalTripBreaker(ctx context.Context, taskName string) {
-	e.emitSignal(ctx, signalOpTripBreaker, tripBreakerPayload{TaskName: taskName})
 }
 
 func (e *Engine) signalStatusChange(ctx context.Context, flowKey, status string) {
@@ -94,18 +75,6 @@ func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) e
 			return errors.Trace(err)
 		}
 		e.handleEnqueue(ctx, p.Shard, p.StepID)
-	case signalOpSyncValve:
-		var p syncValvePayload
-		if err := json.Unmarshal(payload, &p); err != nil {
-			return errors.Trace(err)
-		}
-		e.handleSyncValve(p.TaskName, p.WCong, p.TCong)
-	case signalOpTripBreaker:
-		var p tripBreakerPayload
-		if err := json.Unmarshal(payload, &p); err != nil {
-			return errors.Trace(err)
-		}
-		e.handleTripBreaker(ctx, p.TaskName)
 	case signalOpStatusChange:
 		var p statusChangePayload
 		if err := json.Unmarshal(payload, &p); err != nil {
@@ -116,44 +85,4 @@ func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) e
 		return errors.New("unknown peer signal op: %q", op)
 	}
 	return nil
-}
-
-// handleSyncValve merges an inbound valve gossip signal into the local valve (latest tCong wins, smaller
-// wCong on tie).
-func (e *Engine) handleSyncValve(taskName string, wCong int, tCong time.Time) {
-	if taskName == "" {
-		return
-	}
-	e.valvesLock.Lock()
-	defer e.valvesLock.Unlock()
-	cur, ok := e.valves[taskName]
-	if !ok {
-		e.valves[taskName] = &taskValve{
-			wCong:    wCong,
-			tCong:    tCong,
-			throttle: throttle.New(time.Second, math.MaxInt32),
-		}
-		return
-	}
-	if tCong.After(cur.tCong) || (tCong.Equal(cur.tCong) && wCong < cur.wCong) {
-		cur.wCong = wCong
-		cur.tCong = tCong
-	}
-}
-
-// handleTripBreaker applies an inbound breaker trip signal: it stamps the local clock and drives
-// bulk-park exactly as a local trip does so this replica's view of the task's pending steps converges
-// with the originating replica's. Closures are not gossiped; each peer closes locally when its own probe
-// succeeds.
-func (e *Engine) handleTripBreaker(ctx context.Context, taskName string) {
-	if taskName == "" {
-		return
-	}
-	fresh, nextProbeAt := e.breakerTrip(taskName, breakerCauseAckTimeout)
-	if !fresh {
-		return // already tripped here too; no fresh bulk-park needed
-	}
-	if err := e.breakerBulkPark(ctx, taskName, nextProbeAt, 0, 0); err != nil {
-		e.logger.ErrorContext(ctx, "Bulk-park on gossip trip", "task", taskName, "error", err)
-	}
 }

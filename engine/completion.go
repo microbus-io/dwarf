@@ -371,7 +371,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 	if err != nil {
 		return errors.Trace(err)
 	}
-	// The step is now failed regardless of whether the whole flow fails - count it like the foreman did.
+	// The step is now failed regardless of whether the whole flow fails - count it.
 	e.metricStepExecuted(ctx, taskName, workflow.StatusFailed)
 
 	if !failFlow {

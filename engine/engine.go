@@ -19,7 +19,6 @@ package engine
 import (
 	"context"
 	"io"
-	"math"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -31,7 +30,6 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
-	"github.com/microbus-io/throttle"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -53,14 +51,13 @@ const (
 	// wedgeSweepInterval is the cadence of the dedicated recovery goroutine that runs the defense-in-depth
 	// parked-step wedge sweep. It is kept off the frequently-nudged poll path because the sweep's scans are
 	// heavy and latency-tolerant. parkWedgeThreshold is the minimum age a parked step must reach before the
-	// sweep treats it as wedged - comfortably beyond normal subgraph-completion latency and the 1-minute max
-	// breaker-probe interval, so steady-state operation never trips a false positive.
+	// sweep treats it as wedged - comfortably beyond normal subgraph-completion latency, so steady-state
+	// operation never trips a false positive.
 	wedgeSweepInterval = 5 * time.Minute
 	parkWedgeThreshold = 5 * time.Minute
 
 	parkedNone     = 0
 	parkedSubgraph = 1
-	parkedBreaker  = 2
 
 	// Bounds for the per-flow parsed-graph cache (see graphcache.go). The graph JSON is frozen on the
 	// flow row at creation, so a cached graph is immutable and never needs invalidation; entry count +
@@ -120,7 +117,6 @@ type Engine struct {
 	// Timer goroutine
 	nextPoll     time.Time
 	nextPollLock sync.Mutex
-	nextProbe    atomic.Int64
 	wakeTimer    chan struct{}
 	timerStop    chan struct{}
 	timerWorker  sync.WaitGroup
@@ -133,19 +129,6 @@ type Engine struct {
 	// Wait registry for Await
 	waitersLock sync.Mutex
 	waiters     map[string][]chan string
-
-	// Adaptive per-task dispatch rate
-	valves     map[string]*taskValve
-	valvesLock sync.RWMutex
-
-	// Per-task breaker
-	breakers     map[string]*taskBreaker
-	breakersLock sync.RWMutex
-	// breakerParkLocks serializes breakerBulkPark per task within this replica. A burst of flows hitting
-	// a down task trips the breaker on many workers at once; their bulk-park UPDATEs all target the same
-	// task_name rows and deadlock under pessimistic locking (SQL Server). Serializing per task removes the
-	// self-inflicted storm; residual cross-replica contention is still handled by the retry loop.
-	breakerParkLocks sync.Map // taskName -> *sync.Mutex
 
 	// Per-flow parsed-graph cache. The graph JSON is frozen at flow creation, so processStep reuses
 	// the parsed *workflow.Graph across the flow's steps instead of re-unmarshalling it each step.
@@ -350,7 +333,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 // testID - instead of opening the configured DSN. It is for a host that is itself running under test (so it
 // has no *testing.T to hand RunInTest) but must still convey "use a disposable, isolated database" down to
 // sequel. The testID must be stable for the test run and shared by every replica that should see the same
-// database (e.g. a Microbus plane, which all services in one test app share); distinct test runs pass
+// database (e.g. a per-test isolation key shared by all replicas in one test app); distinct test runs pass
 // distinct ids for isolation. The engine never learns the host's notion of "test mode" - it only receives
 // this concrete instruction. Unlike RunInTest there is no cleanup hook; the host drives teardown by calling
 // Shutdown (e.g. from its own shutdown lifecycle).
@@ -398,8 +381,6 @@ func (e *Engine) initRuntime() {
 	e.timerStop = make(chan struct{})
 	e.recoveryStop = make(chan struct{})
 	e.nextPoll = time.Now()
-	e.valves = map[string]*taskValve{}
-	e.breakers = map[string]*taskBreaker{}
 	e.graphCache = newLRUCache[graphCacheKey, *workflow.Graph](graphCacheMaxEntries, graphCacheTTL)
 	e.waiters = nil
 	e.started.Store(true)
@@ -412,13 +393,6 @@ func (e *Engine) initRuntime() {
 
 	// Resolve the tracer (no-op unless a TracerProvider was injected or the global SDK is configured).
 	e.initTracer()
-
-	// Re-arm the breaker map from surviving parked rows before workers start dispatching, so a
-	// restarting replica does not strand a breaker-parked backlog or dispatch it into a known-bad
-	// endpoint. No-op on a fresh database.
-	if err := e.reconstituteBreakers(e.lifetimeCtx); err != nil {
-		e.logger.ErrorContext(e.lifetimeCtx, "Reconstituting breakers", "error", err)
-	}
 
 	numWorkers := int(e.workers.Load())
 	for range numWorkers {
@@ -533,88 +507,6 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 		resolved.NotifyOnStop = opts.NotifyOnStop
 	}
 	return resolved
-}
-
-// initialParkedFor returns the parked value a new pending step should be inserted with.
-func (e *Engine) initialParkedFor(taskURL string) int {
-	if e.BreakerTripped(taskURL) {
-		return parkedBreaker
-	}
-	return parkedNone
-}
-
-// BreakerTripped reports whether the breaker for the given task URL (the downstream endpoint, the key the
-// breaker is partitioned on) is currently tripped.
-func (e *Engine) BreakerTripped(taskURL string) bool {
-	e.breakersLock.RLock()
-	defer e.breakersLock.RUnlock()
-	b, ok := e.breakers[taskURL]
-	if !ok {
-		return false
-	}
-	return !b.trippedAt.IsZero()
-}
-
-// ValveCount returns the number of tasks that currently have an adaptive-rate valve allocated. Intended
-// for tests/fixtures that assert backpressure engaged; not a hot-path metric (use the dwarf_task_rate_limit
-// gauge for monitoring).
-func (e *Engine) ValveCount() int {
-	e.valvesLock.RLock()
-	defer e.valvesLock.RUnlock()
-	return len(e.valves)
-}
-
-// refreshNextProbeLocked recomputes the soonest probe across all tripped breakers.
-// Caller must hold breakersLock.
-func (e *Engine) refreshNextProbeLocked() {
-	var soonest int64
-	for _, b := range e.breakers {
-		if b.trippedAt.IsZero() {
-			continue
-		}
-		n := b.nextProbeAt.UnixNano()
-		if soonest == 0 || n < soonest {
-			soonest = n
-		}
-	}
-	e.nextProbe.Store(soonest)
-	e.nudgeTimer()
-}
-
-// valvePeek reports whether the task is currently admissible without consuming a slot.
-func (e *Engine) valvePeek(taskName string, now time.Time) bool {
-	e.valvesLock.RLock()
-	v, ok := e.valves[taskName]
-	var wCong int
-	var tCong time.Time
-	if ok {
-		wCong = v.wCong
-		tCong = v.tCong
-	}
-	e.valvesLock.RUnlock()
-	if !ok || wCong == 0 {
-		return true
-	}
-	v.throttle.SetLimit(recoverRate(wCong, tCong, now))
-	admit, _ := v.throttle.Peek()
-	return admit
-}
-
-// valveCommit consumes a throttle slot, creating the valve lazily on first dispatch.
-func (e *Engine) valveCommit(taskName string, now time.Time) {
-	e.valvesLock.Lock()
-	v, ok := e.valves[taskName]
-	if !ok {
-		v = &taskValve{throttle: throttle.New(time.Second, math.MaxInt32)}
-		e.valves[taskName] = v
-	}
-	wCong := v.wCong
-	tCong := v.tCong
-	e.valvesLock.Unlock()
-	if wCong > 0 {
-		v.throttle.SetLimit(recoverRate(wCong, tCong, now))
-	}
-	v.throttle.Allow()
 }
 
 // --- Public API ---
@@ -740,23 +632,3 @@ func (e *Engine) HistoryMermaid(ctx context.Context, flowKey string, w io.String
 	return errors.Trace(err)
 }
 
-// breakerTrip records a trip in the local in-memory breaker map, keyed by the task's dispatch URL.
-func (e *Engine) breakerTrip(taskURL, cause string) (fresh bool, nextProbeAt time.Time) {
-	now := time.Now()
-	e.breakersLock.Lock()
-	defer e.breakersLock.Unlock()
-	b, ok := e.breakers[taskURL]
-	if !ok {
-		b = &taskBreaker{}
-		e.breakers[taskURL] = b
-	}
-	if b.trippedAt.IsZero() {
-		b.trippedAt = now
-		b.probeAttempt = 0
-		b.nextProbeAt = now.Add(breakerProbeBackoff(1))
-		b.cause = cause
-		fresh = true
-		e.refreshNextProbeLocked()
-	}
-	return fresh, b.nextProbeAt
-}

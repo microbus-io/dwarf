@@ -223,12 +223,6 @@ func (e *Engine) start(ctx context.Context, flowKey string) error {
 		); err != nil {
 			return errors.Trace(err)
 		}
-		// If any of the just-transitioned steps belong to a task whose local breaker is currently
-		// tripped, park them at the moment CREATED becomes PENDING so selection never sees them.
-		// Skipped entirely when no breakers are tripped (the common case).
-		if err := e.parkTrippedSteps(ctx, tx, flowID); err != nil {
-			return errors.Trace(err)
-		}
 		res, err := tx.ExecContext(ctx,
 			"UPDATE dwarf_flows SET status=?, started_at=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
 			workflow.StatusRunning, flowID, workflow.StatusCreated,
@@ -403,8 +397,8 @@ func (e *Engine) notifyStatusChange(flowKey string, status string) {
 // enqueueStep rings the work doorbell on this replica AND wakes peer replicas. Use it at every
 // step-origination site (start, restart, resume, retry, fan-out, fan-in, surgraph re-dispatch), so a
 // replica without spare capacity does not strand a freshly-pending step until a peer's backstop poll
-// (up to maxPollInterval away). This mirrors foreman, where a single self-inclusive multicast doorbell
-// reached both the local replica and its peers. SignalPeers is self-excluded (see its contract), so
+// (up to maxPollInterval away). A single logical doorbell must reach both the local replica and its
+// peers. SignalPeers is self-excluded (see its contract), so
 // the local ring is done directly here. Do NOT call this from DeliverSignal's enqueue path (the
 // inbound peer signal): re-broadcasting an inbound doorbell would echo back to the sender and storm.
 // That path uses the local-only handleEnqueue primitive.

@@ -88,7 +88,7 @@ func injectTraceParent(ctx context.Context, traceParent string) context.Context 
 	return traceProp.Extract(ctx, carrier)
 }
 
-// recordSpanError marks a span as errored with the given error, matching the foreman's taskSpan.SetError.
+// recordSpanError marks a span as errored with the given error.
 func recordSpanError(span trace.Span, err error) {
 	if err == nil {
 		return

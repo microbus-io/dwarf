@@ -32,8 +32,8 @@ import (
 // TestTaskdeadlineflow verifies that the engine applies the step's time_budget_ms (set via
 // WithTimeBudget) as the deadline on the context handed to the TaskExecutor. Unlike timebudgetflow,
 // the task here installs NO timeout of its own — it blocks purely on the engine-provided ctx.Done(),
-// mimicking how the Microbus connector enforces sub.TimeBudget and returns a 408 when the unicast
-// deadline lapses. If the engine fails to deadline the call (the migration regression), ctx.Done()
+// the way a host's transport would enforce a per-call deadline and fail when it lapses. If the engine
+// fails to deadline the call (the migration regression), ctx.Done()
 // never fires, the task only returns when its safety net trips, and the flow completes instead of
 // failing — which this fixture catches.
 func TestTaskdeadlineflow(t *testing.T) {

@@ -51,22 +51,12 @@ func (e *Engine) workerLoop(ctx context.Context) {
 	}
 }
 
-// timerLoop sleeps until the sooner of nextPoll/nextProbe, then polls.
+// timerLoop sleeps until nextPoll, then polls.
 func (e *Engine) timerLoop(ctx context.Context) {
 	for {
 		e.nextPollLock.Lock()
 		deadline := e.nextPoll
 		e.nextPollLock.Unlock()
-
-		if probeNanos := e.nextProbe.Load(); probeNanos != 0 {
-			probe := time.Unix(0, probeNanos)
-			if floor := time.Now().Add(breakerInitialProbeDelay); probe.Before(floor) {
-				probe = floor
-			}
-			if probe.Before(deadline) {
-				deadline = probe
-			}
-		}
 
 		delay := max(0, min(time.Until(deadline), maxPollInterval))
 
@@ -255,18 +245,8 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 
 // runRefill replaces the candidate cache with a fresh priority+fairness batch.
 func (e *Engine) runRefill(ctx context.Context) {
-	now := time.Now()
 	capacity := e.cache.capacity()
 	batch := make([]job, 0, capacity)
-	valveDropped := false
-
-	admittable := func(task string) bool {
-		if !e.valvePeek(task, now) {
-			valveDropped = true
-			return false
-		}
-		return true
-	}
 
 	prevBand := -1
 	chosenBand := math.MaxInt
@@ -283,10 +263,6 @@ func (e *Engine) runRefill(ctx context.Context) {
 		byKey := map[string]*keyBucket{}
 		order := []string{}
 		for _, c := range rows {
-			if !admittable(c.task) {
-				e.metricStepSkippedSaturated(ctx, c.task)
-				continue
-			}
 			kb := byKey[c.key]
 			if kb == nil {
 				kb = &keyBucket{weight: c.weight, oldestAge: c.ageMs}
@@ -326,10 +302,6 @@ func (e *Engine) runRefill(ctx context.Context) {
 			bestKey, bestScore := "", -1.0
 			for _, k := range order {
 				kb := byKey[k]
-				for len(kb.steps) > 0 && !admittable(kb.steps[0].task) {
-					e.metricStepSkippedSaturated(ctx, kb.steps[0].task)
-					kb.steps = kb.steps[1:]
-				}
 				if len(kb.steps) == 0 {
 					continue
 				}
@@ -346,7 +318,6 @@ func (e *Engine) runRefill(ctx context.Context) {
 			c := kb.steps[0]
 			kb.steps = kb.steps[1:]
 			batch = append(batch, job{stepID: c.stepID, shard: c.shard})
-			e.valveCommit(c.task, now)
 		}
 		chosenBand = band
 		break
@@ -357,7 +328,4 @@ func (e *Engine) runRefill(ctx context.Context) {
 	// (head-insert when a strictly more important step arrives) is made against the right threshold.
 	// chosenBand stays MaxInt when no band was selected (empty batch), matching the empty-cache case.
 	e.cache.refill(batch, chosenBand)
-	if valveDropped {
-		e.shortenNextPoll(now.Add(time.Second))
-	}
 }

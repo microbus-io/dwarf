@@ -231,31 +231,29 @@ Baggage is set once at `Create`, frozen on the flow, inherited by subgraphs and 
 as the JSON-decoded form (typically `map[string]any`). See
 [Engine operations → Create](operations.md#create-and-run).
 
-## Signaling backpressure and breakers
+## Handling transient failures
 
-A plain returned error is an ordinary failure. To engage the engine's adaptive mechanisms instead, wrap
-the error from your transport:
+The engine never inspects an error's status code or text. Any error you return is terminal for that
+attempt: the engine routes it via the graph's `onError` transition if one exists, otherwise it fails the
+step. There is no engine-side rate-limit or unavailability handling to engage.
+
+To back off on a transient failure (a rate limit, a downstream that's momentarily unavailable), detect it
+yourself and arm `flow.Retry` — the task owns the decision because it owns the resource identity:
 
 ```go
 err := callDownstream(ctx)
 switch {
-case isRateLimited(err): // e.g. HTTP 429
-    return workflow.ErrRateLimited(err, "")
-case isUnavailable(err): // e.g. HTTP 503 / unreachable
-    return workflow.ErrUnavailable(err, "unavailable")
+case isRateLimited(err), isUnavailable(err): // e.g. HTTP 429 / 503
+    if f.Retry(100*time.Millisecond, 2.0, 10*time.Second, time.Hour) {
+        return nil // re-run after wall-clock-bounded backoff
+    }
+    return err // horizon exceeded: onError or fail
 default:
     return err // ordinary failure: onError or fail
 }
 ```
 
-- `ErrRateLimited` → the engine bounces the step back to pending and cuts the task's adaptive dispatch
-  rate (the *valve*). For "you're going too fast."
-- `ErrUnavailable` → the engine parks the task's whole backlog and probes on an exponential schedule (the
-  *breaker*). For "this downstream can't serve right now." The `cause` string is an opaque metric label.
-
-The engine classifies via `IsRateLimited` / `IsUnavailable`; it never inspects status codes itself, so
-your host owns the mapping. See
-[Scheduling & reliability](scheduling-and-reliability.md#backpressure-the-valve).
+The retry bound is wall-clock, not a count; see [Retry](#retry).
 
 ## Timestamps
 

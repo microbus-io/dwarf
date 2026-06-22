@@ -177,7 +177,6 @@ eng.Purge(ctx, workflow.Query{
 
 ```go
 summaries, err := eng.ShardInfo(ctx)    // per-shard health and size
-tripped := eng.BreakerTripped(taskName) // is this task's breaker open right now?
 ```
 
 ## Cross-replica inbound signals

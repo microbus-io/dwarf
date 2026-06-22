@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"strconv"
-	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -35,19 +34,14 @@ import (
 // service.name/instance attributes (those are resource-level, owned by the host's OTEL pipeline).
 const metricScope = "github.com/microbus-io/dwarf"
 
-// engineMetrics holds the engine's OpenTelemetry instruments. The eight counters are incremented
-// inline at their event sites; the seven gauges are observable (async) and pulled by observeGauges
-// at collection time, replacing the foreman's OnObserve* endpoints.
+// engineMetrics holds the engine's OpenTelemetry instruments. The counters are incremented inline at
+// their event sites; the gauges are observable (async) and pulled by observeGauges at collection time.
 type engineMetrics struct {
-	flowsStarted          metric.Int64Counter
-	flowsTerminated       metric.Int64Counter
-	stepsExecuted         metric.Int64Counter
-	stepsRecovered        metric.Int64Counter
-	stepsUnwedged         metric.Int64Counter
-	stepsSkippedSaturated metric.Int64Counter
-	taskRateCuts          metric.Int64Counter
-	taskBreakerTrips      metric.Int64Counter
-	taskBreakerProbes     metric.Int64Counter
+	flowsStarted    metric.Int64Counter
+	flowsTerminated metric.Int64Counter
+	stepsExecuted   metric.Int64Counter
+	stepsRecovered  metric.Int64Counter
+	stepsUnwedged   metric.Int64Counter
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
 }
@@ -78,10 +72,6 @@ func (e *Engine) initMetrics() error {
 	m.stepsExecuted = ctr("dwarf_steps_executed_total", "Counts steps that have been executed.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered_total", "Counts steps recovered by pollPendingSteps after lease expiry.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged_total", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
-	m.stepsSkippedSaturated = ctr("dwarf_steps_skipped_saturated_total", "Counts step admissions skipped because the task was at its current rate-limit ceiling.")
-	m.taskRateCuts = ctr("dwarf_task_rate_cuts_total", "Counts additive-decrease cuts to the per-task rate ceiling triggered by a 429.")
-	m.taskBreakerTrips = ctr("dwarf_task_breaker_trips_total", "Counts per-task circuit-breaker trips, labelled by cause.")
-	m.taskBreakerProbes = ctr("dwarf_task_breaker_probes_total", "Counts probe attempts against a tripped per-task circuit breaker, labelled by outcome and cause.")
 
 	gauge := func(name, desc, unit string) metric.Int64ObservableGauge {
 		g, err := meter.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit(unit))
@@ -94,9 +84,7 @@ func (e *Engine) initMetrics() error {
 	stepsPending := gauge("dwarf_steps_pending", "Due pending steps in each priority band.", "")
 	oldestAge := gauge("dwarf_steps_oldest_pending_age_seconds", "Age of the oldest due pending step in each priority band.", "s")
 	fairnessKeys := gauge("dwarf_steps_fairness_keys", "Distinct fairness keys in the most recent refill selection at the given priority band.", "")
-	rateLimit := gauge("dwarf_task_rate_limit", "Adaptive per-task dispatch-rate ceiling (ops/sec).", "")
 	concurrency := gauge("dwarf_task_concurrency_running", "Cluster-wide running steps per task.", "")
-	breakerState := gauge("dwarf_task_breaker_state", "Per-task circuit-breaker state: 0 closed, 1 tripped.", "")
 
 	reg, err := meter.RegisterCallback(
 		func(ctx context.Context, o metric.Observer) error {
@@ -105,12 +93,10 @@ func (e *Engine) initMetrics() error {
 				stepsPending: stepsPending,
 				oldestAge:    oldestAge,
 				fairnessKeys: fairnessKeys,
-				rateLimit:    rateLimit,
 				concurrency:  concurrency,
-				breakerState: breakerState,
 			})
 		},
-		queueDepth, stepsPending, oldestAge, fairnessKeys, rateLimit, concurrency, breakerState,
+		queueDepth, stepsPending, oldestAge, fairnessKeys, concurrency,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -135,14 +121,12 @@ type observableGauges struct {
 	stepsPending metric.Int64ObservableGauge
 	oldestAge    metric.Int64ObservableGauge
 	fairnessKeys metric.Int64ObservableGauge
-	rateLimit    metric.Int64ObservableGauge
 	concurrency  metric.Int64ObservableGauge
-	breakerState metric.Int64ObservableGauge
 }
 
 // observeGauges is the observable-gauge callback. It reads in-memory engine state and queries the
 // shards for the current-state gauges at collection time. Per-replica: cluster-wide aggregates (e.g.
-// concurrency_running) are summed at the metrics backend across replicas, as the foreman did.
+// concurrency_running) are summed at the metrics backend across replicas.
 func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observableGauges) error {
 	// Local in-memory gauges - no DB.
 	o.ObserveInt64(g.queueDepth, int64(e.cache.len()))
@@ -153,36 +137,6 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	e.lastRefillLock.Unlock()
 	if band >= 0 {
 		o.ObserveInt64(g.fairnessKeys, int64(keys), metric.WithAttributes(attribute.String("priority", strconv.Itoa(band))))
-	}
-
-	// Per-task rate ceiling, for valves that have anchored to a congestion point.
-	now := time.Now()
-	e.valvesLock.RLock()
-	rates := make(map[string]int, len(e.valves))
-	for task, v := range e.valves {
-		if v.wCong == 0 {
-			continue // un-anchored: throttle counts but does not gate, no meaningful limit
-		}
-		rates[task] = recoverRate(v.wCong, v.tCong, now)
-	}
-	e.valvesLock.RUnlock()
-	for task, rate := range rates {
-		o.ObserveInt64(g.rateLimit, int64(rate), metric.WithAttributes(attribute.String("task_url", task)))
-	}
-
-	// Per-task breaker state.
-	e.breakersLock.RLock()
-	tripped := make(map[string]bool, len(e.breakers))
-	for task, b := range e.breakers {
-		tripped[task] = !b.trippedAt.IsZero()
-	}
-	e.breakersLock.RUnlock()
-	for task, t := range tripped {
-		state := int64(0)
-		if t {
-			state = 1
-		}
-		o.ObserveInt64(g.breakerState, state, metric.WithAttributes(attribute.String("task_url", task)))
 	}
 
 	// Shard-querying gauges: pending count + oldest age per priority band, and running count per task.
@@ -341,34 +295,4 @@ func (e *Engine) metricStepUnwedged(ctx context.Context, parkType string) {
 		return
 	}
 	e.metrics.stepsUnwedged.Add(ctx, 1, metric.WithAttributes(attribute.String("park_type", parkType)))
-}
-
-func (e *Engine) metricStepSkippedSaturated(ctx context.Context, taskURL string) {
-	if e.metrics == nil {
-		return
-	}
-	e.metrics.stepsSkippedSaturated.Add(ctx, 1, metric.WithAttributes(attribute.String("task_url", taskURL)))
-}
-
-func (e *Engine) metricTaskRateCut(ctx context.Context, taskURL string) {
-	if e.metrics == nil {
-		return
-	}
-	e.metrics.taskRateCuts.Add(ctx, 1, metric.WithAttributes(attribute.String("task_url", taskURL)))
-}
-
-func (e *Engine) metricBreakerTrip(ctx context.Context, taskURL, cause string) {
-	if e.metrics == nil {
-		return
-	}
-	e.metrics.taskBreakerTrips.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("task_url", taskURL), attribute.String("cause", cause)))
-}
-
-func (e *Engine) metricBreakerProbe(ctx context.Context, taskURL, outcome, cause string) {
-	if e.metrics == nil {
-		return
-	}
-	e.metrics.taskBreakerProbes.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("task_url", taskURL), attribute.String("outcome", outcome), attribute.String("cause", cause)))
 }

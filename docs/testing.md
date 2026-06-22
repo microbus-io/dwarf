@@ -81,12 +81,15 @@ out, _ = eng.Await(ctx, flowKey)
 testarossa.Equal(t, workflow.StatusCompleted, out.Status)
 ```
 
-**Backpressure and breakers.** Return the disposition wrappers from a task to drive the valve or breaker:
+**Transient failures.** A task that returns `nil` after arming `flow.Retry` re-runs after backoff; assert
+the eventual outcome once the task stops failing:
 
 ```go
 proxy.HandleTask("flaky", func(ctx context.Context, f *workflow.Flow) error {
     if firstFewCalls() {
-        return workflow.ErrUnavailable(errors.New("unreachable"), "ack_timeout")
+        if f.Retry(time.Millisecond, 2.0, 10*time.Millisecond, time.Minute) {
+            return nil
+        }
     }
     return nil
 })
@@ -94,7 +97,7 @@ proxy.HandleTask("flaky", func(ctx context.Context, f *workflow.Flow) error {
 
 Because `TestProxy` returns synchronously, it produces a far tighter, more adversarial timing environment
 than a real network — which makes it excellent at surfacing concurrency bugs in retries, fan-in, and
-breaker recovery.
+crash recovery.
 
 **Inspecting execution.** `eng.History(ctx, flowKey)` returns the full step record (including nested
 subgraph history); `eng.HistoryMermaid(ctx, flowKey, w)` renders the execution DAG as a Mermaid diagram for
@@ -116,7 +119,7 @@ proxy2.AddPeer(eng1)
 ```
 
 Use a shared in-memory DSN (e.g. `"file:x%d?mode=memory&cache=shared"`) so both engines see the same
-databases. This is how the engine's own cross-replica `Await` and distributed-backpressure tests are
+databases. This is how the engine's own cross-replica `Await` and step-recovery tests are
 written — see the `fixtures` package in the repository for worked examples.
 
 ## Where examples live

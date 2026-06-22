@@ -114,10 +114,6 @@ fan-out, its siblings are cancelled.
 > specific failure kind (e.g. a timeout), branch inside the task: `flow.Retry` for transient failures,
 > `flow.Goto` for computed recovery, or return the error and let the `onError` handler deal with it.
 
-> Backpressure and breaker signals are **not** errors in this sense — a task wraps those with
-> `workflow.ErrRateLimited` / `workflow.ErrUnavailable` and the engine handles them before error routing.
-> See [Writing tasks → Signaling backpressure and breakers](tasks.md#signaling-backpressure-and-breakers).
-
 ## Fan-in and reducers
 
 When parallel branches (from multiple `when` matches or a `forEach`) converge on a single task, that task

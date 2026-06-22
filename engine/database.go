@@ -246,9 +246,8 @@ func (e *Engine) closeDatabase() {
 
 // openTestDatabaseWithID opens per-test isolated databases for all shards, keyed by a caller-supplied
 // testID. It is the *testing.T-free core shared by RunInTest (testID = t.Name()) and StartupInTest
-// (testID = a host-supplied key shared by every replica of one test run, e.g. a Microbus plane) — so a host
-// that is itself under test can convey "use a throwaway, isolated database" down to sequel without a
-// *testing.T.
+// (testID = a host-supplied key shared by every replica of one test run) — so a host that is itself under
+// test can convey "use a throwaway, isolated database" down to sequel without a *testing.T.
 func (e *Engine) openTestDatabaseWithID(testID string) error {
 	dataSourceName := e.dsn.Load().(string)
 	// Allow the whole fixture suite to run against a real server database without changing any test:
