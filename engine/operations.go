@@ -123,7 +123,12 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 
 	flowToken := randomIdentifier(16)
 	stepToken := randomIdentifier(16)
-	timeBudget := e.taskTimeBudget()
+	// opts.TimeBudget is resolved (create/createTask/continue) or inherited (subgraph). Fall back to the
+	// live default only as defense for an unresolved path.
+	timeBudget := opts.TimeBudget
+	if timeBudget <= 0 {
+		timeBudget = e.taskTimeBudget()
+	}
 
 	db, err := e.shard(shardNum)
 	if err != nil {
@@ -149,9 +154,9 @@ func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
 		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, notify_on_stop, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			flowToken, workflowURL, workflowName, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, notifyOnStop, opts.Priority, opts.FairnessKey, opts.FairnessWeight,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, notify_on_stop, priority, fairness_key, fairness_weight, time_budget_ms)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			flowToken, workflowURL, workflowName, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, notifyOnStop, opts.Priority, opts.FairnessKey, opts.FairnessWeight, timeBudget.Milliseconds(),
 		)
 		if err != nil {
 			return errors.Trace(err)

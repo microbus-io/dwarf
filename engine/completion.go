@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -36,14 +37,18 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 		return "", errors.Trace(err)
 	}
 
+	// Inherit the parent's frozen time budget so a subgraph runs under the same budget as its caller
+	// (priority/fairness already inherited this way).
 	var inherited workflow.FlowOptions
+	var inheritedBudgetMs int
 	err = db.QueryRowContext(ctx,
-		"SELECT priority, fairness_key, fairness_weight FROM dwarf_flows WHERE flow_id=?",
+		"SELECT priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=?",
 		surgraphFlowID,
-	).Scan(&inherited.Priority, &inherited.FairnessKey, &inherited.FairnessWeight)
+	).Scan(&inherited.Priority, &inherited.FairnessKey, &inherited.FairnessWeight, &inheritedBudgetMs)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	inherited.TimeBudget = time.Duration(inheritedBudgetMs) * time.Millisecond
 
 	// The subgraph gets its own "workflow" span parented to the caller step's span (callerTraceParent),
 	// so its whole subtree nests under the task that launched it rather than starting a detached trace.

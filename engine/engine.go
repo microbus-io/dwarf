@@ -160,16 +160,8 @@ func NewEngine() *Engine {
 
 // --- Configuration setters ---
 //
-// These replace the old fluent WithX builder so each can return an error. They fall in two groups by
-// whether the knob can be changed safely on a running engine:
-//
-//   - Live (take effect immediately, callable any time): SetNumShards, SetMaxOpenConns, SetTimeBudget,
-//     SetDefaultPriority. SetTimeBudget/SetDefaultPriority are read fresh on each use; SetMaxOpenConns
-//     re-applies to the live pools; SetNumShards opens+migrates the added shards.
-//   - Construction-time-only (return an error if called after Startup): SetDSN, SetWorkers, SetHost,
-//     SetLogger, SetDebugLogger, SetMeterProvider, SetTracerProvider. Applying these on a running engine
-//     would mean reopening live connections, resizing the worker pool, or re-resolving a frozen provider -
-//     deliberately unsupported, so the setter rejects it rather than silently no-op'ing.
+// Setters split into Live (callable any time) and construction-time-only (rejected after Startup); see the
+// Configuration section in CLAUDE.md for the split and rationale.
 //
 // errSetAfterStartup is the error the construction-time-only setters return on a running engine.
 func errSetAfterStartup(what string) error {
@@ -212,8 +204,9 @@ func (e *Engine) SetWorkers(n int) error {
 	return nil
 }
 
-// SetTimeBudget sets the maximum duration for a single task execution. Live: read fresh on each dispatch,
-// so it takes effect on a running engine immediately.
+// SetTimeBudget sets the default duration for a single task execution, used by any flow that does not
+// override it via FlowOptions.TimeBudget. Live: read fresh on each Create (existing flows keep the budget
+// frozen at their own Create).
 func (e *Engine) SetTimeBudget(d time.Duration) error {
 	e.timeBudgetMs.Store(int64(d / time.Millisecond))
 	return nil
@@ -488,11 +481,13 @@ func (e *Engine) taskTimeBudget() time.Duration {
 	return time.Duration(e.timeBudgetMs.Load()) * time.Millisecond
 }
 
-// resolveFlowOptions applies defaults to caller-supplied options.
+// resolveFlowOptions applies defaults to caller-supplied options. TimeBudget falls back to the engine
+// default and is frozen onto the returned options.
 func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOptions {
 	resolved := &workflow.FlowOptions{
 		Priority:       int(e.defaultPriority.Load()),
 		FairnessWeight: 1,
+		TimeBudget:     e.taskTimeBudget(),
 	}
 	if opts != nil {
 		if opts.Priority > 0 {
@@ -505,6 +500,9 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 		resolved.StartAt = opts.StartAt
 		resolved.Baggage = opts.Baggage
 		resolved.NotifyOnStop = opts.NotifyOnStop
+		if opts.TimeBudget > 0 {
+			resolved.TimeBudget = opts.TimeBudget
+		}
 	}
 	return resolved
 }
@@ -631,4 +629,3 @@ func (e *Engine) HistoryMermaid(ctx context.Context, flowKey string, w io.String
 	_, err = w.WriteString(mmd)
 	return errors.Trace(err)
 }
-

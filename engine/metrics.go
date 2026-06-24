@@ -277,8 +277,8 @@ func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string
 	if e.metrics == nil {
 		return
 	}
-	// Step disposition is keyed by node name (graph topology - "which node"), unlike the adaptive
-	// metrics which key by task_url (the downstream endpoint).
+	// Step disposition keys by node name (graph topology - "which node"), unlike the concurrency/saturation
+	// metric which keys by task_url (the downstream endpoint).
 	e.metrics.stepsExecuted.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("task_name", taskName), attribute.String("status", status)))
 }

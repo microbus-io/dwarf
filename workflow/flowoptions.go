@@ -37,6 +37,11 @@ type FlowOptions struct {
 	// entry step's not_before column; the flow can still be created and started
 	// immediately, but no worker will pick the step up before StartAt.
 	StartAt time.Time `json:"startAt,omitzero"`
+	// TimeBudget overrides the engine's default per-task time budget for this flow, bounding every
+	// ExecuteTask call's context deadline. Subgraph descendants inherit it. Zero uses the engine's
+	// SetTimeBudget default. Frozen at Create and immutable for the flow's life; a per-task default, not a
+	// flow-wide deadline.
+	TimeBudget time.Duration `json:"timeBudget,omitzero"`
 	// NotifyOnStop requests that the host's FlowStopped callback fire when this flow stops
 	// (completed/failed/cancelled/interrupted). The engine persists the intent and, at stop time,
 	// invokes FlowStopped with the flow's Baggage on the context - the host decides where/how to deliver

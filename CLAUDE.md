@@ -74,12 +74,13 @@ adapter bridging to a bus maps between the two at the seam.)
 
 ### Configuration (`Set*` methods)
 
-Configuration is applied through `Set*` methods, each returning an `error` (the engine deliberately has **no**
-fluent `With*` builder - dropping the chained `*Engine` return is what lets every setter surface an error). They
-split into two groups by whether the knob can change safely on a running engine:
+Configuration is applied through `Set*` methods, each returning an `error` rather than chaining a `*Engine` (so
+every setter can surface an error). They split into two groups by whether the knob can change safely on a running
+engine:
 
 - **Live** (take effect immediately, callable any time): `SetNumShards`, `SetMaxOpenConns`, `SetTimeBudget`,
-  `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh on each use; `SetMaxOpenConns`
+  `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an existing flow keeps
+  the budget/priority frozen at its own `Create`); `SetMaxOpenConns`
   re-applies the pool size to every live shard (sequel's pool setters are hot/atomic); `SetNumShards`
   opens+migrates the added shards (see "Database Sharding" - grow-only at runtime).
 - **Construction-time only** (return an error if called after `Startup`): `SetDSN`, `SetWorkers`, `SetHost`,
@@ -516,18 +517,37 @@ step completed. An empty map is returned for a flow with no steps.
 
 ### Time Budgets
 
-Each step has a `time_budget_ms` that bounds the `ExecuteTask` call's context deadline. It is the engine's single
-`SetTimeBudget` config (default 2m), applied uniformly to every step - the graph carries no per-task timing. A host
-that wants a tighter per-task bound enforces it inside its `ExecuteTask` (or the task itself), shortening the call
-context; the engine's budget is the outer ceiling.
+Each step has a `time_budget_ms` that bounds the `ExecuteTask` call's context deadline. It defaults to the engine's
+`SetTimeBudget` config (default 2m) but is **per-flow overridable** via `FlowOptions.TimeBudget`: the value is
+resolved at `Create`, frozen onto the `dwarf_flows.time_budget_ms` column, and denormalized onto every step's
+`time_budget_ms` (the entry step at `Create`, fan-out/fan-in steps from the flow-row value read in `processStep`).
+The graph still carries no per-task timing - the budget is a per-*flow* default every step inherits. A host that
+wants a tighter per-task bound enforces it inside its `ExecuteTask` (or the task itself), shortening the call context;
+narrowing the deadline at dispatch is always allowed. The engine's budget is the outer ceiling.
 
-The worker lease duration is the current `TimeBudget` config + `leaseMargin` (30s), read from in-memory config rather
-than the step row. This lets `processStep` claim the step without an upfront SELECT for `time_budget_ms`. The lease
-always outlasts execution, preventing premature recovery by `pollPendingSteps`. Trade-off: because the lease is sized
-to the ceiling rather than per task, a *crashed* worker that ran a tight-budget task is recovered no sooner than
-`ceiling + leaseMargin`. A separate trade-off: if the operator decreases `TimeBudget` mid-flight below the largest
-in-flight step's stored `time_budget_ms`, the new (shorter) lease may expire before the (longer) dispatch completes,
-causing re-dispatch. Steps not idempotent under re-dispatch should not coexist with such config changes.
+`FlowOptions.TimeBudget` is **frozen at `Create`** (immutable for the flow's life, like `priority`) and **inherited by
+subgraph children** (`createSubgraphFlow` reads the parent's `time_budget_ms` alongside priority/fairness). A
+later `SetTimeBudget` change does not retro-edit existing flows; it only seeds flows created afterward. (`Continue`
+resolves a fresh budget from its own options/the current default, matching how it treats priority/fairness today -
+it does **not** inherit the prior turn's budget.) On a subgraph spawn the child's `LoadGraph` is bounded by the
+caller flow's budget; the create-time `LoadGraph` runs on the caller's own request context instead.
+
+**No engine-imposed ceiling.** `SetTimeBudget` is the default; the engine deliberately enforces **no** upper bound on
+`FlowOptions.TimeBudget`, mirroring its refusal to own a flow-level deadline. Bounding the budget (e.g. an SLA
+ceiling) is the responsibility of whoever creates flows: a host that wants to cap it validates `FlowOptions.TimeBudget`
+against its own limit before calling `Create` and rejects an over-limit request there (a request to *exceed* the
+ceiling, distinct from narrowing the deadline at dispatch, which the host may always do). A standalone caller that
+sets a very large budget simply owns the consequences below.
+
+The worker lease is sized from the **step's own `time_budget_ms`** + `leaseMargin` (30s), written self-referentially
+in the claim CAS (`lease_expires = DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?)`, only the margin a bind param), so
+the lease always outlasts the budget that bounds the `ExecuteTask` call - even for a flow that overrode its budget
+above the engine default. Sizing from the row (not in-memory config) is what keeps lease and budget from diverging;
+it needs no upfront SELECT because `time_budget_ms` is already on the step row at claim time, the same read-locality
+reason `priority`/`fairness` are denormalized there. Consequence: a *crashed* worker is recovered no sooner than its
+step's `budget + leaseMargin`, so a flow's budget directly bounds its worst-case crash-recovery latency - which is the
+practical reason a host caps the budget. (The earlier config-sized lease and its "decrease `TimeBudget` mid-flight"
+re-dispatch trade-off are retired: each step's lease now follows its own frozen budget.)
 
 ### Flow lifetime is the workflow author's responsibility
 
@@ -859,17 +879,21 @@ The schema carries `priority`, `fairness_key`, `fairness_weight` on **both** `dw
 split used for `time_budget_ms`/`baggage`.
 
 `resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to
-`SetDefaultPriority`, the fairness key falls back to the host-supplied key (or `""`), the weight to `1`. The three
-values are immutable for the flow's life (switching a flow's fairness key mid-run would be a self-promotion abuse
-vector). `Create`/`CreateTask` resolve from options; `Continue` and `createSubgraphFlow` **inherit** the parent/thread
-flow's values, so a high-priority parent never silently spawns default-priority descendants.
+`SetDefaultPriority`, the fairness key falls back to the host-supplied key (or `""`), the weight to `1`, and the time
+budget to `SetTimeBudget` (the engine imposes no ceiling on it; see "Time Budgets"). These values are immutable for the
+flow's life (switching a flow's fairness key mid-run would be a self-promotion abuse vector). `Create`/`CreateTask`
+resolve from options. `createSubgraphFlow` **inherits** the parent flow's values (priority, fairness, *and*
+time budget), so a high-priority parent never silently spawns default-priority descendants. `Continue`, by contrast,
+**fresh-resolves** scheduling/budget from its own options (only `baggage` is inherited from the prior turn) - it
+runs through `resolveFlowOptions` like a new `Create`, so a high-priority turn does not carry forward unless the
+caller re-specifies it.
 
 Propagation onto step rows: where the resolved values are in hand (the entry step), they are literal bind parameters
-(`Restart`/`RestartFrom` rewind their target step in place via UPDATE, so the row's immutable priority/fairness
+(`Restart`/`RestartFrom` rewind their target step in place via UPDATE, so the row's immutable priority/fairness/budget
 values are already present and need no re-propagation); in the deep `processStep` paths (fan-out and the two fan-in
-inserts), the values are read once per step execution in the parallel flow-row SELECT and threaded through the call
-chain into the INSERTs as bind parameters (vs. the previous scalar subqueries, which meant 3N PK lookups per N-way
-fan-out).
+inserts), the values - including the flow's frozen `time_budget_ms` - are read once per step execution in the parallel
+flow-row SELECT and threaded through the call chain into the INSERTs as bind parameters (vs. the previous scalar
+subqueries, which meant 3N PK lookups per N-way fan-out).
 
 **Why the scheduling design is shaped this way:**
 
@@ -892,7 +916,7 @@ fan-out).
 
 `dwarf_steps.parked SMALLINT NOT NULL DEFAULT 0` takes a step out of the selection band without changing its
 `status`. The selection index `(status, parked, priority, fairness_key)` and saturation index
-`(status, parked, task_name)` lead with the partitioning columns, so parked rows are physically excluded from every
+`(status, parked, task_url)` lead with the partitioning columns, so parked rows are physically excluded from every
 hot-path scan - no in-memory filter at refill time. The `parked` value labels *why* the step is held:
 
 - `parked=0` (`parkedNone`, default) - active. Selection sees it; `pollPendingSteps` recovers it if its lease
@@ -1027,6 +1051,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
 | `error` | Task error string for `failed` flows. Written by `failStep` to every flow in the surgraph chain in the same UPDATE that sets `status='failed'`; the `WHERE status NOT IN (terminal)` clause makes the write first-failure-wins. Surfaced as `FlowOutcome.Error` |
 | `cancel_reason` | Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
+| `time_budget_ms` | Per-flow task time budget, resolved from `FlowOptions.TimeBudget` (else the `SetTimeBudget` default) and frozen at `Create`; the engine imposes no ceiling (a host bounds it before `Create`). Seeds every step's `time_budget_ms`. Inherited by subgraph children; **not** by `Continue` (fresh-resolved). Always stored concrete at `Create`; a `0` is unexpected and falls back to the live engine default at step insert (pure defense) |
 
 #### `dwarf_steps`
 
@@ -1048,7 +1073,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `status` | Step lifecycle: `created`/`pending`/`running`/`interrupted`/`completed`/`failed`/`cancelled` |
 | `goto_next` | Task-requested `flow.Goto` target; `''` = none |
 | `error` | Error text when `failed`; `''` otherwise |
-| `time_budget_ms` | Execution budget; the deadline on the `ExecuteTask` call context |
+| `time_budget_ms` | Execution budget; the deadline on the `ExecuteTask` call context. Denormalized from the flow's `time_budget_ms` at step insert (frozen, not the live config), and also self-referenced in the claim CAS to size the crash-recovery lease (`time_budget_ms + leaseMargin`) |
 | `breakpoint_hit` | `1` once a breakpoint on this step has fired, so it does not re-trigger on resume |
 | `attempt` | `flow.Retry` attempt counter, drives the backoff |
 | `not_before` | Earliest UTC time the step may execute (`flow.Sleep` / retry backoff) |
@@ -1104,7 +1129,7 @@ without fragmentation or excessive write amplification.
 | `idx_dwarf_steps_status` | `(status, updated_at)` - partial `WHERE status IN ('pending','running')` on pgx | `pollPendingSteps` recovery and pending discovery |
 | `idx_dwarf_steps_created_at` | `(created_at)` | Time-window queries |
 | `idx_dwarf_steps_selection` | `(status, parked, priority, fairness_key)` - partial on pgx/mssql/sqlite, full on mysql | Two-level priority+fairness candidate selection. The `parked` second column excludes parked rows without an in-memory filter |
-| `idx_dwarf_steps_saturation` | `(status, parked, task_name)` - partial as above | Per-task in-flight count for the adaptive controller. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
+| `idx_dwarf_steps_saturation` | `(status, parked, task_url)` - partial as above | Per-task in-flight count for the `dwarf_task_concurrency_running` gauge. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
 
 ### Data Retention
 
@@ -1182,8 +1207,9 @@ closing `wakeTimer` before draining the workers let a worker mid-`processStep` r
 ### Lease-Based Crash Recovery
 
 Transactions don't help when a worker crashes during the `ExecuteTask` call (outside any transaction). The
-`lease_expires` column is a crash-recovery lease: a worker reserving a step sets `lease_expires` to
-`NOW + TimeBudget + leaseMargin`. If the worker crashes, the lease expires and `pollPendingSteps` resets the step to
+`lease_expires` column is a crash-recovery lease: the claim CAS sets `lease_expires` to
+`NOW + step.time_budget_ms + leaseMargin` (the step's own frozen budget, referenced self-referentially in the
+UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `pollPendingSteps` resets the step to
 `pending` for re-execution.
 
 ### Background Recovery
