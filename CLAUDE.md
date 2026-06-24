@@ -219,6 +219,25 @@ string surfaced as `FlowOutcome.CancelReason`.
 `started_at`); `RestartFrom` surgically rewinds the subtree below a chosen step without resetting the flow's run
 timestamps. Both re-zero `parked` on the target step (see "Step Parking").
 
+**Recover** - the operator front door to "re-run the failures" without locating each failed step by hand. Requires
+the flow in `failed` status (409 otherwise), and rewinds every `failed` step **in one transaction**. The failed set
+is exactly the *unhandled* failures (an errored step routed by `onError` is
+`completed`, not `failed`), so a completed sibling in a fan-out is excluded. A failed step has no DAG subtree
+(transitions only run on success), so each rewind is in place: undo its cohort bump (`undoCohortBumps`), reap a
+subgraph caller's terminal child (`deleteSubgraphFlowsRootedAt`, a no-op for a leaf), and reset the row to `pending`;
+the flow flips to `running` and the steps enqueue after the single commit. A failure that originated in a subgraph
+surfaces as a failed *caller* step in the parent flow, so `Recover` on the parent re-runs it (reaping the prior child
+and spawning a fresh one) - no recursion into descendant flows. **One transaction, not a loop of `RestartFrom`**:
+rewinding one failed step at a time would enqueue the first re-run while later siblings are still `failed`, and that
+re-run completing into the fan-in `failures>0` branch (see "Fan-Out and Fan-In") re-fails the flow mid-recovery and
+strands the rest. Zeroing every failed branch's cohort bump atomically before any re-dispatch closes that window - a
+re-run then sees `failures==0` and cannot re-fail. Each rewind is a CAS on `status='failed'`, so two concurrent
+`Recover` calls (or a `Recover` racing a `RestartFrom`) cannot double-undo a cohort - row locking lets exactly one
+win each step. **Idempotent**: a step that fails
+again is left `failed`, and a re-run of `Recover` picks it up. A flow with both a failed and an interrupted fan-out branch settles as `interrupted`
+(a lone branch failure does not resolve the cohort), so `Recover` refuses it until the interrupt is cleared with
+`Resume`.
+
 **History / Step** - `History` returns the step-by-step execution as `[]workflow.FlowStep`; each includes key, depth,
 task name, state, changes, status, error, timestamp. Subgraph-executing steps have `Subgraph=true` with nested
 `SubHistory`. `Step` returns one step by key.
@@ -1253,6 +1272,9 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
   doorbell is recovered by `pollPendingSteps`. Self-healing.
 - **Restart / RestartFrom** - one transaction (rewind the target step in place, delete the rewound subtree, flow ->
   `running`). Self-healing.
+- **Recover** - one transaction (rewind every failed step in place, undo their cohort bumps, flow -> `running`), then
+  enqueue. A pre-commit crash rolls back; a post-commit crash before the doorbell is recovered by `pollPendingSteps`.
+  Self-healing, and idempotent under a re-run.
 - **Cancel / failStep** - one transaction over the whole surgraph chain. A pre-commit crash rolls back; a post-commit
   crash leaves correct terminal state, `Await` callers discover it on the next poll. Self-healing.
 - **processStep - Interrupt** - one transaction. A pre-commit crash rolls back and re-execution produces the interrupt

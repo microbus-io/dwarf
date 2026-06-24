@@ -358,6 +358,130 @@ func (e *Engine) restartFrom(ctx context.Context, stepKey string, stateOverrides
 	return nil
 }
 
+// recoverFlow restarts every failed step of a failed flow in one transaction. It is the operator front
+// door to "re-run the failures" without locating each failed step by hand. The failed-step set is the
+// unhandled failures (an errored step routed by onError is completed, not
+// failed), so a completed sibling in a fan-out is excluded. A failed step has no DAG subtree (transitions
+// only run on success), so each rewind is in place: undo its cohort bump, reap a subgraph caller's child,
+// and reset the row to pending - then flip the flow to running and enqueue, all after the single commit.
+//
+// Why one transaction rather than a loop of RestartFrom: rewinding the failed steps one at a time would
+// enqueue the first re-run while later siblings are still failed, and that re-run completing into the
+// fan-in failures>0 branch re-fails the flow mid-recovery. Zeroing every failed branch's cohort bump
+// atomically before any re-dispatch closes that window - a re-run then sees failures==0 and cannot
+// re-fail. Each rewind is a CAS on status='failed', so concurrent Recover/RestartFrom calls cannot
+// double-undo a cohort. Idempotent: a step that fails again is left failed and a second call picks it up.
+func (e *Engine) recoverFlow(ctx context.Context, flowKey string, stateOverrides any) error {
+	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	db, err := e.shard(shardNum)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	var flowStatus string
+	err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&flowStatus)
+	if err == sql.ErrNoRows {
+		return errors.New("flow not found", http.StatusNotFound)
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if strings.TrimSpace(flowStatus) != workflow.StatusFailed {
+		return errors.New("flow is not in failed status (status: %s)", strings.TrimSpace(flowStatus), http.StatusConflict)
+	}
+
+	type failedStep struct {
+		stepID    int
+		lineageID int
+		state     string
+	}
+	rows, err := db.QueryContext(ctx,
+		"SELECT step_id, lineage_id, state FROM dwarf_steps WHERE flow_id=? AND status=? ORDER BY step_id",
+		flowID, workflow.StatusFailed,
+	)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	var failed []failedStep
+	for rows.Next() {
+		var fs failedStep
+		if err := rows.Scan(&fs.stepID, &fs.lineageID, &fs.state); err != nil {
+			rows.Close()
+			return errors.Trace(err)
+		}
+		failed = append(failed, fs)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return errors.Trace(err)
+	}
+	if len(failed) == 0 {
+		return errors.New("flow has no failed steps to recover", http.StatusConflict)
+	}
+
+	var restarted []int
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		restarted = restarted[:0] // Transact may re-run the closure on lock contention
+		for _, fs := range failed {
+			mergedStateJSON, err := mergeWithOverrides(fs.state, stateOverrides)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			// CAS on status='failed' (write-first): a concurrent Recover or RestartFrom that already rewound
+			// this step flipped it off 'failed', so our UPDATE matches zero rows and we skip the undo/reap
+			// below - otherwise undoCohortBumps would double-decrement the cohort counters. Row locking
+			// serializes the racing transactions, so exactly one wins each step.
+			res, err := tx.ExecContext(ctx,
+				"UPDATE dwarf_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='',"+
+					" attempt=0, breakpoint_hit=0, interrupt_done=0, resume_data='{}',"+
+					" subgraph_done=0, subgraph_result='{}', subgraph_error='',"+
+					" successor_id=0,"+
+					" not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC()"+
+					" WHERE step_id=? AND status=?",
+				workflow.StatusPending, parkedNone, mergedStateJSON, fs.stepID, workflow.StatusFailed,
+			)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				continue
+			}
+			// A failed step has no DAG subtree; reap a subgraph caller's child (no-op for a leaf) and undo
+			// its cohort bump (a failed branch contributed arrivals+1, failures+1; no-op when lineage_id=0).
+			if err := e.deleteSubgraphFlowsRootedAt(ctx, tx, fs.stepID); err != nil {
+				return errors.Trace(err)
+			}
+			if err := e.undoCohortBumps(ctx, tx, fs.lineageID, 1, 1); err != nil {
+				return errors.Trace(err)
+			}
+			restarted = append(restarted, fs.stepID)
+		}
+		if len(restarted) > 0 {
+			tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET status=?, error='', cancel_reason='', final_state='{}', updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=? AND status<>?",
+				workflow.StatusRunning, flowID, flowToken, workflow.StatusCancelled,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if len(restarted) == 0 {
+		return nil // every candidate was rewound by a concurrent Recover/RestartFrom
+	}
+
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "from", workflow.StatusFailed, "to", workflow.StatusRunning, "via", "Recover", "steps", len(restarted))
+	e.notifyStatusChange(flowKey, workflow.StatusRunning)
+	for _, sid := range restarted {
+		e.enqueueStep(ctx, shardNum, sid)
+	}
+	return nil
+}
+
 type sweptMember struct {
 	stepID    int
 	lineageID int

@@ -564,6 +564,13 @@ func (e *Engine) RestartFrom(ctx context.Context, stepKey string, stateOverrides
 	return e.restartFrom(ctx, stepKey, stateOverrides)
 }
 
+// Recover restarts every failed step of a failed flow. The flow must be in failed status. The optional
+// stateOverrides are merged into each failed step's state - target shared upstream input fields, not
+// per-branch fields. Idempotent: re-running picks up any step that fails again.
+func (e *Engine) Recover(ctx context.Context, flowKey string, stateOverrides any) error {
+	return e.recoverFlow(ctx, flowKey, stateOverrides)
+}
+
 // History returns the step-by-step execution history of a flow.
 func (e *Engine) History(ctx context.Context, flowKey string) ([]workflow.FlowStep, error) {
 	return e.history(ctx, flowKey)
