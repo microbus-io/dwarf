@@ -33,9 +33,9 @@ type FlowOptions struct {
 	// Zero uses a weight of 1.
 	FairnessWeight float64 `json:"fairnessWeight,omitzero"`
 	// StartAt delays execution of the flow's entry step until the given UTC time.
-	// Zero or a past time means run as soon as the flow is started. Sets the
-	// entry step's not_before column; the flow can still be created and started
-	// immediately, but no worker will pick the step up before StartAt.
+	// Zero or a past time means run as soon as the flow is started. The flow can
+	// still be created and started immediately, but no worker picks the entry
+	// step up before StartAt.
 	StartAt time.Time `json:"startAt,omitzero"`
 	// TimeBudget overrides the engine's default per-task time budget for this flow, bounding every
 	// ExecuteTask call's context deadline. Subgraph descendants inherit it. Zero uses the engine's

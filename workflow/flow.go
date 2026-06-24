@@ -255,10 +255,9 @@ func (f *Flow) set(key string, value any) {
 	f.changes[key] = raw
 }
 
-// Delete removes the listed state fields. Each becomes JSON null in changes
-// (so the next merge drops the field for Replace, contributes the reducer's
-// identity for sum*/list*/set*) and is removed from the local state map so
-// subsequent reads in this task see it as absent.
+// Delete removes the listed state fields. Each is recorded as a cleared value
+// (JSON null) in changes so the following merge drops it, and is removed from the
+// local state map so later reads in this task see it as absent.
 func (f *Flow) Delete(keys ...string) {
 	for _, k := range keys {
 		f.deleteOne(k)
@@ -365,9 +364,9 @@ func (f *Flow) Goto(taskName string) {
 /*
 Interrupt parks the flow to await external input, or returns the resume data once it has arrived.
 
-On the first call (not yet resumed) it records the interrupt request with the given payload - propagated up
-the surgraph chain and surfaced to the awaiting caller so it can see what data the task needs - and returns
-yield=true. The task must return immediately.
+On the first call (not yet resumed) it records the interrupt request with the given payload - surfaced to the
+awaiting caller so it can see what input the task needs - and returns yield=true. The task must return
+immediately.
 
 On re-entry after Resume it unmarshals the resume data into out with yield=false and does not re-arm; the task
 proceeds. The payload is any JSON-marshalable value (a struct or a map[string]any); out is a pointer (a *struct or
@@ -473,16 +472,13 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 }
 
 // Subtask launches a single task as an isolated child flow, the task-level sibling of Subgraph. The
-// engine synthesizes a trivial one-node graph (named name) around taskURL instead of loading a graph,
-// so any task endpoint can be invoked without a graph definition; everything after launch - parking,
-// re-entry, the out-pointer result, cancel/interrupt propagation - is identical to Subgraph. name is
-// required (it is the node's display name in diagrams/history) and must be non-empty. It is a thin
-// wrapper over Subgraph: the request, single-park guard, input normalization, and re-entry all flow
-// through Subgraph; the non-empty name is what marks the pending request as a subtask.
+// engine synthesizes a trivial one-node graph (named name) around taskURL, so any task endpoint can be
+// invoked without a graph definition; everything after launch - parking, re-entry, the out-pointer
+// result, cancel/interrupt propagation - is identical to Subgraph. name is required and non-empty (the
+// node's display name in diagrams/history).
 //
-// Pass a task URL, not a graph URL: a graph URL would be wrapped as a one-node graph and dispatched as
-// a task, failing at dispatch. (Symmetrically, Subgraph with a task URL fails in LoadGraph.) The typed
-// per-service client makes this mistake impossible; the raw primitives are the dynamic-only escape hatch.
+// Pass a task URL, not a graph URL: a graph URL would be wrapped as a one-node graph and dispatched as a
+// task, failing at dispatch. (Symmetrically, Subgraph with a task URL fails in LoadGraph.)
 func (f *Flow) Subtask(name, taskURL string, in any, out any) (yield bool, err error) {
 	if name == "" {
 		return false, errors.New("subtask name is required")
@@ -564,9 +560,8 @@ func (f *Flow) GotoRequested() string {
 	return f.gotoNext
 }
 
-// RetryRequested returns the backoff parameters and true if Retry was called.
-// The orchestrator uses these to compute the re-dispatch delay; the give-up decision is made
-// client-side in Retry, so only the backoff shape crosses this boundary.
+// RetryRequested returns the backoff parameters (initialDelay, multiplier, maxDelay) and true if Retry
+// was called.
 func (f *Flow) RetryRequested() (initialDelay time.Duration, multiplier float64, maxDelay time.Duration, ok bool) {
 	if !f.retry {
 		return 0, 0, 0, false
