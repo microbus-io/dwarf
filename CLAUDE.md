@@ -1167,11 +1167,18 @@ be relevant after it ends." So retention is either operator-driven or an explici
   are **never** auto-deleted (a failed disposable job is exactly the one to keep for `Restart`/`Recover`). Honored on
   the **root** flow only (`surgraph_flow_id=0`); the delete reuses `Delete`'s cascade to sweep descendants, and the
   flag is not inherited by children. The delete is **inline** in `completeFlow`, after the `dwarf_flows_terminated_total`
-  metric and any `FlowStopped` notification fire - so observability survives the row's deletion - and best-effort (a
-  delete failure only logs and leaves a stray row; no sweeper backstops it). **Contract: `Await` and `Run` reject a
-  `DeleteOnCompletion` flow** (400) - its outcome is deleted, not observable, so they refuse up front,
-  deterministically regardless of timing, rather than race the delete. Receive the result via `NotifyOnStop` (whose
-  `FlowOutcome` is computed before the delete) or run it truly fire-and-forget via `Create`+`Start`.
+  metric and any `FlowStopped` notification fire (so observability and the full outcome survive the row's deletion) and
+  **before `signalStop`** (so a blocking `Await` woken by the stop signal observes a gone row uniformly, never a
+  transient completed state). Best-effort - a delete failure only logs and leaves a stray row; no sweeper backstops it.
+  **Await contract: once it completes, the flow is gone everywhere - uniformly.** A completed disposable flow has no
+  row, so `Snapshot`/`History` and a blocking `Await`/`Run` return "flow not found" (404), the same regardless of
+  timing (the delete-before-signal reorder removes the completed-then-deleted race). For an `Await` that 404 *is* the
+  completion signal - and waiting still works: an `Await` started while the flow runs blocks until it finishes, then
+  404s. A `failed`/`cancelled` disposable flow is *not* deleted, so `Await` returns its real terminal outcome (so a 404
+  specifically means "completed"). Uniform 404 was chosen over a translated `completed` outcome (which was timing-
+  dependent: in-time vs late await) and over a step-pruned tombstone (which only moves the inconsistency to `History`
+  and, by keeping `final_state`, leaks the private data the deletion exists to remove). Callers wanting the outcome use
+  `NotifyOnStop` (whose `FlowOutcome` is computed before the delete).
 
 For operator-driven retention:
 

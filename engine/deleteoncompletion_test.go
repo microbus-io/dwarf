@@ -86,35 +86,61 @@ func TestDeleteOnCompletion_DeletesOnSuccess(t *testing.T) {
 	waitFlowDeleted(t, e, fk, 5*time.Second)
 }
 
-// TestDeleteOnCompletion_AwaitAndRunRejected asserts Await and Run deterministically refuse a flow created
-// with DeleteOnCompletion (its outcome is not observable), regardless of timing.
-func TestDeleteOnCompletion_AwaitAndRunRejected(t *testing.T) {
+// TestDeleteOnCompletion_AwaitReturns404 asserts Await on a disposable flow blocks until it finishes and
+// then returns 404 - the flow is gone, and that 404 is the completion signal (uniform regardless of timing).
+func TestDeleteOnCompletion_AwaitReturns404(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
-	g.SetEndpoint("A", "doc/rej-a")
+	g.SetEndpoint("A", "doc/aw-a")
 	g.AddTransition("A", workflow.END)
-	proxy.HandleGraph("doc/reject", g)
-	proxy.HandleTask("doc/rej-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	proxy.HandleGraph("doc/await", g)
+	proxy.HandleTask("doc/aw-a", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetBool("done", true)
+		return nil
+	})
 
 	e := NewEngine()
 	e.SetHost(proxy)
 	e.RunInTest(t)
 
-	// Await on a created-but-not-started disposable flow is rejected up front (no blocking, no race).
-	fk, err := e.Create(ctx, "doc/reject", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
+	fk, err := e.Create(ctx, "doc/await", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
+	assert.NoError(e.Start(ctx, fk))
+
 	_, err = e.Await(ctx, fk)
 	assert.Error(err)
-	assert.Equal(400, errors.StatusCode(err))
+	assert.Equal(404, errors.StatusCode(err))
 
-	// Run rejects before creating the flow.
-	_, _, err = e.Run(ctx, "doc/reject", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
+	// A second Await yields the same 404 - uniform, not timing-dependent.
+	_, err = e.Await(ctx, fk)
 	assert.Error(err)
-	assert.Equal(400, errors.StatusCode(err))
+	assert.Equal(404, errors.StatusCode(err))
+}
+
+// TestDeleteOnCompletion_RunReturns404 asserts Run on a disposable flow returns 404 once it completes.
+func TestDeleteOnCompletion_RunReturns404(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Solo")
+	g.SetEndpoint("A", "doc/run-a")
+	g.AddTransition("A", workflow.END)
+	proxy.HandleGraph("doc/run", g)
+	proxy.HandleTask("doc/run-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	e.RunInTest(t)
+
+	_, _, err := e.Run(ctx, "doc/run", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
+	assert.Error(err)
+	assert.Equal(404, errors.StatusCode(err))
 }
 
 // TestDeleteOnCompletion_KeepsFailedFlow asserts a failed flow is retained even with DeleteOnCompletion set

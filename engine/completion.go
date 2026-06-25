@@ -251,18 +251,10 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusCompleted)
 	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
-	if notifyOnStop {
-		var finalState map[string]any
-		json.Unmarshal([]byte(finalStateJSON), &finalState)
-		e.fireFlowStopped(ctx, compositeID, baggageJSON, &workflow.FlowOutcome{
-			Status: workflow.StatusCompleted,
-			State:  finalState,
-		})
-	}
-	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
-	e.signalEnqueue(ctx, 0, 0) // Wake peers
 
-	// Propagate to surgraph
+	// Read the surgraph linkage and the disposable flag before notifying, so a DeleteOnCompletion root can
+	// delete itself BEFORE waking Await waiters: a waiter woken by signalStop then observes a gone row and
+	// translates it to a completed outcome (see await), rather than racing the delete.
 	var surgraphFlowID, surgraphStepDepth, surgraphStepID int
 	var deleteOnCompletion bool
 	err = db.QueryRowContext(ctx,
@@ -272,18 +264,33 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	if err != nil {
 		return true, errors.Trace(err)
 	}
+
+	if notifyOnStop {
+		var finalState map[string]any
+		json.Unmarshal([]byte(finalStateJSON), &finalState)
+		e.fireFlowStopped(ctx, compositeID, baggageJSON, &workflow.FlowOutcome{
+			Status: workflow.StatusCompleted,
+			State:  finalState,
+		})
+	}
+
+	if surgraphFlowID == 0 && deleteOnCompletion {
+		// Fire-and-forget durable-execution flow: delete it (and its subgraph descendants) now that it
+		// succeeded, before signalling. Root-only (a surgraph child is swept by the root's cascade).
+		// Best-effort - FlowStopped already delivered the outcome, so a delete failure only leaves a stray row.
+		err := e.deleteFlow(ctx, compositeID)
+		if err != nil {
+			e.logger.WarnContext(ctx, "DeleteOnCompletion delete failed", "flow", flowID, "error", err)
+		}
+	}
+
+	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
+	e.signalEnqueue(ctx, 0, 0) // Wake peers
+
 	if surgraphFlowID != 0 {
 		err := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepDepth, surgraphStepID, finalStateJSON)
 		if err != nil {
 			return true, errors.Trace(err)
-		}
-	} else if deleteOnCompletion {
-		// Fire-and-forget durable-execution flow: delete it and its descendants now that it succeeded.
-		// Root-only (a surgraph child is swept by the root's cascade). Best-effort and inline - the metric
-		// and any FlowStopped notification already fired above, so a delete failure only leaves a stray row.
-		err := e.deleteFlow(ctx, compositeID)
-		if err != nil {
-			e.logger.WarnContext(ctx, "DeleteOnCompletion delete failed", "flow", flowID, "error", err)
 		}
 	}
 

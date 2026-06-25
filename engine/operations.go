@@ -334,29 +334,9 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	return out, nil
 }
 
-// await blocks until a flow stops.
+// await blocks until a flow stops. A completed DeleteOnCompletion flow is gone, so await returns its 404 as
+// the completion signal (see "Data Retention" in CLAUDE.md).
 func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
-	// A DeleteOnCompletion flow deletes its row on success, so its outcome is never observable via a
-	// snapshot - awaiting it would race the delete (return completed if it won, 404 if it lost). Reject it
-	// up front, deterministically; the result is delivered through NotifyOnStop instead. A missing row
-	// (already deleted, or never existed) falls through to the normal snapshot path, which reports it.
-	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	db, err := e.shard(shardNum)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	var deleteOnCompletion bool
-	err = db.QueryRowContext(ctx, "SELECT delete_on_completion FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&deleteOnCompletion)
-	if err != nil && err != sql.ErrNoRows {
-		return nil, errors.Trace(err)
-	}
-	if deleteOnCompletion {
-		return nil, errors.New("cannot await a flow created with DeleteOnCompletion; use NotifyOnStop", http.StatusBadRequest)
-	}
-
 	stopped := func(s string) bool {
 		return s != "" && s != workflow.StatusCreated && s != workflow.StatusPending && s != workflow.StatusRunning
 	}
@@ -647,11 +627,6 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 
 // run creates, starts, and awaits a flow in one call.
 func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
-	// Run awaits the outcome, which a DeleteOnCompletion flow deletes on success - the two are
-	// contradictory. Reject before creating a doomed flow rather than create+start+await-error.
-	if opts != nil && opts.DeleteOnCompletion {
-		return "", nil, errors.New("cannot Run a flow created with DeleteOnCompletion; use Create+Start with NotifyOnStop", http.StatusBadRequest)
-	}
 	flowKey, err = e.create(ctx, workflowURL, initialState, opts)
 	if err != nil {
 		return "", nil, errors.Trace(err)
