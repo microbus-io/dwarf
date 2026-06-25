@@ -72,6 +72,30 @@ identity there. `BaggageFrom` lives in the `workflow` package so task code can r
 (Unlike W3C/OTEL request baggage this is *flow*-scoped and frozen at `Create`, not per-request mutable - a host
 adapter bridging to a bus maps between the two at the seam.)
 
+### Backpressure is the task's or host's job, never the engine's
+
+The engine deliberately holds **no** backpressure machinery - no rate valve, no circuit breaker, no failure
+dispositions. An earlier design had all three; they were removed and must not return. The reason is structural:
+the engine's only vantage is the **task URL**, and that is the wrong axis for every scarcity that actually causes
+backpressure.
+
+- A **rate limit** is keyed by the *account*, which is invisible to the engine, shared across many task URLs, and a
+  single task URL may even span several accounts. A controller keyed on the task URL throttles a dimension that was
+  never the constraint - and for a single never-satisfiable request (one larger than the whole per-window budget) it
+  ratchets throughput toward zero and never recovers, because the request keeps failing identically.
+- **Availability** is keyed by the *downstream service the task calls*, also invisible: the engine sees the task's
+  call site, never what that task reaches. A present task whose own downstream is down is not the engine's to detect.
+
+So resource-accurate control must live in the layer that holds the resource identity. That is the **task itself**
+(it sees its downstream's 429/503, knows the account, and arms `flow.Retry` with an appropriate horizon), or the
+**host adapter** for the one case only it can see - *no responder for the dispatch* (the task's hosting microservice
+is absent), which the host detects and rides out by arming `flow.Retry` on the carrier. The engine just executes,
+routes `onError`, and honors the backoff primitives.
+
+A consequence of having no breaker is no probe *election*: each parked step is its own probe and discovers recovery
+independently on its own backoff. The trade is the breaker's coordinated backlog release (instant unblock the moment
+one probe succeeds) for zero engine-side policy and no shared-state machinery to coordinate across replicas.
+
 ### Configuration (`Set*` methods)
 
 Configuration is applied through `Set*` methods, each returning an `error` rather than chaining a `*Engine` (so
