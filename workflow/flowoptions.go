@@ -48,6 +48,11 @@ type FlowOptions struct {
 	// the notification from that baggage. When false (the default) FlowStopped is never called for the
 	// flow. Set at Create; plain Start then runs the flow.
 	NotifyOnStop bool `json:"notifyOnStop,omitzero"`
+	// DeleteOnCompletion deletes the flow and its subgraph descendants as soon as it completes
+	// successfully. Failed, cancelled, and interrupted flows are not deleted (they stay available for
+	// Restart/Recover/Resume). Honored on the root flow only. Await and Run reject a flow created with this
+	// set (its outcome is deleted, not observable); use NotifyOnStop to receive the result.
+	DeleteOnCompletion bool `json:"deleteOnCompletion,omitzero"`
 	// Baggage is opaque, host-defined context (identity/claims, tenant, locale, ...) carried with the
 	// flow. The engine never interprets it: it is set once here, stored on the flow, inherited by
 	// subgraphs and Continue, and delivered to every Host LoadGraph/ExecuteTask call via the dispatch

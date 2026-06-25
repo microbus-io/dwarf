@@ -151,12 +151,16 @@ func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken
 	if opts.NotifyOnStop {
 		notifyOnStop = 1
 	}
+	deleteOnCompletion := 0
+	if opts.DeleteOnCompletion {
+		deleteOnCompletion = 1
+	}
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
 		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, notify_on_stop, priority, fairness_key, fairness_weight, time_budget_ms)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			flowToken, workflowURL, workflowName, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, notifyOnStop, opts.Priority, opts.FairnessKey, opts.FairnessWeight, timeBudget.Milliseconds(),
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, notify_on_stop, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			flowToken, workflowURL, workflowName, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, notifyOnStop, deleteOnCompletion, opts.Priority, opts.FairnessKey, opts.FairnessWeight, timeBudget.Milliseconds(),
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -331,6 +335,19 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 
 // await blocks until a flow stops.
 func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
+	// A DeleteOnCompletion flow deletes its row on success, so its outcome is never observable via a
+	// snapshot - awaiting it would race the delete (return completed if it won, 404 if it lost). Reject it
+	// up front, deterministically, regardless of whether the row is still present; the result is delivered
+	// through NotifyOnStop instead.
+	if shardNum, flowID, flowToken, err := parseFlowKey(flowKey); err == nil {
+		if db, derr := e.shard(shardNum); derr == nil {
+			var deleteOnCompletion bool
+			if qerr := db.QueryRowContext(ctx, "SELECT delete_on_completion FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&deleteOnCompletion); qerr == nil && deleteOnCompletion {
+				return nil, errors.New("cannot await a flow created with DeleteOnCompletion; use NotifyOnStop", http.StatusBadRequest)
+			}
+		}
+	}
+
 	stopped := func(s string) bool {
 		return s != "" && s != workflow.StatusCreated && s != workflow.StatusPending && s != workflow.StatusRunning
 	}
@@ -620,6 +637,11 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 
 // run creates, starts, and awaits a flow in one call.
 func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
+	// Run awaits the outcome, which a DeleteOnCompletion flow deletes on success - the two are
+	// contradictory. Reject before creating a doomed flow rather than create+start+await-error.
+	if opts != nil && opts.DeleteOnCompletion {
+		return "", nil, errors.New("cannot Run a flow created with DeleteOnCompletion; use Create+Start with NotifyOnStop", http.StatusBadRequest)
+	}
 	flowKey, err = e.create(ctx, workflowURL, initialState, opts)
 	if err != nil {
 		return "", nil, errors.Trace(err)

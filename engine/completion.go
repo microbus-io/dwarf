@@ -260,16 +260,24 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 
 	// Propagate to surgraph
 	var surgraphFlowID, surgraphStepDepth, surgraphStepID int
+	var deleteOnCompletion bool
 	err = db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id FROM dwarf_flows WHERE flow_id=?",
+		"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id, delete_on_completion FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&surgraphFlowID, &surgraphStepDepth, &surgraphStepID)
+	).Scan(&surgraphFlowID, &surgraphStepDepth, &surgraphStepID, &deleteOnCompletion)
 	if err != nil {
 		return true, errors.Trace(err)
 	}
 	if surgraphFlowID != 0 {
 		if err := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepDepth, surgraphStepID, finalStateJSON); err != nil {
 			return true, errors.Trace(err)
+		}
+	} else if deleteOnCompletion {
+		// Fire-and-forget durable-execution flow: delete it and its descendants now that it succeeded.
+		// Root-only (a surgraph child is swept by the root's cascade). Best-effort and inline - the metric
+		// and any FlowStopped notification already fired above, so a delete failure only leaves a stray row.
+		if err := e.deleteFlow(ctx, compositeID); err != nil {
+			e.logger.WarnContext(ctx, "DeleteOnCompletion delete failed", "flow", flowID, "error", err)
 		}
 	}
 

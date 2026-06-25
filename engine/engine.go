@@ -500,6 +500,7 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 		resolved.StartAt = opts.StartAt
 		resolved.Baggage = opts.Baggage
 		resolved.NotifyOnStop = opts.NotifyOnStop
+		resolved.DeleteOnCompletion = opts.DeleteOnCompletion
 		if opts.TimeBudget > 0 {
 			resolved.TimeBudget = opts.TimeBudget
 		}

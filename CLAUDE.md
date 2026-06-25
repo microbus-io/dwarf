@@ -1060,6 +1060,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `thread_token` | Token component of the thread's flowKey |
 | `trace_parent` | W3C `traceparent` of the flow's root "workflow" span, minted at `Create` (or, for a subgraph, parented to the caller step's span). Reconstructed as the parent of every per-step span. Inherited by `Continue` only as a fresh trace (a new root span is minted per turn); a subgraph inherits the caller step's context, not this column. See "Tracing" |
 | `notify_on_stop` | Set from `FlowOptions.NotifyOnStop` at `Create`; `1` fires the `FlowStopped` callback (with the flow's baggage on ctx) when the flow stops, `0` = no notification. The host resolves the delivery target from baggage - the engine stores no address |
+| `delete_on_completion` | Set from `FlowOptions.DeleteOnCompletion` at `Create`; `1` makes the flow delete itself (and cascade to subgraph descendants) the instant it reaches `completed`. Root-only (not inherited by children); `failed`/`cancelled`/`interrupted` flows are never auto-deleted. See "Data Retention" |
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
 | `breakpoints` | JSON `map[taskName]string` of `BreakBefore` breakpoints |
 | `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. Reset by `Restart` (a fresh attempt); NOT by `RestartFrom` (a surgical rewind) |
@@ -1152,9 +1153,27 @@ without fragmentation or excessive write amplification.
 
 ### Data Retention
 
-The engine does not auto-purge flows: every row remains potentially-resurrectable - an `interrupted` flow via
-`Resume`, a `completed` flow via `Continue`, a `failed` flow via `Restart`/`RestartFrom`. A fixed timer would silently break these,
-and no single policy fits both a 1-hour batch and a 30-day approval workflow. For operator-driven retention:
+The engine does not auto-purge flows on a timer: every row remains potentially-resurrectable - an `interrupted` flow via
+`Resume`, a `completed` flow via `Continue`, a `failed` flow via `Restart`/`RestartFrom`. A retention *duration* was
+rejected for two reasons: a clock-triggered delete reaps rows out from under those resurrection paths (a flow `failed`
+for 30 days may still be wanted for `Restart`; one `interrupted` for 30 days is awaiting a human), and no single
+duration fits both a 1-hour batch and a 30-day approval. The author also cannot know at `Create` "how long will this
+be relevant after it ends." So retention is either operator-driven or an explicit author opt-in:
+
+- **`FlowOptions.DeleteOnCompletion`** - the author declares a flow fire-and-forget (durable-execution jobs that retry
+  until success against a SaaS / under backpressure, whose output and history are not needed). The engine deletes the
+  flow and its subgraph descendants the instant it reaches `completed` - an *event* trigger on success, not a clock,
+  so there is no duration to pick and the resurrection paths are preserved: `failed`/`cancelled`/`interrupted` flows
+  are **never** auto-deleted (a failed disposable job is exactly the one to keep for `Restart`/`Recover`). Honored on
+  the **root** flow only (`surgraph_flow_id=0`); the delete reuses `Delete`'s cascade to sweep descendants, and the
+  flag is not inherited by children. The delete is **inline** in `completeFlow`, after the `dwarf_flows_terminated_total`
+  metric and any `FlowStopped` notification fire - so observability survives the row's deletion - and best-effort (a
+  delete failure only logs and leaves a stray row; no sweeper backstops it). **Contract: `Await` and `Run` reject a
+  `DeleteOnCompletion` flow** (400) - its outcome is deleted, not observable, so they refuse up front,
+  deterministically regardless of timing, rather than race the delete. Receive the result via `NotifyOnStop` (whose
+  `FlowOutcome` is computed before the delete) or run it truly fire-and-forget via `Create`+`Start`.
+
+For operator-driven retention:
 
 - **`Delete(flowKey)`** removes one flow and its steps in a transaction, **cascading into the flow's subgraph
   descendants recursively** (`allDescendantSubgraphFlows`, same-shard via parent-shard affinity) - a subgraph child's
