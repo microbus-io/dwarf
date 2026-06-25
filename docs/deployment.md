@@ -5,20 +5,22 @@ configuration, and running multiple replicas.
 
 ## Configuration
 
-All configuration is set with `With*` builder methods. They are applied atomically, so they double as
-**hot-reconfiguration** knobs — safe to call after `Startup`.
+All configuration is set with `Set*` methods, each returning an `error`. They split by whether the knob can
+change on a running engine: the **live** ones (`SetNumShards`, `SetMaxOpenConns`, `SetTimeBudget`,
+`SetDefaultPriority`) take effect immediately, even after `Startup`; the **construction-time-only** ones
+(`SetDSN`, `SetWorkers`, and the dependency-injection setters below) are rejected if called after `Startup`.
 
 | Method | Default | Purpose |
 |---|---|---|
-| `WithDSN(dsn)` | `""` | Database connection string (dialect auto-detected) |
-| `WithNumShards(n)` | 1 | Number of database shards |
-| `WithWorkers(n)` | 64 | Per-replica worker concurrency cap |
-| `WithTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
-| `WithDefaultPriority(p)` | 100 | Priority for flows that don't set one |
-| `WithMaxOpenConns(n)` | 8 | Max open DB connections per shard (idle == open) |
+| `SetDSN(dsn)` | `""` | Database connection string (dialect auto-detected) |
+| `SetNumShards(n)` | 1 | Number of database shards |
+| `SetWorkers(n)` | 64 | Per-replica worker concurrency cap |
+| `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
+| `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
+| `SetMaxOpenConns(n)` | 8 | Max open DB connections per shard (idle == open) |
 
-Dependency injection (set before `Startup`): `WithHost`, `WithLogger`, `WithMeterProvider`,
-`WithTracerProvider`.
+Dependency injection (set before `Startup`): `SetHost`, `SetLogger`, `SetMeterProvider`,
+`SetTracerProvider`.
 
 ## Choosing a database
 
@@ -56,7 +58,7 @@ time. Used automatically by `RunInTest`. Do not run SQLite in production.
 
 ## Sharding
 
-`WithNumShards` partitions flows across databases (or schemas) to scale write throughput and reduce index
+`SetNumShards` partitions flows across databases (or schemas) to scale write throughput and reduce index
 contention. Rough sizing by tolerated concurrent INSERT/sec per shard:
 
 | Engine | INSERT/sec per shard | Suggested shards |
@@ -76,12 +78,13 @@ Rules:
 - New top-level flows pick a random shard; subgraph flows stay on the parent's shard.
 
 ```go
-eng.WithDSN("postgres://user:pass@db:5432/dwarf_%d?sslmode=disable").WithNumShards(4)
+eng.SetDSN("postgres://user:pass@db:5432/dwarf_%d?sslmode=disable")
+eng.SetNumShards(4)
 ```
 
 ## Connection pool
 
-`WithMaxOpenConns` (default 8 per shard, with `MaxIdle == MaxOpen`) sizes each shard's pool. Workers spend
+`SetMaxOpenConns` (default 8 per shard, with `MaxIdle == MaxOpen`) sizes each shard's pool. Workers spend
 most of their time waiting on the `ExecuteTask` call, not holding a SQL connection, so a small absolute
 number suffices. Keeping idle == open matters more than the absolute number: under bursty load, close/reopen
 churn (TCP + TLS + auth per cycle) dominates query time. Pool 8 is a good default; much larger regresses

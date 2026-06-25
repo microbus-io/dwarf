@@ -115,7 +115,8 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 				return nil, errors.Trace(err)
 			}
 			var items []json.RawMessage
-			if err := json.Unmarshal(raw, &items); err != nil {
+			err = json.Unmarshal(raw, &items)
+			if err != nil {
 				return nil, errors.New("forEach field '%s' is not an array", tr.ForEach, err)
 			}
 			itemKey := tr.As

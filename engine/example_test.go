@@ -57,7 +57,8 @@ func Example() {
 	eng.SetDSN("postgres://user:pass@localhost:5432/dwarf")
 	eng.SetHost(exampleHost{graphs: graphs})
 
-	if err := eng.Startup(ctx); err != nil {
+	err := eng.Startup(ctx)
+	if err != nil {
 		panic(err)
 	}
 	defer eng.Shutdown(ctx)
@@ -88,7 +89,8 @@ func ExampleEngine_Create() {
 	}
 
 	// The flow sits in "created" until Start; Await blocks until it stops.
-	if err := eng.Start(ctx, flowKey); err != nil {
+	err = eng.Start(ctx, flowKey)
+	if err != nil {
 		panic(err)
 	}
 	out, _ := eng.Await(ctx, flowKey)

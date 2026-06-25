@@ -109,25 +109,20 @@ them to its transport. The engine never learns how tasks are reached.
 
 ## Production wiring
 
-Each `Set*` returns an `error` (there is no fluent `With*` builder — dropping the chained return is what
-lets every setter surface its error, so misconfiguration fails loudly at wiring time):
+Each `Set*` returns an `error`, so misconfiguration fails loudly at wiring time:
 
 ```go
 eng := dwarf.NewEngine()
-check := func(err error) {
-    if err != nil {
-        log.Fatal(err)
-    }
-}
-check(eng.SetDSN("postgres://user:pass@db:5432/dwarf"))
-check(eng.SetNumShards(2))
-check(eng.SetWorkers(64))
-check(eng.SetHost(host))
-check(eng.SetLogger(slog.Default()))
-check(eng.SetMeterProvider(otel.GetMeterProvider()))
-check(eng.SetTracerProvider(otel.GetTracerProvider()))
+eng.SetDSN("postgres://user:pass@db:5432/dwarf")
+eng.SetNumShards(2)
+eng.SetWorkers(64)
+eng.SetHost(host)
+eng.SetLogger(slog.Default())
+eng.SetMeterProvider(otel.GetMeterProvider())
+eng.SetTracerProvider(otel.GetTracerProvider())
 
-if err := eng.Startup(ctx); err != nil {
+err := eng.Startup(ctx)
+if err != nil {
     log.Fatal(err)
 }
 defer eng.Shutdown(ctx)
@@ -141,7 +136,8 @@ eng.Start(ctx, flowKey)
 outcome, err := eng.Await(ctx, flowKey)
 ```
 
-The `With*` methods are atomic and may be called after `Startup` for hot reconfiguration.
+The live `Set*` methods (`SetNumShards`, `SetMaxOpenConns`, `SetTimeBudget`, `SetDefaultPriority`) may be
+called after `Startup` for hot reconfiguration; the rest are construction-time only.
 
 ## Database support
 

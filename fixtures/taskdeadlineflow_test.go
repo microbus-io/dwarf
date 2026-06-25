@@ -30,7 +30,7 @@ import (
 )
 
 // TestTaskdeadlineflow verifies that the engine applies the step's time_budget_ms (set via
-// WithTimeBudget) as the deadline on the context handed to the TaskExecutor. Unlike timebudgetflow,
+// SetTimeBudget) as the deadline on the context handed to the TaskExecutor. Unlike timebudgetflow,
 // the task here installs NO timeout of its own — it blocks purely on the engine-provided ctx.Done(),
 // the way a host's transport would enforce a per-call deadline and fail when it lapses. If the engine
 // fails to deadline the call (the migration regression), ctx.Done()

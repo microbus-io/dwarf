@@ -595,10 +595,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if fanInArrivals > 0 {
 			tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?", fanInArrivals, cohortSpawnID)
 			var arrivals, size, failures, spawnLineageID int
-			if err := tx.QueryRowContext(ctx,
+			err := tx.QueryRowContext(ctx,
 				"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM dwarf_steps WHERE step_id=?",
 				cohortSpawnID,
-			).Scan(&arrivals, &size, &failures, &spawnLineageID); err != nil {
+			).Scan(&arrivals, &size, &failures, &spawnLineageID)
+			if err != nil {
 				return errors.Trace(err)
 			}
 			fullyResolved := size > 0 && arrivals >= size

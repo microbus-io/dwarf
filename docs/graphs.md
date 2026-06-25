@@ -154,7 +154,8 @@ targets, inconsistent fan-out siblings, illegal mixes (switch with non-switch), 
 validates at create time. Validate early in tests:
 
 ```go
-if err := g.Validate(); err != nil {
+err := g.Validate()
+if err != nil {
     t.Fatalf("invalid graph: %v", err)
 }
 ```

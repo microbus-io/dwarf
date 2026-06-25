@@ -384,7 +384,8 @@ otherwise always nil. Symmetric with Subgraph: any in, pointer out.
 func (f *Flow) Interrupt(payload any, out any) (yield bool, err error) {
 	if f.interruptDone {
 		if out != nil {
-			if err := parseMapInto(f.resumeData, out); err != nil {
+			err := parseMapInto(f.resumeData, out)
+			if err != nil {
 				return false, errors.Trace(err)
 			}
 		}
@@ -442,7 +443,8 @@ err if the child failed. Does not re-arm on re-entry.
 func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err error) {
 	if f.subgraphDone {
 		if out != nil {
-			if err := parseMapInto(f.subgraphResult, out); err != nil {
+			err := parseMapInto(f.subgraphResult, out)
+			if err != nil {
 				return false, errors.Trace(err)
 			}
 		}
@@ -713,7 +715,8 @@ func (f *Flow) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON deserializes the Flow including private fields.
 func (f *Flow) UnmarshalJSON(data []byte) error {
 	var wire flowJSON
-	if err := json.Unmarshal(data, &wire); err != nil {
+	err := json.Unmarshal(data, &wire)
+	if err != nil {
 		return err
 	}
 	f.flowKey = wire.FlowKey

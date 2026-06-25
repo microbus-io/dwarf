@@ -9,7 +9,7 @@ everything degrades to a no-op, so unconfigured and test use pays nothing.
 Inject a standard library `*slog.Logger`:
 
 ```go
-eng.WithLogger(slog.Default())
+eng.SetLogger(slog.Default())
 ```
 
 It defaults to a discard logger — the engine (and its sequel DB layer) stay silent until you inject one,
@@ -25,7 +25,7 @@ record with the active trace and span IDs, giving you trace↔log correlation fo
 Inject an OpenTelemetry `metric.MeterProvider`:
 
 ```go
-eng.WithMeterProvider(otel.GetMeterProvider())
+eng.SetMeterProvider(otel.GetMeterProvider())
 ```
 
 It defaults to the global `otel.GetMeterProvider()` — the no-op provider unless your process configures the
@@ -57,7 +57,7 @@ fairness/priority metrics are aggregate-only.
 Inject an OpenTelemetry `trace.TracerProvider`:
 
 ```go
-eng.WithTracerProvider(otel.GetTracerProvider())
+eng.SetTracerProvider(otel.GetTracerProvider())
 ```
 
 It defaults to the global `otel.GetTracerProvider()` (no-op unless the SDK is configured). The host injects
@@ -87,7 +87,7 @@ unconfigured engine stays silent here too.
 
 ## Configuration timing
 
-All three observability knobs — `WithLogger`, `WithMeterProvider`, `WithTracerProvider` — are
+All three observability knobs — `SetLogger`, `SetMeterProvider`, `SetTracerProvider` — are
 **construction-time**: set them before `Startup`. The engine resolves the providers and wires them into the
 worker hot path and the shard DBs once at startup, so a call after `Startup` is a deliberate no-op (it
 keeps the hot-path reads lock-free). Hot-swapping a provider on a live engine is not supported.
@@ -97,11 +97,11 @@ keeps the hot-path reads lock-free). Hot-swapping a provider on a live engine is
 A typical host configures the OpenTelemetry SDK once and injects all three providers:
 
 ```go
-eng := dwarf.NewEngine().
-    WithLogger(slog.New(otelslog.NewHandler("myapp"))).
-    WithMeterProvider(otel.GetMeterProvider()).
-    WithTracerProvider(otel.GetTracerProvider()).
-    WithHost(host)
+eng := dwarf.NewEngine()
+eng.SetLogger(slog.New(otelslog.NewHandler("myapp")))
+eng.SetMeterProvider(otel.GetMeterProvider())
+eng.SetTracerProvider(otel.GetTracerProvider())
+eng.SetHost(host)
 ```
 
 Next: [Deployment](deployment.md).

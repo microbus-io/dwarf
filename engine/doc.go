@@ -30,7 +30,8 @@ limitations under the License.
 //	eng := engine.NewEngine()
 //	eng.SetDSN("postgres://user:pass@host:5432/dwarf")
 //	eng.SetHost(host)
-//	if err := eng.Startup(ctx); err != nil { ... }
+//	err := eng.Startup(ctx)
+//	if err != nil { ... }
 //	defer eng.Shutdown(ctx)
 //
 // Each Set* method returns an error. The live ones (SetNumShards, SetMaxOpenConns, SetTimeBudget,

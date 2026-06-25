@@ -182,7 +182,8 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 		for rows.Next() {
 			var priority, count int
 			var ageMs sql.NullFloat64
-			if err := rows.Scan(&priority, &count, &ageMs); err != nil {
+			err := rows.Scan(&priority, &count, &ageMs)
+			if err != nil {
 				return errors.Trace(err)
 			}
 			counts[priority] = count
@@ -190,7 +191,8 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 				ages[priority] = int(ageMs.Float64 / 1000)
 			}
 		}
-		if err := rows.Err(); err != nil {
+		err = rows.Err()
+		if err != nil {
 			return errors.Trace(err)
 		}
 		pendingPerShard[shard] = counts
@@ -233,12 +235,14 @@ func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error)
 		for rows.Next() {
 			var task string
 			var count int
-			if err := rows.Scan(&task, &count); err != nil {
+			err := rows.Scan(&task, &count)
+			if err != nil {
 				return errors.Trace(err)
 			}
 			m[task] = count
 		}
-		if err := rows.Err(); err != nil {
+		err = rows.Err()
+		if err != nil {
 			return errors.Trace(err)
 		}
 		perShard[shard] = m

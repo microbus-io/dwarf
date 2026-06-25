@@ -38,7 +38,8 @@ tags   := f.GetStrings("tags")
 if f.Has("coupon") { ... }               // presence check
 
 var order Order
-if err := f.Get("order", &order); err != nil { ... }   // decode a field into a struct
+err := f.Get("order", &order)
+if err != nil { ... }   // decode a field into a struct
 ```
 
 `f.Snapshot()` returns a read-only copy of the entire current state. `f.ParseState(&v)` decodes the whole
@@ -91,7 +92,8 @@ overshoot it, so a wait already known to be doomed is not parked before failing.
 own — you decide what's retryable:
 
 ```go
-if err := callFlaky(ctx); err != nil {
+err := callFlaky(ctx)
+if err != nil {
     if isTransient(err) && f.Retry(100*time.Millisecond, 2.0, 10*time.Second, time.Hour) {
         return nil // will re-run after backoff
     }

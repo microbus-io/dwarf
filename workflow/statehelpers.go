@@ -85,7 +85,8 @@ func parseMapInto(m map[string]any, target any) error {
 				return errors.Trace(err)
 			}
 			ptr := reflect.New(field.Type)
-			if err := json.Unmarshal(raw, ptr.Interface()); err != nil {
+			err = json.Unmarshal(raw, ptr.Interface())
+			if err != nil {
 				return err
 			}
 			fieldVal.Set(ptr.Elem())
@@ -109,7 +110,8 @@ func toStateMap(v any) (map[string]any, error) {
 		return nil, errors.Trace(err)
 	}
 	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
+	err = json.Unmarshal(data, &m)
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	return m, nil

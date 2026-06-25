@@ -116,17 +116,20 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 				return nil, false, errors.Trace(err)
 			}
 			if baseState == nil {
-				if err := json.Unmarshal([]byte(stateJSON), &baseState); err != nil {
+				err := json.Unmarshal([]byte(stateJSON), &baseState)
+				if err != nil {
 					return nil, false, errors.Trace(err)
 				}
 			}
 			var changes map[string]any
-			if err := json.Unmarshal([]byte(changesJSON), &changes); err != nil {
+			err = json.Unmarshal([]byte(changesJSON), &changes)
+			if err != nil {
 				return nil, false, errors.Trace(err)
 			}
 			allChanges = append(allChanges, changes)
 		}
-		if err = rows.Err(); err != nil {
+		err = rows.Err()
+		if err != nil {
 			return nil, false, errors.Trace(err)
 		}
 		if !found {
@@ -215,7 +218,8 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// already marked completed by processStep, the lease recovery (which only resets running rows)
 		// cannot re-dispatch it, leaving the flow stranded 'running' with all steps terminal (an orphan
 		// flow). Mirrors advanceFlow and the fan-in transaction, which write first for the same reason.
-		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID); err != nil {
+		_, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
+		if err != nil {
 			return errors.Trace(err)
 		}
 		fs, wf, err := e.computeFinalState(ctx, tx, flowID)
@@ -269,14 +273,16 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		return true, errors.Trace(err)
 	}
 	if surgraphFlowID != 0 {
-		if err := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepDepth, surgraphStepID, finalStateJSON); err != nil {
+		err := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepDepth, surgraphStepID, finalStateJSON)
+		if err != nil {
 			return true, errors.Trace(err)
 		}
 	} else if deleteOnCompletion {
 		// Fire-and-forget durable-execution flow: delete it and its descendants now that it succeeded.
 		// Root-only (a surgraph child is swept by the root's cascade). Best-effort and inline - the metric
 		// and any FlowStopped notification already fired above, so a delete failure only leaves a stray row.
-		if err := e.deleteFlow(ctx, compositeID); err != nil {
+		err := e.deleteFlow(ctx, compositeID)
+		if err != nil {
 			e.logger.WarnContext(ctx, "DeleteOnCompletion delete failed", "flow", flowID, "error", err)
 		}
 	}

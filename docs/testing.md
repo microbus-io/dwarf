@@ -9,7 +9,7 @@ interrupts, retries — with no database to set up and no transport to stand up.
   (per test, and per shard for multi-shard tests), runs migrations, and registers cleanup via `t.Cleanup`.
   No DSN, no teardown code.
 - **`engine.TestProxy`** is an in-memory implementation of the `Host` interface. Register graphs and task
-  functions on it, then register it with `WithHost(proxy)` — its `LoadGraph`/`ExecuteTask` back the
+  functions on it, then register it with `SetHost(proxy)` — its `LoadGraph`/`ExecuteTask` back the
   required methods, and its peer methods are no-ops.
 
 ```go
@@ -33,8 +33,8 @@ func TestCheckout(t *testing.T) {
         return nil
     })
 
-    eng := dwarf.NewEngine().
-        WithHost(proxy)
+    eng := dwarf.NewEngine()
+    eng.SetHost(proxy)
     eng.RunInTest(t)
 
     out, err := eng.Run(ctx, "checkout", map[string]any{"sku": "ABC"}, nil)
@@ -50,17 +50,17 @@ you write in production.
 
 ## Configuring the test engine
 
-`RunInTest` honors any `With*` settings you apply first — workers, shards, time budget, default priority:
+`RunInTest` honors any `Set*` settings you apply first — workers, shards, time budget, default priority:
 
 ```go
-eng := dwarf.NewEngine().
-    WithHost(proxy).
-    WithWorkers(1).        // serialize dispatch to assert ordering
-    WithNumShards(4)       // each shard gets its own in-memory database
+eng := dwarf.NewEngine()
+eng.SetHost(proxy)
+eng.SetWorkers(1)   // serialize dispatch to assert ordering
+eng.SetNumShards(4) // each shard gets its own in-memory database
 eng.RunInTest(t)
 ```
 
-`WithWorkers(1)` is a common trick for deterministically asserting dispatch order (e.g. fairness or
+`SetWorkers(1)` is a common trick for deterministically asserting dispatch order (e.g. fairness or
 priority tests).
 
 ## Testing the harder paths
@@ -112,8 +112,12 @@ To test cross-replica behavior, give each engine its own `TestProxy` and registe
 ```go
 proxy1, proxy2 := engine.NewTestProxy(), engine.NewTestProxy()
 // register the same graphs/tasks on both...
-eng1 := engine.NewEngine().WithHost(proxy1).WithDSN(sharedDSN)
-eng2 := engine.NewEngine().WithHost(proxy2).WithDSN(sharedDSN)
+eng1 := engine.NewEngine()
+eng1.SetHost(proxy1)
+eng1.SetDSN(sharedDSN)
+eng2 := engine.NewEngine()
+eng2.SetHost(proxy2)
+eng2.SetDSN(sharedDSN)
 proxy1.AddPeer(eng2)
 proxy2.AddPeer(eng1)
 ```

@@ -65,8 +65,8 @@ func TestGreeting(t *testing.T) {
 	})
 
 	// 3. Wire and start the engine.
-	eng := dwarf.NewEngine().
-		WithHost(proxy)
+	eng := dwarf.NewEngine()
+	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
 	// 4. Run a flow to completion.
@@ -83,7 +83,7 @@ func TestGreeting(t *testing.T) {
 ## Wiring a real engine
 
 In production you replace `TestProxy` with your own `Host`, point the engine at a real
-database with `WithDSN`, and manage its lifecycle explicitly. A standalone host need only implement the
+database with `SetDSN`, and manage its lifecycle explicitly. A standalone host need only implement the
 two required methods — the optional peer/notify methods can be no-ops:
 
 ```go
@@ -107,11 +107,12 @@ func (h *myHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.F
 func (h *myHost) FlowStopped(context.Context, string, *workflow.FlowOutcome) {}
 func (h *myHost) SignalPeers(context.Context, string, []byte)                {}
 
-eng := dwarf.NewEngine().
-	WithDSN("postgres://user:pass@db:5432/dwarf").
-	WithHost(&myHost{graphs: loadGraphRegistry()})
+eng := dwarf.NewEngine()
+eng.SetDSN("postgres://user:pass@db:5432/dwarf")
+eng.SetHost(&myHost{graphs: loadGraphRegistry()})
 
-if err := eng.Startup(ctx); err != nil {
+err := eng.Startup(ctx)
+if err != nil {
 	log.Fatal(err)
 }
 defer eng.Shutdown(ctx)
@@ -121,7 +122,7 @@ defer eng.Shutdown(ctx)
 - `Shutdown` drains the workers and closes the connections cleanly.
 - The database must already exist; the engine migrates the schema but does not `CREATE DATABASE`.
 
-Not registering a host (`WithHost`) makes `Startup` return an error.
+Not registering a host (`SetHost`) makes `Startup` return an error.
 
 ## Where to go next
 

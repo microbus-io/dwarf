@@ -380,7 +380,8 @@ func (e *Engine) initRuntime() {
 
 	// Create the dwarf_* instruments and register the observable-gauge callback before workers start
 	// emitting. Falls back to the global (no-op) provider when none was injected.
-	if err := e.initMetrics(); err != nil {
+	err := e.initMetrics()
+	if err != nil {
 		e.logger.ErrorContext(e.lifetimeCtx, "Initializing metrics", "error", err)
 	}
 

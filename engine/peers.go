@@ -71,13 +71,15 @@ func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) e
 	switch signalOp(op) {
 	case signalOpEnqueue:
 		var p enqueuePayload
-		if err := json.Unmarshal(payload, &p); err != nil {
+		err := json.Unmarshal(payload, &p)
+		if err != nil {
 			return errors.Trace(err)
 		}
 		e.handleEnqueue(ctx, p.Shard, p.StepID)
 	case signalOpStatusChange:
 		var p statusChangePayload
-		if err := json.Unmarshal(payload, &p); err != nil {
+		err := json.Unmarshal(payload, &p)
+		if err != nil {
 			return errors.Trace(err)
 		}
 		e.notifyStatusChange(p.FlowKey, p.Status)

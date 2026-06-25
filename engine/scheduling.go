@@ -96,10 +96,11 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 	var nearestDelay time.Duration = -1
 
 	e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		if res, err := db.ExecContext(ctx,
+		res, err := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE status=? AND parked=0 AND lease_expires<=NOW_UTC()",
 			workflow.StatusPending, workflow.StatusRunning,
-		); err == nil {
+		)
+		if err == nil {
 			if recovered, _ := res.RowsAffected(); recovered > 0 {
 				e.metricStepsRecovered(ctx, int(recovered))
 			}
@@ -117,7 +118,7 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 		}
 
 		var dueExists sql.NullInt64
-		err := db.QueryRowContext(ctx,
+		err = db.QueryRowContext(ctx,
 			"SELECT 1 FROM dwarf_steps WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() ORDER BY step_id LIMIT_OFFSET(1, 0)",
 			workflow.StatusPending,
 		).Scan(&dueExists)
@@ -213,7 +214,8 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 			}
 			sr.rows = append(sr.rows, c)
 		}
-		if err = rows.Err(); err != nil {
+		err = rows.Err()
+		if err != nil {
 			return errors.Trace(err)
 		}
 		if sr != nil {

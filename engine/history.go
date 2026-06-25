@@ -96,7 +96,8 @@ func (e *Engine) scanHistorySteps(ctx context.Context, shardNum int, rows *sql.R
 		step.Error = strings.TrimSpace(errMsg)
 		steps = append(steps, step)
 	}
-	if err := rows.Err(); err != nil {
+	err := rows.Err()
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	for i := range steps {
@@ -292,7 +293,8 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		for nrows.Next() {
 			var nid int
 			var ntoken string
-			if err := nrows.Scan(&nid, &ntoken); err != nil {
+			err := nrows.Scan(&nid, &ntoken)
+			if err != nil {
 				return nil, errors.Trace(err)
 			}
 			key := fmt.Sprintf("%d-%d-%s", shardNum, nid, strings.TrimSpace(ntoken))
@@ -684,14 +686,16 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		var flowIDs []any
 		for rows.Next() {
 			var fid int
-			if err := rows.Scan(&fid); err != nil {
+			err := rows.Scan(&fid)
+			if err != nil {
 				rows.Close()
 				return errors.Trace(err)
 			}
 			flowIDs = append(flowIDs, fid)
 		}
 		rows.Close()
-		if err := rows.Err(); err != nil {
+		err = rows.Err()
+		if err != nil {
 			return errors.Trace(err)
 		}
 		if len(flowIDs) == 0 {
@@ -786,11 +790,13 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	}
 
 	var finalState map[string]any
-	if err = json.Unmarshal([]byte(finalStateJSON), &finalState); err != nil {
+	err = json.Unmarshal([]byte(finalStateJSON), &finalState)
+	if err != nil {
 		return "", errors.Trace(err)
 	}
 	var graph workflow.Graph
-	if err = json.Unmarshal([]byte(graphJSON), &graph); err != nil {
+	err = json.Unmarshal([]byte(graphJSON), &graph)
+	if err != nil {
 		return "", errors.Trace(err)
 	}
 

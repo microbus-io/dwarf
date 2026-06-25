@@ -82,7 +82,8 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 	var hits []wedgedCaller
 	for rows.Next() {
 		var w wedgedCaller
-		if err := rows.Scan(&w.stepID, &w.stepDepth, &w.flowID); err != nil {
+		err := rows.Scan(&w.stepID, &w.stepDepth, &w.flowID)
+		if err != nil {
 			rows.Close()
 			e.logger.ErrorContext(ctx, "Wedge sweep: scanning parked subgraph step", "shard", shard, "error", err)
 			return

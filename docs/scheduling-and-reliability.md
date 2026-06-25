@@ -12,7 +12,7 @@ and immutable for its life:
 eng.Create(ctx, "report", state, &workflow.FlowOptions{Priority: 5})
 ```
 
-Lower numbers run first. An unset priority (0) uses the engine default (`WithDefaultPriority`, 100 by
+Lower numbers run first. An unset priority (0) uses the engine default (`SetDefaultPriority`, 100 by
 default). Priority is **strict and cluster-wide**: as long as any priority-5 work is due, no priority-10
 work runs. There is no aging — a steady stream of high-priority flows will starve lower bands by design, so
 reserve the top bands for genuinely urgent work.
@@ -64,7 +64,7 @@ See [Writing tasks → Handling transient failures](tasks.md#handling-transient-
 
 ## Time budgets
 
-Each step's `ExecuteTask` call runs under a context deadline set by `WithTimeBudget` (default 2 minutes),
+Each step's `ExecuteTask` call runs under a context deadline set by `SetTimeBudget` (default 2 minutes),
 applied uniformly to every step. Your executor must honor `ctx` cancellation. For a tighter per-task bound,
 enforce it inside your executor (shorten the call context); the engine's budget is the outer ceiling. There
 is no engine-imposed *flow* deadline — implement one in author space with a `CreatedAt()` guard (see
@@ -72,7 +72,7 @@ is no engine-imposed *flow* deadline — implement one in author space with a `C
 
 ## Workers
 
-`WithWorkers` (default 64) caps per-replica concurrency. It's a generous static ceiling — a worker blocked
+`SetWorkers` (default 64) caps per-replica concurrency. It's a generous static ceiling — a worker blocked
 on an `ExecuteTask` call is just a goroutine and a socket, so over-provisioning is cheap.
 
 Next: [Observability](observability.md).

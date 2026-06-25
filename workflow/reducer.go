@@ -332,7 +332,8 @@ func unmarshalArray(v any, reducerName string) ([]json.RawMessage, error) {
 		return nil, errors.Trace(err)
 	}
 	var arr []json.RawMessage
-	if err := json.Unmarshal(raw, &arr); err != nil {
+	err = json.Unmarshal(raw, &arr)
+	if err != nil {
 		return nil, errors.New("%s reducer requires array, got %s", reducerName, jsonKind(v))
 	}
 	return arr, nil
@@ -347,7 +348,8 @@ func unmarshalObject(v any, reducerName string) (map[string]json.RawMessage, err
 		return nil, errors.Trace(err)
 	}
 	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &obj); err != nil {
+	err = json.Unmarshal(raw, &obj)
+	if err != nil {
 		return nil, errors.New("%s reducer requires object, got %s", reducerName, jsonKind(v))
 	}
 	return obj, nil
@@ -362,7 +364,8 @@ func unmarshalNumber(v any, reducerName string) (float64, error) {
 		return 0, errors.Trace(err)
 	}
 	var n float64
-	if err := json.Unmarshal(raw, &n); err != nil {
+	err = json.Unmarshal(raw, &n)
+	if err != nil {
 		return 0, errors.New("%s reducer requires number, got %s", reducerName, jsonKind(v))
 	}
 	return n, nil
@@ -377,7 +380,8 @@ func unmarshalBool(v any, reducerName string) (bool, error) {
 		return false, errors.Trace(err)
 	}
 	var b bool
-	if err := json.Unmarshal(raw, &b); err != nil {
+	err = json.Unmarshal(raw, &b)
+	if err != nil {
 		return false, errors.New("%s reducer requires bool, got %s", reducerName, jsonKind(v))
 	}
 	return b, nil
@@ -392,7 +396,8 @@ func unmarshalString(v any, reducerName string) (string, error) {
 		return "", errors.Trace(err)
 	}
 	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
+	err = json.Unmarshal(raw, &s)
+	if err != nil {
 		return "", errors.New("%s reducer requires string, got %s", reducerName, jsonKind(v))
 	}
 	return s, nil

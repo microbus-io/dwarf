@@ -408,14 +408,16 @@ func (e *Engine) recoverFlow(ctx context.Context, flowKey string, stateOverrides
 	var failed []failedStep
 	for rows.Next() {
 		var fs failedStep
-		if err := rows.Scan(&fs.stepID, &fs.lineageID, &fs.state); err != nil {
+		err := rows.Scan(&fs.stepID, &fs.lineageID, &fs.state)
+		if err != nil {
 			rows.Close()
 			return errors.Trace(err)
 		}
 		failed = append(failed, fs)
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil {
+	err = rows.Err()
+	if err != nil {
 		return errors.Trace(err)
 	}
 	if len(failed) == 0 {
@@ -451,10 +453,12 @@ func (e *Engine) recoverFlow(ctx context.Context, flowKey string, stateOverrides
 			}
 			// A failed step has no DAG subtree; reap a subgraph caller's child (no-op for a leaf) and undo
 			// its cohort bump (a failed branch contributed arrivals+1, failures+1; no-op when lineage_id=0).
-			if err := e.deleteSubgraphFlowsRootedAt(ctx, tx, fs.stepID); err != nil {
+			err = e.deleteSubgraphFlowsRootedAt(ctx, tx, fs.stepID)
+			if err != nil {
 				return errors.Trace(err)
 			}
-			if err := e.undoCohortBumps(ctx, tx, fs.lineageID, 1, 1); err != nil {
+			err = e.undoCohortBumps(ctx, tx, fs.lineageID, 1, 1)
+			if err != nil {
 				return errors.Trace(err)
 			}
 			restarted = append(restarted, fs.stepID)

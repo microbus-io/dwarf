@@ -226,10 +226,11 @@ func (e *Engine) start(ctx context.Context, flowKey string) error {
 	}
 
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		if _, err := tx.ExecContext(ctx,
+		_, err := tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
 			workflow.StatusPending, flowID, workflow.StatusCreated,
-		); err != nil {
+		)
+		if err != nil {
 			return errors.Trace(err)
 		}
 		res, err := tx.ExecContext(ctx,
@@ -337,15 +338,23 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	// A DeleteOnCompletion flow deletes its row on success, so its outcome is never observable via a
 	// snapshot - awaiting it would race the delete (return completed if it won, 404 if it lost). Reject it
-	// up front, deterministically, regardless of whether the row is still present; the result is delivered
-	// through NotifyOnStop instead.
-	if shardNum, flowID, flowToken, err := parseFlowKey(flowKey); err == nil {
-		if db, derr := e.shard(shardNum); derr == nil {
-			var deleteOnCompletion bool
-			if qerr := db.QueryRowContext(ctx, "SELECT delete_on_completion FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&deleteOnCompletion); qerr == nil && deleteOnCompletion {
-				return nil, errors.New("cannot await a flow created with DeleteOnCompletion; use NotifyOnStop", http.StatusBadRequest)
-			}
-		}
+	// up front, deterministically; the result is delivered through NotifyOnStop instead. A missing row
+	// (already deleted, or never existed) falls through to the normal snapshot path, which reports it.
+	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	db, err := e.shard(shardNum)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	var deleteOnCompletion bool
+	err = db.QueryRowContext(ctx, "SELECT delete_on_completion FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&deleteOnCompletion)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, errors.Trace(err)
+	}
+	if deleteOnCompletion {
+		return nil, errors.New("cannot await a flow created with DeleteOnCompletion; use NotifyOnStop", http.StatusBadRequest)
 	}
 
 	stopped := func(s string) bool {
@@ -433,7 +442,8 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 	priority := math.MaxInt
 	var notBeforeDelayMs sql.NullFloat64
-	if db, err := e.shard(shard); err == nil {
+	db, err := e.shard(shard)
+	if err == nil {
 		db.QueryRowContext(ctx,
 			"SELECT priority, DATE_DIFF_MILLIS(not_before, NOW_UTC()) FROM dwarf_steps WHERE step_id=?",
 			stepID,
