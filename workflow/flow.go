@@ -39,13 +39,10 @@ type Flow struct {
 	interrupt        bool
 	interruptPayload map[string]any
 
-	// Dynamic subgraph / subtask request. subgraphURL holds the URL (a graph URL for Subgraph, a task
-	// URL for Subtask); subgraphTaskName is both the discriminator and the synthesized graph's name:
-	// non-empty => subtask (the engine builds a single-task graph named subgraphTaskName), empty =>
-	// regular subgraph (the engine LoadGraph's the URL).
-	subgraphURL      string
-	subgraphInput    map[string]any
-	subgraphTaskName string
+	// Dynamic subgraph request. subgraphURL holds the graph URL the engine LoadGraph's; subgraphInput is
+	// the child's initial state.
+	subgraphURL   string
+	subgraphInput map[string]any
 
 	// Park resolution (inbound), set by the orchestrator on dispatch from the step row.
 	// interruptDone/resumeData resolve an Interrupt park; subgraphDone/subgraphResult/
@@ -473,27 +470,6 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 	return true, nil
 }
 
-// Subtask launches a single task as an isolated child flow, the task-level sibling of Subgraph. The
-// engine synthesizes a trivial one-node graph (named name) around taskURL, so any task endpoint can be
-// invoked without a graph definition; everything after launch - parking, re-entry, the out-pointer
-// result, cancel/interrupt propagation - is identical to Subgraph. name is required and non-empty (the
-// node's display name in diagrams/history).
-//
-// Pass a task URL, not a graph URL: a graph URL would be wrapped as a one-node graph and dispatched as a
-// task, failing at dispatch. (Symmetrically, Subgraph with a task URL fails in LoadGraph.)
-func (f *Flow) Subtask(name, taskURL string, in any, out any) (yield bool, err error) {
-	if name == "" {
-		return false, errors.New("subtask name is required")
-	}
-	yield, err = f.Subgraph(taskURL, in, out)
-	if yield && err == nil {
-		// A fresh request was armed this dispatch; mark it a subtask. (On re-entry Subgraph returns
-		// yield=false and nothing is armed, so this is correctly skipped.)
-		f.subgraphTaskName = name
-	}
-	return yield, err
-}
-
 /*
 Retry requests the orchestrator to re-execute this task with exponential backoff. The bound is
 wall-clock, not a count: Retry returns true (the caller should return nil) while the next attempt would
@@ -581,14 +557,13 @@ func (f *Flow) InterruptRequested() (map[string]any, bool) {
 	return f.interruptPayload, f.interrupt
 }
 
-// SubgraphRequested returns the request URL, input state, the subtask name, and true if Subgraph or
-// Subtask was called. taskName discriminates: non-empty means Subtask (the engine synthesizes a
-// single-task graph named taskName), empty means a regular Subgraph (the engine loads the graph by URL).
-func (f *Flow) SubgraphRequested() (url string, input map[string]any, taskName string, ok bool) {
+// SubgraphRequested returns the request URL, input state, and true if Subgraph was called. The engine
+// loads the graph by URL.
+func (f *Flow) SubgraphRequested() (url string, input map[string]any, ok bool) {
 	if f.subgraphURL == "" {
-		return "", nil, "", false
+		return "", nil, false
 	}
-	return f.subgraphURL, f.subgraphInput, f.subgraphTaskName, true
+	return f.subgraphURL, f.subgraphInput, true
 }
 
 // --- Internal helpers ---
@@ -667,7 +642,6 @@ type flowJSON struct {
 	InterruptPayload       map[string]any `json:"interruptPayload,omitzero"`
 	SubgraphURL            string         `json:"subgraphURL,omitzero"`
 	SubgraphInput          map[string]any `json:"subgraphInput,omitzero"`
-	SubgraphTaskName       string         `json:"subgraphTaskName,omitzero"`
 	InterruptDone          bool           `json:"interruptDone,omitzero"`
 	ResumeData             map[string]any `json:"resumeData,omitzero"`
 	SubgraphDone           bool           `json:"subgraphDone,omitzero"`
@@ -696,7 +670,6 @@ func (f *Flow) MarshalJSON() ([]byte, error) {
 		InterruptPayload:       f.interruptPayload,
 		SubgraphURL:            f.subgraphURL,
 		SubgraphInput:          f.subgraphInput,
-		SubgraphTaskName:       f.subgraphTaskName,
 		InterruptDone:          f.interruptDone,
 		ResumeData:             f.resumeData,
 		SubgraphDone:           f.subgraphDone,
@@ -730,7 +703,6 @@ func (f *Flow) UnmarshalJSON(data []byte) error {
 	f.interruptPayload = wire.InterruptPayload
 	f.subgraphURL = wire.SubgraphURL
 	f.subgraphInput = wire.SubgraphInput
-	f.subgraphTaskName = wire.SubgraphTaskName
 	f.interruptDone = wire.InterruptDone
 	f.resumeData = wire.ResumeData
 	f.subgraphDone = wire.SubgraphDone

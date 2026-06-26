@@ -191,29 +191,8 @@ The result is unmarshaled into the trailing `out` pointer (a `*struct` for type 
 for dynamic access, or `nil` to ignore it). Pass `nil` input for "no arguments," or `f.Snapshot()` to forward
 the parent's whole state. See [Fan-out & subgraphs → Subgraphs](fan-out-and-subgraphs.md#subgraphs).
 
-### Subtask
-
-Run a **single task** as an isolated child flow — the task-level sibling of `Subgraph`. There is no graph
-for the child: the engine synthesizes a one-node graph named by the first argument (shown in diagrams and
-history). Same park-and-resume, out-pointer shape; only the explicit input and output cross the boundary.
-
-```go
-func score(ctx context.Context, f *workflow.Flow) error {
-    var out struct {
-        Score int `json:"score"`
-    }
-    yield, err := f.Subtask("Score", "risk.score", map[string]any{
-        "id": f.GetString("customerID"),
-    }, &out)
-    if yield || err != nil {
-        return err
-    }
-    f.SetInt("riskScore", out.Score)
-    return nil
-}
-```
-
-Use `Subgraph` to invoke a whole workflow; use `Subtask` to invoke one task without defining a graph for it.
+To invoke a single unit of work as an isolated child, declare a one-node workflow and `Subgraph` it. A bare task
+is only ever a node in a graph; it is not an independently invocable unit.
 
 ## Baggage (host context)
 

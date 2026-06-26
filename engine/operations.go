@@ -49,33 +49,6 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	return flowKey, errors.Trace(err)
 }
 
-// singleTaskGraph synthesizes the trivial one-node graph used to run a single task as its own flow:
-// a node named name that dispatches to taskURL, transitioning straight to END. name is the node's
-// display name (shown in diagrams/history); taskURL is the dispatch target. Shared by createTask and
-// the Subtask dispatch path in processStep, so the wrap lives in one place.
-func singleTaskGraph(name, taskURL string) *workflow.Graph {
-	g := workflow.NewGraph(name)
-	g.SetEndpoint(name, taskURL) // node Name=name (display), dispatch URL=taskURL
-	g.AddTransition(name, workflow.END)
-	return g
-}
-
-// createTask creates a flow that executes a single task and then terminates. name is the node's display
-// name (shown in diagrams/history); taskURL is the dispatch target. The synthesized one-node graph is
-// named name and dispatches to taskURL.
-func (e *Engine) createTask(ctx context.Context, name, taskURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
-	if name == "" {
-		return "", errors.New("task name is required", http.StatusBadRequest)
-	}
-	if taskURL == "" {
-		return "", errors.New("task URL is required", http.StatusBadRequest)
-	}
-	graph := singleTaskGraph(name, taskURL)
-	shardNum := rand.IntN(e.numDBShards()) + 1
-	flowKey, err = e.createWithGraph(ctx, shardNum, taskURL, graph, initialState, 0, "", "", e.resolveFlowOptions(opts))
-	return flowKey, errors.Trace(err)
-}
-
 // baggageMap normalizes an opaque baggage value to the map delivered on the context. It round-trips
 // through JSON - the same path the value takes through the baggage column - so the create-time
 // GraphLoader sees exactly what every dispatch-time callback sees (e.g. JSON numbers as float64),
@@ -94,10 +67,10 @@ func baggageMap(v any) map[string]any {
 	return m
 }
 
-// createWithGraph is the shared implementation for create, createTask, and continue. opts.Baggage is
+// createWithGraph is the shared implementation for create and continue. opts.Baggage is
 // the opaque host value, marshalled to the flow's baggage column (any JSON value, like initialState).
 // parentTraceParent controls the flow's own "workflow" span: empty mints a detached root span (top-level
-// Create / CreateTask / Continue, each its own trace); non-empty parents the span under that context (a
+// Create / Continue, each its own trace); non-empty parents the span under that context (a
 // subgraph nests under the caller step's span). The minted span's context is stored in the flow's
 // trace_parent column and reconstructed as the parent of every per-step span.
 func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState any, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions) (flowKey string, err error) {
@@ -123,7 +96,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 
 	flowToken := randomIdentifier(16)
 	stepToken := randomIdentifier(16)
-	// opts.TimeBudget is resolved (create/createTask/continue) or inherited (subgraph). Fall back to the
+	// opts.TimeBudget is resolved (create/continue) or inherited (subgraph). Fall back to the
 	// live default only as defense for an unresolved path.
 	timeBudget := opts.TimeBudget
 	if timeBudget <= 0 {

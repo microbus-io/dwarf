@@ -118,10 +118,8 @@ child and parks the parent step (`yield == true` — return immediately); when t
 re-runs and the call returns `yield == false` with the child's final state unmarshaled into the trailing
 `out` pointer (`*struct`, `*map[string]any`, or `nil` to ignore).
 
-**Subtask** is the single-task sibling: `f.Subtask(name, taskURL, in, &out)` runs **one task** as an
-isolated child flow with no graph definition — the engine synthesizes a one-node graph named `name`.
-Everything after launch (park, re-entry, out-pointer, cancel/interrupt propagation) is identical to
-`Subgraph`. Use `Subgraph` for a whole workflow, `Subtask` for a single task.
+To invoke a single unit of work in isolation, declare a one-node workflow and `Subgraph` it. A bare task is
+only ever a node in a graph, never an independently invocable child on its own.
 
 - Pass `nil` input for "no arguments"; pass `f.Snapshot()` to forward the parent's entire state.
 - A small upstream adapter task using `f.Transform(newKey, oldKey, …)` is a clean way to reshape parent

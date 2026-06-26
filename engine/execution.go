@@ -316,7 +316,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if resultFlow.GotoRequested() != "" {
 			signalCount++
 		}
-		if _, _, _, ok := resultFlow.SubgraphRequested(); ok {
+		if _, _, ok := resultFlow.SubgraphRequested(); ok {
 			signalCount++
 		}
 		if signalCount > 1 {
@@ -329,7 +329,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Single-park guard
 	{
 		_, interruptArmed := resultFlow.InterruptRequested()
-		_, _, _, subgraphArmed := resultFlow.SubgraphRequested()
+		_, _, subgraphArmed := resultFlow.SubgraphRequested()
 		if (interruptArmed || subgraphArmed) && (interruptDone || subgraphDone) {
 			err = errors.New("task '%s' armed a second park on an already-resolved step", taskName)
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
@@ -345,23 +345,15 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 
 	// Handle subgraph
-	if subgraphURL, subgraphInput, subgraphTaskName, subgraphRequested := resultFlow.SubgraphRequested(); subgraphRequested {
-		e.logger.DebugContext(ctx, "Task requested subflow", "task", taskName, "flow", workflowURL, "subflow", subgraphURL, "subtask", subgraphTaskName)
-		// taskName != "" => Subtask: synthesize a trivial single-task graph in-engine (no LoadGraph,
-		// no host round-trip). Empty => regular Subgraph: load the graph by URL from the host.
-		var subgraphGraph *workflow.Graph
-		if subgraphTaskName != "" {
-			subgraphGraph = singleTaskGraph(subgraphTaskName, subgraphURL)
-		} else {
-			// Bound the subgraph LoadGraph by the caller flow's budget (the create-time LoadGraph uses the caller's ctx).
-			loadCtx, loadCancel := context.WithTimeout(workflow.ContextWithBaggage(ctx, baggage), time.Duration(flowTimeBudgetMs)*time.Millisecond)
-			g, lerr := e.host.LoadGraph(loadCtx, subgraphURL)
-			loadCancel()
-			if lerr != nil {
-				e.failStep(ctx, shardNum, stepID, flowID, flowToken, lerr, taskName)
-				return errors.Trace(lerr)
-			}
-			subgraphGraph = g
+	if subgraphURL, subgraphInput, subgraphRequested := resultFlow.SubgraphRequested(); subgraphRequested {
+		e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "flow", workflowURL, "subgraph", subgraphURL)
+		// Bound the subgraph LoadGraph by the caller flow's budget (the create-time LoadGraph uses the caller's ctx).
+		loadCtx, loadCancel := context.WithTimeout(workflow.ContextWithBaggage(ctx, baggage), time.Duration(flowTimeBudgetMs)*time.Millisecond)
+		subgraphGraph, lerr := e.host.LoadGraph(loadCtx, subgraphURL)
+		loadCancel()
+		if lerr != nil {
+			e.failStep(ctx, shardNum, stepID, flowID, flowToken, lerr, taskName)
+			return errors.Trace(lerr)
 		}
 		// Persist the task's changes AND park the caller step in one UPDATE, BEFORE the child flow is made
 		// dispatchable by start below. The ordering is load-bearing: completeSurgraphFlow revives this
@@ -400,11 +392,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
-		disposition := "subgraph"
-		if subgraphTaskName != "" {
-			disposition = "subtask"
-		}
-		e.metricStepExecuted(ctx, taskName, disposition)
+		e.metricStepExecuted(ctx, taskName, "subgraph")
 		return nil
 	}
 

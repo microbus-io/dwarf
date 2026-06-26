@@ -178,7 +178,7 @@ Create --> created --> Start --> running --> completed
                         cancelled (via Cancel)
 ```
 
-1. **Create** (or `CreateTask`) inserts a flow and its first step in `created` status.
+1. **Create** inserts a flow and its first step in `created` status.
 2. **Start** transitions the flow to `running` and its steps to `pending`, then rings the doorbell.
 3. A worker picks up the step, executes the task, and evaluates transitions to create next steps.
 4. Repeats until no transitions match (flow completes), a task errors (flow fails), or the flow is cancelled.
@@ -191,10 +191,7 @@ Create --> created --> Start --> running --> completed
 These are methods on `*engine.Engine`.
 
 **Create** - Creates a flow without starting it. Calls the `LoadGraph` to fetch the graph, creates the flow row, and
-inserts the entry-point step - both in `created` status. The graph JSON is frozen at creation. `CreateTask(ctx,
-name, taskURL, …)` wraps a single task in a trivial one-node graph (via `singleTaskGraph`) - `name` is the node's
-display name (required, non-empty, placed before `taskURL` to match `NewGraph`/`SetEndpoint`/`flow.Subtask`),
-`taskURL` the dispatch target.
+inserts the entry-point step - both in `created` status. The graph JSON is frozen at creation.
 
 **Start** - Transitions a `created` flow to `running`. Atomically updates all `created` steps to `pending` and the
 flow to `running` in one transaction, then rings the doorbell for the current step. Whether the flow notifies the
@@ -708,19 +705,9 @@ direction. `in` is any JSON-marshalable value (a struct or a `map[string]any`), 
 is unmarshaled into by JSON tag (`parseMapInto`), or nil to ignore the result. A typed struct on either side gives
 field-level type safety without manual `map[string]any` casts.
 
-**Subtask is the single-task front door.** `flow.Subtask(name, url string, in any, out any) (yield bool, err
-error)` runs one task as an isolated child flow, the task-level sibling of `Subgraph`. The *only* difference is at
-launch: instead of calling the host's `LoadGraph`, the engine synthesizes a trivial one-node graph around `url`
-(`singleTaskGraph(name, url)` - the same wrap `CreateTask` uses), named `name`, dispatching to `url`. So any task
-endpoint runs as a child flow with no graph definition. Everything after launch is **identical** to `Subgraph` - it
-is *not* a new park kind: same `parked=parkedSubgraph`, same `subgraph_done`/`subgraph_result`/`subgraph_error`,
-same `surgraph_*` chain, re-entry, history, cancel/interrupt propagation, and wedge recovery. Mechanically `Subtask`
-is a thin wrapper over `Subgraph` that records the (required, non-empty) `name`; the carrier holds the request in
-`subgraphURL` + `subgraphInput`, and `subgraphTaskName` is both the discriminator and the synthesized graph's name
-(non-empty ⟹ subtask; empty ⟹ subgraph). `SubgraphRequested` returns that `taskName`, and `processStep` branches on
-it: non-empty → `singleTaskGraph`, empty → `LoadGraph`. The launch disposition metric is `status="subtask"` vs
-`"subgraph"`. (`Subtask`/`Subgraph` are the two mechanisms; "subflow" is the umbrella for any child flow and is the
-name of the typed host client, not an engine primitive.)
+The engine has no single-task front door: a bare task is only ever a node in a graph, never an independently
+invocable child. To run one unit of work in isolation, declare a one-node workflow and `Subgraph` it. ("Subflow" is
+the umbrella term for any child flow and is the name of the typed host client, not an engine primitive.)
 
 **Into the child:** `SubgraphRequested` passes `subgraphInput` (the `toStateMap`-normalized `in`) directly to
 `createSubgraphFlow` as the child's initial state (nil normalized to `{}`). No merge with parent state. A caller
@@ -766,7 +753,7 @@ turn reads the prior flow's `baggage` column and carries it forward, unless the 
 narrower context scrubs it in an entry adapter task.
 
 **Delivery is context, authoring is `FlowOptions`.** Baggage is *set* explicitly and visibly (a typed
-`FlowOptions` field on `Create`/`CreateTask`/`Run`) but *read* ambiently (off ctx), so the value the engine never
+`FlowOptions` field on `Create`/`Run`) but *read* ambiently (off ctx), so the value the engine never
 interprets is not a parameter on every callback and task handler. The engine injects it into the ctx it hands the
 callbacks (in `processStep` for the per-step executor, and at the create-time `LoadGraph` call); the
 `ContextWithBaggage`/`BaggageFrom` helpers live in the `workflow` package so task-defining code reads baggage
@@ -924,8 +911,8 @@ split used for `time_budget_ms`/`baggage`.
 `resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to
 `SetDefaultPriority`, the fairness key falls back to the host-supplied key (or `""`), the weight to `1`, and the time
 budget to `SetTimeBudget` (the engine imposes no ceiling on it; see "Time Budgets"). These values are immutable for the
-flow's life (switching a flow's fairness key mid-run would be a self-promotion abuse vector). `Create`/`CreateTask`
-resolve from options. `createSubgraphFlow` **inherits** the parent flow's values (priority, fairness, *and*
+flow's life (switching a flow's fairness key mid-run would be a self-promotion abuse vector). `Create`
+resolves from options. `createSubgraphFlow` **inherits** the parent flow's values (priority, fairness, *and*
 time budget), so a high-priority parent never silently spawns default-priority descendants. `Continue`, by contrast,
 **fresh-resolves** scheduling/budget from its own options (only `baggage` is inherited from the prior turn) - it
 runs through `resolveFlowOptions` like a new `Create`, so a high-priority turn does not carry forward unless the
@@ -1027,7 +1014,7 @@ metrics: spans need cross-replica continuity, metrics don't).
 
 - **Root "workflow" span at `Create`** (`mintWorkflowSpan`, called from `createWithGraph`). The span is
   created, `End()`ed immediately, and its W3C context serialized into the flow's `trace_parent` column
-  (`extractTraceParent`). Top-level `Create`/`CreateTask`/`Continue` mint it **detached**
+  (`extractTraceParent`). Top-level `Create`/`Continue` mint it **detached**
   (`trace.ContextWithSpan(ctx, nil)` strips any ambient request span) so each flow - and each `Continue`
   turn - roots its own fresh trace rather than nesting under the request that created it.
 - **Per-step span in `processStep`**, named by the task. The stored `trace_parent` is reconstructed
@@ -1315,7 +1302,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
 
 ### Per-Function Crash Analysis
 
-- **Create / CreateTask** - insert flow (`created`) -> insert step (`created`) -> update flow's `step_id`. A crash
+- **Create** - insert flow (`created`) -> insert step (`created`) -> update flow's `step_id`. A crash
   after the step insert leaves `step_id=0` with a `created` step; the flow is inert until `Start`, and
   `pollPendingSteps` picks up the orphaned `pending` step. Self-healing.
 - **Start / Resume** - one transaction (steps -> `pending`, flow -> `running`). A crash after commit but before the

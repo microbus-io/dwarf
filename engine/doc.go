@@ -56,7 +56,7 @@ limitations under the License.
 //
 // # Operations
 //
-// Create or CreateTask makes a flow; Start runs it; Await blocks until it stops; Run is
+// Create makes a flow; Start runs it; Await blocks until it stops; Run is
 // Create+Start+Await in one call. Snapshot/History/Step/List inspect; Resume/ResumeBreak continue a
 // paused flow; Cancel/Restart/RestartFrom/Continue manage lifecycle; Delete/Purge retain. See the
 // repository's docs/ directory for guides.
