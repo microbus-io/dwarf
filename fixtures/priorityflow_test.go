@@ -70,7 +70,6 @@ func TestPriorityflow(t *testing.T) {
 			map[string]any{"delayMs": 1500, "tag": "holder"},
 			&workflow.FlowOptions{Priority: 1})
 		assert.NoError(err)
-		err = eng.Start(ctx, holderKey)
 		assert.NoError(err)
 
 		time.Sleep(100 * time.Millisecond)
@@ -90,7 +89,6 @@ func TestPriorityflow(t *testing.T) {
 				map[string]any{"delayMs": 50, "tag": fl.tag},
 				&workflow.FlowOptions{Priority: fl.priority})
 			assert.NoError(err)
-			err = eng.Start(ctx, k)
 			assert.NoError(err)
 			keys = append(keys, k)
 		}

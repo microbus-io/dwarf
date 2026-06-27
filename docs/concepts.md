@@ -26,16 +26,15 @@ A **flow** is a single execution of a graph — one running instance. It has a u
 current position, and carries a state map that evolves as tasks run. A flow moves through a lifecycle:
 
 ```
-created ──Start──► running ──► completed
-                     │  ▲              \
-            Interrupt│  │Resume         ► failed   (an unhandled task error)
-                     ▼  │
-                interrupted              ► cancelled (via Cancel)
+Create ──► running ──► completed
+             │  ▲              \
+    Interrupt│  │Resume         ► failed   (an unhandled task error)
+             ▼  │
+        interrupted              ► cancelled (via Cancel)
 ```
 
-- **created** — the flow exists but no work has started.
-- **running** — a task is being dispatched/executed.
-- **interrupted** — parked for external input (a task called `Interrupt`, or a breakpoint was hit).
+- **running** — `Create` makes a flow and immediately runs it; a task is being dispatched/executed.
+- **interrupted** — parked for external input (a task called `Interrupt`).
 - **completed** — finished; no transition matched.
 - **failed** — a task returned an error with no matching error handler.
 - **cancelled** — terminated by `Cancel`.
@@ -47,7 +46,7 @@ A flow's key is a composite string of the form `{shard}-{flowID}-{token}`. You p
 A **step** is one task execution within a flow. Each step captures an immutable **input snapshot**
 (`state`), the **output delta** the task produced (`changes`), and metadata (status, error, timings,
 attempt count). Steps are numbered by depth; parallel fan-out siblings share a depth. The next step's
-input is `merge(state, changes)`. This immutability is what makes checkpointing, restart, and crash
+input is `merge(state, changes)`. This immutability is what makes checkpointing, forking, and crash
 recovery possible — every step is a durable, replayable record.
 
 The full step-by-step record is available with `History`; one step with `Step`.
@@ -93,7 +92,7 @@ Every step has three JSON facets:
 
 A task receives `merge(state, changes-so-far)` as its working state. It mutates the flow; the engine
 records the diff as that step's `changes`. The next step's `state` is the merge of the current step's
-state and changes. Because each step's snapshot is frozen, you can restart from any step, replay history,
+state and changes. Because each step's snapshot is frozen, you can fork from any step, replay history,
 or recover a crashed flow without ambiguity about "what did this task see?".
 
 ## How it fits together

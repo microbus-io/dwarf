@@ -65,7 +65,6 @@ func TestFairnessflow(t *testing.T) {
 			map[string]any{"delayMs": 1500, "tag": "holder"},
 			&workflow.FlowOptions{Priority: 1, FairnessKey: "_holder"})
 		assert.NoError(err)
-		eng.Start(ctx, holderKey)
 
 		time.Sleep(100 * time.Millisecond)
 
@@ -75,13 +74,11 @@ func TestFairnessflow(t *testing.T) {
 			hk, _ := eng.Create(ctx, "fairnessflow.verify:428/fairness",
 				map[string]any{"delayMs": 8, "tag": "heavy"},
 				&workflow.FlowOptions{Priority: 5, FairnessKey: "heavy", FairnessWeight: 4})
-			eng.Start(ctx, hk)
 			keys = append(keys, hk)
 
 			lk, _ := eng.Create(ctx, "fairnessflow.verify:428/fairness",
 				map[string]any{"delayMs": 8, "tag": "light"},
 				&workflow.FlowOptions{Priority: 5, FairnessKey: "light", FairnessWeight: 1})
-			eng.Start(ctx, lk)
 			keys = append(keys, lk)
 
 			_ = i

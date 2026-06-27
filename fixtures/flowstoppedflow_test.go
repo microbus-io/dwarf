@@ -106,9 +106,6 @@ func TestFlowstoppedflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
-			return
-		}
 		ev := waitStop(t, flowKey)
 		assert.Equal("host-complete", ev.hostname)
 		assert.Equal(workflow.StatusCompleted, ev.outcome.Status)
@@ -123,9 +120,6 @@ func TestFlowstoppedflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
-			return
-		}
 		ev := waitStop(t, flowKey)
 		assert.Equal("host-fail", ev.hostname)
 		assert.Equal(workflow.StatusFailed, ev.outcome.Status)
@@ -138,9 +132,6 @@ func TestFlowstoppedflow(t *testing.T) {
 		flowKey, err := eng.Create(ctx, "flowstoppedflow.verify:428/flow", map[string]any{"mode": "interrupt"},
 			&workflow.FlowOptions{NotifyOnStop: true, Baggage: map[string]any{"host": "host-cancel"}})
 		if !assert.NoError(err) {
-			return
-		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
 			return
 		}
 		// First stop is the interrupt; drain it before cancelling.

@@ -68,10 +68,6 @@ func TestInterruptflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		err = eng.Start(ctx, flowKey)
-		if !assert.NoError(err) {
-			return
-		}
 
 		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {

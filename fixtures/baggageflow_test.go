@@ -120,9 +120,6 @@ func TestBaggageflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
-			return
-		}
 		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
@@ -162,9 +159,6 @@ func TestBaggageflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
-			return
-		}
 		if _, err = eng.Await(ctx, flowKey); !assert.NoError(err) {
 			return
 		}
@@ -176,11 +170,8 @@ func TestBaggageflow(t *testing.T) {
 		mu.Unlock()
 
 		// Turn 2 (Continue) must inherit turn 1's baggage even though the caller passes none.
-		nextKey, err := eng.Continue(ctx, flowKey, nil, nil)
+		nextKey, err := eng.Continue(ctx, flowKey, nil)
 		if !assert.NoError(err) {
-			return
-		}
-		if !assert.NoError(eng.Start(ctx, nextKey)) {
 			return
 		}
 		outcome, err := eng.Await(ctx, nextKey)
@@ -222,9 +213,6 @@ func TestBaggageflow(t *testing.T) {
 		// so the flow completes without panicking.
 		flowKey, err := eng.Create(ctx, "baggageflow.verify:428/parent", nil, nil)
 		if !assert.NoError(err) {
-			return
-		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
 			return
 		}
 		outcome, err := eng.Await(ctx, flowKey)

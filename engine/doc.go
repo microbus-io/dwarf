@@ -56,8 +56,8 @@ limitations under the License.
 //
 // # Operations
 //
-// Create makes a flow; Start runs it; Await blocks until it stops; Run is
-// Create+Start+Await in one call. Snapshot/History/Step/List inspect; Resume/ResumeBreak continue a
-// paused flow; Cancel/Restart/RestartFrom/Continue manage lifecycle; Delete/Purge retain. See the
-// repository's docs/ directory for guides.
+// Create makes a flow and runs it; Await blocks until it stops; Run is Create+Await in one
+// call. Snapshot/History/Step/List inspect; Resume continues a paused flow; Cancel/Continue
+// manage lifecycle; Fork clones a terminal flow from a chosen step into a new flow for
+// non-destructive recovery; Delete/Purge retain. See the repository's docs/ directory for guides.
 package engine

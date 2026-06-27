@@ -44,9 +44,46 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	shardNum := rand.IntN(e.numDBShards()) + 1
-	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, initialState, 0, "", "", opts)
+
+	// FlowOptions.ThreadKey joins an existing thread: the shard is encoded in the key, and the new flow
+	// adopts that flow's thread_id/thread_token (a mid-thread flow's thread_id is not its own flow_id).
+	// Empty starts a fresh thread on a random shard.
+	shardNum, threadID, threadToken := 0, 0, ""
+	if opts.ThreadKey != "" {
+		shardNum, threadID, threadToken, err = e.resolveThread(ctx, opts.ThreadKey)
+		if err != nil {
+			return "", errors.Trace(err)
+		}
+	} else {
+		shardNum = rand.IntN(e.numDBShards()) + 1
+	}
+	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, initialState, threadID, threadToken, "", opts, 0, 0, 0)
 	return flowKey, errors.Trace(err)
+}
+
+// resolveThread parses a FlowKey identifying a thread and returns the thread's shard, id, and token. The
+// shard is encoded in the key; the thread_id/thread_token are read from the referenced flow (which may be
+// mid-thread, so its thread_id differs from its own flow_id). Verifies the flow exists (token-checked).
+func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum, threadID int, threadToken string, err error) {
+	shardNum, flowID, flowToken, err := parseFlowKey(threadKey)
+	if err != nil {
+		return 0, 0, "", errors.Trace(err)
+	}
+	db, err := e.shard(shardNum)
+	if err != nil {
+		return 0, 0, "", errors.Trace(err)
+	}
+	err = db.QueryRowContext(ctx,
+		"SELECT thread_id, thread_token FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+		flowID, flowToken,
+	).Scan(&threadID, &threadToken)
+	if err == sql.ErrNoRows {
+		return 0, 0, "", errors.New("thread not found", http.StatusNotFound)
+	}
+	if err != nil {
+		return 0, 0, "", errors.Trace(err)
+	}
+	return shardNum, threadID, strings.TrimSpace(threadToken), nil
 }
 
 // baggageMap normalizes an opaque baggage value to the map delivered on the context. It round-trips
@@ -67,13 +104,20 @@ func baggageMap(v any) map[string]any {
 	return m
 }
 
-// createWithGraph is the shared implementation for create and continue. opts.Baggage is
-// the opaque host value, marshalled to the flow's baggage column (any JSON value, like initialState).
-// parentTraceParent controls the flow's own "workflow" span: empty mints a detached root span (top-level
-// Create / Continue, each its own trace); non-empty parents the span under that context (a
-// subgraph nests under the caller step's span). The minted span's context is stored in the flow's
-// trace_parent column and reconstructed as the parent of every per-step span.
-func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState any, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions) (flowKey string, err error) {
+// createWithGraph is the shared creation path for Create, Continue, and subgraph children. It inserts the
+// flow (already `running`) and its entry step (`pending`, immediately claimable) in one transaction, then
+// rings the doorbell - so a flow always creates-and-runs; there is no externally-visible `created` resting
+// state. opts.Baggage is the opaque host value marshalled to the baggage column. parentTraceParent controls
+// the flow's "workflow" span: empty mints a detached root span (top-level Create/Continue, each its own
+// trace); non-empty parents it under that context (a subgraph nests under the caller step's span).
+//
+// surgraphFlowID/surgraphStepID link a subgraph child to its parent caller step; they are 0 for a
+// top-level flow. The linkage is written in the SAME insert transaction, so the child is fully
+// parent-linked before it can be dispatched and complete - otherwise its completion could not revive the
+// parent. (The parent caller is parked by processStep before this is called, the complementary half of
+// that ordering.) callerStepDepth is the caller step's step_depth (0 for a top-level flow): the entry step
+// is created at callerStepDepth+1, so a subgraph's depths continue from the caller (informational only).
+func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState any, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID int) (flowKey string, err error) {
 	entryPoint := graph.EntryPoint()
 	if entryPoint == "" {
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
@@ -102,24 +146,6 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	if timeBudget <= 0 {
 		timeBudget = e.taskTimeBudget()
 	}
-
-	db, err := e.shard(shardNum)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-
-	entryURL := dispatchURLOf(graph, entryPoint)
-	newFlowID, err := e.createWithGraphTx(ctx, db, flowToken, workflowURL, graph.Name(), graphJSON, baggageJSON, traceParent, threadID, threadToken, entryPoint, entryURL, stateJSON, stepToken, timeBudget, opts)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	e.logger.DebugContext(ctx, "Flow created", "flow", workflowURL, "task", entryPoint)
-	return fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, flowToken), nil
-}
-
-// createWithGraphTx inserts a flow and its entry step in one retryable transaction.
-func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken, workflowURL, workflowName string, graphJSON, baggageJSON []byte, traceParent string, threadID int, threadToken, entryPoint, entryURL string, stateJSON []byte, stepToken string, timeBudget time.Duration, opts *workflow.FlowOptions) (int64, error) {
-	var newFlowID int64
 	notifyOnStop := 0
 	if opts.NotifyOnStop {
 		notifyOnStop = 1
@@ -128,27 +154,33 @@ func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken
 	if opts.DeleteOnCompletion {
 		deleteOnCompletion = 1
 	}
-	err := db.Transact(ctx, func(tx *sequel.Tx) error {
+
+	db, err := e.shard(shardNum)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	entryURL := dispatchURLOf(graph, entryPoint)
+
+	var newFlowID, newStepID int64
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
 		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, notify_on_stop, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			flowToken, workflowURL, workflowName, string(graphJSON), string(baggageJSON), traceParent, workflow.StatusCreated, notifyOnStop, deleteOnCompletion, opts.Priority, opts.FairnessKey, opts.FairnessWeight, timeBudget.Milliseconds(),
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, notify_on_stop, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, started_at)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
+			flowToken, workflowURL, graph.Name(), string(graphJSON), string(baggageJSON), traceParent, workflow.StatusRunning, surgraphFlowID, surgraphStepID, notifyOnStop, deleteOnCompletion, opts.Priority, opts.FairnessKey, opts.FairnessWeight, timeBudget.Milliseconds(),
 		)
 		if err != nil {
 			return errors.Trace(err)
 		}
 
-		startDelayMs := int64(0)
-		if !opts.StartAt.IsZero() {
-			if d := time.Until(opts.StartAt).Milliseconds(); d > 0 {
-				startDelayMs = d
-			}
-		}
-		newStepID, err := tx.InsertReturnID(ctx, "step_id",
+		// Entry step is pending and immediately claimable (not_before=NOW, lease_expires=NOW). Its depth
+		// continues from the caller: callerStepDepth+1 (1 for a top-level flow, where callerStepDepth is 0).
+		// A flow that should wait before running uses an entry gate task with flow.Sleep, not a creation-time
+		// delay.
+		newStepID, err = tx.InsertReturnID(ctx, "step_id",
 			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, 1, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-			newFlowID, stepToken, entryPoint, entryURL, string(stateJSON), workflow.StatusCreated, timeBudget.Milliseconds(), startDelayMs, leaseMargin.Milliseconds(), opts.Priority, opts.FairnessKey, opts.FairnessWeight,
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?)",
+			newFlowID, callerStepDepth+1, stepToken, entryPoint, entryURL, string(stateJSON), workflow.StatusPending, timeBudget.Milliseconds(), opts.Priority, opts.FairnessKey, opts.FairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -167,69 +199,19 @@ func (e *Engine) createWithGraphTx(ctx context.Context, db *sequel.DB, flowToken
 		)
 		return nil
 	})
-	return newFlowID, errors.Trace(err)
-}
-
-// start transitions a created flow to running, ringing the doorbell for its entry step.
-func (e *Engine) start(ctx context.Context, flowKey string) error {
-	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
 	if err != nil {
-		return errors.Trace(err)
-	}
-	db, err := e.shard(shardNum)
-	if err != nil {
-		return errors.Trace(err)
+		return "", errors.Trace(err)
 	}
 
-	var flowStatus, workflowURL string
-	var stepID int
-	err = db.QueryRowContext(ctx,
-		"SELECT status, step_id, workflow_url FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
-		flowID, flowToken,
-	).Scan(&flowStatus, &stepID, &workflowURL)
-	if err == sql.ErrNoRows {
-		return errors.New("flow not found", http.StatusNotFound)
-	}
-	if err != nil {
-		return errors.Trace(err)
-	}
-	flowStatus = strings.TrimSpace(flowStatus)
-	if flowStatus != workflow.StatusCreated {
-		return errors.New("flow is not in created status (status: %s)", flowStatus, http.StatusConflict)
-	}
-
-	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
-			workflow.StatusPending, flowID, workflow.StatusCreated,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, started_at=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=? AND status=?",
-			workflow.StatusRunning, flowID, workflow.StatusCreated,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return errors.New("flow is already started", http.StatusConflict)
-		}
-		return nil
-	})
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "from", workflow.StatusCreated, "to", workflow.StatusRunning)
+	flowKey = fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, flowToken)
+	e.logger.DebugContext(ctx, "Flow created and started", "flow", workflowURL, "task", entryPoint)
 	e.metricFlowStarted(ctx, workflowURL)
-
-	// Ring the doorbell locally and wake peer replicas: a replica that started the flow but has no spare
-	// capacity (or zero workers) must not leave the first step unclaimed until a peer's backstop poll.
-	e.enqueueStep(ctx, shardNum, stepID)
-	return nil
+	// Ring the doorbell so a replica with spare capacity claims the entry step immediately, rather than
+	// waiting for the backstop poll. A missed doorbell is recovered by pollPendingSteps.
+	e.enqueueStep(ctx, shardNum, int(newStepID))
+	return flowKey, nil
 }
+
 
 // snapshot returns the current outcome of a flow.
 func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
@@ -283,9 +265,12 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 		// For interrupted, query the leaf step's state and interrupt payload
 		var stepStateJSON, stepChangesJSON string
 		var interruptPayloadJSON sql.NullString
+		// Pick the same interrupted leaf Resume's chain walk would act on (earliest-updated, step_id
+		// tiebreak) - not by step_depth, which is only an informational ordering and varies with branch
+		// length (loops/gotos) without indicating which interrupt resolves next.
 		err = db.QueryRowContext(ctx,
 			"SELECT state, changes, interrupt_payload FROM dwarf_steps"+
-				" WHERE flow_id=? AND status=? ORDER BY step_depth DESC, step_id DESC LIMIT_OFFSET(1, 0)",
+				" WHERE flow_id=? AND status=? ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)",
 			flowID, workflow.StatusInterrupted,
 		).Scan(&stepStateJSON, &stepChangesJSON, &interruptPayloadJSON)
 		if err == nil {
@@ -600,13 +585,8 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 
 // run creates, starts, and awaits a flow in one call.
 func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
-	flowKey, err = e.create(ctx, workflowURL, initialState, opts)
+	flowKey, err = e.create(ctx, workflowURL, initialState, opts) // auto-starts
 	if err != nil {
-		return "", nil, errors.Trace(err)
-	}
-	err = e.start(ctx, flowKey)
-	if err != nil {
-		e.cancel(ctx, flowKey, "")
 		return "", nil, errors.Trace(err)
 	}
 	outcome, err = e.await(ctx, flowKey)

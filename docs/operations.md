@@ -10,12 +10,13 @@ key**.
 ### Create and Run
 
 ```go
-flowKey, err := eng.Create(ctx, workflowURL, initialState, opts) // makes a flow in "created"
-outcome,  err := eng.Run(ctx, workflowURL, initialState, opts)   // Create + Start + Await
+flowKey, err := eng.Create(ctx, workflowURL, initialState, opts) // makes a running flow
+outcome,  err := eng.Run(ctx, workflowURL, initialState, opts)   // Create + Await
 ```
 
-`Create` calls your host's `LoadGraph`, inserts the flow and its entry step, and freezes the graph — but does
-not start it. `Run` does the whole round-trip and returns the final `*workflow.FlowOutcome`.
+`Create` calls your host's `LoadGraph`, inserts the flow and its entry step, freezes the graph, and starts
+running it immediately — the flow is `running` when `Create` returns. `Run` does the whole round-trip and
+returns the final `*workflow.FlowOutcome`.
 
 `initialState` is any JSON-marshalable value (typically `map[string]any`). `opts` is a
 `*workflow.FlowOptions` (nil for defaults):
@@ -25,10 +26,14 @@ not start it. `Run` does the whole round-trip and returns the final `*workflow.F
     Priority:    10,                             // lower runs first; 0 uses the engine default
     FairnessKey: "tenant-42",                    // fair-scheduling bucket
     FairnessWeight: 4,                           // relative share within the key
-    StartAt:     time.Now().Add(time.Hour),      // delay the entry step
     Baggage:     map[string]any{"actor": "ada"}, // opaque host context; read with BaggageFrom(ctx)
+    ThreadKey:   "1-42-abc",                     // join an existing thread (any flow key in it)
 }
 ```
+
+Setting `ThreadKey` joins the new flow into an existing thread (identified by any flow key in that thread)
+while specifying its scheduling/baggage explicitly — the explicit-policy counterpart to `Continue`, which
+inherits the thread's policy. A nonexistent `ThreadKey` is rejected with a 404.
 
 To run a single unit of work with the engine's durability and scheduling, declare a one-node workflow and
 create a flow for it like any other. A bare task is only ever a node in a graph, not an independently
@@ -38,21 +43,33 @@ invocable unit.
 > failure surfaces as `outcome.Status == "failed"` with `outcome.Error` set — so you never have to
 > disambiguate "the workflow rejected my input" from "the engine is down."
 
-### Start and stop notifications
+### Stop notifications
 
 ```go
-err := eng.Start(ctx, flowKey) // created -> running
-
 // To be notified on stop instead of blocking on Await, opt in at Create:
 flowKey, _ := eng.Create(ctx, workflowURL, state, &workflow.FlowOptions{NotifyOnStop: true})
-_ = eng.Start(ctx, flowKey)
 ```
 
-`Start` transitions a created flow to running and signals the workers to pick it up. When a flow is
-created with `FlowOptions.NotifyOnStop`, the engine invokes your host's `FlowStopped(ctx, outcome)` when
-the flow stops — useful for push notification instead of blocking on `Await`. The engine carries no
-delivery address: the flow's baggage rides on the callback's `ctx` (`workflow.BaggageFrom(ctx)`), so your
-host decides where to deliver (e.g. read a target you stored in baggage at `Create`).
+When a flow is created with `FlowOptions.NotifyOnStop`, the engine invokes your host's
+`FlowStopped(ctx, outcome)` when the flow stops — useful for push notification instead of blocking on
+`Await`. The engine carries no delivery address: the flow's baggage rides on the callback's `ctx`
+(`workflow.BaggageFrom(ctx)`), so your host decides where to deliver (e.g. read a target you stored in
+baggage at `Create`).
+
+### Deferring work
+
+`Create` runs a flow immediately — there is no separate start step and no creation-time delay (no `StartAt`).
+Deferral is expressed in author space:
+
+- **Wait until a wall-clock time (durably):** make the entry task a **gate** that calls `flow.Sleep(until)`
+  and returns; the real work is the next step. The delay is persisted on the step's `not_before`, so it
+  survives restarts — and the flow's status honestly reflects that it ran its gate, not that it's idle.
+- **Wait for an external signal:** make the entry task call `flow.Interrupt(...)`; the flow parks as
+  `interrupted`, and the caller resumes it with `Resume(ctx, flowKey, data)` when ready. (This replaces the
+  old "create now, start later" staging.)
+
+Recurring schedules (cron) are not an engine concern: run a separate scheduler that calls `Create`/`Run` on
+its schedule.
 
 ### Await
 
@@ -111,33 +128,24 @@ return value of its `Interrupt` call (it is **not** merged into state):
 err := eng.Resume(ctx, flowKey, map[string]any{"approved": true})
 ```
 
-### Breakpoints and ResumeBreak
+## Terminating, and recovering with Fork
 
-`BreakBefore` sets or clears a breakpoint that pauses a flow *before* a named task runs. Continue it with
-`ResumeBreak`, which merges your overrides into the about-to-run step's state (the breakpoint pauses before
-the task, so injecting state is how you influence it):
-
-```go
-err := eng.BreakBefore(ctx, flowKey, "charge", true)        // pause before "charge"
-// ... flow pauses at the breakpoint ...
-err = eng.ResumeBreak(ctx, flowKey, map[string]any{"amount": 0}) // edit state, then proceed
-```
-
-`Resume` rejects a breakpoint pause and `ResumeBreak` rejects an interrupt pause (both return 409) — the
-two carry different semantics and the engine refuses to guess.
-
-## Terminating and recovering
+A terminal flow (`completed`/`failed`/`cancelled`) is **immutable** — it is never re-run in place. To
+recover or explore, `Fork` clones a terminal flow up to a chosen step into a *new*, self-contained flow and
+re-runs from there, optionally with state overrides; the original is never touched.
 
 ```go
-err := eng.Cancel(ctx, flowKey, "superseded by newer order")  // abort; surfaced as CancelReason
-err := eng.Restart(ctx, flowKey, stateOverrides)              // re-run a terminated flow from the entry
-err := eng.RestartFrom(ctx, stepKey, stateOverrides)          // surgically rewind from a chosen step
+err := eng.Cancel(ctx, flowKey, "superseded by newer order") // abort; surfaced as CancelReason
+
+// Re-run from a chosen step (its key comes from History) with an edit that lets it succeed.
+newFlowKey, err := eng.Fork(ctx, stepKey, map[string]any{"amount": 0})
 ```
 
-`Cancel` aborts a created, running, or interrupted flow (and its subgraph hierarchy). `Restart` re-runs a
-terminated flow as a fresh attempt from the entry point; `RestartFrom` rewinds the subtree below a chosen
-step without resetting the flow's run timestamps — for operator-driven recovery. Both accept optional state
-overrides.
+`Cancel` aborts a running or interrupted flow (and its subgraph hierarchy). `Fork`'s step may be
+**any recorded step**, including one inside a subgraph; the clone re-runs from that step and bubbles back up
+to the root. The fork inherits the origin flow's scheduling and baggage, forces notify-on-stop off, and does
+not auto-delete. Because the fork is an ordinary new flow, recover a partially-failed fan-out by forking one
+failed branch at a time.
 
 ## Continue a thread
 
@@ -145,16 +153,18 @@ overrides.
 identity forward — the basis for multi-turn conversations and iterative processes:
 
 ```go
-nextKey, err := eng.Continue(ctx, threadKey, additionalState, opts)
+nextKey, err := eng.Continue(ctx, threadKey, additionalState)
 ```
 
 The `threadKey` is any flow key in the thread (the original `Create` key works). The prior turn's final
-state passes through, merged with `additionalState` using the graph's reducers; baggage is inherited unless
-`opts.Baggage` overrides it. The new flow is returned in `created` — call `Start` to run it.
+state passes through, merged with `additionalState` using the graph's reducers. `Continue` inherits the
+thread's policy from the latest completed flow — priority, fairness, time budget, baggage, and
+notify-on-stop. The new flow is returned already `running`. (To join a thread but set policy explicitly
+instead of inheriting it, use `Create`/`Run` with `FlowOptions.ThreadKey`.)
 
 ## Retention
 
-The engine never auto-purges — every flow is potentially resurrectable (resume, continue, restart). Manage
+The engine never auto-purges — every flow is potentially resurrectable (resume, continue, fork). Manage
 retention explicitly:
 
 ```go

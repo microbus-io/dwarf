@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,26 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
+
+// waitFlowStatus polls the flow row until it reaches want, failing the test on timeout. Used where the
+// settled status is reached after a transient one (e.g. interrupted -> failed) so Await is unsuitable.
+func waitFlowStatus(t *testing.T, e *Engine, flowKey, want string, timeout time.Duration) {
+	t.Helper()
+	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
+	testarossa.For(t).NoError(err)
+	db, err := e.shard(shardNum)
+	testarossa.For(t).NoError(err)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var s string
+		db.QueryRowContext(context.Background(), "SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&s)
+		if strings.TrimSpace(s) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("flow %s did not reach status %q within %s", flowKey, want, timeout)
+}
 
 // shardFlowCount returns the number of flows on a shard.
 func shardFlowCount(t *testing.T, e *Engine, shardNum int) int {
@@ -81,7 +102,6 @@ func TestDeleteOnCompletion_DeletesOnSuccess(t *testing.T) {
 
 	fk, err := e.Create(ctx, "doc/solo", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	assert.NoError(e.Start(ctx, fk))
 
 	waitFlowDeleted(t, e, fk, 5*time.Second)
 }
@@ -109,7 +129,6 @@ func TestDeleteOnCompletion_AwaitReturns404(t *testing.T) {
 
 	fk, err := e.Create(ctx, "doc/await", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	assert.NoError(e.Start(ctx, fk))
 
 	_, err = e.Await(ctx, fk)
 	assert.Error(err)
@@ -144,7 +163,7 @@ func TestDeleteOnCompletion_RunReturns404(t *testing.T) {
 }
 
 // TestDeleteOnCompletion_KeepsFailedFlow asserts a failed flow is retained even with DeleteOnCompletion set
-// - failures stay available for diagnosis / Restart / Recover.
+// - failures stay available for diagnosis / Fork.
 func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -165,7 +184,6 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 
 	fk, err := e.Create(ctx, "doc/failing", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	assert.NoError(e.Start(ctx, fk))
 	waitFlowStatus(t, e, fk, workflow.StatusFailed, 5*time.Second)
 
 	// The failed flow row is still present (not auto-deleted).
@@ -217,7 +235,6 @@ func TestDeleteOnCompletion_CascadesSubgraph(t *testing.T) {
 	assert.NoError(err)
 	shardNum, _, _, err := parseFlowKey(fk)
 	assert.NoError(err)
-	assert.NoError(e.Start(ctx, fk))
 
 	// Root completes and deletes itself plus the subgraph child - no flows remain.
 	deadline := time.Now().Add(5 * time.Second)

@@ -85,10 +85,6 @@ func TestCancelledfanoutflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		err = eng.Start(ctx, flowKey)
-		if !assert.NoError(err) {
-			return
-		}
 		time.Sleep(1 * time.Second)
 		err = eng.Cancel(ctx, flowKey, "")
 		if !assert.NoError(err) {

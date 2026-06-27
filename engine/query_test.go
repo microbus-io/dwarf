@@ -50,12 +50,21 @@ func TestQuery_WorkflowName(t *testing.T) {
 	e.RunInTest(t)
 
 	const alphas, betas = 3, 2
+	var keys []string
 	for range alphas {
-		_, err := e.Create(ctx, "q.verify:0/alpha", nil, nil)
+		k, err := e.Create(ctx, "q.verify:0/alpha", nil, nil)
 		assert.NoError(err)
+		keys = append(keys, k)
 	}
 	for range betas {
-		_, err := e.Create(ctx, "q.verify:0/beta", nil, nil)
+		k, err := e.Create(ctx, "q.verify:0/beta", nil, nil)
+		assert.NoError(err)
+		keys = append(keys, k)
+	}
+	// Create auto-starts; wait for all to complete so the query/purge below see a stable terminal state
+	// (Purge skips running flows).
+	for _, k := range keys {
+		_, err := e.Await(ctx, k)
 		assert.NoError(err)
 	}
 

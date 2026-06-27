@@ -163,7 +163,6 @@ func TestSoakflow(t *testing.T) {
 			if !assert.NoError(err) {
 				return
 			}
-			eng.Start(ctx, k)
 			active = append(active, started{key: k, branch: branch})
 			total++
 

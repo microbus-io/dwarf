@@ -93,9 +93,6 @@ func TestFanoutSubgraphflow(t *testing.T) {
 			if !assert.NoError(err) {
 				return
 			}
-			if err := eng.Start(ctx, k); !assert.NoError(err) {
-				return
-			}
 			keys = append(keys, k)
 		}
 

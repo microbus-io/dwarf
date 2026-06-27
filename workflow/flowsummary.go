@@ -29,10 +29,9 @@ type FlowSummary struct {
 	Error        string    `json:"error,omitzero"`
 	CancelReason string    `json:"cancelReason,omitzero"`
 	CreatedAt    time.Time `json:"createdAt,omitzero"`
-	// StartedAt is when this attempt began dispatching (Start, or a Restart/RestartFrom
-	// rewind). Distinct from CreatedAt, which is the row's INSERT moment and is only
-	// reset on full Restart. Use StartedAt for duration metrics; CreatedAt for "when did
-	// this flow first appear."
+	// StartedAt is when this attempt began dispatching (set by Start). Distinct from
+	// CreatedAt, which is the row's INSERT moment. Use StartedAt for duration metrics;
+	// CreatedAt for "when did this flow first appear."
 	StartedAt time.Time `json:"startedAt,omitzero"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 	// Priority is the flow's scheduling priority (>= 1, lower runs first), resolved at Create.

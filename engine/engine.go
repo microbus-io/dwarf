@@ -498,10 +498,10 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 			resolved.FairnessWeight = opts.FairnessWeight
 		}
 		resolved.FairnessKey = opts.FairnessKey
-		resolved.StartAt = opts.StartAt
 		resolved.Baggage = opts.Baggage
 		resolved.NotifyOnStop = opts.NotifyOnStop
 		resolved.DeleteOnCompletion = opts.DeleteOnCompletion
+		resolved.ThreadKey = opts.ThreadKey
 		if opts.TimeBudget > 0 {
 			resolved.TimeBudget = opts.TimeBudget
 		}
@@ -511,16 +511,12 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 
 // --- Public API ---
 
-// Create creates a new flow for a workflow without starting it. opts carries the flow's scheduling
-// (priority/fairness/start-at) and its opaque host Baggage; nil opts uses defaults.
+// Create creates a new flow for a workflow and starts it, returning the running flow's key. opts carries
+// the flow's policy (scheduling, NotifyOnStop, DeleteOnCompletion, Baggage, ThreadKey); nil uses defaults.
+// For a flow that must wait for an external trigger, have the entry task call flow.Interrupt and resume it
+// with Resume (which, unlike a separate start, also delivers a payload).
 func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	return e.create(ctx, workflowURL, initialState, opts)
-}
-
-// Start transitions a created flow to running. Whether the flow notifies the host on stop is set at
-// Create via FlowOptions.NotifyOnStop.
-func (e *Engine) Start(ctx context.Context, flowKey string) error {
-	return e.start(ctx, flowKey)
 }
 
 // Snapshot returns the current state and status of a flow.
@@ -535,12 +531,7 @@ func (e *Engine) Fingerprint(ctx context.Context, flowKey string) (fingerprint s
 
 // Resume continues a flow paused by flow.Interrupt.
 func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) error {
-	return e.resume(ctx, flowKey, false, resumeData)
-}
-
-// ResumeBreak continues a flow paused at a BreakBefore breakpoint.
-func (e *Engine) ResumeBreak(ctx context.Context, flowKey string, stateOverrides any) error {
-	return e.resume(ctx, flowKey, true, stateOverrides)
+	return e.resume(ctx, flowKey, resumeData)
 }
 
 // Cancel aborts a flow.
@@ -548,21 +539,12 @@ func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) erro
 	return e.cancel(ctx, flowKey, reason)
 }
 
-// Restart re-executes a flow from the beginning.
-func (e *Engine) Restart(ctx context.Context, flowKey string, stateOverrides any) error {
-	return e.restart(ctx, flowKey, stateOverrides)
-}
-
-// RestartFrom re-executes a flow from a specific step.
-func (e *Engine) RestartFrom(ctx context.Context, stepKey string, stateOverrides any) error {
-	return e.restartFrom(ctx, stepKey, stateOverrides)
-}
-
-// Recover restarts every failed step of a failed flow. The flow must be in failed status. The optional
-// stateOverrides are merged into each failed step's state - target shared upstream input fields, not
-// per-branch fields. Idempotent: re-running picks up any step that fails again.
-func (e *Engine) Recover(ctx context.Context, flowKey string, stateOverrides any) error {
-	return e.recoverFlow(ctx, flowKey, stateOverrides)
+// Fork clones a terminal flow's prefix up to the given step into a new, self-contained running flow and
+// re-executes from that step with optional stateOverrides applied to it. The original flow is never
+// modified. The fork inherits the original's scheduling and baggage (it does not take FlowOptions).
+// Returns the new flow's key.
+func (e *Engine) Fork(ctx context.Context, stepKey string, stateOverrides any) (string, error) {
+	return e.forkFlow(ctx, stepKey, stateOverrides)
 }
 
 // History returns the step-by-step execution history of a flow.
@@ -607,14 +589,11 @@ func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, 
 	return e.run(ctx, workflowURL, initialState, opts)
 }
 
-// Continue creates a new flow from the latest completed flow in a thread.
-func (e *Engine) Continue(ctx context.Context, threadKey string, additionalState any, opts *workflow.FlowOptions) (string, error) {
-	return e.continueFlow(ctx, threadKey, additionalState, opts)
-}
-
-// BreakBefore sets or clears a breakpoint before a named task.
-func (e *Engine) BreakBefore(ctx context.Context, flowKey string, taskName string, enabled bool) error {
-	return e.setBreakpoint(ctx, flowKey, taskName, enabled)
+// Continue creates a new flow from the latest completed flow in a thread, inheriting that flow's policy
+// (scheduling, baggage, notify-on-stop) - it does not take FlowOptions. For a turn with different policy,
+// use Create with FlowOptions.ThreadKey.
+func (e *Engine) Continue(ctx context.Context, threadKey string, additionalState any) (string, error) {
+	return e.continueFlow(ctx, threadKey, additionalState)
 }
 
 // HistoryMermaid writes the execution DAG of a flow as a Mermaid diagram.

@@ -159,51 +159,80 @@ multi-turn conversation; defaults to `flow_id` (each flow its own thread). `Cont
 `thread_id`. Subgraph flows always start their own thread to avoid contaminating the parent's continuation chain. The
 flowKey returned by the initial `Create` doubles as the threadKey.
 
+### Terminal flows are immutable
+
+**A terminal flow (`completed`/`failed`/`cancelled`) is immutable.** Its outcome (`status`, `final_state`,
+`error`/`cancel_reason`) is frozen; the only operations on it are **read** (Snapshot/History/Continue-source/
+Fork-source) and **removal** (Delete/Purge). There is **no in-place re-run of a terminal flow** - recovery and
+exploration happen only via **`Fork`**, which clones a terminal flow up to a chosen step into a *new*
+self-contained flow and never mutates the original. This invariant governs which operations may exist; it is
+why `Restart`/`RestartFrom`/`Recover` (in-place rewinds) were removed.
+
+Two clarifications: *immutable ≠ permanent* - Delete/Purge/DeleteOnCompletion still **remove** terminal flows.
+And *outcome*-frozen, not byte-frozen - a straggler fan-out sibling can still settle to terminal after its
+flow terminalizes (convergence to the frozen outcome), and `flow.Retry` rewinds a step in place but only while
+the flow is `running` (pre-terminal). `interrupted` is **not** terminal - `Resume` still mutates it.
+
 ### Flow Lifecycle
 
 ```
-Create --> created --> Start --> running --> completed
-                                  |  ^
-                                  |  | Resume
-                                  v  |
-                              interrupted
-                                  |
-                                  v
-                        failed <--+
-                          |
-                          | Restart / RestartFrom
-                          v
-                        running --> ...
+Create --> running --> completed   (terminal, immutable)
+            |  ^
+            |  | Resume
+            v  |
+        interrupted
+            |
+            v
+  failed   (terminal, immutable)
 
-                        cancelled (via Cancel)
+  cancelled (terminal, immutable, via Cancel)
+
+Recovery/exploration: Fork clones a terminal flow up to a chosen step into a NEW flow.
 ```
 
-1. **Create** inserts a flow and its first step in `created` status.
-2. **Start** transitions the flow to `running` and its steps to `pending`, then rings the doorbell.
-3. A worker picks up the step, executes the task, and evaluates transitions to create next steps.
-4. Repeats until no transitions match (flow completes), a task errors (flow fails), or the flow is cancelled.
-5. Tasks can call `flow.Interrupt()` to pause for external input; `Resume` continues.
-6. Terminated flows can be re-run with `Restart` (from the entry step) or `RestartFrom` (from a chosen step),
-   optionally with state overrides. A task can also re-run itself in place via `flow.Retry`.
+1. **Create** inserts a flow and its entry step and starts them in one transaction - the flow is returned
+   already `running` (its entry step `pending`), and the doorbell is rung. There is no separate `Start`
+   step and no externally-visible `created` resting state (`created` survives only as an internal/transient
+   state inside Create's own transaction and Fork's leaf-gate).
+2. A worker picks up the step, executes the task, and evaluates transitions to create next steps.
+3. Repeats until no transitions match (flow completes), a task errors (flow fails), or the flow is cancelled.
+4. Tasks can call `flow.Interrupt()` to pause for external input; `Resume` continues. A flow that should
+   *wait* before doing work uses this as **staged start**: an entry task that interrupts, resumed when ready
+   (such a flow rests as `interrupted`, not `created`).
+5. A terminal flow is never re-run in place. To re-run from a chosen step (optionally with state overrides),
+   `Fork` clones it into a new flow. A task can re-run *itself* in place via `flow.Retry` while still running.
 
 ### Engine Operations
 
 These are methods on `*engine.Engine`.
 
-**Create** - Creates a flow without starting it. Calls the `LoadGraph` to fetch the graph, creates the flow row, and
-inserts the entry-point step - both in `created` status. The graph JSON is frozen at creation.
+**Policy is set once at genesis and inherited by derivation; the operation is the inherit-vs-default selector.**
+A flow's policy (priority, fairness, time budget, baggage, notify-on-stop, thread membership) is authored
+explicitly via `FlowOptions` only at **genesis** - `Create`/`Run`. **Derived** operations carry policy from
+their source rather than taking `FlowOptions`: `Continue` inherits the thread's policy, `Fork` inherits the
+origin flow's, and subgraph children inherit the parent's. So there is no `opts` on `Continue`/`Fork`; choosing
+one of those operations *is* choosing "inherit." The explicit-policy escape hatch for a continuation is
+`Create` with `FlowOptions.ThreadKey` set (join an existing thread but specify policy yourself).
 
-**Start** - Transitions a `created` flow to `running`. Atomically updates all `created` steps to `pending` and the
-flow to `running` in one transaction, then rings the doorbell for the current step. Whether the flow notifies the
-host on stop is a Create-time property (`FlowOptions.NotifyOnStop`).
+**Create** - Creates a flow **and runs it**. Calls `LoadGraph` to fetch the graph, then inserts the flow row
+(already `running`) and its entry-point step (`pending`) in one transaction and rings the doorbell - returning a
+running flow's key. The graph JSON is frozen at creation. There is no separate start call; `created` is never an
+externally-visible resting state. `FlowOptions.ThreadKey` (optional) joins the new flow into an existing thread
+(any flowKey in that thread; a bad/stale key 404s). The engine has **no creation-time delay** (no `StartAt`):
+every flow runs as soon as it is created. A flow that should wait runs author-side - an entry **gate** task that
+calls `flow.Sleep(until)` for a one-shot durable delay, or an interrupt-first entry task + `Resume` (staged
+start) - and recurring schedules are an external concern (a host/cron service that calls `Create`/`Run` on a
+schedule), never the engine's.
 
 **Snapshot** - Returns a `*workflow.FlowOutcome` for a flow at the current moment. For terminal statuses
 (`completed`/`failed`/`cancelled`) it returns the flow's `final_state` (plus `Error`/`CancelReason`); for
-`interrupted` it returns the leaf interrupted step's merged `state+changes` and its `interrupt_payload`.
-For a `running` or `created` flow it returns the status with an **empty `State`** - dwarf does not
-currently reconstruct the live in-flight merged state (including the fan-out `step_id=0` case). Exposing a
-live fan-out snapshot is a deliberately-deferred behavioral decision (it returns work-in-progress state
-that no other path exposes); confirm against product intent before implementing.
+`interrupted` it returns the interrupted step's merged `state+changes` and its `interrupt_payload`. When the
+flow has several interrupted steps, Snapshot picks the **same one the next `Resume` will resolve** - the
+earliest-`updated_at` (`step_id` tiebreak), *not* by `step_depth` - so a Snapshot reports exactly the
+interrupt the next Resume acts on. For a `running` flow it returns the status with an **empty `State`** -
+dwarf does not currently reconstruct the live in-flight merged state (including the fan-out `step_id=0`
+case). Exposing a live fan-out snapshot is a deliberately-deferred behavioral decision (it returns
+work-in-progress state that no other path exposes); confirm against product intent before implementing.
 
 **Resume** - Continues a flow paused by `flow.Interrupt`. Walks up the surgraph chain (`surgraphChain`) and down the
 interrupted subgraph chain (`interruptedSubgraphChain`) to the leaf interrupted step. Records resume data on the
@@ -214,50 +243,46 @@ to `pending`, transitions all flows in the chain to `running`. Callable on any f
 both directions. If multiple fan-out siblings interrupt, each `Resume` handles one; the flow returns to `running`
 only when no interrupted steps remain.
 
-**ResumeBreak** - Continues a flow paused at a `BreakBefore` breakpoint. Shares `Resume`'s chain-walking and re-park
-machinery (both wrap the private `resume`), but instead of recording resume data it merges the caller's
-`stateOverrides` onto the leaf's `state` (replace semantics) so the about-to-run task observes the edits - the
-breakpoint pauses *before* the task runs, so injecting state is the only way to influence it. `breakpoint_hit=1` is
-left set so the re-dispatch skips the breakpoint.
-
-**Resume and ResumeBreak are strictly separated, never auto-routed.** A breakpoint pause and a `flow.Interrupt` pause
-both carry flow status `interrupted`; the discriminator is the *leaf step*, where exactly one of `interrupt_done=1`
-(an interrupt park) or `breakpoint_hit=1` with `interrupt_done=0` (a breakpoint) holds. The private `resume` reads
-those flags and fails with 409 when the leaf's kind does not match the entry point: `Resume` refuses a breakpoint,
-`ResumeBreak` refuses an interrupt. This is deliberate - detection tells you *which leaf you are at*, not *what the
-caller intended*, and the two have different observable effects (a resume payload is delivered to `flow.Interrupt`'s
-return and is **not** merged into state; breakpoint overrides **are** merged). Auto-routing a mismatch would silently
-merge an interrupt answer into state under field names the task may not read, let the task re-arm and re-pause, and
-strand the caller. The kind stays a *step*-level distinction (not a flow status) because fan-out branches can pause
-for different reasons at once.
-
 **Cancel** - Aborts a created, running, or interrupted flow. Walks up (`surgraphChain`) and down (`allSubgraphFlows`)
 the hierarchy, atomically cancels all steps across all flows, computes `final_state` per flow, and cancels all flows
 with per-flow `final_state` via CASE - all in one transaction. Callable on any flow in the chain. Takes a reason
 string surfaced as `FlowOutcome.CancelReason`.
 
-**Restart / RestartFrom** - `Restart` re-runs a flow from its entry point as a fresh attempt (resets `created_at` and
-`started_at`); `RestartFrom` surgically rewinds the subtree below a chosen step without resetting the flow's run
-timestamps. Both re-zero `parked` on the target step (see "Step Parking").
+**Fork** - The sole recovery/exploration operation, given terminal-flow immutability. `Fork(stepKey,
+stateOverrides)` clones a terminal flow's execution tree up to a chosen step into a brand-new,
+self-contained **root** flow, then re-runs from that step (optionally with `stateOverrides` merged onto it). The
+original is never mutated. It takes no `FlowOptions` - as a derived operation it inherits the origin flow's
+scheduling and baggage (and forces notify-on-stop off). The fork point may be **any recorded step** - in the
+root flow or deep inside a subgraph (so an execution-DAG UI can fork from any clickable node). Returns the new
+flow's key.
 
-**Recover** - the operator front door to "re-run the failures" without locating each failed step by hand. Requires
-the flow in `failed` status (409 otherwise), and rewinds every `failed` step **in one transaction**. The failed set
-is exactly the *unhandled* failures (an errored step routed by `onError` is
-`completed`, not `failed`), so a completed sibling in a fan-out is excluded. A failed step has no DAG subtree
-(transitions only run on success), so each rewind is in place: undo its cohort bump (`undoCohortBumps`), reap a
-subgraph caller's terminal child (`deleteSubgraphFlowsRootedAt`, a no-op for a leaf), and reset the row to `pending`;
-the flow flips to `running` and the steps enqueue after the single commit. A failure that originated in a subgraph
-surfaces as a failed *caller* step in the parent flow, so `Recover` on the parent re-runs it (reaping the prior child
-and spawning a fresh one) - no recursion into descendant flows. **One transaction, not a loop of `RestartFrom`**:
-rewinding one failed step at a time would enqueue the first re-run while later siblings are still `failed`, and that
-re-run completing into the fan-in `failures>0` branch (see "Fan-Out and Fan-In") re-fails the flow mid-recovery and
-strands the rest. Zeroing every failed branch's cohort bump atomically before any re-dispatch closes that window - a
-re-run then sees `failures==0` and cannot re-fail. Each rewind is a CAS on `status='failed'`, so two concurrent
-`Recover` calls (or a `Recover` racing a `RestartFrom`) cannot double-undo a cohort - row locking lets exactly one
-win each step. **Idempotent**: a step that fails
-again is left `failed`, and a re-run of `Recover` picks it up. A flow with both a failed and an interrupted fan-out branch settles as `interrupted`
-(a lone branch failure does not resolve the cohort), so `Recover` refuses it until the interrupt is cleared with
-`Resume`.
+*Copy-only-keep, recursive.* `surgraphChain(forkStepFlow)` yields `rewindByFlow`: each flow on the path
+root→fork-flow maps to its rewind step (the leaf fork step in its own flow; the caller step in each ancestor). Per
+cloned flow, only the steps that are **not** strict DAG-descendants of that flow's rewind step are copied
+(everything, for an off-path completed-prefix subgraph); a per-step `INSERT…SELECT` copies all columns DB-side
+(native timestamps) under a fresh `flow_id`/`step_token`, building an old→new id map; predecessor/successor/lineage
+references are remapped (a ref to a pruned step → 0); cohort `arrivals`/`failures` are recomputed on cloned spawns
+from the cloned members' terminal states, **excluding the rewound branch** (so the existing fan-in path converges/
+fails the fork with no special escalation). It recurses into kept subgraph-caller children, skipping the leaf fork
+step (which re-spawns a fresh child).
+
+*Chain rewind.* The leaf fork step is reset (merged overrides, cleared output/park/cohort) and **held `created`
+until the full id mapping is in place, then flipped to `pending`** - so a crash mid-clone leaves an inert flow that
+never dispatches (the clone is also one transaction, so a crash rolls back). Each **ancestor caller** up the
+surgraph chain is **re-parked** (`running`/`parkedSubgraph`, `subgraph_done=0`); when the re-run child re-completes,
+`completeSurgraphFlow` revives the caller and execution bubbles back to the root. Chain flows are set `running`;
+off-path prefix subgraphs keep their `completed` status.
+
+*Scheduling, identity, threading.* Scheduling (priority/fairness/time-budget) is inherited from the **root's
+frozen values**, resolved once and applied **uniformly to every cloned flow and step**, because the original
+tree is uniform (subgraph children inherit the parent's scheduling) and a deep-subgraph fork's re-running leaf
+lives in a descendant, so it must carry the same values. The new root mints a fresh detached trace (like
+`Continue`), sets `forked_from_step` to the *original* fork step's id (provenance + Continue exclusion), copies
+the origin's `thread_id` (so it groups in `List`) but does **not** notify or auto-delete. A failed-fan-out
+fork-of-fork is the partial-recovery path: fork one failed branch at a time; the first fork re-fails cleanly via
+cohort accounting (no limbo) until every failed branch is fixed.
+
+*Caveat:* cloned-prefix step timestamps are fork-time; the immutable original retains the real timings.
 
 **History / Step** - `History` returns the step-by-step execution as `[]workflow.FlowStep`; each includes key, depth,
 task name, state, changes, status, error, timestamp. Subgraph-executing steps have `Subgraph=true` with nested
@@ -266,23 +291,21 @@ task name, state, changes, status, error, timestamp. Subgraph-executing steps ha
 **List** - Queries flows by status, workflow URL, or thread key, with cursor pagination (newest first, default 100).
 Returns `ThreadKey` in each `workflow.FlowSummary`.
 
-**BreakBefore** - Sets/clears a breakpoint that pauses before the named task. Breakpoints live in a `breakpoints` JSON
-column on the flow row (`map[taskName]string`). During `processStep`, if the current task matches a breakpoint and
-`breakpoint_hit` is false, the engine interrupts the flow (same propagation as `flow.Interrupt`) and sets
-`breakpoint_hit=1`. Continued with `ResumeBreak`, not `Resume` (which rejects a breakpoint with 409). Inherited by
-subgraph flows.
+**Continue** - `Continue(threadKey, additionalState)` creates and runs a new flow from the latest completed flow
+in a thread, merged with `additionalState` using the graph's reducers - sugar over `Create` for the multi-turn
+case. The `threadKey` accepts any flowKey in the thread; `Continue` resolves the thread via `thread_id`, finds the
+latest **non-fork** flow (`ORDER BY flow_id DESC` with `forked_from_step=0`), validates it is completed, and
+creates the new flow in the same thread with the same graph, returned **`running`** (like `Create`). The fork
+exclusion keeps a debug `Fork` (which shares the thread's `thread_id` for `List` grouping) from ever becoming a
+production continuation base. The prior turn's `final_state` passes through unfiltered as the new flow's initial
+state; a workflow author wanting narrower carryover scrubs with an entry adapter task using
+`flow.Delete`/`Transform`. As a **derived** operation `Continue` takes no `FlowOptions`: it **inherits the
+thread's policy** - priority, fairness, time budget, baggage, and notify-on-stop - from the latest turn. A caller
+wanting different policy uses `Create` with `FlowOptions.ThreadKey` instead (explicit policy, same thread).
 
-**Continue** - Creates a new flow from the latest completed flow in a thread, merged with additional state using the
-graph's reducers. The `threadKey` accepts any flowKey in the thread; `Continue` resolves the thread via `thread_id`,
-finds the latest flow (`ORDER BY flow_id DESC`), validates it is completed, and creates the new flow in the same
-thread with the same graph, returned `created`. The prior turn's `final_state` passes through unfiltered as the new
-flow's initial state; a workflow author wanting narrower carryover scrubs with an entry adapter task using
-`flow.Delete`/`Transform`. Scheduling (priority, fairness) comes from caller-supplied `FlowOptions`; nil opts uses
-fresh defaults, not the prior flow's.
-
-**Run** - Create + Start + Await in one call, returning `(flowKey string, *workflow.FlowOutcome, error)` -
+**Run** - Create + Await in one call, returning `(flowKey string, *workflow.FlowOutcome, error)` -
 the new flow's key alongside its outcome (the key is the flow's identity, not part of the outcome; callers
-need it for later `History`/`Resume`/`Restart`). On error, `flowKey` is `""` and the outcome is nil.
+need it for later `History`/`Resume`/`Fork`). On error, `flowKey` is `""` and the outcome is nil.
 
 **Await** - Blocks until the flow stops (see "Await" below).
 
@@ -341,8 +364,11 @@ opaque baggage rides on the `FlowStopped` ctx (`workflow.BaggageFrom(ctx)`), and
 from it (e.g. a host adapter stuffs the caller's address into baggage at `Create` and reads it back here). The
 persisted gate is a single `notify_on_stop` flag on the flow row; `notify_on_stop` is honored on the **root** flow
 only (subgraph flows do not notify directly - interrupt/cancel notifications query the root's flag + baggage via the
-surgraph chain). Keeping the delivery address out of the engine is deliberate: a hostname the engine merely stored
-and handed back verbatim is exactly what baggage already carries, so the engine stays transport-agnostic.
+surgraph chain). As a Create-time policy it follows the genesis/derivation rule: `Continue` **inherits** the
+thread's flag (a multi-turn caller keeps being notified without re-specifying), while `Fork` forces it **off** (a
+debug clone never notifies; a caller wanting a fork's outcome uses `Await`/`Snapshot`). Keeping the delivery
+address out of the engine is deliberate: a hostname the engine merely stored and handed back verbatim is exactly
+what baggage already carries, so the engine stays transport-agnostic.
 
 ### Execution Model
 
@@ -538,7 +564,8 @@ is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
   `successor_id=Z`. The exit set is `lineage_id == cohortSpawnID AND task_name IN` the graph-predecessor tasks of the
   fan-in - **not** the whole lineage, so `A`/`B` in `forEach->{A->B->C}->J` are excluded and only the `C`s point at
   `J`.
-- **flow.Retry / RestartFrom**: rewind the step in place (same row), so `predecessor_id` is preserved.
+- **flow.Retry**: rewinds the step in place (same row), so `predecessor_id` is preserved. (A `Fork` copies the
+  step into a new row and remaps `predecessor_id` to the cloned predecessor.)
 - **Entry / subgraph-entry steps**: `predecessor_id` defaults to 0.
 
 The Mermaid renderer ignores `step_depth` and `lineage_id`: it draws the deduped union of `{predecessor_id -> step}`
@@ -638,20 +665,17 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   consumes the backoff shape.
   Pass `giveUpAfter <= 0` for unlimited; to bound by count instead, pass `0` and gate on `flow.Attempt()`. The step row
   is reused. The engine tracks `attempt` and computes the re-dispatch delay `min(initialDelay * delayMultiplier^attempt,
-  maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. Both `flow.Retry`
-  and the operator-facing `RestartFrom` rewind
-  a step row in place; `RestartFrom` additionally sweeps the step's downstream subtree and merges optional state
-  overrides, for operator-driven recovery after a flow has already terminated. **A retry clears the park
+  maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. `flow.Retry`
+  rewinds the step row in place (it is task-initiated, while the flow is still `running` - distinct from `Fork`, which
+  clones a *terminal* flow into a new one). **A retry clears the park
   slot** (`interrupt_done`/`subgraph_done` -> 0, `resume_data`/`subgraph_result` -> `'{}'`, `subgraph_error` -> `''`),
   so a retry after a resolved `flow.Subgraph` re-runs the child and after a resolved `flow.Interrupt` re-interrupts.
   **A retry of a step that launched a subgraph reaps the prior attempt's child flow, recursively, in the same
   transaction as the rewind** (`deleteSubgraphFlowsRootedAt(stepID)`). The child is always *terminal* at retry time
   (the park resolves only on a terminal child), so this is a delete of inert rows, not a cascade-cancel of live work.
   Leaving it would make the execution DAG claim two paths (`X -> iter1 -> iter2 -> Y`) when the model is single-path,
-  and let `subgraphHistory` attach the discarded child's subtree to the caller. This mirrors `RestartFrom`, which
-  likewise reaps the rewound step's own child (its `collectDAGSubtree` seeds `visited` with the target but never
-  *collects* it, so the target's child needs an explicit reap alongside the subtree sweep) - the reap is **step-scoped**
-  (only this caller's children) unlike `Restart`'s flow-scoped `allDescendantSubgraphFlows`. Defense in depth:
+  and let `subgraphHistory` attach the discarded child's subtree to the caller. The reap is **step-scoped** (only this
+  caller's children). Defense in depth:
   `subgraphHistory` selects the latest child (`ORDER BY flow_id DESC`), matching `completeSurgraphFlow`/wedge/`Continue`,
   so even a stray dangling child never renders. `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`
   (retry-on-any-error is usually wrong). To retry only on a timeout, gate on
@@ -720,11 +744,13 @@ child output is **not** merged into the parent's `changes`.
 
 ### Surgraph Step Identification
 
-Each subgraph flow's row stores `surgraph_flow_id`, `surgraph_step_depth`, *and* `surgraph_step_id` - the PK of the
-parked surgraph step it belongs to. `completeSurgraphFlow` looks the surgraph step up by primary key, so it can never
-match a sibling at the same `(flow_id, step_depth)`. This matters for: (1) a fan-in race where a non-subgraph sibling
-at the same depth is momentarily `running`; (2) parallel subgraphs at one depth, each parked at `parked=1`. The PK
-lookup keeps each child flow bound to the step that launched it.
+Each subgraph flow's row stores `surgraph_flow_id` *and* `surgraph_step_id` - the PK of the parked surgraph step
+it belongs to. `completeSurgraphFlow` (and the interrupt/resume chain walks) look the surgraph step up by primary
+key, so they can never match a sibling at the same `(flow_id, step_depth)`. This matters for: (1) a fan-in race
+where a non-subgraph sibling at the same depth is momentarily `running`; (2) parallel subgraphs at one depth, each
+parked at `parked=1`. The PK lookup keeps each child flow bound to the step that launched it. (An earlier design
+also stored the caller's `surgraph_step_depth` and matched on depth; that was ambiguous across parallel callers at
+one depth and was removed - `surgraph_step_id` is the sole, precise link.)
 
 ### Interrupt/Resume Propagation Across Subgraphs
 
@@ -735,7 +761,11 @@ the top-level flow sees `interrupted`.
 
 **Resume propagation (both directions):** `Resume` walks up (`surgraphChain`) and down (`interruptedSubgraphChain`),
 re-parks intermediate surgraph steps, records resume data on the leaf's `resume_data`, resets the leaf to `pending`,
-transitions all flows to `running`, and rings the doorbell - all in one transaction.
+transitions all flows to `running`, and rings the doorbell - all in one transaction. The down-walk picks each
+flow's interrupted step by **earliest `updated_at`** (`step_id` tiebreak) - the same selection `Snapshot` uses, so
+a Snapshot reports exactly the interrupt the next Resume resolves - and descends into the child subgraph spawned by
+that step via **`surgraph_step_id`** (the caller step's PK), never by depth (which is ambiguous when parallel
+subgraph callers share a depth).
 
 **Fan-out interaction:** one sibling may interrupt while others continue. The flow is marked `interrupted` by the
 first; others run to completion. `Resume` handles one interrupted sibling at a time; the flow returns to `running`
@@ -748,9 +778,10 @@ dispatch **context** to every `LoadGraph` and `ExecuteTask` call for the flow's 
 long after creation - the host reads it with `workflow.BaggageFrom(ctx)`. The engine never interprets it; a host
 uses it to carry the original caller's identity (e.g. mint a fresh token inside its `ExecuteTask`). It is
 **inherited** by subgraph flows (`createSubgraphFlow` copies the parent's `baggage`) and by `Continue` (the next
-turn reads the prior flow's `baggage` column and carries it forward, unless the `Continue` call sets
-`opts.Baggage` to override), so a multi-turn conversation keeps the caller's identity across turns. A turn wanting
-narrower context scrubs it in an entry adapter task.
+turn reads the prior flow's `baggage` column and carries it forward - `Continue` takes no options, so the thread's
+baggage always flows on), so a multi-turn conversation keeps the caller's identity across turns. A turn wanting
+narrower context scrubs it in an entry adapter task, or starts a fresh flow with `Create` (with
+`FlowOptions.ThreadKey` to stay in the thread) and its own `FlowOptions.Baggage`.
 
 **Delivery is context, authoring is `FlowOptions`.** Baggage is *set* explicitly and visibly (a typed
 `FlowOptions` field on `Create`/`Run`) but *read* ambiently (off ctx), so the value the engine never
@@ -765,7 +796,7 @@ loader sees the same decoded shape every dispatch will.
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
 `cancelled`/`interrupted`. It registers a buffered channel in the `waiters` map, then loops: check state, return if
 stopped, otherwise `select` on the channel or context cancellation. There is **no periodic re-snapshot** - it wakes
-only on a notification or ctx. Non-terminal notifications (e.g. `running` from `Start`) re-check state rather than
+only on a notification or ctx. Non-terminal notifications (e.g. `running` from `Create`) re-check state rather than
 returning early.
 
 **Cross-replica `Await`.** A flow created on one replica but completed on another wakes a local `Await` only via the
@@ -911,19 +942,21 @@ split used for `time_budget_ms`/`baggage`.
 `resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to
 `SetDefaultPriority`, the fairness key falls back to the host-supplied key (or `""`), the weight to `1`, and the time
 budget to `SetTimeBudget` (the engine imposes no ceiling on it; see "Time Budgets"). These values are immutable for the
-flow's life (switching a flow's fairness key mid-run would be a self-promotion abuse vector). `Create`
-resolves from options. `createSubgraphFlow` **inherits** the parent flow's values (priority, fairness, *and*
-time budget), so a high-priority parent never silently spawns default-priority descendants. `Continue`, by contrast,
-**fresh-resolves** scheduling/budget from its own options (only `baggage` is inherited from the prior turn) - it
-runs through `resolveFlowOptions` like a new `Create`, so a high-priority turn does not carry forward unless the
-caller re-specifies it.
+flow's life (switching a flow's fairness key mid-run would be a self-promotion abuse vector). This is the **genesis**
+path: `Create`/`Run` resolve from options (and `Create` with `FlowOptions.ThreadKey` joins an existing thread while
+still resolving its own policy). The **derived** operations carry policy from their source instead of taking options:
+`createSubgraphFlow` **inherits** the parent flow's values (priority, fairness, *and* time budget), so a
+high-priority parent never silently spawns default-priority descendants; `Continue` **inherits the thread's**
+priority/fairness/budget/baggage/notify from the latest completed turn (it takes no `FlowOptions`); and `Fork`
+inherits the origin flow's. So policy is authored once at genesis and propagates by derivation - the operation is the
+inherit-vs-default selector.
 
-Propagation onto step rows: where the resolved values are in hand (the entry step), they are literal bind parameters
-(`Restart`/`RestartFrom` rewind their target step in place via UPDATE, so the row's immutable priority/fairness/budget
-values are already present and need no re-propagation); in the deep `processStep` paths (fan-out and the two fan-in
-inserts), the values - including the flow's frozen `time_budget_ms` - are read once per step execution in the parallel
-flow-row SELECT and threaded through the call chain into the INSERTs as bind parameters (vs. the previous scalar
-subqueries, which meant 3N PK lookups per N-way fan-out).
+Propagation onto step rows: where the resolved values are in hand (the entry step), they are literal bind parameters;
+in the deep `processStep` paths (fan-out and the two fan-in inserts), the values - including the flow's frozen
+`time_budget_ms` - are read once per step execution in the parallel flow-row SELECT and threaded through the call
+chain into the INSERTs as bind parameters (vs. the previous scalar subqueries, which meant 3N PK lookups per N-way
+fan-out). `Fork` resolves scheduling once for the whole cloned tree and binds it on every cloned flow and step
+(see "Fork").
 
 **Why the scheduling design is shaped this way:**
 
@@ -962,8 +995,8 @@ Once terminal (`completed`/`failed`/`cancelled`), the park slot is gone, and the
 terminal-transition code path resets `parked` in the same UPDATE (the `failStep` write, the `deliverSubgraphError`
 child-leaf write, the `Cancel` cascade, the `processStep` terminal-flow guard). Without this, a step that was parked
 when its flow was cancelled would sit terminal with non-zero `parked` - invisible to the selection index but never
-re-leased, stranding any subsequent `Restart`/`RestartFrom` (which sets `status=pending` but the partitioned index
-still excludes a `parked != 0` row). `Restart`/`RestartFrom` also re-zero `parked` as defense-in-depth.
+re-leased. A `Fork` clone writes each step's `parked` explicitly (the re-parked ancestor callers to `parkedSubgraph`,
+all other cloned steps to `parkedNone`), so cloned rows never inherit a stale non-zero `parked`.
 
 ## Metrics (`engine/metrics.go`)
 
@@ -1062,27 +1095,26 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `workflow_url` | URL of the workflow graph this flow runs (the resolve key passed to `Create` and the host's `LoadGraph`) |
 | `graph` | JSON of the workflow graph, frozen at `Create` time |
 | `baggage` | JSON of the opaque `baggage` map captured at `Create` and passed to every `LoadGraph`/`ExecuteTask` call. Flow-scoped and frozen at `Create`; the engine does not interpret it |
-| `status` | Flow lifecycle: `created`/`running`/`interrupted`/`completed`/`failed`/`cancelled` |
+| `status` | Flow lifecycle: `created`/`running`/`interrupted`/`completed`/`failed`/`cancelled`. `created` is internal/transient only (Create's own transaction, Fork's leaf-gate) - a flow is never externally observed in `created`; Create returns it `running` |
 | `step_id` | The flow's current step; `0` during fan-out (multiple steps active at one depth) |
 | `surgraph_flow_id` | Parent (surgraph) flow id if this is a subgraph flow; `0` otherwise |
-| `surgraph_step_depth` | The parent's `step_depth` that spawned this subgraph |
-| `surgraph_step_id` | PK of the parent's parked surgraph step, so a subgraph flow identifies its surgraph step unambiguously when parallel parked surgraph steps coexist at one depth |
-| `thread_id` | Groups flows in a `Continue` thread; defaults to `flow_id` (each flow its own thread) |
+| `surgraph_step_id` | PK of the parent's parked surgraph step - the **sole** link from a subgraph child to the step that launched it, so completion/interrupt/resume bind to that exact step even with parallel parked surgraph steps at one depth. (The old depth-based `surgraph_step_depth` link was dropped.) |
+| `thread_id` | Groups flows in a thread (`Continue`, or `Create` with `FlowOptions.ThreadKey`); defaults to `flow_id` (each flow its own thread) |
 | `thread_token` | Token component of the thread's flowKey |
 | `trace_parent` | W3C `traceparent` of the flow's root "workflow" span, minted at `Create` (or, for a subgraph, parented to the caller step's span). Reconstructed as the parent of every per-step span. Inherited by `Continue` only as a fresh trace (a new root span is minted per turn); a subgraph inherits the caller step's context, not this column. See "Tracing" |
-| `notify_on_stop` | Set from `FlowOptions.NotifyOnStop` at `Create`; `1` fires the `FlowStopped` callback (with the flow's baggage on ctx) when the flow stops, `0` = no notification. The host resolves the delivery target from baggage - the engine stores no address |
+| `notify_on_stop` | Set from `FlowOptions.NotifyOnStop` at `Create`; `1` fires the `FlowStopped` callback (with the flow's baggage on ctx) when the flow stops, `0` = no notification. The host resolves the delivery target from baggage - the engine stores no address. `Continue` **inherits** the thread's flag; `Fork` forces it **off** (a debug clone never notifies) |
 | `delete_on_completion` | Set from `FlowOptions.DeleteOnCompletion` at `Create`; `1` makes the flow delete itself (and cascade to subgraph descendants) the instant it reaches `completed`. Root-only (not inherited by children); `failed`/`cancelled`/`interrupted` flows are never auto-deleted. See "Data Retention" |
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
-| `breakpoints` | JSON `map[taskName]string` of `BreakBefore` breakpoints |
-| `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. Reset by `Restart` (a fresh attempt); NOT by `RestartFrom` (a surgical rewind) |
-| `started_at` | UTC time this attempt began dispatching. Stamped by `Start` on `created` -> `running`. Reset by `Restart`, not `RestartFrom`. Distinct from `created_at` because a flow can sit `created` indefinitely before its entry dispatches. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
+| `forked_from_step` | `Fork` provenance: the *original* fork-point `step_id` this flow was cloned from; `0` for a non-fork flow. Subsumes the origin flow id (derivable via the step's `flow_id`) and pins the exact divergence node. `Continue` excludes forks via `forked_from_step=0`. See "Fork" |
+| `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. A `Fork` clone is a new flow with its own `created_at` = fork time |
+| `started_at` | UTC time this attempt began dispatching. Stamped by `Start` on `created` -> `running` (and by `Fork` when the clone goes live). Distinct from `created_at` because a flow can sit `created` indefinitely before its entry dispatches. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
 | `updated_at` | UTC time of the last status transition. Surfaced to tasks via `Flow.UpdatedAt()` |
 | `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `SetDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
 | `fairness_key` | Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable |
 | `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
 | `error` | Task error string for `failed` flows. Written by `failStep` to every flow in the surgraph chain in the same UPDATE that sets `status='failed'`; the `WHERE status NOT IN (terminal)` clause makes the write first-failure-wins. Surfaced as `FlowOutcome.Error` |
 | `cancel_reason` | Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
-| `time_budget_ms` | Per-flow task time budget, resolved from `FlowOptions.TimeBudget` (else the `SetTimeBudget` default) and frozen at `Create`; the engine imposes no ceiling (a host bounds it before `Create`). Seeds every step's `time_budget_ms`. Inherited by subgraph children; **not** by `Continue` (fresh-resolved). Always stored concrete at `Create`; a `0` is unexpected and falls back to the live engine default at step insert (pure defense) |
+| `time_budget_ms` | Per-flow task time budget, resolved from `FlowOptions.TimeBudget` (else the `SetTimeBudget` default) and frozen at `Create`; the engine imposes no ceiling (a host bounds it before `Create`). Seeds every step's `time_budget_ms`. Inherited by subgraph children **and** by `Continue`/`Fork` (which carry the source's policy). Always stored concrete at `Create`; a `0` is unexpected and falls back to the live engine default at step insert (pure defense) |
 
 #### `dwarf_steps`
 
@@ -1090,13 +1122,13 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 |---|---|
 | `step_id` | Per-shard auto-increment primary key. External stepKey is `{shard}-{step_id}-{step_token}` |
 | `flow_id` | Owning flow |
-| `step_depth` | Sequential transition depth; fan-out siblings share it. For history ordering, **not** the execution DAG |
+| `step_depth` | Sequential transition depth; fan-out siblings share it. **Purely informational** (History ordering + the surfaced `FlowStep.StepDepth`, useful to see how deep a flow goes) - it is *not* used for the execution DAG (that is `predecessor_id`/`successor_id`), fan-in firing (`lineage_id`/cohort counters), final state (tail steps), or selection. The entry step is `callerStepDepth+1` (1 for a top-level flow; a subgraph continues from its caller's depth); a fan-in step is `max(cohort step_depth)+1` |
 | `step_token` | Random token component of the stepKey |
 | `task_name` | Graph node name of the task this step executes |
 | `state` | JSON input snapshot. Immutable except on retry/resume |
 | `changes` | JSON output delta the task produced |
 | `interrupt_payload` | JSON outbound payload from `flow.Interrupt()` - what the awaiting caller sees |
-| `interrupt_done` | `1` once the interrupt park has been resumed; drives `flow.Interrupt`'s return-vs-arm decision. `0` for breakpoint pauses |
+| `interrupt_done` | `1` once the interrupt park has been resumed; drives `flow.Interrupt`'s return-vs-arm decision |
 | `resume_data` | JSON inbound payload recorded by `Resume`; returned by `flow.Interrupt` on re-dispatch. `'{}'` until resumed |
 | `subgraph_done` | `1` once a `flow.Subgraph` park resolved; drives `flow.Subgraph`'s return-vs-arm decision. A retry clears it to re-run the child |
 | `subgraph_result` | JSON child `final_state` returned by `flow.Subgraph`. `'{}'` until resolved |
@@ -1105,17 +1137,16 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `goto_next` | Task-requested `flow.Goto` target; `''` = none |
 | `error` | Error text when `failed`; `''` otherwise |
 | `time_budget_ms` | Execution budget; the deadline on the `ExecuteTask` call context. Denormalized from the flow's `time_budget_ms` at step insert (frozen, not the live config), and also self-referenced in the claim CAS to size the crash-recovery lease (`time_budget_ms + leaseMargin`) |
-| `breakpoint_hit` | `1` once a breakpoint on this step has fired, so it does not re-trigger on resume |
 | `attempt` | `flow.Retry` attempt counter, drives the backoff |
 | `not_before` | Earliest UTC time the step may execute (`flow.Sleep` / retry backoff) |
 | `lease_expires` | Crash-recovery lease; `pollPendingSteps` reclaims `running` steps past this |
 | `created_at` | UTC creation time |
-| `started_at` | UTC time the *current attempt* first dispatched. The lease UPDATE stamps it via CASE only on a fresh attempt's first dispatch (`attempt=0 AND subgraph_done=0 AND interrupt_done=0`) and **preserves** it on a continuation (subgraph re-dispatch, interrupt/ResumeBreak re-dispatch, retry re-dispatch). A retried step's duration includes every attempt. Drives per-step body duration and inter-step wait labels in `FlowRenderer` |
+| `started_at` | UTC time the *current attempt* first dispatched. The lease UPDATE stamps it via CASE only on a fresh attempt's first dispatch (`attempt=0 AND subgraph_done=0 AND interrupt_done=0`) and **preserves** it on a continuation (subgraph re-dispatch, interrupt re-dispatch, retry re-dispatch). A retried step's duration includes every attempt. Drives per-step body duration and inter-step wait labels in `FlowRenderer` |
 | `updated_at` | UTC time of the last status transition |
 | `lineage_id` | Cohort frame: the spawn step's `step_id` on a push, else inherited. Drives explicit `SetFanIn` arrival counting and merge. A cohort-counting device, **not** a DAG. `0` = no `SetFanIn` |
 | `cohort_size` | On a fan-out spawn step: number of branches spawned |
 | `cohort_arrivals` | On a fan-out spawn step: branches that reached the fan-in; fan-in fires when `arrivals >= size` |
-| `fan_out_ordinal` | This branch's index in its fan-out; fan-in merges in this order so list/sum reducers are deterministic. Preserved across an in-place rewind (`flow.Retry`/`RestartFrom`). `0` = not part of a fan-out |
+| `fan_out_ordinal` | This branch's index in its fan-out; fan-in merges in this order so list/sum reducers are deterministic. Preserved across an in-place `flow.Retry` rewind and copied verbatim by `Fork`. `0` = not part of a fan-out |
 | `predecessor_id` | Step that ran immediately before this one in the execution DAG. `0` = none |
 | `successor_id` | Step that runs immediately after this one. `0` = none (exit) |
 | `priority` | Denormalized copy of the flow's `priority` for the hot selection path |
@@ -1165,9 +1196,9 @@ without fragmentation or excessive write amplification.
 ### Data Retention
 
 The engine does not auto-purge flows on a timer: every row remains potentially-resurrectable - an `interrupted` flow via
-`Resume`, a `completed` flow via `Continue`, a `failed` flow via `Restart`/`RestartFrom`. A retention *duration* was
+`Resume`, a `completed` flow via `Continue`, a terminal flow via `Fork`. A retention *duration* was
 rejected for two reasons: a clock-triggered delete reaps rows out from under those resurrection paths (a flow `failed`
-for 30 days may still be wanted for `Restart`; one `interrupted` for 30 days is awaiting a human), and no single
+for 30 days may still be wanted as a `Fork` source; one `interrupted` for 30 days is awaiting a human), and no single
 duration fits both a 1-hour batch and a 30-day approval. The author also cannot know at `Create` "how long will this
 be relevant after it ends." So retention is either operator-driven or an explicit author opt-in:
 
@@ -1175,7 +1206,7 @@ be relevant after it ends." So retention is either operator-driven or an explici
   until success against a SaaS / under backpressure, whose output and history are not needed). The engine deletes the
   flow and its subgraph descendants the instant it reaches `completed` - an *event* trigger on success, not a clock,
   so there is no duration to pick and the resurrection paths are preserved: `failed`/`cancelled`/`interrupted` flows
-  are **never** auto-deleted (a failed disposable job is exactly the one to keep for `Restart`/`Recover`). Honored on
+  are **never** auto-deleted (a failed disposable job is exactly the one to keep as a `Fork` source). Honored on
   the **root** flow only (`surgraph_flow_id=0`); the delete reuses `Delete`'s cascade to sweep descendants, and the
   flag is not inherited by children. The delete is **inline** in `completeFlow`, after the `dwarf_flows_terminated_total`
   metric and any `FlowStopped` notification fire (so observability and the full outcome survive the row's deletion) and
@@ -1256,9 +1287,10 @@ closing `wakeTimer` before draining the workers let a worker mid-`processStep` r
 
 ### Transactions
 
-`Start`, `Resume`, `Restart`, `RestartFrom`, and `Cancel` wrap their step and flow mutations in a transaction with
-**steps-first-then-flow lock ordering** to prevent deadlocks. `processStep`'s transition evaluation (insert next steps
-+ update flow's `step_id`) also runs in a transaction.
+`Create` (insert flow + entry step + the `created→running` transition), `Resume`, and `Cancel` wrap their step and
+flow mutations in a transaction with **steps-first-then-flow lock ordering** to prevent deadlocks. `processStep`'s transition evaluation (insert next steps
++ update flow's `step_id`) also runs in a transaction. `Fork` performs its entire recursive tree clone in one
+transaction (so a crash mid-clone rolls back), and the leaf fork step is held `created` until the mapping is complete.
 
 ### Lease-Based Crash Recovery
 
@@ -1302,16 +1334,16 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
 
 ### Per-Function Crash Analysis
 
-- **Create** - insert flow (`created`) -> insert step (`created`) -> update flow's `step_id`. A crash
-  after the step insert leaves `step_id=0` with a `created` step; the flow is inert until `Start`, and
-  `pollPendingSteps` picks up the orphaned `pending` step. Self-healing.
-- **Start / Resume** - one transaction (steps -> `pending`, flow -> `running`). A crash after commit but before the
+- **Create** - one transaction: insert flow (`running`) -> insert entry step (`pending`) -> set the flow's
+  `thread_id`/`step_id`, then ring the doorbell. A pre-commit crash rolls back entirely (no partial flow); a
+  post-commit crash before the doorbell is recovered by `pollPendingSteps` picking up the `pending` entry step.
+  There is no separate `Start`, so no inert `created` window. Self-healing.
+- **Resume** - one transaction (steps -> `pending`, flow -> `running`). A crash after commit but before the
   doorbell is recovered by `pollPendingSteps`. Self-healing.
-- **Restart / RestartFrom** - one transaction (rewind the target step in place, delete the rewound subtree, flow ->
-  `running`). Self-healing.
-- **Recover** - one transaction (rewind every failed step in place, undo their cohort bumps, flow -> `running`), then
-  enqueue. A pre-commit crash rolls back; a post-commit crash before the doorbell is recovered by `pollPendingSteps`.
-  Self-healing, and idempotent under a re-run.
+- **Fork** - one transaction clones the whole tree (new flow + step rows, id remap, re-parked ancestor callers), with
+  the leaf fork step held `created` until the mapping completes, then enqueue. A pre-commit crash rolls back entirely
+  (no partial clone); a post-commit crash before the doorbell is recovered by `pollPendingSteps`. The original flow is
+  read-only throughout, so it is never at risk. Self-healing.
 - **Cancel / failStep** - one transaction over the whole surgraph chain. A pre-commit crash rolls back; a post-commit
   crash leaves correct terminal state, `Await` callers discover it on the next poll. Self-healing.
 - **processStep - Interrupt** - one transaction. A pre-commit crash rolls back and re-execution produces the interrupt

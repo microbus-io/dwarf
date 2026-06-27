@@ -77,13 +77,9 @@ func TestCrossReplicaAwait(t *testing.T) {
 	assert.NoError(err)
 	t.Cleanup(func() { eng2.Shutdown(ctx) })
 
-	// Create and start on the awaiter replica. eng1 has no workers, so eng2 (reached via the relayed
+	// Create (auto-starts) on the awaiter replica. eng1 has no workers, so eng2 (reached via the relayed
 	// Enqueue doorbell, or its own poll) is the only replica that can run the step.
 	flowKey, err := eng1.Create(ctx, "crossreplica.verify:428/flow", nil, nil)
-	if !assert.NoError(err) {
-		return
-	}
-	err = eng1.Start(ctx, flowKey)
 	if !assert.NoError(err) {
 		return
 	}

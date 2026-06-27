@@ -103,9 +103,6 @@ func TestSubgraphinterruptflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
-			return
-		}
 
 		// The root flow surfaces the interrupt raised deep inside the subgraph.
 		outcome, err := eng.Await(ctx, flowKey)

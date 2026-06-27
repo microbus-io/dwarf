@@ -18,9 +18,9 @@ package workflow
 
 import "time"
 
-// FlowOptions sets flow-level properties at Create or Run: scheduling (priority, fairness, start
-// time) plus the opaque host Baggage. A nil *FlowOptions, or any zero field, uses the engine's
-// defaults.
+// FlowOptions sets a flow's policy at genesis - Create or Run only. Derived operations (Continue, Fork)
+// do not take FlowOptions; they inherit policy from their source, so the operation is the
+// inherit-vs-default selector. A nil *FlowOptions, or any zero field, uses the engine's defaults.
 type FlowOptions struct {
 	// Priority orders flows competing for workers; an explicit priority is >= 1,
 	// lower runs first. Zero means "unset" and uses the engine's
@@ -32,11 +32,6 @@ type FlowOptions struct {
 	// FairnessWeight is the relative dispatch share of the fairness key.
 	// Zero uses a weight of 1.
 	FairnessWeight float64 `json:"fairnessWeight,omitzero"`
-	// StartAt delays execution of the flow's entry step until the given UTC time.
-	// Zero or a past time means run as soon as the flow is started. The flow can
-	// still be created and started immediately, but no worker picks the entry
-	// step up before StartAt.
-	StartAt time.Time `json:"startAt,omitzero"`
 	// TimeBudget overrides the engine's default per-task time budget for this flow, bounding every
 	// ExecuteTask call's context deadline. Subgraph descendants inherit it. Zero uses the engine's
 	// SetTimeBudget default. Frozen at Create and immutable for the flow's life; a per-task default, not a
@@ -58,4 +53,9 @@ type FlowOptions struct {
 	// context - read it with BaggageFrom(ctx). Any JSON-marshalable value; the host receives the
 	// JSON-decoded form (typically map[string]any), exactly like flow state.
 	Baggage any `json:"baggage,omitzero"`
+	// ThreadKey places the new flow into an existing thread (multi-turn conversation) instead of starting
+	// its own. It is any FlowKey in that thread; the engine reads its thread id and routes the new flow to
+	// the thread's shard. Empty starts a fresh thread. This is the explicit-policy way to add a turn to a
+	// thread (Continue is the inherit-everything convenience); the host can mix the two.
+	ThreadKey string `json:"threadKey,omitzero"`
 }

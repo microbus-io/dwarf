@@ -71,7 +71,6 @@ The harness drives every engine feature. A few patterns:
 
 ```go
 flowKey, _ := eng.Create(ctx, "approval", state, nil)
-eng.Start(ctx, flowKey)
 out, _ := eng.Await(ctx, flowKey)
 testarossa.Equal(t, workflow.StatusInterrupted, out.Status)
 // out.InterruptPayload holds what the task asked for

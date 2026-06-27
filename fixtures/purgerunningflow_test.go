@@ -62,9 +62,6 @@ func TestPurgerunningflow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	if !assert.NoError(eng.Start(ctx, flowKey)) {
-		return
-	}
 
 	// Wait until the task is actually running.
 	select {

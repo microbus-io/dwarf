@@ -103,10 +103,6 @@ func TestNestedfailfanoutflow(t *testing.T) {
 	if !testarossa.For(t).NoError(err) {
 		return
 	}
-	err = eng.Start(ctx, flowKey)
-	if !testarossa.For(t).NoError(err) {
-		return
-	}
 
 	// Wait until all 9 inner cells have started.
 	deadline := time.Now().Add(15 * time.Second)
@@ -154,47 +150,5 @@ func TestNestedfailfanoutflow(t *testing.T) {
 		assert.Equal(8, c)
 		assert.Equal(2, ji)
 		assert.Equal(0, jo)
-	})
-
-	// RestartFrom the failed cell with overrides so it succeeds.
-	steps, err := eng.History(ctx, flowKey)
-	if !testarossa.For(t).NoError(err) {
-		return
-	}
-	var failedStepKey string
-	for _, s := range steps {
-		if s.Status == workflow.StatusFailed {
-			failedStepKey = s.StepKey
-			break
-		}
-	}
-	if !testarossa.For(t).NotEqual("", failedStepKey) {
-		return
-	}
-
-	err = eng.RestartFrom(ctx, failedStepKey, map[string]any{"currentOuter": 2})
-	if !testarossa.For(t).NoError(err) {
-		return
-	}
-	restartOutcome, err := eng.Await(ctx, flowKey)
-
-	t.Run("restart_flips_to_completed", func(t *testing.T) {
-		assert := testarossa.For(t)
-		assert.NoError(err)
-		if !assert.NotNil(restartOutcome) {
-			return
-		}
-		assert.Equal(workflow.StatusCompleted, restartOutcome.Status)
-	})
-
-	t.Run("only_failed_cell_re_executed", func(t *testing.T) {
-		assert := testarossa.For(t)
-		mu.Lock()
-		s, c, ji, jo := innerStarts, innerCompleted, joinIRuns, joinORuns
-		mu.Unlock()
-		assert.Equal(10, s)
-		assert.Equal(9, c)
-		assert.Equal(3, ji)
-		assert.Equal(1, jo)
 	})
 }

@@ -36,5 +36,5 @@ You build a `workflow.Graph` of tasks and transitions. You implement a `Host` wh
 returns a graph by name and whose **`ExecuteTask`** runs one task. The engine creates a **flow** (one
 execution of a graph), runs each task in turn, persists state to SQL between steps, follows transitions
 to decide what runs next, merges parallel branches, and recovers from crashes. You drive it with a handful
-of operations — `Create`, `Start`, `Await`, `Run`, `Resume`, `Cancel` — and observe it through logs,
+of operations — `Create`, `Run`, `Await`, `Resume`, `Cancel`, `Continue`, `Fork` — and observe it through logs,
 metrics, and traces.

@@ -123,7 +123,6 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 	// Override well above the default; the lease must follow the override, not the 1s default.
 	fk, err := e.Create(ctx, "timebudget/blockergraph", nil, &workflow.FlowOptions{TimeBudget: 120 * time.Second})
 	assert.NoError(err)
-	assert.NoError(e.Start(ctx, fk))
 
 	<-started // the entry step is now running and leased
 

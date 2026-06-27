@@ -67,7 +67,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	var n int64
 	var stepDepth int
 	var taskName, stepToken, stateJSON, priorChangesJSON string
-	var breakpointHit bool
 	var attempt, lineageID, flowID, timeBudgetMs int
 	var interruptDone bool
 	var resumeDataJSON string
@@ -81,9 +80,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
-				" RETURNING step_depth, task_name, step_token, state, changes, breakpoint_hit, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at",
+				" RETURNING step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at",
 			workflow.StatusRunning, leaseMarginMs, stepID, workflow.StatusPending, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -93,10 +92,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		err = db.QueryRowContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
-				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.breakpoint_hit, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at"+
+				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at"+
 				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
 			workflow.StatusRunning, leaseMarginMs, stepID, workflow.StatusPending, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -124,9 +123,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		go func() {
 			defer wg.Done()
 			e := db.QueryRowContext(ctx,
-				"SELECT step_depth, task_name, step_token, state, changes, breakpoint_hit, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at FROM dwarf_steps WHERE step_id=?",
+				"SELECT step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at FROM dwarf_steps WHERE step_id=?",
 				stepID,
-			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &breakpointHit, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
+			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
 			if e != nil && e != sql.ErrNoRows {
 				readErr = e
 			}
@@ -147,7 +146,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Read flow data
 	var flowToken, flowStatus, workflowURL, graphJSON, baggageJSON, traceParent string
-	var breakpointsJSON string
 	var notifyOnStop bool
 	var flowCreatedAt, flowUpdatedAt time.Time
 	var flowPriority int
@@ -155,9 +153,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	var flowFairnessWeight float64
 	var flowTimeBudgetMs int
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, notify_on_stop, breakpoints, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=?",
+		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, notify_on_stop, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &notifyOnStop, &breakpointsJSON, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs)
+	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &notifyOnStop, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -224,20 +222,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Parse baggage for the task executor
 	var baggage map[string]any
 	unmarshalJSONMap(baggageJSON, &baggage)
-
-	// Breakpoint check
-	if !breakpointHit {
-		breakpoints := map[string]string{}
-		if breakpointsJSON != "" && breakpointsJSON != "{}" {
-			json.Unmarshal([]byte(breakpointsJSON), &breakpoints)
-		}
-		breakpointMatch := breakpoints[taskName] == "b"
-		if len(breakpoints) > 0 && breakpointMatch {
-			e.logger.DebugContext(ctx, "Breakpoint hit", "task", taskName, "step", stepDepth, "flow", workflowURL)
-			e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
-			return e.handleBreakpoint(ctx, shardNum, db, stepID, flowID, flowToken)
-		}
-	}
 
 	// Execute the task. The step's time_budget_ms bounds the executor call's context deadline; the
 	// surrounding DB work keeps using the undeadlined ctx so persistence is never cut short.
@@ -382,12 +366,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// The caller step's span is still live on taskCtx; parent the subgraph's "workflow" span under it
 		// so the subgraph subtree nests beneath this task in the trace.
 		callerTraceParent := extractTraceParent(taskCtx)
-		subgraphFlowKey, err := e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphURL, subgraphGraph, childInputState, baggageJSON, callerTraceParent, breakpointsJSON)
-		if err != nil {
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
-			return errors.Trace(err)
-		}
-		err = e.start(ctx, subgraphFlowKey)
+		// createSubgraphFlow inserts the child already surgraph-linked and running, so no separate start.
+		_, err = e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphURL, subgraphGraph, childInputState, baggageJSON, callerTraceParent)
 		if err != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
@@ -423,9 +403,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// reaped, recursively, in the same transaction as the rewind: leaving it dangling makes
 		// the execution DAG claim two paths (X -> iter1 -> iter2 -> Y) when the model is
 		// single-path, and lets history attach the discarded child's subtree to this caller.
-		// This mirrors RestartFrom, the operator-facing in-place rewind, which already reaps its
-		// descendant subgraph flows. Step-scoped (only this caller's children), unlike
-		// RestartFrom's flow-scoped sweep, so a retrying fan-out sibling's cohort is untouched.
+		// The reap is step-scoped (only this caller's children), so a retrying fan-out sibling's
+		// cohort is untouched.
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			if reapErr := e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID); reapErr != nil {
 				return errors.Trace(reapErr)
@@ -664,54 +643,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	return nil
 }
 
-// handleBreakpoint pauses execution before a task due to a breakpoint.
-func (e *Engine) handleBreakpoint(ctx context.Context, shardNum int, db *sequel.DB, stepID int, flowID int, flowToken string) error {
-	chainFlowIDs, chainStepIDs, chainCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowToken)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
-		flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
-		flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
-			flowArgs...,
-		)
-
-		allStepIDs := append([]any{stepID}, chainStepIDs...)
-		stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
-		stepArgs := append([]any{workflow.StatusInterrupted}, allStepIDs...)
-		stepArgs = append(stepArgs, workflow.StatusRunning, workflow.StatusInterrupted)
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
-			stepArgs...,
-		)
-		tx.ExecContext(ctx, "UPDATE dwarf_steps SET breakpoint_hit=1 WHERE step_id=?", stepID)
-		return nil
-	})
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	for _, compositeID := range chainCompositeIDs {
-		e.signalStop(ctx, compositeID, workflow.StatusInterrupted)
-	}
-
-	rootCompositeID := chainCompositeIDs[len(chainCompositeIDs)-1]
-	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1]
-	var rootNotifyOnStop bool
-	var rootBaggageJSON string
-	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyOnStop, &rootBaggageJSON)
-	if rootNotifyOnStop {
-		e.fireFlowStopped(ctx, rootCompositeID, rootBaggageJSON, &workflow.FlowOutcome{
-			Status: workflow.StatusInterrupted,
-		})
-	}
-	return nil
-}
-
 // handleInterrupt pauses a flow for external input.
 func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.DB, stepID int, flowID int, flowToken string, changesJSON []byte, interruptPayload map[string]any) error {
 	chainFlowIDs, chainStepIDs, chainCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowToken)
@@ -836,16 +767,21 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	merged, _ := workflow.MergeState(spawnState, spawnChanges, graph.Reducers())
 
 	rows, err := tx.QueryContext(ctx,
-		"SELECT status, changes FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_id",
+		"SELECT status, changes, step_depth FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_id",
 		flowID, cohortSpawnID,
 	)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
 	defer rows.Close()
+	maxCohortDepth := 0
 	for rows.Next() {
 		var status, changesJSON string
-		rows.Scan(&status, &changesJSON)
+		var depth int
+		rows.Scan(&status, &changesJSON, &depth)
+		if depth > maxCohortDepth {
+			maxCohortDepth = depth
+		}
 		status = strings.TrimSpace(status)
 		if status != workflow.StatusCompleted {
 			continue
@@ -855,6 +791,14 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 		merged, _ = workflow.MergeState(merged, changes, graph.Reducers())
 	}
 	rows.Close()
+
+	// The fan-in sits one level below the DEEPEST cohort branch, not merely below the last sibling to
+	// complete - branch lengths can differ (loops, gotos, varying chains), so step_depth must reflect the
+	// deepest path the flow took. nextStepDepth (last-completer+1) is the floor for the defensive empty case.
+	fanInDepth := maxCohortDepth + 1
+	if fanInDepth < nextStepDepth {
+		fanInDepth = nextStepDepth
+	}
 
 	// Drop per-branch forEach bookkeeping
 	for _, tr := range graph.Transitions() {
@@ -871,7 +815,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
 		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-		flowID, nextStepDepth, randomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
+		flowID, fanInDepth, randomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
 	)
 	if err != nil {
 		return 0, errors.Trace(err)

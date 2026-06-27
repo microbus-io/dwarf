@@ -77,7 +77,7 @@ func TestGreeting(t *testing.T) {
 }
 ```
 
-`Run` is `Create` + `Start` + `Await` in one call. The `nil` last argument is `*workflow.FlowOptions`
+`Run` is `Create` + `Await` in one call. The `nil` last argument is `*workflow.FlowOptions`
 (scheduling and baggage) — see [Engine operations](operations.md).
 
 ## Wiring a real engine

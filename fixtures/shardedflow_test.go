@@ -70,7 +70,6 @@ func TestShardedflow(t *testing.T) {
 		holderKey, _ := eng.Create(ctx, "shardedflow.verify:428/sharded",
 			map[string]any{"delayMs": 1500, "tag": "holder"},
 			&workflow.FlowOptions{Priority: 1})
-		eng.Start(ctx, holderKey)
 		time.Sleep(100 * time.Millisecond)
 
 		var keys []string
@@ -80,7 +79,6 @@ func TestShardedflow(t *testing.T) {
 			k, _ := eng.Create(ctx, "shardedflow.verify:428/sharded",
 				map[string]any{"delayMs": 50, "tag": tag},
 				&workflow.FlowOptions{Priority: p})
-			eng.Start(ctx, k)
 			keys = append(keys, k)
 		}
 

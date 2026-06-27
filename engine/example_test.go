@@ -19,7 +19,6 @@ package engine_test
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
@@ -63,7 +62,7 @@ func Example() {
 	}
 	defer eng.Shutdown(ctx)
 
-	// Run is Create + Start + Await in one call.
+	// Run is Create + Await in one call.
 	_, out, err := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
 	if err != nil {
 		panic(err)
@@ -71,8 +70,8 @@ func Example() {
 	fmt.Println(out.State["greeting"])
 }
 
-// Create separates flow creation from starting it, and accepts FlowOptions for scheduling and the opaque
-// host baggage carried with the flow.
+// Create makes and runs a flow, and accepts FlowOptions for scheduling, notifications, thread membership,
+// and the opaque host baggage carried with the flow.
 func ExampleEngine_Create() {
 	var eng *engine.Engine // obtained from NewEngine().…Startup(ctx)
 	ctx := context.Background()
@@ -81,18 +80,13 @@ func ExampleEngine_Create() {
 		&workflow.FlowOptions{
 			Priority:    10,                             // lower runs first
 			FairnessKey: "tenant-42",                    // fair scheduling bucket
-			StartAt:     time.Now().Add(1 * time.Hour),  // delayed start
 			Baggage:     map[string]any{"actor": "ada"}, // read with workflow.BaggageFrom(ctx)
 		})
 	if err != nil {
 		panic(err)
 	}
 
-	// The flow sits in "created" until Start; Await blocks until it stops.
-	err = eng.Start(ctx, flowKey)
-	if err != nil {
-		panic(err)
-	}
+	// Create runs the flow immediately; Await blocks until it stops.
 	out, _ := eng.Await(ctx, flowKey)
 	fmt.Println(out.Status)
 }

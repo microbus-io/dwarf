@@ -70,9 +70,6 @@ func TestCancelinterruptedflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
-			return
-		}
 
 		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {

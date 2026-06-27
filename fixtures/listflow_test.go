@@ -55,7 +55,6 @@ func TestListflow(t *testing.T) {
 	for range total {
 		flowKey, err := eng.Create(ctx, "listflow.verify:428/list", nil, nil)
 		testarossa.NoError(t, err)
-		testarossa.NoError(t, eng.Start(ctx, flowKey))
 		outcome, err := eng.Await(ctx, flowKey)
 		testarossa.NoError(t, err)
 		testarossa.Equal(t, workflow.StatusCompleted, outcome.Status)
@@ -138,7 +137,6 @@ func TestListflow(t *testing.T) {
 			if !assert.NoError(err) {
 				return
 			}
-			assert.NoError(eng.Start(ctx, fk))
 			_, err = eng.Await(ctx, fk)
 			assert.NoError(err)
 		}
@@ -146,7 +144,6 @@ func TestListflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		assert.NoError(eng.Start(ctx, fkB))
 		_, err = eng.Await(ctx, fkB)
 		assert.NoError(err)
 

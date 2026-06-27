@@ -68,7 +68,7 @@ func (e *Engine) sweepWedgedParks(ctx context.Context, db *sequel.DB, shard int)
 // no non-terminal child is genuinely wedged.
 func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, shard int, minAge time.Duration) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT s.step_id, s.step_depth, s.flow_id FROM dwarf_steps s"+
+		"SELECT s.step_id, s.flow_id FROM dwarf_steps s"+
 			" WHERE s.parked=? AND s.status=? AND s.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" AND NOT EXISTS (SELECT 1 FROM dwarf_flows f WHERE f.surgraph_step_id=s.step_id AND f.status IN (?, ?, ?))",
 		parkedSubgraph, workflow.StatusRunning, -minAge.Milliseconds(),
@@ -78,11 +78,11 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		e.logger.ErrorContext(ctx, "Wedge sweep: querying parked subgraph steps", "shard", shard, "error", err)
 		return
 	}
-	type wedgedCaller struct{ stepID, stepDepth, flowID int }
+	type wedgedCaller struct{ stepID, flowID int }
 	var hits []wedgedCaller
 	for rows.Next() {
 		var w wedgedCaller
-		err := rows.Scan(&w.stepID, &w.stepDepth, &w.flowID)
+		err := rows.Scan(&w.stepID, &w.flowID)
 		if err != nil {
 			rows.Close()
 			e.logger.ErrorContext(ctx, "Wedge sweep: scanning parked subgraph step", "shard", shard, "error", err)
@@ -119,7 +119,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 				"shard", shard, "step", w.stepID, "childFlow", childFlowID, "childStatus", childStatus)
 			var rerr error
 			if childStatus == workflow.StatusCompleted {
-				rerr = e.completeSurgraphFlow(ctx, shard, w.flowID, w.stepDepth, w.stepID, childFinalState)
+				rerr = e.completeSurgraphFlow(ctx, shard, w.flowID, w.stepID, childFinalState)
 			} else {
 				// failed / cancelled: deliver the child's error (or a synthesized one) to the caller.
 				msg := strings.TrimSpace(childError)

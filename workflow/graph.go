@@ -99,7 +99,7 @@ func (g *Graph) Transitions() []Transition {
 
 // SetEndpoint binds a node (identified by its graph name) to the given dispatch URL, creating the node
 // if it does not exist and updating its URL if it does. The name is the node's identity in the graph
-// (used by transitions, fan-in, goto, breakpoints); the URL is the opaque downstream endpoint the engine
+// (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
 // hands to the host's ExecuteTask and groups the breaker/valve/saturation by. The first node bound
 // becomes the default entry point unless SetEntryPoint is called explicitly. The pseudo-node END is not
 // registered.

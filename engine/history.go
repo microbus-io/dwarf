@@ -757,7 +757,7 @@ func (e *Engine) shardInfo(ctx context.Context) ([]ShardSummary, error) {
 	return shards, nil
 }
 
-func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalState any, opts *workflow.FlowOptions) (string, error) {
+func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalState any) (string, error) {
 	shardNum, flowID, flowToken, err := parseFlowKey(threadKey)
 	if err != nil {
 		return "", errors.Trace(err)
@@ -766,7 +766,6 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	opts = e.resolveFlowOptions(opts)
 
 	var threadID int
 	var threadToken string
@@ -776,11 +775,16 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	}
 	threadToken = strings.TrimSpace(threadToken)
 
-	var flowStatus, finalStateJSON, graphJSON, workflowURL, baggageJSON string
+	// The new turn inherits the latest completed turn's full policy (scheduling, baggage, notify-on-stop).
+	// Exclude debug forks: a Fork shares the thread_id for List grouping but must never become a
+	// production Continue's base (forked_from_step<>0 marks a fork).
+	var flowStatus, finalStateJSON, graphJSON, workflowURL, baggageJSON, fairnessKey string
+	var priority, timeBudgetMs, notifyOnStop int
+	var fairnessWeight float64
 	err = db.QueryRowContext(ctx,
-		"SELECT status, final_state, graph, workflow_url, baggage FROM dwarf_flows WHERE thread_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+		"SELECT status, final_state, graph, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms, notify_on_stop FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 		threadID,
-	).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON)
+	).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs, &notifyOnStop)
 	if err != nil {
 		return "", errors.New("no flows found in thread", http.StatusNotFound)
 	}
@@ -805,45 +809,23 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		return "", errors.Trace(err)
 	}
 
-	// Inherit the thread's baggage by default: a multi-turn conversation keeps the original caller's
-	// identity / host context across turns, matching subgraph inheritance. A caller that passes
-	// opts.Baggage explicitly overrides it. The host scrubs it in an entry adapter task if a turn
-	// needs narrower context.
-	if opts.Baggage == nil {
-		var inherited map[string]any
-		unmarshalJSONMap(baggageJSON, &inherited)
-		opts.Baggage = inherited
+	// Inherit the thread's policy. A multi-turn conversation keeps the original caller's scheduling,
+	// identity (baggage), and notify-on-stop across turns. DeleteOnCompletion is forced off (a disposable
+	// flow deletes itself, so it could never have been a Continue source). A turn that needs different
+	// policy uses Create with FlowOptions.ThreadKey instead.
+	var inheritedBaggage map[string]any
+	unmarshalJSONMap(baggageJSON, &inheritedBaggage)
+	opts := &workflow.FlowOptions{
+		Priority:       priority,
+		FairnessKey:    fairnessKey,
+		FairnessWeight: fairnessWeight,
+		TimeBudget:     time.Duration(timeBudgetMs) * time.Millisecond,
+		NotifyOnStop:   notifyOnStop != 0,
+		Baggage:        inheritedBaggage,
 	}
 
-	// A Continue turn starts its own trace (fresh root span), so pass an empty trace_parent.
-	return e.createWithGraph(ctx, shardNum, workflowURL, &graph, mergedState, threadID, threadToken, "", opts)
+	// A Continue turn starts its own trace (fresh root span), so pass an empty trace_parent and no surgraph
+	// linkage. Create-sugar: it creates-and-runs, returning a running flow.
+	return e.createWithGraph(ctx, shardNum, workflowURL, &graph, mergedState, threadID, threadToken, "", opts, 0, 0, 0)
 }
 
-func (e *Engine) setBreakpoint(ctx context.Context, flowKey string, key string, enabled bool) error {
-	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	db, err := e.shard(shardNum)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	var breakpointsJSON string
-	err = db.QueryRowContext(ctx, "SELECT breakpoints FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&breakpointsJSON)
-	if err == sql.ErrNoRows {
-		return errors.New("flow not found", http.StatusNotFound)
-	}
-	if err != nil {
-		return errors.Trace(err)
-	}
-	breakpoints := map[string]string{}
-	json.Unmarshal([]byte(breakpointsJSON), &breakpoints)
-	if enabled {
-		breakpoints[key] = "b"
-	} else {
-		delete(breakpoints, key)
-	}
-	updatedJSON, _ := json.Marshal(breakpoints)
-	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET breakpoints=?, updated_at=NOW_UTC() WHERE flow_id=? AND flow_token=?", string(updatedJSON), flowID, flowToken)
-	return errors.Trace(err)
-}

@@ -106,9 +106,6 @@ func TestSubgraphfailflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
-			return
-		}
 		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
@@ -146,9 +143,6 @@ func TestSubgraphfailflow(t *testing.T) {
 
 		flowKey, err := eng.Create(ctx, "subgraphfailflow.verify:428/failparent", nil, nil)
 		if !assert.NoError(err) {
-			return
-		}
-		if !assert.NoError(eng.Start(ctx, flowKey)) {
 			return
 		}
 		outcome, err := eng.Await(ctx, flowKey)

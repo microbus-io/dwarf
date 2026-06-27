@@ -72,9 +72,6 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	if !assert.NoError(e.Start(ctx, flowKey)) {
-		return
-	}
 	shard, parentFlowID, _, err := parseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return

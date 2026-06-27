@@ -99,10 +99,6 @@ func TestAliasflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		err = eng.Start(ctx, flowKey)
-		if !assert.NoError(err) {
-			return
-		}
 		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
@@ -126,10 +122,6 @@ func TestAliasflow(t *testing.T) {
 
 		// Alt path: history should include "BPrime" but not "B".
 		flowKey, err = eng.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": "alt"}, nil)
-		if !assert.NoError(err) {
-			return
-		}
-		err = eng.Start(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}

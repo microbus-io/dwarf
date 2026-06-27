@@ -30,15 +30,17 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// createSubgraphFlow creates a subgraph flow for a dynamic subgraph transition.
-func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, callerTraceParent string, breakpointsJSON string) (string, error) {
+// createSubgraphFlow creates a subgraph flow for a dynamic subgraph transition. callerStepDepth is the
+// caller step's step_depth, so the child's entry step (and thus its whole subtree) is numbered as a
+// continuation of the caller (callerStepDepth+1).
+func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, callerTraceParent string) (string, error) {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 
-	// Inherit the parent's frozen time budget so a subgraph runs under the same budget as its caller
-	// (priority/fairness already inherited this way).
+	// Inherit the parent's frozen scheduling/budget and its baggage, all passed into the child's insert so
+	// the child is fully formed (surgraph-linked + baggage) in one transaction.
 	var inherited workflow.FlowOptions
 	var inheritedBudgetMs int
 	err = db.QueryRowContext(ctx,
@@ -49,27 +51,15 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 		return "", errors.Trace(err)
 	}
 	inherited.TimeBudget = time.Duration(inheritedBudgetMs) * time.Millisecond
+	var inheritedBaggage map[string]any
+	unmarshalJSONMap(baggageJSON, &inheritedBaggage)
+	inherited.Baggage = inheritedBaggage
 
-	// The subgraph gets its own "workflow" span parented to the caller step's span (callerTraceParent),
-	// so its whole subtree nests under the task that launched it rather than starting a detached trace.
-	subgraphFlowKey, err := e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, 0, "", callerTraceParent, &inherited)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	_, subgraphFlowID, _, err := parseFlowKey(subgraphFlowKey)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-
-	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_flows SET surgraph_flow_id=?, surgraph_step_depth=?, surgraph_step_id=?, baggage=?, breakpoints=?, updated_at=NOW_UTC() WHERE flow_id=?",
-		surgraphFlowID, surgraphStepDepth, surgraphStepID, baggageJSON, breakpointsJSON, subgraphFlowID,
-	)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-
-	return subgraphFlowKey, nil
+	// The child is inserted already surgraph-linked and running in one transaction, so it can never complete
+	// before its parent pointer is set (which would lose the parent's revive). The caller step is parked by
+	// processStep before this call - the complementary half of that ordering. The child's "workflow" span is
+	// parented to the caller step's span (callerTraceParent), nesting the subtree under the launching task.
+	return e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, 0, "", callerTraceParent, &inherited, surgraphFlowID, callerStepDepth, surgraphStepID)
 }
 
 // fireFlowStopped invokes the host's FlowStopped callback with the flow's baggage on the context, so the
@@ -255,12 +245,12 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	// Read the surgraph linkage and the disposable flag before notifying, so a DeleteOnCompletion root can
 	// delete itself BEFORE waking Await waiters: a waiter woken by signalStop then observes a gone row and
 	// translates it to a completed outcome (see await), rather than racing the delete.
-	var surgraphFlowID, surgraphStepDepth, surgraphStepID int
+	var surgraphFlowID, surgraphStepID int
 	var deleteOnCompletion bool
 	err = db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id, delete_on_completion FROM dwarf_flows WHERE flow_id=?",
+		"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&surgraphFlowID, &surgraphStepDepth, &surgraphStepID, &deleteOnCompletion)
+	).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion)
 	if err != nil {
 		return true, errors.Trace(err)
 	}
@@ -288,7 +278,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	e.signalEnqueue(ctx, 0, 0) // Wake peers
 
 	if surgraphFlowID != 0 {
-		err := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepDepth, surgraphStepID, finalStateJSON)
+		err := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepID, finalStateJSON)
 		if err != nil {
 			return true, errors.Trace(err)
 		}
@@ -298,7 +288,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 }
 
 // completeSurgraphFlow re-dispatches a parked surgraph step after its child completes.
-func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepDepth int, surgraphStepID int, subgraphFinalStateJSON string) error {
+func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, subgraphFinalStateJSON string) error {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
@@ -332,7 +322,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	}
 	if reDispatch {
 		e.logger.DebugContext(ctx, "Resuming surgraph task after subgraph flow completion",
-			"surgraphFlow", surgraphFlowID, "surgraphStep", surgraphStepDepth)
+			"surgraphFlow", surgraphFlowID, "surgraphStep", surgraphStepID)
 		e.enqueueStep(ctx, shardNum, surgraphStepID)
 	}
 	return nil
@@ -550,21 +540,26 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 
 	currentFlowID := flowID
 	for {
-		var stepID, stepDepth int
+		// Pick this flow's interrupted leaf the SAME way Snapshot does (earliest-updated, step_id tiebreak),
+		// so a Snapshot reports exactly the interrupt the next Resume will resolve.
+		var stepID int
 		err = db.QueryRowContext(ctx,
-			"SELECT step_id, step_depth FROM dwarf_steps WHERE flow_id=? AND status=? ORDER BY updated_at LIMIT_OFFSET(1, 0)",
+			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND status=? ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)",
 			currentFlowID, workflow.StatusInterrupted,
-		).Scan(&stepID, &stepDepth)
+		).Scan(&stepID)
 		if err != nil {
 			return nil, nil, nil, errors.Trace(err)
 		}
 		stepIDs = append(stepIDs, stepID)
 
+		// Descend into the interrupted child subgraph spawned by THIS caller step, keyed on its PK
+		// (surgraph_step_id). Matching on depth would be ambiguous when parallel subgraph callers share a
+		// depth in a fan-out, and could descend into the wrong child.
 		var subFlowID int
 		var subFlowToken string
 		err = db.QueryRowContext(ctx,
-			"SELECT flow_id, flow_token FROM dwarf_flows WHERE surgraph_flow_id=? AND surgraph_step_depth=? AND status=?",
-			currentFlowID, stepDepth, workflow.StatusInterrupted,
+			"SELECT flow_id, flow_token FROM dwarf_flows WHERE surgraph_step_id=? AND status=?",
+			stepID, workflow.StatusInterrupted,
 		).Scan(&subFlowID, &subFlowToken)
 		if err == sql.ErrNoRows {
 			return flowIDs, stepIDs, compositeFlowIDs, nil
@@ -580,8 +575,8 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	}
 }
 
-// resume is the shared machinery for Resume (interrupt) and ResumeBreak.
-func (e *Engine) resume(ctx context.Context, flowKey string, breakpoint bool, data any) error {
+// resume continues a flow paused by flow.Interrupt, delivering resume data to the leaf interrupt park.
+func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
@@ -622,25 +617,14 @@ func (e *Engine) resume(ctx context.Context, flowKey string, breakpoint bool, da
 	parkStepIDs := append([]any{}, upStepIDs...)
 	parkStepIDs = append(parkStepIDs, downStepIDs[:len(downStepIDs)-1]...)
 
-	var leafInterruptDone, leafBreakpointHit bool
-	var leafStateJSON string
-	db.QueryRowContext(ctx, "SELECT interrupt_done, breakpoint_hit, state FROM dwarf_steps WHERE step_id=?", leafStepID).Scan(&leafInterruptDone, &leafBreakpointHit, &leafStateJSON)
-	if breakpoint && (leafInterruptDone || !leafBreakpointHit) {
-		return errors.New("flow is not paused at a breakpoint; use Resume to continue an interrupt", http.StatusConflict)
-	}
-	if !breakpoint && !leafInterruptDone {
-		return errors.New("flow is not paused at an interrupt; use ResumeBreak to continue a breakpoint", http.StatusConflict)
+	var leafInterruptDone bool
+	db.QueryRowContext(ctx, "SELECT interrupt_done FROM dwarf_steps WHERE step_id=?", leafStepID).Scan(&leafInterruptDone)
+	if !leafInterruptDone {
+		return errors.New("flow is not paused at an interrupt", http.StatusConflict)
 	}
 
 	resumeDataJSON := "{}"
-	breakpointStateJSON := leafStateJSON
-	if breakpoint {
-		var leafState map[string]any
-		json.Unmarshal([]byte(leafStateJSON), &leafState)
-		merged, _ := workflow.MergeState(leafState, data, nil)
-		mergedJSON, _ := json.Marshal(merged)
-		breakpointStateJSON = string(mergedJSON)
-	} else if data != nil {
+	if data != nil {
 		b, _ := json.Marshal(data)
 		var resumeMap map[string]any
 		json.Unmarshal(b, &resumeMap)
@@ -661,13 +645,8 @@ func (e *Engine) resume(ctx context.Context, flowKey string, breakpoint bool, da
 			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status=?", parkArgs...)
 		}
 
-		if breakpoint {
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, state=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-				workflow.StatusPending, breakpointStateJSON, leafStepID, workflow.StatusInterrupted)
-		} else {
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-				workflow.StatusPending, resumeDataJSON, leafStepID, workflow.StatusInterrupted)
-		}
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+			workflow.StatusPending, resumeDataJSON, leafStepID, workflow.StatusInterrupted)
 
 		for _, chainFlowID := range chainFlowIDs {
 			tx.ExecContext(ctx,
@@ -699,12 +678,11 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 
 	currentFlowID := flowID
 	for {
-		var surgraphFlowID, surgraphStepDepth, surgraphStepID int
-		var wfName string
+		var surgraphFlowID, surgraphStepID int
 		err = db.QueryRowContext(ctx,
-			"SELECT surgraph_flow_id, surgraph_step_depth, surgraph_step_id, workflow_url FROM dwarf_flows WHERE flow_id=?",
+			"SELECT surgraph_flow_id, surgraph_step_id FROM dwarf_flows WHERE flow_id=?",
 			currentFlowID,
-		).Scan(&surgraphFlowID, &surgraphStepDepth, &surgraphStepID, &wfName)
+		).Scan(&surgraphFlowID, &surgraphStepID)
 		if err != nil {
 			return nil, nil, nil, errors.Trace(err)
 		}
@@ -716,12 +694,6 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 			"SELECT flow_token FROM dwarf_flows WHERE flow_id=?",
 			surgraphFlowID,
 		).Scan(&surgraphFlowToken)
-		if surgraphStepID == 0 {
-			db.QueryRowContext(ctx,
-				"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND step_depth=? AND task_name=?",
-				surgraphFlowID, surgraphStepDepth, strings.TrimSpace(wfName),
-			).Scan(&surgraphStepID)
-		}
 		flowIDs = append(flowIDs, surgraphFlowID)
 		stepIDs = append(stepIDs, surgraphStepID)
 		compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, surgraphFlowID, strings.TrimSpace(surgraphFlowToken)))
