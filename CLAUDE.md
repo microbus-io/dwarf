@@ -1065,11 +1065,17 @@ in the provider's Resource, not in per-metric attributes** (no `service.name` on
 explode cardinality and is off-spec). The only attributes the engine attaches are the metric-specific labels:
 `workflow`, `status`, `task`, `priority`, `park_type`.
 
-**5 counters, incremented inline** at their logical event sites: `dwarf_flows_started_total`
-(start path), `dwarf_flows_terminated_total` (completeFlow), `dwarf_steps_executed_total` (every terminal step
-disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered_total`
-(pollPendingSteps lease recovery), and `dwarf_steps_unwedged_total{park_type}` (the parked-step wedge sweep; a
+**5 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
+(start path), `dwarf_flows_terminated` (completeFlow), `dwarf_steps_executed` (every terminal step
+disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered`
+(pollPendingSteps lease recovery), and `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
 nonzero value flags a latent bug). The inline helpers no-op when `e.metrics == nil` (before Startup).
+
+**Counter instrument names carry no `_total` suffix.** `_total` is a Prometheus naming convention, not an
+OpenTelemetry one: a Prometheus exporter appends it to every counter at the scrape boundary (and
+de-duplicates, so a name already ending in `_total` is not doubled), while the OTLP push path uses the
+instrument name verbatim. So the instruments are named `dwarf_flows_started` etc., and a Prometheus query
+references them as `dwarf_flows_started_total`. Do not bake `_total` into a counter's instrument name.
 
 **5 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
 time and reads engine state: in-memory for
@@ -1266,7 +1272,7 @@ be relevant after it ends." So retention is either operator-driven or an explici
   so there is no duration to pick and the resurrection paths are preserved: `failed`/`cancelled`/`interrupted` flows
   are **never** auto-deleted (a failed disposable job is exactly the one to keep as a `Fork` source). Honored on
   the **root** flow only (`surgraph_flow_id=0`); the delete reuses `Delete`'s cascade to sweep descendants, and the
-  flag is not inherited by children. The delete is **inline** in `completeFlow`, after the `dwarf_flows_terminated_total`
+  flag is not inherited by children. The delete is **inline** in `completeFlow`, after the `dwarf_flows_terminated`
   metric and any `FlowStopped` notification fire (so observability and the full outcome survive the row's deletion) and
   **before `signalStop`** (so a blocking `Await` woken by the stop signal observes a gone row uniformly, never a
   transient completed state). Best-effort - a delete failure only logs and leaves a stray row; no sweeper backstops it.
@@ -1386,7 +1392,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
      failed/cancelled/absent one. (A fan-out has several caller steps, each its own `surgraph_step_id`, checked
      independently; `flow.Retry` leaves older terminal children whose latest sibling is still active - handled by
      the `NOT EXISTS` + latest-child logic.)
-   Each unwedge increments `dwarf_steps_unwedged_total{park_type}` (the always-on alarm; a nonzero value means a
+   Each unwedge increments `dwarf_steps_unwedged{park_type}` (the always-on alarm; a nonzero value means a
    latent bug let a step wedge) and logs at error level (silent under the default discard logger, surfaced once a
    host injects one).
 

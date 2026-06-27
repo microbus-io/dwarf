@@ -53,7 +53,7 @@ func (e *Engine) recoveryLoop(ctx context.Context) {
 // every detector carries a parkWedgeThreshold age guard so steady-state operation never trips a false
 // positive. Each recovery re-invokes the normal release mechanism (which is guarded by a CAS on the park
 // state), so it is idempotent and harmless under a concurrent resolution, a false positive, or a peer
-// replica sweeping the same shard. A nonzero dwarf_steps_unwedged_total means a latent bug let a step wedge
+// replica sweeping the same shard. A nonzero dwarf_steps_unwedged means a latent bug let a step wedge
 // - the sweep papered over the effect but the cause is worth finding.
 func (e *Engine) sweepWedgedParks(ctx context.Context, db *sequel.DB, shard int) {
 	e.recoverWedgedSubgraphParks(ctx, db, shard, parkWedgeThreshold)

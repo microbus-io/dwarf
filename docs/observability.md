@@ -32,20 +32,22 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 10 instruments — 5 counters and 5 gauges:
+The engine emits 10 instruments — 5 counters and 5 gauges. Counter instrument names carry **no** `_total`
+suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
+PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
-| `dwarf_*` metric | Type | Labels | Measures |
-|---|---|---|---|
-| `dwarf_flows_started_total` | counter | `workflow` | flows started |
-| `dwarf_flows_terminated_total` | counter | `workflow`, `status` | flows reaching a terminal status |
-| `dwarf_steps_executed_total` | counter | `task`, `status` | steps executed, by disposition |
-| `dwarf_steps_recovered_total` | counter | — | steps recovered after a lease expiry |
-| `dwarf_steps_unwedged_total` | counter | — | wedged subgraph parks recovered by the sweep |
-| `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache |
-| `dwarf_steps_pending` | gauge | `priority` | due pending steps per priority band |
-| `dwarf_steps_oldest_pending_age_seconds` | gauge | `priority` | age of the oldest due pending step |
-| `dwarf_steps_fairness_keys` | gauge | `priority` | distinct fairness keys in the last refill |
-| `dwarf_task_concurrency_running` | gauge | `task` | running steps per task |
+| `dwarf_*` instrument | Type | Labels | Measures | PromQL name |
+|---|---|---|---|---|
+| `dwarf_flows_started` | counter | `workflow` | flows started | `dwarf_flows_started_total` |
+| `dwarf_flows_terminated` | counter | `workflow`, `status` | flows reaching a terminal status | `dwarf_flows_terminated_total` |
+| `dwarf_steps_executed` | counter | `task`, `status` | steps executed, by disposition | `dwarf_steps_executed_total` |
+| `dwarf_steps_recovered` | counter | — | steps recovered after a lease expiry | `dwarf_steps_recovered_total` |
+| `dwarf_steps_unwedged` | counter | — | wedged subgraph parks recovered by the sweep | `dwarf_steps_unwedged_total` |
+| `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
+| `dwarf_steps_pending` | gauge | `priority` | due pending steps per priority band | `dwarf_steps_pending` |
+| `dwarf_steps_oldest_pending_age_seconds` | gauge | `priority` | age of the oldest due pending step | `dwarf_steps_oldest_pending_age_seconds` |
+| `dwarf_steps_fairness_keys` | gauge | `priority` | distinct fairness keys in the last refill | `dwarf_steps_fairness_keys` |
+| `dwarf_task_concurrency_running` | gauge | `task` | running steps per task | `dwarf_task_concurrency_running` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state
 at collection time. Gauges emit **per replica** — sum them at the backend for cluster-wide totals. Labels

@@ -104,18 +104,19 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 		return
 	}
 
-	// Counters.
-	started, ok := sumCounter(rm, "dwarf_flows_started_total", "", "")
-	assert.True(ok, "dwarf_flows_started_total should be present")
+	// Counters. Instrument names carry no _total suffix (the Prometheus exporter appends it); the manual
+	// reader here observes the raw instrument names.
+	started, ok := sumCounter(rm, "dwarf_flows_started", "", "")
+	assert.True(ok, "dwarf_flows_started should be present")
 	assert.Equal(int64(1), started)
 
-	terminated, ok := sumCounter(rm, "dwarf_flows_terminated_total", "status", workflow.StatusCompleted)
-	assert.True(ok, "dwarf_flows_terminated_total{status=completed} should be present")
+	terminated, ok := sumCounter(rm, "dwarf_flows_terminated", "status", workflow.StatusCompleted)
+	assert.True(ok, "dwarf_flows_terminated{status=completed} should be present")
 	assert.Equal(int64(1), terminated)
 
 	// Two steps complete (taskA, taskB), each counted under status=completed.
-	executed, ok := sumCounter(rm, "dwarf_steps_executed_total", "status", workflow.StatusCompleted)
-	assert.True(ok, "dwarf_steps_executed_total{status=completed} should be present")
+	executed, ok := sumCounter(rm, "dwarf_steps_executed", "status", workflow.StatusCompleted)
+	assert.True(ok, "dwarf_steps_executed{status=completed} should be present")
 	assert.Equal(int64(2), executed)
 
 	// The queue-depth observable gauge always emits a point at collection time.

@@ -67,11 +67,12 @@ func (e *Engine) initMetrics() error {
 		}
 		return c
 	}
-	m.flowsStarted = ctr("dwarf_flows_started_total", "Counts flows that have been started.")
-	m.flowsTerminated = ctr("dwarf_flows_terminated_total", "Counts flows that have reached a terminal status.")
-	m.stepsExecuted = ctr("dwarf_steps_executed_total", "Counts steps that have been executed.")
-	m.stepsRecovered = ctr("dwarf_steps_recovered_total", "Counts steps recovered by pollPendingSteps after lease expiry.")
-	m.stepsUnwedged = ctr("dwarf_steps_unwedged_total", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
+	// Counter instrument names carry no _total suffix; the Prometheus exporter appends it (see CLAUDE.md).
+	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started.")
+	m.flowsTerminated = ctr("dwarf_flows_terminated", "Counts flows that have reached a terminal status.")
+	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed.")
+	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps recovered by pollPendingSteps after lease expiry.")
+	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
 
 	gauge := func(name, desc, unit string) metric.Int64ObservableGauge {
 		g, err := meter.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit(unit))
