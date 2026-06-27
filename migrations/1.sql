@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     step_id              BIGINT       NOT NULL DEFAULT 0,
     surgraph_flow_id     BIGINT       NOT NULL DEFAULT 0,
     surgraph_step_id     BIGINT       NOT NULL DEFAULT 0,
+    root_flow_id         BIGINT       NOT NULL DEFAULT 0,
     forked_from_step     BIGINT       NOT NULL DEFAULT 0,
     thread_id            BIGINT       NOT NULL DEFAULT 0,
     thread_token         CHAR(16)     NOT NULL DEFAULT '',
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     INDEX idx_dwarf_flows_status (status, updated_at),
     INDEX idx_dwarf_flows_workflow_url (workflow_url),
     INDEX idx_dwarf_flows_surgraph (surgraph_flow_id),
+    INDEX idx_dwarf_flows_root (root_flow_id),
     INDEX idx_dwarf_flows_thread (thread_id, flow_id),
     INDEX idx_dwarf_flows_created_at (created_at)
 );
@@ -60,6 +62,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     step_id              BIGINT       NOT NULL DEFAULT 0,
     surgraph_flow_id     BIGINT       NOT NULL DEFAULT 0,
     surgraph_step_id     BIGINT       NOT NULL DEFAULT 0,
+    root_flow_id         BIGINT       NOT NULL DEFAULT 0,
     forked_from_step     BIGINT       NOT NULL DEFAULT 0,
     thread_id            BIGINT       NOT NULL DEFAULT 0,
     thread_token         CHAR(16)     NOT NULL DEFAULT '',
@@ -89,6 +92,9 @@ CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
 
 -- DRIVER: pgx
+CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
+
+-- DRIVER: pgx
 CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
 
 -- DRIVER: pgx
@@ -106,6 +112,7 @@ CREATE TABLE dwarf_flows (
     step_id              BIGINT        NOT NULL DEFAULT 0,
     surgraph_flow_id     BIGINT        NOT NULL DEFAULT 0,
     surgraph_step_id     BIGINT        NOT NULL DEFAULT 0,
+    root_flow_id         BIGINT        NOT NULL DEFAULT 0,
     forked_from_step     BIGINT        NOT NULL DEFAULT 0,
     thread_id            BIGINT        NOT NULL DEFAULT 0,
     thread_token         NCHAR(16)     NOT NULL DEFAULT '',
@@ -135,6 +142,9 @@ CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
 
 -- DRIVER: mssql
+CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
+
+-- DRIVER: mssql
 CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
 
 -- DRIVER: mssql
@@ -152,6 +162,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     step_id              INTEGER      NOT NULL DEFAULT 0,
     surgraph_flow_id     INTEGER      NOT NULL DEFAULT 0,
     surgraph_step_id     INTEGER      NOT NULL DEFAULT 0,
+    root_flow_id         INTEGER      NOT NULL DEFAULT 0,
     forked_from_step     INTEGER      NOT NULL DEFAULT 0,
     thread_id            INTEGER      NOT NULL DEFAULT 0,
     thread_token         TEXT         NOT NULL DEFAULT '',
@@ -178,6 +189,9 @@ CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
+
+-- DRIVER: sqlite
+CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);

@@ -42,11 +42,11 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	// Inherit the parent's frozen scheduling/budget and its baggage, all passed into the child's insert so
 	// the child is fully formed (surgraph-linked + baggage) in one transaction.
 	var inherited workflow.FlowOptions
-	var inheritedBudgetMs int
+	var inheritedBudgetMs, rootFlowID int
 	err = db.QueryRowContext(ctx,
-		"SELECT priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=?",
+		"SELECT priority, fairness_key, fairness_weight, time_budget_ms, root_flow_id FROM dwarf_flows WHERE flow_id=?",
 		surgraphFlowID,
-	).Scan(&inherited.Priority, &inherited.FairnessKey, &inherited.FairnessWeight, &inheritedBudgetMs)
+	).Scan(&inherited.Priority, &inherited.FairnessKey, &inherited.FairnessWeight, &inheritedBudgetMs, &rootFlowID)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -59,7 +59,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	// before its parent pointer is set (which would lose the parent's revive). The caller step is parked by
 	// processStep before this call - the complementary half of that ordering. The child's "workflow" span is
 	// parented to the caller step's span (callerTraceParent), nesting the subtree under the launching task.
-	return e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, 0, "", callerTraceParent, &inherited, surgraphFlowID, callerStepDepth, surgraphStepID)
+	return e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, 0, "", callerTraceParent, &inherited, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID)
 }
 
 // fireFlowStopped invokes the host's FlowStopped callback with the flow's baggage on the context, so the
@@ -497,81 +497,128 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childSt
 	return nil
 }
 
-// allSubgraphFlows iteratively finds all active descendant subgraph flows.
+// allSubgraphFlows finds all active (non-terminal) descendant subgraph flows of flowID. It fetches the
+// whole tree in one scan via the denormalized root_flow_id, then BFS in memory through non-terminal nodes
+// only - the same set the former level-by-level recursion produced (which likewise stopped descending at a
+// terminal node), one round-trip regardless of depth. root_flow_id gives tree membership; surgraph_flow_id
+// gives the parent/child structure the BFS walks.
 func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int) (flowIDs []any, compositeFlowIDs []string, err error) {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
-	current := []any{flowID}
-	for len(current) > 0 {
-		placeholders := strings.Repeat("?,", len(current)-1) + "?"
-		args := append([]any{}, current...)
-		args = append(args, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled)
-		rows, err := db.QueryContext(ctx,
-			"SELECT flow_id, flow_token FROM dwarf_flows WHERE surgraph_flow_id IN ("+placeholders+") AND status NOT IN (?, ?, ?)",
-			args...,
-		)
-		if err != nil {
-			return nil, nil, errors.Trace(err)
+	rows, err := db.QueryContext(ctx,
+		"SELECT flow_id, flow_token, surgraph_flow_id, status FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
+		flowID,
+	)
+	if err != nil {
+		return nil, nil, errors.Trace(err)
+	}
+	type node struct {
+		token    string
+		terminal bool
+	}
+	byID := map[int]node{}
+	childrenByParent := map[int][]int{}
+	for rows.Next() {
+		var id, parent int
+		var token, status string
+		rows.Scan(&id, &token, &parent, &status)
+		status = strings.TrimSpace(status)
+		term := status == workflow.StatusCompleted || status == workflow.StatusFailed || status == workflow.StatusCancelled
+		byID[id] = node{token: strings.TrimSpace(token), terminal: term}
+		if parent != 0 {
+			childrenByParent[parent] = append(childrenByParent[parent], id)
 		}
-		current = nil
-		for rows.Next() {
-			var id int
-			var token string
-			rows.Scan(&id, &token)
-			flowIDs = append(flowIDs, id)
-			compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, id, strings.TrimSpace(token)))
-			current = append(current, id)
+	}
+	rows.Close()
+
+	queue := []int{flowID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, child := range childrenByParent[cur] {
+			n := byID[child]
+			if n.terminal { // a terminal node is neither collected nor descended through (matches the old walk)
+				continue
+			}
+			flowIDs = append(flowIDs, child)
+			compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, child, n.token))
+			queue = append(queue, child)
 		}
-		rows.Close()
 	}
 	return flowIDs, compositeFlowIDs, nil
 }
 
-// interruptedSubgraphChain walks down from a flow through interrupted subgraph steps to find the leaf.
+// interruptedSubgraphChain walks down from a flow through interrupted subgraph steps to find the leaf. It
+// loads the tree once via root_flow_id (structure + per-flow tokens/status) and each flow's interrupted-leaf
+// step in one batched query (SQL does the earliest-updated_at ordering, so there is no Go-side timestamp
+// comparison), then descends in memory - one round-trip per concern regardless of depth, vs the former two
+// queries per level. The leaf is picked the SAME way Snapshot does (earliest updated_at, step_id tiebreak),
+// so a Snapshot reports exactly the interrupt the next Resume resolves. Descent is keyed on surgraph_step_id
+// (the caller step's PK), never depth, which is ambiguous when parallel subgraph callers share a depth.
 func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flowID int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
+
+	frows, err := db.QueryContext(ctx,
+		"SELECT flow_id, flow_token, surgraph_step_id, status FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
+		flowID,
+	)
+	if err != nil {
+		return nil, nil, nil, errors.Trace(err)
+	}
+	tokenByID := map[int]string{}
+	childByCallerStep := map[int]int{} // surgraph_step_id -> interrupted child flow_id
+	for frows.Next() {
+		var id, ssid int
+		var token, status string
+		frows.Scan(&id, &token, &ssid, &status)
+		tokenByID[id] = strings.TrimSpace(token)
+		if ssid != 0 && strings.TrimSpace(status) == workflow.StatusInterrupted {
+			childByCallerStep[ssid] = id
+		}
+	}
+	frows.Close()
+
+	// Each tree flow's interrupted leaf: order in SQL, take the first row per flow_id in memory.
+	interruptedLeafByFlow := map[int]int{}
+	srows, err := db.QueryContext(ctx,
+		"SELECT flow_id, step_id FROM dwarf_steps WHERE status=? AND flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)) ORDER BY flow_id, updated_at, step_id",
+		workflow.StatusInterrupted, flowID,
+	)
+	if err != nil {
+		return nil, nil, nil, errors.Trace(err)
+	}
+	for srows.Next() {
+		var fid, sid int
+		srows.Scan(&fid, &sid)
+		if _, seen := interruptedLeafByFlow[fid]; !seen {
+			interruptedLeafByFlow[fid] = sid // first row per flow_id = earliest updated_at, step_id
+		}
+	}
+	srows.Close()
+
 	flowIDs = []any{flowID}
 	compositeFlowIDs = []string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)}
-
-	currentFlowID := flowID
+	cur := flowID
 	for {
-		// Pick this flow's interrupted leaf the SAME way Snapshot does (earliest-updated, step_id tiebreak),
-		// so a Snapshot reports exactly the interrupt the next Resume will resolve.
-		var stepID int
-		err = db.QueryRowContext(ctx,
-			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND status=? ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)",
-			currentFlowID, workflow.StatusInterrupted,
-		).Scan(&stepID)
-		if err != nil {
-			return nil, nil, nil, errors.Trace(err)
+		leaf, ok := interruptedLeafByFlow[cur]
+		if !ok {
+			// An interrupted flow on the descent always has an interrupted step; its absence is the
+			// degenerate case the per-flow leaf SELECT used to surface as ErrNoRows.
+			return nil, nil, nil, errors.Trace(sql.ErrNoRows)
 		}
-		stepIDs = append(stepIDs, stepID)
-
-		// Descend into the interrupted child subgraph spawned by THIS caller step, keyed on its PK
-		// (surgraph_step_id). Matching on depth would be ambiguous when parallel subgraph callers share a
-		// depth in a fan-out, and could descend into the wrong child.
-		var subFlowID int
-		var subFlowToken string
-		err = db.QueryRowContext(ctx,
-			"SELECT flow_id, flow_token FROM dwarf_flows WHERE surgraph_step_id=? AND status=?",
-			stepID, workflow.StatusInterrupted,
-		).Scan(&subFlowID, &subFlowToken)
-		if err == sql.ErrNoRows {
-			return flowIDs, stepIDs, compositeFlowIDs, nil
+		stepIDs = append(stepIDs, leaf)
+		child, ok := childByCallerStep[leaf]
+		if !ok {
+			return flowIDs, stepIDs, compositeFlowIDs, nil // no interrupted child spawned here - leaf reached
 		}
-		if err != nil {
-			return nil, nil, nil, errors.Trace(err)
-		}
-
-		subFlowToken = strings.TrimSpace(subFlowToken)
-		flowIDs = append(flowIDs, subFlowID)
-		compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, subFlowID, subFlowToken))
-		currentFlowID = subFlowID
+		flowIDs = append(flowIDs, child)
+		compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, child, tokenByID[child]))
+		cur = child
 	}
 }
 
@@ -667,37 +714,48 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	return nil
 }
 
-// surgraphChain walks from a flow up to the root surgraph.
+// surgraphChain walks from a flow up to the root surgraph. It loads the whole tree once via the denormalized
+// root_flow_id, then follows surgraph_flow_id/surgraph_step_id pointers from flowID up to the root in memory -
+// one round-trip regardless of nesting depth, vs the former two queries per level. root_flow_id gives the tree
+// membership; the surgraph links give the parent/caller structure the walk follows.
 func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
 	db, err := e.shard(shardNum)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
+	rows, err := db.QueryContext(ctx,
+		"SELECT flow_id, flow_token, surgraph_flow_id, surgraph_step_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
+		flowID,
+	)
+	if err != nil {
+		return nil, nil, nil, errors.Trace(err)
+	}
+	type fnode struct {
+		token      string
+		surgFlowID int
+		surgStepID int
+	}
+	byID := map[int]fnode{}
+	for rows.Next() {
+		var id, sfid, ssid int
+		var token string
+		rows.Scan(&id, &token, &sfid, &ssid)
+		byID[id] = fnode{token: strings.TrimSpace(token), surgFlowID: sfid, surgStepID: ssid}
+	}
+	rows.Close()
+
 	flowIDs = []any{flowID}
 	compositeFlowIDs = []string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)}
-
-	currentFlowID := flowID
+	cur := flowID
 	for {
-		var surgraphFlowID, surgraphStepID int
-		err = db.QueryRowContext(ctx,
-			"SELECT surgraph_flow_id, surgraph_step_id FROM dwarf_flows WHERE flow_id=?",
-			currentFlowID,
-		).Scan(&surgraphFlowID, &surgraphStepID)
-		if err != nil {
-			return nil, nil, nil, errors.Trace(err)
-		}
-		if surgraphFlowID == 0 {
+		n, ok := byID[cur]
+		if !ok || n.surgFlowID == 0 {
 			break
 		}
-		var surgraphFlowToken string
-		db.QueryRowContext(ctx,
-			"SELECT flow_token FROM dwarf_flows WHERE flow_id=?",
-			surgraphFlowID,
-		).Scan(&surgraphFlowToken)
-		flowIDs = append(flowIDs, surgraphFlowID)
-		stepIDs = append(stepIDs, surgraphStepID)
-		compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, surgraphFlowID, strings.TrimSpace(surgraphFlowToken)))
-		currentFlowID = surgraphFlowID
+		flowIDs = append(flowIDs, n.surgFlowID)
+		stepIDs = append(stepIDs, n.surgStepID)
+		compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, n.surgFlowID, byID[n.surgFlowID].token))
+		cur = n.surgFlowID
 	}
 	return flowIDs, stepIDs, compositeFlowIDs, nil
 }

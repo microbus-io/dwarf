@@ -152,6 +152,7 @@ type forkClone struct {
 	fairnessWeight  float64
 	timeBudgetMs    int
 	newLeafStepID   int
+	newRootFlowID   int // the cloned root's flow_id; descendants inherit it as their root_flow_id
 }
 
 // cloneSubtree clones originFlowID into a new flow under the given new-surgraph context, then recurses into
@@ -207,15 +208,17 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	}
 	newFlowID := int(newFlowID64)
 	if isRoot {
+		// The cloned root is its own root; descendants inherit this id as their root_flow_id.
+		cc.newRootFlowID = newFlowID
 		// The root's flow_token must match the key returned to the caller.
-		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET flow_token=?, thread_id=?, thread_token=? WHERE flow_id=?",
-			cc.rootFlowToken, cc.threadID, cc.threadToken, newFlowID)
+		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET flow_token=?, thread_id=?, thread_token=?, root_flow_id=? WHERE flow_id=?",
+			cc.rootFlowToken, cc.threadID, cc.threadToken, newFlowID, newFlowID)
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
 	} else {
-		// Subgraph flows are their own thread.
-		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET thread_id=? WHERE flow_id=?", newFlowID, newFlowID)
+		// Subgraph flows are their own thread but share the cloned root's tree-membership id.
+		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET thread_id=?, root_flow_id=? WHERE flow_id=?", newFlowID, cc.newRootFlowID, newFlowID)
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -442,23 +445,38 @@ func (e *Engine) collectDAGSubtree(ctx context.Context, db sequel.Executor, flow
 	return collected, nil
 }
 
+// allDescendantSubgraphFlows returns every subgraph flow descended from flowID (any status), recursively.
+// It fetches the whole tree (root + all descendants) in one scan via the denormalized root_flow_id, then
+// derives flowID's descendants in memory from the surgraph_flow_id parent links - the same set the former
+// level-by-level recursion produced, but one round-trip regardless of tree depth. root_flow_id gives tree
+// *membership*; the surgraph link still gives the parent/child *structure* the BFS walks.
 func (e *Engine) allDescendantSubgraphFlows(ctx context.Context, db sequel.Executor, flowID int) ([]int, error) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT flow_id, surgraph_flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
+		flowID,
+	)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	childrenByParent := map[int][]int{}
+	for rows.Next() {
+		var id, parent int
+		rows.Scan(&id, &parent)
+		if parent != 0 {
+			childrenByParent[parent] = append(childrenByParent[parent], id)
+		}
+	}
+	rows.Close()
+
 	var collected []int
-	current := []any{flowID}
-	for len(current) > 0 {
-		ph := strings.Repeat("?,", len(current)-1) + "?"
-		rows, err := db.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id IN ("+ph+")", current...)
-		if err != nil {
-			return nil, errors.Trace(err)
+	queue := []int{flowID}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, child := range childrenByParent[cur] {
+			collected = append(collected, child)
+			queue = append(queue, child)
 		}
-		current = nil
-		for rows.Next() {
-			var id int
-			rows.Scan(&id)
-			collected = append(collected, id)
-			current = append(current, id)
-		}
-		rows.Close()
 	}
 	return collected, nil
 }

@@ -57,7 +57,7 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	} else {
 		shardNum = rand.IntN(e.numDBShards()) + 1
 	}
-	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, initialState, threadID, threadToken, "", opts, 0, 0, 0)
+	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, initialState, threadID, threadToken, "", opts, 0, 0, 0, 0)
 	return flowKey, errors.Trace(err)
 }
 
@@ -117,7 +117,7 @@ func baggageMap(v any) map[string]any {
 // parent. (The parent caller is parked by processStep before this is called, the complementary half of
 // that ordering.) callerStepDepth is the caller step's step_depth (0 for a top-level flow): the entry step
 // is created at callerStepDepth+1, so a subgraph's depths continue from the caller (informational only).
-func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState any, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID int) (flowKey string, err error) {
+func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState any, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID int) (flowKey string, err error) {
 	entryPoint := graph.EntryPoint()
 	if entryPoint == "" {
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
@@ -193,9 +193,16 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 			tid = int(newFlowID)
 			ttok = flowToken
 		}
+		// root_flow_id is the denormalized tree-membership index: a top-level flow (rootFlowID==0) is its
+		// own root; a subgraph child inherits the parent's root. Written once here, immutable thereafter, so
+		// a whole tree is reachable by `WHERE root_flow_id=?` without a recursive surgraph walk.
+		rfid := rootFlowID
+		if rfid == 0 {
+			rfid = int(newFlowID)
+		}
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET thread_id=?, thread_token=?, step_id=?, updated_at=NOW_UTC() WHERE flow_id=?",
-			tid, ttok, newStepID, newFlowID,
+			"UPDATE dwarf_flows SET thread_id=?, thread_token=?, step_id=?, root_flow_id=?, updated_at=NOW_UTC() WHERE flow_id=?",
+			tid, ttok, newStepID, rfid, newFlowID,
 		)
 		return nil
 	})

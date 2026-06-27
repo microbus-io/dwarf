@@ -752,6 +752,62 @@ parked at `parked=1`. The PK lookup keeps each child flow bound to the step that
 also stored the caller's `surgraph_step_depth` and matched on depth; that was ambiguous across parallel callers at
 one depth and was removed - `surgraph_step_id` is the sole, precise link.)
 
+### Denormalized root pointer (`root_flow_id`)
+
+Every flow carries `root_flow_id`, the `flow_id` of the root of its subgraph tree, so a whole tree (a root plus
+all its subgraph descendants, recursively) is reachable in **one query** - `WHERE root_flow_id=?` - instead of a
+recursive `surgraph_flow_id` walk that issues one round-trip per tree level. It is **write-once at creation,
+immutable** thereafter:
+
+- A top-level flow (`Create`/`Run`/`Continue`) is its **own** root: `root_flow_id = its own flow_id` (set in the
+  same post-insert UPDATE that fixes `thread_id`/`step_id`). The own-id convention - rather than `0`-means-self -
+  keeps the root's *own* row matching the membership scan with no `COALESCE`/`OR` predicate.
+- A subgraph child **inherits** the parent's `root_flow_id` (`createSubgraphFlow` reads it alongside the inherited
+  scheduling/budget and passes it into `createWithGraph`).
+- A `Fork` clone is a fresh self-contained tree: the new root is its **own** root, and the fork's cloned subgraph
+  descendants inherit the **new** root's id (`cloneSubtree` stamps `cc.newRootFlowID`, set right after the root
+  insert and before any descendant recurses). The fork does **not** inherit the origin's `root_flow_id`.
+
+Single-shard by construction: subgraph flows have parent-shard affinity, so a whole tree lives on one shard and
+`root_flow_id` never crosses shards. (If that affinity ever changed, tree scans would need cross-shard fan-out.)
+
+**Membership, not structure.** `root_flow_id` answers *which flows are in this tree* (the set); it does **not**
+encode *who is whose parent* (the structure). So it **augments**, never replaces, the `surgraph_flow_id`/
+`surgraph_step_id` links: `root_flow_id` is the **membership index** that loads the tree's rows in one scan, and
+the surgraph links - now read from those *in-memory* rows - are still what supplies the parent/caller/child
+*structure* every walk follows.
+
+**Where it is used.** All four tree walks fetch the whole tree in one `root_flow_id` scan
+(`WHERE root_flow_id = (SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)`) and then derive their result **in
+memory** by following the loaded `surgraph_flow_id`/`surgraph_step_id` pointers - identical results to the former
+level-by-level recursion, but a fixed number of round-trips regardless of nesting depth (the property that matters
+as subgraph-as-function-call invites deep nesting). The subquery resolves the tree first, so each walk works whether
+its starting flow is the root or a mid-tree node:
+
+- `allDescendantSubgraphFlows` (Delete cascade, History assembly) - BFS *down* from the given flow over the loaded
+  rows (any status).
+- `allSubgraphFlows` (Cancel's descendant set) - BFS *down* through **non-terminal** nodes only, matching the old
+  walk, which also stopped descending at a terminal node. Mid-tree Cancel/Delete therefore keep their exact prior
+  "descendants of *this* node" semantics, not "the whole tree."
+- `surgraphChain` (the ordered *up*-walk: Cancel, Resume, Fork, interrupt propagation) - follows
+  `surgraph_flow_id`/`surgraph_step_id` pointers from the flow up to the root, collecting each ancestor's caller
+  step + token. One scan vs the former *two* queries per level.
+- `interruptedSubgraphChain` (Resume's *down*-walk) - one tree scan plus **one** batched query for every flow's
+  interrupted leaf (`status=interrupted ... ORDER BY flow_id, updated_at, step_id`, first row per flow taken in
+  memory), then descends by `surgraph_step_id`. SQL still does the earliest-`updated_at` ordering, so there is no
+  fragile Go-side timestamp comparison (the leaf is still the one Snapshot reports).
+
+`Fork`'s own tree-discovery still uses `surgraphChain` + per-flow child queries while it recurses (it needs the
+structure to clone, not just membership), and `deleteSubgraphFlowsRootedAt` stays step-scoped (`surgraph_step_id`).
+
+**Consistency.** Denormalized + write-once-at-create is low-risk, but a creation path that forgot to set it (or set
+it wrong on a fork descendant) would silently drop rows from tree scans - and, now that the structural walks ride
+the same scan, mis-route a Cancel/Resume/Fork. `TestRootFlowID_*` (engine package, white-box) pins the three
+population paths: top-level self-root, subgraph inheritance, and Fork self-root + non-inheritance; `Continue`
+starting a fresh root. `fixtures/deepsubgraphflow_test.go` pins the walks themselves at depth 5: a leaf interrupt
+propagating up to the root, Resume descending back to the leaf with state threaded through every level, and a
+root Cancel tearing down the whole interrupted tree.
+
 ### Interrupt/Resume Propagation Across Subgraphs
 
 **Interrupt propagation (up):** when a step inside a subgraph flow is interrupted, the engine uses `surgraphChain` to
@@ -1099,6 +1155,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `step_id` | The flow's current step; `0` during fan-out (multiple steps active at one depth) |
 | `surgraph_flow_id` | Parent (surgraph) flow id if this is a subgraph flow; `0` otherwise |
 | `surgraph_step_id` | PK of the parent's parked surgraph step - the **sole** link from a subgraph child to the step that launched it, so completion/interrupt/resume bind to that exact step even with parallel parked surgraph steps at one depth. (The old depth-based `surgraph_step_depth` link was dropped.) |
+| `root_flow_id` | Denormalized **tree-membership** index: the `flow_id` of the root of this flow's subgraph tree, so the whole tree (root + all subgraph descendants) is reachable in one query (`WHERE root_flow_id=?`) instead of a recursive `surgraph_flow_id` walk. Write-once at creation, immutable: a top-level flow (`Create`/`Run`/`Continue`/`Fork`) is its **own** root (`root_flow_id = its own flow_id`, so the root's own row matches the scan); a subgraph child **inherits** the parent's. Single-shard by construction (subgraph parent-shard affinity). It augments, does **not** replace, `surgraph_flow_id`/`surgraph_step_id`: it answers *which flows are in the tree* (membership/set), not *who is whose parent* (structure) - ordered/structural walks (`surgraphChain`, `interruptedSubgraphChain`) still use the surgraph links. See "Denormalized root pointer" |
 | `thread_id` | Groups flows in a thread (`Continue`, or `Create` with `FlowOptions.ThreadKey`); defaults to `flow_id` (each flow its own thread) |
 | `thread_token` | Token component of the thread's flowKey |
 | `trace_parent` | W3C `traceparent` of the flow's root "workflow" span, minted at `Create` (or, for a subgraph, parented to the caller step's span). Reconstructed as the parent of every per-step span. Inherited by `Continue` only as a fresh trace (a new root span is minted per turn); a subgraph inherits the caller step's context, not this column. See "Tracing" |
@@ -1180,6 +1237,7 @@ without fragmentation or excessive write amplification.
 | `idx_dwarf_flows_workflow_url` | `(workflow_url)` | `List` by workflow URL |
 | `idx_dwarf_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
 | `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite | Walking the subgraph chain |
+| `idx_dwarf_flows_root` | `(root_flow_id)` | One-query whole-tree scans (`WHERE root_flow_id=?`) for the membership walks. A plain (non-partial) index: `root_flow_id` is set for every flow (a root points at itself), so a `> 0` partial would index everything anyway |
 | `idx_dwarf_flows_created_at` | `(created_at)` | Time-window queries; append-only/monotonic |
 
 #### `dwarf_steps`

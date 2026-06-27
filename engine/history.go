@@ -826,6 +826,6 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 
 	// A Continue turn starts its own trace (fresh root span), so pass an empty trace_parent and no surgraph
 	// linkage. Create-sugar: it creates-and-runs, returning a running flow.
-	return e.createWithGraph(ctx, shardNum, workflowURL, &graph, mergedState, threadID, threadToken, "", opts, 0, 0, 0)
+	return e.createWithGraph(ctx, shardNum, workflowURL, &graph, mergedState, threadID, threadToken, "", opts, 0, 0, 0, 0)
 }
 
