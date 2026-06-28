@@ -21,7 +21,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test (SQLite in-memory)
-        run: go test ./... -count=1 -timeout 3m
+        run: go test ./... -count=1 -timeout 2m
 
   postgres:
     name: PostgreSQL
@@ -46,7 +46,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test (PostgreSQL)
-        run: go test ./... -count=1 -timeout 3m
+        run: go test ./... -count=1 -timeout 2m
 
   mysql:
     name: MySQL
@@ -71,7 +71,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test (MySQL)
-        run: go test ./... -count=1 -timeout 3m
+        run: go test ./... -count=1 -timeout 2m
 
   sqlserver:
     name: SQL Server
@@ -104,4 +104,4 @@ jobs:
             /opt/mssql-tools18/bin/sqlcmd -C -b -S 127.0.0.1,1433 -U sa -P 'Dwarf_CI_Pass_2026' \
             -Q "ALTER DATABASE model SET READ_COMMITTED_SNAPSHOT ON;"
       - name: Test (SQL Server)
-        run: go test ./... -count=1 -timeout 3m
+        run: go test ./... -count=1 -timeout 2m
