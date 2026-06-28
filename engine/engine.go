@@ -161,7 +161,7 @@ func NewEngine() *Engine {
 // --- Configuration setters ---
 //
 // Setters split into Live (callable any time) and construction-time-only (rejected after Startup).
-//
+
 // errSetAfterStartup is the error the construction-time-only setters return on a running engine.
 func errSetAfterStartup(what string) error {
 	return errors.New(what + " cannot be changed after Startup")
@@ -340,17 +340,34 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// SetInTest puts the engine into test mode keyed by name, so a subsequent Startup opens per-name isolated,
+// auto-dropped databases (via sequel.CreateTestingDatabase) instead of the configured ones. Construction-
+// time only. It is the *testing.T-free counterpart to RunInTest, for a host running under an external test
+// harness that has no *testing.T but a stable isolation key such as its plane: every engine sharing the
+// same name resolves to the same isolated databases, so the replicas of a multi-replica test app converge
+// on one set. RunInTest(t) is SetInTest(t.Name()) plus Startup and a t.Cleanup shutdown.
+func (e *Engine) SetInTest(name string) error {
+	if e.started.Load() {
+		return errSetAfterStartup("test mode")
+	}
+	// Hash the name to a short, bounded id so the testing-database name sequel derives stays within the
+	// strictest SQL identifier limit (Postgres 63 / MySQL 64), whatever the name's length. A non-empty
+	// testHashedID is also what switches openDatabaseShard onto the isolated-test open path. It is set before
+	// initRuntime flips started, so the atomic started flag publishes it to expandShards's later reads.
+	sum := sha256.Sum256([]byte(name))
+	e.testHashedID = hex.EncodeToString(sum[:])[:16]
+	return nil
+}
+
 // RunInTest initializes the engine for testing with per-test isolated databases (keyed by t.Name()) and
 // registers cleanup via t.Cleanup.
 func (e *Engine) RunInTest(t *testing.T) {
 	t.Helper()
-	// Hash the test name to a short, bounded id so the testing-database name sequel derives stays within the
-	// strictest SQL identifier limit (Postgres 63 / MySQL 64), whatever the test name's length. A non-empty
-	// testHashedID is also what switches openDatabaseShard onto the isolated-test open path. It is set before
-	// initRuntime flips started, so the atomic started flag publishes it to expandShards's later reads.
-	sum := sha256.Sum256([]byte(t.Name()))
-	e.testHashedID = hex.EncodeToString(sum[:])[:16]
-	err := e.Startup(t.Context())
+	err := e.SetInTest(t.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = e.Startup(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}

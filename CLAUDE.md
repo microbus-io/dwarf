@@ -902,7 +902,12 @@ matching the broadcast-only-on-terminal-stops policy.
 ### SQLite Testing Support
 
 `engine.RunInTest(t)` hashes `t.Name()` into the engine's `testHashedID`, then runs the normal `Startup`/`Shutdown`
-(via `t.Cleanup`) against per-test isolated databases. The `testHashedID` is what switches the open path into test
+(via `t.Cleanup`) against per-test isolated databases. It is sugar over **`SetInTest(name)`** — the
+construction-time, `*testing.T`-free hook that does the hashing and flips on test mode — plus `Startup` and a
+`t.Cleanup` shutdown; `RunInTest(t)` is exactly `SetInTest(t.Name())` + that. A host with no `*testing.T` (e.g. one
+running under an external test harness) calls `SetInTest(key)` itself with a stable isolation key — the foreman
+core service passes its Microbus *plane*, so its replicas share one isolated set. The `testHashedID` is what
+switches the open path into test
 mode: `openDatabaseShard` resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN`
 (the same variable sequel reads, so one knob redirects the whole suite at a real server); else the SQLite in-memory
 default **`file:dwarf_%d?mode=memory&cache=shared`** - substitutes `%d` with the shard index, then routes the result

@@ -7,7 +7,9 @@ interrupts, retries — with no database to set up and no transport to stand up.
 
 - **`Engine.RunInTest(t)`** replaces `Startup`/`Shutdown`. It opens an isolated SQLite in-memory database
   (per test, and per shard for multi-shard tests), runs migrations, and registers cleanup via `t.Cleanup`.
-  No DSN, no teardown code.
+  No DSN, no teardown code. It is sugar over `SetInTest(t.Name())` + `Startup`; a host with no `*testing.T`
+  (e.g. one embedded in an external test harness) calls `Engine.SetInTest(key)` itself with a stable
+  isolation key, then `Startup(ctx)` — engines sharing the same key resolve to the same isolated databases.
 - **`engine.TestProxy`** is an in-memory implementation of the `Host` interface. Register graphs and task
   functions on it, then register it with `SetHost(proxy)` — its `LoadGraph`/`ExecuteTask` back the
   required methods, and its peer methods are no-ops.
