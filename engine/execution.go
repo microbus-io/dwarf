@@ -775,8 +775,18 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	unmarshalJSONMap(spawnChangesJSON, &spawnChanges)
 	merged, _ := workflow.MergeState(spawnState, spawnChanges, graph.Reducers())
 
+	// The cohort-exit steps whose successor_id must point at the fan-in step. Collected from this same
+	// cohort scan so the successor_id write can target them by primary key (step_id IN ...) below,
+	// rather than re-scanning dwarf_steps by (flow_id, lineage_id, task_name) - that unindexed predicate
+	// took an Update lock across the whole table and deadlocked two concurrent fan-ins on SQL Server.
+	exitTaskSet := make(map[string]bool)
+	for _, t := range fanInPredecessorTasks(graph, fanInTaskName) {
+		exitTaskSet[t] = true
+	}
+	var exitStepIDs []int
+
 	rows, err := tx.QueryContext(ctx,
-		"SELECT status, changes, step_depth FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_id",
+		"SELECT step_id, task_name, status, changes, step_depth FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_id",
 		flowID, cohortSpawnID,
 	)
 	if err != nil {
@@ -785,11 +795,17 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	defer rows.Close()
 	maxCohortDepth := 0
 	for rows.Next() {
-		var status, changesJSON string
+		var memberStepID int
+		var memberTaskName, status, changesJSON string
 		var depth int
-		rows.Scan(&status, &changesJSON, &depth)
+		rows.Scan(&memberStepID, &memberTaskName, &status, &changesJSON, &depth)
 		if depth > maxCohortDepth {
 			maxCohortDepth = depth
+		}
+		// Match the prior predicate's row set exactly: every cohort member with an exit task name,
+		// regardless of status (the scan it replaces had no status filter).
+		if exitTaskSet[strings.TrimSpace(memberTaskName)] {
+			exitStepIDs = append(exitStepIDs, memberStepID)
 		}
 		status = strings.TrimSpace(status)
 		if status != workflow.StatusCompleted {
@@ -830,15 +846,17 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 		return 0, errors.Trace(err)
 	}
 
-	exitTasks := fanInPredecessorTasks(graph, fanInTaskName)
-	if len(exitTasks) > 0 {
-		placeholders := strings.Repeat("?,", len(exitTasks)-1) + "?"
-		args := []any{int(fanInStepID), flowID, cohortSpawnID}
-		for _, t := range exitTasks {
-			args = append(args, t)
+	// Record the cohort-exit -> fan-in edges, targeting the exit steps by primary key (collected above)
+	// so the write locks only those rows. The previous (flow_id, lineage_id, task_name IN ...) predicate
+	// had no supporting index and scan-locked dwarf_steps, deadlocking concurrent fan-ins on SQL Server.
+	if len(exitStepIDs) > 0 {
+		placeholders := strings.Repeat("?,", len(exitStepIDs)-1) + "?"
+		args := []any{int(fanInStepID)}
+		for _, id := range exitStepIDs {
+			args = append(args, id)
 		}
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET successor_id=? WHERE flow_id=? AND lineage_id=? AND task_name IN ("+placeholders+")",
+			"UPDATE dwarf_steps SET successor_id=? WHERE step_id IN ("+placeholders+")",
 			args...,
 		)
 	}

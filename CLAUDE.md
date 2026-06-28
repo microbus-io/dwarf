@@ -562,9 +562,17 @@ is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
 - **Fan-out** `X->{Yi}`: every `Yi.predecessor_id=X`; `X.successor_id` = the first child only (the full set recovered
   from the children's `predecessor_id`).
 - **Fan-in** `{Yi}->Z`: `Z.predecessor_id` = the last cohort member to finish; every cohort *exit* step gets
-  `successor_id=Z`. The exit set is `lineage_id == cohortSpawnID AND task_name IN` the graph-predecessor tasks of the
-  fan-in - **not** the whole lineage, so `A`/`B` in `forEach->{A->B->C}->J` are excluded and only the `C`s point at
-  `J`.
+  `successor_id=Z`. The exit set is *logically* `lineage_id == cohortSpawnID AND task_name IN` the graph-predecessor
+  tasks of the fan-in - **not** the whole lineage, so `A`/`B` in `forEach->{A->B->C}->J` are excluded and only the
+  `C`s point at `J`. **The `successor_id` write targets those exit steps by primary key** (`step_id IN (...)`), where
+  the ids are collected during `insertFanInStep`'s existing cohort-member merge scan - **not** by re-issuing the
+  `(flow_id, lineage_id, task_name)` predicate as an `UPDATE`. That predicate has no supporting index, so SQL Server
+  ran the `UPDATE` as a clustered-index scan taking `U` locks across the whole `dwarf_steps` table; two concurrent
+  fan-ins then locked interleaved PK rows in opposite order and **deadlocked** (writer-vs-writer, so RCSI does not
+  help). The transition transaction retried and gave up, stranding the flow `running` with a `completed` exit step
+  and no fan-in successor - the soak/fan-out-subgraph wedge. Collecting the exit ids from the scan that already runs
+  and updating by PK locks only those rows, in deterministic PK order, with no extra query and no new index. (The
+  linear `X.successor_id=Y` and `fireFanInDirect` writes were always PK-keyed and never had this problem.)
 - **flow.Retry**: rewinds the step in place (same row), so `predecessor_id` is preserved. (A `Fork` copies the
   step into a new row and remaps `predecessor_id` to the cloned predecessor.)
 - **Entry / subgraph-entry steps**: `predecessor_id` defaults to 0.
