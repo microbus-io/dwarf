@@ -19,6 +19,8 @@ package engine
 import (
 	"context"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -245,4 +247,51 @@ func TestDeleteOnCompletion_CascadesSubgraph(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	assert.Equal(0, shardFlowCount(t, e, shardNum))
+}
+
+// TestDeleteOnCompletion_AwaitReturns404UnderConcurrency hammers many disposable flows concurrently to
+// pin the uniform-404 contract under contention. It regresses two defects: (1) the per-flow delete ran in
+// a transaction separate from the completion commit, leaving an observable window where Await's first
+// snapshot saw a transient `completed` outcome instead of 404; and (2) on SQLite that separate delete was
+// read-first and could deadlock under load, failing best-effort and leaving a stray completed row. Both
+// surfaced here as Awaits returning a non-404 outcome. The fix folds the delete into the completion
+// transaction (atomic running -> gone). Before the fix this failed reliably; after, every Await 404s.
+func TestDeleteOnCompletion_AwaitReturns404UnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Solo")
+	g.SetEndpoint("A", "doc/conc-a")
+	g.AddTransition("A", workflow.END)
+	proxy.HandleGraph("doc/conc", g)
+	proxy.HandleTask("doc/conc-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	e.SetWorkers(8)
+	e.RunInTest(t)
+
+	const workers = 8
+	const perWorker = 25
+	var wg sync.WaitGroup
+	var notGone atomic.Int64
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				fk, err := e.Create(ctx, "doc/conc", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
+				if err != nil {
+					notGone.Add(1)
+					continue
+				}
+				// A disposable flow is gone once completed, so Await blocks until completion then 404s.
+				if _, err := e.Await(ctx, fk); errors.StatusCode(err) != 404 {
+					notGone.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	testarossa.For(t).Equal(int64(0), notGone.Load(),
+		"every disposable Await must return 404 (flow gone); a non-404 means a stray completed row")
 }

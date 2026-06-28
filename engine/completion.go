@@ -204,6 +204,8 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		return false, errors.Trace(err)
 	}
 	var finalStateJSON, workflowURL string
+	var surgraphFlowID, surgraphStepID int
+	var deleteOnCompletion bool
 	completed := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
@@ -215,6 +217,15 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// cannot re-dispatch it, leaving the flow stranded 'running' with all steps terminal (an orphan
 		// flow). Mirrors advanceFlow and the fan-in transaction, which write first for the same reason.
 		_, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		// Read the surgraph linkage and disposable flag under the write lock - needed both for the post-tx
+		// surgraph revival and for the atomic disposable delete below.
+		err = tx.QueryRowContext(ctx,
+			"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion FROM dwarf_flows WHERE flow_id=?",
+			flowID,
+		).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -235,6 +246,39 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		if n, _ := res.RowsAffected(); n > 0 {
 			completed = true
 		}
+
+		// A DeleteOnCompletion root deletes itself (and its subgraph descendants) in this SAME transaction,
+		// so the flow transitions running -> gone atomically with no committed `completed` state in between.
+		// Doing it as a separate post-completion delete left an observable window: a Snapshot/Await whose
+		// read landed between the status=completed commit and the delete saw a `completed` outcome instead
+		// of the intended uniform 404 (await's first snapshot, before it ever waits on signalStop, is the
+		// common way to hit it). Folding the delete in removes the window entirely. Root-only
+		// (surgraph_flow_id=0); the FlowStopped notification below still fires with the computed outcome.
+		if completed && deleteOnCompletion && surgraphFlowID == 0 {
+			descendants, derr := e.allDescendantSubgraphFlows(ctx, tx, flowID)
+			if derr != nil {
+				return errors.Trace(derr)
+			}
+			if len(descendants) > 0 {
+				ph := strings.Repeat("?,", len(descendants)-1) + "?"
+				args := make([]any, 0, len(descendants))
+				for _, id := range descendants {
+					args = append(args, id)
+				}
+				if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN ("+ph+")", args...); err != nil {
+					return errors.Trace(err)
+				}
+				if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id IN ("+ph+")", args...); err != nil {
+					return errors.Trace(err)
+				}
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id=?", flowID); err != nil {
+				return errors.Trace(err)
+			}
+			if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id=?", flowID); err != nil {
+				return errors.Trace(err)
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -248,19 +292,6 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 
-	// Read the surgraph linkage and the disposable flag before notifying, so a DeleteOnCompletion root can
-	// delete itself BEFORE waking Await waiters: a waiter woken by signalStop then observes a gone row and
-	// translates it to a completed outcome (see await), rather than racing the delete.
-	var surgraphFlowID, surgraphStepID int
-	var deleteOnCompletion bool
-	err = db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion FROM dwarf_flows WHERE flow_id=?",
-		flowID,
-	).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion)
-	if err != nil {
-		return true, errors.Trace(err)
-	}
-
 	if notifyOnStop {
 		var finalState map[string]any
 		json.Unmarshal([]byte(finalStateJSON), &finalState)
@@ -268,16 +299,6 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 			Status: workflow.StatusCompleted,
 			State:  finalState,
 		})
-	}
-
-	if surgraphFlowID == 0 && deleteOnCompletion {
-		// Fire-and-forget durable-execution flow: delete it (and its subgraph descendants) now that it
-		// succeeded, before signalling. Root-only (a surgraph child is swept by the root's cascade).
-		// Best-effort - FlowStopped already delivered the outcome, so a delete failure only leaves a stray row.
-		err := e.deleteFlow(ctx, compositeID)
-		if err != nil {
-			e.logger.WarnContext(ctx, "DeleteOnCompletion delete failed", "flow", flowID, "error", err)
-		}
 	}
 
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)

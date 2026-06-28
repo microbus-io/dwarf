@@ -1281,13 +1281,19 @@ be relevant after it ends." So retention is either operator-driven or an explici
   so there is no duration to pick and the resurrection paths are preserved: `failed`/`cancelled`/`interrupted` flows
   are **never** auto-deleted (a failed disposable job is exactly the one to keep as a `Fork` source). Honored on
   the **root** flow only (`surgraph_flow_id=0`); the delete reuses `Delete`'s cascade to sweep descendants, and the
-  flag is not inherited by children. The delete is **inline** in `completeFlow`, after the `dwarf_flows_terminated`
-  metric and any `FlowStopped` notification fire (so observability and the full outcome survive the row's deletion) and
-  **before `signalStop`** (so a blocking `Await` woken by the stop signal observes a gone row uniformly, never a
-  transient completed state). Best-effort - a delete failure only logs and leaves a stray row; no sweeper backstops it.
+  flag is not inherited by children. The delete happens **inside the same transaction that marks the flow
+  `completed`** (`completeFlow`), so a disposable flow transitions `running` -> gone **atomically** - there is never a
+  committed `completed` state for it. This is what makes the uniform 404 hold for *every* reader, not just an `Await`
+  woken by `signalStop`: an earlier design deleted in a *separate* transaction after the completion commit, which left
+  an observable window where a `Snapshot`/`Await` read landing between the two commits saw a transient `completed`
+  outcome instead of 404 - most easily `Await`'s **first snapshot**, taken before it ever blocks on the stop signal.
+  Folding the delete into the completion transaction removes the window. The `dwarf_flows_terminated` metric and any
+  `FlowStopped` notification fire *after* the commit, from values captured before the delete (so observability and the
+  full outcome survive the row's deletion); `signalStop` then wakes blocked `Await`s, which re-snapshot a gone row and
+  404. If the completion transaction fails it rolls back whole - no partial delete, no stray `completed` row.
   **Await contract: once it completes, the flow is gone everywhere - uniformly.** A completed disposable flow has no
   row, so `Snapshot`/`History` and a blocking `Await`/`Run` return "flow not found" (404), the same regardless of
-  timing (the delete-before-signal reorder removes the completed-then-deleted race). For an `Await` that 404 *is* the
+  timing (the atomic running->gone transition removes the completed-then-deleted race). For an `Await` that 404 *is* the
   completion signal - and waiting still works: an `Await` started while the flow runs blocks until it finishes, then
   404s. A `failed`/`cancelled` disposable flow is *not* deleted, so `Await` returns its real terminal outcome (so a 404
   specifically means "completed"). Uniform 404 was chosen over a translated `completed` outcome (which was timing-
