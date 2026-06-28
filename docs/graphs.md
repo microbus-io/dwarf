@@ -160,11 +160,10 @@ if err != nil {
 }
 ```
 
-## Annotations and inspection
+## Inspection
 
-`g.Annotate(name, note)` attaches documentation to a node, retrievable with `g.Annotation(name)` and
-rendered in diagrams. Read-only inspectors include `Name`, `EntryPoint`, `Nodes`, `Transitions`,
-`Reducers`, `URLOf`, `NamesForURL`, `IsFanIn`, `IsFanOutSource`, and `FanInFor`. Graphs marshal to and from
-JSON (`MarshalJSON`/`UnmarshalJSON`), which is how the engine freezes a graph onto a flow.
+Read-only inspectors include `Name`, `EntryPoint`, `Nodes`, `Transitions`, `Reducers`, `URLOf`,
+`IsFanIn`, `IsFanOutSource`, and `FanInFor`. Graphs marshal to and from JSON
+(`MarshalJSON`/`UnmarshalJSON`), which is how the engine freezes a graph onto a flow.
 
 Next: [Writing tasks](tasks.md).

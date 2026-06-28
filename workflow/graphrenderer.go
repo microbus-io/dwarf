@@ -32,15 +32,14 @@ const (
 // GraphRenderer renders a workflow Graph to a Mermaid flowchart. Configure via
 // the With* builder methods, then call Render.
 type GraphRenderer struct {
-	g               *Graph
-	primaryFill     string
-	primaryText     string
-	secondaryFill   string
-	secondaryText   string
-	annotationColor string
-	direction       string
-	titleLabel      bool
-	linkParam       string
+	g             *Graph
+	primaryFill   string
+	primaryText   string
+	secondaryFill string
+	secondaryText string
+	direction     string
+	titleLabel    bool
+	linkParam     string
 }
 
 // NewGraphRenderer creates a renderer for the given graph with default styling.
@@ -67,12 +66,6 @@ func (r *GraphRenderer) WithPrimaryColors(fill, text string) *GraphRenderer {
 func (r *GraphRenderer) WithSecondaryColors(fill, text string) *GraphRenderer {
 	r.secondaryFill = fill
 	r.secondaryText = text
-	return r
-}
-
-// WithAnnotationColor overrides the color of annotation text.
-func (r *GraphRenderer) WithAnnotationColor(color string) *GraphRenderer {
-	r.annotationColor = color
 	return r
 }
 
@@ -115,11 +108,6 @@ func (r *GraphRenderer) Render() (string, error) {
 	fmt.Fprintf(&b, "graph %s\n", r.direction)
 	fmt.Fprintf(&b, "    classDef task fill:%s,color:%s,stroke:%s\n", r.primaryFill, r.primaryText, r.primaryFill)
 	fmt.Fprintf(&b, "    classDef term fill:%s,color:%s,stroke:%s\n", r.secondaryFill, r.secondaryText, r.primaryFill)
-	annoColor := r.annotationColor
-	if annoColor == "" {
-		annoColor = r.primaryFill
-	}
-	fmt.Fprintf(&b, "    classDef note fill:none,stroke:none,color:%s,font-size:0.8em\n", annoColor)
 	fmt.Fprintf(&b, "    linkStyle default stroke:%s\n", r.primaryFill)
 	b.WriteString("\n")
 
@@ -201,18 +189,7 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 		}
 	}
 	emitOneNode := func(name string, indent string) {
-		if note := g.annotations[name]; note != "" {
-			annoID := ids[name] + "_anno"
-			noteID := ids[name] + "_note"
-			fmt.Fprintf(b, "%ssubgraph %s [\" \"]\n", indent, annoID)
-			fmt.Fprintf(b, "%s    direction TB\n", indent)
-			emitNodeBody(name, indent+"    ")
-			fmt.Fprintf(b, "%s    %s[%q]:::note\n", indent, noteID, note)
-			fmt.Fprintf(b, "%send\n", indent)
-			fmt.Fprintf(b, "%sstyle %s fill:none,stroke:none\n", indent, annoID)
-		} else {
-			emitNodeBody(name, indent)
-		}
+		emitNodeBody(name, indent)
 		if g.fanInNodes[name] {
 			fmt.Fprintf(b, "%s%s_reduce((%q)):::term\n", indent, ids[name], "reduce")
 			fmt.Fprintf(b, "%s%s_reduce --> %s\n", indent, ids[name], ids[name])

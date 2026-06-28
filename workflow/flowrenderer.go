@@ -249,7 +249,6 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 		emitClick(nodeID, s.StepKey)
 		if isSubgraphCaller {
 			fmt.Fprintf(buf, "    subgraph %s [%q]\n", blk.blockID, blk.label)
-			buf.WriteString("        direction TB\n")
 			buf.WriteString(blk.body)
 			buf.WriteString("    end\n")
 			fmt.Fprintf(buf, "    style %s %s\n", blk.blockID, r.clusterStyle())
@@ -286,7 +285,6 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 		}
 		blockID := fmt.Sprintf("%sfo_s%d", prefix, pid)
 		fmt.Fprintf(buf, "    subgraph %s [\" \"]\n", blockID)
-		buf.WriteString("        direction TB\n")
 		for _, child := range childrenOf[pid] {
 			emitStep(child)
 			emittedSteps[child] = true
@@ -375,7 +373,7 @@ func (r *FlowRenderer) clusterStyle() string {
 	if r.primaryFill != "" {
 		parts = append(parts, "fill:"+r.primaryFill)
 	}
-	parts = append(parts, "fill-opacity:0.03")
+	parts = append(parts, "fill-opacity:0.06")
 	parts = append(parts, "stroke:none")
 	if r.primaryText != "" && r.primaryFill != "" {
 		parts = append(parts, "color:"+r.primaryFill)

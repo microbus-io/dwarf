@@ -924,33 +924,6 @@ func TestGraph_MermaidReduceCircle(t *testing.T) {
 	assert.NotContains(m, "t2 --> t3\n")
 }
 
-func TestGraph_MermaidAnnotation(t *testing.T) {
-	assert := testarossa.For(t)
-
-	g := NewGraph("Annotated")
-	g.AddTransition("a", "b")
-	g.AddTransition("b", END)
-	g.Annotate("a", "kicks off the loop")
-
-	mmd := must(NewGraphRenderer(g).Render())
-	// Annotated node is wrapped in an invisible TB subgraph.
-	assert.Contains(mmd, `subgraph t0_anno [" "]`)
-	assert.Contains(mmd, "direction TB")
-	assert.Contains(mmd, "style t0_anno fill:none,stroke:none")
-	// The note is a teal, chromeless text node beneath the source.
-	assert.Contains(mmd, `t0_note["kicks off the loop"]:::note`)
-	assert.Contains(mmd, "classDef note fill:none,stroke:none,color:#32a7c1,font-size:0.8em")
-	// Edges still target the actual task node, not the wrapper.
-	assert.Contains(mmd, "t0 --> t1")
-	assert.NotContains(mmd, "t0_anno --> ")
-
-	// Re-annotating replaces; passing "" clears.
-	g.Annotate("a", "")
-	mmd = must(NewGraphRenderer(g).Render())
-	assert.NotContains(mmd, "kicks off the loop")
-	assert.NotContains(mmd, "t0_anno")
-}
-
 func TestGraph_WhenMermaidDiamond(t *testing.T) {
 	assert := testarossa.For(t)
 

@@ -60,7 +60,6 @@ type Graph struct {
 	reducers      map[string]Reducer
 	fanInNodes    map[string]bool
 	fanOutToFanIn map[string]string // populated by Validate
-	annotations   map[string]string // node name -> annotation text rendered as a note under the node
 }
 
 // NewGraph creates a new workflow graph with the given display name. The name is a human-friendly
@@ -299,24 +298,6 @@ func (g *Graph) SetReducer(field string, reducer Reducer) {
 // Reducers returns the reducer map for state fields.
 func (g *Graph) Reducers() map[string]Reducer {
 	return g.reducers
-}
-
-// Annotate attaches a short note to a node. The note renders as a teal,
-// borderless text label directly beneath the node in the Mermaid diagram.
-func (g *Graph) Annotate(name string, note string) {
-	if g.annotations == nil {
-		g.annotations = make(map[string]string)
-	}
-	if note == "" {
-		delete(g.annotations, name)
-		return
-	}
-	g.annotations[name] = note
-}
-
-// Annotation returns the note attached to a node via Annotate, or "" if none.
-func (g *Graph) Annotation(name string) string {
-	return g.annotations[name]
 }
 
 // Validate checks the graph for structural errors.
