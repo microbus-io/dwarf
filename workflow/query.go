@@ -42,6 +42,13 @@ type Query struct {
 	// NewerThan filters to flows whose updated_at is within this duration of now.
 	// Zero disables the filter. Composes with OlderThan to express "between X and Y ago."
 	NewerThan time.Duration `json:"newerThan,omitzero"`
+	// IncludeSubgraphs adds subgraph-child flows to the results alongside roots. They are excluded by default -
+	// a subgraph child is an internal execution detail most callers never want in a list. Pair it with
+	// WorkflowURL (a graph that runs only as a subgraph has no root flows under that URL) to locate every run
+	// of a graph that executed as a subgraph; FlowSummary.Subgraph marks which kind each returned flow is.
+	// Purge ignores this flag and always targets roots only (deleting a subgraph child directly would strand
+	// its parent).
+	IncludeSubgraphs bool `json:"includeSubgraphs,omitzero"`
 	// Shard restricts the query to a single 1-based shard. Zero queries all shards.
 	Shard int `json:"shard,omitzero"`
 	// Cursor is the opaque pagination cursor returned as NextCursor by the previous List call.

@@ -424,15 +424,21 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	}
 
 	var flowStatus string
+	var surgraphFlowID int
 	err = db.QueryRowContext(ctx,
-		"SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
-	).Scan(&flowStatus)
+	).Scan(&flowStatus, &surgraphFlowID)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
 	}
 	if err != nil {
 		return errors.Trace(err)
+	}
+	// Cancel tears down the whole tree (it walks up to the root and down to all descendants), so it must be
+	// addressed by the root flow key; a subgraph child key is read-only (introspection/Fork only).
+	if surgraphFlowID != 0 {
+		return errors.New("cannot cancel a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
 	flowStatus = strings.TrimSpace(flowStatus)
 	if flowStatus == workflow.StatusCompleted || flowStatus == workflow.StatusFailed || flowStatus == workflow.StatusCancelled {
@@ -542,15 +548,22 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 
 	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
 		var flowStatus string
+		var surgraphFlowID int
 		err := tx.QueryRowContext(ctx,
-			"SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+			"SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 			flowID, flowToken,
-		).Scan(&flowStatus)
+		).Scan(&flowStatus, &surgraphFlowID)
 		if err == sql.ErrNoRows {
 			return errors.New("flow not found", http.StatusNotFound)
 		}
 		if err != nil {
 			return errors.Trace(err)
+		}
+		// Delete cascades down the subgraph tree only; deleting a subgraph child directly would strand its
+		// parent's surgraph step (a dangling reference). It must be addressed by the root flow key, which
+		// sweeps the whole tree; a subgraph child key is read-only (introspection/Fork only).
+		if surgraphFlowID != 0 {
+			return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
 		}
 		if strings.TrimSpace(flowStatus) == workflow.StatusRunning {
 			return errors.New("cannot delete a running flow; cancel it first", http.StatusConflict)

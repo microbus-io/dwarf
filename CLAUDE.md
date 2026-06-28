@@ -259,14 +259,16 @@ interrupted subgraph chain (`interruptedSubgraphChain`) to the leaf interrupted 
 leaf's `resume_data` column (the leaf already has `interrupt_done=1`, set when the task armed `flow.Interrupt`); on
 re-dispatch the task's `flow.Interrupt` call returns that data with `yield=false`. Resume data is **not** merged into
 `state`/`changes` - the task receives it as the return value. Re-parks intermediate surgraph steps, resets the leaf
-to `pending`, transitions all flows in the chain to `running`. Callable on any flow in the chain; propagation goes
-both directions. If multiple fan-out siblings interrupt, each `Resume` handles one; the flow returns to `running`
-only when no interrupted steps remain.
+to `pending`, transitions all flows in the chain to `running`. Propagation goes both directions. Must be addressed
+by the **root** flow key (a subgraph-child key is rejected with 400 - see "Subgraph keys are read-only"). If
+multiple fan-out siblings interrupt, each `Resume` handles one; the flow returns to `running` only when no
+interrupted steps remain.
 
 **Cancel** - Aborts a created, running, or interrupted flow. Walks up (`surgraphChain`) and down (`allSubgraphFlows`)
 the hierarchy, atomically cancels all steps across all flows, computes `final_state` per flow, and cancels all flows
-with per-flow `final_state` via CASE - all in one transaction. Callable on any flow in the chain. Takes a reason
-string surfaced as `FlowOutcome.CancelReason`.
+with per-flow `final_state` via CASE - all in one transaction. Must be addressed by the **root** flow key (a
+subgraph-child key is rejected with 400 - see "Subgraph keys are read-only"). Takes a reason string surfaced as
+`FlowOutcome.CancelReason`.
 
 **Fork** - The sole recovery/exploration operation, given terminal-flow immutability. `Fork(stepKey,
 stateOverrides)` clones a terminal flow's execution tree up to a chosen step into a brand-new,
@@ -309,11 +311,16 @@ task name, state, changes, status, error, timestamp. Subgraph-executing steps ha
 `SubHistory`. `Step` returns one step by key.
 
 **List** - Queries flows by status, workflow URL, or thread key, with cursor pagination (newest first, default 100).
-Returns `ThreadKey` in each `workflow.FlowSummary`.
+Returns `ThreadKey` and a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
+`Query.IncludeSubgraphs` adds subgraph children to the results. Combined with `WorkflowURL` (a graph that runs only
+as a subgraph has no root flows under that URL) this locates every run of a graph that executed as a subgraph.
+`Purge` ignores the flag and always targets roots only (deleting a subgraph child directly would strand its parent's
+surgraph step).
 
 **Continue** - `Continue(threadKey, additionalState)` creates and runs a new flow from the latest completed flow
 in a thread, merged with `additionalState` using the graph's reducers - sugar over `Create` for the multi-turn
-case. The `threadKey` accepts any flowKey in the thread; `Continue` resolves the thread via `thread_id`, finds the
+case. The `threadKey` accepts any **root** flowKey in the thread (a subgraph-child key is rejected with 400 - see
+"Subgraph keys are read-only"); `Continue` resolves the thread via `thread_id`, finds the
 latest **non-fork** flow (`ORDER BY flow_id DESC` with `forked_from_step=0`), validates it is completed, and
 creates the new flow in the same thread with the same graph, returned **`running`** (like `Create`). The fork
 exclusion keeps a debug `Fork` (which shares the thread's `thread_id` for `List` grouping) from ever becoming a
@@ -343,6 +350,26 @@ most frequent: it signals that a step is pending. The receiving replica does one
 If `not_before` is in the future the doorbell defers to the poll timer (`shortenNextPoll(not_before)`); if due, the
 priority drives the cache offer (refill or head-insert; see "Execution Model"). It does not enqueue a specific step
 into a queue. Fire-and-forget - a missed doorbell is recovered by `pollPendingSteps`.
+
+### Subgraph keys are read-only
+
+A subgraph child flow has a real flowKey (a task inside it reads its own via `flow.FlowKey()`, and `List` with
+`IncludeSubgraphs` surfaces it), but that key is a **read** handle, not a write unit: a child cannot be mutated
+independently because its parent is parked waiting on it, and the unit for any lifecycle change is the whole tree.
+So the **lifecycle mutations reject a subgraph-child key with 400** (`surgraph_flow_id != 0`): `Resume`, `Cancel`,
+`Delete`, `Continue`. The rejection is folded into each operation's existing flow-row SELECT (no extra round-trip;
+the 404-not-found check still takes precedence). The caller addresses the tree by the **root** key instead - which
+it always holds (it came from `Create`/`Run`/`Continue`, or from `List` of roots). The rationale per op: `Resume`/
+`Cancel` are inherently tree-wide (they walk up to the root and down), so a child key is just a confusing alias for
+the root; `Delete` cascades *down* only, so deleting a child directly would strand the parent's surgraph step; and
+`Continue` on a child's own (private) thread would spin up a detached top-level flow from the subgraph's final state,
+not a thread turn. **Reject, not silently widen** - widening `Delete(childKey)` into a whole-tree delete is a
+surprising blast radius, so the engine makes the caller name the root.
+
+What a subgraph-child key *is* good for: **introspection** - `Snapshot`, `Fingerprint`, `History`, `HistoryMermaid`,
+`Step` all operate on that child's own subtree - and **`Fork`**, which intentionally accepts any recorded step,
+including one deep inside a subgraph. `fixtures/subflowguardflow_test.go` pins both halves (the four 400 rejections,
+introspection + `List`-by-subgraph-URL still working).
 
 ### FlowOutcome and side-channel signals
 
@@ -1457,12 +1484,23 @@ For operator-driven retention:
   flows, not children. (In practice a non-running root has no running descendant - subgraph children are terminal when
   the parent is - so the descendant guard is defense against a race.)
 - **`Purge(Query)`** bulk-deletes flows matching the query, except running. Same `Query` shape as `List` (Status,
-  WorkflowURL, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit). Capped at 10000 per call;
-  returns the count deleted. The non-running guard is enforced inside the DELETE. **Purge deliberately does *not*
-  cascade into subgraph descendants** - that would require a per-row recursive SELECT-then-DELETE descent, defeating
-  the single bulk-DELETE that makes Purge a mass trim. A subgraph child orphaned by a purged parent is itself a
-  terminal flow matching the same age/status filters, so the next Purge sweeps it; the dangling window is bounded and
-  self-healing, acceptable for a retention sweep in a way it is not for a targeted `Delete`.
+  WorkflowURL, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit); it **rejects**
+  `IncludeSubgraphs` with 400 (a subgraph child is purged only as part of its root's tree, never on its own). Capped
+  at 10000 **root** flows per call; returns the count of root flows deleted (so `deleted <= Limit`). It **selects
+  root flows only** but **deletes each matched root's whole subgraph subtree** - the root, its steps, and all
+  subgraph descendants (and their steps) - keyed on the `root_flow_id` tree-membership index (a root points at
+  itself, descendants inherit it; single-shard by construction). Done per matched-root batch in one transaction:
+  delete the trees' steps (`flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (roots))`), then the
+  roots (counted, status-reguarded against the SELECT→DELETE running race), then the descendants (`root_flow_id IN
+  (roots)`, now matching only subtrees since the roots are gone). The matched-root ids are **embedded as integer
+  literals, not bind params** (they are trusted ids from the engine's own SELECT), which dodges the per-driver
+  parameter-count ceiling (SQL Server 2100, older SQLite 999); they are batched (`purgeBatchSize`) so each statement
+  stays under any statement-length limit. (An earlier revision deleted only the matched root row + its own steps,
+  leaving subgraph descendants permanently orphaned - never reachable by a later Purge, which selects roots only, nor
+  by `Delete`, which rejects a child key. Deleting the whole tree is the fix; cascading per root keeps the matched
+  set stable across the three deletes - a single self-referential `DELETE … WHERE flow_id IN (SELECT … FROM
+  dwarf_flows …)` cannot do this, because MySQL forbids deleting from a table named in its own subquery and the
+  capped root set vanishes once the roots are deleted.)
 
 Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the current
 step's `task_name` (excludes fan-out flows, `step_id=0`). `Query.OlderThan`/`NewerThan` are database-anchored

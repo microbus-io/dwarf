@@ -38,6 +38,9 @@ type FlowSummary struct {
 	Priority int `json:"priority,omitzero"`
 	// FairnessKey is the flow's scheduling fairness bucket, resolved at Create.
 	FairnessKey string `json:"fairnessKey,omitzero"`
+	// Subgraph is true when this flow is a subgraph child (it has a parent caller step), false for a
+	// top-level/root flow. A list returns roots only unless Query.Subgraph opts subgraph children in.
+	Subgraph bool `json:"subgraph,omitzero"`
 }
 
 // Duration is the wall-clock time from StartedAt to UpdatedAt.

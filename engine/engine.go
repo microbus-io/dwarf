@@ -595,7 +595,8 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 	return e.deleteFlow(ctx, flowKey)
 }
 
-// Purge deletes flows matching a query.
+// Purge deletes flows matching a query, their subflows, and their step history.
+// No more than 1000 flows are deleted at a time. Iterate to delete more.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (int, error) {
 	return e.purge(ctx, query)
 }

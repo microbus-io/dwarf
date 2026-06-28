@@ -431,7 +431,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	}
 	numShards := e.numDBShards()
 
-	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query)
+	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, subgraphCondition(query.IncludeSubgraphs))
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
@@ -482,7 +482,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			args = append(args, scArgs...)
 		}
 		args = append(args, perShardLimit)
-		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_url, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key" +
+		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_url, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key, f.surgraph_flow_id" +
 			" FROM dwarf_flows f" + joinSQL +
 			" WHERE " + strings.Join(conditions, " AND ") +
 			" ORDER BY f.flow_id DESC LIMIT_OFFSET(?, 0)"
@@ -495,12 +495,13 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 		for rows.Next() {
 			var lr listRow
 			var flowToken, threadToken, flowError, cancelReason string
-			var threadID int
+			var threadID, surgraphFlowID int
 			var taskName sql.NullString
-			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowURL, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey)
+			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowURL, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey, &surgraphFlowID)
 			if err != nil {
 				return errors.Trace(err)
 			}
+			lr.summary.Subgraph = surgraphFlowID != 0
 			lr.summary.FlowKey = fmt.Sprintf("%d-%d-%s", shardIdx, lr.flowID, strings.TrimSpace(flowToken))
 			lr.summary.ThreadKey = fmt.Sprintf("%d-%d-%s", shardIdx, threadID, strings.TrimSpace(threadToken))
 			lr.summary.Status = strings.TrimSpace(lr.summary.Status)
@@ -575,14 +576,25 @@ func searchClause(driverName string, shardIdx int, search string) (string, []any
 	return sql, []any{pattern, pattern, pattern, pattern, pattern, pattern}
 }
 
-func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string, string, []any, int, error) {
+// subgraphCondition maps Query.IncludeSubgraphs to the surgraph_flow_id predicate: the default excludes
+// subgraph children (roots only), IncludeSubgraphs returns both kinds.
+func subgraphCondition(includeSubgraphs bool) string {
+	if includeSubgraphs {
+		return "1=1" // roots and subgraph children
+	}
+	return "f.surgraph_flow_id=0" // roots only (default)
+}
+
+// queryClauses builds the shared WHERE/JOIN for list and purge. subgraphCond is the surgraph_flow_id
+// predicate the caller chose: list honors Query.Subgraph, purge always passes roots-only.
+func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgraphCond string) (string, string, []any, int, error) {
 	numShards := e.numDBShards()
 	if query.Shard < 0 || query.Shard > numShards {
 		return "", "", nil, 0, errors.New("invalid shard", http.StatusBadRequest)
 	}
 	restrictShardNum := query.Shard
 
-	conditions := []string{"f.surgraph_flow_id=0"}
+	conditions := []string{subgraphCond}
 	var args []any
 	if query.Status != "" {
 		conditions = append(conditions, "f.status=?")
@@ -640,18 +652,39 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query) (string
 	return joinSQL, whereSQL, args, restrictShardNum, nil
 }
 
+// intCSV renders ids as a comma-separated list for direct embedding in a SQL IN (...) clause. The ids are
+// trusted integers scanned from the engine's own query, so there is no injection surface.
+func intCSV(ids []int) string {
+	var b strings.Builder
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.Itoa(id))
+	}
+	return b.String()
+}
+
 func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	if query.Status == "" && query.WorkflowURL == "" && query.WorkflowName == "" && query.OlderThan == 0 {
 		return 0, errors.New("purge requires at least one filter (status, workflowURL, workflowName, or olderThan)", http.StatusBadRequest)
 	}
-	const purgeCap = 10000
+	// A subgraph child cannot be purged independently - it is removed as part of its root's subtree. Reject
+	// IncludeSubgraphs rather than silently ignoring it, so a caller is not surprised the flag did nothing.
+	if query.IncludeSubgraphs {
+		return 0, errors.New("purge cannot include subgraphs; a subgraph child is purged with its root", http.StatusBadRequest)
+	}
+	// Cap the matched-root count per call so the per-shard id list embedded into the DELETE statements stays
+	// small (a single statement, no batching). A caller trimming more loops Purge until it returns 0.
+	const purgeCap = 1000
 	limit := query.Limit
 	if limit <= 0 || limit > purgeCap {
 		limit = purgeCap
 	}
 	numShards := e.numDBShards()
 
-	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query)
+	// Purge selects root flows only and deletes each matched root's whole subgraph subtree (below).
+	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, "f.surgraph_flow_id=0")
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
@@ -683,7 +716,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		if err != nil {
 			return errors.Trace(err)
 		}
-		var flowIDs []any
+		var flowIDs []int
 		for rows.Next() {
 			var fid int
 			err := rows.Scan(&fid)
@@ -703,23 +736,38 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		}
 
 		return db.Transact(ctx, func(tx *sequel.Tx) error {
-			placeholders := strings.Repeat("?,", len(flowIDs)-1) + "?"
-			tx.ExecContext(ctx,
-				"DELETE FROM dwarf_steps WHERE flow_id IN ("+placeholders+")",
-				flowIDs...,
+			// The id list is embedded directly (trusted integers from our own SELECT, so no bind params -
+			// which dodges the per-driver parameter-count ceiling, e.g. SQL Server's 2100); the purgeCap keeps
+			// it small enough for one statement. Delete each matched root's whole subgraph tree - its steps,
+			// the root, and its descendants. root_flow_id is the tree-membership index (a root points at
+			// itself, descendants inherit it) and is single-shard by construction, so root_flow_id IN (roots)
+			// is exactly the tree. Steps first (the subquery reads the flow rows), then the roots (counted,
+			// status-reguarded against the SELECT->DELETE running race), then the descendants (terminal once
+			// their root is, so the reguard rarely matters).
+			ids := intCSV(flowIDs)
+			_, err := tx.ExecContext(ctx,
+				"DELETE FROM dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN ("+ids+"))",
 			)
-			// Re-guard against the race where a flow transitioned to running between SELECT and DELETE.
-			delArgs := append([]any(nil), flowIDs...)
-			delArgs = append(delArgs, workflow.StatusRunning)
+			if err != nil {
+				return errors.Trace(err)
+			}
 			res, err := tx.ExecContext(ctx,
-				"DELETE FROM dwarf_flows WHERE flow_id IN ("+placeholders+") AND status<>?",
-				delArgs...,
+				"DELETE FROM dwarf_flows WHERE flow_id IN ("+ids+") AND status<>?",
+				workflow.StatusRunning,
 			)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			n, _ := res.RowsAffected()
 			perShardDeleted[shardIdx] = int(n)
+			// Roots are gone now, so root_flow_id IN (roots) matches only the descendant subtrees.
+			_, err = tx.ExecContext(ctx,
+				"DELETE FROM dwarf_flows WHERE root_flow_id IN ("+ids+") AND status<>?",
+				workflow.StatusRunning,
+			)
+			if err != nil {
+				return errors.Trace(err)
+			}
 			return nil
 		})
 	})
@@ -769,9 +817,16 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 
 	var threadID int
 	var threadToken string
-	err = db.QueryRowContext(ctx, "SELECT thread_id, thread_token FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&threadID, &threadToken)
+	var surgraphFlowID int
+	err = db.QueryRowContext(ctx, "SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&threadID, &threadToken, &surgraphFlowID)
 	if err != nil {
 		return "", errors.New("flow not found", http.StatusNotFound)
+	}
+	// A subgraph child runs in its own thread (subgraphs never join the parent's continuation chain), so
+	// continuing one would spin up a detached top-level flow from the subgraph's final state - not a thread
+	// turn. Continue must be addressed by a root flow's key.
+	if surgraphFlowID != 0 {
+		return "", errors.New("cannot continue a subgraph child; use a root flow key", http.StatusBadRequest)
 	}
 	threadToken = strings.TrimSpace(threadToken)
 

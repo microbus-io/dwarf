@@ -661,12 +661,18 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	}
 
 	var flowStatus string
-	err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&flowStatus)
+	var surgraphFlowID int
+	err = db.QueryRowContext(ctx, "SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&flowStatus, &surgraphFlowID)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
 	}
 	if err != nil {
 		return errors.Trace(err)
+	}
+	// Resume acts on the whole interrupt chain (it walks up to the root and down to the leaf), so it must be
+	// addressed by the root flow key; a subgraph child key is read-only (introspection/Fork only).
+	if surgraphFlowID != 0 {
+		return errors.New("cannot resume a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
 	flowStatus = strings.TrimSpace(flowStatus)
 	if flowStatus != workflow.StatusInterrupted {
