@@ -488,7 +488,9 @@ func (e *Engine) requestRefill() {
 // shortenNextPoll updates nextPoll to tm if tm is earlier, and wakes the timer.
 func (e *Engine) shortenNextPoll(tm time.Time) {
 	e.nextPollLock.Lock()
-	if tm.Before(e.nextPoll) {
+	// Lower nextPoll to tm, or replace it if it already lies in the past (a fired deadline the timer is
+	// mid-poll on) - else a wake request later than that stale value is dropped and lost to a re-dispatch wedge.
+	if tm.Before(e.nextPoll) || e.nextPoll.Before(time.Now()) {
 		e.nextPoll = tm
 	}
 	e.nextPollLock.Unlock()

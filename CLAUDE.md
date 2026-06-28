@@ -498,6 +498,19 @@ The timer waits on the `nextPoll` deadline, shortened to the nearest future `not
 backoff) so a due step wakes the replica even when no doorbell arrives. The timer loop (`timerLoop`) runs
 `pollPendingSteps` on the adaptive interval.
 
+**`shortenNextPoll` must treat a past `nextPoll` as "needs rescheduling," not just lower it.** `nextPoll` holds a
+*past* value during the window between a deadline firing and the in-flight `pollPendingSteps` writing the next one.
+A wake request arriving in that window (e.g. `flow.Retry`/`flow.Sleep` re-dispatch arming `not_before` a few hundred
+ms out) is *later* than that stale past value, so a strictly-lower-only update would drop it - and the in-flight poll,
+having scanned a moment too early (the step was still `running`), then overwrites `nextPoll` with its far
+`maxPollInterval` default, leapfrogging the armed `not_before`. The wake is lost and the step waits the full poll
+interval (minutes) instead of its backoff - an intermittent sleep/retry **wedge** (every worker parked on the cache,
+the timer asleep on the stale far deadline; the backlog-poll safety net never engages because it only caps `nextPoll`
+*after* a poll runs). So `shortenNextPoll` updates when `tm` is sooner **or** the current `nextPoll` already lies in
+the past: `if tm.Before(nextPoll) || nextPoll.Before(now)`. With that, a concurrent re-dispatch records its future
+`tm` over the stale value, and the poll's own `nextPoll.Before(now)` clobber clause then leaves that future value
+alone. Reproduced as ~1-in-40 timeouts of `fixtures/sleepretrycomposeflow_test.go` under stress before the fix.
+
 ### Query Parallelism
 
 `processStep` is the hot path. Independent queries within it run in parallel (errgroup-style) to minimize latency on a
