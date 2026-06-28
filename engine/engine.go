@@ -361,8 +361,22 @@ func (e *Engine) SetInTest(name string) error {
 
 // RunInTest initializes the engine for testing with per-test isolated databases (keyed by t.Name()) and
 // registers cleanup via t.Cleanup.
+//
+// Unless the caller wired its own logger, the engine logs to stderr at Info by default (rather than the
+// production discard default) so a CI failure has engine-level clues - flow-status transitions show where a
+// flow got stuck, and the Error logs surface wedge sweeps / poll / refill faults. stderr, not t.Log, because
+// a `go test` timeout panic drops the failing test's buffered t.Log output but not stderr. Override the level
+// with DWARF_TEST_LOG_LEVEL (e.g. "error" to quiet local runs, "debug" for the full play-by-play), or call
+// SetLogger/SetDebugLogger before RunInTest to take over entirely.
 func (e *Engine) RunInTest(t *testing.T) {
 	t.Helper()
+	if e.logger.Handler() == slog.DiscardHandler {
+		level := slog.LevelInfo
+		if s := os.Getenv("DWARF_TEST_LOG_LEVEL"); s != "" {
+			_ = level.UnmarshalText([]byte(s))
+		}
+		_ = e.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+	}
 	err := e.SetInTest(t.Name())
 	if err != nil {
 		t.Fatal(err)
