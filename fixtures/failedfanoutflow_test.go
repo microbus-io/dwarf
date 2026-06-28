@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -29,8 +28,6 @@ import (
 func TestFailedfanoutflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
-	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("FailedFanOut")
 	graph.SetEndpoint("Src", "failedfanoutflow.verify:428/src")
@@ -46,34 +43,30 @@ func TestFailedfanoutflow(t *testing.T) {
 	graph.AddTransition("A", "J")
 	graph.AddTransition("B", "J")
 	graph.AddTransitionChain("C", "J", workflow.END)
-	proxy.HandleGraph("failedfanoutflow.verify:428/failed-fan-out", graph)
+	commonProxy.HandleGraph("failedfanoutflow.verify:428/failed-fan-out", graph)
 
-	proxy.HandleTask("failedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("failedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("failedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("failedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("triggered failure in B")
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("failedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	proxy.HandleTask("failedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("failedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-
-	eng := engine.NewEngine()
-	eng.SetHost(proxy)
-	eng.RunInTest(t)
 
 	t.Run("failing_branch_fails_the_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		_, outcome, err := eng.Run(ctx, "failedfanoutflow.verify:428/failed-fan-out", nil, nil)
+		_, outcome, err := commonEngine.Run(ctx, "failedfanoutflow.verify:428/failed-fan-out", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 	})

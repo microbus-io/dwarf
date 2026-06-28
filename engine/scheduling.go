@@ -94,6 +94,7 @@ func (e *Engine) refillerLoop(ctx context.Context) {
 func (e *Engine) pollPendingSteps(ctx context.Context) {
 	var mu sync.Mutex
 	var nearestDelay time.Duration = -1
+	var sizingErr bool // a sizing query failed (e.g. transient DB error); re-poll soon, don't sleep maxPollInterval
 
 	e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		res, err := db.ExecContext(ctx,
@@ -105,13 +106,16 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 				e.metricStepsRecovered(ctx, int(recovered))
 			}
 		}
+		shardErr := err != nil
 
 		var nearestMs sql.NullFloat64
-		db.QueryRowContext(ctx,
+		if err := db.QueryRowContext(ctx,
 			"SELECT DATE_DIFF_MILLIS(MIN(not_before), NOW_UTC()) FROM dwarf_steps"+
 				" WHERE status=? AND parked=0 AND not_before>NOW_UTC() AND not_before<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND lease_expires<=NOW_UTC()",
 			workflow.StatusPending, maxPollInterval.Milliseconds(),
-		).Scan(&nearestMs)
+		).Scan(&nearestMs); err != nil && err != sql.ErrNoRows {
+			shardErr = true
+		}
 		var shardNearestDelay time.Duration = -1
 		if nearestMs.Valid && nearestMs.Float64 > 0 {
 			shardNearestDelay = time.Duration(nearestMs.Float64 * float64(time.Millisecond))
@@ -122,7 +126,9 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 			"SELECT 1 FROM dwarf_steps WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() ORDER BY step_id LIMIT_OFFSET(1, 0)",
 			workflow.StatusPending,
 		).Scan(&dueExists)
-		if err == nil && (shardNearestDelay < 0 || shardNearestDelay > backlogPollInterval) {
+		if err != nil && err != sql.ErrNoRows {
+			shardErr = true
+		} else if err == nil && (shardNearestDelay < 0 || shardNearestDelay > backlogPollInterval) {
 			shardNearestDelay = backlogPollInterval
 		}
 
@@ -130,11 +136,13 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 		// of a worker that died holding the lease happens promptly, rather than waiting
 		// for the next maxPollInterval sweep.
 		var leaseMs sql.NullFloat64
-		db.QueryRowContext(ctx,
+		if err := db.QueryRowContext(ctx,
 			"SELECT DATE_DIFF_MILLIS(MIN(lease_expires), NOW_UTC()) FROM dwarf_steps"+
 				" WHERE status=? AND parked=0 AND lease_expires>NOW_UTC() AND lease_expires<=DATE_ADD_MILLIS(NOW_UTC(), ?)",
 			workflow.StatusRunning, maxPollInterval.Milliseconds(),
-		).Scan(&leaseMs)
+		).Scan(&leaseMs); err != nil && err != sql.ErrNoRows {
+			shardErr = true
+		}
 		if leaseMs.Valid && leaseMs.Float64 > 0 {
 			leaseDelay := time.Duration(leaseMs.Float64 * float64(time.Millisecond))
 			if shardNearestDelay < 0 || leaseDelay < shardNearestDelay {
@@ -146,9 +154,22 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 		if shardNearestDelay >= 0 && (nearestDelay < 0 || shardNearestDelay < nearestDelay) {
 			nearestDelay = shardNearestDelay
 		}
+		if shardErr {
+			sizingErr = true
+		}
 		mu.Unlock()
 		return nil
 	})
+
+	// A failed sizing query (typically a transient DB error such as a momentary connection-limit
+	// rejection) leaves the backlog unknown for that shard. Treating "unknown" as "nothing pending"
+	// would park the timer for maxPollInterval (minutes) while a due step sits undispatched - the
+	// wedge a swallowed error used to cause. Re-poll soon instead so the doorbell fires again once
+	// the blip clears; sequel already waits out a brief connection-limit rejection underneath us, so
+	// reaching here means it outlasted that window and a prompt re-poll is the right recovery.
+	if sizingErr && (nearestDelay < 0 || nearestDelay > pollErrorRetryInterval) {
+		nearestDelay = pollErrorRetryInterval
+	}
 
 	now := time.Now()
 	var proposed time.Time

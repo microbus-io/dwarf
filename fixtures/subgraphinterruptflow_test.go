@@ -27,7 +27,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -36,15 +35,13 @@ func TestSubgraphinterruptflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
-
 	// Parent: A -> runInner -> Z
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("TaskA", "subgraphinterruptflow.verify:428/task-a")
 	parent.SetEndpoint("RunInner", "subgraphinterruptflow.verify:428/run-inner")
 	parent.SetEndpoint("TaskZ", "subgraphinterruptflow.verify:428/task-z")
 	parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.END)
-	proxy.HandleGraph("subgraphinterruptflow.verify:428/parent", parent)
+	commonProxy.HandleGraph("subgraphinterruptflow.verify:428/parent", parent)
 
 	// Inner: X -> pause (interrupts) -> Y
 	inner := workflow.NewGraph("Inner")
@@ -52,16 +49,16 @@ func TestSubgraphinterruptflow(t *testing.T) {
 	inner.SetEndpoint("Pause", "subgraphinterruptflow.verify:428/pause")
 	inner.SetEndpoint("TaskY", "subgraphinterruptflow.verify:428/task-y")
 	inner.AddTransitionChain("TaskX", "Pause", "TaskY", workflow.END)
-	proxy.HandleGraph("subgraphinterruptflow.verify:428/inner", inner)
+	commonProxy.HandleGraph("subgraphinterruptflow.verify:428/inner", inner)
 
-	proxy.HandleTask("subgraphinterruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("subgraphinterruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("subgraphinterruptflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("inner", "X")
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("subgraphinterruptflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
 		var resumeData map[string]any
 		yield, err := f.Interrupt(map[string]any{"need": "input"}, &resumeData)
 		if yield || err != nil {
@@ -72,11 +69,11 @@ func TestSubgraphinterruptflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("subgraphinterruptflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("innerResult", f.GetString("inner")+"->Y("+f.GetString("answer")+")")
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("subgraphinterruptflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("subgraphinterruptflow.verify:428/inner", nil, &out)
 		if yield || err != nil {
@@ -87,25 +84,21 @@ func TestSubgraphinterruptflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("subgraphinterruptflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("subgraphinterruptflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", "Z("+f.GetString("innerResult")+")")
 		return nil
 	})
 
-	eng := engine.NewEngine()
-	eng.SetHost(proxy)
-	eng.RunInTest(t)
-
 	t.Run("inner_interrupt_surfaces_and_resumes_at_root", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := eng.Create(ctx, "subgraphinterruptflow.verify:428/parent", nil, nil)
+		flowKey, err := commonEngine.Create(ctx, "subgraphinterruptflow.verify:428/parent", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
 
 		// The root flow surfaces the interrupt raised deep inside the subgraph.
-		outcome, err := eng.Await(ctx, flowKey)
+		outcome, err := commonEngine.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -113,10 +106,10 @@ func TestSubgraphinterruptflow(t *testing.T) {
 		assert.Equal("input", outcome.InterruptPayload["need"])
 
 		// Resuming the root propagates the answer down to the inner leaf.
-		if !assert.NoError(eng.Resume(ctx, flowKey, map[string]any{"answer": "42"})) {
+		if !assert.NoError(commonEngine.Resume(ctx, flowKey, map[string]any{"answer": "42"})) {
 			return
 		}
-		outcome, err = eng.Await(ctx, flowKey)
+		outcome, err = commonEngine.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}

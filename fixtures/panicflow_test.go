@@ -27,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -36,13 +35,11 @@ func TestPanicflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	proxy := engine.NewTestProxy()
-
 	// Graph 1: a bare panicking task with no onError -> the flow fails.
 	bare := workflow.NewGraph("Bare")
 	bare.SetEndpoint("Boom", "panicflow.verify:0/boom")
 	bare.AddTransition("Boom", workflow.END)
-	proxy.HandleGraph("panicflow.verify:0/bare", bare)
+	commonProxy.HandleGraph("panicflow.verify:0/bare", bare)
 
 	// Graph 2: a panicking task with an onError handler -> the flow recovers via the handler.
 	handled := workflow.NewGraph("Handled")
@@ -51,21 +48,17 @@ func TestPanicflow(t *testing.T) {
 	handled.AddTransition("Boom", workflow.END)
 	handled.AddTransitionOnError("Boom", "Rescue")
 	handled.AddTransition("Rescue", workflow.END)
-	proxy.HandleGraph("panicflow.verify:0/handled", handled)
+	commonProxy.HandleGraph("panicflow.verify:0/handled", handled)
 
-	proxy.HandleTask("panicflow.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("panicflow.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
 		var nilMap map[string]int
 		nilMap["x"] = 1 // assignment to entry in nil map -> panic
 		return nil
 	})
-	proxy.HandleTask("panicflow.verify:0/rescue", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("panicflow.verify:0/rescue", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("recovered", "yes")
 		return nil
 	})
-
-	eng := engine.NewEngine()
-	eng.SetHost(proxy)
-	eng.RunInTest(t)
 
 	t.Run("panic_without_onError_fails_the_step", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -75,7 +68,7 @@ func TestPanicflow(t *testing.T) {
 		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
-		_, outcome, err := eng.Run(awaitCtx, "panicflow.verify:0/bare", nil, nil)
+		_, outcome, err := commonEngine.Run(awaitCtx, "panicflow.verify:0/bare", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
@@ -89,7 +82,7 @@ func TestPanicflow(t *testing.T) {
 		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
-		_, outcome, err := eng.Run(awaitCtx, "panicflow.verify:0/handled", nil, nil)
+		_, outcome, err := commonEngine.Run(awaitCtx, "panicflow.verify:0/handled", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

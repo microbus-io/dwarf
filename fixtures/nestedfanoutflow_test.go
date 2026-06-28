@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -29,8 +28,6 @@ import (
 func TestNestedfanoutflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
-	proxy := engine.NewTestProxy()
 
 	// Outer graph: A -> {NormalB, RunInner} -> J
 	outer := workflow.NewGraph("Nested")
@@ -43,7 +40,7 @@ func TestNestedfanoutflow(t *testing.T) {
 	outer.AddTransition("TaskA", "RunInner")
 	outer.AddTransition("NormalB", "TaskJ")
 	outer.AddTransitionChain("RunInner", "TaskJ", workflow.END)
-	proxy.HandleGraph("nestedfanoutflow.verify:428/nested", outer)
+	commonProxy.HandleGraph("nestedfanoutflow.verify:428/nested", outer)
 
 	// Inner subgraph: X -> {Y, Z} -> W with ReducerAdd on "inner"
 	inner := workflow.NewGraph("Inner")
@@ -57,31 +54,31 @@ func TestNestedfanoutflow(t *testing.T) {
 	inner.AddTransition("TaskX", "TaskZ")
 	inner.AddTransition("TaskY", "TaskW")
 	inner.AddTransitionChain("TaskZ", "TaskW", workflow.END)
-	proxy.HandleGraph("nestedfanoutflow.verify:428/inner", inner)
+	commonProxy.HandleGraph("nestedfanoutflow.verify:428/inner", inner)
 
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("nestedfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("nestedfanoutflow.verify:428/normal-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("normalResult", "normal")
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("nestedfanoutflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("nestedfanoutflow.verify:428/task-y", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("inner", 10)
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("nestedfanoutflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("inner", 20)
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-w", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("nestedfanoutflow.verify:428/task-w", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("innerResult", f.GetInt("inner"))
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("nestedfanoutflow.verify:428/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
 		yield, err := f.Subgraph("nestedfanoutflow.verify:428/inner", nil, &out)
 		if yield || err != nil {
@@ -92,19 +89,15 @@ func TestNestedfanoutflow(t *testing.T) {
 		}
 		return nil
 	})
-	proxy.HandleTask("nestedfanoutflow.verify:428/task-j", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("nestedfanoutflow.verify:428/task-j", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", fmt.Sprintf("%s/%d", f.GetString("normalResult"), f.GetInt("innerResult")))
 		return nil
 	})
 
-	eng := engine.NewEngine()
-	eng.SetHost(proxy)
-	eng.RunInTest(t)
-
 	t.Run("nested_fan_out_via_subgraph", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		_, outcome, err := eng.Run(ctx, "nestedfanoutflow.verify:428/nested", nil, nil)
+		_, outcome, err := commonEngine.Run(ctx, "nestedfanoutflow.verify:428/nested", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("normal/30", outcome.State["result"])

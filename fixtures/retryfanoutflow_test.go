@@ -25,7 +25,6 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -33,8 +32,6 @@ import (
 func TestRetryfanoutflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
-	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("RetryFanOut")
 	graph.SetEndpoint("Enter", "retryfanoutflow.verify:428/enter")
@@ -44,12 +41,12 @@ func TestRetryfanoutflow(t *testing.T) {
 	graph.SetReducer("results", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Enter", "Increment", "elements", "element")
 	graph.AddTransitionChain("Increment", "Join", workflow.END)
-	proxy.HandleGraph("retryfanoutflow.verify:428/retry-fan-out", graph)
+	commonProxy.HandleGraph("retryfanoutflow.verify:428/retry-fan-out", graph)
 
-	proxy.HandleTask("retryfanoutflow.verify:428/enter", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("retryfanoutflow.verify:428/enter", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("retryfanoutflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("retryfanoutflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
 		if rand.Float64() < 0.10 {
 			f.Retry(0, 0, 0, 0)
 			return nil
@@ -57,13 +54,9 @@ func TestRetryfanoutflow(t *testing.T) {
 		f.Set("results", []int{f.GetInt("element") + 1})
 		return nil
 	})
-	proxy.HandleTask("retryfanoutflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("retryfanoutflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-
-	eng := engine.NewEngine()
-	eng.SetHost(proxy)
-	eng.RunInTest(t)
 
 	t.Run("ordered_despite_random_retries", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -73,7 +66,7 @@ func TestRetryfanoutflow(t *testing.T) {
 			elements[i] = i
 		}
 		initialState := map[string]any{"elements": elements}
-		_, outcome, err := eng.Run(ctx, "retryfanoutflow.verify:428/retry-fan-out", initialState, nil)
+		_, outcome, err := commonEngine.Run(ctx, "retryfanoutflow.verify:428/retry-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 

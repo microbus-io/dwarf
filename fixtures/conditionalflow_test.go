@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -28,8 +27,6 @@ import (
 func TestConditionalflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
-	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("Conditional")
 	graph.SetEndpoint("TaskA", "conditionalflow.verify:428/task-a")
@@ -41,32 +38,28 @@ func TestConditionalflow(t *testing.T) {
 	graph.AddTransitionWhen("TaskA", "TaskLow", "score < 50")
 	graph.AddTransition("TaskHigh", "TaskC")
 	graph.AddTransitionChain("TaskLow", "TaskC", workflow.END)
-	proxy.HandleGraph("conditionalflow.verify:428/conditional", graph)
+	commonProxy.HandleGraph("conditionalflow.verify:428/conditional", graph)
 
-	proxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-high", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("conditionalflow.verify:428/task-high", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "high")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-low", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("conditionalflow.verify:428/task-low", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("branch", "low")
 		return nil
 	})
-	proxy.HandleTask("conditionalflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("conditionalflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-
-	eng := engine.NewEngine()
-	eng.SetHost(proxy)
-	eng.RunInTest(t)
 
 	t.Run("score_high_takes_high_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"score": 80}
-		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
+		_, outcome, err := commonEngine.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])
@@ -76,7 +69,7 @@ func TestConditionalflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"score": 20}
-		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
+		_, outcome, err := commonEngine.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("low", outcome.State["branch"])
@@ -86,7 +79,7 @@ func TestConditionalflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"score": 50}
-		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
+		_, outcome, err := commonEngine.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("high", outcome.State["branch"])

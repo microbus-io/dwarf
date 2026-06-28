@@ -48,6 +48,11 @@ const (
 	leaseMargin         = 30 * time.Second
 	backlogPollInterval = 1 * time.Minute
 
+	// pollErrorRetryInterval caps the wake delay after a sizing query in pollPendingSteps fails, so a
+	// transient DB error (e.g. a momentary connection-limit rejection) triggers a prompt re-poll instead
+	// of the timer sleeping for maxPollInterval while a due step sits undispatched.
+	pollErrorRetryInterval = 1 * time.Second
+
 	// wedgeSweepInterval is the cadence of the dedicated recovery goroutine that runs the defense-in-depth
 	// parked-step wedge sweep. It is kept off the frequently-nudged poll path because the sweep's scans are
 	// heavy and latency-tolerant. parkWedgeThreshold is the minimum age a parked step must reach before the

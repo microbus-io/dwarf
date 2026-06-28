@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -29,8 +28,6 @@ import (
 func TestFanouterrorflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
-	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("FanOutError")
 	graph.SetEndpoint("TaskA", "fanouterrorflow.verify:428/task-a")
@@ -48,39 +45,35 @@ func TestFanouterrorflow(t *testing.T) {
 	graph.AddTransition("TaskC", "TaskE")
 	graph.AddTransition("TaskD", "TaskE")
 	graph.AddTransitionChain("Handler", "TaskE", workflow.END)
-	proxy.HandleGraph("fanouterrorflow.verify:428/fan-out-error", graph)
+	commonProxy.HandleGraph("fanouterrorflow.verify:428/fan-out-error", graph)
 
-	proxy.HandleTask("fanouterrorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanouterrorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanouterrorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("triggered failure in TaskB")
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanouterrorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markC", true)
 		return nil
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanouterrorflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markD", true)
 		return nil
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanouterrorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("handled", true)
 		return nil
 	})
-	proxy.HandleTask("fanouterrorflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanouterrorflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("recovered", f.GetBool("handled") && !f.GetBool("markB"))
 		return nil
 	})
 
-	eng := engine.NewEngine()
-	eng.SetHost(proxy)
-	eng.RunInTest(t)
-
 	t.Run("flow_does_not_fail", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		_, outcome, err := eng.Run(ctx, "fanouterrorflow.verify:428/fan-out-error", nil, nil)
+		_, outcome, err := commonEngine.Run(ctx, "fanouterrorflow.verify:428/fan-out-error", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 	})
@@ -88,7 +81,7 @@ func TestFanouterrorflow(t *testing.T) {
 	t.Run("handler_runs_and_state_reaches_taskE", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		_, outcome, err := eng.Run(ctx, "fanouterrorflow.verify:428/fan-out-error", nil, nil)
+		_, outcome, err := commonEngine.Run(ctx, "fanouterrorflow.verify:428/fan-out-error", nil, nil)
 		assert.NoError(err)
 		assert.Equal(true, outcome.State["recovered"])
 	})

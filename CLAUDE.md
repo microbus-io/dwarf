@@ -466,6 +466,15 @@ due-pending backlog exists it caps `nextPoll` at `backlogPollInterval` (1 minute
 doorbell still re-scans. This is a coarse safety net, not the primary wake path: due work is normally picked up
 immediately by the completion doorbell, and `nextPoll` is shortened to anything sooner.
 
+**Sizing-error clamp.** A sizing SELECT in `pollPendingSteps` can *fail* (a transient DB error - most commonly a
+momentary connection-limit rejection under load; see "Shared fixture engine"). The error must not be swallowed into
+a "nothing pending" reading, because that would size `nextPoll` to `maxPollInterval` (5 minutes) while a due step
+sits undispatched - a multi-minute wedge that a transient blip turned into a stall. So when any shard's sizing query
+errors, `pollPendingSteps` clamps `nextPoll` to `pollErrorRetryInterval` (1s): re-poll promptly, ring the doorbell
+again, and let the step dispatch once the blip clears. The clamp is the engine's own resilience to transient DB
+errors; it never *retries the connection* (that is left to the layer holding the resource - the task or host), it
+just refuses to convert an unknown backlog into a long sleep.
+
 The timer waits on the `nextPoll` deadline, shortened to the nearest future `not_before` (`flow.Sleep` / retry
 backoff) so a due step wakes the replica even when no doorbell arrives. The timer loop (`timerLoop`) runs
 `pollPendingSteps` on the adaptive interval.
@@ -885,6 +894,38 @@ concrete `testID` and opens isolated throwaway databases keyed by it. The id is 
 identifier limits) and is **deterministic**, so peer replicas that pass the *same* id (e.g. a shared per-test isolation
 key) resolve to the *same* isolated databases - exactly what shared-state multi-replica fixtures need - while a
 different id is isolated. Unlike `RunInTest` it registers no cleanup; the host drives teardown by calling `Shutdown`.
+
+#### Shared fixture engine (connection-load control)
+
+**Each `RunInTest`/`StartupInTest` engine opens its own connection pool** - up to `maxOpenConns` (default 8) per
+shard. The `fixtures` suite runs its tests with `t.Parallel()`, so `go test` runs up to `-parallel` (defaults to
+`GOMAXPROCS`) of them at once. If every test stood up its own engine, that is *N parallel engines × pool × shards*
+connections to the **same** server, and the sum overruns the server's connection cap - **PostgreSQL defaults to
+`max_connections = 100`** (MySQL 151, SQL Server ~32k, SQLite none), so Postgres trips first. When the pool tries to
+open a physical connection past the cap, the server *rejects* it with an error (it does **not** block); the engine
+then either fails the operation or, on a sizing query in `pollPendingSteps`, briefly re-polls (see the poll-error
+clamp below). Retrying the connection does not fix a *structural* oversubscription (3 replicas each wanting 60
+against a 100-cap server can never be satisfied) - the only real fix is to keep the **sum of pools under the cap**.
+
+So `fixtures/main_test.go` builds **one shared `commonEngine`** (with `commonProxy` as its host) once in `TestMain`
+via `StartupInTest`, and the bulk of fixtures dispatch through it instead of each creating their own. One pool for
+dozens of tests keeps the suite far under any server cap, and as a bonus the schema migrates once. `TestProxy`
+guards its handler maps with a `RWMutex` so parallel tests register concurrently, and fixture task/graph URLs are
+namespaced per file (`<fixture>.verify:428/<task>`), so the shared registry never collides.
+
+A fixture must **keep its own engine** (`engine.NewEngine()` + `RunInTest`) when it needs isolation rather than
+shared use:
+- **deterministic exclusive scheduling** - it asserts cross-flow ordering, priority, fairness, throughput, or a
+  timing race that a concurrently-loaded shared engine would perturb (the `SetWorkers` tests);
+- **a non-default topology** - `SetNumShards`, `SetTimeBudget`, or a specific `SetWorkers` count;
+- **host singletons** - `OnFlowStopped` (one callback per proxy) or multi-replica `AddPeer`/peers, or a custom host
+  wrapping `TestProxy`;
+- **a clean database** - `List`/`Purge`/`ShardInfo` or any assertion over the full flow set.
+
+Sharing is safe for the common case because a fixture that only inspects its **own** flows by key is unaffected by
+other flows in the same database or worker pool; correctness-by-key is deterministic regardless of co-tenant load.
+Additional shared engines with other topologies (e.g. a multi-shard `commonEngine`) can be added in `TestMain` as
+fixtures need them.
 
 - **Write-first transactions** - `advanceFlow` does an `UPDATE` as the first operation to immediately acquire a write
   lock. On MySQL/Postgres this serializes concurrent workers (like `SELECT ... FOR UPDATE`). On SQLite with

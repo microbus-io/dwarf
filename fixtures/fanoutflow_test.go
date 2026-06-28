@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -28,8 +27,6 @@ import (
 func TestFanoutflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-
-	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("FanOut")
 	graph.SetEndpoint("TaskA", "fanoutflow.verify:428/task-a")
@@ -44,37 +41,33 @@ func TestFanoutflow(t *testing.T) {
 	graph.AddTransition("TaskB", "TaskE")
 	graph.AddTransition("TaskC", "TaskE")
 	graph.AddTransitionChain("TaskD", "TaskE", workflow.END)
-	proxy.HandleGraph("fanoutflow.verify:428/fan-out", graph)
+	commonProxy.HandleGraph("fanoutflow.verify:428/fan-out", graph)
 
-	proxy.HandleTask("fanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markA", true)
 		return nil
 	})
-	proxy.HandleTask("fanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markB", f.GetBool("markA"))
 		return nil
 	})
-	proxy.HandleTask("fanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markC", f.GetBool("markA"))
 		return nil
 	})
-	proxy.HandleTask("fanoutflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanoutflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("markD", f.GetBool("markA"))
 		return nil
 	})
-	proxy.HandleTask("fanoutflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("fanoutflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("allMarked", f.GetBool("markB") && f.GetBool("markC") && f.GetBool("markD"))
 		return nil
 	})
 
-	eng := engine.NewEngine()
-	eng.SetHost(proxy)
-	eng.RunInTest(t)
-
 	t.Run("static_fan_out_and_fan_in", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		_, outcome, err := eng.Run(ctx, "fanoutflow.verify:428/fan-out", nil, nil)
+		_, outcome, err := commonEngine.Run(ctx, "fanoutflow.verify:428/fan-out", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(true, outcome.State["allMarked"])

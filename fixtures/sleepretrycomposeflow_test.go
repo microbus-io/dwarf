@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -43,14 +42,12 @@ func TestSleepRetryComposeflow(t *testing.T) {
 	const backoff = 200 * time.Millisecond
 	const lowerBound = 350.0 // ms; below Sleep+backoff (400) but well above either alone (200)
 
-	proxy := engine.NewTestProxy()
-
 	graph := workflow.NewGraph("SleepRetryCompose")
 	graph.SetEndpoint("Flaky", "sleepretrycomposeflow.verify:428/flaky")
 	graph.AddTransitionChain("Flaky", workflow.END)
-	proxy.HandleGraph("sleepretrycomposeflow.verify:428/compose", graph)
+	commonProxy.HandleGraph("sleepretrycomposeflow.verify:428/compose", graph)
 
-	proxy.HandleTask("sleepretrycomposeflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
+	commonProxy.HandleTask("sleepretrycomposeflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
 		n := f.GetInt("attempts") + 1
 		f.SetInt("attempts", n)
 		f.SetFloat(fmt.Sprintf("t%d", n), float64(time.Now().UnixMilli()))
@@ -63,13 +60,9 @@ func TestSleepRetryComposeflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
-	eng.SetHost(proxy)
-	eng.RunInTest(t)
-
 	assert := testarossa.For(t)
 
-	_, outcome, err := eng.Run(ctx, "sleepretrycomposeflow.verify:428/compose", map[string]any{}, nil)
+	_, outcome, err := commonEngine.Run(ctx, "sleepretrycomposeflow.verify:428/compose", map[string]any{}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 

@@ -202,6 +202,18 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	flowKey, err := eng.Create(ctx, "psub.verify:428/parent", nil, nil)
 	assert.NoError(err)
 
+	// Wait until BOTH parallel callers have propagated their child's interrupt up to the parent before
+	// snapshotting. Snapshotting after only one has landed races the selection: the not-yet-visible
+	// sibling can carry an EARLIER updated_at (the engine stamps it via the database clock, and on
+	// Postgres NOW_UTC() is the transaction-start time, which is not ordered by commit/visibility), so the
+	// earliest-updated pick - which both Snapshot and Resume use - can shift between the Snapshot and the
+	// Resume. With both settled, the set is frozen and the two selections agree (the invariant under test).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && interruptedStepCount(t, eng, flowKey) < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.Equal(2, interruptedStepCount(t, eng, flowKey))
+
 	// snapshotN returns the n of the child Snapshot says will resolve next (the propagated interrupt payload
 	// of the parent's earliest-updated interrupted caller).
 	snapshotN := func() int {
