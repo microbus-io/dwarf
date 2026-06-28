@@ -103,5 +103,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # READ_COMMITTED_SNAPSHOT is required to avoid deadlocks
+      - name: Enable READ_COMMITTED_SNAPSHOT on test databases
+        run: |
+          docker run --rm --network host mcr.microsoft.com/mssql/server:2022-latest \
+            /opt/mssql-tools18/bin/sqlcmd -C -b -S 127.0.0.1,1433 -U sa -P 'Dwarf_CI_Pass_2026' \
+            -Q "ALTER DATABASE model SET READ_COMMITTED_SNAPSHOT ON;"
       - name: Test (SQL Server)
         run: go test ./... -count=1 -timeout 20m
