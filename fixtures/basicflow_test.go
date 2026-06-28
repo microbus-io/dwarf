@@ -20,30 +20,35 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestBasicflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("Basic")
 	graph.SetEndpoint("TaskA", "basicflow.verify:428/task-a")
 	graph.SetEndpoint("TaskB", "basicflow.verify:428/task-b")
 	graph.SetEndpoint("TaskC", "basicflow.verify:428/task-c")
 	graph.AddTransitionChain("TaskA", "TaskB", "TaskC", workflow.END)
-	commonProxy.HandleGraph("basicflow.verify:428/basic", graph)
+	proxy.HandleGraph("basicflow.verify:428/basic", graph)
 
-	commonProxy.HandleTask("basicflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("basicflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", "A")
 		return nil
 	})
-	commonProxy.HandleTask("basicflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("basicflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"B")
 		return nil
 	})
-	commonProxy.HandleTask("basicflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("basicflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"C")
 		return nil
 	})
@@ -51,7 +56,7 @@ func TestBasicflow(t *testing.T) {
 	t.Run("sequential_a_b_c", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		_, outcome, err := commonEngine.Run(ctx, "basicflow.verify:428/basic", nil, nil)
+		_, outcome, err := eng.Run(ctx, "basicflow.verify:428/basic", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("ABC", outcome.State["path"])

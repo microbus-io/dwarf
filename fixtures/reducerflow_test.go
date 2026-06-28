@@ -25,13 +25,18 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestReducerflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("Reducer")
 	graph.SetEndpoint("TaskA", "reducerflow.verify:428/task-a")
@@ -49,30 +54,30 @@ func TestReducerflow(t *testing.T) {
 	graph.AddTransition("TaskB", "TaskE")
 	graph.AddTransition("TaskC", "TaskE")
 	graph.AddTransitionChain("TaskD", "TaskE", workflow.END)
-	commonProxy.HandleGraph("reducerflow.verify:428/reducer", graph)
+	proxy.HandleGraph("reducerflow.verify:428/reducer", graph)
 
-	commonProxy.HandleTask("reducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducerflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("reducerflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducerflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 10)
 		f.SetStrings("tags", []string{"b"})
 		f.SetStrings("seen", []string{"x"})
 		return nil
 	})
-	commonProxy.HandleTask("reducerflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducerflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 20)
 		f.SetStrings("tags", []string{"c"})
 		f.SetStrings("seen", []string{"y", "x"})
 		return nil
 	})
-	commonProxy.HandleTask("reducerflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducerflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("total", 30)
 		f.SetStrings("tags", []string{"d"})
 		f.SetStrings("seen", []string{"z"})
 		return nil
 	})
-	commonProxy.HandleTask("reducerflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducerflow.verify:428/task-e", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("finalSum", f.GetInt("total"))
 		f.SetStrings("finalList", f.GetStrings("tags"))
 		f.SetStrings("finalSet", f.GetStrings("seen"))
@@ -82,7 +87,7 @@ func TestReducerflow(t *testing.T) {
 	t.Run("sum_list_and_set_reducers_apply", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		_, outcome, err := commonEngine.Run(ctx, "reducerflow.verify:428/reducer", nil, nil)
+		_, outcome, err := eng.Run(ctx, "reducerflow.verify:428/reducer", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(60.0, outcome.State["finalSum"])

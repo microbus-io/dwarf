@@ -84,7 +84,6 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 // TestDeleteOnCompletion_DeletesOnSuccess asserts a flow created with DeleteOnCompletion deletes itself
 // (and its steps) once it completes successfully.
 func TestDeleteOnCompletion_DeletesOnSuccess(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -111,7 +110,6 @@ func TestDeleteOnCompletion_DeletesOnSuccess(t *testing.T) {
 // TestDeleteOnCompletion_AwaitReturns404 asserts Await on a disposable flow blocks until it finishes and
 // then returns 404 - the flow is gone, and that 404 is the completion signal (uniform regardless of timing).
 func TestDeleteOnCompletion_AwaitReturns404(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -144,7 +142,6 @@ func TestDeleteOnCompletion_AwaitReturns404(t *testing.T) {
 
 // TestDeleteOnCompletion_RunReturns404 asserts Run on a disposable flow returns 404 once it completes.
 func TestDeleteOnCompletion_RunReturns404(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -167,7 +164,6 @@ func TestDeleteOnCompletion_RunReturns404(t *testing.T) {
 // TestDeleteOnCompletion_KeepsFailedFlow asserts a failed flow is retained even with DeleteOnCompletion set
 // - failures stay available for diagnosis / Fork.
 func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -202,7 +198,6 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 // cascades into its subgraph descendants - the child is swept by the root's cascade (it carries no flag of
 // its own).
 func TestDeleteOnCompletion_CascadesSubgraph(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -28,8 +29,12 @@ import (
 // linear A->B->C flow, the middle step B must resolve to A as its previous and C as its next, so a UI
 // can offer ?step= links across the execution DAG.
 func TestStepnavflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 	assert := testarossa.For(t)
 
 	graph := workflow.NewGraph("Flow")
@@ -37,19 +42,19 @@ func TestStepnavflow(t *testing.T) {
 	graph.SetEndpoint("TaskB", "stepnavflow.verify:428/task-b")
 	graph.SetEndpoint("TaskC", "stepnavflow.verify:428/task-c")
 	graph.AddTransitionChain("TaskA", "TaskB", "TaskC", workflow.END)
-	commonProxy.HandleGraph("stepnavflow.verify:428/flow", graph)
+	proxy.HandleGraph("stepnavflow.verify:428/flow", graph)
 	noop := func(ctx context.Context, f *workflow.Flow) error { return nil }
-	commonProxy.HandleTask("stepnavflow.verify:428/task-a", noop)
-	commonProxy.HandleTask("stepnavflow.verify:428/task-b", noop)
-	commonProxy.HandleTask("stepnavflow.verify:428/task-c", noop)
+	proxy.HandleTask("stepnavflow.verify:428/task-a", noop)
+	proxy.HandleTask("stepnavflow.verify:428/task-b", noop)
+	proxy.HandleTask("stepnavflow.verify:428/task-c", noop)
 
-	flowKey, outcome, err := commonEngine.Run(ctx, "stepnavflow.verify:428/flow", nil, nil)
+	flowKey, outcome, err := eng.Run(ctx, "stepnavflow.verify:428/flow", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-	steps, err := commonEngine.History(ctx, flowKey)
+	steps, err := eng.History(ctx, flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -64,7 +69,7 @@ func TestStepnavflow(t *testing.T) {
 		return
 	}
 
-	mid, err := commonEngine.Step(ctx, midKey)
+	mid, err := eng.Step(ctx, midKey)
 	if !assert.NoError(err) {
 		return
 	}

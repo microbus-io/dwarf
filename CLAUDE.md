@@ -20,6 +20,23 @@ observability. Where this doc refers to "the host" or "the adapter," it means th
 > generic term **"host"** for the upstream layer that embeds the dwarf engine, and describe what that host *does*
 > (mints a token, enforces a per-call deadline, shares a per-test isolation key) rather than which product does it.
 
+> **Audience convention (where each kind of prose lives).** Dwarf is a module consumed by upstream **hosts**, so the
+> two audiences - the *host developer* using the API and the *agent working on the engine itself* - get different
+> prose in different places:
+> - **Godoc on exported identifiers** (uppercase functions, types, fields, packages) is the **host developer's** API
+>   documentation. Write it for someone *using* the engine, not building it: what the call does, its contract, args,
+>   return values, errors, and invariants the caller must respect. Keep it focused on use, not implementation.
+> - **Internal rationale and design notes - the *why* behind the mechanics - belong in this CLAUDE.md by default.**
+>   It is the agent's reference, not the host developer's. Prefer adding to the relevant section here over expanding a
+>   godoc comment.
+> - **Unexported comments** (on lowercase functions, or inline) carry agent-facing notes that genuinely need to sit
+>   *next to the code* - a non-obvious ordering constraint, a subtle invariant a future edit could break, a "why this
+>   and not the obvious alternative." Keep them as short as the point allows.
+> - **Avoid lengthy explanation in code** (exported or not). If a comment is growing into multiple paragraphs of
+>   rationale, that rationale belongs in CLAUDE.md; leave a terse pointer-free note at the code if anything.
+> - **Do not refer to CLAUDE.md from code.** Code comments must stand on their own; CLAUDE.md may reference code,
+>   never the reverse (the file is the agent's map of the code, not a dependency of it).
+
 ### The Host interface (how the engine reaches the outside world)
 
 The graph/task/notify/peer seam is a single **`Host`** interface, registered once via `SetHost`; the
@@ -103,11 +120,13 @@ Configuration is applied through `Set*` methods, each returning an `error` rathe
 every setter can surface an error). They split into two groups by whether the knob can change safely on a running
 engine:
 
-- **Live** (take effect immediately, callable any time): `SetNumShards`, `SetMaxOpenConns`, `SetTimeBudget`,
-  `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an existing flow keeps
-  the budget/priority frozen at its own `Create`); `SetMaxOpenConns`
-  re-applies the pool size to every live shard (sequel's pool setters are hot/atomic); `SetNumShards`
-  opens+migrates the added shards (see "Database Sharding" - grow-only at runtime).
+- **Live** (take effect immediately, callable any time): `SetNumShards`, `SetMaxOpenConns`, `SetWorkersPerConn`,
+  `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
+  existing flow keeps the budget/priority frozen at its own `Create`); `SetMaxOpenConns` (the per-shard connection
+  ceiling) and `SetWorkersPerConn` (the pool-sizing divisor) re-apply the sizing formula to every live shard
+  (`applyConnPoolSizes` per shard; sequel's pool setters are hot/atomic - see "Connection pool sizing"); `SetNumShards`
+  opens+migrates the added shards and re-sizes existing shards' pools to the new shard count (see "Database
+  Sharding" - grow-only at runtime).
 - **Construction-time only** (return an error if called after `Startup`): `SetDSN`, `SetWorkers`, `SetHost`,
   `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying these on a
   running engine would mean reopening live connections (`SetDSN`), resizing the worker pool + candidate cache
@@ -467,7 +486,7 @@ doorbell still re-scans. This is a coarse safety net, not the primary wake path:
 immediately by the completion doorbell, and `nextPoll` is shortened to anything sooner.
 
 **Sizing-error clamp.** A sizing SELECT in `pollPendingSteps` can *fail* (a transient DB error - most commonly a
-momentary connection-limit rejection under load; see "Shared fixture engine"). The error must not be swallowed into
+momentary connection-limit rejection under load; see "Per-test engine + sequential execution"). The error must not be swallowed into
 a "nothing pending" reading, because that would size `nextPoll` to `maxPollInterval` (5 minutes) while a due step
 sits undispatched - a multi-minute wedge that a transient blip turned into a stall. So when any shard's sizing query
 errors, `pollPendingSteps` clamps `nextPoll` to `pollErrorRetryInterval` (1s): re-poll promptly, ring the doorbell
@@ -882,50 +901,58 @@ matching the broadcast-only-on-terminal-stops policy.
 
 ### SQLite Testing Support
 
-`engine.RunInTest(t)` runs Startup with per-test SQLite databases and registers cleanup via `t.Cleanup`. An empty DSN
-selects SQLite in-memory; each shard is routed through `sequel.CreateTestingDatabase` with a per-shard test ID so the
-shards are isolated databases (folding the shard index into the test ID is what keeps a multi-shard `RunInTest` from
-collapsing every shard onto one shared in-memory DB). Key SQLite differences from server databases:
+`engine.RunInTest(t)` hashes `t.Name()` into the engine's `testHashedID`, then runs the normal `Startup`/`Shutdown`
+(via `t.Cleanup`) against per-test isolated databases. The `testHashedID` is what switches the open path into test
+mode: `openDatabaseShard` resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN`
+(the same variable sequel reads, so one knob redirects the whole suite at a real server); else the SQLite in-memory
+default **`file:dwarf_%d?mode=memory&cache=shared`** - substitutes `%d` with the shard index, then routes the result
+through `sequel.CreateTestingDatabase`, which keys an isolated, auto-dropped database on `(driver, baseDSN, testID)`.
 
-`engine.StartupInTest(ctx, testID)` is the `*testing.T`-free sibling, for a **host that is itself under test** and so
-has no `*testing.T` to hand `RunInTest` (e.g. a host whose lifecycle is driven by its own harness, not by `t`). Both
-share the `openTestDatabaseWithID` core: the engine never learns the host's notion of "test mode" - it only receives a
-concrete `testID` and opens isolated throwaway databases keyed by it. The id is hashed to a bounded 16 hex chars (SQL
-identifier limits) and is **deterministic**, so peer replicas that pass the *same* id (e.g. a shared per-test isolation
-key) resolve to the *same* isolated databases - exactly what shared-state multi-replica fixtures need - while a
-different id is isolated. Unlike `RunInTest` it registers no cleanup; the host drives teardown by calling `Shutdown`.
+**Per-shard isolation comes from the DSN's `%d`, not from the testID.** The default DSN carries `%d`, so shard *i*
+opens base `file:dwarf_i?…` - a distinct base per shard, so `CreateTestingDatabase`'s key already differs per shard
+and a multi-shard engine never collapses onto one in-memory DB. (An earlier design used a no-`%d` default and folded
+the shard index into the testID to manufacture that difference; with a `%d`-bearing default that fold is redundant
+and was removed.) The consequence is a deliberately-honest sharp edge: a multi-shard run against a `SEQUEL_TESTING_DSN`
+that **lacks `%d`** collapses its shards onto one database and its tests fail - the same "`%d` required when
+`NumShards > 1`" rule the production DSN already obeys, surfaced as a loud failure rather than a silent fold.
 
-#### Shared fixture engine (connection-load control)
+The testID is hashed to a bounded 16 hex chars (SQL identifier limits: Postgres 63 / MySQL 64) before it reaches
+`CreateTestingDatabase`, so an arbitrarily long Go subtest name still yields a valid database name. The hash is
+deterministic, so two engines in the **same** test (both keyed by `t.Name()`) resolve to the *same* isolated
+databases - which is how an in-test multi-replica fixture gives its peer engines shared state. Key SQLite differences
+from server databases:
 
-**Each `RunInTest`/`StartupInTest` engine opens its own connection pool** - up to `maxOpenConns` (default 8) per
-shard. The `fixtures` suite runs its tests with `t.Parallel()`, so `go test` runs up to `-parallel` (defaults to
-`GOMAXPROCS`) of them at once. If every test stood up its own engine, that is *N parallel engines × pool × shards*
-connections to the **same** server, and the sum overruns the server's connection cap - **PostgreSQL defaults to
-`max_connections = 100`** (MySQL 151, SQL Server ~32k, SQLite none), so Postgres trips first. When the pool tries to
-open a physical connection past the cap, the server *rejects* it with an error (it does **not** block); the engine
-then either fails the operation or, on a sizing query in `pollPendingSteps`, briefly re-polls (see the poll-error
-clamp below). Retrying the connection does not fix a *structural* oversubscription (3 replicas each wanting 60
-against a 100-cap server can never be satisfied) - the only real fix is to keep the **sum of pools under the cap**.
+#### Per-test engine + sequential execution (connection-load control)
 
-So `fixtures/main_test.go` builds **one shared `commonEngine`** (with `commonProxy` as its host) once in `TestMain`
-via `StartupInTest`, and the bulk of fixtures dispatch through it instead of each creating their own. One pool for
-dozens of tests keeps the suite far under any server cap, and as a bonus the schema migrates once. `TestProxy`
-guards its handler maps with a `RWMutex` so parallel tests register concurrently, and fixture task/graph URLs are
-namespaced per file (`<fixture>.verify:428/<task>`), so the shared registry never collides.
+**Each `RunInTest` engine opens its own connection pool** - up to `maxOpenConns` (default 8) per
+shard. **Each fixture stands up its own engine** (`engine.NewEngine()` + `SetHost(proxy)` + `RunInTest(t)`, with a
+fresh `proxy := engine.NewTestProxy()` per test), and `RunInTest` registers a `t.Cleanup` that shuts it down - so a
+fixture's pool is open only for the duration of that one test. There is **no** shared/`TestMain`-built engine; the
+suite was deliberately moved off one.
 
-A fixture must **keep its own engine** (`engine.NewEngine()` + `RunInTest`) when it needs isolation rather than
-shared use:
-- **deterministic exclusive scheduling** - it asserts cross-flow ordering, priority, fairness, throughput, or a
-  timing race that a concurrently-loaded shared engine would perturb (the `SetWorkers` tests);
-- **a non-default topology** - `SetNumShards`, `SetTimeBudget`, or a specific `SetWorkers` count;
-- **host singletons** - `OnFlowStopped` (one callback per proxy) or multi-replica `AddPeer`/peers, or a custom host
-  wrapping `TestProxy`;
-- **a clean database** - `List`/`Purge`/`ShardInfo` or any assertion over the full flow set.
+What keeps the pools from summing past a server's connection cap is that **the fixtures do not run with
+`t.Parallel()`** - they run **sequentially**, so at most ~one engine (plus the one being torn down by `t.Cleanup`) is
+live at a time. With `t.Parallel()`, `go test` would run up to `-parallel` (defaults to `GOMAXPROCS`) tests at once,
+and each per-test engine would multiply into *N parallel engines × pool × shards* connections to the **same** server -
+a sum that overruns the cap (**PostgreSQL defaults to `max_connections = 100`**; MySQL 151, SQL Server ~32k, SQLite
+none, so Postgres trips first). When a pool tries to open a physical connection past the cap the server *rejects* it
+with an error (it does **not** block); the engine then either fails the operation or, on a sizing query in
+`pollPendingSteps`, briefly re-polls (see the poll-error clamp below). Retrying the connection does not fix a
+*structural* oversubscription (3 replicas each wanting 60 against a 100-cap server can never be satisfied) - the only
+real fix is to keep the **sum of live pools under the cap**, and running tests serially is what holds the count of
+concurrently-live engines to roughly one. So a fixture must **not** add `t.Parallel()`; if the suite is ever
+parallelized, connection load must be re-controlled (e.g. a shared engine, or a per-test `SetMaxOpenConns` low enough
+that `parallel × pool × shards` stays under the cap).
 
-Sharing is safe for the common case because a fixture that only inspects its **own** flows by key is unaffected by
-other flows in the same database or worker pool; correctness-by-key is deterministic regardless of co-tenant load.
-Additional shared engines with other topologies (e.g. a multi-shard `commonEngine`) can be added in `TestMain` as
-fixtures need them.
+Each fixture owns its own engine *and* its own `TestProxy`, so there is no cross-test sharing to coordinate. `TestProxy`
+still guards its handler maps with a `RWMutex` because the engine's own worker goroutines dispatch concurrently while
+the test registers handlers; fixture task/graph URLs are namespaced per file (`<fixture>.verify:428/<task>`) by
+convention. A fixture asserting over the **full** flow set (`List`/`Purge`/`ShardInfo`) gets a clean database for free
+- its engine sees only its own flows.
+
+A fixture needing a **non-default topology** (`SetNumShards`, `SetTimeBudget`, a specific `SetWorkers` count) or
+**host singletons** (`OnFlowStopped`, multi-replica `AddPeer`/peers, a custom host wrapping `TestProxy`) configures
+them on its own engine/proxy before `RunInTest` - the same per-test ownership, just with non-default knobs.
 
 - **Write-first transactions** - `advanceFlow` does an `UPDATE` as the first operation to immediately acquire a write
   lock. On MySQL/Postgres this serializes concurrent workers (like `SELECT ... FOR UPDATE`). On SQLite with
@@ -1032,12 +1059,72 @@ Rough sizing:
 `NumShards` can grow at runtime via `SetNumShards`; it cannot shrink (old shards drain naturally). New flows land on
 new shards; existing flows stay on their original shard.
 
-**Connection pool sizing (`SetMaxOpenConns`, default 8 per shard, MaxIdle == MaxOpen).** Workers spend most of their
-time waiting on the `ExecuteTask` call, not holding a SQL connection - the DB-only segments of `processStep` are
-short. So the per-shard pool needs only a small absolute number of connections. `MaxIdle == MaxOpen` matters more
-than the absolute number: under bursty load the close/reopen churn (TCP+TLS+auth per cycle) dominates over query
-time. Empirically pool=8 is a good default; pool=32 regresses (pool-mutex contention with no usable extra
-concurrency). Operators with a different workload mix (longer DB-hold, larger shards) should tune explicitly.
+**Shard-per-server is the recommended production topology.** Put each shard on its **own database server** - the
+`%d` in the DSN goes in the **hostname**, not the database name:
+
+```
+# PROD (distributed): %d in the hostname - one server per shard
+postgres://user:pass@db-shard-%d.internal:5432/dwarf?sslmode=disable
+
+# test/dev (co-located): %d in the database name - shards as databases on one server
+postgres://user:pass@127.0.0.1:5432/dwarf_%d?sslmode=disable
+```
+
+The connection budget is a **per-server** property. With distributed shards each server hosts one shard per replica,
+so it sees only `replicas × perShardPool` connections - **shard count never multiplies a server's load**, and the
+per-shard ceiling (`SetMaxOpenConns`) *is* the per-server budget. With co-located shards (all shards as databases on
+one server) the server sees `replicas × shards × perShardPool`, so the `× shards` multiplier can overrun the server's
+`max_connections` under parallel load - which is why co-located is for test/dev/single-instance only. Both forms are
+transparent to the engine and sequel: the DSN is just `fmt.Sprintf`'d with the shard index and each shard gets its own
+independent pool, so moving `%d` is purely a deployment choice (zero code change). The engine migrates schema but does
+**not** `CREATE DATABASE` or provision servers - those must exist.
+
+**Connection pool sizing - worker-proportional, shard-aware.** The per-shard pool is **derived from the worker
+pool**, not a flat constant, because a worker holds a connection only during the short DB segments of `processStep`
+(the long `ExecuteTask` call holds none), so connection *demand* is bounded by the workers, not the shard count.
+`calcConnPoolSizes` (in `database.go`) computes, per shard:
+
+```
+idle    = max(2, ceil(workers / shards / workersPerConn))   // demand-sized; the 2 is poolFloor
+maxOpen = min(idle*2 + 2, perShardCap)                      // warm core + burst headroom, under the ceiling
+idle    = min(idle, maxOpen)                                 // clamp idle to a tight ceiling
+```
+
+- **`SetWorkersPerConn` (default 8)** is the formula divisor - the assumed workers sharing one connection (its
+  inverse is the DB-hold duty cycle). Raise it for DB-light workloads (remote `ExecuteTask` dominates), lower it for
+  DB-heavy ones. A *larger* value yields a *smaller* pool - the pool is derived from the workers, it is not a cap on
+  them.
+- **`SetMaxOpenConns` (default 8)** is now a **per-shard ceiling** (= per-server budget in the distributed topology),
+  not the pool size: the formula sizes the pool and then clamps to this. It **must be ≥ 1** - there is deliberately
+  no "unlimited" sentinel (a `0` to `database/sql` means *unlimited*, a footgun; pass a high value like 1000 for an
+  effectively unbounded ceiling). The default of 8 pins the common single-shard case to exactly `8/8`
+  (`maxIdle == maxOpen == 8`, today's behavior) and keeps the new default **≤ the old flat `8×shards` at every shard
+  count**. Worked table (workers=64, wpc=8, cap=8): `1 shard → 8/8 · 2 → 4/8 · 4 → 2/6 · 8 → 2/6`. The per-replica
+  total grows with shards, which is correct under distributed PROD (more servers, each within its own budget). A high
+  ceiling is harmless: `maxOpen` is only a ceiling, connections open lazily on demand, and demand is bounded by the
+  worker pool (at most ~`workers` concurrent DB holders on a shard), so the pool never actually opens more than that
+  however high the ceiling is set - no explicit clamp to the worker count is needed.
+- The pool floor (2) gives each shard a little warm headroom for balls-in-bins distribution variance and per-flow
+  fan-out/subgraph-affinity bursts (a single flow's fan-out concentrates on its one shard). `maxOpen = idle*2 + 2`
+  (the `+2` matches sequel's singleton sizing) supplies burst headroom; connections opened above `idle` during a
+  burst close on return.
+- **`MaxIdle == MaxOpen` no longer holds** (it was the old flat model) - there is now an idle core plus burst
+  headroom. The "avoid reconnect churn" goal the old equal-sizing served is now met by the warm idle core plus the
+  recycle/drain timers below.
+
+**Idle drain & lifetime recycle (hard-coded, server drivers only).** Each pool is also given a **2-minute
+`ConnMaxIdleTime`** (idle connections drain after a quiet spell, releasing server connections post-burst; reuse
+resets each connection's idle clock, so a steadily-loaded shard keeps its core warm) and a **1-hour
+`ConnMaxLifetime`** (every connection recycles at that age - sheds stale connections, lets LB/DNS/failover rebalance;
+~one reconnect/connection/hour). These are constants, not knobs, set via the `*sql.DB` methods promoted through
+`sequel.DB`. They are **skipped for SQLite**, whose in-memory test databases are dropped the instant their last
+connection closes. They are a production win (long-lived replicas); they never fire during the fast test suite.
+
+**Live re-sizing.** `SetWorkersPerConn`, `SetMaxOpenConns`, and `SetNumShards` (growth) all re-apply the formula to
+every open shard by looping `applyConnPoolSizes` over the live shards - growth shrinks each existing shard's share
+because the divisor changed.
+Sizing each shard at open uses the *target* `numShards` (set before any shard opens), so initial shards are sized for
+the final count with no post-startup pass.
 
 ### Flow Scheduling (priority / fairness)
 
@@ -1526,7 +1613,7 @@ regardless of shard count.
 partial-tolerance attempt was rejected: real outages mostly manifest as hangs, not errors; classifying "shard down"
 vs transient/data errors is driver-specific and brittle; and a helper that *claims* partial tolerance only in a
 narrow subset of failure modes lies to operators about resilience. The cross-shard fan-out sites share one helper
-(`eachShard`), invoked once per shard with the resolved DB and the 1-based index; any non-nil return fails the whole
+(`onEachShard`), invoked once per shard with the resolved DB and the 1-based index; any non-nil return fails the whole
 call. Each caller retries on its next natural cycle (`pollPendingSteps` next tick, `scanPriorityBand` next refill), so
 a transient hiccup heals within one cycle and a persistent outage degrades loudly.
 
@@ -1537,10 +1624,17 @@ an opaque cursor encoding each shard's smallest-returned `flow_id`. `List` is st
 the whole call (the per-shard debug path is `ShardInfo` + `List(Shard=N)`).
 
 **Dynamic expansion:** `SetNumShards` can increase at runtime - new shards are opened, migrated, and immediately
-available. Shrinking is rejected (old shards drain naturally).
+available; shrinking is rejected (old shards drain naturally). `expandShards` is the internal primitive behind it,
+and is **append-only** (a target at or below the live count is a no-op) and **concurrency-safe**: `expandLock`
+serializes callers, the slow open+migrate I/O runs *outside* `dbsLock`, and each freshly-migrated shard is appended
+under `dbsLock`, so the hot path (`dbsLock.RLock`) only ever sees fully-ready shards. Before Startup it is a no-op
+(shards open at Startup). Growth then re-sizes every *existing* shard's connection pool, since the shard count is the
+pool-sizing divisor (see "Connection pool sizing"). It is **test-mode-agnostic**: `openDatabaseShard` wraps each new
+shard in an isolated test database when the engine is in test mode, exactly as at startup.
 
-**DSN format:** when `NumShards > 1`, the DSN must contain `%d` (replaced with the shard index). In test mode each
-shard gets a separate in-memory SQLite database via a unique per-shard test ID.
+**DSN format:** when `NumShards > 1`, the DSN must contain `%d` (replaced with the shard index). In test mode the
+default DSN carries `%d` too, so each shard's `%d` selects a separate in-memory SQLite database; per-test isolation
+comes from the hashed test id folded into the database name (see "SQLite Testing Support"), not from the shard index.
 
 ## Flow Rendering (`workflow.FlowRenderer`)
 

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -35,8 +36,12 @@ import (
 // each gap between attempts must be ~400ms. The lower-bound assertion of 350ms proves the two were
 // summed: Sleep-only or backoff-only would be ~200ms.
 func TestSleepRetryComposeflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	const sleep = 200 * time.Millisecond
 	const backoff = 200 * time.Millisecond
@@ -45,9 +50,9 @@ func TestSleepRetryComposeflow(t *testing.T) {
 	graph := workflow.NewGraph("SleepRetryCompose")
 	graph.SetEndpoint("Flaky", "sleepretrycomposeflow.verify:428/flaky")
 	graph.AddTransitionChain("Flaky", workflow.END)
-	commonProxy.HandleGraph("sleepretrycomposeflow.verify:428/compose", graph)
+	proxy.HandleGraph("sleepretrycomposeflow.verify:428/compose", graph)
 
-	commonProxy.HandleTask("sleepretrycomposeflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("sleepretrycomposeflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
 		n := f.GetInt("attempts") + 1
 		f.SetInt("attempts", n)
 		f.SetFloat(fmt.Sprintf("t%d", n), float64(time.Now().UnixMilli()))
@@ -62,7 +67,7 @@ func TestSleepRetryComposeflow(t *testing.T) {
 
 	assert := testarossa.For(t)
 
-	_, outcome, err := commonEngine.Run(ctx, "sleepretrycomposeflow.verify:428/compose", map[string]any{}, nil)
+	_, outcome, err := eng.Run(ctx, "sleepretrycomposeflow.verify:428/compose", map[string]any{}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 

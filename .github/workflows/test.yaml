@@ -11,12 +11,6 @@ concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 
-# The suite picks its database from the SEQUEL_TESTING_DSN environment variable. An unset/empty
-# value runs against in-memory SQLite; otherwise sequel.CreateTestingDatabase connects to the
-# server's master database and provisions an isolated, auto-dropped testing_* database per shard.
-# The DSN must contain %d (substituted with the 1-based shard index) because sharded fixtures run
-# up to 8 shards. Credentials below are throwaway CI service-container values, not secrets.
-
 jobs:
   sqlite:
     name: SQLite

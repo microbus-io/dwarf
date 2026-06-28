@@ -30,26 +30,31 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestSubgraphfailflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	// Inner: X -> boom (fails)
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("TaskX", "subgraphfailflow.verify:428/task-x")
 	inner.SetEndpoint("Boom", "subgraphfailflow.verify:428/boom")
 	inner.AddTransitionChain("TaskX", "Boom", workflow.END)
-	commonProxy.HandleGraph("subgraphfailflow.verify:428/inner", inner)
+	proxy.HandleGraph("subgraphfailflow.verify:428/inner", inner)
 
-	commonProxy.HandleTask("subgraphfailflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("subgraphfailflow.verify:428/task-x", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("subgraphfailflow.verify:428/boom", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("subgraphfailflow.verify:428/boom", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("inner exploded", http.StatusInternalServerError)
 	})
 
@@ -65,12 +70,12 @@ func TestSubgraphfailflow(t *testing.T) {
 		parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.END)
 		parent.AddTransitionOnError("RunInner", "Recover")
 		parent.AddTransition("Recover", workflow.END)
-		commonProxy.HandleGraph("subgraphfailflow.verify:428/recoverparent", parent)
+		proxy.HandleGraph("subgraphfailflow.verify:428/recoverparent", parent)
 
-		commonProxy.HandleTask("subgraphfailflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+		proxy.HandleTask("subgraphfailflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 			return nil
 		})
-		commonProxy.HandleTask("subgraphfailflow.verify:428/run-inner-recover", func(ctx context.Context, f *workflow.Flow) error {
+		proxy.HandleTask("subgraphfailflow.verify:428/run-inner-recover", func(ctx context.Context, f *workflow.Flow) error {
 			var out map[string]any
 			yield, err := f.Subgraph("subgraphfailflow.verify:428/inner", nil, &out)
 			if yield {
@@ -84,22 +89,22 @@ func TestSubgraphfailflow(t *testing.T) {
 			_ = out
 			return nil
 		})
-		commonProxy.HandleTask("subgraphfailflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
+		proxy.HandleTask("subgraphfailflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 			f.SetString("result", "Z-should-not-run")
 			return nil
 		})
-		commonProxy.HandleTask("subgraphfailflow.verify:428/recover", func(ctx context.Context, f *workflow.Flow) error {
+		proxy.HandleTask("subgraphfailflow.verify:428/recover", func(ctx context.Context, f *workflow.Flow) error {
 			var onErr errors.TracedError
 			_ = f.Get("onErr", &onErr)
 			f.SetString("result", "recovered: "+onErr.Error())
 			return nil
 		})
 
-		flowKey, err := commonEngine.Create(ctx, "subgraphfailflow.verify:428/recoverparent", nil, nil)
+		flowKey, err := eng.Create(ctx, "subgraphfailflow.verify:428/recoverparent", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
-		outcome, err := commonEngine.Await(ctx, flowKey)
+		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -118,27 +123,27 @@ func TestSubgraphfailflow(t *testing.T) {
 		parent.SetEndpoint("RunInner", "subgraphfailflow.verify:428/run-inner-fail")
 		parent.SetEndpoint("TaskZ", "subgraphfailflow.verify:428/task-z2")
 		parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.END)
-		commonProxy.HandleGraph("subgraphfailflow.verify:428/failparent", parent)
+		proxy.HandleGraph("subgraphfailflow.verify:428/failparent", parent)
 
-		commonProxy.HandleTask("subgraphfailflow.verify:428/task-a2", func(ctx context.Context, f *workflow.Flow) error {
+		proxy.HandleTask("subgraphfailflow.verify:428/task-a2", func(ctx context.Context, f *workflow.Flow) error {
 			return nil
 		})
-		commonProxy.HandleTask("subgraphfailflow.verify:428/run-inner-fail", func(ctx context.Context, f *workflow.Flow) error {
+		proxy.HandleTask("subgraphfailflow.verify:428/run-inner-fail", func(ctx context.Context, f *workflow.Flow) error {
 			yield, err := f.Subgraph("subgraphfailflow.verify:428/inner", nil, nil)
 			if yield {
 				return nil
 			}
 			return err
 		})
-		commonProxy.HandleTask("subgraphfailflow.verify:428/task-z2", func(ctx context.Context, f *workflow.Flow) error {
+		proxy.HandleTask("subgraphfailflow.verify:428/task-z2", func(ctx context.Context, f *workflow.Flow) error {
 			return nil
 		})
 
-		flowKey, err := commonEngine.Create(ctx, "subgraphfailflow.verify:428/failparent", nil, nil)
+		flowKey, err := eng.Create(ctx, "subgraphfailflow.verify:428/failparent", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
-		outcome, err := commonEngine.Await(ctx, flowKey)
+		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}

@@ -20,13 +20,18 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestAliasflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("Alias")
 	graph.SetEndpoint("S", "aliasflow.verify:428/task-s")
@@ -39,27 +44,27 @@ func TestAliasflow(t *testing.T) {
 	graph.AddTransitionGoto("S", "BPrime")
 	graph.AddTransitionChain("A", "B", "C", workflow.END)
 	graph.AddTransitionChain("BPrime", "D", workflow.END)
-	commonProxy.HandleGraph("aliasflow.verify:428/alias", graph)
+	proxy.HandleGraph("aliasflow.verify:428/alias", graph)
 
-	commonProxy.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("aliasflow.verify:428/task-s", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("branch") == "alt" {
 			f.Goto("BPrime")
 		}
 		return nil
 	})
-	commonProxy.HandleTask("aliasflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("aliasflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"A")
 		return nil
 	})
-	commonProxy.HandleTask("aliasflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("aliasflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"B")
 		return nil
 	})
-	commonProxy.HandleTask("aliasflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("aliasflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"C")
 		return nil
 	})
-	commonProxy.HandleTask("aliasflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("aliasflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("path", f.GetString("path")+"D")
 		return nil
 	})
@@ -68,7 +73,7 @@ func TestAliasflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"branch": ""}
-		_, outcome, err := commonEngine.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("ABC", outcome.State["path"])
@@ -78,7 +83,7 @@ func TestAliasflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"branch": "alt"}
-		_, outcome, err := commonEngine.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("BD", outcome.State["path"])
@@ -88,17 +93,17 @@ func TestAliasflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		// Default path: history should include "B" but not "BPrime".
-		flowKey, err := commonEngine.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": ""}, nil)
+		flowKey, err := eng.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": ""}, nil)
 		if !assert.NoError(err) {
 			return
 		}
-		outcome, err := commonEngine.Await(ctx, flowKey)
+		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-		history, err := commonEngine.History(ctx, flowKey)
+		history, err := eng.History(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -114,17 +119,17 @@ func TestAliasflow(t *testing.T) {
 		assert.Equal(0, nodeNames["D"])
 
 		// Alt path: history should include "BPrime" but not "B".
-		flowKey, err = commonEngine.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": "alt"}, nil)
+		flowKey, err = eng.Create(ctx, "aliasflow.verify:428/alias", map[string]any{"branch": "alt"}, nil)
 		if !assert.NoError(err) {
 			return
 		}
-		outcome, err = commonEngine.Await(ctx, flowKey)
+		outcome, err = eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-		history, err = commonEngine.History(ctx, flowKey)
+		history, err = eng.History(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}

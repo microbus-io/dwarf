@@ -31,7 +31,6 @@ import (
 )
 
 func TestShardedflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

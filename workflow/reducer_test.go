@@ -24,7 +24,6 @@ import (
 )
 
 func TestReducer_Replace(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	result, err := ReducerReplace.Reduce(json.RawMessage(`"old"`), json.RawMessage(`"new"`))
@@ -33,7 +32,6 @@ func TestReducer_Replace(t *testing.T) {
 }
 
 func TestReducer_Append(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	result, err := ReducerAppend.Reduce(json.RawMessage(`[1,2]`), json.RawMessage(`[3,4]`))
@@ -51,7 +49,6 @@ func TestReducer_Append(t *testing.T) {
 }
 
 func TestReducer_Add(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	result, err := ReducerAdd.Reduce(json.RawMessage(`10`), json.RawMessage(`5`))
@@ -69,7 +66,6 @@ func TestReducer_Add(t *testing.T) {
 }
 
 func TestReducer_Min(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	result, err := ReducerMin.Reduce(json.RawMessage(`10`), json.RawMessage(`5`))
@@ -99,7 +95,6 @@ func TestReducer_Min(t *testing.T) {
 }
 
 func TestReducer_Max(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	result, err := ReducerMax.Reduce(json.RawMessage(`10`), json.RawMessage(`5`))
@@ -127,7 +122,6 @@ func TestReducer_Max(t *testing.T) {
 }
 
 func TestReducer_Union(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	result, err := ReducerUnion.Reduce(json.RawMessage(`[1,2,3]`), json.RawMessage(`[2,3,4]`))
@@ -150,7 +144,6 @@ func TestReducer_Union(t *testing.T) {
 }
 
 func TestReducer_And(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	result, err := ReducerAnd.Reduce(json.RawMessage(`true`), json.RawMessage(`true`))
@@ -170,7 +163,6 @@ func TestReducer_And(t *testing.T) {
 }
 
 func TestReducer_Or(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	result, err := ReducerOr.Reduce(json.RawMessage(`false`), json.RawMessage(`false`))
@@ -190,7 +182,6 @@ func TestReducer_Or(t *testing.T) {
 }
 
 func TestReducer_Concat(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	result, err := ReducerConcat.Reduce(json.RawMessage(`"hello "`), json.RawMessage(`"world"`))
@@ -206,7 +197,6 @@ func TestReducer_Concat(t *testing.T) {
 }
 
 func TestReducer_EmptyDefault(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Empty string reducer should behave like replace
@@ -216,7 +206,6 @@ func TestReducer_EmptyDefault(t *testing.T) {
 }
 
 func TestReducer_Unknown(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	_, err := Reducer("bogus").Reduce(json.RawMessage(`1`), json.RawMessage(`2`))
@@ -224,7 +213,6 @@ func TestReducer_Unknown(t *testing.T) {
 }
 
 func TestReducer_Merge(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// New keys win on collision; all keys retained.
@@ -247,7 +235,6 @@ func TestReducer_Merge(t *testing.T) {
 }
 
 func TestReducer_TypeMismatchErrors(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	_, err := ReducerAdd.Reduce(json.RawMessage(`"hi"`), json.RawMessage(`1`))
@@ -282,7 +269,6 @@ func TestReducer_TypeMismatchErrors(t *testing.T) {
 }
 
 func TestReducer_NullContributionIgnored(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Add: null is identity 0 on either side.
@@ -344,7 +330,6 @@ func TestReducer_NullContributionIgnored(t *testing.T) {
 }
 
 func TestMergeState_UnregisteredFieldIsReplace(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Without a registered reducer, every field uses last-write-wins.
@@ -370,7 +355,6 @@ func TestMergeState_UnregisteredFieldIsReplace(t *testing.T) {
 }
 
 func TestMergeState_Replace(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	state := map[string]any{"a": 1, "b": 2}
@@ -388,7 +372,6 @@ func TestMergeState_Replace(t *testing.T) {
 }
 
 func TestMergeState_WithReducers(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	state := map[string]any{
@@ -418,7 +401,6 @@ func TestMergeState_WithReducers(t *testing.T) {
 }
 
 func TestMergeState_NilInputs(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Nil state

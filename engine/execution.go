@@ -249,7 +249,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		defer cancel()
 	}
 	// A panic in the in-process host is caught here so it flows through the normal error disposition
-	// rather than wedging this leased step; see CLAUDE.md "Host-call panic isolation".
+	// rather than wedging this leased step until lease expiry.
 	execErr := errors.CatchPanic(func() error {
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	})

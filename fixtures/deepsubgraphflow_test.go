@@ -32,13 +32,18 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestDeepsubgraphflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	const depth = 4 // intermediate levels g0..g3; g4 is the interrupting leaf
 
@@ -50,11 +55,11 @@ func TestDeepsubgraphflow(t *testing.T) {
 		g := workflow.NewGraph("G" + strconv.Itoa(i))
 		g.SetEndpoint("Call", taskURL)
 		g.AddTransition("Call", workflow.END)
-		commonProxy.HandleGraph(gURL, g)
+		proxy.HandleGraph(gURL, g)
 
 		level := i
 		nextURL := "deepnest.verify:0/g" + strconv.Itoa(i+1)
-		commonProxy.HandleTask(taskURL, func(ctx context.Context, f *workflow.Flow) error {
+		proxy.HandleTask(taskURL, func(ctx context.Context, f *workflow.Flow) error {
 			var out map[string]any
 			yield, err := f.Subgraph(nextURL, nil, &out)
 			if yield || err != nil {
@@ -70,8 +75,8 @@ func TestDeepsubgraphflow(t *testing.T) {
 	leafG := workflow.NewGraph("Leaf")
 	leafG.SetEndpoint("Leaf", "deepnest.verify:0/leaf")
 	leafG.AddTransition("Leaf", workflow.END)
-	commonProxy.HandleGraph("deepnest.verify:0/g"+strconv.Itoa(depth), leafG)
-	commonProxy.HandleTask("deepnest.verify:0/leaf", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleGraph("deepnest.verify:0/g"+strconv.Itoa(depth), leafG)
+	proxy.HandleTask("deepnest.verify:0/leaf", func(ctx context.Context, f *workflow.Flow) error {
 		var rd map[string]any
 		yield, err := f.Interrupt(map[string]any{"depth": depth}, &rd)
 		if yield || err != nil {
@@ -85,13 +90,13 @@ func TestDeepsubgraphflow(t *testing.T) {
 	t.Run("deep_interrupt_propagates_up_and_resume_descends", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := commonEngine.Create(ctx, "deepnest.verify:0/g0", nil, nil)
+		flowKey, err := eng.Create(ctx, "deepnest.verify:0/g0", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
 
 		// The interrupt raised 5 levels deep surfaces at the root (surgraphChain up-walk).
-		outcome, err := commonEngine.Await(ctx, flowKey)
+		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -99,10 +104,10 @@ func TestDeepsubgraphflow(t *testing.T) {
 		assert.Equal(float64(depth), outcome.InterruptPayload["depth"])
 
 		// Resume on the root descends to the leaf (interruptedSubgraphChain) and bubbles completion back up.
-		if !assert.NoError(commonEngine.Resume(ctx, flowKey, map[string]any{"answer": "ok"})) {
+		if !assert.NoError(eng.Resume(ctx, flowKey, map[string]any{"answer": "ok"})) {
 			return
 		}
-		outcome, err = commonEngine.Await(ctx, flowKey)
+		outcome, err = eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -114,21 +119,21 @@ func TestDeepsubgraphflow(t *testing.T) {
 	t.Run("cancel_deeply_interrupted_tree_from_root", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := commonEngine.Create(ctx, "deepnest.verify:0/g0", nil, nil)
+		flowKey, err := eng.Create(ctx, "deepnest.verify:0/g0", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
-		outcome, err := commonEngine.Await(ctx, flowKey)
+		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
 
 		// Cancel from the root tears down the whole interrupted tree (surgraphChain + allSubgraphFlows).
-		if !assert.NoError(commonEngine.Cancel(ctx, flowKey, "stop")) {
+		if !assert.NoError(eng.Cancel(ctx, flowKey, "stop")) {
 			return
 		}
-		outcome, err = commonEngine.Await(ctx, flowKey)
+		outcome, err = eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}

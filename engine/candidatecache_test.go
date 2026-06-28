@@ -25,7 +25,6 @@ import (
 )
 
 func TestCandidateCache_InitLowWater(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c1 candidateCache
@@ -47,7 +46,6 @@ func TestCandidateCache_InitLowWater(t *testing.T) {
 }
 
 func TestCandidateCache_RefillPopFIFOAndFloorReset(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c candidateCache
@@ -71,7 +69,6 @@ func TestCandidateCache_RefillPopFIFOAndFloorReset(t *testing.T) {
 }
 
 func TestCandidateCache_NeedRefillAtLowWater(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c candidateCache
@@ -94,7 +91,6 @@ func TestCandidateCache_NeedRefillAtLowWater(t *testing.T) {
 }
 
 func TestCandidateCache_PopBlocksThenRefillWakes(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c candidateCache
@@ -121,7 +117,6 @@ func TestCandidateCache_PopBlocksThenRefillWakes(t *testing.T) {
 }
 
 func TestCandidateCache_CloseUnblocksBlockedPop(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c candidateCache
@@ -147,7 +142,6 @@ func TestCandidateCache_CloseUnblocksBlockedPop(t *testing.T) {
 }
 
 func TestCandidateCache_OfferEmptyWakesIdleNoInsert(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c candidateCache
@@ -158,7 +152,6 @@ func TestCandidateCache_OfferEmptyWakesIdleNoInsert(t *testing.T) {
 }
 
 func TestCandidateCache_OfferPriorityJumpNoFlush(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c candidateCache
@@ -177,7 +170,6 @@ func TestCandidateCache_OfferPriorityJumpNoFlush(t *testing.T) {
 }
 
 func TestCandidateCache_OfferBoundsToSize(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c candidateCache
@@ -192,7 +184,6 @@ func TestCandidateCache_OfferBoundsToSize(t *testing.T) {
 }
 
 func TestCandidateCache_OfferClosedIsNoop(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c candidateCache
@@ -202,7 +193,6 @@ func TestCandidateCache_OfferClosedIsNoop(t *testing.T) {
 }
 
 func TestCandidateCache_RefillEmptyOrClosedIsNoop(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	var c candidateCache
@@ -218,7 +208,6 @@ func TestCandidateCache_RefillEmptyOrClosedIsNoop(t *testing.T) {
 }
 
 func TestCandidateCache_CloseZeroValueDoesNotPanic(t *testing.T) {
-	t.Parallel()
 	var c candidateCache
 	c.close()
 }

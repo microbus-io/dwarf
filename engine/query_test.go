@@ -29,7 +29,6 @@ import (
 // filter and deletes only the matching flows. Two graphs share neither URL nor display name, so the
 // filter must distinguish them by name (not URL).
 func TestQuery_WorkflowName(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

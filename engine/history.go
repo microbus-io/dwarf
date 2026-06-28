@@ -467,7 +467,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	}
 	perShard := make([][]listRow, numShards+1)
 
-	err = e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
+	err = e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
 		if restrictShardNum != 0 && shardIdx != restrictShardNum {
 			return nil
 		}
@@ -666,7 +666,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	}
 
 	perShardDeleted := make([]int, numShards+1)
-	err = e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
+	err = e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
 		if restrictShardNum != 0 && shardIdx != restrictShardNum {
 			return nil
 		}
@@ -736,7 +736,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 func (e *Engine) shardInfo(ctx context.Context) ([]ShardSummary, error) {
 	numShards := e.numDBShards()
 	results := make([]ShardSummary, numShards+1)
-	e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
+	e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
 		results[shardIdx].Shard = shardIdx
 		start := time.Now()
 		var one int
@@ -828,4 +828,3 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	// linkage. Create-sugar: it creates-and-runs, returning a running flow.
 	return e.createWithGraph(ctx, shardNum, workflowURL, &graph, mergedState, threadID, threadToken, "", opts, 0, 0, 0, 0)
 }
-

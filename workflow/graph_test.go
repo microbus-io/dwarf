@@ -31,7 +31,6 @@ func must[T any](v T, err error) T {
 }
 
 func TestGraph_BuilderAndMarshal(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("CreateOrder")
@@ -59,7 +58,6 @@ func TestGraph_BuilderAndMarshal(t *testing.T) {
 }
 
 func TestGraph_EmptyReducers(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Simple")
@@ -77,7 +75,6 @@ func TestGraph_EmptyReducers(t *testing.T) {
 }
 
 func TestGraph_DefaultEntryPoint(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -88,7 +85,6 @@ func TestGraph_DefaultEntryPoint(t *testing.T) {
 }
 
 func TestGraph_ExplicitEntryPoint(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -100,7 +96,6 @@ func TestGraph_ExplicitEntryPoint(t *testing.T) {
 }
 
 func TestGraph_AutoRegisterTasks(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -115,7 +110,6 @@ func TestGraph_AutoRegisterTasks(t *testing.T) {
 }
 
 func TestGraph_DuplicateTaskIgnored(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -127,7 +121,6 @@ func TestGraph_DuplicateTaskIgnored(t *testing.T) {
 }
 
 func TestGraph_Validate(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Valid graph
@@ -173,7 +166,6 @@ func TestGraph_Validate(t *testing.T) {
 }
 
 func TestGraph_AddTransitionChain(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Chain")
@@ -199,7 +191,6 @@ func TestGraph_AddTransitionChain(t *testing.T) {
 }
 
 func TestGraph_AddTransitionFanOut(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("FanOut")
@@ -221,7 +212,6 @@ func TestGraph_AddTransitionFanOut(t *testing.T) {
 }
 
 func TestGraph_TransitionOutOfENDRejected(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("BadEnd")
@@ -234,7 +224,6 @@ func TestGraph_TransitionOutOfENDRejected(t *testing.T) {
 }
 
 func TestGraph_END(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -263,7 +252,6 @@ func TestGraph_END(t *testing.T) {
 }
 
 func TestGraph_Mermaid(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("CreateOrder")
@@ -284,7 +272,6 @@ func TestGraph_Mermaid(t *testing.T) {
 }
 
 func TestGraph_GotoTransition(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -317,7 +304,6 @@ func TestGraph_GotoTransition(t *testing.T) {
 }
 
 func TestGraph_TransitionNoWhen(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -338,7 +324,6 @@ func TestGraph_TransitionNoWhen(t *testing.T) {
 }
 
 func TestGraph_ValidateWhenExpression(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Valid expression
@@ -361,7 +346,6 @@ func TestGraph_ValidateWhenExpression(t *testing.T) {
 }
 
 func TestGraph_AddTransitionOnError(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -380,7 +364,6 @@ func TestGraph_AddTransitionOnError(t *testing.T) {
 }
 
 func TestGraph_OnErrorJSONRoundTrip(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -408,7 +391,6 @@ func TestGraph_OnErrorJSONRoundTrip(t *testing.T) {
 }
 
 func TestGraph_MermaidForEachShape(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -426,7 +408,6 @@ func TestGraph_MermaidForEachShape(t *testing.T) {
 }
 
 func TestGraph_MermaidFanInShape(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -448,7 +429,6 @@ func TestGraph_MermaidFanInShape(t *testing.T) {
 }
 
 func TestGraph_MermaidForEachFanInLabel(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -468,7 +448,6 @@ func TestGraph_MermaidForEachFanInLabel(t *testing.T) {
 }
 
 func TestGraph_MermaidNestedForEachLabels(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -489,7 +468,6 @@ func TestGraph_MermaidNestedForEachLabels(t *testing.T) {
 }
 
 func TestGraph_MermaidLabelsOnError(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -502,7 +480,6 @@ func TestGraph_MermaidLabelsOnError(t *testing.T) {
 }
 
 func TestGraph_SelfLoopOnErrorRejected(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
@@ -517,7 +494,6 @@ func TestGraph_SelfLoopOnErrorRejected(t *testing.T) {
 }
 
 func TestGraph_GotoSelfLoopAllowed(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// A goto-driven self-loop is not restricted by the no-error-self-loop rule.
@@ -532,7 +508,6 @@ func TestGraph_GotoSelfLoopAllowed(t *testing.T) {
 // Lineage validator tests.
 
 func TestLineage_SequentialNoFanOut(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// SetFanIn opts the graph into the lineage validator. With no fan-out, the validator
@@ -548,7 +523,6 @@ func TestLineage_SequentialNoFanOut(t *testing.T) {
 }
 
 func TestLineage_SimpleFanOutFanIn(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("SimpleFanin")
@@ -563,7 +537,6 @@ func TestLineage_SimpleFanOutFanIn(t *testing.T) {
 }
 
 func TestLineage_NestedFanOutFanIn(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Nested")
@@ -586,7 +559,6 @@ func TestLineage_NestedFanOutFanIn(t *testing.T) {
 }
 
 func TestLineage_ForEachThenFanIn(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("ForeachFanin")
@@ -599,7 +571,6 @@ func TestLineage_ForEachThenFanIn(t *testing.T) {
 }
 
 func TestLineage_ConditionalWhenFanIn(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("WhenFanin")
@@ -614,7 +585,6 @@ func TestLineage_ConditionalWhenFanIn(t *testing.T) {
 }
 
 func TestLineage_AliasedNodesInDifferentScopes(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// The same task URL is registered under two distinct names so that one copy lives
@@ -633,7 +603,6 @@ func TestLineage_AliasedNodesInDifferentScopes(t *testing.T) {
 }
 
 func TestLineage_GotoStaysInScope(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Goto from inside a fan-out branch back to the same branch is fine: the target stays
@@ -650,7 +619,6 @@ func TestLineage_GotoStaysInScope(t *testing.T) {
 }
 
 func TestLineage_OnErrorHandlerConvergesToFanIn(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("OnerrorFanin")
@@ -666,7 +634,6 @@ func TestLineage_OnErrorHandlerConvergesToFanIn(t *testing.T) {
 }
 
 func TestLineage_EndWithUnpoppedFrame(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Branch from fan-out reaches END without passing through the FanIn.
@@ -683,7 +650,6 @@ func TestLineage_EndWithUnpoppedFrame(t *testing.T) {
 }
 
 func TestLineage_DivergentStacksAtSameNode(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// "shared" is first visited with stack [s] (via a). Then a goto from join (stack [])
@@ -703,7 +669,6 @@ func TestLineage_DivergentStacksAtSameNode(t *testing.T) {
 }
 
 func TestLineage_FanInOutsideAnyScope(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("FaninNoScope")
@@ -716,7 +681,6 @@ func TestLineage_FanInOutsideAnyScope(t *testing.T) {
 }
 
 func TestLineage_GotoCrossingScopeRejected(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// goto from inside the fan-out scope to a node in the parent scope (downstream of
@@ -736,7 +700,6 @@ func TestLineage_GotoCrossingScopeRejected(t *testing.T) {
 }
 
 func TestLineage_FanOutSourceMissingFanIn(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Two parallel branches both reach END without converging at any FanIn.
@@ -754,7 +717,6 @@ func TestLineage_FanOutSourceMissingFanIn(t *testing.T) {
 }
 
 func TestLineage_FanOutDirectlyToFanIn(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Some siblings go through intermediate work; one sibling goes directly to the join.
@@ -770,7 +732,6 @@ func TestLineage_FanOutDirectlyToFanIn(t *testing.T) {
 }
 
 func TestLineage_SetFanInOnUnknownNodeRejected(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("BadFaninName")
@@ -783,7 +744,6 @@ func TestLineage_SetFanInOnUnknownNodeRejected(t *testing.T) {
 }
 
 func TestLineage_FanInFlagSurvivesJSONRoundTrip(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Roundtrip")
@@ -808,7 +768,6 @@ func TestLineage_FanInFlagSurvivesJSONRoundTrip(t *testing.T) {
 }
 
 func TestGraph_SwitchValid(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("SwitchRouting")
@@ -825,7 +784,6 @@ func TestGraph_SwitchValid(t *testing.T) {
 }
 
 func TestGraph_SwitchRejectsEmptyWhen(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("SwitchNoWhen")
@@ -837,7 +795,6 @@ func TestGraph_SwitchRejectsEmptyWhen(t *testing.T) {
 }
 
 func TestGraph_SwitchRejectsMixWithPlain(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("SwitchMixed")
@@ -851,7 +808,6 @@ func TestGraph_SwitchRejectsMixWithPlain(t *testing.T) {
 }
 
 func TestGraph_SwitchRejectsMixWithWhen(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("SwitchVsWhen")
@@ -865,7 +821,6 @@ func TestGraph_SwitchRejectsMixWithWhen(t *testing.T) {
 }
 
 func TestGraph_SwitchAllowedWithGoto(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// WithGoto is an explicit task-requested override; it preempts Switch
@@ -881,7 +836,6 @@ func TestGraph_SwitchAllowedWithGoto(t *testing.T) {
 }
 
 func TestGraph_SwitchAllowedWithOnError(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("SwitchWithOnerror")
@@ -895,7 +849,6 @@ func TestGraph_SwitchAllowedWithOnError(t *testing.T) {
 }
 
 func TestGraph_SwitchNoFanInRequired(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Three Switch branches from one node, no SetFanIn anywhere: validator must accept.
@@ -910,7 +863,6 @@ func TestGraph_SwitchNoFanInRequired(t *testing.T) {
 }
 
 func TestGraph_SwitchRejectsForEach(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// A switch transition with ForEach set is constructed directly to bypass the
@@ -925,7 +877,6 @@ func TestGraph_SwitchRejectsForEach(t *testing.T) {
 }
 
 func TestGraph_SwitchMermaidDiamond(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("SwitchRender")
@@ -947,7 +898,6 @@ func TestGraph_SwitchMermaidDiamond(t *testing.T) {
 }
 
 func TestGraph_MermaidReduceCircle(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Classic two-branch fan-out converging on a SetFanIn node.
@@ -975,7 +925,6 @@ func TestGraph_MermaidReduceCircle(t *testing.T) {
 }
 
 func TestGraph_MermaidAnnotation(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("Annotated")
@@ -1003,7 +952,6 @@ func TestGraph_MermaidAnnotation(t *testing.T) {
 }
 
 func TestGraph_WhenMermaidDiamond(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	g := NewGraph("WhenRender")

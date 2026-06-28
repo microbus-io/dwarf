@@ -20,13 +20,18 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestInterruptedfanoutflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("InterruptedFanOut")
 	graph.SetEndpoint("Src", "interruptedfanoutflow.verify:428/src")
@@ -42,16 +47,16 @@ func TestInterruptedfanoutflow(t *testing.T) {
 	graph.AddTransition("A", "J")
 	graph.AddTransition("B", "J")
 	graph.AddTransitionChain("C", "J", workflow.END)
-	commonProxy.HandleGraph("interruptedfanoutflow.verify:428/interrupted-fan-out", graph)
+	proxy.HandleGraph("interruptedfanoutflow.verify:428/interrupted-fan-out", graph)
 
-	commonProxy.HandleTask("interruptedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("interruptedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	commonProxy.HandleTask("interruptedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{"branch": "B"}, nil)
 		if yield || err != nil {
 			return err
@@ -59,11 +64,11 @@ func TestInterruptedfanoutflow(t *testing.T) {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	commonProxy.HandleTask("interruptedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("executed", 1)
 		return nil
 	})
-	commonProxy.HandleTask("interruptedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptedfanoutflow.verify:428/j", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("totalExecuted", f.GetInt("executed"))
 		return nil
 	})
@@ -71,23 +76,23 @@ func TestInterruptedfanoutflow(t *testing.T) {
 	t.Run("interrupt_then_resume_completes_with_sum_3", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := commonEngine.Create(ctx, "interruptedfanoutflow.verify:428/interrupted-fan-out", nil, nil)
+		flowKey, err := eng.Create(ctx, "interruptedfanoutflow.verify:428/interrupted-fan-out", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
 
-		outcome, err := commonEngine.Await(ctx, flowKey)
+		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
 
-		err = commonEngine.Resume(ctx, flowKey, map[string]any{"resumed": true})
+		err = eng.Resume(ctx, flowKey, map[string]any{"resumed": true})
 		if !assert.NoError(err) {
 			return
 		}
 
-		outcome, err = commonEngine.Await(ctx, flowKey)
+		outcome, err = eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}

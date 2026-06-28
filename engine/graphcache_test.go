@@ -24,7 +24,6 @@ import (
 )
 
 func TestLRUCache_HitMiss(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	c := newLRUCache[int, string](4, 0)
@@ -44,7 +43,6 @@ func TestLRUCache_HitMiss(t *testing.T) {
 }
 
 func TestLRUCache_EvictsLeastRecentlyUsed(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	c := newLRUCache[int, string](2, 0)
@@ -65,7 +63,6 @@ func TestLRUCache_EvictsLeastRecentlyUsed(t *testing.T) {
 }
 
 func TestLRUCache_TTLExpiry(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	c := newLRUCache[int, string](8, 20*time.Millisecond)
@@ -80,7 +77,6 @@ func TestLRUCache_TTLExpiry(t *testing.T) {
 }
 
 func TestLRUCache_ZeroMaxEntriesNoEvict(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	c := newLRUCache[int, int](0, 0)

@@ -74,7 +74,6 @@ func failedCellKeyByIndex(t *testing.T, eng *engine.Engine, flowKey string, idx 
 // TestForkflow_LinearWithOverride forks a completed linear flow at a middle step with a state override
 // and confirms the fork re-runs from there with the override while the original stays untouched.
 func TestForkflow_LinearWithOverride(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -136,7 +135,6 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 // TestForkflow_RecoverFailedStep forks a failed flow at the failing step with an override that makes it
 // succeed, confirming the fork completes while the original stays failed (non-destructive recovery).
 func TestForkflow_RecoverFailedStep(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -190,7 +188,6 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 // TestForkflow_ContinueExcludesFork confirms a fork shares the thread for List grouping but is invisible
 // to Continue, which bases the next turn on the original completed flow, not the fork.
 func TestForkflow_ContinueExcludesFork(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -240,7 +237,6 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 // fork still fails (the other branch is still broken) - converging cleanly via cohort accounting, no
 // limbo - and the second fork (of the first) completes once both branches are fixed.
 func TestForkflow_FanoutForkOfFork(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -357,7 +353,6 @@ func subgraphForkProxy(childRuns *int32) *engine.TestProxy {
 // clears the subgraph park, so the fork re-spawns a *fresh* child subgraph (re-running it end to end) and
 // the override flows into the child. History of the fork re-shows the subgraph (its new child).
 func TestForkflow_AtSubgraphCaller(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	var childRuns int32
@@ -407,7 +402,6 @@ func TestForkflow_AtSubgraphCaller(t *testing.T) {
 // re-parks the subgraph caller up the chain, and re-runs from the inner step; when the child re-completes
 // the caller revives and execution bubbles back to the root. The override reaches the inner step.
 func TestForkflow_InsideSubgraph(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	var childRuns int32
@@ -580,7 +574,6 @@ func nestedSubgraphProxy(rec *budgetRec) *engine.TestProxy {
 // All three flow levels are cloned, and the inherited budget (Fork takes no FlowOptions) must reach the
 // re-running step at every nesting level - including the deepest, which lives in a descendant flow.
 func TestForkflow_NestedSubgraphBudgetInherited(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	// The tasks that re-run when forking at C, across all three nesting levels.

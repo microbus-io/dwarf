@@ -147,7 +147,6 @@ func kebab(camel string) string {
 }
 
 func TestSuperflow_Sequential(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	for _, shards := range []int{1, 4} {
@@ -171,7 +170,6 @@ func TestSuperflow_Sequential(t *testing.T) {
 }
 
 func TestSuperflow_Subgraph(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	for _, shards := range []int{1, 4} {
@@ -191,7 +189,6 @@ func TestSuperflow_Subgraph(t *testing.T) {
 }
 
 func TestSuperflow_Goto(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	eng, _, visits := superflowSetup(t, 1)
@@ -212,7 +209,6 @@ func TestSuperflow_Goto(t *testing.T) {
 }
 
 func TestSuperflow_OnError(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	for _, shards := range []int{1, 4} {
@@ -235,7 +231,6 @@ func TestSuperflow_OnError(t *testing.T) {
 }
 
 func TestSuperflow_Sleep(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	eng, _, visits := superflowSetup(t, 1)

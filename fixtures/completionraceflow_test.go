@@ -38,7 +38,6 @@ import (
 // drain bound (far below any lease) makes a stranded flow fail rather than eventually self-heal. Without the
 // fix this strands a flow on roughly one run in five; with it, all drain in well under a second.
 func TestCompletionRaceflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

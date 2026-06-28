@@ -21,30 +21,35 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestSleepflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("Delay")
 	graph.SetEndpoint("TaskA", "sleepflow.verify:428/task-a")
 	graph.SetEndpoint("TaskB", "sleepflow.verify:428/task-b")
 	graph.SetEndpoint("TaskC", "sleepflow.verify:428/task-c")
 	graph.AddTransitionChain("TaskA", "TaskB", "TaskC", workflow.END)
-	commonProxy.HandleGraph("sleepflow.verify:428/delay", graph)
+	proxy.HandleGraph("sleepflow.verify:428/delay", graph)
 
-	commonProxy.HandleTask("sleepflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("sleepflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("sleepflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("sleepflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.Sleep(f.GetDuration("sleepFor"))
 		f.SetBool("marked", true)
 		return nil
 	})
-	commonProxy.HandleTask("sleepflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("sleepflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 
@@ -54,7 +59,7 @@ func TestSleepflow(t *testing.T) {
 		sleepFor := 100 * time.Millisecond
 		initialState := map[string]any{"sleepFor": sleepFor}
 		start := time.Now()
-		_, outcome, err := commonEngine.Run(ctx, "sleepflow.verify:428/delay", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "sleepflow.verify:428/delay", initialState, nil)
 		elapsed := time.Since(start)
 
 		assert.NoError(err)

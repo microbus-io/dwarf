@@ -28,7 +28,6 @@ import (
 // safe knobs (time budget, pool size, shard count) hot while refusing the unsafe ones (DSN, workers,
 // host, providers) rather than silently no-op'ing.
 func TestSetters_ConstructionTimeOnly(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()

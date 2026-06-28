@@ -30,7 +30,6 @@ import (
 // in flight must survive a Purge whose query matches it; purging in-flight work would corrupt active
 // executions. The non-running guard lives inside the DELETE, so the running flow is skipped.
 func TestPurgerunningflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

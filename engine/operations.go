@@ -305,7 +305,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 }
 
 // await blocks until a flow stops. A completed DeleteOnCompletion flow is gone, so await returns its 404 as
-// the completion signal (see "Data Retention" in CLAUDE.md).
+// the completion signal.
 func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	stopped := func(s string) bool {
 		return s != "" && s != workflow.StatusCreated && s != workflow.StatusPending && s != workflow.StatusRunning

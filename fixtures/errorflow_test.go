@@ -21,14 +21,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestErrorflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("Error")
 	graph.SetEndpoint("TaskA", "errorflow.verify:428/task-a")
@@ -39,19 +44,19 @@ func TestErrorflow(t *testing.T) {
 	graph.AddTransitionOnError("TaskB", "Handler")
 	graph.AddTransition("TaskB", "TaskC")
 	graph.AddTransitionChain("Handler", "TaskC", workflow.END)
-	commonProxy.HandleGraph("errorflow.verify:428/error", graph)
+	proxy.HandleGraph("errorflow.verify:428/error", graph)
 
-	commonProxy.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("errorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("errorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("errorflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("trigger") == "fail" {
 			return errors.New("triggered failure")
 		}
 		f.SetString("result", "normal")
 		return nil
 	})
-	commonProxy.HandleTask("errorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("errorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
 		var onErr errors.TracedError
 		err := f.Get("onErr", &onErr)
 		if err != nil || onErr.Error() == "" {
@@ -61,7 +66,7 @@ func TestErrorflow(t *testing.T) {
 		}
 		return nil
 	})
-	commonProxy.HandleTask("errorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("errorflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("finalResult", "final:"+f.GetString("result"))
 		return nil
 	})
@@ -70,7 +75,7 @@ func TestErrorflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"trigger": "ok"}
-		_, outcome, err := commonEngine.Run(ctx, "errorflow.verify:428/error", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("final:normal", outcome.State["finalResult"])
@@ -80,7 +85,7 @@ func TestErrorflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"trigger": "fail"}
-		_, outcome, err := commonEngine.Run(ctx, "errorflow.verify:428/error", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		finalResult, _ := outcome.State["finalResult"].(string)

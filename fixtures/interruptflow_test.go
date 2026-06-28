@@ -20,25 +20,30 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestInterruptflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("Interrupt")
 	graph.SetEndpoint("TaskA", "interruptflow.verify:428/task-a")
 	graph.SetEndpoint("AwaitInput", "interruptflow.verify:428/await-input")
 	graph.SetEndpoint("Compose", "interruptflow.verify:428/compose")
 	graph.AddTransitionChain("TaskA", "AwaitInput", "Compose", workflow.END)
-	commonProxy.HandleGraph("interruptflow.verify:428/interrupt", graph)
+	proxy.HandleGraph("interruptflow.verify:428/interrupt", graph)
 
-	commonProxy.HandleTask("interruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("interruptflow.verify:428/await-input", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptflow.verify:428/await-input", func(ctx context.Context, f *workflow.Flow) error {
 		var resumeData map[string]any
 		yield, err := f.Interrupt(map[string]any{"requestedInput": "userInput"}, &resumeData)
 		if yield || err != nil {
@@ -49,7 +54,7 @@ func TestInterruptflow(t *testing.T) {
 		}
 		return nil
 	})
-	commonProxy.HandleTask("interruptflow.verify:428/compose", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptflow.verify:428/compose", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", f.GetString("prompt")+", "+f.GetString("userInput"))
 		return nil
 	})
@@ -57,23 +62,23 @@ func TestInterruptflow(t *testing.T) {
 	t.Run("interrupt_then_resume_completes_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := commonEngine.Create(ctx, "interruptflow.verify:428/interrupt", map[string]any{"prompt": "Hello"}, nil)
+		flowKey, err := eng.Create(ctx, "interruptflow.verify:428/interrupt", map[string]any{"prompt": "Hello"}, nil)
 		if !assert.NoError(err) {
 			return
 		}
 
-		outcome, err := commonEngine.Await(ctx, flowKey)
+		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
 
-		err = commonEngine.Resume(ctx, flowKey, map[string]any{"userInput": "world"})
+		err = eng.Resume(ctx, flowKey, map[string]any{"userInput": "world"})
 		if !assert.NoError(err) {
 			return
 		}
 
-		outcome, err = commonEngine.Await(ctx, flowKey)
+		outcome, err = eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}

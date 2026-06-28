@@ -18,13 +18,12 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -45,7 +44,7 @@ func (e *Engine) shard(n int) (*sequel.DB, error) {
 	return e.dbs[n-1], nil
 }
 
-// numDBShards returns the current number of database shards.
+// numDBShards returns the current number of open database shards.
 func (e *Engine) numDBShards() int {
 	e.dbsLock.RLock()
 	n := len(e.dbs)
@@ -53,8 +52,8 @@ func (e *Engine) numDBShards() int {
 	return n
 }
 
-// eachShard fans op out over every shard concurrently using an errgroup.
-func (e *Engine) eachShard(ctx context.Context, op func(ctx context.Context, db *sequel.DB, shard int) error) error {
+// onEachShard fans op out over every shard concurrently using an errgroup.
+func (e *Engine) onEachShard(ctx context.Context, op func(ctx context.Context, db *sequel.DB, shard int) error) error {
 	numShards := e.numDBShards()
 	if numShards == 1 {
 		db, err := e.shard(1)
@@ -89,13 +88,9 @@ func (e *Engine) eachShard(ctx context.Context, op func(ctx context.Context, db 
 
 // openDatabase opens connections to all database shards and runs migrations.
 func (e *Engine) openDatabase(ctx context.Context) error {
-	dataSourceName := e.dsn.Load().(string)
 	numShards := int(e.numShards.Load())
-	if numShards > 1 && !strings.Contains(dataSourceName, "%d") {
-		return errors.New("DSN must contain %%d when NumShards > 1")
-	}
 	for i := 1; i <= numShards; i++ {
-		db, err := e.openDatabaseShard(ctx, dataSourceName, i)
+		db, err := e.openDatabaseShard(ctx, i)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -104,18 +99,11 @@ func (e *Engine) openDatabase(ctx context.Context) error {
 	return nil
 }
 
-// expandShards reconciles the open shards up to the current numShards target, opening+migrating any that
-// are not yet live. It is the internal primitive behind SetNumShards; new top-level flows then land on
-// the new shards (selection, polling, and the cross-shard fan-outs all read the current len(e.dbs)),
-// while existing flows stay on their original shard.
-//
-// It only ever appends - shrinking is unsupported (old shards drain naturally), so a target below the
-// live count is a no-op, as is a target equal to it. Concurrency-safe: expandLock serializes callers, the
-// open+migrate I/O runs outside dbsLock, and each freshly-migrated shard is appended under dbsLock.Lock,
-// so the hot path (dbsLock.RLock) only ever sees fully-ready shards. Before Startup it is a no-op (shards
-// open at Startup). In test mode (RunInTest / StartupInTest) new shards are opened as isolated test
-// databases keyed by the same testID, matching the shards opened at startup.
-func (e *Engine) expandShards() error {
+// expandShards reconciles the open shards up to the current numShards target, opening+migrating any not yet
+// live. Append-only and concurrency-safe: expandLock serializes callers, open+migrate runs outside dbsLock,
+// and each ready shard is appended under dbsLock so the hot path only sees fully-ready shards. No-op before
+// Startup or when the target is at/below the live count.
+func (e *Engine) expandShards(ctx context.Context) error {
 	if !e.started.Load() {
 		return nil
 	}
@@ -130,26 +118,8 @@ func (e *Engine) expandShards() error {
 		return nil
 	}
 
-	dataSourceName := e.dsn.Load().(string)
-	testMode := e.testHashedID != ""
-	if testMode && dataSourceName == "" {
-		// Mirror openTestDatabaseWithID's fallback so expansion resolves the same base DSN as startup.
-		dataSourceName = os.Getenv("SEQUEL_TESTING_DSN")
-	}
-	// The %d requirement applies only to a real DSN; the test path folds the shard index into the
-	// testID when the DSN has no placeholder, so a multi-shard test DSN need not carry %d.
-	if !testMode && target > 1 && !strings.Contains(dataSourceName, "%d") {
-		return errors.New("DSN must contain %%d when NumShards > 1")
-	}
-
 	for i := current + 1; i <= target; i++ {
-		var db *sequel.DB
-		var err error
-		if testMode {
-			db, err = e.openDatabaseShardForTest(context.Background(), dataSourceName, i, e.testHashedID)
-		} else {
-			db, err = e.openDatabaseShard(context.Background(), dataSourceName, i)
-		}
+		db, err := e.openDatabaseShard(ctx, i)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -157,37 +127,49 @@ func (e *Engine) expandShards() error {
 		e.dbs = append(e.dbs, db)
 		e.dbsLock.Unlock()
 	}
+	// The shard count is the pool-sizing divisor, so growth shrinks every shard's share: resize the
+	// pre-existing shards down too (the newly opened ones were already sized for the new count at open).
+	e.dbsLock.RLock()
+	for _, db := range e.dbs {
+		e.applyConnPoolSizes(db)
+	}
+	e.dbsLock.RUnlock()
 	return nil
 }
 
-// openDatabaseShardForTest opens a single shard using sequel.CreateTestingDatabase
-// for per-test isolation.
-func (e *Engine) openDatabaseShardForTest(ctx context.Context, dataSourceName string, shardIndex int, testID string) (*sequel.DB, error) {
-	const driverName = ""
-	dsn := dataSourceName
-	if strings.Contains(dataSourceName, "%d") {
-		dsn = fmt.Sprintf(dataSourceName, shardIndex)
+// openDatabaseShard opens a single database shard connection and runs migrations. It resolves the base DSN
+// (in test mode an unset explicit DSN falls back to SEQUEL_TESTING_DSN, then the SQLite in-memory default),
+// substitutes %d with the shard index, and in test mode (testHashedID set) wraps the result via
+// sequel.CreateTestingDatabase into an isolated, auto-dropped database keyed on (driver, baseDSN, testID) -
+// the base DSN's %d already distinguishes the shards.
+func (e *Engine) openDatabaseShard(ctx context.Context, shardIndex int) (db *sequel.DB, err error) {
+	dsn := e.dsn.Load().(string)
+	if e.testHashedID != "" {
+		if dsn == "" {
+			dsn = os.Getenv("SEQUEL_TESTING_DSN")
+		}
+		if dsn == "" {
+			dsn = "file:dwarf_%d?mode=memory&cache=shared"
+		}
 	}
-	// Each shard must resolve to its own isolated testing database. CreateTestingDatabase keys its
-	// database on (driver, baseDSN, testID), so without a per-shard distinguisher every shard of a
-	// multi-shard engine would collapse onto a single shared in-memory database. A DSN carrying a
-	// %d placeholder already produces a distinct base per shard; otherwise fold the shard index into
-	// the test ID so the cache key differs per shard.
-	shardTestID := fmt.Sprintf("%s#%d", testID, shardIndex)
-	dsn, err := sequel.CreateTestingDatabase(driverName, dsn, shardTestID)
+	if strings.Contains(dsn, "%d") {
+		dsn = fmt.Sprintf(dsn, shardIndex)
+	} else if shardIndex > 1 {
+		// No %d to distinguish shards, yet this is shard 2+ - every shard would collapse onto one database.
+		return nil, errors.New("DSN must contain %%d when NumShards > 1")
+	}
+	if e.testHashedID != "" {
+		var err error
+		dsn, err = sequel.CreateTestingDatabase("", dsn, e.testHashedID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+	db, err = e.openAndMigrate(dsn)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return e.openAndMigrate(dsn)
-}
-
-// openDatabaseShard opens a single database shard connection and runs migrations.
-func (e *Engine) openDatabaseShard(ctx context.Context, dataSourceName string, shardIndex int) (*sequel.DB, error) {
-	dsn := dataSourceName
-	if strings.Contains(dataSourceName, "%d") {
-		dsn = fmt.Sprintf(dataSourceName, shardIndex)
-	}
-	return e.openAndMigrate(dsn)
+	return db, nil
 }
 
 // openAndMigrate opens a database connection and runs schema migrations.
@@ -197,13 +179,14 @@ func (e *Engine) openAndMigrate(dsn string) (*sequel.DB, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	poolSize := int(e.maxOpenConns.Load())
-	db.SetMaxOpenConns(poolSize)
-	db.SetMaxIdleConns(poolSize)
-	// Point sequel at the engine's own observability providers before migrating, so the SQL layer's
-	// sequel_* spans/metrics and its migration logs flow through the same logger/tracer/meter the host
-	// injected into dwarf - and migration telemetry is captured too. Resolved injected-or-global,
-	// matching how the engine resolves its own providers in initTracer/initMetrics.
+	e.applyConnPoolSizes(db)
+	// Drain idle connections and recycle aged ones - but not on SQLite, whose in-memory test databases are
+	// dropped the moment their last connection closes (a closed idle/expired conn would lose the data).
+	if db.DriverName() != "sqlite" {
+		db.SetConnMaxIdleTime(2 * time.Minute)
+		db.SetConnMaxLifetime(1 * time.Hour)
+	}
+	// Point Sequel at the engine's own observability providers
 	e.configureDBTelemetry(db)
 	err = db.Migrate(sequenceName, migrations.FS)
 	if err != nil {
@@ -212,18 +195,40 @@ func (e *Engine) openAndMigrate(dsn string) (*sequel.DB, error) {
 	return db, nil
 }
 
-// configureDBTelemetry directs a shard's sequel DB to the engine's logger, tracer, and meter providers,
-// so the SQL layer emits sequel_* telemetry under the host's configured OTEL pipeline. The tracer/meter
-// fall back to the global providers (no-op unless the host configured the SDK) when none was injected,
-// exactly as initTracer/initMetrics resolve the engine's own providers.
-func (e *Engine) configureDBTelemetry(db *sequel.DB) {
-	// Only hand sequel a logger when the host explicitly set one. The engine's own e.logger defaults to a
-	// discard logger so its internal logging is silent until configured; sequel similarly should not log
-	// (it emits migration events at Info) unless the host opted in. A nil logger disables sequel's logging
-	// entirely.
-	if e.loggerSet {
-		db.SetLogger(e.logger)
+// calcConnPoolSizes sizes the connection pool of a shard given the sizing parameters.
+func calcConnPoolSizes(workers, shards, workersPerConn, cap int) (idle, open int) {
+	if shards < 1 {
+		shards = 1
 	}
+	if workersPerConn < 1 {
+		workersPerConn = 1
+	}
+	if cap < 1 {
+		cap = 1
+	}
+	denom := shards * workersPerConn
+	idle = (workers + denom - 1) / denom // ceil(workers / (shards*workersPerConn))
+	idle = max(idle, 2)                  // at least 2 connections per shard
+	open = idle*2 + 2                    // warm core + burst headroom
+	if open > cap {
+		open = cap
+	}
+	if idle > open { // a tight ceiling can pull open below the formula idle
+		idle = open
+	}
+	return idle, open
+}
+
+// applyConnPoolSizes computes the per-shard connection pool sizes from the live config and applies them to db.
+func (e *Engine) applyConnPoolSizes(db *sequel.DB) {
+	idle, open := calcConnPoolSizes(int(e.workers.Load()), int(e.numShards.Load()), int(e.workersPerConn.Load()), int(e.maxOpenConns.Load()))
+	db.SetMaxIdleConns(idle)
+	db.SetMaxOpenConns(open)
+}
+
+// configureDBTelemetry directs a shard's sequel DB to the engine's logger, tracer, and meter providers.
+func (e *Engine) configureDBTelemetry(db *sequel.DB) {
+	db.SetLogger(e.logger)
 	tp := e.tracerProvider
 	if tp == nil {
 		tp = otel.GetTracerProvider()
@@ -242,42 +247,4 @@ func (e *Engine) closeDatabase() {
 		db.Close()
 	}
 	e.dbs = nil
-}
-
-// openTestDatabaseWithID opens per-test isolated databases for all shards, keyed by a caller-supplied
-// testID. It is the *testing.T-free core shared by RunInTest (testID = t.Name()) and StartupInTest
-// (testID = a host-supplied key shared by every replica of one test run) — so a host that is itself under
-// test can convey "use a throwaway, isolated database" down to sequel without a *testing.T.
-func (e *Engine) openTestDatabaseWithID(testID string) error {
-	dataSourceName := e.dsn.Load().(string)
-	// Allow the whole fixture suite to run against a real server database without changing any test:
-	// when no DSN was set explicitly, fall back to SEQUEL_TESTING_DSN — the same variable sequel itself
-	// reads, so one knob redirects dwarf and any other sequel-backed suite at the same server. Unset/empty
-	// keeps the SQLite in-memory default. sequel.CreateTestingDatabase creates an isolated, auto-dropped
-	// testing_* database per shard off this base DSN (needs CREATE/DROP DATABASE privilege on a server).
-	if dataSourceName == "" {
-		dataSourceName = os.Getenv("SEQUEL_TESTING_DSN")
-	}
-	numShards := int(e.numShards.Load())
-	// sequel.CreateTestingDatabase derives the throwaway database name as testing_<hour>_<base>_<testID>,
-	// which must fit the strictest SQL identifier limit (Postgres 63, MySQL 64 chars). Hash the caller's
-	// testID to a fixed 16 hex chars so the derived name is always bounded, regardless of how long the id
-	// is (a deeply nested Go subtest name, or an opaque host key). 16 hex chars (64 bits) is collision-free
-	// across a test suite. Hashing is deterministic, so two callers sharing a testID (e.g. peer replicas in
-	// one test app passing the same plane) resolve to the same isolated database — exactly what shared-state
-	// multi-replica fixtures need.
-	sum := sha256.Sum256([]byte(testID))
-	hashedID := hex.EncodeToString(sum[:])[:16]
-	// Remember the hashed id so a later ExpandShards routes new shards through the isolated-test open
-	// path (openDatabaseShardForTest) rather than opening a real DSN. Set before initRuntime flips
-	// started, so it is safely published to ExpandShards's post-started read.
-	e.testHashedID = hashedID
-	for i := 1; i <= numShards; i++ {
-		db, err := e.openDatabaseShardForTest(context.Background(), dataSourceName, i, hashedID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		e.dbs = append(e.dbs, db)
-	}
-	return nil
 }

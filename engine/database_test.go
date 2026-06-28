@@ -25,7 +25,6 @@ import (
 )
 
 func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -46,82 +45,11 @@ func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
 	assert.Equal(0, count)
 }
 
-func TestDatabase_StartupInTestCreatesSchema(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	e := NewEngine()
-	e.SetHost(noopHost{})
-	err := e.StartupInTest(context.Background(), t.Name())
-	assert.NoError(err)
-	defer e.Shutdown(context.Background())
-
-	db, err := e.shard(1)
-	assert.NoError(err)
-	var count int
-	err = db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_flows").Scan(&count)
-	assert.NoError(err)
-	assert.Equal(0, count)
-}
-
-func TestDatabase_StartupInTestRequiresHost(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	e := NewEngine() // no host
-	err := e.StartupInTest(context.Background(), t.Name())
-	assert.Error(err)
-}
-
-// TestDatabase_StartupInTestSharesByID is the load-bearing property for multi-replica test apps: engines
-// that pass the same testID resolve to the same isolated database (so peer replicas in one app see shared
-// state), while a different testID is isolated.
-func TestDatabase_StartupInTestSharesByID(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-	sharedID := t.Name() + "/shared"
-
-	a := NewEngine()
-	a.SetHost(noopHost{})
-	assert.NoError(a.StartupInTest(ctx, sharedID))
-	defer a.Shutdown(ctx)
-	b := NewEngine()
-	b.SetHost(noopHost{})
-	assert.NoError(b.StartupInTest(ctx, sharedID))
-	defer b.Shutdown(ctx)
-	c := NewEngine()
-	c.SetHost(noopHost{})
-	assert.NoError(c.StartupInTest(ctx, t.Name()+"/other"))
-	defer c.Shutdown(ctx)
-
-	// A writes a probe table; B (same id) sees it, C (different id) does not.
-	dbA, err := a.shard(1)
-	assert.NoError(err)
-	_, err = dbA.ExecContext(ctx, "CREATE TABLE shared_probe (n INT)")
-	assert.NoError(err)
-	_, err = dbA.ExecContext(ctx, "INSERT INTO shared_probe (n) VALUES (42)")
-	assert.NoError(err)
-
-	dbB, err := b.shard(1)
-	assert.NoError(err)
-	var n int
-	err = dbB.QueryRowContext(ctx, "SELECT n FROM shared_probe").Scan(&n)
-	assert.NoError(err)
-	assert.Equal(42, n)
-
-	dbC, err := c.shard(1)
-	assert.NoError(err)
-	err = dbC.QueryRowContext(ctx, "SELECT n FROM shared_probe").Scan(&n)
-	assert.Error(err) // isolated database: no such table
-}
-
 // TestSetNumShards covers runtime shard expansion (R7): before Startup SetNumShards just records the
 // target (applied when the shards open), and on a running engine it opens+migrates the added shards. It
 // also asserts the guards: idempotent at the same target, and shrink (a lower target) leaves the live
 // shards in place rather than dropping them.
 func TestSetNumShards(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -161,7 +89,6 @@ func TestSetNumShards(t *testing.T) {
 }
 
 func TestDatabase_ShardOutOfRange(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -177,7 +104,6 @@ func TestDatabase_ShardOutOfRange(t *testing.T) {
 }
 
 func TestDatabase_EachShardSingleShard(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -185,7 +111,7 @@ func TestDatabase_EachShardSingleShard(t *testing.T) {
 	e.RunInTest(t)
 
 	var visited []int
-	err := e.eachShard(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
+	err := e.onEachShard(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
 		visited = append(visited, shard)
 		return nil
 	})

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -31,8 +32,12 @@ import (
 // completion, capture a step key from each child off the carrier, delete the root, and assert every
 // descendant's step can no longer be loaded.
 func TestDeletecascadeflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 	assert := testarossa.For(t)
 
 	var mu sync.Mutex
@@ -50,51 +55,51 @@ func TestDeletecascadeflow(t *testing.T) {
 	root.SetEndpoint("RunChild", "deletecascadeflow.verify:428/run-child")
 	root.SetEndpoint("TaskZ", "deletecascadeflow.verify:428/task-z")
 	root.AddTransitionChain("TaskA", "RunChild", "TaskZ", workflow.END)
-	commonProxy.HandleGraph("deletecascadeflow.verify:428/root", root)
+	proxy.HandleGraph("deletecascadeflow.verify:428/root", root)
 
 	// Child: ChildWork -> RunGrandchild
 	child := workflow.NewGraph("Child")
 	child.SetEndpoint("ChildWork", "deletecascadeflow.verify:428/child-work")
 	child.SetEndpoint("RunGrandchild", "deletecascadeflow.verify:428/run-grandchild")
 	child.AddTransitionChain("ChildWork", "RunGrandchild", workflow.END)
-	commonProxy.HandleGraph("deletecascadeflow.verify:428/child", child)
+	proxy.HandleGraph("deletecascadeflow.verify:428/child", child)
 
 	// Grandchild: GrandchildWork
 	grandchild := workflow.NewGraph("Grandchild")
 	grandchild.SetEndpoint("GrandchildWork", "deletecascadeflow.verify:428/grandchild-work")
 	grandchild.AddTransition("GrandchildWork", workflow.END)
-	commonProxy.HandleGraph("deletecascadeflow.verify:428/grandchild", grandchild)
+	proxy.HandleGraph("deletecascadeflow.verify:428/grandchild", grandchild)
 
-	commonProxy.HandleTask("deletecascadeflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("deletecascadeflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("deletecascadeflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("deletecascadeflow.verify:428/task-z", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("deletecascadeflow.verify:428/run-child", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("deletecascadeflow.verify:428/run-child", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("deletecascadeflow.verify:428/child", nil, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	commonProxy.HandleTask("deletecascadeflow.verify:428/child-work", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("deletecascadeflow.verify:428/child-work", func(ctx context.Context, f *workflow.Flow) error {
 		record("ChildWork", f)
 		return nil
 	})
-	commonProxy.HandleTask("deletecascadeflow.verify:428/run-grandchild", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("deletecascadeflow.verify:428/run-grandchild", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("deletecascadeflow.verify:428/grandchild", nil, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	commonProxy.HandleTask("deletecascadeflow.verify:428/grandchild-work", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("deletecascadeflow.verify:428/grandchild-work", func(ctx context.Context, f *workflow.Flow) error {
 		record("GrandchildWork", f)
 		return nil
 	})
 
-	flowKey, outcome, err := commonEngine.Run(ctx, "deletecascadeflow.verify:428/root", nil, nil)
+	flowKey, outcome, err := eng.Run(ctx, "deletecascadeflow.verify:428/root", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
@@ -108,20 +113,20 @@ func TestDeletecascadeflow(t *testing.T) {
 	assert.NotEqual("", grandchildKey)
 
 	// Both descendant steps are loadable before the delete.
-	_, err = commonEngine.Step(ctx, childKey)
+	_, err = eng.Step(ctx, childKey)
 	assert.NoError(err)
-	_, err = commonEngine.Step(ctx, grandchildKey)
+	_, err = eng.Step(ctx, grandchildKey)
 	assert.NoError(err)
 
 	// Delete the root flow.
-	err = commonEngine.Delete(ctx, flowKey)
+	err = eng.Delete(ctx, flowKey)
 	assert.NoError(err)
 
 	// The root and every subgraph descendant are gone.
-	_, err = commonEngine.Snapshot(ctx, flowKey)
+	_, err = eng.Snapshot(ctx, flowKey)
 	assert.Error(err)
-	_, err = commonEngine.Step(ctx, childKey)
+	_, err = eng.Step(ctx, childKey)
 	assert.Error(err)
-	_, err = commonEngine.Step(ctx, grandchildKey)
+	_, err = eng.Step(ctx, grandchildKey)
 	assert.Error(err)
 }

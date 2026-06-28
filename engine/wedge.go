@@ -39,7 +39,7 @@ func (e *Engine) recoveryLoop(ctx context.Context) {
 		case <-e.recoveryStop:
 			return
 		case <-ticker.C:
-			e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+			e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 				e.sweepWedgedParks(ctx, db, shard)
 				return nil
 			})

@@ -96,7 +96,7 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 	var nearestDelay time.Duration = -1
 	var sizingErr bool // a sizing query failed (e.g. transient DB error); re-poll soon, don't sleep maxPollInterval
 
-	e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+	e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		res, err := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE status=? AND parked=0 AND lease_expires<=NOW_UTC()",
 			workflow.StatusPending, workflow.StatusRunning,
@@ -205,7 +205,7 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 	}
 	numShards := e.numDBShards()
 	results := make([]*shardResult, numShards+1)
-	err := e.eachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+	err := e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
 			"SELECT step_id, task_url, fairness_key, fairness_weight, priority, DATE_DIFF_MILLIS(NOW_UTC(), created_at) FROM dwarf_steps"+
 				" WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?"+

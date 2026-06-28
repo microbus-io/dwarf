@@ -20,14 +20,19 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestRetryloopflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("RetryLoop")
 	graph.SetEndpoint("TaskA", "retryloopflow.verify:428/task-a")
@@ -39,22 +44,22 @@ func TestRetryloopflow(t *testing.T) {
 	graph.AddTransition("TaskB", "TaskC")
 	graph.AddTransition("Handler", "TaskB")
 	graph.AddTransition("TaskC", workflow.END)
-	commonProxy.HandleGraph("retryloopflow.verify:428/retry-loop", graph)
+	proxy.HandleGraph("retryloopflow.verify:428/retry-loop", graph)
 
-	commonProxy.HandleTask("retryloopflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("retryloopflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("retryloopflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("retryloopflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("attempts") >= f.GetInt("target") {
 			return nil
 		}
 		return errors.New("not yet")
 	})
-	commonProxy.HandleTask("retryloopflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("retryloopflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("attempts", f.GetInt("attempts")+1)
 		return nil
 	})
-	commonProxy.HandleTask("retryloopflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("retryloopflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("finalAttempts", f.GetInt("attempts"))
 		return nil
 	})
@@ -63,7 +68,7 @@ func TestRetryloopflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"target": 3}
-		_, outcome, err := commonEngine.Run(ctx, "retryloopflow.verify:428/retry-loop", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "retryloopflow.verify:428/retry-loop", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3.0, outcome.State["finalAttempts"])

@@ -31,7 +31,6 @@ import (
 // fix prevents it), so the test forges the DB state the bug would leave and backdates the caller past
 // parkWedgeThreshold, then calls the recovery directly (bypassing the time gate).
 func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

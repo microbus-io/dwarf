@@ -26,32 +26,37 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestCancelinterruptedflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("Flow")
 	graph.SetEndpoint("TaskA", "cancelinterruptedflow.verify:428/task-a")
 	graph.SetEndpoint("Pause", "cancelinterruptedflow.verify:428/pause")
 	graph.SetEndpoint("TaskB", "cancelinterruptedflow.verify:428/task-b")
 	graph.AddTransitionChain("TaskA", "Pause", "TaskB", workflow.END)
-	commonProxy.HandleGraph("cancelinterruptedflow.verify:428/flow", graph)
+	proxy.HandleGraph("cancelinterruptedflow.verify:428/flow", graph)
 
-	commonProxy.HandleTask("cancelinterruptedflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("cancelinterruptedflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("cancelinterruptedflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("cancelinterruptedflow.verify:428/pause", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{"need": "input"}, nil)
 		if yield || err != nil {
 			return err
 		}
 		return nil
 	})
-	commonProxy.HandleTask("cancelinterruptedflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("cancelinterruptedflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("result", "reached B")
 		return nil
 	})
@@ -59,22 +64,22 @@ func TestCancelinterruptedflow(t *testing.T) {
 	t.Run("cancel_an_interrupted_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := commonEngine.Create(ctx, "cancelinterruptedflow.verify:428/flow", nil, nil)
+		flowKey, err := eng.Create(ctx, "cancelinterruptedflow.verify:428/flow", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
 
-		outcome, err := commonEngine.Await(ctx, flowKey)
+		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
 
 		// Cancel the parked flow with a reason.
-		if !assert.NoError(commonEngine.Cancel(ctx, flowKey, "no longer needed")) {
+		if !assert.NoError(eng.Cancel(ctx, flowKey, "no longer needed")) {
 			return
 		}
-		outcome, err = commonEngine.Await(ctx, flowKey)
+		outcome, err = eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -85,7 +90,7 @@ func TestCancelinterruptedflow(t *testing.T) {
 		assert.False(reachedB)
 
 		// Resuming a cancelled flow is rejected — it is terminal.
-		err = commonEngine.Resume(ctx, flowKey, map[string]any{"answer": "x"})
+		err = eng.Resume(ctx, flowKey, map[string]any{"answer": "x"})
 		assert.Error(err)
 	})
 }

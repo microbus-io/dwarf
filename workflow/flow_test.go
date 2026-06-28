@@ -25,7 +25,6 @@ import (
 )
 
 func TestFlow_GetSetString(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	err := f.Set("name", "Alice")
@@ -34,7 +33,6 @@ func TestFlow_GetSetString(t *testing.T) {
 }
 
 func TestFlow_GetSetInt(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	err := f.Set("count", 42)
@@ -43,7 +41,6 @@ func TestFlow_GetSetInt(t *testing.T) {
 }
 
 func TestFlow_GetSetFloat(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	err := f.Set("score", 3.14)
@@ -52,7 +49,6 @@ func TestFlow_GetSetFloat(t *testing.T) {
 }
 
 func TestFlow_GetSetBool(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	err := f.Set("valid", true)
@@ -61,7 +57,6 @@ func TestFlow_GetSetBool(t *testing.T) {
 }
 
 func TestFlow_GetSetStrings(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	err := f.Set("tags", []string{"a", "b"})
@@ -73,7 +68,6 @@ func TestFlow_GetSetStrings(t *testing.T) {
 }
 
 func TestFlow_GetSetDuration(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	err := f.Set("timeout", 5*time.Second)
@@ -82,7 +76,6 @@ func TestFlow_GetSetDuration(t *testing.T) {
 }
 
 func TestFlow_GetComplex(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	type Order struct {
 		ID    string `json:"id"`
@@ -99,7 +92,6 @@ func TestFlow_GetComplex(t *testing.T) {
 }
 
 func TestFlow_GetMissing(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	assert.Equal("", f.GetString("missing"))
@@ -107,7 +99,6 @@ func TestFlow_GetMissing(t *testing.T) {
 }
 
 func TestFlow_SetTracksChanges(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	f.Set("a", "1")
@@ -117,7 +108,6 @@ func TestFlow_SetTracksChanges(t *testing.T) {
 }
 
 func TestFlow_ParseStateAndSetChanges(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	f.Set("name", "Alice")
@@ -147,7 +137,6 @@ func TestFlow_ParseStateAndSetChanges(t *testing.T) {
 }
 
 func TestFlow_SetChangesNoChanges(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	f.Set("name", "Alice")
@@ -165,7 +154,6 @@ func TestFlow_SetChangesNoChanges(t *testing.T) {
 }
 
 func TestFlow_Has(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	assert.False(f.Has("missing"))
@@ -174,7 +162,6 @@ func TestFlow_Has(t *testing.T) {
 }
 
 func TestFlow_Delete(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	f := NewFlow()
@@ -201,7 +188,6 @@ func TestFlow_Delete(t *testing.T) {
 }
 
 func TestFlow_Clear(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	f := NewFlow()
@@ -223,7 +209,6 @@ func TestFlow_Clear(t *testing.T) {
 }
 
 func TestFlow_Transform(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	f := NewFlow()
@@ -252,7 +237,6 @@ func TestFlow_Transform(t *testing.T) {
 }
 
 func TestFlow_TransformSkipsMissingAndNull(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	f := NewFlow()
@@ -268,7 +252,6 @@ func TestFlow_TransformSkipsMissingAndNull(t *testing.T) {
 }
 
 func TestFlow_TransformPanicsOnOddArgs(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	f := NewFlow()
@@ -280,7 +263,6 @@ func TestFlow_TransformPanicsOnOddArgs(t *testing.T) {
 }
 
 func TestFlow_GetTreatsJSONNullAsAbsent(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	f := NewFlow()
@@ -305,7 +287,6 @@ func TestFlow_GetTreatsJSONNullAsAbsent(t *testing.T) {
 }
 
 func TestFlow_Goto(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	f.Goto("next-task")
@@ -313,7 +294,6 @@ func TestFlow_Goto(t *testing.T) {
 }
 
 func TestFlow_Interrupt(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	f.Interrupt(map[string]any{"request": "ssn"}, nil)
@@ -322,7 +302,6 @@ func TestFlow_Interrupt(t *testing.T) {
 }
 
 func TestFlow_SingleParkGuard(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Subgraph armed this dispatch blocks a subsequent interrupt.
@@ -383,7 +362,6 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 }
 
 func TestFlow_Retry(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Within the horizon: should retry, and the backoff shape is recorded.
@@ -422,7 +400,6 @@ func TestFlow_Retry(t *testing.T) {
 }
 
 func TestFlow_Sleep(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	f := NewFlow()
 	f.Sleep(10 * time.Second)
@@ -430,7 +407,6 @@ func TestFlow_Sleep(t *testing.T) {
 }
 
 func TestFlow_MarshalUnmarshal(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	original := NewFlow()
 	original.Set("name", "Alice")

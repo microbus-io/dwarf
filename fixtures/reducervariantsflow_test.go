@@ -26,13 +26,18 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestReducervariantsflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("Reducer")
 	graph.SetEndpoint("TaskA", "reducervariantsflow.verify:428/task-a")
@@ -53,12 +58,12 @@ func TestReducervariantsflow(t *testing.T) {
 	graph.AddTransition("TaskB", "Join")
 	graph.AddTransition("TaskC", "Join")
 	graph.AddTransitionChain("TaskD", "Join", workflow.END)
-	commonProxy.HandleGraph("reducervariantsflow.verify:428/reducer", graph)
+	proxy.HandleGraph("reducervariantsflow.verify:428/reducer", graph)
 
-	commonProxy.HandleTask("reducervariantsflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("reducervariantsflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("lo", 5)
 		f.SetInt("hi", 5)
 		f.SetBool("allOk", true)
@@ -67,7 +72,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.Set("obj", map[string]any{"k1": 1.0})
 		return nil
 	})
-	commonProxy.HandleTask("reducervariantsflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("lo", 2)
 		f.SetInt("hi", 8)
 		f.SetBool("allOk", true)
@@ -76,7 +81,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.Set("obj", map[string]any{"k2": 2.0})
 		return nil
 	})
-	commonProxy.HandleTask("reducervariantsflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/task-d", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("lo", 9)
 		f.SetInt("hi", 3)
 		f.SetBool("allOk", false)
@@ -85,7 +90,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.Set("obj", map[string]any{"k1": 9.0})
 		return nil
 	})
-	commonProxy.HandleTask("reducervariantsflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("reducervariantsflow.verify:428/join", func(ctx context.Context, f *workflow.Flow) error {
 		// Copy merged values forward under stable result keys.
 		f.SetFloat("rLo", f.GetFloat("lo"))
 		f.SetFloat("rHi", f.GetFloat("hi"))
@@ -101,7 +106,7 @@ func TestReducervariantsflow(t *testing.T) {
 	t.Run("min_max_and_or_concat_merge", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		_, outcome, err := commonEngine.Run(ctx, "reducervariantsflow.verify:428/reducer", nil, nil)
+		_, outcome, err := eng.Run(ctx, "reducervariantsflow.verify:428/reducer", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}

@@ -56,7 +56,6 @@ func entryStepBudgetMs(t *testing.T, e *Engine, flowKey string) int {
 // row, and denormalized onto the entry step - while a flow with no override freezes the engine default, and
 // a later default change does not retro-edit an existing flow.
 func TestTimeBudget_FrozenAtCreate(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -92,7 +91,6 @@ func TestTimeBudget_FrozenAtCreate(t *testing.T) {
 // time_budget_ms, not the engine default. With a tiny default and a large per-flow override, the running
 // step's lease must reflect the override (else a long task would be falsely reclaimed mid-flight).
 func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -150,7 +148,6 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 // TestTimeBudget_InheritedBySubgraph asserts a subgraph child flow inherits the parent's frozen budget via
 // the same rail priority/fairness use.
 func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

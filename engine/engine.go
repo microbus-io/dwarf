@@ -18,7 +18,10 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
+	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -63,13 +66,6 @@ const (
 
 	parkedNone     = 0
 	parkedSubgraph = 1
-
-	// Bounds for the per-flow parsed-graph cache (see graphcache.go). The graph JSON is frozen on the
-	// flow row at creation, so a cached graph is immutable and never needs invalidation; entry count +
-	// TTL alone keep the cache bounded. A graph definition is ~1-2KB parsed, so a few thousand entries
-	// costs only single-digit MB while covering the active flows of a busy replica without thrashing.
-	graphCacheMaxEntries = 4096
-	graphCacheTTL        = 15 * time.Minute
 )
 
 // Engine is the standalone workflow orchestration engine.
@@ -77,7 +73,6 @@ type Engine struct {
 	// Dependencies (set before Startup)
 	host           Host
 	logger         *slog.Logger
-	loggerSet      bool // true once SetLogger received a non-nil logger; gates whether sequel logs
 	meterProvider  metric.MeterProvider
 	metrics        *engineMetrics
 	tracerProvider trace.TracerProvider
@@ -89,7 +84,8 @@ type Engine struct {
 	workers         atomic.Int32
 	timeBudgetMs    atomic.Int64
 	defaultPriority atomic.Int32
-	maxOpenConns    atomic.Int32
+	maxOpenConns    atomic.Int32 // per-shard open ceiling (= per-server budget); <=0 means unbounded
+	workersPerConn  atomic.Int32 // workers assumed to share one connection; the pool-sizing divisor
 
 	// Database
 	dbs     []*sequel.DB
@@ -98,10 +94,11 @@ type Engine struct {
 	// count and each open the same new shard. The slow open+migrate I/O runs under this lock but
 	// outside dbsLock, so it never blocks the hot path (which only takes dbsLock).
 	expandLock sync.Mutex
-	// testHashedID is the hashed test database id when the engine was started in test mode (RunInTest /
-	// StartupInTest), empty in production. ExpandShards reads it to route new shards through the
-	// isolated-test open path. Written once during single-threaded startup before started.Store(true),
-	// read only after started.Load()==true, so the atomic started flag is the happens-before barrier.
+	// testHashedID is the hashed test database id when the engine was started in test mode (RunInTest),
+	// empty in production. openDatabaseShard reads it (at startup and on later expandShards growth) to wrap
+	// each shard in an isolated test database. Written once during single-threaded startup before
+	// started.Store(true), read only after started.Load()==true, so the atomic started flag is the
+	// happens-before barrier.
 	testHashedID string
 
 	// Candidate cache and worker pool
@@ -148,9 +145,6 @@ type Engine struct {
 // NewEngine creates a new workflow engine.
 func NewEngine() *Engine {
 	e := &Engine{
-		// Default to a discard logger: a library stays silent until the host opts in by injecting one
-		// (SetLogger), rather than writing unbidden to the application-owned slog.Default(). Non-nil so
-		// the engine's e.logger.*Context call sites are nil-safe; produces no output until configured.
 		logger:         slog.New(slog.DiscardHandler),
 		lastRefillBand: -1,
 	}
@@ -160,13 +154,13 @@ func NewEngine() *Engine {
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
 	e.defaultPriority.Store(100)
 	e.maxOpenConns.Store(8)
+	e.workersPerConn.Store(8)
 	return e
 }
 
 // --- Configuration setters ---
 //
-// Setters split into Live (callable any time) and construction-time-only (rejected after Startup); see the
-// Configuration section in CLAUDE.md for the split and rationale.
+// Setters split into Live (callable any time) and construction-time-only (rejected after Startup).
 //
 // errSetAfterStartup is the error the construction-time-only setters return on a running engine.
 func errSetAfterStartup(what string) error {
@@ -195,7 +189,7 @@ func (e *Engine) SetDSN(dsn string) error {
 // are open yet). It takes no ctx because the underlying open+migrate path is not ctx-cancellable.
 func (e *Engine) SetNumShards(num int) error {
 	e.numShards.Store(int32(num))
-	return e.expandShards()
+	return e.expandShards(context.Background())
 }
 
 // SetWorkers sets the number of worker goroutines. Construction-time only: the pool is spawned at Startup
@@ -224,17 +218,32 @@ func (e *Engine) SetDefaultPriority(p int) error {
 	return nil
 }
 
-// SetMaxOpenConns sets the maximum number of open SQL connections per shard and re-applies it to every
-// live shard pool, so it takes effect on a running engine immediately. (sequel's pool setters are
-// hot/atomic.) Before Startup it records the value, applied as each shard opens.
+// SetMaxOpenConns sets the per-shard hard ceiling on open SQL connections.
 func (e *Engine) SetMaxOpenConns(n int) error {
+	if n < 1 {
+		return errors.New("max open connections must be >= 1", http.StatusBadRequest)
+	}
 	e.maxOpenConns.Store(int32(n))
 	e.dbsLock.RLock()
-	defer e.dbsLock.RUnlock()
 	for _, db := range e.dbs {
-		db.SetMaxOpenConns(n)
-		db.SetMaxIdleConns(n)
+		e.applyConnPoolSizes(db)
 	}
+	e.dbsLock.RUnlock()
+	return nil
+}
+
+// SetWorkersPerConn sets the assumed number of worker goroutines that share one database connection.
+// The pool size is derived FROM the number of workers, not the other way around.
+func (e *Engine) SetWorkersPerConn(n int) error {
+	if n < 1 {
+		return errors.New("workers per connection must be >= 1", http.StatusBadRequest)
+	}
+	e.workersPerConn.Store(int32(n))
+	e.dbsLock.RLock()
+	for _, db := range e.dbs {
+		e.applyConnPoolSizes(db)
+	}
+	e.dbsLock.RUnlock()
 	return nil
 }
 
@@ -292,9 +301,6 @@ func (e *Engine) SetLogger(l *slog.Logger) error {
 	}
 	if l == nil {
 		l = slog.New(slog.DiscardHandler)
-		e.loggerSet = false
-	} else {
-		e.loggerSet = true
 	}
 	e.logger = l
 	return nil
@@ -327,26 +333,6 @@ func (e *Engine) Startup(ctx context.Context) error {
 	return nil
 }
 
-// StartupInTest initializes the engine against isolated, throwaway test databases - one per shard, keyed by
-// testID - instead of opening the configured DSN. It is for a host that is itself running under test (so it
-// has no *testing.T to hand RunInTest) but must still convey "use a disposable, isolated database" down to
-// sequel. The testID must be stable for the test run and shared by every replica that should see the same
-// database (e.g. a per-test isolation key shared by all replicas in one test app); distinct test runs pass
-// distinct ids for isolation. The engine never learns the host's notion of "test mode" - it only receives
-// this concrete instruction. Unlike RunInTest there is no cleanup hook; the host drives teardown by calling
-// Shutdown (e.g. from its own shutdown lifecycle).
-func (e *Engine) StartupInTest(ctx context.Context, testID string) error {
-	if e.host == nil {
-		return errors.New("host is required")
-	}
-	err := e.openTestDatabaseWithID(testID)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	e.initRuntime()
-	return nil
-}
-
 // Shutdown stops all worker goroutines and closes database connections.
 func (e *Engine) Shutdown(ctx context.Context) error {
 	e.drainRuntime()
@@ -354,18 +340,22 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// RunInTest initializes the engine for testing with per-test SQLite databases
-// and registers cleanup via t.Cleanup.
+// RunInTest initializes the engine for testing with per-test isolated databases (keyed by t.Name()) and
+// registers cleanup via t.Cleanup.
 func (e *Engine) RunInTest(t *testing.T) {
 	t.Helper()
-	err := e.openTestDatabaseWithID(t.Name())
+	// Hash the test name to a short, bounded id so the testing-database name sequel derives stays within the
+	// strictest SQL identifier limit (Postgres 63 / MySQL 64), whatever the test name's length. A non-empty
+	// testHashedID is also what switches openDatabaseShard onto the isolated-test open path. It is set before
+	// initRuntime flips started, so the atomic started flag publishes it to expandShards's later reads.
+	sum := sha256.Sum256([]byte(t.Name()))
+	e.testHashedID = hex.EncodeToString(sum[:])[:16]
+	err := e.Startup(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.initRuntime()
 	t.Cleanup(func() {
-		e.drainRuntime()
-		e.closeDatabase()
+		e.Shutdown(t.Context())
 	})
 }
 
@@ -379,7 +369,7 @@ func (e *Engine) initRuntime() {
 	e.timerStop = make(chan struct{})
 	e.recoveryStop = make(chan struct{})
 	e.nextPoll = time.Now()
-	e.graphCache = newLRUCache[graphCacheKey, *workflow.Graph](graphCacheMaxEntries, graphCacheTTL)
+	e.graphCache = newLRUCache[graphCacheKey, *workflow.Graph](4096, 15*time.Minute)
 	e.waiters = nil
 	e.started.Store(true)
 

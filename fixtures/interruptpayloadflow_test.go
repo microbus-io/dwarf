@@ -27,25 +27,30 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestInterruptpayloadflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("Interrupt")
 	graph.SetEndpoint("Setup", "interruptpayloadflow.verify:428/setup")
 	graph.SetEndpoint("Ask", "interruptpayloadflow.verify:428/ask")
 	graph.AddTransitionChain("Setup", "Ask", workflow.END)
-	commonProxy.HandleGraph("interruptpayloadflow.verify:428/interrupt", graph)
+	proxy.HandleGraph("interruptpayloadflow.verify:428/interrupt", graph)
 
-	commonProxy.HandleTask("interruptpayloadflow.verify:428/setup", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptpayloadflow.verify:428/setup", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("prompt", "choose")
 		return nil
 	})
-	commonProxy.HandleTask("interruptpayloadflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("interruptpayloadflow.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Interrupt(map[string]any{
 			"question": "pick one",
 			"options":  []string{"a", "b"},
@@ -59,11 +64,11 @@ func TestInterruptpayloadflow(t *testing.T) {
 	t.Run("payload_is_separate_from_state", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		flowKey, err := commonEngine.Create(ctx, "interruptpayloadflow.verify:428/interrupt", nil, nil)
+		flowKey, err := eng.Create(ctx, "interruptpayloadflow.verify:428/interrupt", nil, nil)
 		if !assert.NoError(err) {
 			return
 		}
-		outcome, err := commonEngine.Await(ctx, flowKey)
+		outcome, err := eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -79,7 +84,7 @@ func TestInterruptpayloadflow(t *testing.T) {
 		assert.False(hasQuestion, "payload field leaked into State")
 
 		// A caller wanting the combined view merges them explicitly.
-		graph, err := commonProxy.LoadGraph(ctx, "interruptpayloadflow.verify:428/interrupt")
+		graph, err := proxy.LoadGraph(ctx, "interruptpayloadflow.verify:428/interrupt")
 		if !assert.NoError(err) {
 			return
 		}

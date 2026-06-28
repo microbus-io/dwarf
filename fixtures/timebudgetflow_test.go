@@ -21,25 +21,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestTimebudgetflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("TimeBudget")
 	graph.SetEndpoint("TaskA", "timebudgetflow.verify:428/task-a")
 	graph.SetEndpoint("Slow", "timebudgetflow.verify:428/slow")
 	graph.AddTransitionChain("TaskA", "Slow", workflow.END)
-	commonProxy.HandleGraph("timebudgetflow.verify:428/time-budget", graph)
+	proxy.HandleGraph("timebudgetflow.verify:428/time-budget", graph)
 
-	commonProxy.HandleTask("timebudgetflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("timebudgetflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
 	// A host's transport may enforce a per-call time budget; here the task handler enforces its own timeout.
-	commonProxy.HandleTask("timebudgetflow.verify:428/slow", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("timebudgetflow.verify:428/slow", func(ctx context.Context, f *workflow.Flow) error {
 		ctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 		defer cancel()
 		select {
@@ -54,7 +59,7 @@ func TestTimebudgetflow(t *testing.T) {
 	t.Run("slow_task_exceeds_budget_and_fails_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		_, outcome, err := commonEngine.Run(ctx, "timebudgetflow.verify:428/time-budget", nil, nil)
+		_, outcome, err := eng.Run(ctx, "timebudgetflow.verify:428/time-budget", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusFailed, outcome.Status)
 	})

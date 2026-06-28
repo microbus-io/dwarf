@@ -50,7 +50,6 @@ func depthByTask(steps []workflow.FlowStep, taskName string) (int, bool) {
 // TestStepDepth_SubgraphContinuesFromCaller verifies a subgraph's steps are numbered as a continuation of
 // the caller: if the caller step is at depth X, the subgraph's entry step is at X+1.
 func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -108,7 +107,6 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 // by a goto (deeper) while the other goes straight to the fan-in. The fan-in depth must reflect the deeper
 // branch regardless of completion order.
 func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

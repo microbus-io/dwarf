@@ -34,8 +34,8 @@ import (
 // step - in the root flow or deep inside a subgraph. The original is never mutated (terminal flows are
 // immutable); recovery/exploration is non-destructive.
 //
-// The design (copy-only-keep clone, re-parking ancestor callers up the surgraph chain, the created->pending
-// crash-gate, and uniform scheduling resolution) is documented in CLAUDE.md, "Fork".
+// The design is a copy-only-keep clone, re-parking ancestor callers up the surgraph chain, a created->pending
+// crash-gate, and uniform scheduling resolution.
 func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides any) (string, error) {
 	shardNum, forkStepID, forkStepToken, err := parseStepKey(stepKey)
 	if err != nil {
@@ -188,8 +188,8 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	if isRoot || rewind != 0 { // on the rewind chain
 		newStatus = workflow.StatusRunning
 	}
-	// Scheduling (cc.*) is resolved once and applied uniformly to every cloned flow and step; see
-	// CLAUDE.md, "Fork", for why (uniform tree + deep-subgraph leaf carries the override).
+	// Scheduling (cc.*) is resolved once and applied uniformly to every cloned flow and step - the tree is
+	// uniform and a deep-subgraph fork's re-running leaf must carry the same overridden values.
 	forkedFromStep, newTrace := 0, traceParent
 	flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget := cc.priority, cc.fairnessKey, cc.fairnessWeight, cc.timeBudgetMs
 	if isRoot {

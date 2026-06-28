@@ -20,13 +20,18 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 func TestDynamicfanoutflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
 
 	graph := workflow.NewGraph("DynamicFanOut")
 	graph.SetEndpoint("TaskA", "dynamicfanoutflow.verify:428/task-a")
@@ -38,12 +43,12 @@ func TestDynamicfanoutflow(t *testing.T) {
 	graph.SetReducer("seenCounts", workflow.ReducerUnion)
 	graph.AddTransitionForEach("TaskA", "TaskB", "items", "item")
 	graph.AddTransitionChain("TaskB", "TaskC", workflow.END)
-	commonProxy.HandleGraph("dynamicfanoutflow.verify:428/dynamic-fan-out", graph)
+	proxy.HandleGraph("dynamicfanoutflow.verify:428/dynamic-fan-out", graph)
 
-	commonProxy.HandleTask("dynamicfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("dynamicfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-	commonProxy.HandleTask("dynamicfanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("dynamicfanoutflow.verify:428/task-b", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetString("item") == "" {
 			return nil
 		}
@@ -52,7 +57,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		f.Set("seenCounts", []int{f.GetInt("itemCount")})
 		return nil
 	})
-	commonProxy.HandleTask("dynamicfanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
+	proxy.HandleTask("dynamicfanoutflow.verify:428/task-c", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetInt("processedCount", f.GetInt("processed"))
 		return nil
 	})
@@ -61,7 +66,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{"x", "y", "z"}}
-		_, outcome, err := commonEngine.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(3.0, outcome.State["processedCount"])
@@ -71,7 +76,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{"only"}}
-		_, outcome, err := commonEngine.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(1.0, outcome.State["processedCount"])
@@ -81,7 +86,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		assert := testarossa.For(t)
 
 		initialState := map[string]any{"items": []string{}}
-		_, outcome, err := commonEngine.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
+		_, outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 	})

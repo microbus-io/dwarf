@@ -37,7 +37,6 @@ import (
 // never fires, the task only returns when its safety net trips, and the flow completes instead of
 // failing — which this fixture catches.
 func TestTaskdeadlineflow(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
