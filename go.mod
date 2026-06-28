@@ -7,7 +7,7 @@ tool github.com/microbus-io/copyrighter
 require (
 	github.com/microbus-io/boolexp v1.1.1
 	github.com/microbus-io/errors v1.0.1
-	github.com/microbus-io/sequel v1.10.4
+	github.com/microbus-io/sequel v1.10.5
 	github.com/microbus-io/testarossa v0.7.3
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0

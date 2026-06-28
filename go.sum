@@ -51,10 +51,8 @@ github.com/microbus-io/copyrighter v1.4.0 h1:EucSuHMyUO1fb+0eVOAz9ORpygTfaQxz/LK
 github.com/microbus-io/copyrighter v1.4.0/go.mod h1:zk1Tt0nD2cI3NA1i6SHOCRgj7n02TZLyq6uHAMqLmXs=
 github.com/microbus-io/errors v1.0.1 h1:pujosfRSEqSJi0gcx6d+A7Mf2RZr2vQVMSQz0pG+wkM=
 github.com/microbus-io/errors v1.0.1/go.mod h1:NZTmmm+wxKQ8JFCeOMWWj+oqGylYsMKmS1YXysHZASM=
-github.com/microbus-io/sequel v1.10.3 h1:0Z5W9x/Ggb+gfeqqeUFtQoB1pol5DawVmWTXBl9YzJs=
-github.com/microbus-io/sequel v1.10.3/go.mod h1:uRHsZ2rPPrPDTCOHjDevDs59bu+MLWyyMBycRe9Rxy0=
-github.com/microbus-io/sequel v1.10.4 h1:b2+Gx2TnZUl3WAZ8EKyC3Snijcs6l1SEDy3/N5ZUJ3U=
-github.com/microbus-io/sequel v1.10.4/go.mod h1:uRHsZ2rPPrPDTCOHjDevDs59bu+MLWyyMBycRe9Rxy0=
+github.com/microbus-io/sequel v1.10.5 h1:LgRxg/9YY/51nYEyWpl4jKKw1yb1gqgpOSjI6gviUd4=
+github.com/microbus-io/sequel v1.10.5/go.mod h1:uRHsZ2rPPrPDTCOHjDevDs59bu+MLWyyMBycRe9Rxy0=
 github.com/microbus-io/testarossa v0.7.3 h1:CsLpfjFG1/+rl0FqT1jJpjBiXZBydEe7CZOnQWbob9A=
 github.com/microbus-io/testarossa v0.7.3/go.mod h1:VNzOPk+3EQSXb4bmV7ZXC1wOAOPKock3H/eYJqxUqBg=
 github.com/modocache/gover v0.0.0-20171022184752-b58185e213c5/go.mod h1:caMODM3PzxT8aQXRPkAt8xlV/e7d7w8GM5g0fa5F0D8=

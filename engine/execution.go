@@ -248,7 +248,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		taskCtx, cancel = context.WithTimeout(taskCtx, time.Duration(timeBudgetMs)*time.Millisecond)
 		defer cancel()
 	}
-	execErr := e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
+	// A panic in the in-process host is caught here so it flows through the normal error disposition
+	// rather than wedging this leased step; see CLAUDE.md "Host-call panic isolation".
+	execErr := errors.CatchPanic(func() error {
+		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
+	})
 	recordSpanError(taskSpan, execErr)
 
 	var resultFlow *workflow.RawFlow
@@ -333,8 +337,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "flow", workflowURL, "subgraph", subgraphURL)
 		// Bound the subgraph LoadGraph by the caller flow's budget (the create-time LoadGraph uses the caller's ctx).
 		loadCtx, loadCancel := context.WithTimeout(workflow.ContextWithBaggage(ctx, baggage), time.Duration(flowTimeBudgetMs)*time.Millisecond)
-		subgraphGraph, lerr := e.host.LoadGraph(loadCtx, subgraphURL)
-		loadCancel()
+		var subgraphGraph *workflow.Graph
+		lerr := errors.CatchPanic(func() error {
+			var e2 error
+			subgraphGraph, e2 = e.host.LoadGraph(loadCtx, subgraphURL)
+			return e2
+		})
+		loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
 		if lerr != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, lerr, taskName)
 			return errors.Trace(lerr)

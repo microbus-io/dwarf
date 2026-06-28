@@ -67,7 +67,13 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 func (e *Engine) fireFlowStopped(ctx context.Context, flowKey string, baggageJSON string, outcome *workflow.FlowOutcome) {
 	var baggage map[string]any
 	unmarshalJSONMap(baggageJSON, &baggage)
-	e.host.FlowStopped(workflow.ContextWithBaggage(ctx, baggage), flowKey, outcome)
+	err := errors.CatchPanic(func() error {
+		e.host.FlowStopped(workflow.ContextWithBaggage(ctx, baggage), flowKey, outcome)
+		return nil
+	})
+	if err != nil {
+		e.logger.ErrorContext(ctx, "FlowStopped callback panicked", "flow", flowKey, "error", err)
+	}
 }
 
 // completeFlowSequential marks a flow completed when no successor exists.

@@ -40,7 +40,12 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	opts = e.resolveFlowOptions(opts)
 	// The create-time GraphLoader sees the baggage on ctx in the same decoded shape every dispatch will.
 	loaderCtx := workflow.ContextWithBaggage(ctx, baggageMap(opts.Baggage))
-	graph, err := e.host.LoadGraph(loaderCtx, workflowURL)
+	var graph *workflow.Graph
+	err = errors.CatchPanic(func() error {
+		var lerr error
+		graph, lerr = e.host.LoadGraph(loaderCtx, workflowURL)
+		return lerr
+	})
 	if err != nil {
 		return "", errors.Trace(err)
 	}

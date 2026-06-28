@@ -52,7 +52,13 @@ func (e *Engine) emitSignal(ctx context.Context, op signalOp, payload any) {
 		e.logger.ErrorContext(ctx, "Marshaling peer signal", "op", string(op), "error", err)
 		return
 	}
-	e.host.SignalPeers(ctx, string(op), data)
+	err = errors.CatchPanic(func() error {
+		e.host.SignalPeers(ctx, string(op), data)
+		return nil
+	})
+	if err != nil {
+		e.logger.ErrorContext(ctx, "SignalPeers callback panicked", "op", string(op), "error", err)
+	}
 }
 
 func (e *Engine) signalEnqueue(ctx context.Context, shard, stepID int) {

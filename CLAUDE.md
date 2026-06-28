@@ -33,8 +33,9 @@ observability providers below are injected separately. A host must implement `Lo
   carrier with state pre-populated; writes its changes back onto the flow. The engine never knows *how* the task is
   reached (local call, RPC, message bus). The flow's baggage rides on ctx (`workflow.BaggageFrom(ctx)`). Any error the
   task returns is terminal for that attempt: the engine routes it via the graph's `onError` transition if one exists,
-  else it fails the step. The engine never sniffs status codes or error text; a task that wants to back off on a
-  transient failure detects that itself and arms `flow.Retry`.
+  else it fails the step. A **panic** in the in-process handler is caught at the call boundary and treated as exactly
+  such an error (see "Host-call panic isolation"). The engine never sniffs status codes or error text; a task that
+  wants to back off on a transient failure detects that itself and arms `flow.Retry`.
 - **`FlowStopped(ctx, flowKey string, outcome *workflow.FlowOutcome)`** - fired when a flow stops
   (completed/failed/cancelled/interrupted) for a flow created with `FlowOptions.NotifyOnStop=true`. `flowKey`
   identifies the stopped flow (it is *not* part of the outcome). The engine traffics in no delivery address:
@@ -1313,6 +1314,34 @@ filters. The engine models no tenant concept of its own - the `tenant_id` column
 ## Concurrency and Crash Recovery
 
 The engine uses SQL transactions for multi-statement operations and `lease_expires` for crash recovery.
+
+### Host-call panic isolation
+
+The host runs **in-process**, so a panic in host code propagates straight into the engine's own goroutines -
+and being in-process is the reason to defend, not ignore it: there is no process boundary to contain the blast
+radius, so one buggy task handler would otherwise take down every flow sharing the replica. Each of the four
+`Host` calls is therefore wrapped in `errors.CatchPanic` at its **call boundary** (not only at the worker loop):
+
+- **`ExecuteTask`** (`execution.go`) - the panic becomes the call's `error` and flows through the **normal
+  disposition**: routed via the graph's `onError` transition if one exists, else `failStep`. This is the
+  load-bearing case. The worker loop *already* wraps `processStep` in `CatchPanic` (`scheduling.go`), so the
+  process never died - but that catch is too coarse: a panic there unwinds the whole `processStep` stack *past*
+  the error routing, leaving the already-leased step stuck `running` until lease expiry (`budget + leaseMargin`),
+  which then re-dispatches and re-panics - a slow crash-loop that also silently skips the author's `onError`.
+  Catching at the boundary turns a panic into a clean, immediate step failure (lease released), identical to a
+  returned error. A panic is treated as *any other task error* (no special bypass) for consistency;
+  `errors.CatchPanic` captures the stack trace into the error for diagnosis.
+- **`LoadGraph`** (`operations.go` at `Create`, `execution.go` at subgraph spawn) - converted to an error
+  return. The subgraph-spawn site runs inside `processStep`, so without this it would wedge the caller step
+  exactly like `ExecuteTask`; the `Create` site fails the `Create` call cleanly instead of unwinding into the
+  host's own frame.
+- **`FlowStopped`** / **`SignalPeers`** (`completion.go` / `peers.go`) - both fire-and-forget; the panic is
+  caught and logged at error level only, so it can never derail flow completion/cancel or the calling operation.
+
+The worker-loop and refiller `CatchPanic` wrappers stay as **defense-in-depth** for panics in *engine* code
+(transition evaluation, fan-in, etc.) outside any host call. `fixtures/panicflow_test.go` pins both task-panic
+outcomes (no `onError` → flow `failed`; with `onError` → routed to the handler and `completed`), using a bounded
+`Await` that would time out if the panic had wedged the step instead of failing it.
 
 ### Worker context (the engine lifetime)
 
