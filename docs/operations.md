@@ -169,7 +169,7 @@ retention explicitly:
 
 ```go
 err := eng.Delete(ctx, flowKey)          // remove one flow and its steps (refuses a running flow)
-count, err := eng.Purge(ctx, query)      // bulk-delete matching flows (except running), capped at 10000
+count, err := eng.Purge(ctx, query)      // bulk-delete matching flows (except running), capped at 1000
 ```
 
 `Purge` takes the same `workflow.Query` as `List`. `OlderThan` / `NewerThan` are database-anchored and
