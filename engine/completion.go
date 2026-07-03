@@ -355,6 +355,21 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	return nil
 }
 
+// failAndReturn fails the step and returns the error processStep should surface. If failStep's own
+// transaction errored - most plausibly its lock-contention retries exhausting under a deadlock storm,
+// which leaves the step still leased-and-running because the fail UPDATE never committed - that error is
+// returned so processStep's recovery defer sees a lock-contention error and rewinds the step
+// (running→pending) for immediate re-dispatch, instead of leaving it stranded running until lease expiry
+// (budget+leaseMargin, minutes past the poll cadence). When failStep succeeds the original failure reason
+// is returned unchanged (the step is already terminal, so the defer's guarded reset is a no-op). All
+// failStep call sites in processStep go through this so the defer covers every fail path uniformly.
+func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, flowID int, flowToken string, taskErr error, taskName string) error {
+	if ferr := e.failStep(ctx, shardNum, stepID, flowID, flowToken, taskErr, taskName); ferr != nil {
+		return errors.Trace(ferr)
+	}
+	return errors.Trace(taskErr)
+}
+
 // failStep handles a task failure.
 func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID int, flowToken string, taskErr error, taskName string) error {
 	db, err := e.shard(shardNum)

@@ -356,7 +356,14 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 			return outcome, nil
 		}
 		select {
-		case <-ch:
+		case s := <-ch:
+			// drainRuntime sends this sentinel at Shutdown so a waiter on a still-running flow returns
+			// instead of spinning on the ticker until the caller's ctx expires. A real stop status buffered
+			// ahead of it was already caught by the snapshot at the top of this loop, so reaching here on the
+			// sentinel means the flow has not stopped and never will under this engine.
+			if s == awaitShutdownSignal {
+				return nil, errors.New("engine is shutting down", http.StatusServiceUnavailable)
+			}
 		case <-ticker.C:
 		case <-ctx.Done():
 			return nil, errors.Trace(ctx.Err(), http.StatusRequestTimeout)

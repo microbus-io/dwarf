@@ -802,6 +802,17 @@ hang to one interval. It is deliberately coarse (5s) because the signal is the f
 the rare lost wake, so its steady-state cost is one PK snapshot per interval per blocked `Await`. (`awaitPollInterval`
 is a `var`, not a `const`, only so a test can shorten it.)
 
+**Shutdown wakes waiters with a sentinel, not an empty string.** `drainRuntime` (after draining workers/timer/
+refiller, so no goroutine will ever signal again) fans a single `awaitShutdownSignal` sentinel out to every
+registered waiter channel. `await` returns a "shutting down" error (503) on receiving it. The sentinel matters
+because the loop distinguishes real stop statuses via `stopped()`: an empty-string wake (the pre-fix value) reads
+as "re-snapshot," so a waiter on a *still-running* flow re-snapshots (a `running` read on the not-yet-closed DB),
+re-blocks on a channel nobody will signal again, and escapes only when its own ctx expires - or, incidentally, up
+to a full `awaitPollInterval` later, when a ticker re-snapshot happens to hit the now-closed DB. The sentinel send
+is non-blocking (`select … default`): a real stop status already buffered on the channel wins, and the waiter
+returns that outcome instead (the snapshot at the loop top catches it). Shutdown drains waiters *before*
+`closeDatabase`, so the sentinel path never touches a closed DB. Pinned by `fixtures/awaitshutdownflow_test.go`.
+
 **Cross-replica `Await`.** A flow created on one replica but completed on another wakes a local `Await` only via the
 `SignalPeers` broadcast (op `statusChange`). Every flow-stop site calls an internal `signalStop` helper that does the
 local waiter wake *and* the peer broadcast; the receiving replica's `DeliverSignal` routes it to `notifyStatusChange`, which wakes

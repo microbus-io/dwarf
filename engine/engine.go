@@ -82,6 +82,12 @@ const (
 // const, only so tests can shorten it.
 var awaitPollInterval = 5 * time.Second
 
+// awaitShutdownSignal is the sentinel drainRuntime sends on each Await waiter channel so a blocked await
+// returns a shutdown error instead of re-snapshotting and re-blocking on a channel that will never be
+// signaled again. The null-byte prefix guarantees it can never collide with a real flow status (the set
+// await distinguishes via stopped()).
+const awaitShutdownSignal = "\x00shutdown"
+
 // Engine is the standalone workflow orchestration engine.
 type Engine struct {
 	// Dependencies (set before Startup)
@@ -483,11 +489,15 @@ func (e *Engine) drainRuntime() {
 		close(e.refillStop)
 	}
 	e.refiller.Wait()
+	// Wake every blocked Await with the shutdown sentinel so it returns an error rather than re-snapshotting
+	// and re-blocking on a channel no goroutine will ever signal again (workers/timer/refiller are already
+	// drained above). A non-blocking send: if a real stop status is already buffered, that wins (the awaiter
+	// re-snapshots and returns the outcome) and the sentinel is simply dropped.
 	e.waitersLock.Lock()
 	for _, chans := range e.waiters {
 		for _, ch := range chans {
 			select {
-			case ch <- "":
+			case ch <- awaitShutdownSignal:
 			default:
 			}
 		}

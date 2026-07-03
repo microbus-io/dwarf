@@ -201,7 +201,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		graph = &workflow.Graph{}
 		err = json.Unmarshal([]byte(graphJSON), graph)
 		if err != nil {
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 		e.graphCache.Store(graphKey, graph)
@@ -291,8 +291,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			errorRouted = true
 			errorTarget = tr.To
 		} else {
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, execErr, taskName)
-			return errors.Trace(execErr)
+			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, execErr, taskName)
+			return errors.Trace(err)
 		}
 	} else {
 		// Re-read the flow's changes after execution: the task executor wrote to the Flow
@@ -334,7 +334,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 		if signalCount > 1 {
 			err = errors.New("task '%s' set multiple competing control signals", taskName)
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 	}
@@ -345,7 +345,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		_, _, subgraphArmed := resultFlow.SubgraphRequested()
 		if (interruptArmed || subgraphArmed) && (interruptDone || subgraphDone) {
 			err = errors.New("task '%s' armed a second park on an already-resolved step", taskName)
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 	}
@@ -370,8 +370,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		})
 		loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
 		if lerr != nil {
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, lerr, taskName)
-			return errors.Trace(lerr)
+			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, lerr, taskName)
+			return errors.Trace(err)
 		}
 		// Persist the task's changes AND park the caller step in one UPDATE, BEFORE the child flow is made
 		// dispatchable by start below. The ordering is load-bearing: completeSurgraphFlow revives this
@@ -387,7 +387,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			string(changesJSON), parkedSubgraph, stepID, workflow.StatusRunning,
 		)
 		if err != nil {
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 		if n, _ := parkRes.RowsAffected(); n == 0 {
@@ -403,7 +403,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// createSubgraphFlow inserts the child already surgraph-linked and running, so no separate start.
 		_, err = e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphURL, subgraphGraph, childInputState, baggageJSON, callerTraceParent)
 		if err != nil {
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 		e.metricStepExecuted(ctx, taskName, "subgraph")
@@ -464,7 +464,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			return errors.Trace(e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID))
 		})
 		if err != nil {
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 		if !rewound {
@@ -507,7 +507,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	} else {
 		nextTasks, err = evaluateTransitions(graph, taskName, resultFlow)
 		if err != nil {
-			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 	}
