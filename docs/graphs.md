@@ -5,26 +5,28 @@ your host's `LoadGraph`. This guide covers the full graph-authoring API.
 
 ## Tasks
 
-A graph is a set of tasks connected by transitions. Add a task with a **node name** (its identity in the
-graph) and a **URL** (the address your host's `ExecuteTask` resolves to reach it):
+A graph is a set of tasks connected by transitions. Bind a task with `SetEndpoint`, giving a **node name**
+(its identity in the graph) and a **URL** (the address your host's `ExecuteTask` resolves to reach it):
 
 ```go
-g := workflow.NewGraph("Checkout", "checkout")
-g.AddTask("Reserve", "inventory.reserve")
-g.AddTask("Charge", "billing.charge")
-g.AddTask("Ship", "fulfillment.ship")
+g := workflow.NewGraph("Checkout")
+g.SetEndpoint("Reserve", "inventory.reserve")
+g.SetEndpoint("Charge", "billing.charge")
+g.SetEndpoint("Ship", "fulfillment.ship")
 ```
 
-The node name and URL can differ, which lets the same task URL appear at several positions under
-different names. The engine passes the URL to your executor; your executor decides what that address means
-(a function key, an HTTP endpoint, a message topic).
+`NewGraph` takes only the display name; the workflow's resolve URL is a separate opaque key passed to
+`Create`/`Run`/`LoadGraph`, not carried on the graph. `SetEndpoint` creates the node if new and updates its
+URL if it already exists. The node name and URL can differ, which lets the same task URL appear at several
+positions under different names. The engine passes the URL to your executor; your executor decides what that
+address means (a function key, an HTTP endpoint, a message topic).
 
 By convention, **graph and task (node) names are PascalCase** (`Reserve`, `Charge`) — they are
 graph-topology identifiers, distinct from the lowercased URLs they dispatch to and from the camelCase
 **state fields** tasks read and write (`lineItems`, `loopsLeft`). Keeping the three namespaces visually
 distinct makes graphs easier to read; the engine itself imposes no casing.
 
-The **entry point** defaults to the first task added. Override it with `g.SetEntryPoint("Reserve")`.
+The **entry point** defaults to the first task bound. Override it with `g.SetEntryPoint("Reserve")`.
 
 `workflow.END` is the sentinel terminal target — a transition to `END` ends the flow.
 

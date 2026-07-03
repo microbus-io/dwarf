@@ -165,6 +165,36 @@ func TestGraph_Validate(t *testing.T) {
 	assert.Error(g7.Validate())
 }
 
+// TestGraph_ValidateFanOutConvergence pins that all branches of one fan-out must converge on the SAME
+// fan-in node. The cohort shares a spawn step and the cohort-resolution path selects the fan-in from
+// whichever sibling completes last, so divergent fan-in targets make the convergence node
+// nondeterministic - Validate must reject that, while a shared fan-in validates cleanly.
+func TestGraph_ValidateFanOutConvergence(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// Divergent: S fans out to A,B; A -> J, B -> K (different fan-ins). Rejected.
+	bad := NewGraph("Divergent")
+	bad.AddTransition("svc/s", "svc/a")
+	bad.AddTransition("svc/s", "svc/b")
+	bad.AddTransition("svc/a", "svc/j")
+	bad.AddTransition("svc/b", "svc/k")
+	bad.AddTransition("svc/j", END)
+	bad.AddTransition("svc/k", END)
+	bad.SetFanIn("svc/j")
+	bad.SetFanIn("svc/k")
+	assert.Error(bad.Validate())
+
+	// Convergent: same shape, both siblings -> J. Accepted.
+	good := NewGraph("Convergent")
+	good.AddTransition("svc/s", "svc/a")
+	good.AddTransition("svc/s", "svc/b")
+	good.AddTransition("svc/a", "svc/j")
+	good.AddTransition("svc/b", "svc/j")
+	good.AddTransition("svc/j", END)
+	good.SetFanIn("svc/j")
+	assert.NoError(good.Validate())
+}
+
 func TestGraph_AddTransitionChain(t *testing.T) {
 	assert := testarossa.For(t)
 

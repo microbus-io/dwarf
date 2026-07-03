@@ -99,7 +99,7 @@ func (g *Graph) Transitions() []Transition {
 // SetEndpoint binds a node (identified by its graph name) to the given dispatch URL, creating the node
 // if it does not exist and updating its URL if it does. The name is the node's identity in the graph
 // (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
-// hands to the host's ExecuteTask and groups the breaker/valve/saturation by. The first node bound
+// hands to the host's ExecuteTask and groups the saturation/concurrency metric by. The first node bound
 // becomes the default entry point unless SetEntryPoint is called explicitly. The pseudo-node END is not
 // registered.
 //
@@ -474,9 +474,10 @@ func (g *Graph) validateLineage() error {
 			case tr.WithGoto, tr.OnError, tr.Switch:
 				nextStack = fromStack
 			case g.fanInNodes[tr.To]:
+				var fanOutSource string
 				if fromIsFanOut {
 					nextStack = fromStack
-					g.fanOutToFanIn[from] = tr.To
+					fanOutSource = from
 				} else {
 					if len(fromStack) == 0 {
 						return errors.New(
@@ -485,8 +486,19 @@ func (g *Graph) validateLineage() error {
 						)
 					}
 					nextStack = stackCopy(fromStack[:len(fromStack)-1])
-					g.fanOutToFanIn[fromStack[len(fromStack)-1]] = tr.To
+					fanOutSource = fromStack[len(fromStack)-1]
 				}
+				// All branches of one fan-out must converge on the SAME fan-in. The cohort shares a spawn
+				// step, and the cohort-resolution path picks the fan-in from whichever sibling completes
+				// last - so divergent fan-in targets make the convergence node nondeterministic. A prior
+				// mapping to a different fan-in is that divergence.
+				if prior, ok := g.fanOutToFanIn[fanOutSource]; ok && prior != tr.To {
+					return errors.New(
+						"fan-out source '%s' in graph '%s' has branches converging on different fan-in nodes ('%s' and '%s'); all siblings of a fan-out must converge on the same fan-in",
+						stripProto(fanOutSource), g.name, stripProto(prior), stripProto(tr.To),
+					)
+				}
+				g.fanOutToFanIn[fanOutSource] = tr.To
 			case fromIsFanOut:
 				nextStack = append(stackCopy(fromStack), from)
 			default:

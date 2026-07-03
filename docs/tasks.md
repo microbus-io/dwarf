@@ -21,7 +21,7 @@ func charge(ctx context.Context, f *workflow.Flow) error {
 
 The engine populates the flow's state from the step's input before the call, records whatever you change
 as the step's `changes`, and persists it. Returning a non-nil error fails the step (unless an `onError`
-transition matches; see [Building graphs](graphs.md#error-handling-onerror-ontimeout)).
+transition matches; see [Building graphs](graphs.md#error-handling-onerror)).
 
 ## Reading state
 

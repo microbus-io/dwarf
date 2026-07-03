@@ -19,9 +19,9 @@ func TestCheckout(t *testing.T) {
     ctx := context.Background()
     proxy := engine.NewTestProxy()
 
-    g := workflow.NewGraph("Checkout", "checkout")
-    g.AddTask("Reserve", "inventory.reserve")
-    g.AddTask("Charge", "billing.charge")
+    g := workflow.NewGraph("Checkout")
+    g.SetEndpoint("Reserve", "inventory.reserve")
+    g.SetEndpoint("Charge", "billing.charge")
     g.AddTransition("Reserve", "Charge")
     g.AddTransition("Charge", workflow.END)
     proxy.HandleGraph("checkout", g)
@@ -39,7 +39,7 @@ func TestCheckout(t *testing.T) {
     eng.SetHost(proxy)
     eng.RunInTest(t)
 
-    out, err := eng.Run(ctx, "checkout", map[string]any{"sku": "ABC"}, nil)
+    _, out, err := eng.Run(ctx, "checkout", map[string]any{"sku": "ABC"}, nil)
     testarossa.NoError(t, err)
     testarossa.Equal(t, workflow.StatusCompleted, out.Status)
     testarossa.Equal(t, "r-123", out.State["receipt"])
@@ -47,7 +47,7 @@ func TestCheckout(t *testing.T) {
 ```
 
 `TestProxy.HandleGraph(name, graph)` registers a graph; `HandleTask(url, handler)` registers a task by its
-URL (the address used in `AddTask`). The handler signature is the same `func(ctx, *workflow.Flow) error`
+URL (the address bound with `SetEndpoint`). The handler signature is the same `func(ctx, *workflow.Flow) error`
 you write in production.
 
 ## Configuring the test engine

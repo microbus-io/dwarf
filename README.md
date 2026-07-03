@@ -42,7 +42,7 @@ fmt.Println(out.State["greeting"]) // hello ada
 ## Why dwarf
 
 - **Durable by construction.** Every step is checkpointed to SQL. A crashed worker's in-flight step is
-  recovered by lease expiry; a flow can be inspected, resumed, restarted, or continued days later.
+  recovered by lease expiry; a flow can be inspected, resumed, forked, or continued days later.
 - **Parallelism that merges cleanly.** Static and dynamic (`forEach`) fan-out run branches concurrently;
   fan-in merges their state with per-field reducers (append, add, union, merge, …).
 - **Human-in-the-loop.** A task can `Interrupt` to park the flow for external input and `Resume` later —
@@ -132,12 +132,11 @@ flowKey, err := eng.Create(ctx, "checkout", initialState, &workflow.FlowOptions{
     FairnessKey: tenantID,
     Baggage:     actorClaims,
 })
-eng.Start(ctx, flowKey)
-outcome, err := eng.Await(ctx, flowKey)
+outcome, err := eng.Await(ctx, flowKey) // Create returns a running flow; there is no separate start call
 ```
 
-The live `Set*` methods (`SetNumShards`, `SetMaxOpenConns`, `SetTimeBudget`, `SetDefaultPriority`) may be
-called after `Startup` for hot reconfiguration; the rest are construction-time only.
+The live `Set*` methods (`SetMaxOpenConns`, `SetWorkersPerConn`, `SetTimeBudget`, `SetDefaultPriority`) may
+be called after `Startup` for hot reconfiguration; the rest are construction-time only.
 
 ## Database support
 
@@ -158,7 +157,7 @@ Full guides live in [`docs/`](docs/):
 - [Concepts](docs/concepts.md) — graph, task, flow, step, thread, reducer, lifecycle
 - [Building graphs](docs/graphs.md) — transitions, conditions, fan-out, error handling, reducers
 - [Writing tasks](docs/tasks.md) — the Flow carrier, state, control signals, baggage, error handling
-- [Engine operations](docs/operations.md) — create, run, inspect, resume, cancel, restart, continue, retain
+- [Engine operations](docs/operations.md) — create, run, inspect, resume, cancel, fork, continue, retain
 - [Fan-out & subgraphs](docs/fan-out-and-subgraphs.md) — parallelism, dynamic `forEach`, calling sub-workflows
 - [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, retries, recovery
 - [Observability](docs/observability.md) — logs, metrics, tracing

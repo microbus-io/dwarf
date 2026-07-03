@@ -23,8 +23,9 @@ package workflow
 type FlowOutcome struct {
 	// Status is the flow's current lifecycle status: created, running, interrupted, completed, failed, or cancelled.
 	Status string `json:"status,omitzero"`
-	// State is the flow's accumulated state. For terminal statuses this is the final_state;
-	// for running and interrupted flows it is the merged snapshot of the current step.
+	// State is the flow's accumulated state. For terminal statuses this is the final_state; for an
+	// interrupted flow it is the merged snapshot of the interrupted step. For a running flow it is
+	// deliberately empty - the live in-flight merged state is not reconstructed.
 	State map[string]any `json:"state,omitzero"`
 	// Error is the task error string. Populated when Status is "failed".
 	Error string `json:"error,omitzero"`

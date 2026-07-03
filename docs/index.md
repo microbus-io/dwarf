@@ -20,7 +20,7 @@ If you're new, read in this order:
 Then dip into the topic guides as you need them:
 
 - **[Engine operations](operations.md)** — every method on the engine: creating, running, inspecting,
-  pausing/resuming, cancelling, restarting, continuing a thread, and retention.
+  pausing/resuming, cancelling, forking, continuing a thread, and retention.
 - **[Fan-out & subgraphs](fan-out-and-subgraphs.md)** — running work in parallel and calling
   sub-workflows.
 - **[Scheduling & reliability](scheduling-and-reliability.md)** — priority, fairness, retries, and

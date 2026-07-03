@@ -51,41 +51,80 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return e.historyBeforeStep(ctx, shardNum, flowID, 0)
-}
-
-func (e *Engine) historyBeforeStep(ctx context.Context, shardNum int, flowID int, beforeStepDepth int) ([]workflow.FlowStep, error) {
-	db, err := e.shard(shardNum)
+	// Load the whole subgraph tree in a fixed two queries via root_flow_id (single-shard by parent-shard
+	// affinity), then assemble the nested history in memory - instead of a per-step surgraph_step_id lookup,
+	// an N+1 over every step in the tree. This mirrors the root_flow_id membership walks in completion.go.
+	// Starting from a mid-tree flow (a subgraph child, which History accepts) over-fetches the ancestor and
+	// sibling subtrees, but the assembly only descends from flowID, so the extra rows are never rendered.
+	childByCaller, err := e.loadSubgraphChildren(ctx, db, flowID)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	var rows *sql.Rows
-	if beforeStepDepth > 0 {
-		rows, err = db.QueryContext(ctx,
-			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked FROM dwarf_steps WHERE flow_id=? AND step_depth<? ORDER BY step_depth, step_id",
-			flowID, beforeStepDepth,
-		)
-	} else {
-		rows, err = db.QueryContext(ctx,
-			"SELECT step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked FROM dwarf_steps WHERE flow_id=? ORDER BY step_depth, step_id",
-			flowID,
-		)
+	stepsByFlow, err := e.loadTreeSteps(ctx, db, shardNum, flowID)
+	if err != nil {
+		return nil, errors.Trace(err)
 	}
+	return assembleHistory(flowID, childByCaller, stepsByFlow), nil
+}
+
+// subgraphChild is the latest child flow launched by a surgraph caller step, used to attach subhistory
+// during in-memory History assembly.
+type subgraphChild struct {
+	flowID       int
+	workflowURL  string
+	workflowName string
+}
+
+// loadSubgraphChildren returns, for the whole subgraph tree flowID belongs to, a map from each surgraph
+// caller step's id to the latest child flow it launched. flow.Retry rewinds a caller in place and re-spawns
+// a fresh child each attempt, so several child flows can share one surgraph_step_id; ORDER BY flow_id ASC
+// means the last row written for a caller step wins, giving the highest flow_id - matching subgraphHistory's
+// former ORDER BY flow_id DESC LIMIT 1 (the child whose value the caller actually used).
+func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, flowID int) (map[int]subgraphChild, error) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT flow_id, surgraph_step_id, workflow_url, workflow_name FROM dwarf_flows"+
+			" WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?) AND surgraph_step_id>0 ORDER BY flow_id",
+		flowID,
+	)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
-	return e.scanHistorySteps(ctx, shardNum, rows)
+	childByCaller := map[int]subgraphChild{}
+	for rows.Next() {
+		var childFlowID, callerStepID int
+		var url, name string
+		err := rows.Scan(&childFlowID, &callerStepID, &url, &name)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		childByCaller[callerStepID] = subgraphChild{
+			flowID:       childFlowID,
+			workflowURL:  strings.TrimSpace(url),
+			workflowName: strings.TrimSpace(name),
+		}
+	}
+	return childByCaller, errors.Trace(rows.Err())
 }
 
-func (e *Engine) scanHistorySteps(ctx context.Context, shardNum int, rows *sql.Rows) ([]workflow.FlowStep, error) {
-	var steps []workflow.FlowStep
+// loadTreeSteps loads every step of every flow in flowID's subgraph tree (one query, keyed on the
+// root_flow_id membership index), grouped by owning flow_id and ordered within each flow.
+func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int, flowID int) (map[int][]workflow.FlowStep, error) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT flow_id, step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked FROM dwarf_steps"+
+			" WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)) ORDER BY flow_id, step_depth, step_id",
+		flowID,
+	)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	defer rows.Close()
+	stepsByFlow := map[int][]workflow.FlowStep{}
 	for rows.Next() {
 		var step workflow.FlowStep
-		var stepID int
+		var stepFlowID, stepID, parked int
 		var stepToken, errMsg string
-		var parked int
-		err := rows.Scan(&stepID, &stepToken, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &step.PredecessorID, &step.SuccessorID, &parked)
+		err := rows.Scan(&stepFlowID, &stepID, &stepToken, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &step.PredecessorID, &step.SuccessorID, &parked)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -94,50 +133,30 @@ func (e *Engine) scanHistorySteps(ctx context.Context, shardNum int, rows *sql.R
 		step.StepKey = fmt.Sprintf("%d-%d-%s", shardNum, stepID, strings.TrimSpace(stepToken))
 		step.Status = strings.TrimSpace(step.Status)
 		step.Error = strings.TrimSpace(errMsg)
-		steps = append(steps, step)
+		stepsByFlow[stepFlowID] = append(stepsByFlow[stepFlowID], step)
 	}
-	err := rows.Err()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	for i := range steps {
-		subWorkflowURL, subWorkflowName, subHistory, err := e.subgraphHistory(ctx, shardNum, steps[i].StepID)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		if len(subHistory) > 0 {
-			steps[i].Subgraph = true
-			steps[i].SubWorkflowURL = subWorkflowURL
-			steps[i].SubWorkflowName = subWorkflowName
-			steps[i].SubHistory = subHistory
-		}
-	}
-	return steps, nil
+	return stepsByFlow, errors.Trace(rows.Err())
 }
 
-func (e *Engine) subgraphHistory(ctx context.Context, shardNum int, surgraphStepID int) (string, string, []workflow.FlowStep, error) {
-	db, err := e.shard(shardNum)
-	if err != nil {
-		return "", "", nil, errors.Trace(err)
+// assembleHistory builds one flow's history from the pre-loaded tree maps, recursively attaching each
+// surgraph caller step's latest child subhistory. Purely in memory - no per-step query. Each flow has one
+// surgraph parent, so the recursion visits every flow at most once (no cycle guard needed).
+func assembleHistory(flowID int, childByCaller map[int]subgraphChild, stepsByFlow map[int][]workflow.FlowStep) []workflow.FlowStep {
+	steps := stepsByFlow[flowID]
+	for i := range steps {
+		child, ok := childByCaller[steps[i].StepID]
+		if !ok {
+			continue
+		}
+		sub := assembleHistory(child.flowID, childByCaller, stepsByFlow)
+		if len(sub) > 0 {
+			steps[i].Subgraph = true
+			steps[i].SubWorkflowURL = child.workflowURL
+			steps[i].SubWorkflowName = child.workflowName
+			steps[i].SubHistory = sub
+		}
 	}
-	var subFlowID int
-	var subWorkflowURL, subWorkflowName string
-	// A surgraph step can have more than one child flow: flow.Retry rewinds the caller in place and
-	// re-spawns a fresh child each attempt. Pick the latest (flow_id DESC), matching completeSurgraphFlow,
-	// the wedge recovery, and Continue - so history renders the child whose value the caller actually used,
-	// never a discarded prior attempt. (flow.Retry now reaps the prior child, so normally only one exists;
-	// this ordering is the defense-in-depth invariant if a dangling child ever appears for any other reason.)
-	err = db.QueryRowContext(ctx, "SELECT flow_id, workflow_url, workflow_name FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)", surgraphStepID).Scan(&subFlowID, &subWorkflowURL, &subWorkflowName)
-	if err == sql.ErrNoRows {
-		return "", "", nil, nil
-	}
-	if err != nil {
-		return "", "", nil, errors.Trace(err)
-	}
-	subWorkflowURL = strings.TrimSpace(subWorkflowURL)
-	subWorkflowName = strings.TrimSpace(subWorkflowName)
-	steps, err := e.historyBeforeStep(ctx, shardNum, subFlowID, 0)
-	return subWorkflowURL, subWorkflowName, steps, errors.Trace(err)
+	return steps
 }
 
 func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, error) {

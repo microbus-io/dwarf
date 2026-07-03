@@ -303,7 +303,10 @@ the origin's `thread_id` (so it groups in `List`) but does **not** notify or aut
 fork-of-fork is the partial-recovery path: fork one failed branch at a time; the first fork re-fails cleanly via
 cohort accounting (no limbo) until every failed branch is fixed.
 
-*Caveat:* cloned-prefix step timestamps are fork-time; the immutable original retains the real timings.
+*Caveat:* the cloned-prefix steps keep the **origin's** timestamps (the `INSERT…SELECT` copies `created_at`/
+`started_at`/`updated_at` verbatim); only the **rewound** rows (the leaf fork step and re-parked ancestor
+callers) are stamped fork-time (`NOW_UTC()`). So a cloned prefix's timings match the original, and only the
+re-run boundary reads as new.
 
 **History / Step** - `History` returns the step-by-step execution as `[]workflow.FlowStep`; each includes key, depth,
 task name, state, changes, status, error, timestamp. Subgraph-executing steps have `Subgraph=true` with nested
@@ -611,13 +614,18 @@ branch's position in the spawn loop (the `forEach` array index or static declara
 filter cannot deadlock fan-in. Only `completed` members contribute `changes`; `failed`/`cancelled`/`pending`/
 `running` contribute nothing.
 
-**The fan-in does not escalate on failed/cancelled members.** It records a normal `pending` fan-in step regardless of
-cohort composition - never marks itself terminal or cascades `failStep`. A `cancelled` member is the *expected*
-OnError sibling-cancel case (one branch errored and routed to its handler, which cancelled the others; the flow must
-recover via the handler -> fan-in path). Genuine terminal outcomes are handled elsewhere: an unhandled error cascades
-via `failStep`, `Cancel` sets the flow terminal directly, and the terminal-flow check in `processStep` catches
-siblings. An earlier revision had the fan-in *poison* itself when any member was failed/cancelled; that regressed the
-OnError recovery invariant and made the fanouterrorflow fixture flaky, so it was removed.
+**Escalation is counter-based (`cohort_failures`), not status-based, and happens *before* `insertFanInStep`.**
+`insertFanInStep` itself never marks the flow terminal - but it is only reached when the cohort resolves with
+`cohort_failures == 0`. The escalation decision lives one level up, in the cohort-arrival path of `processStep`:
+when a branch's own `failStep` runs with no `onError` handler, `propagateCohortFailure` bumps the spawn step's
+`cohort_arrivals` **and** `cohort_failures` (walking up nested cohorts); and when a cohort fully arrives with
+`cohort_failures > 0`, the flow is **failed** instead of creating a fan-in step (`fullyResolved && failures > 0`).
+The signal is a *counter* incremented only by a genuine `failStep`, so it is distinct from the removed status-based
+"poison" (which scanned member *statuses* in the merge and failed on any `failed`/`cancelled` member - that raced
+with OnError recovery and made the fanouterrorflow fixture flaky). A `cancelled` member (the OnError sibling-cancel
+case) does **not** bump `cohort_failures`, so it never escalates: the cohort still converges and the flow recovers
+via the handler -> fan-in path. So the invariant is precise: escalate on a genuinely-unhandled branch failure,
+never on an OnError-cancelled sibling.
 
 **Retry rejoins its cohort naturally.** `flow.Retry` rewinds the failed step in place - same `step_id`, `lineage_id`,
 `fan_out_ordinal`, just `status='pending'` and the prior error/park slot cleared. The merge query sees one row per
@@ -678,8 +686,9 @@ narrowing the deadline at dispatch is always allowed. The engine's budget is the
 `FlowOptions.TimeBudget` is **frozen at `Create`** (immutable for the flow's life, like `priority`) and **inherited by
 subgraph children** (`createSubgraphFlow` reads the parent's `time_budget_ms` alongside priority/fairness). A
 later `SetTimeBudget` change does not retro-edit existing flows; it only seeds flows created afterward. (`Continue`
-resolves a fresh budget from its own options/the current default, matching how it treats priority/fairness today -
-it does **not** inherit the prior turn's budget.) On a subgraph spawn the child's `LoadGraph` is bounded by the
+**inherits** the prior turn's budget - it reads the latest turn's `time_budget_ms` and carries it forward, the same
+as priority/fairness/baggage/notify, since `Continue` takes no `FlowOptions`; a caller wanting a different budget
+uses `Create` with `FlowOptions.ThreadKey`.) On a subgraph spawn the child's `LoadGraph` is bounded by the
 caller flow's budget; the create-time `LoadGraph` runs on the caller's own request context instead.
 
 **No engine-imposed ceiling.** `SetTimeBudget` is the default; the engine deliberately enforces **no** upper bound on
@@ -769,10 +778,10 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   transaction as the rewind** (`deleteSubgraphFlowsRootedAt(stepID)`). The child is always *terminal* at retry time
   (the park resolves only on a terminal child), so this is a delete of inert rows, not a cascade-cancel of live work.
   Leaving it would make the execution DAG claim two paths (`X -> iter1 -> iter2 -> Y`) when the model is single-path,
-  and let `subgraphHistory` attach the discarded child's subtree to the caller. The reap is **step-scoped** (only this
+  and let History assembly attach the discarded child's subtree to the caller. The reap is **step-scoped** (only this
   caller's children). Defense in depth:
-  `subgraphHistory` selects the latest child (`ORDER BY flow_id DESC`), matching `completeSurgraphFlow`/wedge/`Continue`,
-  so even a stray dangling child never renders. `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`
+  History's `loadSubgraphChildren` keeps only the latest child per caller step (`ORDER BY flow_id`, last row wins =
+  highest `flow_id`), matching `completeSurgraphFlow`/wedge/`Continue`, so even a stray dangling child never renders. `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`
   (retry-on-any-error is usually wrong). To retry only on a timeout, gate on
   `errors.StatusCode(err) == http.StatusRequestTimeout`.
 - **No jitter on retry backoff:** the worker pool already throttles per-replica concurrency, so simultaneous retries
@@ -810,9 +819,14 @@ serialized as a `TracedError` into state field `onErr`, the handler task becomes
 marked `completed` with its changes preserved, and any fan-out siblings are cancelled. If there is no `onError`
 transition, the step fails via `failStep`.
 
-**Fan-out sibling constraint:** `Graph.Validate()` enforces that fan-out siblings have the same set of non-goto,
-non-error outgoing transition targets, because the engine evaluates outgoing transitions from only the last sibling
-to complete - differing transitions would make the result depend on which finished last.
+**Fan-out sibling constraint:** `Graph.Validate()` (via `validateLineage`) enforces that all branches of one
+fan-out **converge on the same fan-in node**. The cohort shares a spawn step, and the cohort-resolution path in
+`processStep` picks the fan-in target from whichever sibling completes *last*, so branches routing to different
+fan-in nodes would make the convergence node depend on completion order (nondeterministic). The check rides the
+existing `fanOutToFanIn` mapping: `validateLineage` records each fan-out source's fan-in as branches pop the
+lineage frame, and a second branch popping the same source to a *different* fan-in is the violation. (Divergent
+non-fan-in *immediate* targets that still converge on one fan-in are fine - each sibling spawns its own next step;
+only the shared fan-in target must be single-valued.)
 
 ### State Across Subgraphs
 
@@ -879,7 +893,7 @@ level-by-level recursion, but a fixed number of round-trips regardless of nestin
 as subgraph-as-function-call invites deep nesting). The subquery resolves the tree first, so each walk works whether
 its starting flow is the root or a mid-tree node:
 
-- `allDescendantSubgraphFlows` (Delete cascade, History assembly) - BFS *down* from the given flow over the loaded
+- `allDescendantSubgraphFlows` (Delete cascade, `Fingerprint`) - BFS *down* from the given flow over the loaded
   rows (any status).
 - `allSubgraphFlows` (Cancel's descendant set) - BFS *down* through **non-terminal** nodes only, matching the old
   walk, which also stopped descending at a terminal node. Mid-tree Cancel/Delete therefore keep their exact prior
@@ -894,6 +908,16 @@ its starting flow is the root or a mid-tree node:
 
 `Fork`'s own tree-discovery still uses `surgraphChain` + per-flow child queries while it recurses (it needs the
 structure to clone, not just membership), and `deleteSubgraphFlowsRootedAt` stays step-scoped (`surgraph_step_id`).
+
+`History` assembly rides the same principle with its own two inline `root_flow_id` queries rather than a named
+walk (it needs a *caller-step*-keyed child map with each child's `workflow_url`/`workflow_name`, a shape the
+`[]int` membership helpers don't supply): one query builds `surgraph_step_id -> latest child flow`
+(`ORDER BY flow_id`, last wins = the child the caller used), a second loads every tree flow's steps
+(`WHERE flow_id IN (SELECT ... root_flow_id ...)`), and the nested history is stitched **in memory**
+(`assembleHistory` recurses caller-step -> child). This replaced a per-step `WHERE surgraph_step_id=?` lookup -
+an N+1 over every step in the tree - so `History`/`HistoryMermaid` are now a fixed two round-trips regardless of
+nesting depth. (`idx_dwarf_flows_surgraph_step` still backs the remaining single-row `surgraph_step_id=?` lookups
+elsewhere - the retry-reap, the wedge sweep, and `Step`-navigation.)
 
 **Consistency.** Denormalized + write-once-at-create is low-risk, but a creation path that forgot to set it (or set
 it wrong on a fork descendant) would silently drop rows from tree scans - and, now that the structural walks ride
@@ -1262,7 +1286,8 @@ configures the SDK, so unconfigured/standalone/test use pays nothing. Instrument
 `mp.Meter("github.com/microbus-io/dwarf")` - that scope distinguishes dwarf's metrics; **service identity lives
 in the provider's Resource, not in per-metric attributes** (no `service.name` on data points - that would
 explode cardinality and is off-spec). The only attributes the engine attaches are the metric-specific labels:
-`workflow`, `status`, `task`, `priority`, `park_type`.
+`workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `task_url` (on `dwarf_task_concurrency_running`),
+`priority`, and `park_type`.
 
 **5 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
 (start path), `dwarf_flows_terminated` (completeFlow), `dwarf_steps_executed` (every terminal step
@@ -1369,12 +1394,12 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
 | `forked_from_step` | `Fork` provenance: the *original* fork-point `step_id` this flow was cloned from; `0` for a non-fork flow. Subsumes the origin flow id (derivable via the step's `flow_id`) and pins the exact divergence node. `Continue` excludes forks via `forked_from_step=0`. See "Fork" |
 | `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. A `Fork` clone is a new flow with its own `created_at` = fork time |
-| `started_at` | UTC time this attempt began dispatching. Stamped by `Start` on `created` -> `running` (and by `Fork` when the clone goes live). Distinct from `created_at` because a flow can sit `created` indefinitely before its entry dispatches. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
+| `started_at` | UTC time this attempt began dispatching. Stamped when the flow goes `running` at `Create` (and by `Fork` when the clone goes live); there is no separate `Start`. Distinct from `created_at`, which is the row's INSERT moment. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
 | `updated_at` | UTC time of the last status transition. Surfaced to tasks via `Flow.UpdatedAt()` |
 | `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `SetDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
 | `fairness_key` | Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable |
 | `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
-| `error` | Task error string for `failed` flows. Written by `failStep` to every flow in the surgraph chain in the same UPDATE that sets `status='failed'`; the `WHERE status NOT IN (terminal)` clause makes the write first-failure-wins. Surfaced as `FlowOutcome.Error` |
+| `error` | Task error string for `failed` flows. Written by `failStep` to the **failing flow only** (`WHERE flow_id=? AND status NOT IN (terminal)`, so first-failure-wins on that flow). Cross-subgraph failure does **not** write the whole chain in one UPDATE - it bubbles up level-by-level: `deliverSubgraphError` fails the child flow and surfaces the error to the parked caller step (`subgraph_error`), whose task re-fails on re-dispatch, writing `error` on the parent flow, and so on to the root. Surfaced as `FlowOutcome.Error` |
 | `cancel_reason` | Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
 | `time_budget_ms` | Per-flow task time budget, resolved from `FlowOptions.TimeBudget` (else the `SetTimeBudget` default) and frozen at `Create`; the engine imposes no ceiling (a host bounds it before `Create`). Seeds every step's `time_budget_ms`. Inherited by subgraph children **and** by `Continue`/`Fork` (which carry the source's policy). Always stored concrete at `Create`; a `0` is unexpected and falls back to the live engine default at step insert (pure defense) |
 
@@ -1408,6 +1433,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `lineage_id` | Cohort frame: the spawn step's `step_id` on a push, else inherited. Drives explicit `SetFanIn` arrival counting and merge. A cohort-counting device, **not** a DAG. `0` = no `SetFanIn` |
 | `cohort_size` | On a fan-out spawn step: number of branches spawned |
 | `cohort_arrivals` | On a fan-out spawn step: branches that reached the fan-in; fan-in fires when `arrivals >= size` |
+| `cohort_failures` | On a fan-out spawn step: branches that failed via `failStep` with no `onError` (bumped by `propagateCohortFailure`). When the cohort fully arrives with `cohort_failures > 0` the flow is failed instead of creating a fan-in step. `0` = none |
 | `fan_out_ordinal` | This branch's index in its fan-out; fan-in merges in this order so list/sum reducers are deterministic. Preserved across an in-place `flow.Retry` rewind and copied verbatim by `Fork`. `0` = not part of a fan-out |
 | `predecessor_id` | Step that ran immediately before this one in the execution DAG. `0` = none |
 | `successor_id` | Step that runs immediately after this one. `0` = none (exit) |
@@ -1441,7 +1467,8 @@ without fragmentation or excessive write amplification.
 | `idx_dwarf_flows_status` | `(status, updated_at)` | `List` by status |
 | `idx_dwarf_flows_workflow_url` | `(workflow_url)` | `List` by workflow URL |
 | `idx_dwarf_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
-| `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite | Walking the subgraph chain |
+| `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite/mssql | Walking the subgraph chain |
+| `idx_dwarf_flows_surgraph_step` | `(surgraph_step_id)`, partial `WHERE surgraph_step_id > 0` on pgx/sqlite/mssql | Point lookups on the caller-step link (`WHERE surgraph_step_id=?`): the `flow.Retry` reap (`fork.go`), the parked-step wedge sweep, and `Step`-navigation. Cheap to carry: `surgraph_step_id` is write-once at insert (no update churn/fragmentation) and `0` for every root flow, so the partial index covers only subgraph children. Without it, the retry-reap's unindexed predicate is the SQL-Server clustered-index-scan U-lock **deadlock** class the fan-in `successor_id` fix documented. Same profile as `idx_dwarf_flows_surgraph` above |
 | `idx_dwarf_flows_root` | `(root_flow_id)` | One-query whole-tree scans (`WHERE root_flow_id=?`) for the membership walks. A plain (non-partial) index: `root_flow_id` is set for every flow (a root points at itself), so a `> 0` partial would index everything anyway |
 | `idx_dwarf_flows_created_at` | `(created_at)` | Time-window queries; append-only/monotonic |
 
@@ -1503,7 +1530,7 @@ For operator-driven retention:
 - **`Purge(Query)`** bulk-deletes flows matching the query, except running. Same `Query` shape as `List` (Status,
   WorkflowURL, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit); it **rejects**
   `IncludeSubgraphs` with 400 (a subgraph child is purged only as part of its root's tree, never on its own). Capped
-  at 10000 **root** flows per call; returns the count of root flows deleted (so `deleted <= Limit`). It **selects
+  at `purgeCap` (**1000**) **root** flows per call; returns the count of root flows deleted (so `deleted <= Limit`). It **selects
   root flows only** but **deletes each matched root's whole subgraph subtree** - the root, its steps, and all
   subgraph descendants (and their steps) - keyed on the `root_flow_id` tree-membership index (a root points at
   itself, descendants inherit it; single-shard by construction). Done per matched-root batch in one transaction:
@@ -1511,8 +1538,8 @@ For operator-driven retention:
   roots (counted, status-reguarded against the SELECT→DELETE running race), then the descendants (`root_flow_id IN
   (roots)`, now matching only subtrees since the roots are gone). The matched-root ids are **embedded as integer
   literals, not bind params** (they are trusted ids from the engine's own SELECT), which dodges the per-driver
-  parameter-count ceiling (SQL Server 2100, older SQLite 999); they are batched (`purgeBatchSize`) so each statement
-  stays under any statement-length limit. (An earlier revision deleted only the matched root row + its own steps,
+  parameter-count ceiling (SQL Server 2100, older SQLite 999). The `purgeCap` (1000) keeps the embedded id list
+  small enough to ride in a single statement per shard - there is no batching. (An earlier revision deleted only the matched root row + its own steps,
   leaving subgraph descendants permanently orphaned - never reachable by a later Purge, which selects roots only, nor
   by `Delete`, which rejects a child key. Deleting the whole tree is the fix; cascading per root keeps the matched
   set stable across the three deletes - a single self-referential `DELETE … WHERE flow_id IN (SELECT … FROM

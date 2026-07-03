@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     INDEX idx_dwarf_flows_status (status, updated_at),
     INDEX idx_dwarf_flows_workflow_url (workflow_url),
     INDEX idx_dwarf_flows_surgraph (surgraph_flow_id),
+    INDEX idx_dwarf_flows_surgraph_step (surgraph_step_id),
     INDEX idx_dwarf_flows_root (root_flow_id),
     INDEX idx_dwarf_flows_thread (thread_id, flow_id),
     INDEX idx_dwarf_flows_created_at (created_at)
@@ -90,6 +91,9 @@ CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
+
+-- DRIVER: pgx
+CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHERE surgraph_step_id > 0;
 
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
@@ -142,6 +146,9 @@ CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
 
 -- DRIVER: mssql
+CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHERE surgraph_step_id > 0;
+
+-- DRIVER: mssql
 CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 
 -- DRIVER: mssql
@@ -189,6 +196,9 @@ CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE surgraph_flow_id > 0;
+
+-- DRIVER: sqlite
+CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHERE surgraph_step_id > 0;
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);

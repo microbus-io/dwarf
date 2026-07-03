@@ -10,13 +10,14 @@ key**.
 ### Create and Run
 
 ```go
-flowKey, err := eng.Create(ctx, workflowURL, initialState, opts) // makes a running flow
-outcome,  err := eng.Run(ctx, workflowURL, initialState, opts)   // Create + Await
+flowKey, err := eng.Create(ctx, workflowURL, initialState, opts)       // makes a running flow
+flowKey, outcome, err := eng.Run(ctx, workflowURL, initialState, opts) // Create + Await
 ```
 
 `Create` calls your host's `LoadGraph`, inserts the flow and its entry step, freezes the graph, and starts
 running it immediately — the flow is `running` when `Create` returns. `Run` does the whole round-trip and
-returns the final `*workflow.FlowOutcome`.
+returns the new flow's key alongside its final `*workflow.FlowOutcome` (the key is the flow's identity, not
+part of the outcome — you need it for later `History`/`Resume`/`Fork`).
 
 `initialState` is any JSON-marshalable value (typically `map[string]any`). `opts` is a
 `*workflow.FlowOptions` (nil for defaults):
@@ -51,8 +52,8 @@ flowKey, _ := eng.Create(ctx, workflowURL, state, &workflow.FlowOptions{NotifyOn
 ```
 
 When a flow is created with `FlowOptions.NotifyOnStop`, the engine invokes your host's
-`FlowStopped(ctx, outcome)` when the flow stops — useful for push notification instead of blocking on
-`Await`. The engine carries no delivery address: the flow's baggage rides on the callback's `ctx`
+`FlowStopped(ctx, flowKey, outcome)` when the flow stops — useful for push notification instead of blocking
+on `Await`. The engine carries no delivery address: the flow's baggage rides on the callback's `ctx`
 (`workflow.BaggageFrom(ctx)`), so your host decides where to deliver (e.g. read a target you stored in
 baggage at `Create`).
 
@@ -87,7 +88,6 @@ replicas, `Await` relies on the host's `SignalPeers` broadcast (see [Deployment]
 
 ```go
 type FlowOutcome struct {
-    FlowKey          string
     Status           string
     State            map[string]any  // final_state when terminal; current snapshot otherwise
     Error            string          // set when Status == "failed"
@@ -95,6 +95,9 @@ type FlowOutcome struct {
     CancelReason     string          // set when Status == "cancelled"
 }
 ```
+
+The flow key is **not** on the outcome — it is delivered separately: you passed it to `Snapshot`/`Await`,
+`Run` returns it alongside the outcome, and `FlowStopped` receives it as its own argument.
 
 Side-channel fields are populated only for the matching status.
 

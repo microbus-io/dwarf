@@ -640,9 +640,6 @@ func (f *Flow) diffAndApply(source any, snapshot, state, changes map[string]any)
 type flowJSON struct {
 	FlowKey                string         `json:"flowKey,omitzero"`
 	StepKey                string         `json:"stepKey,omitzero"`
-	WorkflowURL            string         `json:"workflowURL"`
-	TaskName               string         `json:"taskName"`
-	StepNum                int            `json:"stepNum"`
 	State                  map[string]any `json:"state,omitzero"`
 	Changes                map[string]any `json:"changes,omitzero"`
 	Goto                   string         `json:"goto,omitzero"`

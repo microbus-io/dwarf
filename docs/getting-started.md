@@ -47,9 +47,9 @@ func TestGreeting(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// 1. Define a two-task graph: Greet -> Shout -> END.
-	g := workflow.NewGraph("Greet", "greet")
-	g.AddTask("Greet", "greet")
-	g.AddTask("Shout", "shout")
+	g := workflow.NewGraph("Greet")
+	g.SetEndpoint("Greet", "greet") // node "Greet" dispatches to endpoint "greet"; first node bound is the entry point
+	g.SetEndpoint("Shout", "shout")
 	g.AddTransition("Greet", "Shout")
 	g.AddTransition("Shout", workflow.END)
 	proxy.HandleGraph("greet", g)
@@ -70,7 +70,7 @@ func TestGreeting(t *testing.T) {
 	eng.RunInTest(t)
 
 	// 4. Run a flow to completion.
-	out, err := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
+	_, out, err := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
 	testarossa.NoError(t, err)
 	testarossa.Equal(t, workflow.StatusCompleted, out.Status)
 	testarossa.Equal(t, "HELLO ADA", out.State["message"])

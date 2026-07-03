@@ -459,8 +459,8 @@ func (e *Engine) drainRuntime() {
 		close(e.timerStop)
 	}
 	e.timerWorker.Wait()
-	// The recovery loop can requestRefill (re-electing a wedged breaker probe), so drain it before the
-	// refiller, mirroring the timer.
+	// The recovery loop can requestRefill (a wedge sweep that unparks a stuck subgraph caller re-offers it),
+	// so drain it before the refiller, mirroring the timer.
 	if e.recoveryStop != nil {
 		close(e.recoveryStop)
 	}

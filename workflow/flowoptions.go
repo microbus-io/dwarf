@@ -27,7 +27,7 @@ type FlowOptions struct {
 	// DefaultPriority config.
 	Priority int `json:"priority,omitzero"`
 	// FairnessKey groups flows for fair scheduling, typically a tenant.
-	// Empty derives it from baggage, else the "" bucket.
+	// Empty uses the "" bucket.
 	FairnessKey string `json:"fairnessKey,omitzero"`
 	// FairnessWeight is the relative dispatch share of the fairness key.
 	// Zero uses a weight of 1.
@@ -41,7 +41,7 @@ type FlowOptions struct {
 	// (completed/failed/cancelled/interrupted). The engine persists the intent and, at stop time,
 	// invokes FlowStopped with the flow's Baggage on the context - the host decides where/how to deliver
 	// the notification from that baggage. When false (the default) FlowStopped is never called for the
-	// flow. Set at Create; plain Start then runs the flow.
+	// flow. Set at Create (which also runs the flow; there is no separate Start).
 	NotifyOnStop bool `json:"notifyOnStop,omitzero"`
 	// DeleteOnCompletion deletes the flow as soon as it completes successfully - for fire-and-forget jobs
 	// whose output is not retained. Failed and cancelled flows are kept. A completed flow cannot be queried
