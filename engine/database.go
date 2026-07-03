@@ -94,6 +94,9 @@ func (e *Engine) openDatabase(ctx context.Context) error {
 	for i := 1; i <= numShards; i++ {
 		db, err := e.openDatabaseShard(ctx, i)
 		if err != nil {
+			// Close the shards already opened this attempt so a partial failure leaks no connections
+			// and leaves e.dbs empty for a clean retry (rather than duplicating on the next Startup).
+			e.closeDatabase()
 			return errors.Trace(err)
 		}
 		e.dbs = append(e.dbs, db)

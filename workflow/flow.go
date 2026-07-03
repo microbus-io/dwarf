@@ -578,6 +578,9 @@ func (f *Flow) applyFields(source any, target map[string]any) error {
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
+	if v.Kind() != reflect.Struct {
+		return errors.New("source must be a struct or pointer to struct, got %s", v.Kind())
+	}
 	t := v.Type()
 	for i := range t.NumField() {
 		field := t.Field(i)
@@ -600,6 +603,9 @@ func (f *Flow) diffAndApply(source any, snapshot, state, changes map[string]any)
 	v := reflect.ValueOf(source)
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return errors.New("source must be a struct or pointer to struct, got %s", v.Kind())
 	}
 	t := v.Type()
 	for i := range t.NumField() {

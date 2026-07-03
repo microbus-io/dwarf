@@ -724,9 +724,12 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 	rootCompositeID := chainCompositeIDs[len(chainCompositeIDs)-1]
 	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1]
 	var rootNotifyOnStop bool
-	var rootBaggageJSON string
-	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyOnStop, &rootBaggageJSON)
-	if rootNotifyOnStop {
+	var rootBaggageJSON, rootStatus string
+	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage, status FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyOnStop, &rootBaggageJSON, &rootStatus)
+	// The interrupt UPDATEs above are guarded to running/interrupted, so a racing Cancel can win and leave
+	// the flow cancelled. Notify only if it actually interrupted, else a spurious interrupted callback fires
+	// alongside Cancel's own cancelled one.
+	if rootNotifyOnStop && strings.TrimSpace(rootStatus) == workflow.StatusInterrupted {
 		e.fireFlowStopped(ctx, rootCompositeID, rootBaggageJSON, &workflow.FlowOutcome{
 			Status:           workflow.StatusInterrupted,
 			InterruptPayload: interruptPayload,

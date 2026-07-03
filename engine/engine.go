@@ -174,7 +174,7 @@ func (e *Engine) SetDSN(dsn string) error {
 	return nil
 }
 
-// SetNumShards sets the number of database shards. Construction-time only: shards are opened and migrated at
+// SetNumShards sets the number of database shards (must be at least 1). Construction-time only: shards are opened and migrated at
 // Startup at this count, and the count is immutable for the engine's life, so a call on a running engine is
 // rejected. Changing the shard count requires a coordinated restart (a maintenance window): each flow key
 // encodes its shard, so a live/piecemeal change would leave flows on a newly-added shard unroutable (404) on
@@ -183,6 +183,9 @@ func (e *Engine) SetDSN(dsn string) error {
 func (e *Engine) SetNumShards(num int) error {
 	if e.started.Load() {
 		return errSetAfterStartup("number of shards")
+	}
+	if num < 1 {
+		return errors.New("number of shards must be at least 1")
 	}
 	e.numShards.Store(int32(num))
 	return nil
@@ -318,6 +321,9 @@ func (e *Engine) SetDebugLogger() error {
 // Startup initializes the engine: opens database connections, runs migrations,
 // and starts worker goroutines.
 func (e *Engine) Startup(ctx context.Context) error {
+	if e.started.Load() {
+		return errors.New("engine is already started")
+	}
 	if e.host == nil {
 		return errors.New("host is required")
 	}
@@ -329,8 +335,13 @@ func (e *Engine) Startup(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown stops all worker goroutines and closes database connections.
+// Shutdown stops all worker goroutines and closes database connections. Idempotent: a call on an engine
+// that is not running (never started, or already shut down) is a no-op, so it is safe to defer and to call
+// more than once.
 func (e *Engine) Shutdown(ctx context.Context) error {
+	if !e.started.CompareAndSwap(true, false) {
+		return nil
+	}
 	e.drainRuntime()
 	e.closeDatabase()
 	return nil
@@ -436,9 +447,9 @@ func (e *Engine) initRuntime() {
 	e.requestRefill()
 }
 
-// drainRuntime stops all goroutines in order.
+// drainRuntime stops all goroutines in order. The caller (Shutdown) has already flipped e.started to false
+// via CompareAndSwap, which also serves as the single-shutdown guard.
 func (e *Engine) drainRuntime() {
-	e.started.Store(false)
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()
