@@ -64,6 +64,12 @@ const (
 	wedgeSweepInterval = 5 * time.Minute
 	parkWedgeThreshold = 5 * time.Minute
 
+	// orphanFlowThreshold is the minimum age a `running` flow with no non-terminal step must reach
+	// before the recovery loop reports it as orphaned (stranded by a failed post-completion transition).
+	// It sits far beyond the sub-second gap between a step completing and its successor committing, so a
+	// flow merely between steps is never flagged.
+	orphanFlowThreshold = 5 * time.Minute
+
 	parkedNone     = 0
 	parkedSubgraph = 1
 )

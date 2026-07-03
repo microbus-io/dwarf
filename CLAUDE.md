@@ -508,8 +508,10 @@ in-flight step and, under single-slot coalescing, never scan post-completion sta
 with a backlog. Post-completion the next refiller scan always reflects every freed slot. The worker also requests at
 the low-water mark so draining overlaps refilling. The cache holds 2x the worker count, low-water is half that.
 
-`pollPendingSteps` does not enumerate the backlog onto a queue. It recovers expired-lease steps, detects orphaned
-flows, sizes the wake timer to the nearest future `not_before`, and rings the local doorbell each cycle. If a
+`pollPendingSteps` does not enumerate the backlog onto a queue. It recovers expired-lease steps, sizes the wake
+timer to the nearest future `not_before`, and rings the local doorbell each cycle. (Orphan-flow and parked-step
+wedge detection are *not* here - their heavy `NOT EXISTS` scans run on the separate latency-tolerant `recoveryLoop`;
+see "Background Recovery".) If a
 due-pending backlog exists it caps `nextPoll` at `backlogPollInterval` (1 minute) so an idle replica that got no
 doorbell still re-scans. This is a coarse safety net, not the primary wake path: due work is normally picked up
 immediately by the completion doorbell, and `nextPoll` is shortened to anything sooner.
@@ -1642,9 +1644,18 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
 2. **Terminal flow check** in `processStep` - after loading flow data, if the flow is `cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
-3. **Orphan flow detection** in `pollPendingSteps` - logs an error for any `running` flow with no non-terminal steps
-   whose `updated_at` is older than 5 minutes. A bug signal; auto-recovery is intentionally not implemented (it would
-   duplicate the transition logic and could double-advance on a false positive).
+3. **Orphan flow detection** (`detectOrphanedFlows`, `wedge.go`) - logs an error for any `running` flow with no
+   non-terminal step whose `updated_at` is older than `orphanFlowThreshold` (5m). A `running` flow with every step
+   terminal and no successor is stranded - the shape the post-completion transition wedge produces (see "processStep -
+   Normal Completion" below). A bug signal; **auto-recovery is intentionally not attempted here** - re-driving the flow
+   would duplicate the transition-evaluation logic and a false positive could double-advance it. The real recovery is
+   the `processStep` recovery defer (which rolls the just-`completed` step back to `pending` so it re-dispatches); this
+   detector is the last-resort alarm for the residual case that defer cannot cover (its own reset UPDATE losing to a
+   contention storm). It runs on the same **dedicated `recoveryLoop`** as the wedge sweep (#4) - kept off
+   `pollPendingSteps` for the identical heavy-scan reason (its `NOT EXISTS` over `dwarf_steps` is latency-tolerant,
+   while the poll is nudged sub-second). Excludes a flow legitimately waiting (a `running`+parked subgraph caller, a
+   `pending` sleep/retry step, an `interrupted` step - all non-terminal), so steady-state operation never trips it. Logs
+   at error level only (silent under the default discard logger, surfaced once a host injects one); no metric.
 4. **Parked-step wedge sweep** (`sweepWedgedParks`, `wedge.go`) - defense in depth for the `parkedSubgraph` park,
    whose releasing condition could in principle never fire (a parked step is invisible to selection, and
    `parkedSubgraph` is invisible to lease recovery too). Runs on a **dedicated recovery goroutine** (`recoveryLoop`)
@@ -1683,9 +1694,20 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
   crash leaves correct terminal state, `Await` callers discover it on the next poll. Self-healing.
 - **processStep - Interrupt** - one transaction. A pre-commit crash rolls back and re-execution produces the interrupt
   again (interrupt-producing tasks should be idempotent). Self-healing.
-- **processStep - Normal Completion (with next steps)** - step -> `completed`, fan-in check, transaction (insert next
-  + update `step_id`), doorbell. A crash in the narrow (~microsecond) window after step completion but before the
-  transaction leaves the flow stuck - an accepted edge case for removing the `completing` intermediate status.
+- **processStep - Normal Completion (with next steps)** - step -> `completed` (a standalone UPDATE), then a separate
+  transaction inserts the successors / bumps `cohort_arrivals` / updates `step_id`, then the doorbell. The gap between
+  the two is a wedge window: a `completed` step with no successor is invisible to lease recovery (`running`-only), the
+  parked-step wedge sweep (`parkedSubgraph`-only), and the lock-contention reset (`status='running'`-guarded), so the
+  flow would strand `running` forever. This is not only a ~microsecond crash window - the follow-up transaction can
+  fail *persistently* (Transact exhausting its contention retries under load, or a non-retryable DB error). The
+  **`processStep` recovery defer** closes it: on any error return after the step was marked `completed`, it rolls the
+  step back `completed` -> `pending` (guarded `WHERE status='completed'`, retried via Transact) so the normal
+  re-dispatch machinery re-runs the task and re-evaluates transitions - the failed transaction already rolled back its
+  partial writes, so the re-run starts clean. This is the same reset idiom the defer already applied to the
+  `running` -> `pending` lock-contention case, generalized to the post-completion state. Re-execution on recovery is
+  the engine's standard behavior (lease recovery re-dispatches too), so completion tasks must tolerate re-running,
+  exactly as crash-recovered ones do. Residual hole: the reset UPDATE can itself lose to a contention storm, leaving
+  the step `completed` - that surviving orphan is surfaced (log-only) by `detectOrphanedFlows` (Background Recovery #3).
 - **processStep - Flow Completion (no next steps)** - flow -> `completed` then step -> `completed`. A crash between
   leaves the step `running`; the lease expires, `pollPendingSteps` resets it, and the terminal-flow check marks it
   `completed`. Self-healing.

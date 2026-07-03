@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -41,6 +42,7 @@ func (e *Engine) recoveryLoop(ctx context.Context) {
 		case <-ticker.C:
 			e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 				e.sweepWedgedParks(ctx, db, shard)
+				e.detectOrphanedFlows(ctx, db, shard)
 				return nil
 			})
 		}
@@ -134,5 +136,42 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 			}
 			e.metricStepUnwedged(ctx, "subgraph")
 		}
+	}
+}
+
+// detectOrphanedFlows reports `running` flows that have no non-terminal step and have not advanced for
+// orphanFlowThreshold - a flow stranded by a post-completion transition that failed to commit its
+// successor (see the processStep recovery defer, whose own reset UPDATE can lose to a contention storm).
+// It is a bug signal, logged at error level only: auto-recovery is deliberately not attempted here, since
+// re-driving the flow would duplicate the transition-evaluation logic and a false positive could
+// double-advance it. The processStep defer is the actual recovery; this is the last-resort alarm for the
+// residual case it cannot cover. A flow legitimately waiting - on a subgraph child (its caller step is
+// `running`+parked), a sleep/retry backoff (its next step is `pending`), or a human (`interrupted`) - has
+// a non-terminal step and is excluded, so steady-state operation never trips it.
+func (e *Engine) detectOrphanedFlows(ctx context.Context, db *sequel.DB, shard int) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT f.flow_id, f.flow_token FROM dwarf_flows f"+
+			" WHERE f.status=? AND f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
+			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN (?, ?, ?, ?))",
+		workflow.StatusRunning, -orphanFlowThreshold.Milliseconds(),
+		workflow.StatusCreated, workflow.StatusPending, workflow.StatusRunning, workflow.StatusInterrupted,
+	)
+	if err != nil {
+		e.logger.ErrorContext(ctx, "Orphan detection: querying running flows", "shard", shard, "error", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var flowID int
+		var flowToken string
+		if err := rows.Scan(&flowID, &flowToken); err != nil {
+			e.logger.ErrorContext(ctx, "Orphan detection: scanning running flow", "shard", shard, "error", err)
+			return
+		}
+		e.logger.ErrorContext(ctx, "Orphaned flow: running with all steps terminal and no successor",
+			"flow", fmt.Sprintf("%d-%d-%s", shard, flowID, flowToken))
+	}
+	if err := rows.Err(); err != nil {
+		e.logger.ErrorContext(ctx, "Orphan detection: iterating running flows", "shard", shard, "error", err)
 	}
 }

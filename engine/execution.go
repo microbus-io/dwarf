@@ -34,25 +34,50 @@ import (
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
 func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err error) {
+	// stepMarkedComplete is set once the step is flipped to `completed` below, before its forward
+	// progress (transitions / fan-in / flow completion) is committed in a separate transaction. If
+	// that later commit fails, the recovery defer rolls the step back so it re-dispatches.
+	var stepMarkedComplete bool
 	defer func() {
-		if sequel.IsLockContentionError(err) {
-			if db, derr := e.shard(shardNum); derr == nil {
-				// Reset the leased step so the immediate re-poll can re-dispatch it. This recovery
-				// runs precisely during a lock-contention storm, so a single best-effort UPDATE can
-				// itself lose to contention and silently fail - leaving the step `running` with its
-				// full lease (TimeBudget+margin) and stranding the flow until lease expiry, minutes
-				// past the poll cadence. Transact retries on contention; the WHERE status='running'
-				// guard keeps it idempotent.
-				db.Transact(ctx, func(tx *sequel.Tx) error {
-					_, terr := tx.ExecContext(ctx,
-						"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-						workflow.StatusPending, stepID, workflow.StatusRunning,
-					)
-					return terr
-				})
-			}
-			e.shortenNextPoll(time.Now())
+		if err == nil {
+			return
 		}
+		// Reset a step that processStep left in a non-pending state so recovery can re-dispatch it,
+		// then re-poll. Two mutually-exclusive cases per step:
+		//   running→pending    a lock-contention error left the step leased mid-processStep. Without
+		//                       the reset it keeps its full lease (TimeBudget+margin), stranding the
+		//                       flow until lease expiry, minutes past the poll cadence.
+		//   completed→pending  the step was marked `completed` but the follow-up transaction that
+		//                       inserts successors / bumps cohort_arrivals / completes the flow failed
+		//                       to commit (Transact exhausted its contention retries, or a non-retryable
+		//                       DB error). A `completed` step with no successor wedges the flow forever:
+		//                       it is invisible to lease recovery (running-only), the parked-step wedge
+		//                       sweep (parkedSubgraph-only), and the running→pending reset above.
+		//                       Re-dispatch re-runs the task and re-evaluates transitions; the failed
+		//                       transaction already rolled back its partial writes, so the re-run starts
+		//                       clean.
+		// Both are guarded on the from-status for idempotency and retried via Transact since this
+		// recovery can itself race a contention storm; the reset UPDATE losing that race is the residual
+		// wedge that detectOrphanedFlows surfaces.
+		fromStatus := ""
+		if stepMarkedComplete {
+			fromStatus = workflow.StatusCompleted
+		} else if sequel.IsLockContentionError(err) {
+			fromStatus = workflow.StatusRunning
+		}
+		if fromStatus == "" {
+			return
+		}
+		if db, derr := e.shard(shardNum); derr == nil {
+			db.Transact(ctx, func(tx *sequel.Tx) error {
+				_, terr := tx.ExecContext(ctx,
+					"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
+					workflow.StatusPending, stepID, fromStatus,
+				)
+				return terr
+			})
+		}
+		e.shortenNextPoll(time.Now())
 	}()
 	db, err := e.shard(shardNum)
 	if err != nil {
@@ -460,6 +485,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if nn, _ := stepRes.RowsAffected(); nn == 0 {
 		return nil
 	}
+	stepMarkedComplete = true
 
 	// Evaluate transitions
 	var nextTasks []nextStep

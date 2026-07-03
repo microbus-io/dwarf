@@ -18,12 +18,46 @@ package engine
 
 import (
 	"context"
+	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
+
+// orphanLogCapture records the `flow` attribute of every "Orphaned flow" error log detectOrphanedFlows emits.
+type orphanLogCapture struct {
+	mu    sync.Mutex
+	flows []string
+}
+
+func (c *orphanLogCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (c *orphanLogCapture) WithAttrs([]slog.Attr) slog.Handler       { return c }
+func (c *orphanLogCapture) WithGroup(string) slog.Handler            { return c }
+func (c *orphanLogCapture) Handle(_ context.Context, r slog.Record) error {
+	if r.Message != "Orphaned flow: running with all steps terminal and no successor" {
+		return nil
+	}
+	var flow string
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "flow" {
+			flow = a.Value.String()
+		}
+		return true
+	})
+	c.mu.Lock()
+	c.flows = append(c.flows, flow)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *orphanLogCapture) seen() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.flows...)
+}
 
 // TestWedgeSweep_SubgraphCallerRevived manufactures a wedged parkedSubgraph caller (child reached terminal
 // but the revive was lost) and asserts the sweep re-drives completeSurgraphFlow so the caller resumes and
@@ -119,4 +153,87 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	got, _ := out.State["got"].(float64)
 	assert.Equal(7, int(got))
+}
+
+// TestOrphanDetection_FlagsWedgedFlow forges the exact state the post-completion transition wedge leaves - a
+// `running` flow whose only step is `completed` (no successor) - and asserts detectOrphanedFlows logs it, while
+// a genuinely-running flow (with a live non-terminal step) is left alone even when equally old. Log-only by
+// design: the detector is the last-resort alarm, not a recovery, so the assertion is on the emitted error log.
+func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	capture := &orphanLogCapture{}
+	proxy := NewTestProxy()
+	release := make(chan struct{})
+
+	solo := workflow.NewGraph("Solo")
+	solo.SetEndpoint("A", "orphan.verify:0/a")
+	solo.AddTransition("A", workflow.END)
+	proxy.HandleGraph("orphan.verify:0/solo", solo)
+	proxy.HandleTask("orphan.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	// A separate graph whose task blocks, so its flow stays running with a live step - the healthy control.
+	blocked := workflow.NewGraph("Blocked")
+	blocked.SetEndpoint("B", "orphan.verify:0/b")
+	blocked.AddTransition("B", workflow.END)
+	proxy.HandleGraph("orphan.verify:0/blocked", blocked)
+	proxy.HandleTask("orphan.verify:0/b", func(ctx context.Context, f *workflow.Flow) error {
+		<-release
+		return nil
+	})
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	assert.NoError(e.SetLogger(slog.New(capture)))
+	e.RunInTest(t)
+	defer close(release)
+
+	// A flow run to completion, then forged back to `running`: its step stays `completed`, so the flow is now
+	// running with no non-terminal step - the orphan shape a failed post-completion transition would strand.
+	orphanKey, err := e.Create(ctx, "orphan.verify:0/solo", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	orphanOut, err := e.Await(ctx, orphanKey)
+	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, orphanOut.Status) {
+		return
+	}
+	shard, orphanFlowID, _, err := parseFlowKey(orphanKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := e.shard(shard)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// The healthy control: a flow blocked in its task, so it holds a `running` step.
+	healthyKey, err := e.Create(ctx, "orphan.verify:0/blocked", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	_, healthyFlowID, _, err := parseFlowKey(healthyKey)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// Backdate both flows past orphanFlowThreshold (DB clock, native format), and flip the orphan to running.
+	pastMs := -(orphanFlowThreshold + time.Minute).Milliseconds()
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_flows SET status=?, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
+		workflow.StatusRunning, pastMs, orphanFlowID)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
+		pastMs, healthyFlowID)
+	assert.NoError(err)
+
+	e.detectOrphanedFlows(ctx, db, shard)
+
+	seen := capture.seen()
+	assert.Len(seen, 1, "exactly one flow should be flagged as orphaned")
+	if len(seen) == 1 {
+		assert.Equal(orphanKey, seen[0], "the flagged flow is the forged orphan, not the healthy blocked flow")
+	}
 }
