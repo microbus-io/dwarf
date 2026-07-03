@@ -578,7 +578,22 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		flowFailedErr, flowFailedFinalState = "", ""
 		flowFailedParentStepID, flowFailedReDispatchParent = 0, false
 
-		tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
+		// Write-first: take the flow row's lock before any step, guarded on non-terminal status. If a
+		// concurrent Cancel/failStep terminalized this flow after the step was marked completed but before
+		// this transition committed (the D3 Cancel-vs-transition window, and the retry after a lock-contention
+		// rollback), the guard yields zero rows and the transition becomes a clean no-op. Without it, the tx
+		// would insert pending successors into an already-terminal flow — orphan work only reaped later by the
+		// claim-time terminal-flow guard. The completed step is left as a harmless tail on the final flow.
+		flowRes, flowErr := tx.ExecContext(ctx,
+			"UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+			flowID, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
+		)
+		if flowErr != nil {
+			return errors.Trace(flowErr)
+		}
+		if n, _ := flowRes.RowsAffected(); n == 0 {
+			return nil
+		}
 
 		for i, next := range normalNexts {
 			stepStateJSON := childInputJSON
@@ -732,14 +747,14 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 	}
 
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
-		flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
-		flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
-			flowArgs...,
-		)
-
+		// Steps-first-then-flow lock ordering, matching resume and Cancel (which walk this same surgraph
+		// chain). Interrupt is non-terminating, so it carries no write-first orphan obligation; the only
+		// requirement is that the first statement be a write (satisfied here, keeping SQLite's shared-lock
+		// upgrade deadlock closed). Ordering steps before flows removes the D2 cycle with a concurrent
+		// resume, which holds the chain step rows and wants the chain flow rows: acquiring in the same order
+		// on both sides means one blocks rather than deadlocks. The flow-first transition/completion cluster
+		// (advanceFlow, completeFlow) is unaffected — it shares only the single flow row with this path (it
+		// never locks a sibling's step row), and one shared resource cannot cycle.
 		allStepIDs := append([]any{stepID}, chainStepIDs...)
 		stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
 		stepArgs := []any{stepID, string(changesJSON), stepID, workflow.StatusInterrupted, parkedNone}
@@ -768,6 +783,14 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 				payloadArgs...,
 			)
 		}
+
+		flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
+		flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
+		flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
+		tx.ExecContext(ctx,
+			"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
+			flowArgs...,
+		)
 		return nil
 	})
 	if err != nil {

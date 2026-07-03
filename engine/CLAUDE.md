@@ -822,7 +822,10 @@ broadcast-only-on-terminal-stops policy.
   lease recovery (which only resets `running` rows) can't re-dispatch the now-`completed` step - the flow strands
   `running` with every step terminal (a permanent orphan). `failStep`, the fan-in transaction, and `completeFlow` all
   write first. A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go` reproduce
-  the wedge without the fix.
+  the wedge without the fix. This write-first rule governs the flow-*advancing*/*terminating* transactions only; the
+  lifecycle mutations (`Resume`/`Cancel`/`failStep`/`Delete`) run the **opposite** (steps-first) order on purpose, so
+  the two disciplines cross on row-locking engines - see "Transactions" for why that crossing is tolerated (retry-
+  recovered) rather than reconciled, and do not "fix" one side into matching the other.
 - **Busy timeout** - `sequel` applies `_pragma=busy_timeout(1000)` to SQLite DSNs without one, so concurrent workers
   hitting a write lock wait up to 1s instead of failing immediately with `SQLITE_BUSY`. Essential during fan-out.
 - **Lock contention recovery** - `processStep` defers a check: on a lock-contention error
@@ -1219,10 +1222,61 @@ mid-`processStep` race the close and panic).
 
 ### Transactions
 
-`Create` (insert flow + entry step + the `created→running` transition), `Resume`, and `Cancel` wrap their step and
-flow mutations in a transaction with **steps-first-then-flow lock ordering** to prevent deadlocks. `processStep`'s transition evaluation (insert next steps
-+ update flow's `step_id`) also runs in a transaction. `Fork` performs its entire recursive tree clone in one
+The multi-statement write paths each run under one `db.Transact`. **There is no single engine-wide row-lock
+order** - two disciplines coexist deliberately, and any earlier claim of a uniform "steps-first-then-flow"
+ordering was wrong:
+
+- **Flow-row-first (write-first).** Every flow-*advancing* / flow-*terminating* transaction takes the
+  `dwarf_flows` row's write lock as its **first** statement, before touching steps: `processStep`'s transition
+  evaluation (`advanceFlow` - insert next steps + update the flow's `step_id`, `execution.go`), `completeFlow`,
+  and `fireFanInDirect`. This is mandatory, not stylistic - see "Write-ordering & lock contention" above for the
+  SQLite SHARED-upgrade deadlock and the `completed`-step-strands-`running` orphan failure mode it prevents (the
+  terminating step is marked `completed` in a standalone UPDATE *before* the disposition tx, so the flow row must
+  be locked first for the disposition to be recoverable). Do not reorder these to read-first.
+- **Steps-first.** The lifecycle mutations update `dwarf_steps` before `dwarf_flows`: `Resume`, `Cancel`,
+  `failStep`, `deliverSubgraphError`, `handleInterrupt`, and `Delete`/`Purge` (the deletes run steps-before-flows,
+  ascending id). `handleInterrupt` belongs here despite advancing the flow (running→interrupted): interrupt is
+  **non-terminating** and marks no step `completed` in a prior standalone UPDATE, so it carries **no** orphan-strand
+  obligation - its only write-first requirement is that the *first* statement be a write (the `UPDATE dwarf_steps`
+  satisfies it, keeping the SQLite deadlock closed). It is deliberately steps-first to match `Resume`/`Cancel`,
+  which walk the *same* surgraph chain, so the two never lock that chain's flow+step rows in opposite order (the
+  former D2 cycle, now eliminated).
+
+`Create` inserts the flow row, then the entry step, then updates the flow (`created→running`) - flow-row-first in
+statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it
+honors no existing-row lock order and cannot cycle. `Fork` performs its entire recursive tree clone in one
 transaction (so a crash mid-clone rolls back), and the leaf fork step is held `created` until the mapping is complete.
+
+**The two disciplines still cross in one place on row-locking engines, and that is tolerated, not eliminated.**
+On MySQL `REPEATABLE READ` and SQL Server without RCSI, a flow-row-first transaction and a steps-first one can
+acquire the same flow and step rows in opposite orders and form a genuine lock cycle - the surviving case is
+`Cancel` (steps + gap locks, then the flow row) vs the transition tx (flow row, then step insert/`successor_id`)
+on one flow. It is **recoverable**: both paths run under `db.Transact`, whose lock-contention retry rolls the
+loser back and re-runs the closure, so the cycle degrades to a transient rollback visible only on retry
+exhaustion - and the transition side is further backstopped by the `processStep` lock-contention defer (rewinds
+the leased step and re-polls) and, last-resort, lease recovery. The recommended `READ COMMITTED` (MySQL) / `RCSI`
+(SQL Server) settings drop the gap locks and remove it outright. This last cross is *not* cheaply reconcilable:
+forcing the flow-terminating transactions steps-first would reintroduce the SQLite deadlock and the orphan-strand,
+and forcing `Cancel` flow-first buys nothing on SQLite (it serializes writes, so its only exposed deadlock is the
+read-first-upgrade one the write-first rule already closes) while giving `Cancel` a wider flow-row lock hold.
+
+The former `handleInterrupt` (flow-first) vs `Resume` (steps-first) cross on a shared interrupt chain - the more
+dangerous of the two, because it locked *two* overlapping resources (chain flow rows **and** chain step rows) in
+opposite order - was **eliminated** by making `handleInterrupt` steps-first (above): with `handleInterrupt`,
+`Resume`, and `Cancel` all acquiring that chain's steps before its flows, none can cycle against another. The
+move is safe precisely because interrupt is non-terminating (no orphan-strand obligation), and `handleInterrupt`
+still shares only the *single* flow row with the flow-first cluster (`advanceFlow`/`completeFlow` never lock a
+sibling's step row), which cannot form a cycle - the same reason steps-first `Resume` already coexisted with them.
+
+Orthogonal to that tolerated cross (the deadlock stays retry-recovered; the lock order is **unchanged** - the
+transition tx still takes the flow row write-first), the transition must not *extend* a flow `Cancel` already
+terminalized. Whenever the race resolves in `Cancel`'s favor - or the transition simply re-runs after a
+contention rollback against a since-cancelled flow - its opening write-first `UPDATE dwarf_flows` is **guarded on
+non-terminal status** (`AND status NOT IN (completed, failed, cancelled)`) and bails on zero rows. Without the
+guard it would insert `pending` successors (and bump `cohort_arrivals` / write a fan-in step) into the terminal
+flow - orphan work reaped only later by the claim-time terminal-flow guard. The already-`completed` step is left
+as a harmless tail on the final flow. The guard passes `interrupted` (a sibling interrupt must not stop a
+completing sibling's transition), so it short-circuits only genuinely-terminal flows.
 
 ### Lease-Based Crash Recovery
 
