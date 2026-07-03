@@ -126,7 +126,8 @@ The error from `Charge` routes to `Refund` rather than failing the flow. The err
 state field `onErr` (as a structured error the handler can read), the failed step is marked completed with
 its changes preserved, and the handler runs next. If no `onError` handler is declared, the flow fails. An
 `onError` transition can't combine with `forEach`, `goto`, or `switch`. If the failing task was part of a
-fan-out, its siblings are cancelled.
+fan-out, its siblings keep running — the errored branch continues down its handler path and the cohort
+converges normally.
 
 > The engine routes on *any* error — it never inspects the error's HTTP status or text. To handle a
 > specific failure kind (e.g. a timeout), branch inside the task: `flow.Retry` for transient failures,
