@@ -74,6 +74,14 @@ const (
 	parkedSubgraph = 1
 )
 
+// awaitPollInterval bounds how long an Await can block past the moment the flow actually stops when the
+// in-memory wake is lost - a worker crash between the terminal commit and signalStop, a dropped peer
+// broadcast, or a no-op SignalPeers on a multi-replica host. signalStop is the fast path; this periodic
+// re-snapshot is the safety net, so it is coarse enough to add negligible steady-state query load while
+// still bounding the worst-case waiter hang (otherwise unbounded on a deadline-less ctx). A var, not a
+// const, only so tests can shorten it.
+var awaitPollInterval = 5 * time.Second
+
 // Engine is the standalone workflow orchestration engine.
 type Engine struct {
 	// Dependencies (set before Startup)

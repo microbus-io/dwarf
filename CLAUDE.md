@@ -28,6 +28,28 @@ observability. Where this doc refers to "the host" or "the adapter," it means th
 > - **Avoid lengthy rationale in code.** If a comment grows into paragraphs, move the rationale here and leave a terse note.
 > - **Do not refer to CLAUDE.md from code.** Comments stand on their own; CLAUDE.md references code, never the reverse.
 
+## Where the design docs live
+
+This root file is always loaded and holds the engine's cross-cutting design. Package-specific rationale lives in
+sibling `CLAUDE.md` files that load automatically when you read a file in that package - **read the matching one
+before working there:**
+
+- **`workflow/CLAUDE.md`** - the `workflow.Flow` carrier and pure types: state model, control signals
+  (`flow.Retry`/`Sleep`/`Goto`/`Interrupt`/`Subgraph`), task self-identity, and the `FlowRenderer`.
+- **`migrations/CLAUDE.md`** - schema: the `dwarf_flows`/`dwarf_steps` column catalog, indexing strategy, and the
+  SQL-authoring gotchas.
+- **`fixtures/CLAUDE.md`** - the test harness: `RunInTest`/`SetInTest` test mode, the per-test-engine +
+  no-`t.Parallel` connection-load rule, and `TestProxy` conventions.
+
+**Landmines that radiate into engine code - obey these even though the full detail now lives in a package doc:**
+
+- **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`migrations/CLAUDE.md`)
+- **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`migrations/CLAUDE.md`)
+- **State delete:** `flow.Delete`/`Set(k,nil)` writes a JSON `null` that `MergeState` *drops* on materialization but
+  *preserves* during changes-accumulation. (`workflow/CLAUDE.md`; enforced at `execution.go`)
+- **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
+  `running` orphan (see "Write-ordering & lock contention" below).
+
 ### The Host interface (how the engine reaches the outside world)
 
 The graph/task/notify/peer seam is a single **`Host`** interface, registered once via `SetHost`; the
@@ -516,7 +538,7 @@ doorbell still re-scans. This is a coarse safety net, not the primary wake path:
 immediately by the completion doorbell, and `nextPoll` is shortened to anything sooner.
 
 **Sizing-error clamp.** A sizing SELECT in `pollPendingSteps` can *fail* (a transient DB error - most commonly a
-momentary connection-limit rejection under load; see "Per-test engine + sequential execution"). The error must not be swallowed into
+momentary connection-limit rejection under load; see "Per-test engine + sequential execution" in `fixtures/CLAUDE.md`). The error must not be swallowed into
 a "nothing pending" reading, because that would size `nextPoll` to `maxPollInterval` (5 minutes) while a due step
 sits undispatched - a multi-minute wedge that a transient blip turned into a stall. So when any shard's sizing query
 errors, `pollPendingSteps` clamps `nextPoll` to `pollErrorRetryInterval` (1s): re-poll promptly, ring the doorbell
@@ -697,90 +719,6 @@ elapsed; a `flow.Retry` loop that exhausts after a chosen bound; an `OnError`/ti
 caller scheduling a `Cancel`. `Flow.CreatedAt()` and `Flow.UpdatedAt()` are populated on every dispatch, so the
 elapsed-time guard is one call away inside any task.
 
-### Task self-identity on the carrier
-
-`Flow.FlowKey()` and `Flow.StepKey()` return the task's own flow/step keys (`{shard}-{id}-{token}`), populated by the
-orchestrator on every dispatch alongside the timestamps. They let a task correlate logs/traces or call back into the
-engine (`History`, `Step`, `Snapshot`) for its own flow without the host threading identity through baggage. `step_token`
-is read alongside the claim/read in `processStep` (added to the RETURNING/OUTPUT/SELECT of all three driver branches);
-`flow_token` already rides the flow-row load. Both keys also survive the `Flow` JSON round-trip (the `flowJSON` wire
-format carries them), so a remote task reached over a transport sees the same identity as an in-process one. Empty when
-read outside a dispatched task.
-
-### State Model
-
-Each step has three JSON columns: `state` (input snapshot), `changes` (output delta), `interrupt_payload` (from
-`flow.Interrupt`). `state` is set at creation and normally immutable; `changes` is written after execution. The next
-step's `state` is `merge(currentState, changes)`. This immutability enables checkpointing, restart, and recovery.
-
-**State mutation on retry:** on `flow.Retry()`, the engine merges `state + changes` back into `state` so the task
-sees its own prior output next attempt; `changes` is preserved. `Resume` does **not** mutate `state`: it writes the
-caller's data to `resume_data`, which `flow.Interrupt` returns on re-dispatch.
-
-**Reducer delta convention:** tasks writing to reducer-managed fields (append, add, union, merge) set only the
-**delta**, not the accumulated value. E.g. for a field wired to the append reducer via
-`graph.SetReducer("messages", workflow.ReducerAppend)`, set `flow.Set("messages", []string{newMessage})`, not the
-whole history. Violating this duplicates during fan-in merge.
-
-**forEach element injection:** the current element is injected into `state` only (under `as`), not `changes`, so it is
-available to the task but does not participate in fan-in merge.
-
-**Delete is a cleared (JSON null) entry in `changes`, and `MergeState` has two modes for it.** `flow.Delete`
-(and `Set(k, nil)`) writes JSON `null` into `changes` - `dwarf` conflates null and absent everywhere
-(`isCleared`), so there is no way to store a literal null value. `MergeState` **drops** a cleared key from its
-result (both the replace path and any reducer-managed field), so a delete never survives as a `"k": null`
-tombstone in materialized state - which is what `final_state`/`FlowOutcome.State`/`Snapshot` expose to the host,
-and what the next step's `state` column becomes. This is the *materialization* mode and covers every `MergeState`
-call except one. The exception is **changes accumulation** (`processStep` folding a task's fresh output onto a
-prior attempt's `changes` before persisting the `changes` column): there the null must be **preserved**, because
-it is the pending-delete marker *in transit* - it only enacts the delete when `changes` later folds onto `state`.
-That site therefore uses a plain overlay (`maps.Copy`), not `MergeState` (with a don't-simplify-this note at the
-accumulation site in `execution.go`).
-
-### Task-Initiated Control Signals
-
-Tasks signal the engine via control methods on the `Flow` carrier (distinct from the operations above):
-
-- **`flow.Retry(initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter) bool`** - re-execute this task with
-  exponential backoff. The bound is wall-clock, not a count: returns `true` (task should return `nil`) while the next
-  attempt would still land within `giveUpAfter` of the step's first creation, else `false` (task should return its
-  error) - including when the next backoff delay alone would overshoot the horizon, so a doomed wait is never parked
-  before failing. The give-up check is made client-side in `Retry` against `flow.StepCreatedAt()`; the engine only
-  consumes the backoff shape.
-  Pass `giveUpAfter <= 0` for unlimited; to bound by count instead, pass `0` and gate on `flow.Attempt()`. The step row
-  is reused. The engine tracks `attempt` and computes the re-dispatch delay `min(initialDelay * delayMultiplier^attempt,
-  maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. `flow.Retry`
-  rewinds the step row in place (it is task-initiated, while the flow is still `running` - distinct from `Fork`, which
-  clones a *terminal* flow into a new one). **A retry clears the park
-  slot** (`interrupt_done`/`subgraph_done` -> 0, `resume_data`/`subgraph_result` -> `'{}'`, `subgraph_error` -> `''`),
-  so a retry after a resolved `flow.Subgraph` re-runs the child and after a resolved `flow.Interrupt` re-interrupts.
-  **A retry of a step that launched a subgraph reaps the prior attempt's child flow, recursively, in the same
-  transaction as the rewind** (`deleteSubgraphFlowsRootedAt(stepID)`). The child is always *terminal* at retry time
-  (the park resolves only on a terminal child), so this is a delete of inert rows, not a cascade-cancel of live work.
-  Leaving it would make the execution DAG claim two paths (`X -> iter1 -> iter2 -> Y`) when the model is single-path,
-  and let History assembly attach the discarded child's subtree to the caller. The reap is **step-scoped** (only this
-  caller's children). Defense in depth:
-  History's `loadSubgraphChildren` keeps only the latest child per caller step (`ORDER BY flow_id`, last row wins =
-  highest `flow_id`), matching `completeSurgraphFlow`/wedge/`Continue`, so even a stray dangling child never renders. `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`
-  (retry-on-any-error is usually wrong). To retry only on a timeout, gate on
-  `errors.StatusCode(err) == http.StatusRequestTimeout`.
-- **No jitter on retry backoff:** the worker pool already throttles per-replica concurrency, so simultaneous retries
-  queue in the pool rather than overwhelm downstream. Jitter would add latency for no throughput benefit.
-- **`flow.Sleep(duration)`** - delay the *next* step's execution by setting its `not_before`. The timer adapts to
-  wake when the sleep expires. In fan-out, only the last sibling's sleep affects the fan-in point.
-- **`flow.Goto(target)`** - override transition routing: skip normal evaluation and follow the `withGoto` transition
-  to `target`, if registered. Goto transitions are never taken during normal evaluation.
-- **`flow.Interrupt(payload)`** - pause and park the flow. The payload is stored in `interrupt_payload` and propagated
-  up the surgraph chain. The task should return normally after. The engine sets the flow `interrupted` and fires the
-  `FlowStopped` callback when the root flow's `notify_on_stop` is set.
-
-**Single-park guard.** A step parks at most once - interrupt XOR subgraph, never both and never the other kind on
-re-entry. `processStep` enforces this after the task returns: a competing-signals check fails the step if more than
-one control signal is set in one dispatch, and a second check fails the step when the returned flow arms a park while
-the step row's materialized `interrupt_done`/`subgraph_done` shows the *other* kind already resolved. The `workflow`
-package's parkers already reject a conflicting second park at the call site; this guard is the trust boundary for an
-untrusted returned flow.
-
 ### Transition Evaluation
 
 Transitions are evaluated after a task completes successfully:
@@ -834,7 +772,11 @@ child output is **not** merged into the parent's `changes`.
 **Failure back to the parent (a subgraph child fails exactly like a top-level flow, never eagerly).** When a
 task inside a subgraph child errors with no `onError`, the child's failure is surfaced to the parent's
 `flow.Subgraph` call as the `err` return (carried in `subgraph_error`, re-dispatching the parked caller step -
-`deliverFlowFailureToParent`), rather than notifying directly (`notify_on_stop` is root-only). The load-bearing
+`deliverFlowFailureToParent`), rather than notifying directly (`notify_on_stop` is root-only). That root-only
+rule governs only the `FlowStopped` **callback**, *not* `Await`: the child still `signalStop`s its own failure
+(a subgraph-child key is a legal read-only `Await`/`Snapshot` target), so a blocked `Await(childKey)` wakes on
+the signal instead of idling to the lost-wake poll backstop - `failStep`'s subgraph-child branch signals exactly
+as the top-level path does. The load-bearing
 rule is *when*: the child flow fails only **when it actually fails as a flow** - which, for a child with an
 internal fan-out, means **after its cohort fully resolves**, running the *same* `cohort_failures` accounting a
 top-level flow runs (`failStep` for a failing last-arriver, the `processStep` cohort-arrival path for a
@@ -853,7 +795,9 @@ calls it. Defense in depth for any residual orphan (e.g. the Cancel-vs-spawn rac
 `recoverOrphanedSubgraphChildren` (see "Background Recovery"). `fixtures`/`engine`
 `TestSubgraphCohortFail_NoStrandOnBranchFailure` pins the child staying `running` after one branch failed while a
 sibling is parked on a live grandchild, then converging to a clean terminal tree with the branch error surfaced
-to the root.
+to the root. `fixtures/subgrapherrorwaitflow_test.go` pins the `Await(childKey)` wake: an `Await` registered on a
+still-running child returns promptly (well under the poll interval) when the child fails, proving the signal, not
+the backstop, woke it.
 
 ### Surgraph Step Identification
 
@@ -973,73 +917,26 @@ loader sees the same decoded shape every dispatch will.
 
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
 `cancelled`/`interrupted`. It registers a buffered channel in the `waiters` map, then loops: check state, return if
-stopped, otherwise `select` on the channel or context cancellation. There is **no periodic re-snapshot** - it wakes
-only on a notification or ctx. Non-terminal notifications (e.g. `running` from `Create`) re-check state rather than
-returning early.
+stopped, otherwise `select` on the channel, a periodic `awaitPollInterval` (5s) ticker, or context cancellation.
+Non-terminal notifications (e.g. `running` from `Create`) re-check state rather than returning early. The ticker is a
+**safety net, not the primary wake path**: `signalStop` is a post-commit, in-memory, fire-and-forget wake that can be
+*lost* - a worker crash between committing the terminal status and signaling, a dropped peer broadcast, or a no-op
+`SignalPeers` on a multi-replica host - which would otherwise block the waiter until its ctx deadline (forever on a
+deadline-less ctx) while the flow already sits stopped in the DB. The periodic re-snapshot bounds that worst-case
+hang to one interval. It is deliberately coarse (5s) because the signal is the fast path and the poll only backstops
+the rare lost wake, so its steady-state cost is one PK snapshot per interval per blocked `Await`. (`awaitPollInterval`
+is a `var`, not a `const`, only so a test can shorten it.)
 
 **Cross-replica `Await`.** A flow created on one replica but completed on another wakes a local `Await` only via the
 `SignalPeers` broadcast (op `statusChange`). Every flow-stop site calls an internal `signalStop` helper that does the
 local waiter wake *and* the peer broadcast; the receiving replica's `DeliverSignal` routes it to `notifyStatusChange`, which wakes
-its local waiters. Without this wiring, an `Await` on the replica that did not run the final step blocks until its
-context deadline (there is no poll fallback). Non-terminal (`running`) transitions are notified locally only,
-matching the broadcast-only-on-terminal-stops policy.
+its local waiters. Without this wiring, an `Await` on the replica that did not run the final step would rely solely
+on the `awaitPollInterval` re-snapshot (above) to notice the DB-committed stop - the broadcast is the *fast* path
+that avoids that up-to-5s wait, while the poll is the backstop when a broadcast is dropped (or a host leaves
+`SignalPeers` a no-op). Non-terminal (`running`) transitions are notified locally only, matching the
+broadcast-only-on-terminal-stops policy.
 
-### SQLite Testing Support
-
-`engine.RunInTest(t)` hashes `t.Name()` into the engine's `testHashedID`, then runs the normal `Startup`/`Shutdown`
-(via `t.Cleanup`) against per-test isolated databases. It is sugar over **`SetInTest(name)`** — the
-construction-time, `*testing.T`-free hook that does the hashing and flips on test mode — plus `Startup` and a
-`t.Cleanup` shutdown. A host with no `*testing.T` (e.g. one running under an external test harness) calls
-`SetInTest(key)` itself with a stable isolation key — one shared across its replicas so they resolve to the same
-isolated set. The `testHashedID` switches the open path into test mode: `openDatabaseShard`
-resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN` (the same variable
-sequel reads, so one knob redirects the whole suite at a real server); else the SQLite in-memory default
-**`file:dwarf_%d?mode=memory&cache=shared`** - substitutes `%d` with the shard index, then routes through
-`sequel.CreateTestingDatabase`, which keys an isolated, auto-dropped database on `(driver, baseDSN, testID)`.
-
-**Per-shard isolation comes from the DSN's `%d`, not from the testID.** The default DSN carries `%d`, so shard *i*
-opens base `file:dwarf_i?…` - a distinct base per shard, so `CreateTestingDatabase`'s key already differs per shard
-and a multi-shard engine never collapses onto one in-memory DB. (An earlier design used a no-`%d` default and folded
-the shard index into the testID to manufacture that difference; with a `%d`-bearing default that fold is redundant
-and was removed.) The consequence is a deliberately-honest sharp edge: a multi-shard run against a `SEQUEL_TESTING_DSN`
-that **lacks `%d`** collapses its shards onto one database and its tests fail - the same "`%d` required when
-`NumShards > 1`" rule the production DSN already obeys, surfaced as a loud failure rather than a silent fold.
-
-The testID is hashed to a bounded 16 hex chars (SQL identifier limits: Postgres 63 / MySQL 64) before it reaches
-`CreateTestingDatabase`, so an arbitrarily long Go subtest name still yields a valid database name. The hash is
-deterministic, so two engines in the **same** test (both keyed by `t.Name()`) resolve to the *same* isolated
-databases - which is how an in-test multi-replica fixture gives its peer engines shared state. Key SQLite differences
-from server databases:
-
-#### Per-test engine + sequential execution (connection-load control)
-
-**Each `RunInTest` engine opens its own connection pool** - up to `maxOpenConns` (default 8) per
-shard. **Each fixture stands up its own engine** (`engine.NewEngine()` + `SetHost(proxy)` + `RunInTest(t)`, with a
-fresh `proxy := engine.NewTestProxy()` per test), and `RunInTest` registers a `t.Cleanup` that shuts it down - so a
-fixture's pool is open only for the duration of that one test. There is **no** shared/`TestMain`-built engine; the
-suite was deliberately moved off one.
-
-What keeps the pools from summing past a server's connection cap is that **the fixtures do not run with
-`t.Parallel()`** - they run **sequentially**, so at most ~one engine (plus the one being torn down by `t.Cleanup`) is
-live at a time. With `t.Parallel()`, `go test` runs up to `-parallel` (defaults to `GOMAXPROCS`) tests at once, and
-each per-test engine would multiply into *N parallel engines × pool × shards* connections to the **same** server - a
-sum that overruns the cap (**PostgreSQL defaults to `max_connections = 100`**; MySQL 151, SQL Server ~32k, SQLite
-none, so Postgres trips first). A pool opening a connection past the cap is *rejected* with an error (not blocked); the
-engine then fails the operation or, on a `pollPendingSteps` sizing query, briefly re-polls (see the poll-error clamp
-below). Retrying does not fix *structural* oversubscription (3 replicas each wanting 60 against a 100-cap server) - the
-only fix is to keep the **sum of live pools under the cap**, which serial execution does. So a fixture must **not** add
-`t.Parallel()`; if the suite is ever parallelized, connection load must be re-controlled (a shared engine, or a
-per-test `SetMaxOpenConns` low enough that `parallel × pool × shards` stays under the cap).
-
-Each fixture owns its own engine *and* its own `TestProxy`, so there is no cross-test sharing to coordinate. `TestProxy`
-still guards its handler maps with a `RWMutex` because the engine's own worker goroutines dispatch concurrently while
-the test registers handlers; fixture task/graph URLs are namespaced per file (`<fixture>.verify:428/<task>`) by
-convention. A fixture asserting over the **full** flow set (`List`/`Purge`/`ShardInfo`) gets a clean database for free
-- its engine sees only its own flows.
-
-A fixture needing a **non-default topology** (`SetNumShards`, `SetTimeBudget`, a specific `SetWorkers` count) or
-**host singletons** (`OnFlowStopped`, multi-replica `AddPeer`/peers, a custom host wrapping `TestProxy`) configures
-them on its own engine/proxy before `RunInTest` - the same per-test ownership, just with non-default knobs.
+### Write-ordering & lock contention
 
 - **Write-first transactions** - `advanceFlow` does an `UPDATE` as the first operation to immediately acquire a write
   lock. On MySQL/Postgres this serializes concurrent workers (like `SELECT ... FOR UPDATE`). On SQLite with
@@ -1059,50 +956,6 @@ them on its own engine/proxy before `RunInTest` - the same per-test ownership, j
   recovers running steps whose lease has *already* expired, and a freshly leased step holds a minutes-long lease.
   Without the lease reset, the immediate poll finds nothing and the step (and its fan-in) stalls until the lease
   lapses. The reset is guarded by `WHERE status='running'`, so only the leased-and-uncommitted case is rewound.
-
-### MySQL Column Defaults
-
-In `-- DRIVER: mysql` schema sections, `TEXT`/`BLOB`/`JSON` columns cannot take a bare literal `DEFAULT` (MySQL error
-1101); the value must be a parenthesized expression default, `DEFAULT ('{}')` (MySQL 8.0.13+). The same applies to
-function defaults other than `CURRENT_TIMESTAMP`, which is why `NOW_UTC()` expands parenthesized. `VARCHAR`/`CHAR`
-keep bare literal defaults. Postgres, SQL Server, and SQLite permit bare literal defaults on text/JSON types, so this
-is MySQL-only. Mirror the parenthesized form on every MySQL `TEXT`/`JSON` column or fresh MySQL deployments fail to
-migrate.
-
-**Comparing a MySQL `JSON` column to a string literal does not match.** `WHERE json_col = '{}'` returns zero rows on
-MySQL - the JSON-typed column is not implicitly compared against the bare SQL string `'{}'` (you'd need
-`CAST(json_col AS CHAR) = '{}'` or `json_col = CAST('{}' AS JSON)`). The same `= '{}'` predicate *does* match on
-SQLite (`TEXT`), Postgres (`JSONB` casts the unknown literal), and SQL Server (`NVARCHAR`), so a single shared query
-string silently no-ops only on MySQL. The `interrupt_payload='{}'` first-writer-wins guard in `handleInterrupt`
-(`execution.go`) hit exactly this: on MySQL the payload write matched nothing and `flow.Interrupt` payloads came back
-empty. It now branches on `db.DriverName()` to use `CAST(interrupt_payload AS CHAR)='{}'` for MySQL. **Assignments**
-(`SET col='{}'`) and the parenthesized column `DEFAULT ('{}')` are unaffected - only `=`/`<>` *comparisons* against a
-JSON column in a `WHERE`/`CASE` need the cast. Any new query comparing a JSON/JSONB column to a literal must apply the
-same per-driver treatment.
-
-### Timestamps come from the database clock, never from Go
-
-**Every timestamp column is written with a SQL expression (`NOW_UTC()`, `DATE_ADD_MILLIS(NOW_UTC(), ?)`), never a
-bound Go `time.Time`.** Two reasons, both load-bearing:
-
-1. **Clock source / skew.** `created_at` ordering, lease expiry, `not_before`, and the fairness `ageMs` all compare a
-   stored timestamp against the database's own `NOW_UTC()`. If some rows were stamped by
-   the *application* clock and others by the *database* clock, every such comparison would carry the app↔DB skew (and,
-   across shards, the inter-node skew the scheduling design is careful to cancel - see "Selection", where both terms
-   of `ageMs` come from one shard clock so per-shard offset cancels exactly). Writing only via `NOW_UTC()` keeps a
-   single clock per shard authoritative.
-
-2. **Native string format.** Each driver's `NOW_UTC()` emits that engine's *native* datetime text, and the same
-   engine's date functions consume it without conversion. SQLite is the sharp edge: its native form is
-   **space-separated** (`2026-06-16 01:18:14.596`, from `STRFTIME`/`datetime()`), and that is what `NOW_UTC()`
-   produces. A bound Go `time.Time`, by contrast, is serialized by the modernc-sqlite driver as **RFC3339**
-   (`2000-01-01T00:00:00Z`) - which `JULIANDAY`/`DATE_DIFF_MILLIS` then fails to parse (returning NULL → a silent
-   `0`), so an age guard like `DATE_DIFF_MILLIS(NOW_UTC(), updated_at) > ?` quietly never matches. (The reverse is a
-   *read*-only artifact and harmless: modernc reformats a `DATETIME` *column* back to RFC3339 when marshaling to Go,
-   but the value stored on disk and compared in SQL is still the native space form, so engine-internal `WHERE`
-   comparisons are unaffected.) The lesson surfaced in a test that backdated `updated_at` with `time.Date(...)`; the
-   fix was to backdate with `DATE_ADD_MILLIS(NOW_UTC(), -ms)` - DB clock, native format. Never round-trip a timestamp
-   out to Go and back into a `WHERE`/`SET`; recompute it in SQL.
 
 ### Database Choice and Configuration
 
@@ -1358,123 +1211,7 @@ after `Run` returns may miss it. The fixture keeps a trailing task last and asse
 are deterministically flushed by then. Not an engine concern: a real exporter keeps flushing after
 `Await` returns.
 
-## Schema Column Catalog
-
-The `migrations/*.sql` migration files carry **no prose comments by design** - only the functional
-`-- DRIVER: <dialect>` directives the `sequel` runner parses. All schema rationale lives here.
-
-#### `dwarf_flows`
-
-| Column | Meaning |
-|---|---|
-| `flow_id` | Per-shard auto-increment primary key. The external flowKey is `{shard}-{flow_id}-{flow_token}` |
-| `flow_token` | Random token component of the flowKey, guards against id guessing |
-| `workflow_url` | URL of the workflow graph this flow runs (the resolve key passed to `Create` and the host's `LoadGraph`) |
-| `graph` | JSON of the workflow graph, frozen at `Create` time |
-| `baggage` | JSON of the opaque `baggage` map captured at `Create` and passed to every `LoadGraph`/`ExecuteTask` call. Flow-scoped and frozen at `Create`; the engine does not interpret it |
-| `status` | Flow lifecycle: `created`/`running`/`interrupted`/`completed`/`failed`/`cancelled`. `created` is internal/transient only (Create's own transaction, Fork's leaf-gate) - a flow is never externally observed in `created`; Create returns it `running` |
-| `step_id` | The flow's current step; `0` during fan-out (multiple steps active at one depth) |
-| `surgraph_flow_id` | Parent (surgraph) flow id if this is a subgraph flow; `0` otherwise |
-| `surgraph_step_id` | PK of the parent's parked surgraph step - the **sole** link from a subgraph child to the step that launched it, so completion/interrupt/resume bind to that exact step even with parallel parked surgraph steps at one depth. (The old depth-based `surgraph_step_depth` link was dropped.) |
-| `root_flow_id` | Denormalized **tree-membership** index: the `flow_id` of the root of this flow's subgraph tree, so the whole tree (root + all subgraph descendants) is reachable in one query (`WHERE root_flow_id=?`) instead of a recursive `surgraph_flow_id` walk. Write-once at creation, immutable: a top-level flow (`Create`/`Run`/`Continue`/`Fork`) is its **own** root (`root_flow_id = its own flow_id`, so the root's own row matches the scan); a subgraph child **inherits** the parent's. Single-shard by construction (subgraph parent-shard affinity). It augments, does **not** replace, `surgraph_flow_id`/`surgraph_step_id`: it answers *which flows are in the tree* (membership/set), not *who is whose parent* (structure) - ordered/structural walks (`surgraphChain`, `interruptedSubgraphChain`) still use the surgraph links. See "Denormalized root pointer" |
-| `thread_id` | Groups flows in a thread (`Continue`, or `Create` with `FlowOptions.ThreadKey`); defaults to `flow_id` (each flow its own thread) |
-| `thread_token` | Token component of the thread's flowKey |
-| `trace_parent` | W3C `traceparent` of the flow's root "workflow" span, minted at `Create` (or, for a subgraph, parented to the caller step's span). Reconstructed as the parent of every per-step span. Inherited by `Continue` only as a fresh trace (a new root span is minted per turn); a subgraph inherits the caller step's context, not this column. See "Tracing" |
-| `notify_on_stop` | Set from `FlowOptions.NotifyOnStop` at `Create`; `1` fires the `FlowStopped` callback (with the flow's baggage on ctx) when the flow stops, `0` = no notification. The host resolves the delivery target from baggage - the engine stores no address. `Continue` **inherits** the thread's flag; `Fork` forces it **off** (a debug clone never notifies) |
-| `delete_on_completion` | Set from `FlowOptions.DeleteOnCompletion` at `Create`; `1` makes the flow delete itself (and cascade to subgraph descendants) the instant it reaches `completed`. Root-only (not inherited by children); `failed`/`cancelled`/`interrupted` flows are never auto-deleted. See "Data Retention" |
-| `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
-| `forked_from_step` | `Fork` provenance: the *original* fork-point `step_id` this flow was cloned from; `0` for a non-fork flow. Subsumes the origin flow id (derivable via the step's `flow_id`) and pins the exact divergence node. `Continue` excludes forks via `forked_from_step=0`. See "Fork" |
-| `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. A `Fork` clone is a new flow with its own `created_at` = fork time |
-| `started_at` | UTC time this attempt began dispatching. Stamped when the flow goes `running` at `Create` (and by `Fork` when the clone goes live); there is no separate `Start`. Distinct from `created_at`, which is the row's INSERT moment. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
-| `updated_at` | UTC time of the last status transition. Surfaced to tasks via `Flow.UpdatedAt()` |
-| `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `SetDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
-| `fairness_key` | Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable |
-| `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
-| `error` | Task error string for `failed` flows. Written by `failStep` to the **failing flow only** (`WHERE flow_id=? AND status NOT IN (terminal)`, so first-failure-wins on that flow). Cross-subgraph failure does **not** write the whole chain in one UPDATE - it bubbles up level-by-level: when a subgraph child fails (via cohort accounting, never eagerly - see "Failure back to the parent"), `deliverFlowFailureToParent` surfaces the error to the parked caller step (`subgraph_error`), whose task re-fails on re-dispatch, writing `error` on the parent flow, and so on to the root. (`deliverSubgraphError` does the same re-dispatch from the wedge sweep only.) Surfaced as `FlowOutcome.Error` |
-| `cancel_reason` | Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
-| `time_budget_ms` | Per-flow task time budget, resolved from `FlowOptions.TimeBudget` (else the `SetTimeBudget` default) and frozen at `Create`; the engine imposes no ceiling (a host bounds it before `Create`). Seeds every step's `time_budget_ms`. Inherited by subgraph children **and** by `Continue`/`Fork` (which carry the source's policy). Always stored concrete at `Create`; a `0` is unexpected and falls back to the live engine default at step insert (pure defense) |
-
-#### `dwarf_steps`
-
-| Column | Meaning |
-|---|---|
-| `step_id` | Per-shard auto-increment primary key. External stepKey is `{shard}-{step_id}-{step_token}` |
-| `flow_id` | Owning flow |
-| `step_depth` | Sequential transition depth; fan-out siblings share it. **Purely informational** (History ordering + the surfaced `FlowStep.StepDepth`, useful to see how deep a flow goes) - it is *not* used for the execution DAG (that is `predecessor_id`/`successor_id`), fan-in firing (`lineage_id`/cohort counters), final state (tail steps), or selection. The entry step is `callerStepDepth+1` (1 for a top-level flow; a subgraph continues from its caller's depth); a fan-in step is `max(cohort step_depth)+1` |
-| `step_token` | Random token component of the stepKey |
-| `task_name` | Graph node name of the task this step executes |
-| `state` | JSON input snapshot. Immutable except on retry/resume |
-| `changes` | JSON output delta the task produced |
-| `interrupt_payload` | JSON outbound payload from `flow.Interrupt()` - what the awaiting caller sees |
-| `interrupt_done` | `1` once the interrupt park has been resumed; drives `flow.Interrupt`'s return-vs-arm decision |
-| `resume_data` | JSON inbound payload recorded by `Resume`; returned by `flow.Interrupt` on re-dispatch. `'{}'` until resumed |
-| `subgraph_done` | `1` once a `flow.Subgraph` park resolved; drives `flow.Subgraph`'s return-vs-arm decision. A retry clears it to re-run the child |
-| `subgraph_result` | JSON child `final_state` returned by `flow.Subgraph`. `'{}'` until resolved |
-| `subgraph_error` | child error text for a failed `flow.Subgraph` park, returned as the `err`. `''` when none |
-| `status` | Step lifecycle: `created`/`pending`/`running`/`interrupted`/`completed`/`failed`/`cancelled` |
-| `goto_next` | Task-requested `flow.Goto` target; `''` = none |
-| `error` | Error text when `failed`; `''` otherwise |
-| `time_budget_ms` | Execution budget; the deadline on the `ExecuteTask` call context. Denormalized from the flow's `time_budget_ms` at step insert (frozen, not the live config), and also self-referenced in the claim CAS to size the crash-recovery lease (`time_budget_ms + leaseMargin`) |
-| `attempt` | `flow.Retry` attempt counter, drives the backoff |
-| `not_before` | Earliest UTC time the step may execute (`flow.Sleep` / retry backoff) |
-| `lease_expires` | Crash-recovery lease; `pollPendingSteps` reclaims `running` steps past this |
-| `created_at` | UTC creation time |
-| `started_at` | UTC time the *current attempt* first dispatched. The lease UPDATE stamps it via CASE only on a fresh attempt's first dispatch (`attempt=0 AND subgraph_done=0 AND interrupt_done=0`) and **preserves** it on a continuation (subgraph re-dispatch, interrupt re-dispatch, retry re-dispatch). A retried step's duration includes every attempt. Drives per-step body duration and inter-step wait labels in `FlowRenderer` |
-| `updated_at` | UTC time of the last status transition |
-| `lineage_id` | Cohort frame: the spawn step's `step_id` on a push, else inherited. Drives explicit `SetFanIn` arrival counting and merge. A cohort-counting device, **not** a DAG. `0` = no `SetFanIn` |
-| `cohort_size` | On a fan-out spawn step: number of branches spawned |
-| `cohort_arrivals` | On a fan-out spawn step: branches that reached the fan-in; fan-in fires when `arrivals >= size` |
-| `cohort_failures` | On a fan-out spawn step: branches that failed via `failStep` with no `onError` (bumped by `propagateCohortFailure`). When the cohort fully arrives with `cohort_failures > 0` the flow is failed instead of creating a fan-in step. `0` = none |
-| `fan_out_ordinal` | This branch's index in its fan-out; fan-in merges in this order so list/sum reducers are deterministic. Preserved across an in-place `flow.Retry` rewind and copied verbatim by `Fork`. `0` = not part of a fan-out |
-| `predecessor_id` | Step that ran immediately before this one in the execution DAG. `0` = none |
-| `successor_id` | Step that runs immediately after this one. `0` = none (exit) |
-| `priority` | Denormalized copy of the flow's `priority` for the hot selection path |
-| `fairness_key` | Denormalized copy of the flow's `fairness_key` |
-| `fairness_weight` | Denormalized copy of the flow's `fairness_weight` |
-| `parked` | Selection discriminator. `0` = active; `1` = surgraph park. The selection and saturation indexes lead with `(status, parked)` and the claim CAS requires `parked=parkedNone`, so non-zero rows are excluded from the hot path. See "Step Parking" |
-
-## Database Indexing Strategy
-
-The `dwarf_flows` and `dwarf_steps` tables grow indefinitely. The indexing strategy keeps hot-path queries fast
-without fragmentation or excessive write amplification.
-
-### Design Principles
-
-1. **Append-only terminal sections.** Indexes leading with `status` partition the B-tree by status. Terminal
-   statuses are append-only (entries arrive with monotonically increasing `updated_at`), so terminal sections stay
-   well-ordered - no mid-tree page splits.
-2. **Small transient sections.** The `pending`/`running` sections churn but stay small (proportional to active work,
-   not history); page reuse is efficient.
-3. **Partial indexes for PostgreSQL.** Where only non-terminal statuses are queried, Postgres uses a partial index
-   filtered to `status IN ('pending','running')`. MySQL and SQL Server use the full composite (no partial support).
-
-### Index Catalog
-
-#### `dwarf_flows`
-
-| Index | Columns | Purpose |
-|---|---|---|
-| PK | `(flow_id)` | Row lookups by flow ID |
-| `idx_dwarf_flows_status` | `(status, updated_at)` | `List` by status |
-| `idx_dwarf_flows_workflow_url` | `(workflow_url)` | `List` by workflow URL |
-| `idx_dwarf_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
-| `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite/mssql | Walking the subgraph chain |
-| `idx_dwarf_flows_surgraph_step` | `(surgraph_step_id)`, partial `WHERE surgraph_step_id > 0` on pgx/sqlite/mssql | Point lookups on the caller-step link (`WHERE surgraph_step_id=?`): the `flow.Retry` reap (`fork.go`), the parked-step wedge sweep, and `Step`-navigation. Cheap to carry: `surgraph_step_id` is write-once at insert (no update churn/fragmentation) and `0` for every root flow, so the partial index covers only subgraph children. Without it, the retry-reap's unindexed predicate is the SQL-Server clustered-index-scan U-lock **deadlock** class the fan-in `successor_id` fix documented. Same profile as `idx_dwarf_flows_surgraph` above |
-| `idx_dwarf_flows_root` | `(root_flow_id)` | One-query whole-tree scans (`WHERE root_flow_id=?`) for the membership walks. A plain (non-partial) index: `root_flow_id` is set for every flow (a root points at itself), so a `> 0` partial would index everything anyway |
-| `idx_dwarf_flows_created_at` | `(created_at)` | Time-window queries; append-only/monotonic |
-
-#### `dwarf_steps`
-
-| Index | Columns | Purpose |
-|---|---|---|
-| PK | `(step_id)` | Row lookups, lease acquisition in `processStep` |
-| `idx_dwarf_steps_flow_id` | `(flow_id, step_id)` on MySQL; `(flow_id)` on pgx/mssql | Per-flow step queries |
-| `idx_dwarf_steps_status` | `(status, updated_at)` - partial `WHERE status IN ('pending','running')` on pgx | `pollPendingSteps` recovery and pending discovery |
-| `idx_dwarf_steps_created_at` | `(created_at)` | Time-window queries |
-| `idx_dwarf_steps_selection` | `(status, parked, priority, fairness_key)` - partial on pgx/mssql/sqlite, full on mysql | Two-level priority+fairness candidate selection. The `parked` second column excludes parked rows without an in-memory filter |
-| `idx_dwarf_steps_saturation` | `(status, parked, task_url)` - partial as above | Per-task in-flight count for the `dwarf_task_concurrency_running` gauge. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
-
-### Data Retention
+## Data Retention
 
 The engine does not auto-purge flows on a timer: every row remains potentially-resurrectable - an `interrupted` flow via
 `Resume`, a `completed` flow via `Continue`, a terminal flow via `Fork`. A retention *duration* was
@@ -1757,74 +1494,5 @@ across replicas plus rebalancing - is a larger problem left unsolved; until then
 
 **DSN format:** when `NumShards > 1`, the DSN must contain `%d` (replaced with the shard index). In test mode the
 default DSN carries `%d` too, so each shard's `%d` selects a separate in-memory SQLite database; per-test isolation
-comes from the hashed test id folded into the database name (see "SQLite Testing Support"), not from the shard index.
+comes from the hashed test id folded into the database name (see "SQLite Testing Support" in `fixtures/CLAUDE.md`), not from the shard index.
 
-## Flow Rendering (`workflow.FlowRenderer`)
-
-`FlowRenderer` produces a Mermaid flowchart from a `History` result. Diagnostic intent: answer "where did the time go
-in this flow?" at a glance. Defaults render top-down; `With*Colors` swap palettes; `WithLinks` enables per-node click
-directives. `HistoryMermaid` wraps it as an engine method writing to an `io.StringWriter`.
-
-### CSS-variable theming model
-
-Color values flow through `classDef`/`style` directives; the renderer emits no themeVariables init block. Callers pass
-either hex literals (static rendering) or CSS custom-property references like `var(--primary-container)` (host pages
-that track a page-level theme). With `var()` values, browsers resolve through the SVG's CSS cascade and the diagram
-re-colors on light/dark toggle without reinvocation. The CSS-mode pattern: pass `"currentColor"` for fill and `""`
-for text - the generated classDef omits `color:`, host CSS sets it, and Mermaid inherits via `currentColor`.
-
-### Color knobs and status groups
-
-| Pair | Statuses |
-|---|---|
-| primary | `completed`, `running` (running gets a dashed border) |
-| secondary | `pending` + chrome (`_start`, `_end`, fan-out cohort wrappers, subgraph block fills) |
-| error | `failed`, `cancelled` |
-| attention | `interrupted` (distinct from error - "needs human eyes," not hard failure) |
-
-### DAG-edge model
-
-The execution DAG is reconstructed from `PredecessorID`/`SuccessorID`, NOT `step_depth`. Every edge is recorded on at
-least one endpoint - fan-out via each child's `PredecessorID`, fan-in via each cohort exit's `SuccessorID`, linear on
-both - and the rendered edge set is their deduped union, exact for arbitrary nesting.
-
-### Subgraph caller decomposition
-
-A subgraph caller step renders as **two** visual elements: the caller's task node and a visible Mermaid subgraph
-wrapper block containing the recursively-rendered SubHistory. The caller node's duration label is the **net** caller
-cost: `net = (caller.UpdatedAt - caller.StartedAt) - subgraph_wall_time`, where `subgraph_wall_time = max(SubHistory*
-.UpdatedAt) - min(SubHistory*.CreatedAt)` walked recursively. The net is the caller's own pre-call + post-return body
-time; total call cost reconstructs as `net + subgraph_wall_time` without double-counting. Edges thread:
-
-```
-predecessor --> caller         (parent DAG, transition gap label)
-caller --> innerHead           (the call, queue-wait label)
-innerTail --> Y.entries        (the return, transition gap label)
-```
-
-`byID[caller].exits` is set to the subgraph's inner tails, so the existing `addEdge(caller, Y)` machinery emits one
-edge per inner-tail x parent-DAG-successor combination. A terminal subgraph caller surfaces its inner tails as outer
-tails, connected to `_end`.
-
-### Node and edge label semantics
-
-**Node label** = `UpdatedAt - StartedAt` (task body time) for any non-caller step that ran and reached a terminal
-status. Pending/created/in-flight steps render with just the task name. Subgraph callers render the *net* cost.
-
-**Edge label** = `to.StartedAt - from.UpdatedAt` (transition gap: DB commit + queue + dispatch). Computed from the
-step records.
-
-**Call edge label** = `entry.StartedAt - entry.CreatedAt` (queue wait on the subgraph's entry step). Without it, that
-time would be inside `subgraph_wall_time` but invisible on any rendered edge.
-
-### Fan-out cohort wrappers
-
-Two-or-more steps sharing one `PredecessorID` get wrapped in an invisible Mermaid `subgraph` block (empty label, no
-fill, no stroke) - purely a layout container so siblings cluster near their parent. Edges always go between actual
-task nodes; nothing terminates at the cohort wrapper.
-
-### Truncation in label formatting
-
-`formatDuration` uses integer-millisecond truncation for sub-second values (`%dms`). A diagram with N labeled edges
-accumulates up to ~N/2 ms of systematic underestimation in any path sum - diagnostically irrelevant (the goal is to
-spot where time went, not reconcile to the millisecond).

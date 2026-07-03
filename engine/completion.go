@@ -433,9 +433,13 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 		return nil
 	}
 
-	// A subgraph child does not notify directly (notify_on_stop is root-only); its failure is delivered to
-	// the parent's flow.Subgraph call, which re-dispatches to observe the error.
+	// A subgraph child does not fire the FlowStopped callback (notify_on_stop is root-only) and delivers its
+	// failure to the parent's flow.Subgraph call for re-dispatch - but it has still stopped, so wake any Await
+	// on the child key (legal read-only introspection), locally and on peers, exactly as the top-level path
+	// below does. Without this signalStop, Await(childKey) blocks until its context deadline despite the child
+	// being terminal.
 	if isSubgraphChild {
+		e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken)), workflow.StatusFailed)
 		if reDispatchParent {
 			e.enqueueStep(ctx, shardNum, parentStepID)
 		}

@@ -443,19 +443,32 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// single-path, and lets history attach the discarded child's subtree to this caller.
 		// The reap is step-scoped (only this caller's children), so a retrying fan-out sibling's
 		// cohort is untouched.
+		// The rewind is guarded to status='running': a Cancel landing mid-task flips this step terminal
+		// (cancelled), and an unguarded rewind would both revive an immutable terminal step and, via the reap,
+		// delete the now-terminal tree's subgraph children. So rewind first under the guard and reap (and
+		// re-dispatch) only when it actually rewound a still-running step; a lost guard (n==0) leaves the step
+		// terminal - the Cancel already cancelled its children - and returns without reaping or re-dispatching.
+		var rewound bool
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
-			if reapErr := e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID); reapErr != nil {
-				return errors.Trace(reapErr)
-			}
-			_, execErr := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='' WHERE step_id=?",
-				workflow.StatusPending, string(changesJSON), attempt+1, retrySleepMs, stepID,
+			res, execErr := tx.ExecContext(ctx,
+				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='' WHERE step_id=? AND status=?",
+				workflow.StatusPending, string(changesJSON), attempt+1, retrySleepMs, stepID, workflow.StatusRunning,
 			)
-			return errors.Trace(execErr)
+			if execErr != nil {
+				return errors.Trace(execErr)
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return nil
+			}
+			rewound = true
+			return errors.Trace(e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID))
 		})
 		if err != nil {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
+		}
+		if !rewound {
+			return nil
 		}
 		if retrySleepMs > 0 {
 			e.shortenNextPoll(time.Now().Add(time.Duration(retrySleepMs) * time.Millisecond))

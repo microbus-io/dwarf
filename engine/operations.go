@@ -338,6 +338,15 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 		e.waitersLock.Unlock()
 	}()
 
+	// signalStop is a post-commit, in-memory, fire-and-forget wake, so it can be lost: a worker crash
+	// between committing the terminal status and signaling, a dropped peer broadcast, or a no-op
+	// SignalPeers on a multi-replica host. Any of those would leave this waiter blocked until its ctx
+	// deadline (forever on a deadline-less ctx) while the flow already sits stopped in the DB. The ticker
+	// is the safety net: re-snapshot every awaitPollInterval even absent a notification, so the worst-case
+	// hang past the actual stop is bounded by that interval rather than unbounded.
+	ticker := time.NewTicker(awaitPollInterval)
+	defer ticker.Stop()
+
 	for {
 		outcome, err := e.snapshot(ctx, flowKey)
 		if err != nil {
@@ -348,7 +357,7 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 		}
 		select {
 		case <-ch:
-			continue
+		case <-ticker.C:
 		case <-ctx.Done():
 			return nil, errors.Trace(ctx.Err(), http.StatusRequestTimeout)
 		}

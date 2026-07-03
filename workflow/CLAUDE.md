@@ -1,0 +1,165 @@
+# Dwarf `workflow` package — carrier, state, and rendering
+
+> Load when: editing the `workflow.Flow` carrier, state/merge semantics, control signals, or the Mermaid renderer.
+> Coupled with: root `CLAUDE.md` — the engine dispatch side implements much of what these describe.
+
+### Task self-identity on the carrier
+
+`Flow.FlowKey()` and `Flow.StepKey()` return the task's own flow/step keys (`{shard}-{id}-{token}`), populated by the
+orchestrator on every dispatch alongside the timestamps. They let a task correlate logs/traces or call back into the
+engine (`History`, `Step`, `Snapshot`) for its own flow without the host threading identity through baggage. `step_token`
+is read alongside the claim/read in `processStep` (added to the RETURNING/OUTPUT/SELECT of all three driver branches);
+`flow_token` already rides the flow-row load. Both keys also survive the `Flow` JSON round-trip (the `flowJSON` wire
+format carries them), so a remote task reached over a transport sees the same identity as an in-process one. Empty when
+read outside a dispatched task.
+
+### State Model
+
+Each step has three JSON columns: `state` (input snapshot), `changes` (output delta), `interrupt_payload` (from
+`flow.Interrupt`). `state` is set at creation and normally immutable; `changes` is written after execution. The next
+step's `state` is `merge(currentState, changes)`. This immutability enables checkpointing, restart, and recovery.
+
+**State mutation on retry:** on `flow.Retry()`, the engine merges `state + changes` back into `state` so the task
+sees its own prior output next attempt; `changes` is preserved. `Resume` does **not** mutate `state`: it writes the
+caller's data to `resume_data`, which `flow.Interrupt` returns on re-dispatch.
+
+**Reducer delta convention:** tasks writing to reducer-managed fields (append, add, union, merge) set only the
+**delta**, not the accumulated value. E.g. for a field wired to the append reducer via
+`graph.SetReducer("messages", workflow.ReducerAppend)`, set `flow.Set("messages", []string{newMessage})`, not the
+whole history. Violating this duplicates during fan-in merge.
+
+**forEach element injection:** the current element is injected into `state` only (under `as`), not `changes`, so it is
+available to the task but does not participate in fan-in merge.
+
+**Delete is a cleared (JSON null) entry in `changes`, and `MergeState` has two modes for it.** `flow.Delete`
+(and `Set(k, nil)`) writes JSON `null` into `changes` - `dwarf` conflates null and absent everywhere
+(`isCleared`), so there is no way to store a literal null value. `MergeState` **drops** a cleared key from its
+result (both the replace path and any reducer-managed field), so a delete never survives as a `"k": null`
+tombstone in materialized state - which is what `final_state`/`FlowOutcome.State`/`Snapshot` expose to the host,
+and what the next step's `state` column becomes. This is the *materialization* mode and covers every `MergeState`
+call except one. The exception is **changes accumulation** (`processStep` folding a task's fresh output onto a
+prior attempt's `changes` before persisting the `changes` column): there the null must be **preserved**, because
+it is the pending-delete marker *in transit* - it only enacts the delete when `changes` later folds onto `state`.
+That site therefore uses a plain overlay (`maps.Copy`), not `MergeState` (with a don't-simplify-this note at the
+accumulation site in `execution.go`).
+
+### Task-Initiated Control Signals
+
+Tasks signal the engine via control methods on the `Flow` carrier (distinct from the operations above):
+
+- **`flow.Retry(initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter) bool`** - re-execute this task with
+  exponential backoff. The bound is wall-clock, not a count: returns `true` (task should return `nil`) while the next
+  attempt would still land within `giveUpAfter` of the step's first creation, else `false` (task should return its
+  error) - including when the next backoff delay alone would overshoot the horizon, so a doomed wait is never parked
+  before failing. The give-up check is made client-side in `Retry` against `flow.StepCreatedAt()`; the engine only
+  consumes the backoff shape.
+  Pass `giveUpAfter <= 0` for unlimited; to bound by count instead, pass `0` and gate on `flow.Attempt()`. The step row
+  is reused. The engine tracks `attempt` and computes the re-dispatch delay `min(initialDelay * delayMultiplier^attempt,
+  maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. `flow.Retry`
+  rewinds the step row in place (it is task-initiated, while the flow is still `running` - distinct from `Fork`, which
+  clones a *terminal* flow into a new one). **A retry clears the park
+  slot** (`interrupt_done`/`subgraph_done` -> 0, `resume_data`/`subgraph_result` -> `'{}'`, `subgraph_error` -> `''`),
+  so a retry after a resolved `flow.Subgraph` re-runs the child and after a resolved `flow.Interrupt` re-interrupts.
+  **A retry of a step that launched a subgraph reaps the prior attempt's child flow, recursively, in the same
+  transaction as the rewind** (`deleteSubgraphFlowsRootedAt(stepID)`). The child is always *terminal* at retry time
+  (the park resolves only on a terminal child), so this is a delete of inert rows, not a cascade-cancel of live work.
+  Leaving it would make the execution DAG claim two paths (`X -> iter1 -> iter2 -> Y`) when the model is single-path,
+  and let History assembly attach the discarded child's subtree to the caller. The reap is **step-scoped** (only this
+  caller's children). **The rewind is guarded on `status='running'`, and the reap runs only if it fires:** a `Cancel`
+  landing mid-task terminalizes this running step (cancelled) before the task returns and arms the retry, so an
+  unguarded rewind would revive the immutable cancelled step to `pending` (with a far backoff `not_before` - a transient
+  zombie the terminal-flow check only clears minutes later) *and* reap the now-terminal tree's children (inert, but
+  belonging to a terminal flow - an immutability violation). `processStep` therefore rewinds first under the guard and
+  reaps/re-dispatches only when it actually rewound a still-running step; a lost guard leaves the step cancelled (its
+  children already cancelled by the `Cancel` cascade) and returns. This is the enforcement behind "`flow.Retry` rewinds
+  a step in place but only while the flow is `running`" (see root "Terminal flows are immutable"). Defense in depth:
+  History's `loadSubgraphChildren` keeps only the latest child per caller step (`ORDER BY flow_id`, last row wins =
+  highest `flow_id`), matching `completeSurgraphFlow`/wedge/`Continue`, so even a stray dangling child never renders. `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`
+  (retry-on-any-error is usually wrong). To retry only on a timeout, gate on
+  `errors.StatusCode(err) == http.StatusRequestTimeout`.
+- **No jitter on retry backoff:** the worker pool already throttles per-replica concurrency, so simultaneous retries
+  queue in the pool rather than overwhelm downstream. Jitter would add latency for no throughput benefit.
+- **`flow.Sleep(duration)`** - delay the *next* step's execution by setting its `not_before`. The timer adapts to
+  wake when the sleep expires. In fan-out, only the last sibling's sleep affects the fan-in point.
+- **`flow.Goto(target)`** - override transition routing: skip normal evaluation and follow the `withGoto` transition
+  to `target`, if registered. Goto transitions are never taken during normal evaluation.
+- **`flow.Interrupt(payload)`** - pause and park the flow. The payload is stored in `interrupt_payload` and propagated
+  up the surgraph chain. The task should return normally after. The engine sets the flow `interrupted` and fires the
+  `FlowStopped` callback when the root flow's `notify_on_stop` is set.
+
+**Single-park guard.** A step parks at most once - interrupt XOR subgraph, never both and never the other kind on
+re-entry. `processStep` enforces this after the task returns: a competing-signals check fails the step if more than
+one control signal is set in one dispatch, and a second check fails the step when the returned flow arms a park while
+the step row's materialized `interrupt_done`/`subgraph_done` shows the *other* kind already resolved. The `workflow`
+package's parkers already reject a conflicting second park at the call site; this guard is the trust boundary for an
+untrusted returned flow.
+
+## Flow Rendering (`workflow.FlowRenderer`)
+
+`FlowRenderer` produces a Mermaid flowchart from a `History` result. Diagnostic intent: answer "where did the time go
+in this flow?" at a glance. Defaults render top-down; `With*Colors` swap palettes; `WithLinks` enables per-node click
+directives. `HistoryMermaid` wraps it as an engine method writing to an `io.StringWriter`.
+
+### CSS-variable theming model
+
+Color values flow through `classDef`/`style` directives; the renderer emits no themeVariables init block. Callers pass
+either hex literals (static rendering) or CSS custom-property references like `var(--primary-container)` (host pages
+that track a page-level theme). With `var()` values, browsers resolve through the SVG's CSS cascade and the diagram
+re-colors on light/dark toggle without reinvocation. The CSS-mode pattern: pass `"currentColor"` for fill and `""`
+for text - the generated classDef omits `color:`, host CSS sets it, and Mermaid inherits via `currentColor`.
+
+### Color knobs and status groups
+
+| Pair | Statuses |
+|---|---|
+| primary | `completed`, `running` (running gets a dashed border) |
+| secondary | `pending` + chrome (`_start`, `_end`, fan-out cohort wrappers, subgraph block fills) |
+| error | `failed`, `cancelled` |
+| attention | `interrupted` (distinct from error - "needs human eyes," not hard failure) |
+
+### DAG-edge model
+
+The execution DAG is reconstructed from `PredecessorID`/`SuccessorID`, NOT `step_depth`. Every edge is recorded on at
+least one endpoint - fan-out via each child's `PredecessorID`, fan-in via each cohort exit's `SuccessorID`, linear on
+both - and the rendered edge set is their deduped union, exact for arbitrary nesting.
+
+### Subgraph caller decomposition
+
+A subgraph caller step renders as **two** visual elements: the caller's task node and a visible Mermaid subgraph
+wrapper block containing the recursively-rendered SubHistory. The caller node's duration label is the **net** caller
+cost: `net = (caller.UpdatedAt - caller.StartedAt) - subgraph_wall_time`, where `subgraph_wall_time = max(SubHistory*
+.UpdatedAt) - min(SubHistory*.CreatedAt)` walked recursively. The net is the caller's own pre-call + post-return body
+time; total call cost reconstructs as `net + subgraph_wall_time` without double-counting. Edges thread:
+
+```
+predecessor --> caller         (parent DAG, transition gap label)
+caller --> innerHead           (the call, queue-wait label)
+innerTail --> Y.entries        (the return, transition gap label)
+```
+
+`byID[caller].exits` is set to the subgraph's inner tails, so the existing `addEdge(caller, Y)` machinery emits one
+edge per inner-tail x parent-DAG-successor combination. A terminal subgraph caller surfaces its inner tails as outer
+tails, connected to `_end`.
+
+### Node and edge label semantics
+
+**Node label** = `UpdatedAt - StartedAt` (task body time) for any non-caller step that ran and reached a terminal
+status. Pending/created/in-flight steps render with just the task name. Subgraph callers render the *net* cost.
+
+**Edge label** = `to.StartedAt - from.UpdatedAt` (transition gap: DB commit + queue + dispatch). Computed from the
+step records.
+
+**Call edge label** = `entry.StartedAt - entry.CreatedAt` (queue wait on the subgraph's entry step). Without it, that
+time would be inside `subgraph_wall_time` but invisible on any rendered edge.
+
+### Fan-out cohort wrappers
+
+Two-or-more steps sharing one `PredecessorID` get wrapped in an invisible Mermaid `subgraph` block (empty label, no
+fill, no stroke) - purely a layout container so siblings cluster near their parent. Edges always go between actual
+task nodes; nothing terminates at the cohort wrapper.
+
+### Truncation in label formatting
+
+`formatDuration` uses integer-millisecond truncation for sub-second values (`%dms`). A diagram with N labeled edges
+accumulates up to ~N/2 ms of systematic underestimation in any path sum - diagnostically irrelevant (the goal is to
+spot where time went, not reconcile to the millisecond).
