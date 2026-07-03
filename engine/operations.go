@@ -636,12 +636,12 @@ func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, 
 	}
 	outcome, err = e.await(ctx, flowKey)
 	if err != nil {
-		// await usually fails because ctx expired (timeout/cancel); cancel on a detached ctx (values kept,
-		// deadline dropped) so the just-started flow is actually torn down instead of left running.
-		// await usually fails because ctx expired (timeout/cancel); cancel on a detached ctx (values kept,
-		// deadline dropped) so the just-started flow is actually torn down instead of left running.
-		e.cancel(context.WithoutCancel(ctx), flowKey, "")
-		return "", nil, errors.Trace(err)
+		// await usually fails because the caller's ctx expired (timeout/cancel). The flow is durable and
+		// already running on the engine's own worker lifetime, independent of this call - so do NOT tear it
+		// down. Cancelling here would destroy healthy, in-progress work (a durable retry-until-success job
+		// especially) just because the caller stopped waiting - an availability footgun. Return the flowKey
+		// with the error instead, so the caller keeps a handle to re-Await/Snapshot/Cancel on its own terms.
+		return flowKey, nil, errors.Trace(err)
 	}
 	return flowKey, outcome, nil
 }

@@ -972,3 +972,80 @@ func TestGraph_WhenMermaidDiamond(t *testing.T) {
 	assert.Contains(m, `t0_when -->|"i==1"| t1`)
 	assert.Contains(m, `t0_when -->|"i==2"| t2`)
 }
+
+func TestEscapeMermaid(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// The common case (URL-shaped task/graph names) carries no Mermaid metacharacters and is unchanged.
+	assert.Equal("CreateOrder", escapeMermaid("CreateOrder"))
+	assert.Equal("svc.name:8080/task-v2", escapeMermaid("svc.name:8080/task-v2"))
+
+	// Every metacharacter is rewritten to a Mermaid character reference.
+	assert.Equal(
+		"#quot;#91;#93;#123;#125;#40;#41;#lt;#gt;#124;#96;#35;#39;",
+		escapeMermaid("\"[]{}()<>|`#'"),
+	)
+	// '#' is escaped first, so an author-supplied "#quot;"-shaped substring cannot survive as a live
+	// reference (single non-overlapping pass, no re-scan of emitted references).
+	assert.Equal("#35;quot;", escapeMermaid("#quot;"))
+}
+
+func TestGraph_MermaidEscapesInjection(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// A malicious workflow author names the graph, a task, and a when-expression with Mermaid/HTML
+	// metacharacters, aiming to break out of the ["..."] label and inject node/edge/click syntax or
+	// an <img> XSS payload into a host UI that renders the diagram.
+	g := NewGraph(`Ord"er<x>`)
+	evil := "svc/pwn\"]:::term click n \"http\" `x` <img src=q onerror=alert(1)> [z] {q}"
+	g.AddTransitionWhen(evil, "svc/next", `a || b == "c"`)
+	g.AddTransition("svc/next", END)
+
+	m := must(NewGraphRenderer(g).Render())
+
+	// No raw metacharacter survives to end a label or inject markup/directives.
+	assert.NotContains(m, `<img`)
+	assert.NotContains(m, `<x>`)
+	assert.NotContains(m, "`x`")
+	assert.NotContains(m, `"]:::term`)
+	// The frontmatter title (author-controlled graph name) is escaped, not passed through by %q.
+	assert.Contains(m, `title: "Ord#quot;er#lt;x#gt;"`)
+	// Metacharacters are rewritten to Mermaid character references in node and edge labels.
+	assert.Contains(m, `#lt;img`)
+	assert.Contains(m, `#quot;`)
+	assert.Contains(m, `#96;`)  // backticks
+	assert.Contains(m, `#124;`) // the || in the when-expression
+}
+
+func TestFlow_MermaidEscapesInjection(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// Malicious task name, subgraph (workflow) name, and title carried through a flow's rendered history.
+	steps := []FlowStep{
+		{
+			StepID:   1,
+			TaskName: "svc/pwn\"]:::term <img src=q onerror=alert(1)> |z|",
+			Status:   StatusCompleted,
+		},
+		{
+			StepID:          2,
+			TaskName:        "svc/caller",
+			PredecessorID:   1,
+			Subgraph:        true,
+			SubWorkflowName: `Evil"]<img>`,
+			SubHistory:      []FlowStep{{StepID: 3, TaskName: "svc/inner", Status: StatusCompleted}},
+			Status:          StatusCompleted,
+		},
+	}
+
+	m := must(NewFlowRenderer(steps).WithTitle(`T"itle<x>`).Render())
+
+	// No raw metacharacter survives in node labels, the subgraph block title, or the chart title.
+	assert.NotContains(m, `<img`)
+	assert.NotContains(m, `<x>`)
+	assert.NotContains(m, `"]:::term`)
+	// Escaped forms are emitted instead.
+	assert.Contains(m, `#lt;img`)
+	assert.Contains(m, `#quot;`)
+	assert.Contains(m, `_title{{"T#quot;itle#lt;x#gt;"}}`)
+}

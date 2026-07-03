@@ -143,7 +143,7 @@ func (r *FlowRenderer) Render() (string, error) {
 	b.WriteString("\n")
 
 	if r.title != "" {
-		fmt.Fprintf(&b, "    _title{{%q}}:::term -.-> _start\n", r.title)
+		fmt.Fprintf(&b, "    _title{{\"%s\"}}:::term -.-> _start\n", escapeMermaid(r.title))
 	}
 	showEnd := !hasInflightStep(r.steps)
 
@@ -245,10 +245,10 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 		if statusClass == "" {
 			statusClass = StatusPending
 		}
-		fmt.Fprintf(buf, "    %s[\"%s\"]:::%s\n", nodeID, escapeMermaidLabel(label), statusClass)
+		fmt.Fprintf(buf, "    %s[\"%s\"]:::%s\n", nodeID, escapeMermaid(label), statusClass)
 		emitClick(nodeID, s.StepKey)
 		if isSubgraphCaller {
-			fmt.Fprintf(buf, "    subgraph %s [%q]\n", blk.blockID, blk.label)
+			fmt.Fprintf(buf, "    subgraph %s [\"%s\"]\n", blk.blockID, escapeMermaid(blk.label))
 			buf.WriteString(blk.body)
 			buf.WriteString("    end\n")
 			fmt.Fprintf(buf, "    style %s %s\n", blk.blockID, r.clusterStyle())
@@ -309,7 +309,7 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 			fmt.Fprintf(buf, "    %s --> %s\n", src, dst)
 			return
 		}
-		fmt.Fprintf(buf, "    %s -- %q --> %s\n", src, label, dst)
+		fmt.Fprintf(buf, "    %s -- \"%s\" --> %s\n", src, escapeMermaid(label), dst)
 	}
 	edgeLabel := func(from, to FlowStep) string {
 		if from.UpdatedAt.IsZero() || !to.HasStarted() || to.StartedAt.IsZero() {
@@ -398,12 +398,34 @@ func flowClassDefLine(b *strings.Builder, name, fill, text, stroke, extra string
 	fmt.Fprintf(b, "    classDef %s %s\n", name, strings.Join(parts, ","))
 }
 
-func escapeMermaidLabel(s string) string {
-	return strings.NewReplacer(
-		"\"", "#quot;",
-		"[", "#91;",
-		"]", "#93;",
-	).Replace(s)
+// mermaidEscaper neutralizes every Mermaid metacharacter in an author-controlled string (task and
+// workflow names, titles, when-expressions) before it is emitted into a label, edge text, or subgraph
+// title. Mermaid honors no backslash escaping inside labels, so Go %q is the wrong tool: a raw " ends
+// the label and lets the remainder inject node/edge/click syntax, and <, >, ` pass through into the
+// host's HTML-rendered label (an XSS/markup vector). Each is rewritten to its Mermaid numeric/named
+// character reference (#NN; / #quot;), which renders as the literal glyph. '#' is escaped first so an
+// input that already contains a "#quot;"-shaped substring cannot survive as a live reference:
+// strings.NewReplacer does a single non-overlapping left-to-right pass, so the references we emit are
+// never re-scanned. Every sink wraps the result in its own quotes; this handles the label *content*.
+var mermaidEscaper = strings.NewReplacer(
+	"#", "#35;",
+	"\"", "#quot;",
+	"'", "#39;",
+	"<", "#lt;",
+	">", "#gt;",
+	"`", "#96;",
+	"[", "#91;",
+	"]", "#93;",
+	"{", "#123;",
+	"}", "#125;",
+	"(", "#40;",
+	")", "#41;",
+	"|", "#124;",
+)
+
+// escapeMermaid is the single Mermaid-aware escaper for every author-controlled string in both renderers.
+func escapeMermaid(s string) string {
+	return mermaidEscaper.Replace(s)
 }
 
 func isTerminalStepStatus(status string) bool {

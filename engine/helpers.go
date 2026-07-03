@@ -63,6 +63,17 @@ func parseStepKey(stepKey string) (shardNum int, stepID int, stepToken string, e
 	return int(shardNum64), int(stepID64), parts[2], nil
 }
 
+// flowCorrelationID is the non-secret, capability-free flow identifier for telemetry (spans, logs,
+// metrics): the flowKey with its random token segment omitted. It uniquely identifies the flow for
+// correlation - {shard} disambiguates the per-shard sequential flow_id - but grants nothing. It is
+// deliberately NOT a valid engine key: no operation accepts it, and the engine offers no
+// correlationID->key lookup, so a trace/log reader cannot escalate it into the flow's write capability.
+// Every place a flow identifier crosses into an observability sink must use this, never the token-bearing
+// key (which belongs only on the task carrier, the FlowStopped callback, and in-memory waiter matching).
+func flowCorrelationID(shardNum, flowID int) string {
+	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(flowID)
+}
+
 // unmarshalJSONMap parses a JSON string into a map. Empty or "{}" input yields a nil map.
 func unmarshalJSONMap(jsonStr string, out *map[string]any) {
 	if jsonStr == "" || jsonStr == "{}" {

@@ -188,7 +188,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 
 	for _, o := range hits {
 		e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child whose parent is terminal",
-			"shard", shard, "childFlow", fmt.Sprintf("%d-%d-%s", shard, o.flowID, strings.TrimSpace(o.token)))
+			"shard", shard, "childFlow", flowCorrelationID(shard, o.flowID))
 		if rerr := e.cancelOrphanedSubtree(ctx, shard, o.flowID, o.token); rerr != nil {
 			e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child", "shard", shard, "childFlow", o.flowID, "error", rerr)
 			continue
@@ -272,7 +272,7 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 // a non-terminal step and is excluded, so steady-state operation never trips it.
 func (e *Engine) detectOrphanedFlows(ctx context.Context, db *sequel.DB, shard int) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT f.flow_id, f.flow_token FROM dwarf_flows f"+
+		"SELECT f.flow_id FROM dwarf_flows f"+
 			" WHERE f.status=? AND f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN (?, ?, ?, ?))",
 		workflow.StatusRunning, -orphanFlowThreshold.Milliseconds(),
@@ -285,13 +285,13 @@ func (e *Engine) detectOrphanedFlows(ctx context.Context, db *sequel.DB, shard i
 	defer rows.Close()
 	for rows.Next() {
 		var flowID int
-		var flowToken string
-		if err := rows.Scan(&flowID, &flowToken); err != nil {
+		if err := rows.Scan(&flowID); err != nil {
 			e.logger.ErrorContext(ctx, "Orphan detection: scanning running flow", "shard", shard, "error", err)
 			return
 		}
+		// Token-free correlation id: this is an operator alarm, not a capability. See "Tracing".
 		e.logger.ErrorContext(ctx, "Orphaned flow: running with all steps terminal and no successor",
-			"flow", fmt.Sprintf("%d-%d-%s", shard, flowID, flowToken))
+			"flow", flowCorrelationID(shard, flowID))
 	}
 	if err := rows.Err(); err != nil {
 		e.logger.ErrorContext(ctx, "Orphan detection: iterating running flows", "shard", shard, "error", err)

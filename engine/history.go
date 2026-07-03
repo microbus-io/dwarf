@@ -579,11 +579,22 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	return flows, nextCursor, nil
 }
 
+// likeEscape is the LIKE ESCAPE character used by searchClause. It is a printable char that is neither a
+// LIKE metacharacter nor special inside a string literal on any of the four dialects (unlike backslash,
+// which MySQL and Postgres treat differently in literals), so `ESCAPE '~'` is portable as-is.
+const likeEscape = "~"
+
+var likeEscaper = strings.NewReplacer(likeEscape, likeEscape+likeEscape, "%", likeEscape+"%", "_", likeEscape+"_")
+
 func searchClause(driverName string, shardIdx int, search string) (string, []any) {
 	if search == "" {
 		return "", nil
 	}
-	pattern := "%" + strings.ToLower(search) + "%"
+	// Escape the caller-supplied term's LIKE metacharacters (% and _) and the escape char itself before
+	// wrapping in %...%, so a search for "a_b" or "50%" matches literally instead of being steered into an
+	// unbounded wildcard full scan. Every LIKE below carries the matching ESCAPE clause. No injection risk
+	// either way (the term is a bind parameter); this is purely about scan cost.
+	pattern := "%" + likeEscaper.Replace(strings.ToLower(search)) + "%"
 	var flowKeyExpr string
 	switch driverName {
 	case "mysql", "mssql":
@@ -591,7 +602,8 @@ func searchClause(driverName string, shardIdx int, search string) (string, []any
 	default:
 		flowKeyExpr = fmt.Sprintf("'%d-' || f.flow_id || '-' || TRIM(f.flow_token)", shardIdx)
 	}
-	sql := "(LOWER(f.workflow_url) LIKE ? OR LOWER(f.workflow_name) LIKE ? OR LOWER(s.task_name) LIKE ? OR LOWER(f.error) LIKE ? OR LOWER(f.cancel_reason) LIKE ? OR LOWER(" + flowKeyExpr + ") LIKE ?)"
+	e := " ESCAPE '" + likeEscape + "'"
+	sql := "(LOWER(f.workflow_url) LIKE ?" + e + " OR LOWER(f.workflow_name) LIKE ?" + e + " OR LOWER(s.task_name) LIKE ?" + e + " OR LOWER(f.error) LIKE ?" + e + " OR LOWER(f.cancel_reason) LIKE ?" + e + " OR LOWER(" + flowKeyExpr + ") LIKE ?" + e + ")"
 	return sql, []any{pattern, pattern, pattern, pattern, pattern, pattern}
 }
 

@@ -72,7 +72,7 @@ func (e *Engine) fireFlowStopped(ctx context.Context, flowKey string, baggageJSO
 		return nil
 	})
 	if err != nil {
-		e.logger.ErrorContext(ctx, "FlowStopped callback panicked", "flow", flowKey, "error", err)
+		e.logger.ErrorContext(ctx, "FlowStopped callback panicked", "error", err)
 	}
 }
 

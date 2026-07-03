@@ -26,11 +26,12 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestRuntimeoutcancelflow pins that when Run's context expires before the flow stops, the cleanup cancel
-// still runs. Run awaits on the caller's ctx; when that ctx times out, await returns a 408 and Run tears the
-// just-started flow down. Before the fix Run passed the already-expired ctx to cancel, so every cancel DB op
-// failed immediately and the flow was left running - a silent leak only the log-only orphan detector noticed.
-// The fix cancels on a detached ctx (context.WithoutCancel), so the flow ends cancelled.
+// TestRuntimeoutcancelflow pins that when Run's context expires before the flow stops, Run does NOT tear the
+// flow down. Run awaits on the caller's ctx; when that ctx times out, await returns a 408, and Run leaves the
+// durable flow running (it is not bound to this call) and returns its flowKey with the error - so the caller
+// keeps a handle. Cancelling a healthy durable flow just because the caller stopped waiting is an availability
+// footgun (and the earlier "cancel on the caller's behalf" both never ran - the await ctx was already expired -
+// and was the wrong intent). Teardown-on-timeout is the caller's explicit choice: it Cancels via the returned key.
 func TestRuntimeoutcancelflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -62,12 +63,20 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	tctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
 	flowKey, outcome, err := eng.Run(tctx, "runtimeoutcancelflow.verify:428/run-timeout-cancel", nil, nil)
-	assert.Error(err) // 408 from the expired await
-	assert.Equal("", flowKey)
+	assert.Error(err)            // 408 from the expired await
+	assert.NotEqual("", flowKey) // the flow's handle is returned so the caller can recover it
 	assert.Nil(outcome)
 
-	// The cleanup cancel must have marked the running flow cancelled. Poll briefly on a fresh ctx: the cancel
-	// commits synchronously inside Run, so this resolves immediately; the loop only guards CI jitter.
+	// Run left the flow running - it never cancels on the caller's behalf.
+	flows, _, listErr := eng.List(ctx, workflow.Query{WorkflowURL: "runtimeoutcancelflow.verify:428/run-timeout-cancel"})
+	assert.NoError(listErr)
+	if assert.Equal(1, len(flows)) {
+		assert.Equal(workflow.StatusRunning, flows[0].Status)
+	}
+
+	// The returned key is a live handle: the caller tears the flow down explicitly (the supported
+	// teardown-on-timeout path). Cancel commits synchronously, so the flow is cancelled right after.
+	assert.NoError(eng.Cancel(ctx, flowKey, "caller gave up waiting"))
 	var status string
 	for range 100 {
 		flows, _, listErr := eng.List(ctx, workflow.Query{WorkflowURL: "runtimeoutcancelflow.verify:428/run-timeout-cancel"})
@@ -80,5 +89,5 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	assert.Equal(workflow.StatusCancelled, status) // not left running
+	assert.Equal(workflow.StatusCancelled, status)
 }

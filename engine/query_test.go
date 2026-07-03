@@ -94,3 +94,64 @@ func TestQuery_WorkflowName(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(betas, len(remaining))
 }
+
+// TestQuery_SearchEscapesWildcards pins that Search treats a caller-supplied LIKE metacharacter as a
+// literal, not a wildcard - so "_" (SQL LIKE "any single char") and "%" ("any run") do not steer the
+// query into an unbounded full-table scan that matches every flow. One graph's display name carries a
+// literal underscore; the others do not.
+func TestQuery_SearchEscapesWildcards(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := NewTestProxy()
+	// Display names: only "Under_Score" contains a LIKE metacharacter. URLs and task names carry none, and
+	// flow tokens are hex, so the underscore appears in exactly one searched column across all flows.
+	plain := workflow.NewGraph("PlainName")
+	plain.SetEndpoint("A", "q.esc:0/a")
+	plain.AddTransition("A", workflow.END)
+	proxy.HandleGraph("q.esc:0/plain", plain)
+	under := workflow.NewGraph("Under_Score")
+	under.SetEndpoint("B", "q.esc:0/b")
+	under.AddTransition("B", workflow.END)
+	proxy.HandleGraph("q.esc:0/under", under)
+	proxy.HandleTask("q.esc:0/a", func(context.Context, *workflow.Flow) error { return nil })
+	proxy.HandleTask("q.esc:0/b", func(context.Context, *workflow.Flow) error { return nil })
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	e.RunInTest(t)
+
+	var keys []string
+	for range 3 {
+		k, err := e.Create(ctx, "q.esc:0/plain", nil, nil)
+		assert.NoError(err)
+		keys = append(keys, k)
+	}
+	k, err := e.Create(ctx, "q.esc:0/under", nil, nil)
+	assert.NoError(err)
+	keys = append(keys, k)
+	for _, k := range keys {
+		_, err := e.Await(ctx, k)
+		assert.NoError(err)
+	}
+
+	// "_" is a wildcard in an unescaped LIKE (would match all 4 flows); escaped, it matches only the one
+	// flow whose display name contains a literal underscore.
+	underscore, _, err := e.List(ctx, workflow.Query{Search: "_"})
+	assert.NoError(err)
+	assert.Equal(1, len(underscore))
+	if len(underscore) == 1 {
+		assert.Equal("Under_Score", underscore[0].WorkflowName)
+	}
+
+	// "%" is a wildcard too (would match all); no display name/URL contains a literal percent, so escaped
+	// it matches nothing.
+	percent, _, err := e.List(ctx, workflow.Query{Search: "%"})
+	assert.NoError(err)
+	assert.Equal(0, len(percent))
+
+	// A plain substring search still works - the escaping only neutralizes metacharacters.
+	byName, _, err := e.List(ctx, workflow.Query{Search: "under_score"})
+	assert.NoError(err)
+	assert.Equal(1, len(byName))
+}

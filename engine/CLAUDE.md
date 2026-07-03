@@ -229,7 +229,14 @@ uses `Create` with `FlowOptions.ThreadKey` (explicit policy, same thread).
 
 **Run** - Create + Await in one call, returning `(flowKey string, *workflow.FlowOutcome, error)` -
 the new flow's key alongside its outcome (the key is the flow's identity, not part of the outcome; callers
-need it for later `History`/`Resume`/`Fork`). On error, `flowKey` is `""` and the outcome is nil.
+need it for later `History`/`Resume`/`Fork`). Error semantics are phase-split: a **create** failure
+returns `flowKey == ""` with a nil outcome (no flow exists); an **await** failure (usually the caller's
+ctx expiring first) **leaves the flow running** and returns its **`flowKey`** with a nil outcome and the
+error, so the caller retains a handle. `Run` never cancels the flow on the caller's behalf - tearing down
+a healthy durable flow just because the caller stopped waiting is an availability footgun; a caller that
+wants teardown-on-timeout calls `Cancel` itself. (This is the corrected behavior of the former bug where
+`Run` cancelled the just-started flow with the already-expired await ctx - so the cancel silently never
+ran *and* the intent to cancel a healthy durable flow was itself wrong.)
 
 **Await** - Blocks until the flow stops (see "Await" below).
 
@@ -788,6 +795,44 @@ callbacks (in `processStep` for the per-step executor, and at the create-time `L
 without importing `engine`. The create-time injection round-trips the value through JSON (`baggageMap`) so the
 loader sees the same decoded shape every dispatch will.
 
+### Keys are capabilities, not authorization
+
+A flow/step key (`{shard}-{id}-{token}`) is an **unguessable bearer capability**, not an authorization
+decision - the host-facing contract is in `doc.go`; this is the *why* and the entropy decision. The engine
+holds no authN/authZ, no rate limiting, and no notion of caller identity: its only vantage is the flow
+reference and the task URL. Ownership and tenancy - the axes any real access-control check turns on - are
+structurally invisible to it, the same reason it owns no backpressure (see "Backpressure is the task's or
+host's job"). So the token cannot *be* the access control; it can only make the reference **unforgeable**,
+and authorization must live in the host, which has the principal (typically via the baggage it set at
+`Create`).
+
+**What the token buys, precisely.** `flow_id` is a per-shard sequential integer - an enumeration oracle on
+its own. The random `flow_token` turns "an integer anyone can type" into "a handle you must have been
+given," so a host authz bug alone is not sufficient to walk the table (you would also need each flow's
+token): two independent failures, not one. It also preserves the no-existence-oracle property (every
+operation on an unknown-or-mismatched key returns a uniform not-found - verified) and enables opaque
+capability-URL patterns (a "resume your approval" link). What it is **not** is access control: a leaked,
+logged, or shared key is a full write capability for that one flow. The amplifier is therefore `List`/
+`Search`, which return keys wholesale (a separate concern) - not the token itself.
+
+**Why 64-bit, and why not widen.** `randomIdentifier(16)` is 16 hex chars = **64 bits** of `crypto/rand`.
+That is adequate *because the token is never a standalone lookup*: every gate is `WHERE flow_id=? AND
+flow_token=?` (and `step_id=? AND step_token=?`) - verified across the codebase; the only token-only
+`WHERE`s are in tests. So the token has no birthday/collision surface (the unique id disambiguates rows) -
+it only has to resist *targeted* guessing of one specific row's token. Targeted online guessing of 64 bits
+of `crypto/rand`, even at an implausible sustained 1M attempts/sec against one `flow_id`, is ~300,000
+years expected; offline is impossible (no oracle). Widening to 128-bit (a periodically-suggested review
+item) buys no security against any realistic threat - the capability-URL leak channels (email, logs,
+referrer) are unaffected by token width and want short-TTL/single-use, a host concern - while doubling the
+visible random tail on every printed key. So keep 64-bit; revisit only if a concrete driver appears (a
+future token-only lookup, or an offline-exposed capability URL). If it is ever widened, the `CHAR(16)`
+columns must grow in lockstep and `randomIdentifier`'s argument with them.
+
+**Related engine-side hardening (all verified, none a substitute for host authz):** uniform not-found on
+key mismatch (no existence oracle); telemetry carries only the token-free correlation id and there is no
+correlation-id→key lookup (see "Tracing"); subgraph-child keys are read-only for lifecycle mutations (see
+"Subgraph keys are read-only"). The engine cannot go further - it never sees the principal.
+
 ### Await
 
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
@@ -1070,10 +1115,34 @@ metrics: spans need cross-replica continuity, metrics don't).
   (`trace.ContextWithSpan(ctx, nil)` strips any ambient request span) so each flow - and each `Continue`
   turn - roots its own fresh trace rather than nesting under the request that created it.
 - **Per-step span in `processStep`**, named by the task. The stored `trace_parent` is reconstructed
-  (`injectTraceParent`) as the parent, the span is started with `workflow.id`=flowKey and `workflow.name`
+  (`injectTraceParent`) as the parent, the span is started with `workflow.id` and `workflow.name`
   attributes, and the span's context is **placed on the `ExecuteTask`'s ctx** so the task's own
   downstream spans nest under it automatically. The span records the dispatch error
   (`recordSpanError` → `RecordError`+`SetStatus(codes.Error)`) when the executor returns one.
+
+**Telemetry carries the token-free correlation id, never the flowKey.** `workflow.id` is
+`flowCorrelationID(shard, flowID)` = `"{shard}-{flowID}"`, **not** the flowKey. The flowKey's third
+segment is a random token that is a *bearer write-capability* (`Resume`/`Cancel`/`Fork`/… gate only on
+`flow_id`+`flow_token`), and a trace backend is typically readable far more broadly than the workflow
+data - so stamping the key onto every span would hand a write capability for every traced flow to every
+trace reader. The correlation id uniquely identifies the flow ({shard} disambiguates the per-shard
+sequential id) for grouping/pivoting/log-join, but grants nothing. The same rule governs logs and metric
+labels: the token appears only on the task carrier (`flow.SetFlowKey`, trusted task code), in the
+`FlowStopped` callback (the flow's identity handed to the trusted host), and as an in-memory waiter-match
+key (`signalStop`/`notifyStatusChange`, never leaves the process). No log line emits a flow key at all -
+`fireFlowStopped`'s panic log records only the error (a token-free identifier would be redundant with the
+ctx-correlated span anyway). Any new span/log/metric that names a flow must use `flowCorrelationID`, never
+the raw key.
+
+**No correlationID→key lookup, by design.** The correlation id is deliberately *not* a valid engine key
+(no operation accepts it) and the engine offers **no** operation that resolves it back to a key - that
+would be a capability-minting oracle, re-leaking through the back door exactly what dropping the token
+from telemetry closes (a trace reader, or any service that can reach the engine, could turn the id into
+write access). Legitimate "act on the flow I found in a trace" resolves outside the engine: the host's own
+store of the keys it minted at `Create` (under the host's authz), or database break-glass
+(`SELECT flow_token …`, already the top privilege tier - it exposes everything, so it mints no *new*
+capability). The friction of "a trace id is not accepted by any API" is the trace-read < data-read <
+DB-read privilege boundary working, not a gap to fill.
 
 **Subgraphs nest, they don't flatten.** A subgraph gets its **own** "workflow" span parented to the
 **caller step's span**, not the parent flow's root - so the trace reads

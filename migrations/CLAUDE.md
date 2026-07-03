@@ -29,7 +29,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `delete_on_completion` | Set from `FlowOptions.DeleteOnCompletion` at `Create`; `1` makes the flow delete itself (and cascade to subgraph descendants) the instant it reaches `completed`. Root-only (not inherited by children); `failed`/`cancelled`/`interrupted` flows are never auto-deleted. See "Data Retention" |
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
 | `forked_from_step` | `Fork` provenance: the *original* fork-point `step_id` this flow was cloned from; `0` for a non-fork flow. Subsumes the origin flow id (derivable via the step's `flow_id`) and pins the exact divergence node. `Continue` excludes forks via `forked_from_step=0`. See "Fork" |
-| `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. A `Fork` clone is a new flow with its own `created_at` = fork time |
+| `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. A `Fork` clone is a new flow with its own `created_at` = fork time. **Deliberately unindexed**: no query filters or orders on it (`List`/`Purge` age filters anchor on `updated_at` - the correct "time since the flow last did anything/finished" retention signal - and the fairness `ageMs` only *projects* `NOW - created_at` while ordering by `step_id`). A `created_at` index would be pure write amplification; if a "created in window X" analytics filter is ever added, add the index with the `Query` field then |
 | `started_at` | UTC time this attempt began dispatching. Stamped when the flow goes `running` at `Create` (and by `Fork` when the clone goes live); there is no separate `Start`. Distinct from `created_at`, which is the row's INSERT moment. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
 | `updated_at` | UTC time of the last status transition. Surfaced to tasks via `Flow.UpdatedAt()` |
 | `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `SetDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
@@ -63,7 +63,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `attempt` | `flow.Retry` attempt counter, drives the backoff |
 | `not_before` | Earliest UTC time the step may execute (`flow.Sleep` / retry backoff) |
 | `lease_expires` | Crash-recovery lease; `pollPendingSteps` reclaims `running` steps past this |
-| `created_at` | UTC creation time |
+| `created_at` | UTC creation time. Deliberately unindexed (see the `dwarf_flows.created_at` note); the refiller reads it only as the projected fairness `ageMs` (`NOW - created_at`), ordering by `step_id` |
 | `started_at` | UTC time the *current attempt* first dispatched. The lease UPDATE stamps it via CASE only on a fresh attempt's first dispatch (`attempt=0 AND subgraph_done=0 AND interrupt_done=0`) and **preserves** it on a continuation (subgraph re-dispatch, interrupt re-dispatch, retry re-dispatch). A retried step's duration includes every attempt. Drives per-step body duration and inter-step wait labels in `FlowRenderer` |
 | `updated_at` | UTC time of the last status transition |
 | `lineage_id` | Cohort frame: the spawn step's `step_id` on a push, else inherited. Drives explicit `SetFanIn` arrival counting and merge. A cohort-counting device, **not** a DAG. `0` = no `SetFanIn` |
@@ -106,7 +106,6 @@ without fragmentation or excessive write amplification.
 | `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite/mssql | Walking the subgraph chain |
 | `idx_dwarf_flows_surgraph_step` | `(surgraph_step_id)`, partial `WHERE surgraph_step_id > 0` on pgx/sqlite/mssql | Point lookups on the caller-step link (`WHERE surgraph_step_id=?`): the `flow.Retry` reap (`fork.go`), the parked-step wedge sweep, and `Step`-navigation. Cheap to carry: `surgraph_step_id` is write-once at insert (no update churn/fragmentation) and `0` for every root flow, so the partial index covers only subgraph children. Without it, the retry-reap's unindexed predicate is the SQL-Server clustered-index-scan U-lock **deadlock** class the fan-in `successor_id` fix documented. Same profile as `idx_dwarf_flows_surgraph` above. **Deliberately single-column** (a review suggested `(surgraph_step_id, flow_id)`): the only `ORDER BY flow_id DESC LIMIT 1` on this column was a per-step N+1 in `subgraphHistory`, since replaced by one batched `root_flow_id` scan (`loadSubgraphChildren`); the sole remaining ordered probe (the wedge sweep's latest-child lookup) matches only the handful of retry-attempt children of one caller step and runs on the latency-tolerant recovery loop, so a second key column would only widen every subgraph-child insert against the write-amplification budget for no measurable gain |
 | `idx_dwarf_flows_root` | `(root_flow_id)` | One-query whole-tree scans (`WHERE root_flow_id=?`) for the membership walks. A plain (non-partial) index: `root_flow_id` is set for every flow (a root points at itself), so a `> 0` partial would index everything anyway |
-| `idx_dwarf_flows_created_at` | `(created_at)` | Time-window queries; append-only/monotonic |
 
 #### `dwarf_steps`
 
@@ -115,7 +114,6 @@ without fragmentation or excessive write amplification.
 | PK | `(step_id)` | Row lookups, lease acquisition in `processStep` |
 | `idx_dwarf_steps_flow_id` | `(flow_id, step_id)` on MySQL; `(flow_id)` on pgx/mssql | Per-flow step queries |
 | `idx_dwarf_steps_status` | `(status, updated_at)` - partial `WHERE status IN ('pending','running')` on pgx | `pollPendingSteps` recovery and pending discovery |
-| `idx_dwarf_steps_created_at` | `(created_at)` | Time-window queries |
 | `idx_dwarf_steps_selection` | `(status, parked, priority, fairness_key)` - partial on pgx/mssql/sqlite, full on mysql | Two-level priority+fairness candidate selection. The `parked` second column excludes parked rows without an in-memory filter |
 | `idx_dwarf_steps_saturation` | `(status, parked, task_url)` - partial as above | Per-task in-flight count for the `dwarf_task_concurrency_running` gauge. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
 

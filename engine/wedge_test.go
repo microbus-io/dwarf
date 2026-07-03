@@ -373,6 +373,8 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	seen := capture.seen()
 	assert.Len(seen, 1, "exactly one flow should be flagged as orphaned")
 	if len(seen) == 1 {
-		assert.Equal(orphanKey, seen[0], "the flagged flow is the forged orphan, not the healthy blocked flow")
+		// The alarm logs the token-free correlation id (SEC2), never the capability-bearing flowKey.
+		assert.Equal(flowCorrelationID(shard, orphanFlowID), seen[0], "the flagged flow is the forged orphan, not the healthy blocked flow")
+		assert.NotEqual(orphanKey, seen[0], "the logged id carries no token")
 	}
 }

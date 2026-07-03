@@ -644,7 +644,13 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 
 // Run creates, starts, and awaits a flow in one call, returning the new flow's key alongside its outcome
 // (the key is the flow's identity, not part of the outcome). opts carries scheduling and the opaque host
-// Baggage; nil opts uses defaults. On error, flowKey is "" and outcome is nil.
+// Baggage; nil opts uses defaults.
+//
+// Error semantics differ by phase. A create failure returns flowKey "" and a nil outcome - no flow
+// exists. An await failure - most commonly the caller's ctx expiring before the flow stops - leaves the
+// flow running (it is durable and not bound to this call) and returns its flowKey with a nil outcome and
+// the error, so the caller keeps a handle to Await/Snapshot/Cancel it later. Run never cancels the flow
+// on the caller's behalf; a caller that wants the flow torn down on timeout calls Cancel explicitly.
 func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
 	return e.run(ctx, workflowURL, initialState, opts)
 }

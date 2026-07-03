@@ -47,8 +47,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     INDEX idx_dwarf_flows_surgraph (surgraph_flow_id),
     INDEX idx_dwarf_flows_surgraph_step (surgraph_step_id),
     INDEX idx_dwarf_flows_root (root_flow_id),
-    INDEX idx_dwarf_flows_thread (thread_id, flow_id),
-    INDEX idx_dwarf_flows_created_at (created_at)
+    INDEX idx_dwarf_flows_thread (thread_id, flow_id)
 );
 
 -- DRIVER: pgx
@@ -101,9 +100,6 @@ CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
 
--- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_created_at ON dwarf_flows (created_at);
-
 -- DRIVER: mssql
 CREATE TABLE dwarf_flows (
     flow_id              BIGINT        NOT NULL IDENTITY(1,1),
@@ -154,9 +150,6 @@ CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 -- DRIVER: mssql
 CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
 
--- DRIVER: mssql
-CREATE INDEX idx_dwarf_flows_created_at ON dwarf_flows (created_at);
-
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              INTEGER      NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -205,6 +198,3 @@ CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_flows_thread ON dwarf_flows (thread_id, flow_id);
-
--- DRIVER: sqlite
-CREATE INDEX idx_dwarf_flows_created_at ON dwarf_flows (created_at);

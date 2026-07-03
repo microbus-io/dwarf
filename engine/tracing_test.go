@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/microbus-io/dwarf/workflow"
@@ -25,6 +26,16 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+// spanAttrString returns the string value of a span attribute, or "" if absent.
+func spanAttrString(s sdktrace.ReadOnlySpan, key string) string {
+	for _, kv := range s.Attributes() {
+		if string(kv.Key) == key {
+			return kv.Value.AsString()
+		}
+	}
+	return ""
+}
 
 // TestTracing_SpansEmittedOnRun pins the two span sites and their nesting:
 //   - the root "workflow" span minted (detached) at Create,
@@ -78,7 +89,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	eng.SetTracerProvider(tp)
 	eng.RunInTest(t)
 
-	_, outcome, err := eng.Run(ctx, "tracingflow.verify:428/parent", nil, nil)
+	flowKey, outcome, err := eng.Run(ctx, "tracingflow.verify:428/parent", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
@@ -149,4 +160,13 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	}
 	assert.True(armerFound, "subgraph workflow span should be parented to the runInner dispatch that armed it")
 	assert.Equal(subRoot.SpanContext().SpanID(), taskX.Parent().SpanID(), "subgraph step parented to the subgraph workflow span")
+
+	// SEC2: the per-step span's workflow.id is the token-free correlation id ("{shard}-{flowID}"), never
+	// the flowKey (whose third segment is a bearer write-capability). It equals the key with the token
+	// stripped, has no token segment, and is not the full key.
+	wantCorrID := flowKey[:strings.LastIndexByte(flowKey, '-')]
+	gotID := spanAttrString(taskA, "workflow.id")
+	assert.Equal(wantCorrID, gotID, "workflow.id is the token-free correlation id")
+	assert.Equal(1, strings.Count(gotID, "-"), "correlation id has exactly two segments (shard-flowID), no token")
+	assert.NotEqual(flowKey, gotID, "workflow.id must not be the capability-bearing flowKey")
 }

@@ -73,6 +73,15 @@ func (e *Engine) signalStatusChange(ctx context.Context, flowKey, status string)
 // payload bytes it received from a peer (the JSON encoding of what the engine handed that peer's
 // SignalPeers). It delegates by op to the matching internal handler. op and payload are opaque to the
 // host; only the engine interprets them.
+//
+// Trust boundary: the engine treats every DeliverSignal caller as an authenticated peer and does not
+// authenticate the signal itself - it has no transport of its own to authenticate on. The host owns the
+// peer channel and MUST authenticate it (accept signals only from genuine cluster replicas); a signal
+// admitted here is trusted. The blast radius of a spoofed signal is intentionally small - an enqueue op
+// is a single PK lookup that returns no flow data and dispatches nothing an owning replica would not
+// dispatch anyway (the claim CAS still arbitrates), and a statusChange op only wakes local Await waiters,
+// which re-snapshot the authoritative row - so this is a low-severity surface, but the host's transport
+// auth is the control that keeps it that way.
 func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) error {
 	switch signalOp(op) {
 	case signalOpEnqueue:

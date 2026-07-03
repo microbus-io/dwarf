@@ -60,4 +60,30 @@ limitations under the License.
 // call. Snapshot/History/Step/List inspect; Resume continues a paused flow; Cancel/Continue
 // manage lifecycle; Fork clones a terminal flow from a chosen step into a new flow for
 // non-destructive recovery; Delete/Purge retain. See the repository's docs/ directory for guides.
+//
+// # Security model
+//
+// Flow and step keys ("{shard}-{id}-{token}") are unguessable bearer capabilities, not authorization.
+// Holding a flow key is by itself sufficient to act on that one flow — Resume, Cancel, Fork, Continue,
+// Delete, and every introspection call — with no further check: the sole gate is the key (the numeric id
+// plus its random flow_token). The engine performs no authentication, authorization, or rate limiting and
+// has no notion of caller identity; its only vantage is the flow reference and the task URL, so ownership
+// and tenancy are invisible to it. Authorizing an operation is therefore the host's responsibility:
+// before calling the engine, verify the authenticated principal may act on the flow — typically from the
+// baggage the host set at Create (see workflow.FlowOptions.Baggage), or the host's own record mapping a
+// principal to the keys it was issued.
+//
+// The token defends only against reference forgery and id enumeration: flow ids are sequential, so without
+// the token a caller cannot fabricate a key for a flow it was never handed. That is defense in depth, not
+// access control — a leaked, logged, or shared key grants its bearer full write access to that one flow,
+// so treat a key like a password. The engine does not emit keys to traces or logs (telemetry carries only
+// a token-free "{shard}-{id}" correlation id), and there is deliberately no operation that resolves a
+// correlation id back to a key, which would be a capability-minting oracle.
+//
+// List and Search return keys, tokens included. Exposing them to a principal is equivalent to granting the
+// write capability for every flow they return, so a host must gate them by ownership and never surface
+// them to less-than-fully-trusted callers. The inbound peer entry point DeliverSignal is unauthenticated
+// by the engine; authenticating replica-to-replica transport is the host's responsibility. Operations on
+// an unknown or mismatched key return a uniform not-found (no existence oracle), but that is a hardening
+// detail, not a substitute for host authorization.
 package engine

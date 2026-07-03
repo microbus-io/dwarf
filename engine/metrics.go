@@ -34,6 +34,20 @@ import (
 // service.name/instance attributes (those are resource-level, owned by the host's OTEL pipeline).
 const metricScope = "github.com/microbus-io/dwarf"
 
+// Attribute cardinality is the host's to bound. The workflow-identifying labels are raw author-supplied
+// strings, so a metric's series count scales with the deployment's distinct values: `workflow` (on
+// flows_started/flows_terminated) with the number of distinct workflow URLs (typically hundreds to low
+// thousands - a useful, affordable dashboard slice), and the per-task labels `task_name` (on
+// steps_executed, multiplied by ~6 statuses) and `task_url` (on the task_concurrency_running gauge) with
+// the number of distinct task URLs, which in a large system can reach tens of thousands - a real
+// cardinality cost, and a PII risk if the host encodes ids/tenants into workflow or task URLs. The engine
+// deliberately does not cap this: it emits through the OTEL metric *API*, and the host owns the *SDK*, so
+// a host at that scale attaches a metric View to drop or aggregate any of these attributes (e.g. drop
+// `task_name`/`task_url` to keep only the aggregate counts, or reduce URLs to a bounded route template)
+// with zero engine change. Hosts should therefore keep unbounded ids out of workflow/task URLs, or View
+// them away. The remaining labels are bounded by construction: `status` (5 flow/step statuses),
+// `priority` (the small configured band set), and `park_type` (two values).
+
 // engineMetrics holds the engine's OpenTelemetry instruments. The counters are incremented inline at
 // their event sites; the gauges are observable (async) and pulled by observeGauges at collection time.
 type engineMetrics struct {

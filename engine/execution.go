@@ -249,13 +249,14 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Open a per-step span parented to the flow's root "workflow" span (reconstructed from the stored
 	// trace_parent), and place it on the executor's context so the task's downstream spans nest under it.
-	// The span is named by the task; no-op unless a TracerProvider is configured.
-	flowKey := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
+	// The span is named by the task; no-op unless a TracerProvider is configured. workflow.id carries the
+	// token-free correlation id, never the flowKey: a trace backend is typically readable far more broadly
+	// than the workflow data, and the key is a bearer write-capability (see "Tracing" in CLAUDE.md).
 	taskCtx = injectTraceParent(taskCtx, traceParent)
 	taskCtx, taskSpan := e.tracer.Start(taskCtx, taskName,
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
-			attribute.String("workflow.id", flowKey),
+			attribute.String("workflow.id", flowCorrelationID(shardNum, flowID)),
 			attribute.String("workflow.name", workflowURL),
 		),
 	)

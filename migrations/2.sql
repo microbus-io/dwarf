@@ -52,7 +52,6 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     PRIMARY KEY (step_id),
     INDEX idx_dwarf_steps_flow_id (flow_id, step_id),
     INDEX idx_dwarf_steps_status (status, updated_at),
-    INDEX idx_dwarf_steps_created_at (created_at),
     INDEX idx_dwarf_steps_selection (status, parked, priority, fairness_key),
     INDEX idx_dwarf_steps_saturation (status, parked, task_url)
 );
@@ -102,9 +101,6 @@ CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id);
 
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_steps_status ON dwarf_steps (status, updated_at) WHERE status IN ('pending', 'running');
-
--- DRIVER: pgx
-CREATE INDEX idx_dwarf_steps_created_at ON dwarf_steps (created_at);
 
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
@@ -159,9 +155,6 @@ CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id);
 CREATE INDEX idx_dwarf_steps_status ON dwarf_steps (status, updated_at) WHERE status IN ('pending', 'running');
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_steps_created_at ON dwarf_steps (created_at);
-
--- DRIVER: mssql
 CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');
 
 -- DRIVER: mssql
@@ -211,9 +204,6 @@ CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id, step_id);
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_steps_status ON dwarf_steps (status, updated_at) WHERE status IN ('pending', 'running');
-
--- DRIVER: sqlite
-CREATE INDEX idx_dwarf_steps_created_at ON dwarf_steps (created_at);
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key) WHERE status IN ('pending', 'running');

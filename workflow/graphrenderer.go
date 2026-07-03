@@ -99,11 +99,14 @@ func (r *GraphRenderer) Render() (string, error) {
 	var b strings.Builder
 	if r.titleLabel {
 		// Mermaid frontmatter: title and themeCSS are quoted YAML scalars so names/CSS with
-		// colons, braces, and '#' stay valid. The built-in themes ignore titleColor on the
-		// flowchart caption, so paint .flowchartTitleText directly with the theme cyan (primary)
-		// - it reads on light and dark backgrounds (and tracks the CSS var in var() mode).
+		// colons, braces, and '#' stay valid. The author-controlled graph name is additionally
+		// escapeMermaid'd (it strips every " so plain quotes suffice, and neutralizes < > ` that
+		// %q would pass through into the rendered caption). themeCSS is host-controlled and kept as
+		// %q. The built-in themes ignore titleColor on the flowchart caption, so paint
+		// .flowchartTitleText directly with the theme cyan (primary) - it reads on light and dark
+		// backgrounds (and tracks the CSS var in var() mode).
 		titleCSS := fmt.Sprintf(".flowchartTitleText { fill: %s; }", r.primaryFill)
-		fmt.Fprintf(&b, "---\ntitle: %q\nconfig:\n  themeCSS: %q\n---\n", r.g.name, titleCSS)
+		fmt.Fprintf(&b, "---\ntitle: \"%s\"\nconfig:\n  themeCSS: %q\n---\n", escapeMermaid(r.g.name), titleCSS)
 	}
 	fmt.Fprintf(&b, "graph %s\n", r.direction)
 	fmt.Fprintf(&b, "    classDef task fill:%s,color:%s,stroke:%s\n", r.primaryFill, r.primaryText, r.primaryFill)
@@ -122,7 +125,7 @@ func (r *GraphRenderer) Render() (string, error) {
 	}
 	for _, ee := range endEdges {
 		if ee.label != "" {
-			fmt.Fprintf(&b, "    %s -->|%q| _end(( )):::term\n", ee.from, ee.label)
+			fmt.Fprintf(&b, "    %s -->|\"%s\"| _end(( )):::term\n", ee.from, escapeMermaid(ee.label))
 		} else {
 			fmt.Fprintf(&b, "    %s --> _end(( )):::term\n", ee.from)
 		}
@@ -183,7 +186,7 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 	}
 
 	emitNodeBody := func(name string, indent string) {
-		fmt.Fprintf(b, "%s%s[%q]:::task\n", indent, ids[name], labels[name])
+		fmt.Fprintf(b, "%s%s[\"%s\"]:::task\n", indent, ids[name], escapeMermaid(labels[name]))
 		if r.linkParam != "" {
 			fmt.Fprintf(b, "%sclick %s \"?%s=%s\"\n", indent, ids[name], r.linkParam, url.QueryEscape(name))
 		}
@@ -265,7 +268,7 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 		for _, src := range srcExits {
 			for _, dst := range dstEntries {
 				if label != "" {
-					fmt.Fprintf(b, "%s%s -->|%q| %s\n", indent, src, label, dst)
+					fmt.Fprintf(b, "%s%s -->|\"%s\"| %s\n", indent, src, escapeMermaid(label), dst)
 				} else {
 					fmt.Fprintf(b, "%s%s --> %s\n", indent, src, dst)
 				}
@@ -287,7 +290,7 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 				continue
 			}
 			for _, dst := range entries[arm.to] {
-				fmt.Fprintf(b, "%s%s -->|%q| %s\n", indent, diamondID, arm.label, dst)
+				fmt.Fprintf(b, "%s%s -->|\"%s\"| %s\n", indent, diamondID, escapeMermaid(arm.label), dst)
 			}
 		}
 	}
