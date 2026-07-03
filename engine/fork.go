@@ -260,6 +260,18 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	}
 	mrows.Close()
 
+	// A terminal fork origin never holds an interrupted step (interrupt forces the whole surgraph chain -
+	// up to the root - non-terminal, and Fork rejects a non-terminal root), so a KEPT interrupted step (one
+	// not on this flow's rewind path, which is reset/re-parked below) can only arise from a broken invariant.
+	// Copied verbatim it would clone into the running fork as an orphan: it can never be resumed (resume needs
+	// flow status interrupted, but the fork is running) and, if a cohort member, its cohort can never fully
+	// arrive - wedging the fork permanently at its fan-in. Reject the fork loudly rather than silently wedge.
+	for _, s := range keep {
+		if s.status == workflow.StatusInterrupted && s.oldID != rewind {
+			return 0, errors.New("cannot fork: tree holds an unresolved interrupted step (%d) off the fork path", s.oldID, http.StatusConflict)
+		}
+	}
+
 	// Copy kept steps (all columns DB-side, native timestamps), overriding flow_id, a fresh token, and the
 	// flow's scheduling. The leaf fork step is inserted `created` (gated); all others keep their status.
 	idMap := make(map[int]int, len(keep))

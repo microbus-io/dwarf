@@ -88,9 +88,13 @@ func TestCountRunningByTask_ExcludesParked(t *testing.T) {
 		return
 	}
 	ins := func(taskURL, status string, parked int) {
+		// lease_expires is set far in the future so pollPendingSteps' lease recovery (which resets a
+		// running step whose lease has lapsed) cannot flip this forged running step back to pending
+		// between the insert and the count - the source of an intermittent "actual '0'" flake. A real
+		// running step likewise holds a live lease into the future.
 		_, err := db.ExecContext(ctx,
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, parked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			1, 1, "tok", "T", taskURL, status, 1000, parked,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, parked, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?))",
+			1, 1, "tok", "T", taskURL, status, 1000, parked, 3600000,
 		)
 		assert.NoError(err)
 	}

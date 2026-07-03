@@ -362,13 +362,16 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 		return errors.Trace(err)
 	}
 
-	// Check if this is a dynamic subgraph child
-	parentStepID, isDynamic, err := e.dynamicSubgraphParent(ctx, db, flowID)
+	// A subgraph child's failure is surfaced to the parent's flow.Subgraph call (via the parked caller step,
+	// carried in subgraph_error) rather than notified directly - but only when the child flow ACTUALLY fails,
+	// which for a child with a fan-out is after its cohort fully resolves (the same cohort accounting below
+	// that governs a top-level flow), never eagerly on the first branch error. Failing the child eagerly
+	// while a sibling branch is still live would strand that sibling and any subgraph descendants it parked
+	// on: the interrupt/resume/cancel tree walks all skip a terminal flow, so nothing could ever release
+	// them. parentStepID>0 iff this flow is a subgraph child.
+	parentStepID, isSubgraphChild, err := e.dynamicSubgraphParent(ctx, db, flowID)
 	if err != nil {
 		return errors.Trace(err)
-	}
-	if isDynamic {
-		return e.deliverSubgraphError(ctx, shardNum, stepID, flowID, parentStepID, taskErr)
 	}
 
 	var stepLineageID int
@@ -382,10 +385,12 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 
 	errMsg := taskErr.Error()
 	failFlow := false
+	reDispatchParent := false
 	var finalStateJSON string
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		failFlow = stepLineageID == 0
 		finalStateJSON = ""
+		reDispatchParent = false
 		tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
 			workflow.StatusFailed, parkedNone, errMsg, stepID,
@@ -408,6 +413,13 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 				finalStateJSON, workflow.StatusFailed, errMsg, flowID,
 				workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 			)
+			if isSubgraphChild {
+				var derr error
+				reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, errMsg)
+				if derr != nil {
+					return errors.Trace(derr)
+				}
+			}
 		}
 		return nil
 	})
@@ -418,6 +430,15 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 	e.metricStepExecuted(ctx, taskName, workflow.StatusFailed)
 
 	if !failFlow {
+		return nil
+	}
+
+	// A subgraph child does not notify directly (notify_on_stop is root-only); its failure is delivered to
+	// the parent's flow.Subgraph call, which re-dispatches to observe the error.
+	if isSubgraphChild {
+		if reDispatchParent {
+			e.enqueueStep(ctx, shardNum, parentStepID)
+		}
 		return nil
 	}
 
@@ -514,17 +535,9 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childSt
 		if err != nil {
 			return errors.Trace(err)
 		}
-		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
-			workflow.StatusPending, parkedNone, errMsg, parentStepID, workflow.StatusRunning, parkedSubgraph,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			reDispatchParent = true
-		}
-		return nil
+		var derr error
+		reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, errMsg)
+		return errors.Trace(derr)
 	})
 	if err != nil {
 		return errors.Trace(err)
@@ -533,6 +546,27 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childSt
 		e.enqueueStep(ctx, shardNum, parentStepID)
 	}
 	return nil
+}
+
+// deliverFlowFailureToParent re-arms a parked parent caller step with a failed child flow's error, so the
+// parent's flow.Subgraph call re-dispatches and observes it (yield=false, err set from subgraph_error).
+// Called inside the child flow's terminating transaction, after the child flow row has been marked failed.
+// Returns true when the caller step was still parked and got re-armed - the caller then enqueues it after
+// the transaction. Returns false for a top-level flow (parentStepID==0) or a caller step no longer parked
+// (already resolved, cancelled, or retried away), in which case there is nothing to re-dispatch.
+func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Executor, parentStepID int, errMsg string) (bool, error) {
+	if parentStepID == 0 {
+		return false, nil
+	}
+	res, err := tx.ExecContext(ctx,
+		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
+		workflow.StatusPending, parkedNone, errMsg, parentStepID, workflow.StatusRunning, parkedSubgraph,
+	)
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // allSubgraphFlows finds all active (non-terminal) descendant subgraph flows of flowID. It fetches the

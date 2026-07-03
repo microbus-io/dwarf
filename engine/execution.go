@@ -548,6 +548,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	var newStepIDs []int
 	flowFailed := false
 	var flowFailedErr, flowFailedFinalState string
+	// When the failing flow is a subgraph child, its failure is delivered to the parent's flow.Subgraph
+	// call rather than notified directly (see failStep). Captured in the transaction, acted on after it.
+	flowFailedParentStepID := 0
+	flowFailedReDispatchParent := false
 
 	// The transition (insert next steps, then advance or fail the flow) runs as one retryable
 	// transaction. Under pessimistic locking it can deadlock with a concurrent worker, and a deadlocked
@@ -559,6 +563,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		newStepIDs = newStepIDs[:0]
 		flowFailed = false
 		flowFailedErr, flowFailedFinalState = "", ""
+		flowFailedParentStepID, flowFailedReDispatchParent = 0, false
 
 		tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
 
@@ -646,6 +651,19 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 					flowFailed = true
 					flowFailedErr = sampleErr
 					flowFailedFinalState = finalStateJSON
+					// The cohort fully resolved here (this branch completed last), so every sibling has
+					// settled - nothing is stranded. If this flow is a subgraph child, deliver the failure
+					// to the parked parent caller step rather than notifying directly.
+					var parentStepID int
+					tx.QueryRowContext(ctx, "SELECT surgraph_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID)
+					if parentStepID != 0 {
+						rd, derr := e.deliverFlowFailureToParent(ctx, tx, parentStepID, sampleErr)
+						if derr != nil {
+							return errors.Trace(derr)
+						}
+						flowFailedParentStepID = parentStepID
+						flowFailedReDispatchParent = rd
+					}
 				}
 			}
 		}
@@ -664,6 +682,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 
 	if flowFailed {
+		if flowFailedParentStepID != 0 {
+			// Subgraph child: delivered to the parent's flow.Subgraph call; no direct notify (root-only).
+			if flowFailedReDispatchParent {
+				e.enqueueStep(ctx, shardNum, flowFailedParentStepID)
+			}
+			return nil
+		}
 		compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 		if notifyOnStop {
 			var finalState map[string]any

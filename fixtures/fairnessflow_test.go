@@ -124,10 +124,13 @@ func TestFairnessflow(t *testing.T) {
 		// Weighted 4:1 share (the point of FairnessWeight): heavy (weight 4) is dispatched preferentially
 		// over light (weight 1), so heavy work clusters earlier in the dispatch order. The earlier assertions
 		// (all 80 complete, some interleaving) would still pass if weights were ignored and the two keys
-		// interleaved evenly - these two checks are what actually pin the ratio. If the 4:1 semantics
-		// regressed to 1:1, mean dispatch indices would converge (~39.5 each) and the early window would be
-		// ~even, failing both. The thresholds are loose relative to the observed signal (meanHeavy~26.5 vs
-		// meanLight~54.5; first-25 heavy:light ~20:4) so ordinary scheduler jitter never trips them.
+		// interleaved evenly. The mean-dispatch-index gap is the primary ratio guard: if the 4:1 semantics
+		// regressed to 1:1 the means would converge (~39.5 each, gap ~0), far below the >=10 threshold
+		// (observed gap ~28, with 25-run range ~20..37, so ordinary jitter never trips it). The early-window
+		// check is a secondary, non-brittle confirmation that heavy *leads* early: with weighted sampling the
+		// first-25 counts are noisy (heavy 14..24, light 0..10 across runs), so a fixed 2:1 ratio there flaked
+		// when heavy dipped to ~14-15; only the direction (heavy > light early, observed gap always >=4) is
+		// asserted, leaving the ratio magnitude to the robust mean gap above.
 		var sumHeavy, sumLight int
 		var earlyHeavy, earlyLight int
 		const earlyWindow = 25
@@ -150,7 +153,7 @@ func TestFairnessflow(t *testing.T) {
 		t.Logf("meanHeavyIdx=%.1f meanLightIdx=%.1f earlyHeavy=%d earlyLight=%d", meanHeavy, meanLight, earlyHeavy, earlyLight)
 		assert.True(meanLight-meanHeavy >= 10,
 			"weighted 4:1 share too weak (may have regressed toward 1:1): meanHeavyIdx=%.1f meanLightIdx=%.1f", meanHeavy, meanLight)
-		assert.True(earlyHeavy >= 2*earlyLight,
-			"heavy (weight 4) should dominate the first %d dispatches ~4:1: earlyHeavy=%d earlyLight=%d", earlyWindow, earlyHeavy, earlyLight)
+		assert.True(earlyHeavy > earlyLight,
+			"heavy (weight 4) should lead light in the first %d dispatches: earlyHeavy=%d earlyLight=%d", earlyWindow, earlyHeavy, earlyLight)
 	})
 }

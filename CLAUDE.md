@@ -13,29 +13,20 @@ single **injected `Host` interface** (plus separately injected observability pro
 transport. A host application (for example a microservice) wires that interface to its own transport, identity, and
 observability. Where this doc refers to "the host" or "the adapter," it means that wrapping layer.
 
-> **Documentation convention.** Dwarf is a standalone package, published and consumed independently; in this repo's
-> wider context it sits *downstream* of the Microbus Fabric framework, but it must never depend on or assume that
-> particular host. Documentation and code comments in this module must therefore stay host-agnostic: do **not** name
-> the Fabric, the Foreman, or any other specific host (or its types, like `sub.TimeBudget` or a "plane"). Use the
-> generic term **"host"** for the upstream layer that embeds the dwarf engine, and describe what that host *does*
-> (mints a token, enforces a per-call deadline, shares a per-test isolation key) rather than which product does it.
+> **Documentation convention.** Keep all prose and code comments host-agnostic. Dwarf is standalone; though it sits
+> downstream of a specific framework in this repo, it must never name or assume that host (not the Fabric, the Foreman,
+> or their types like `sub.TimeBudget` or a "plane"). Use **"host"** for the upstream layer and describe what it *does*
+> (mints a token, enforces a per-call deadline, shares a per-test isolation key), not which product does it.
 
-> **Audience convention (where each kind of prose lives).** Dwarf is a module consumed by upstream **hosts**, so the
-> two audiences - the *host developer* using the API and the *agent working on the engine itself* - get different
-> prose in different places:
-> - **Godoc on exported identifiers** (uppercase functions, types, fields, packages) is the **host developer's** API
->   documentation. Write it for someone *using* the engine, not building it: what the call does, its contract, args,
->   return values, errors, and invariants the caller must respect. Keep it focused on use, not implementation.
-> - **Internal rationale and design notes - the *why* behind the mechanics - belong in this CLAUDE.md by default.**
->   It is the agent's reference, not the host developer's. Prefer adding to the relevant section here over expanding a
->   godoc comment.
-> - **Unexported comments** (on lowercase functions, or inline) carry agent-facing notes that genuinely need to sit
->   *next to the code* - a non-obvious ordering constraint, a subtle invariant a future edit could break, a "why this
->   and not the obvious alternative." Keep them as short as the point allows.
-> - **Avoid lengthy explanation in code** (exported or not). If a comment is growing into multiple paragraphs of
->   rationale, that rationale belongs in CLAUDE.md; leave a terse pointer-free note at the code if anything.
-> - **Do not refer to CLAUDE.md from code.** Code comments must stand on their own; CLAUDE.md may reference code,
->   never the reverse (the file is the agent's map of the code, not a dependency of it).
+> **Audience convention (where each kind of prose lives).**
+> - **Godoc on exported identifiers** is the host developer's API doc: what the call does, its contract, args, returns,
+>   errors, and caller invariants. Focused on use, not implementation.
+> - **Internal rationale - the *why* behind the mechanics - belongs here in CLAUDE.md by default.** Prefer adding to the
+>   relevant section here over expanding a godoc comment.
+> - **Unexported/inline comments** carry agent-facing notes that must sit *next to the code* - a non-obvious ordering
+>   constraint, an invariant a future edit could break. Keep them short.
+> - **Avoid lengthy rationale in code.** If a comment grows into paragraphs, move the rationale here and leave a terse note.
+> - **Do not refer to CLAUDE.md from code.** Comments stand on their own; CLAUDE.md references code, never the reverse.
 
 ### The Host interface (how the engine reaches the outside world)
 
@@ -48,11 +39,10 @@ observability providers below are injected separately. A host must implement `Lo
   baggage rides on ctx (`workflow.BaggageFrom(ctx)`) for identity-dependent loading (authz, per-actor graphs).
 - **`ExecuteTask(ctx, taskName string, flow *workflow.Flow) error`** - executes one task. Receives the flow
   carrier with state pre-populated; writes its changes back onto the flow. The engine never knows *how* the task is
-  reached (local call, RPC, message bus). The flow's baggage rides on ctx (`workflow.BaggageFrom(ctx)`). Any error the
-  task returns is terminal for that attempt: the engine routes it via the graph's `onError` transition if one exists,
-  else it fails the step. A **panic** in the in-process handler is caught at the call boundary and treated as exactly
-  such an error (see "Host-call panic isolation"). The engine never sniffs status codes or error text; a task that
-  wants to back off on a transient failure detects that itself and arms `flow.Retry`.
+  reached (local call, RPC, message bus). Any error the task returns is terminal for that attempt: routed via the
+  graph's `onError` transition if one exists, else the step fails. A **panic** in the in-process handler is caught at
+  the call boundary and treated as such an error (see "Host-call panic isolation"). The engine never sniffs status
+  codes or error text; a task backing off on a transient failure detects that itself and arms `flow.Retry`.
 - **`FlowStopped(ctx, flowKey string, outcome *workflow.FlowOutcome)`** - fired when a flow stops
   (completed/failed/cancelled/interrupted) for a flow created with `FlowOptions.NotifyOnStop=true`. `flowKey`
   identifies the stopped flow (it is *not* part of the outcome). The engine traffics in no delivery address:
@@ -81,14 +71,12 @@ observability providers below are injected separately. A host must implement `Lo
   span code.
 
 The **baggage** is opaque to the engine: set once at `Create` via `FlowOptions.Baggage` (an `any`, like
-`initialState`), stored on the flow row (the `baggage` column), and delivered to every `LoadGraph` and
-`ExecuteTask` call for the flow's lifetime on the dispatch **context** - the host reads it with
-`workflow.BaggageFrom(ctx)`. It is authored in one visible, typed place (`FlowOptions`) and observed ambiently
-where used; most callbacks ignore it. The engine never interprets it; a host carries actor claims / tenant
-identity there. `BaggageFrom` lives in the `workflow` package so task code can read baggage without importing
-`engine`. The host always receives the JSON-decoded form (typically `map[string]any`), exactly like flow state.
-(Unlike W3C/OTEL request baggage this is *flow*-scoped and frozen at `Create`, not per-request mutable - a host
-adapter bridging to a bus maps between the two at the seam.)
+`initialState`), stored on the flow row (the `baggage` column), and delivered on the dispatch **context** to every
+`LoadGraph`/`ExecuteTask` call for the flow's lifetime - the host reads it with `workflow.BaggageFrom(ctx)` (which
+lives in the `workflow` package so task code needn't import `engine`). Authored in one typed place, observed
+ambiently; most callbacks ignore it. The engine never interprets it; a host carries actor claims / tenant identity
+there, receiving the JSON-decoded form (typically `map[string]any`), like flow state. (Unlike W3C/OTEL request
+baggage this is *flow*-scoped and frozen at `Create`, not per-request mutable.) See "Identity / baggage propagation".
 
 ### Backpressure is the task's or host's job, never the engine's
 
@@ -249,9 +237,8 @@ schedule), never the engine's.
 flow has several interrupted steps, Snapshot picks the **same one the next `Resume` will resolve** - the
 earliest-`updated_at` (`step_id` tiebreak), *not* by `step_depth` - so a Snapshot reports exactly the
 interrupt the next Resume acts on. For a `running` flow it returns the status with an **empty `State`** -
-dwarf does not currently reconstruct the live in-flight merged state (including the fan-out `step_id=0`
-case). Exposing a live fan-out snapshot is a deliberately-deferred behavioral decision (it returns
-work-in-progress state that no other path exposes); confirm against product intent before implementing.
+dwarf does not reconstruct live in-flight merged state (including the fan-out `step_id=0` case). Exposing a
+live fan-out snapshot is a deliberately-deferred decision; confirm against product intent before implementing.
 
 **Resume** - Continues a flow paused by `flow.Interrupt`. Walks up the surgraph chain (`surgraphChain`) and down the
 interrupted subgraph chain (`interruptedSubgraphChain`) to the leaf interrupted step. Records resume data on the
@@ -286,6 +273,18 @@ references are remapped (a ref to a pruned step → 0); cohort `arrivals`/`failu
 from the cloned members' terminal states, **excluding the rewound branch** (so the existing fan-in path converges/
 fails the fork with no special escalation). It recurses into kept subgraph-caller children, skipping the leaf fork
 step (which re-spawns a fresh child).
+
+*Interrupted-kept-step guard.* `cloneSubtree` copies a kept step's status verbatim, so a kept `interrupted`
+step would clone into the running fork as an orphan - unresumable (`Resume` needs the flow `interrupted`, but the
+fork is `running`) and, as a cohort member, uncountable at fan-in (the cohort recompute scores `interrupted` as
+neither arrival nor failure), wedging the fork permanently. This *cannot* arise from a valid origin: an interrupt
+forces the whole surgraph chain non-terminal (up to the root), and Fork rejects a non-terminal root - so a
+terminal fork origin never holds an interrupted step (a failed branch of a cohort that also has an interrupted
+branch rests the flow `interrupted`, not `failed`, because the cohort can never fully arrive). The guard is
+therefore defense-in-depth against a broken invariant: cloneSubtree rejects the fork with 409 if any kept
+(non-rewind) step is `interrupted`, turning a would-be silent permanent wedge into a loud, clean, transactional
+failure that never mutates the origin. The rewind steps themselves (leaf fork step, re-parked ancestor callers)
+are exempt - they are reset/re-parked, so forking *at* an interrupted step is fine.
 
 *Chain rewind.* The leaf fork step is reset (merged overrides, cleared output/park/cohort) and **held `created`
 until the full id mapping is in place, then flipped to `pending`** - so a crash mid-clone leaves an inert flow that
@@ -329,8 +328,8 @@ exclusion keeps a debug `Fork` (which shares the thread's `thread_id` for `List`
 production continuation base. The prior turn's `final_state` passes through unfiltered as the new flow's initial
 state; a workflow author wanting narrower carryover scrubs with an entry adapter task using
 `flow.Delete`/`Transform`. As a **derived** operation `Continue` takes no `FlowOptions`: it **inherits the
-thread's policy** - priority, fairness, time budget, baggage, and notify-on-stop - from the latest turn. A caller
-wanting different policy uses `Create` with `FlowOptions.ThreadKey` instead (explicit policy, same thread).
+thread's policy** (priority/fairness/budget/baggage/notify) from the latest turn; a caller wanting different policy
+uses `Create` with `FlowOptions.ThreadKey` (explicit policy, same thread).
 
 **Run** - Create + Await in one call, returning `(flowKey string, *workflow.FlowOutcome, error)` -
 the new flow's key alongside its outcome (the key is the flow's identity, not part of the outcome; callers
@@ -529,18 +528,12 @@ The timer waits on the `nextPoll` deadline, shortened to the nearest future `not
 backoff) so a due step wakes the replica even when no doorbell arrives. The timer loop (`timerLoop`) runs
 `pollPendingSteps` on the adaptive interval.
 
-**`shortenNextPoll` must treat a past `nextPoll` as "needs rescheduling," not just lower it.** `nextPoll` holds a
-*past* value during the window between a deadline firing and the in-flight `pollPendingSteps` writing the next one.
-A wake request arriving in that window (e.g. `flow.Retry`/`flow.Sleep` re-dispatch arming `not_before` a few hundred
-ms out) is *later* than that stale past value, so a strictly-lower-only update would drop it - and the in-flight poll,
-having scanned a moment too early (the step was still `running`), then overwrites `nextPoll` with its far
-`maxPollInterval` default, leapfrogging the armed `not_before`. The wake is lost and the step waits the full poll
-interval (minutes) instead of its backoff - an intermittent sleep/retry **wedge** (every worker parked on the cache,
-the timer asleep on the stale far deadline; the backlog-poll safety net never engages because it only caps `nextPoll`
-*after* a poll runs). So `shortenNextPoll` updates when `tm` is sooner **or** the current `nextPoll` already lies in
-the past: `if tm.Before(nextPoll) || nextPoll.Before(now)`. With that, a concurrent re-dispatch records its future
-`tm` over the stale value, and the poll's own `nextPoll.Before(now)` clobber clause then leaves that future value
-alone. Reproduced as ~1-in-40 timeouts of `fixtures/sleepretrycomposeflow_test.go` under stress before the fix.
+**`shortenNextPoll` treats a past `nextPoll` as "needs rescheduling," not just lower.** If `nextPoll` already lies in
+the past (a fired deadline the timer is mid-poll on), a strictly-lower-only update would drop a wake request arming a
+*future* `not_before`, and the in-flight poll then clobbers `nextPoll` with its far `maxPollInterval` default - an
+intermittent sleep/retry **wedge** (every worker parked on the cache, the timer asleep on the stale far deadline). So
+it updates when `tm` is sooner **or** `nextPoll` is already past (the exact predicate is at `shortenNextPoll` in
+`engine.go`). Reproduced as ~1-in-40 timeouts of `fixtures/sleepretrycomposeflow_test.go` under stress before the fix.
 
 ### Query Parallelism
 
@@ -548,17 +541,11 @@ alone. Reproduced as ~1-in-40 timeouts of `fixtures/sleepretrycomposeflow_test.g
 remote database:
 
 - **Claim UPDATE + step SELECT** - on pgx/sqlite/mssql the claim and read are **one** round-trip via
-  `RETURNING`/`OUTPUT`, which reads the row *as updated* in the same statement - always a consistent snapshot.
-  MySQL lacks RETURNING, so it is two statements, and they run **serially, not in parallel** (claim first, read only
-  on a successful claim). Parallelizing them on separate connections is **unsafe**: the read pulls columns a
-  concurrent `Resume`/`flow.Retry`/subgraph-completion mutates (`resume_data`, `subgraph_result`, `attempt`,
-  `interrupt_done`, `subgraph_done`) in the *same* transaction that flips the step to `pending`, so with independent
-  snapshots the read could observe the pre-transition row (empty `resume_data`) while the claim observes the committed
-  `pending` row and succeeds - delivering an **empty resume payload** to the task. Those columns are *not* stable
-  against a concurrent pending-setter (an earlier "the SELECT reads only stable columns" rationale was wrong).
-  Claiming first guarantees the subsequent read's snapshot is after the claim commit - hence after the
-  pending-setter's commit; a lost claim (`n==0`) skips the read entirely and returns. The lease size comes from the
-  step row's own `time_budget_ms` (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
+  `RETURNING`/`OUTPUT` (reads the row *as updated* - a consistent snapshot). MySQL lacks RETURNING, so they are two
+  statements run **serially, not in parallel** (claim first, read only on success): parallelizing on separate
+  connections is unsafe - an independent read snapshot can observe the pre-transition row and deliver an empty resume
+  payload (the reason is spelled out at the claim site in `execution.go`). The lease size comes from the step row's
+  own `time_budget_ms` (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
 - **Flow data** - runs after the claim+read, since it needs the `flow_id`.
 - **Fan-in sibling counts** - the unfinished and failed sibling COUNT queries run concurrently.
 - **Subgraph status counts** - the active and completed subgraph COUNT queries run concurrently.
@@ -648,15 +635,9 @@ is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
 - **Fan-in** `{Yi}->Z`: `Z.predecessor_id` = the last cohort member to finish; every cohort *exit* step gets
   `successor_id=Z`. The exit set is *logically* `lineage_id == cohortSpawnID AND task_name IN` the graph-predecessor
   tasks of the fan-in - **not** the whole lineage, so `A`/`B` in `forEach->{A->B->C}->J` are excluded and only the
-  `C`s point at `J`. **The `successor_id` write targets those exit steps by primary key** (`step_id IN (...)`), where
-  the ids are collected during `insertFanInStep`'s existing cohort-member merge scan - **not** by re-issuing the
-  `(flow_id, lineage_id, task_name)` predicate as an `UPDATE`. That predicate has no supporting index, so SQL Server
-  ran the `UPDATE` as a clustered-index scan taking `U` locks across the whole `dwarf_steps` table; two concurrent
-  fan-ins then locked interleaved PK rows in opposite order and **deadlocked** (writer-vs-writer, so RCSI does not
-  help). The transition transaction retried and gave up, stranding the flow `running` with a `completed` exit step
-  and no fan-in successor - the soak/fan-out-subgraph wedge. Collecting the exit ids from the scan that already runs
-  and updating by PK locks only those rows, in deterministic PK order, with no extra query and no new index. (The
-  linear `X.successor_id=Y` and `fireFanInDirect` writes were always PK-keyed and never had this problem.)
+  `C`s point at `J`. The `successor_id` write targets those exit steps **by primary key** (ids collected during
+  `insertFanInStep`'s cohort-member merge scan), not by the `(flow_id, lineage_id, task_name)` predicate - which is
+  unindexed and deadlocked concurrent fan-ins on SQL Server (the deadlock story is at that write in `execution.go`).
 - **flow.Retry**: rewinds the step in place (same row), so `predecessor_id` is preserved. (A `Fork` copies the
   step into a new row and remaps `predecessor_id` to the cloned predecessor.)
 - **Entry / subgraph-entry steps**: `predecessor_id` defaults to 0.
@@ -685,20 +666,17 @@ The graph still carries no per-task timing - the budget is a per-*flow* default 
 wants a tighter per-task bound enforces it inside its `ExecuteTask` (or the task itself), shortening the call context;
 narrowing the deadline at dispatch is always allowed. The engine's budget is the outer ceiling.
 
-`FlowOptions.TimeBudget` is **frozen at `Create`** (immutable for the flow's life, like `priority`) and **inherited by
-subgraph children** (`createSubgraphFlow` reads the parent's `time_budget_ms` alongside priority/fairness). A
-later `SetTimeBudget` change does not retro-edit existing flows; it only seeds flows created afterward. (`Continue`
-**inherits** the prior turn's budget - it reads the latest turn's `time_budget_ms` and carries it forward, the same
-as priority/fairness/baggage/notify, since `Continue` takes no `FlowOptions`; a caller wanting a different budget
-uses `Create` with `FlowOptions.ThreadKey`.) On a subgraph spawn the child's `LoadGraph` is bounded by the
-caller flow's budget; the create-time `LoadGraph` runs on the caller's own request context instead.
+`FlowOptions.TimeBudget` is **frozen at `Create`** (immutable for the flow's life, like `priority`), **inherited by
+subgraph children** (`createSubgraphFlow` reads the parent's `time_budget_ms` alongside priority/fairness) and by
+`Continue` (the thread's latest turn, since it takes no `FlowOptions`). A later `SetTimeBudget` change does not
+retro-edit existing flows; it only seeds flows created afterward. On a subgraph spawn the child's `LoadGraph` is
+bounded by the caller flow's budget; the create-time `LoadGraph` runs on the caller's own request context instead.
 
-**No engine-imposed ceiling.** `SetTimeBudget` is the default; the engine deliberately enforces **no** upper bound on
-`FlowOptions.TimeBudget`, mirroring its refusal to own a flow-level deadline. Bounding the budget (e.g. an SLA
-ceiling) is the responsibility of whoever creates flows: a host that wants to cap it validates `FlowOptions.TimeBudget`
-against its own limit before calling `Create` and rejects an over-limit request there (a request to *exceed* the
-ceiling, distinct from narrowing the deadline at dispatch, which the host may always do). A standalone caller that
-sets a very large budget simply owns the consequences below.
+**No engine-imposed ceiling.** The engine enforces **no** upper bound on `FlowOptions.TimeBudget`, mirroring its
+refusal to own a flow-level deadline. A host wanting an SLA cap validates `FlowOptions.TimeBudget` against its own
+limit before `Create` and rejects an over-limit request there (a request to *exceed* the ceiling, distinct from
+narrowing the deadline at dispatch, which the host may always do). A standalone caller setting a very large budget
+owns the consequences below.
 
 The worker lease is sized from the **step's own `time_budget_ms`** + `leaseMargin` (30s), written self-referentially
 in the claim CAS (`lease_expires = DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?)`, only the margin a bind param), so
@@ -756,8 +734,8 @@ and what the next step's `state` column becomes. This is the *materialization* m
 call except one. The exception is **changes accumulation** (`processStep` folding a task's fresh output onto a
 prior attempt's `changes` before persisting the `changes` column): there the null must be **preserved**, because
 it is the pending-delete marker *in transit* - it only enacts the delete when `changes` later folds onto `state`.
-That site therefore uses a plain overlay (`maps.Copy`), not `MergeState`; "simplifying" it back to `MergeState`
-silently breaks `Delete` (the null is dropped before it is ever persisted, so the deletion never propagates).
+That site therefore uses a plain overlay (`maps.Copy`), not `MergeState` (with a don't-simplify-this note at the
+accumulation site in `execution.go`).
 
 ### Task-Initiated Control Signals
 
@@ -853,6 +831,30 @@ wanting the parent's full state passes `flow.Snapshot()` as `in` - explicit opt-
 unmarshals that `final_state` into the caller's `out` (yield=false), and the task reads the fields it wants. The
 child output is **not** merged into the parent's `changes`.
 
+**Failure back to the parent (a subgraph child fails exactly like a top-level flow, never eagerly).** When a
+task inside a subgraph child errors with no `onError`, the child's failure is surfaced to the parent's
+`flow.Subgraph` call as the `err` return (carried in `subgraph_error`, re-dispatching the parked caller step -
+`deliverFlowFailureToParent`), rather than notifying directly (`notify_on_stop` is root-only). The load-bearing
+rule is *when*: the child flow fails only **when it actually fails as a flow** - which, for a child with an
+internal fan-out, means **after its cohort fully resolves**, running the *same* `cohort_failures` accounting a
+top-level flow runs (`failStep` for a failing last-arriver, the `processStep` cohort-arrival path for a
+completing last-arriver; both call `deliverFlowFailureToParent` when `failFlow` becomes true). It is **not** an
+eager terminalization on the first branch error. Failing the child eagerly (an earlier `failStep` short-circuit
+straight into `deliverSubgraphError`, bypassing cohort accounting) stranded the child's *other* live branches and
+any subgraph descendants they had parked on: every tree walk skips a terminal flow (`Resume`'s down-walk descends
+only `interrupted` children; `Cancel`/`allSubgraphFlows` stop at terminal nodes; the parked-caller wedge sweep
+sees a *terminal* caller step, not `running`+`parkedSubgraph`), so the stranded sub-tree had no path out but
+`Delete`. Deferring the child's failure to cohort resolution means every branch has settled (completed or failed)
+before the child terminalizes, so there is no live sibling to strand - and a sibling parked on a grandchild that
+*interrupts* propagates up normally, so the whole tree parks `interrupted` and a root `Resume` still threads down
+to it (rather than the grandchild's approval being silently cancelled). `deliverSubgraphError` remains, now used
+**only** by the wedge sweep (a wedged caller whose child already went terminal); the live failStep path no longer
+calls it. Defense in depth for any residual orphan (e.g. the Cancel-vs-spawn race) is
+`recoverOrphanedSubgraphChildren` (see "Background Recovery"). `fixtures`/`engine`
+`TestSubgraphCohortFail_NoStrandOnBranchFailure` pins the child staying `running` after one branch failed while a
+sibling is parked on a live grandchild, then converging to a clean terminal tree with the branch error surfaced
+to the root.
+
 ### Surgraph Step Identification
 
 Each subgraph flow's row stores `surgraph_flow_id` *and* `surgraph_step_id` - the PK of the parked surgraph step
@@ -889,11 +891,10 @@ the surgraph links - now read from those *in-memory* rows - are still what suppl
 *structure* every walk follows.
 
 **Where it is used.** All four tree walks fetch the whole tree in one `root_flow_id` scan
-(`WHERE root_flow_id = (SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)`) and then derive their result **in
+(`WHERE root_flow_id = (SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)`) and derive their result **in
 memory** by following the loaded `surgraph_flow_id`/`surgraph_step_id` pointers - identical results to the former
-level-by-level recursion, but a fixed number of round-trips regardless of nesting depth (the property that matters
-as subgraph-as-function-call invites deep nesting). The subquery resolves the tree first, so each walk works whether
-its starting flow is the root or a mid-tree node:
+level-by-level recursion, but a fixed number of round-trips regardless of nesting depth. The subquery resolves the
+tree first, so each walk works whether its starting flow is the root or a mid-tree node:
 
 - `allDescendantSubgraphFlows` (Delete cascade, `Fingerprint`) - BFS *down* from the given flow over the loaded
   rows (any status).
@@ -988,14 +989,13 @@ matching the broadcast-only-on-terminal-stops policy.
 `engine.RunInTest(t)` hashes `t.Name()` into the engine's `testHashedID`, then runs the normal `Startup`/`Shutdown`
 (via `t.Cleanup`) against per-test isolated databases. It is sugar over **`SetInTest(name)`** — the
 construction-time, `*testing.T`-free hook that does the hashing and flips on test mode — plus `Startup` and a
-`t.Cleanup` shutdown; `RunInTest(t)` is exactly `SetInTest(t.Name())` + that. A host with no `*testing.T` (e.g. one
-running under an external test harness) calls `SetInTest(key)` itself with a stable isolation key — the foreman
-core service passes its Microbus *plane*, so its replicas share one isolated set. The `testHashedID` is what
-switches the open path into test
-mode: `openDatabaseShard` resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN`
-(the same variable sequel reads, so one knob redirects the whole suite at a real server); else the SQLite in-memory
-default **`file:dwarf_%d?mode=memory&cache=shared`** - substitutes `%d` with the shard index, then routes the result
-through `sequel.CreateTestingDatabase`, which keys an isolated, auto-dropped database on `(driver, baseDSN, testID)`.
+`t.Cleanup` shutdown. A host with no `*testing.T` (e.g. one running under an external test harness) calls
+`SetInTest(key)` itself with a stable isolation key — one shared across its replicas so they resolve to the same
+isolated set. The `testHashedID` switches the open path into test mode: `openDatabaseShard`
+resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN` (the same variable
+sequel reads, so one knob redirects the whole suite at a real server); else the SQLite in-memory default
+**`file:dwarf_%d?mode=memory&cache=shared`** - substitutes `%d` with the shard index, then routes through
+`sequel.CreateTestingDatabase`, which keys an isolated, auto-dropped database on `(driver, baseDSN, testID)`.
 
 **Per-shard isolation comes from the DSN's `%d`, not from the testID.** The default DSN carries `%d`, so shard *i*
 opens base `file:dwarf_i?…` - a distinct base per shard, so `CreateTestingDatabase`'s key already differs per shard
@@ -1021,17 +1021,15 @@ suite was deliberately moved off one.
 
 What keeps the pools from summing past a server's connection cap is that **the fixtures do not run with
 `t.Parallel()`** - they run **sequentially**, so at most ~one engine (plus the one being torn down by `t.Cleanup`) is
-live at a time. With `t.Parallel()`, `go test` would run up to `-parallel` (defaults to `GOMAXPROCS`) tests at once,
-and each per-test engine would multiply into *N parallel engines × pool × shards* connections to the **same** server -
-a sum that overruns the cap (**PostgreSQL defaults to `max_connections = 100`**; MySQL 151, SQL Server ~32k, SQLite
-none, so Postgres trips first). When a pool tries to open a physical connection past the cap the server *rejects* it
-with an error (it does **not** block); the engine then either fails the operation or, on a sizing query in
-`pollPendingSteps`, briefly re-polls (see the poll-error clamp below). Retrying the connection does not fix a
-*structural* oversubscription (3 replicas each wanting 60 against a 100-cap server can never be satisfied) - the only
-real fix is to keep the **sum of live pools under the cap**, and running tests serially is what holds the count of
-concurrently-live engines to roughly one. So a fixture must **not** add `t.Parallel()`; if the suite is ever
-parallelized, connection load must be re-controlled (e.g. a shared engine, or a per-test `SetMaxOpenConns` low enough
-that `parallel × pool × shards` stays under the cap).
+live at a time. With `t.Parallel()`, `go test` runs up to `-parallel` (defaults to `GOMAXPROCS`) tests at once, and
+each per-test engine would multiply into *N parallel engines × pool × shards* connections to the **same** server - a
+sum that overruns the cap (**PostgreSQL defaults to `max_connections = 100`**; MySQL 151, SQL Server ~32k, SQLite
+none, so Postgres trips first). A pool opening a connection past the cap is *rejected* with an error (not blocked); the
+engine then fails the operation or, on a `pollPendingSteps` sizing query, briefly re-polls (see the poll-error clamp
+below). Retrying does not fix *structural* oversubscription (3 replicas each wanting 60 against a 100-cap server) - the
+only fix is to keep the **sum of live pools under the cap**, which serial execution does. So a fixture must **not** add
+`t.Parallel()`; if the suite is ever parallelized, connection load must be re-controlled (a shared engine, or a
+per-test `SetMaxOpenConns` low enough that `parallel × pool × shards` stays under the cap).
 
 Each fixture owns its own engine *and* its own `TestProxy`, so there is no cross-test sharing to coordinate. `TestProxy`
 still guards its handler maps with a `RWMutex` because the engine's own worker goroutines dispatch concurrently while
@@ -1048,13 +1046,11 @@ them on its own engine/proxy before `RunInTest` - the same per-test ownership, j
   `cache=shared`, starting with a write avoids the deadlock where two read-first deferred transactions both hold
   SHARED locks and neither can upgrade. **Every flow-terminating transaction must be write-first for the same
   reason**, and the failure mode is worse than a transient error: the terminal step is marked `completed` by
-  `processStep` *before* the disposition runs, so once the disposition's `Transact` exhausts its lock-contention
-  retries and errors, the lease recovery (which only resets `running` rows) can't re-dispatch the now-`completed`
-  step, and the flow is stranded `running` with every step terminal — a permanent orphan flow. `failStep` and the
-  fan-in transaction write first (the failed-step / `updated_at` UPDATE); `completeFlow` was the one read-first
-  holdout (`computeFinalState`'s SELECTs before the status UPDATE) and now takes the flow row's write lock first.
-  A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go` reproduce the wedge
-  without the fix.
+  `processStep` *before* the disposition runs, so if the disposition's `Transact` exhausts its retries and errors,
+  lease recovery (which only resets `running` rows) can't re-dispatch the now-`completed` step - the flow strands
+  `running` with every step terminal (a permanent orphan). `failStep`, the fan-in transaction, and `completeFlow` all
+  write first. A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go` reproduce
+  the wedge without the fix.
 - **Busy timeout** - `sequel` applies `_pragma=busy_timeout(1000)` to SQLite DSNs without one, so concurrent workers
   hitting a write lock wait up to 1s instead of failing immediately with `SQLITE_BUSY`. Essential during fan-out.
 - **Lock contention recovery** - `processStep` defers a check: on a lock-contention error
@@ -1183,16 +1179,15 @@ idle    = min(idle, maxOpen)                                 // clamp idle to a 
   inverse is the DB-hold duty cycle). Raise it for DB-light workloads (remote `ExecuteTask` dominates), lower it for
   DB-heavy ones. A *larger* value yields a *smaller* pool - the pool is derived from the workers, it is not a cap on
   them.
-- **`SetMaxOpenConns` (default 8)** is now a **per-shard ceiling** (= per-server budget in the distributed topology),
+- **`SetMaxOpenConns` (default 8)** is a **per-shard ceiling** (= per-server budget in the distributed topology),
   not the pool size: the formula sizes the pool and then clamps to this. It **must be ≥ 1** - there is deliberately
   no "unlimited" sentinel (a `0` to `database/sql` means *unlimited*, a footgun; pass a high value like 1000 for an
   effectively unbounded ceiling). The default of 8 pins the common single-shard case to exactly `8/8`
-  (`maxIdle == maxOpen == 8`, today's behavior) and keeps the new default **≤ the old flat `8×shards` at every shard
-  count**. Worked table (workers=64, wpc=8, cap=8): `1 shard → 8/8 · 2 → 4/8 · 4 → 2/6 · 8 → 2/6`. The per-replica
-  total grows with shards, which is correct under distributed PROD (more servers, each within its own budget). A high
-  ceiling is harmless: `maxOpen` is only a ceiling, connections open lazily on demand, and demand is bounded by the
-  worker pool (at most ~`workers` concurrent DB holders on a shard), so the pool never actually opens more than that
-  however high the ceiling is set - no explicit clamp to the worker count is needed.
+  (`maxIdle == maxOpen == 8`) and keeps the new default **≤ the old flat `8×shards` at every shard count**. Worked
+  table (workers=64, wpc=8, cap=8): `1 shard → 8/8 · 2 → 4/8 · 4 → 2/6 · 8 → 2/6`. The per-replica total grows with
+  shards, correct under distributed PROD (more servers, each within its own budget). A high ceiling is harmless:
+  connections open lazily on demand, and demand is bounded by the worker pool (~`workers` concurrent DB holders per
+  shard), so the pool never opens more than that however high the ceiling - no explicit clamp needed.
 - The pool floor (2) gives each shard a little warm headroom for balls-in-bins distribution variance and per-flow
   fan-out/subgraph-affinity bursts (a single flow's fan-out concentrates on its one shard). `maxOpen = idle*2 + 2`
   (the `+2` matches sequel's singleton sizing) supplies burst headroom; connections opened above `idle` during a
@@ -1221,16 +1216,12 @@ The schema carries `priority`, `fairness_key`, `fairness_weight` on **both** `dw
 split used for `time_budget_ms`/`baggage`.
 
 `resolveFlowOptions` resolves a caller's `*workflow.FlowOptions` against the engine defaults: priority falls back to
-`SetDefaultPriority`, the fairness key falls back to the host-supplied key (or `""`), the weight to `1`, and the time
-budget to `SetTimeBudget` (the engine imposes no ceiling on it; see "Time Budgets"). These values are immutable for the
-flow's life (switching a flow's fairness key mid-run would be a self-promotion abuse vector). This is the **genesis**
-path: `Create`/`Run` resolve from options (and `Create` with `FlowOptions.ThreadKey` joins an existing thread while
-still resolving its own policy). The **derived** operations carry policy from their source instead of taking options:
-`createSubgraphFlow` **inherits** the parent flow's values (priority, fairness, *and* time budget), so a
-high-priority parent never silently spawns default-priority descendants; `Continue` **inherits the thread's**
-priority/fairness/budget/baggage/notify from the latest completed turn (it takes no `FlowOptions`); and `Fork`
-inherits the origin flow's. So policy is authored once at genesis and propagates by derivation - the operation is the
-inherit-vs-default selector.
+`SetDefaultPriority`, the fairness key to the host-supplied key (or `""`), the weight to `1`, and the time budget to
+`SetTimeBudget` (no ceiling; see "Time Budgets"). These values are immutable for the flow's life (switching a flow's
+fairness key mid-run would be a self-promotion abuse vector). This is the **genesis** path (`Create`/`Run`); the
+**derived** operations inherit instead - `createSubgraphFlow` from the parent (so a high-priority parent never
+silently spawns default-priority descendants), `Continue` from the thread's latest turn, `Fork` from the origin. See
+"Policy is set once at genesis" under Engine Operations.
 
 Propagation onto step rows: where the resolved values are in hand (the entry step), they are literal bind parameters;
 in the deep `processStep` paths (fan-out and the two fan-in inserts), the values - including the flow's frozen
@@ -1282,14 +1273,13 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 ## Metrics (`engine/metrics.go`)
 
 The engine emits 10 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
-injects the provider; it defaults to the global `otel.GetMeterProvider()` - the no-op provider unless the host
-configures the SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in
-`initMetrics` (called from `initRuntime`, so both `Startup` and `RunInTest` get them) from
-`mp.Meter("github.com/microbus-io/dwarf")` - that scope distinguishes dwarf's metrics; **service identity lives
-in the provider's Resource, not in per-metric attributes** (no `service.name` on data points - that would
-explode cardinality and is off-spec). The only attributes the engine attaches are the metric-specific labels:
-`workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `task_url` (on `dwarf_task_concurrency_running`),
-`priority`, and `park_type`.
+injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
+SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
+`initRuntime`, so both `Startup` and `RunInTest` get them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
+scope distinguishes dwarf's metrics; **service identity lives in the provider's Resource, not in per-metric
+attributes** (no `service.name` on data points - cardinality explosion, off-spec). The only attributes attached are
+the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `task_url` (on
+`dwarf_task_concurrency_running`), `priority`, and `park_type`.
 
 **5 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
 (start path), `dwarf_flows_terminated` (completeFlow), `dwarf_steps_executed` (every terminal step
@@ -1321,12 +1311,11 @@ slice root-vs-subgraph. `TestMetrics_EmittedOnRun` pins emission with an in-memo
 
 ## Tracing (`engine/tracing.go`)
 
-The engine is OTEL-native for tracing, symmetric with metrics: `SetTracerProvider(tp)` overrides the
-global `otel.GetTracerProvider()` (the no-op provider unless the host configures the SDK), and the engine
-creates spans from `tp.Tracer("github.com/microbus-io/dwarf")` (same scope as the metrics; service
-identity lives in the provider's Resource, not in span attributes). The host injects **only** the
-provider - no span code, no `trace_parent` handling. Resolved once in `initRuntime` (`initTracer`); under
-the no-op tracer every site below is free.
+The engine is OTEL-native for tracing, symmetric with metrics: `SetTracerProvider(tp)` overrides the global
+`otel.GetTracerProvider()` (no-op unless the host configures the SDK), and the engine creates spans from
+`tp.Tracer("github.com/microbus-io/dwarf")` (same scope as metrics; service identity lives in the provider's
+Resource, not span attributes). The host injects **only** the provider - no span code, no `trace_parent` handling.
+Resolved once in `initRuntime` (`initTracer`); under the no-op tracer every site below is free.
 
 **Two span sites, persisted across replicas via the `trace_parent` column.** A flow's trace context is
 minted once and reconstructed on every step dispatch (which may land on any replica), so it must survive
@@ -1401,7 +1390,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `SetDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
 | `fairness_key` | Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable |
 | `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
-| `error` | Task error string for `failed` flows. Written by `failStep` to the **failing flow only** (`WHERE flow_id=? AND status NOT IN (terminal)`, so first-failure-wins on that flow). Cross-subgraph failure does **not** write the whole chain in one UPDATE - it bubbles up level-by-level: `deliverSubgraphError` fails the child flow and surfaces the error to the parked caller step (`subgraph_error`), whose task re-fails on re-dispatch, writing `error` on the parent flow, and so on to the root. Surfaced as `FlowOutcome.Error` |
+| `error` | Task error string for `failed` flows. Written by `failStep` to the **failing flow only** (`WHERE flow_id=? AND status NOT IN (terminal)`, so first-failure-wins on that flow). Cross-subgraph failure does **not** write the whole chain in one UPDATE - it bubbles up level-by-level: when a subgraph child fails (via cohort accounting, never eagerly - see "Failure back to the parent"), `deliverFlowFailureToParent` surfaces the error to the parked caller step (`subgraph_error`), whose task re-fails on re-dispatch, writing `error` on the parent flow, and so on to the root. (`deliverSubgraphError` does the same re-dispatch from the wedge sweep only.) Surfaced as `FlowOutcome.Error` |
 | `cancel_reason` | Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
 | `time_budget_ms` | Per-flow task time budget, resolved from `FlowOptions.TimeBudget` (else the `SetTimeBudget` default) and frozen at `Create`; the engine imposes no ceiling (a host bounds it before `Create`). Seeds every step's `time_budget_ms`. Inherited by subgraph children **and** by `Continue`/`Fork` (which carry the source's policy). Always stored concrete at `Create`; a `0` is unexpected and falls back to the live engine default at step insert (pure defense) |
 
@@ -1499,26 +1488,23 @@ be relevant after it ends." So retention is either operator-driven or an explici
   flow and its subgraph descendants the instant it reaches `completed` - an *event* trigger on success, not a clock,
   so there is no duration to pick and the resurrection paths are preserved: `failed`/`cancelled`/`interrupted` flows
   are **never** auto-deleted (a failed disposable job is exactly the one to keep as a `Fork` source). Honored on
-  the **root** flow only (`surgraph_flow_id=0`); the delete reuses `Delete`'s cascade to sweep descendants, and the
-  flag is not inherited by children. The delete happens **inside the same transaction that marks the flow
-  `completed`** (`completeFlow`), so a disposable flow transitions `running` -> gone **atomically** - there is never a
-  committed `completed` state for it. This is what makes the uniform 404 hold for *every* reader, not just an `Await`
-  woken by `signalStop`: an earlier design deleted in a *separate* transaction after the completion commit, which left
-  an observable window where a `Snapshot`/`Await` read landing between the two commits saw a transient `completed`
-  outcome instead of 404 - most easily `Await`'s **first snapshot**, taken before it ever blocks on the stop signal.
-  Folding the delete into the completion transaction removes the window. The `dwarf_flows_terminated` metric and any
-  `FlowStopped` notification fire *after* the commit, from values captured before the delete (so observability and the
-  full outcome survive the row's deletion); `signalStop` then wakes blocked `Await`s, which re-snapshot a gone row and
-  404. If the completion transaction fails it rolls back whole - no partial delete, no stray `completed` row.
-  **Await contract: once it completes, the flow is gone everywhere - uniformly.** A completed disposable flow has no
-  row, so `Snapshot`/`History` and a blocking `Await`/`Run` return "flow not found" (404), the same regardless of
-  timing (the atomic running->gone transition removes the completed-then-deleted race). For an `Await` that 404 *is* the
-  completion signal - and waiting still works: an `Await` started while the flow runs blocks until it finishes, then
-  404s. A `failed`/`cancelled` disposable flow is *not* deleted, so `Await` returns its real terminal outcome (so a 404
-  specifically means "completed"). Uniform 404 was chosen over a translated `completed` outcome (which was timing-
-  dependent: in-time vs late await) and over a step-pruned tombstone (which only moves the inconsistency to `History`
-  and, by keeping `final_state`, leaks the private data the deletion exists to remove). Callers wanting the outcome use
-  `NotifyOnStop` (whose `FlowOutcome` is computed before the delete).
+  the **root** flow only (`surgraph_flow_id=0`), not inherited by children; the delete reuses `Delete`'s cascade to
+  sweep descendants. The delete happens **inside the same transaction that marks the flow `completed`**
+  (`completeFlow`), so a disposable flow transitions `running` -> gone **atomically** - there is never a committed
+  `completed` state, which is what makes the uniform 404 hold for *every* reader (an earlier design deleted in a
+  *separate* transaction after the completion commit, leaving a window where a `Snapshot`/`Await` read - most easily
+  `Await`'s **first snapshot**, before it blocks - saw a transient `completed` outcome instead of 404). The
+  `dwarf_flows_terminated` metric and any `FlowStopped` notification fire *after* the commit from values captured
+  before the delete (so observability and the full outcome survive); `signalStop` then wakes blocked `Await`s, which
+  re-snapshot a gone row and 404. A failed completion transaction rolls back whole - no partial delete, no stray
+  `completed` row. **Await contract: once it completes, the flow is gone everywhere - uniformly.** `Snapshot`/`History`
+  and a blocking `Await`/`Run` return "flow not found" (404) regardless of timing; for an `Await` that 404 *is* the
+  completion signal (waiting still works: an `Await` started mid-run blocks until finish, then 404s). A
+  `failed`/`cancelled` disposable flow is *not* deleted, so `Await` returns its real terminal outcome (a 404
+  specifically means "completed"). Uniform 404 was chosen over a translated `completed` outcome (timing-dependent) and
+  over a step-pruned tombstone (which moves the inconsistency to `History` and, by keeping `final_state`, leaks the
+  private data the deletion exists to remove). Callers wanting the outcome use `NotifyOnStop` (whose `FlowOutcome` is
+  computed before the delete).
 
 For operator-driven retention:
 
@@ -1531,22 +1517,20 @@ For operator-driven retention:
   the parent is - so the descendant guard is defense against a race.)
 - **`Purge(Query)`** bulk-deletes flows matching the query, except running. Same `Query` shape as `List` (Status,
   WorkflowURL, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit); it **rejects**
-  `IncludeSubgraphs` with 400 (a subgraph child is purged only as part of its root's tree, never on its own). Capped
-  at `purgeCap` (**1000**) **root** flows per call; returns the count of root flows deleted (so `deleted <= Limit`). It **selects
-  root flows only** but **deletes each matched root's whole subgraph subtree** - the root, its steps, and all
-  subgraph descendants (and their steps) - keyed on the `root_flow_id` tree-membership index (a root points at
-  itself, descendants inherit it; single-shard by construction). Done per matched-root batch in one transaction:
-  delete the trees' steps (`flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (roots))`), then the
-  roots (counted, status-reguarded against the SELECT→DELETE running race), then the descendants (`root_flow_id IN
-  (roots)`, now matching only subtrees since the roots are gone). The matched-root ids are **embedded as integer
-  literals, not bind params** (they are trusted ids from the engine's own SELECT), which dodges the per-driver
-  parameter-count ceiling (SQL Server 2100, older SQLite 999). The `purgeCap` (1000) keeps the embedded id list
-  small enough to ride in a single statement per shard - there is no batching. (An earlier revision deleted only the matched root row + its own steps,
-  leaving subgraph descendants permanently orphaned - never reachable by a later Purge, which selects roots only, nor
-  by `Delete`, which rejects a child key. Deleting the whole tree is the fix; cascading per root keeps the matched
-  set stable across the three deletes - a single self-referential `DELETE … WHERE flow_id IN (SELECT … FROM
-  dwarf_flows …)` cannot do this, because MySQL forbids deleting from a table named in its own subquery and the
-  capped root set vanishes once the roots are deleted.)
+  `IncludeSubgraphs` with 400 (a subgraph child is purged only as part of its root's tree). Capped at `purgeCap`
+  (**1000**) **root** flows per call; returns the count deleted (`deleted <= Limit`). It **selects root flows only**
+  but **deletes each matched root's whole subgraph subtree** (root, steps, and all subgraph descendants), keyed on
+  the `root_flow_id` tree-membership index. Done per matched-root batch in one transaction: delete the trees' steps
+  (`flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (roots))`), then the roots (counted,
+  status-reguarded against the SELECT→DELETE running race), then the descendants (`root_flow_id IN (roots)`, now
+  matching only subtrees since the roots are gone). The matched-root ids are **embedded as integer literals, not bind
+  params** (trusted ids from the engine's own SELECT), dodging the per-driver parameter-count ceiling (SQL Server
+  2100, older SQLite 999); `purgeCap` keeps the id list small enough for one statement per shard, so there is no
+  batching. (An earlier revision deleted only the matched root + its own steps, permanently orphaning subgraph
+  descendants - unreachable by a later Purge, which selects roots only, or by `Delete`, which rejects a child key.
+  Cascading per root also keeps the matched set stable across the three deletes - a single self-referential
+  `DELETE … WHERE flow_id IN (SELECT … FROM dwarf_flows …)` cannot, because MySQL forbids deleting from a table named
+  in its own subquery and the capped root set vanishes once the roots are deleted.)
 
 Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the current
 step's `task_name` (excludes fan-out flows, `step_id=0`). `Query.OlderThan`/`NewerThan` are database-anchored
@@ -1561,20 +1545,19 @@ The engine uses SQL transactions for multi-statement operations and `lease_expir
 
 ### Host-call panic isolation
 
-The host runs **in-process**, so a panic in host code propagates straight into the engine's own goroutines -
-and being in-process is the reason to defend, not ignore it: there is no process boundary to contain the blast
-radius, so one buggy task handler would otherwise take down every flow sharing the replica. Each of the four
-`Host` calls is therefore wrapped in `errors.CatchPanic` at its **call boundary** (not only at the worker loop):
+The host runs **in-process**, so a panic in host code propagates straight into the engine's own goroutines - and
+that is the reason to defend: with no process boundary, one buggy task handler would otherwise take down every flow
+sharing the replica. Each of the four `Host` calls is wrapped in `errors.CatchPanic` at its **call boundary** (not
+only at the worker loop):
 
 - **`ExecuteTask`** (`execution.go`) - the panic becomes the call's `error` and flows through the **normal
-  disposition**: routed via the graph's `onError` transition if one exists, else `failStep`. This is the
-  load-bearing case. The worker loop *already* wraps `processStep` in `CatchPanic` (`scheduling.go`), so the
-  process never died - but that catch is too coarse: a panic there unwinds the whole `processStep` stack *past*
-  the error routing, leaving the already-leased step stuck `running` until lease expiry (`budget + leaseMargin`),
-  which then re-dispatches and re-panics - a slow crash-loop that also silently skips the author's `onError`.
-  Catching at the boundary turns a panic into a clean, immediate step failure (lease released), identical to a
-  returned error. A panic is treated as *any other task error* (no special bypass) for consistency;
-  `errors.CatchPanic` captures the stack trace into the error for diagnosis.
+  disposition**: routed via `onError` if one exists, else `failStep`. This is the load-bearing case. The worker loop
+  *already* wraps `processStep` in `CatchPanic` (`scheduling.go`), so the process never died - but that catch is too
+  coarse: a panic there unwinds the whole `processStep` stack *past* the error routing, leaving the leased step stuck
+  `running` until lease expiry (`budget + leaseMargin`), which re-dispatches and re-panics - a slow crash-loop that
+  also skips the author's `onError`. Catching at the boundary turns a panic into a clean, immediate step failure
+  (lease released), identical to a returned error. `errors.CatchPanic` captures the stack trace into the error for
+  diagnosis.
 - **`LoadGraph`** (`operations.go` at `Create`, `execution.go` at subgraph spawn) - converted to an error
   return. The subgraph-spawn site runs inside `processStep`, so without this it would wedge the caller step
   exactly like `ExecuteTask`; the `Create` site fails the `Create` call cleanly instead of unwinding into the
@@ -1614,13 +1597,13 @@ refiller.Wait()      // refiller fully exited; its DB ops complete
 ```
 
 The timer and refiller each have their own WaitGroup, separate from the worker pool, so the close-then-wait order can
-be staged. `timerStop` is stopped before `refillStop` because `timerLoop`'s final poll can still `requestRefill`;
-stopping the refiller first would lose that work or race the trigger. `refillTrigger`, like `wakeTimer`, is **never
-closed** and only sent to non-blockingly, so a late coalesced `requestRefill` from the timer's final poll is a
-harmless no-op rather than a `send on closed channel` panic; the refiller is stopped by closing the *separate*
-`refillStop`. A `cache.refill` into an already-closed cache is a no-op. Using never-closed nudge channels plus
-dedicated `timerStop`/`refillStop` termination signals removes the ordering hazard an earlier design carried, where
-closing `wakeTimer` before draining the workers let a worker mid-`processStep` race the close and panic.
+be staged. `timerStop` is closed before `refillStop` because `timerLoop`'s final poll can still `requestRefill`;
+stopping the refiller first would lose that work or race the trigger. `refillTrigger`, like `wakeTimer`, is never
+closed and only sent to non-blockingly, so a late `requestRefill` from the timer's final poll is a harmless no-op
+rather than a `send on closed channel` panic; the refiller is stopped via the separate `refillStop`. A `cache.refill`
+into an already-closed cache is a no-op. Never-closed nudge channels plus dedicated `timerStop`/`refillStop` signals
+remove the ordering hazard an earlier design carried (closing `wakeTimer` before draining the workers let a worker
+mid-`processStep` race the close and panic).
 
 ### Transactions
 
@@ -1645,17 +1628,17 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
 3. **Orphan flow detection** (`detectOrphanedFlows`, `wedge.go`) - logs an error for any `running` flow with no
-   non-terminal step whose `updated_at` is older than `orphanFlowThreshold` (5m). A `running` flow with every step
-   terminal and no successor is stranded - the shape the post-completion transition wedge produces (see "processStep -
-   Normal Completion" below). A bug signal; **auto-recovery is intentionally not attempted here** - re-driving the flow
-   would duplicate the transition-evaluation logic and a false positive could double-advance it. The real recovery is
-   the `processStep` recovery defer (which rolls the just-`completed` step back to `pending` so it re-dispatches); this
-   detector is the last-resort alarm for the residual case that defer cannot cover (its own reset UPDATE losing to a
-   contention storm). It runs on the same **dedicated `recoveryLoop`** as the wedge sweep (#4) - kept off
-   `pollPendingSteps` for the identical heavy-scan reason (its `NOT EXISTS` over `dwarf_steps` is latency-tolerant,
-   while the poll is nudged sub-second). Excludes a flow legitimately waiting (a `running`+parked subgraph caller, a
-   `pending` sleep/retry step, an `interrupted` step - all non-terminal), so steady-state operation never trips it. Logs
-   at error level only (silent under the default discard logger, surfaced once a host injects one); no metric.
+   non-terminal step and `updated_at` older than `orphanFlowThreshold` (5m). Such a flow (every step terminal, no
+   successor) is stranded - the shape the post-completion transition wedge produces (see "processStep - Normal
+   Completion" below). A bug signal; **auto-recovery is intentionally not attempted** - re-driving the flow would
+   duplicate transition-evaluation logic and a false positive could double-advance it. The real recovery is the
+   `processStep` recovery defer (which rolls the just-`completed` step back to `pending` to re-dispatch); this detector
+   is the last-resort alarm for the residual case the defer cannot cover (its own reset UPDATE losing to a contention
+   storm). It runs on the same **dedicated `recoveryLoop`** as the wedge sweep (#4) - off `pollPendingSteps` for the
+   same heavy-scan reason (its `NOT EXISTS` over `dwarf_steps` is latency-tolerant, while the poll is nudged
+   sub-second). Excludes a flow legitimately waiting (`running`+parked subgraph caller, a `pending` sleep/retry step,
+   an `interrupted` step - all non-terminal), so steady-state never trips it. Logs at error level only (silent under
+   the default discard logger); no metric.
 4. **Parked-step wedge sweep** (`sweepWedgedParks`, `wedge.go`) - defense in depth for the `parkedSubgraph` park,
    whose releasing condition could in principle never fire (a parked step is invisible to selection, and
    `parkedSubgraph` is invisible to lease recovery too). Runs on a **dedicated recovery goroutine** (`recoveryLoop`)
@@ -1664,9 +1647,11 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
    latency-tolerant; the recovery loop is drained before the refiller in `drainRuntime` since a recovered park can
    `requestRefill`. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a
    false positive (the guard sits comfortably beyond normal subgraph-completion latency). Unlike orphan-flow detection
-   this **does** auto-recover, because each recovery re-invokes the *normal* release mechanism - which is guarded by a
-   CAS on the park state - rather than duplicating transition logic, so it is idempotent and harmless under a
-   concurrent resolution, a false positive, or a peer replica sweeping the same shard:
+   this **does** auto-recover, because each recovery re-invokes a *normal, status-guarded* mechanism (the
+   `parkedSubgraph` revive CAS, or a subtree `Cancel` guarded by `status NOT IN (terminal)`) rather than duplicating
+   transition logic, so it is idempotent and harmless under a concurrent resolution, a false positive, or a peer
+   replica sweeping the same shard. It runs **two mirror-image detectors** - a wedged caller (child gone) and an
+   orphaned child (caller/parent gone):
    - **`parkedSubgraph`** (`recoverWedgedSubgraphParks`): a caller step `running`+`parkedSubgraph` with **no
      non-terminal child** (`surgraph_step_id = step_id`, status created/running/interrupted) is wedged - the child
      reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
@@ -1674,6 +1659,23 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
      failed/cancelled/absent one. (A fan-out has several caller steps, each its own `surgraph_step_id`, checked
      independently; `flow.Retry` leaves older terminal children whose latest sibling is still active - handled by
      the `NOT EXISTS` + latest-child logic.)
+   - **orphaned subgraph child** (`recoverOrphanedSubgraphChildren`) - the **mirror image** of the above: a
+     non-terminal child flow (`created`/`running`/`interrupted`) whose *parent flow* is already terminal
+     (`completed`/`failed`/`cancelled`). Where the `parkedSubgraph` case is a live caller whose child vanished,
+     this is a live child whose caller/parent vanished. It is the residue of a `Cancel` that terminalized the
+     tree in the narrow window **after the caller step parked but before the child flow was inserted**
+     (`execution.go`: the park UPDATE commits, then `createSubgraphFlow` runs), so the teardown - working from a
+     scan taken before the child existed - missed it. (A fan-out sibling's `failStep` no longer produces this
+     residue: a subgraph child now fails via cohort accounting after every branch settles, never eagerly while a
+     sibling is live - see "Failure back to the parent".) The orphan has no path out on its
+     own: the terminal root 409s `Resume`/`Cancel`, the child's own key is read-only (400), and
+     `recoverWedgedSubgraphParks` is blind because the caller step is *terminal*, not `running`+`parkedSubgraph`.
+     The sweep cancels the orphan's whole subtree (`cancelOrphanedSubtree`: a subtree-scoped clone of `Cancel`'s
+     transaction with no surgraph up-walk, since the ancestor chain is already terminal), sharing the parent's
+     terminal fate. An **`interrupted`** parent is deliberately *excluded* (not terminal - a `Resume` of the root
+     revives that branch and a sibling child under it is healthy); the `parkWedgeThreshold` age guard excludes the
+     sub-second window where a just-terminalized parent's sibling child is still being cleaned up by the normal
+     completion/error path. It counts under `park_type="orphaned_child"`.
    Each unwedge increments `dwarf_steps_unwedged{park_type}` (the always-on alarm; a nonzero value means a
    latent bug let a step wedge) and logs at error level (silent under the default discard logger, surfaced once a
    host injects one).
@@ -1695,19 +1697,18 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
 - **processStep - Interrupt** - one transaction. A pre-commit crash rolls back and re-execution produces the interrupt
   again (interrupt-producing tasks should be idempotent). Self-healing.
 - **processStep - Normal Completion (with next steps)** - step -> `completed` (a standalone UPDATE), then a separate
-  transaction inserts the successors / bumps `cohort_arrivals` / updates `step_id`, then the doorbell. The gap between
-  the two is a wedge window: a `completed` step with no successor is invisible to lease recovery (`running`-only), the
-  parked-step wedge sweep (`parkedSubgraph`-only), and the lock-contention reset (`status='running'`-guarded), so the
-  flow would strand `running` forever. This is not only a ~microsecond crash window - the follow-up transaction can
-  fail *persistently* (Transact exhausting its contention retries under load, or a non-retryable DB error). The
-  **`processStep` recovery defer** closes it: on any error return after the step was marked `completed`, it rolls the
-  step back `completed` -> `pending` (guarded `WHERE status='completed'`, retried via Transact) so the normal
-  re-dispatch machinery re-runs the task and re-evaluates transitions - the failed transaction already rolled back its
-  partial writes, so the re-run starts clean. This is the same reset idiom the defer already applied to the
-  `running` -> `pending` lock-contention case, generalized to the post-completion state. Re-execution on recovery is
-  the engine's standard behavior (lease recovery re-dispatches too), so completion tasks must tolerate re-running,
-  exactly as crash-recovered ones do. Residual hole: the reset UPDATE can itself lose to a contention storm, leaving
-  the step `completed` - that surviving orphan is surfaced (log-only) by `detectOrphanedFlows` (Background Recovery #3).
+  transaction inserts the successors / bumps `cohort_arrivals` / updates `step_id`, then the doorbell. The gap is a
+  wedge window: a `completed` step with no successor is invisible to lease recovery (`running`-only), the parked-step
+  wedge sweep (`parkedSubgraph`-only), and the lock-contention reset (`status='running'`-guarded), so the flow would
+  strand `running` forever. Not only a ~microsecond crash window - the follow-up transaction can fail *persistently*
+  (Transact exhausting contention retries under load, or a non-retryable DB error). The **`processStep` recovery
+  defer** closes it: on any error return after the step was marked `completed`, it rolls the step back
+  `completed` -> `pending` (guarded `WHERE status='completed'`, retried via Transact) so the normal re-dispatch
+  machinery re-runs the task and re-evaluates transitions (the failed transaction already rolled back its partial
+  writes, so the re-run starts clean). Same reset idiom the defer applies to the `running` -> `pending` lock-contention
+  case, generalized to post-completion. Re-execution on recovery is standard (lease recovery re-dispatches too), so
+  completion tasks must tolerate re-running. Residual hole: the reset UPDATE can itself lose to a contention storm,
+  leaving the step `completed` - surfaced (log-only) by `detectOrphanedFlows` (#3).
 - **processStep - Flow Completion (no next steps)** - flow -> `completed` then step -> `completed`. A crash between
   leaves the step `running`; the lease expires, `pollPendingSteps` resets it, and the terminal-flow check marks it
   `completed`. Self-healing.

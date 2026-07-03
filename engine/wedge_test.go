@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -153,6 +154,144 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	got, _ := out.State["got"].(float64)
 	assert.Equal(7, int(got))
+}
+
+// TestWedgeSweep_OrphanedSubgraphChildCancelled forges the zombie a Cancel racing a subgraph spawn leaves - a
+// non-terminal subgraph child whose parent tree was cancelled in the window after the caller step parked but
+// before the child was inserted, so the teardown missed it. The child rests interrupted with no path out
+// (root-key ops 409 on the terminal root, the child's own key is read-only, and recoverWedgedSubgraphParks is
+// blind because the caller step is cancelled, not running+parked). recoverOrphanedSubgraphChildren must cancel
+// it, while leaving a healthy subgraph child (running under a still-running parent) untouched.
+func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	proxy := NewTestProxy()
+	release := make(chan struct{})
+
+	// Orphan scenario: parent spawns a child whose entry task interrupts, so the child rests interrupted.
+	parent := workflow.NewGraph("OrphanParent")
+	parent.SetEndpoint("P", "orphanchild.verify:0/p")
+	parent.AddTransition("P", workflow.END)
+	proxy.HandleGraph("orphanchild.verify:0/parent", parent)
+	ichild := workflow.NewGraph("OrphanChild")
+	ichild.SetEndpoint("K", "orphanchild.verify:0/k")
+	ichild.AddTransition("K", workflow.END)
+	proxy.HandleGraph("orphanchild.verify:0/child", ichild)
+	proxy.HandleTask("orphanchild.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
+		var out map[string]any
+		_, err := f.Subgraph("orphanchild.verify:0/child", nil, &out)
+		return err
+	})
+	proxy.HandleTask("orphanchild.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Interrupt(map[string]any{"awaiting": true}, nil)
+		if yield || err != nil {
+			return err
+		}
+		return nil
+	})
+
+	// Healthy control: parent whose child blocks (stays running), so the parent stays running+parked.
+	hparent := workflow.NewGraph("HealthyParent")
+	hparent.SetEndpoint("P", "orphanchild.verify:0/hp")
+	hparent.AddTransition("P", workflow.END)
+	proxy.HandleGraph("orphanchild.verify:0/healthyparent", hparent)
+	hchild := workflow.NewGraph("HealthyChild")
+	hchild.SetEndpoint("K", "orphanchild.verify:0/hk")
+	hchild.AddTransition("K", workflow.END)
+	proxy.HandleGraph("orphanchild.verify:0/healthychild", hchild)
+	proxy.HandleTask("orphanchild.verify:0/hp", func(ctx context.Context, f *workflow.Flow) error {
+		var out map[string]any
+		_, err := f.Subgraph("orphanchild.verify:0/healthychild", nil, &out)
+		return err
+	})
+	proxy.HandleTask("orphanchild.verify:0/hk", func(ctx context.Context, f *workflow.Flow) error {
+		<-release
+		return nil
+	})
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	e.RunInTest(t)
+	defer close(release)
+
+	// Orphan: create, await the interrupt, then forge a Cancel that raced the spawn - the parent tree is
+	// cancelled but the child (which the racing scan missed) is left interrupted.
+	parentKey, err := e.Create(ctx, "orphanchild.verify:0/parent", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	out, err := e.Await(ctx, parentKey)
+	if !assert.NoError(err) || !assert.Equal(workflow.StatusInterrupted, out.Status) {
+		return
+	}
+	shard, parentFlowID, _, err := parseFlowKey(parentKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := e.shard(shard)
+	if !assert.NoError(err) {
+		return
+	}
+	var childFlowID int
+	var childToken string
+	if !assert.NoError(db.QueryRowContext(ctx,
+		"SELECT flow_id, flow_token FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID,
+	).Scan(&childFlowID, &childToken)) {
+		return
+	}
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=?, cancel_reason=? WHERE flow_id=?",
+		workflow.StatusCancelled, "forged", parentFlowID)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET status=?, parked=? WHERE flow_id=? AND status IN (?, ?)",
+		workflow.StatusCancelled, parkedNone, parentFlowID, workflow.StatusInterrupted, workflow.StatusRunning)
+	assert.NoError(err)
+
+	// Healthy control: a subgraph child running under a still-running parent.
+	healthyKey, err := e.Create(ctx, "orphanchild.verify:0/healthyparent", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	_, healthyParentID, _, err := parseFlowKey(healthyKey)
+	if !assert.NoError(err) {
+		return
+	}
+	var healthyChildID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if db.QueryRowContext(ctx,
+			"SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=? AND status=?",
+			healthyParentID, workflow.StatusRunning,
+		).Scan(&healthyChildID) == nil && healthyChildID != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !assert.NotEqual(0, healthyChildID, "healthy subgraph child never started") {
+		return
+	}
+
+	// Recover (minAge=0 bypasses the age gate).
+	e.recoverOrphanedSubgraphChildren(ctx, db, shard, 0)
+
+	// The orphaned child is cancelled with the recovery reason, and its interrupted step is cancelled too.
+	var childStatus, childReason string
+	assert.NoError(db.QueryRowContext(ctx, "SELECT status, cancel_reason FROM dwarf_flows WHERE flow_id=?", childFlowID).
+		Scan(&childStatus, &childReason))
+	assert.Equal(workflow.StatusCancelled, strings.TrimSpace(childStatus))
+	assert.Equal("parent flow terminated (orphan recovery)", strings.TrimSpace(childReason))
+	var liveChildSteps int
+	assert.NoError(db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status IN (?, ?, ?, ?)",
+		childFlowID, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning,
+	).Scan(&liveChildSteps))
+	assert.Equal(0, liveChildSteps, "orphaned child's steps should all be cancelled")
+
+	// The healthy child (parent still running) is untouched.
+	var healthyChildStatus string
+	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", healthyChildID).Scan(&healthyChildStatus))
+	assert.Equal(workflow.StatusRunning, strings.TrimSpace(healthyChildStatus))
 }
 
 // TestOrphanDetection_FlagsWedgedFlow forges the exact state the post-completion transition wedge leaves - a

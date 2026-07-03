@@ -224,7 +224,6 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	return flowKey, nil
 }
 
-
 // snapshot returns the current outcome of a flow.
 func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
