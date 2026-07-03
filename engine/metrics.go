@@ -225,8 +225,8 @@ func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error)
 	perShard := make([]map[string]int, numShards+1)
 	err := e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
-			"SELECT task_url, COUNT(*) FROM dwarf_steps WHERE status=? GROUP BY task_url",
-			workflow.StatusRunning,
+			"SELECT task_url, COUNT(*) FROM dwarf_steps WHERE status=? AND parked=? GROUP BY task_url",
+			workflow.StatusRunning, parkedNone,
 		)
 		if err != nil {
 			return errors.Trace(err)

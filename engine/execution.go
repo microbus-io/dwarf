@@ -599,7 +599,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			} else if fullyResolved && failures > 0 {
 				failFlow := spawnLineageID == 0
 				if !failFlow {
-					failFlow, _ = e.propagateCohortFailure(ctx, tx, spawnLineageID)
+					var pcfErr error
+					failFlow, pcfErr = e.propagateCohortFailure(ctx, tx, spawnLineageID)
+					if pcfErr != nil {
+						return errors.Trace(pcfErr)
+					}
 				}
 				if failFlow {
 					var sampleErr string

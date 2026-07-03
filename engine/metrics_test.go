@@ -71,6 +71,41 @@ func gaugePresent(rm metricdata.ResourceMetrics, name string) bool {
 	return false
 }
 
+// TestCountRunningByTask_ExcludesParked pins that the dwarf_task_concurrency_running gauge counts only
+// active (parked=parkedNone) running steps, not parked subgraph callers. A parked caller is status=running
+// but holds no executing slot, so counting it would inflate task concurrency and contradict the saturation
+// index's documented purpose (its (status, parked, task_url) shape excludes parked rows).
+func TestCountRunningByTask_ExcludesParked(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	eng := NewEngine()
+	eng.SetHost(noopHost{})
+	eng.RunInTest(t)
+
+	db, err := eng.shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+	ins := func(taskURL, status string, parked int) {
+		_, err := db.ExecContext(ctx,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, parked) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			1, 1, "tok", "T", taskURL, status, 1000, parked,
+		)
+		assert.NoError(err)
+	}
+	ins("svc/x", workflow.StatusRunning, parkedNone)     // active caller - counts
+	ins("svc/y", workflow.StatusRunning, parkedSubgraph) // parked caller - must be excluded
+
+	counts, err := eng.countRunningByTask(ctx)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(1, counts["svc/x"])
+	_, present := counts["svc/y"]
+	assert.False(present) // parked subgraph caller does not inflate concurrency
+}
+
 func TestMetrics_EmittedOnRun(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()

@@ -616,7 +616,11 @@ func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, 
 	}
 	outcome, err = e.await(ctx, flowKey)
 	if err != nil {
-		e.cancel(ctx, flowKey, "")
+		// await usually fails because ctx expired (timeout/cancel); cancel on a detached ctx (values kept,
+		// deadline dropped) so the just-started flow is actually torn down instead of left running.
+		// await usually fails because ctx expired (timeout/cancel); cancel on a detached ctx (values kept,
+		// deadline dropped) so the just-started flow is actually torn down instead of left running.
+		e.cancel(context.WithoutCancel(ctx), flowKey, "")
 		return "", nil, errors.Trace(err)
 	}
 	return flowKey, outcome, nil
