@@ -290,7 +290,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		accumulatedChanges = priorChanges
 		changesJSON = []byte(priorChangesJSON)
 	} else {
-		accumulatedChanges, _ = workflow.MergeState(priorChanges, rawChanges, nil)
+		// Overlay, not MergeState: this builds the persisted changes delta, where a cleared (null) entry is
+		// a pending-delete marker that must survive. It only takes effect (drops the key) when changes later
+		// fold onto state via MergeState.
+		accumulatedChanges = make(map[string]any, len(priorChanges)+len(rawChanges))
+		maps.Copy(accumulatedChanges, priorChanges)
+		maps.Copy(accumulatedChanges, rawChanges)
 		changesJSON, _ = json.Marshal(accumulatedChanges)
 	}
 

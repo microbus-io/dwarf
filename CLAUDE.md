@@ -729,6 +729,18 @@ whole history. Violating this duplicates during fan-in merge.
 **forEach element injection:** the current element is injected into `state` only (under `as`), not `changes`, so it is
 available to the task but does not participate in fan-in merge.
 
+**Delete is a cleared (JSON null) entry in `changes`, and `MergeState` has two modes for it.** `flow.Delete`
+(and `Set(k, nil)`) writes JSON `null` into `changes` - `dwarf` conflates null and absent everywhere
+(`isCleared`), so there is no way to store a literal null value. `MergeState` **drops** a cleared key from its
+result (both the replace path and any reducer-managed field), so a delete never survives as a `"k": null`
+tombstone in materialized state - which is what `final_state`/`FlowOutcome.State`/`Snapshot` expose to the host,
+and what the next step's `state` column becomes. This is the *materialization* mode and covers every `MergeState`
+call except one. The exception is **changes accumulation** (`processStep` folding a task's fresh output onto a
+prior attempt's `changes` before persisting the `changes` column): there the null must be **preserved**, because
+it is the pending-delete marker *in transit* - it only enacts the delete when `changes` later folds onto `state`.
+That site therefore uses a plain overlay (`maps.Copy`), not `MergeState`; "simplifying" it back to `MergeState`
+silently breaks `Delete` (the null is dropped before it is ever persisted, so the deletion never propagates).
+
 ### Task-Initiated Control Signals
 
 Tasks signal the engine via control methods on the `Flow` carrier (distinct from the operations above):

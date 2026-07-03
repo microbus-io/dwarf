@@ -400,6 +400,34 @@ func TestMergeState_WithReducers(t *testing.T) {
 	}
 }
 
+// TestMergeState_ClearedChangeDropsKey pins that a cleared change (JSON null, from Flow.Delete/Set(k,nil))
+// removes the key from the merged result instead of leaving a null tombstone - both on the replace path and
+// on a reducer-managed field, so a delete never leaks null into materialized state or is silently ignored at
+// fan-in.
+func TestMergeState_ClearedChangeDropsKey(t *testing.T) {
+	assert := testarossa.For(t)
+
+	state := map[string]any{
+		"keep":  json.RawMessage(`1`),
+		"drop":  json.RawMessage(`2`),
+		"total": json.RawMessage(`10`),
+	}
+	changes := map[string]any{
+		"drop":  json.RawMessage(`null`), // replace-path delete
+		"total": json.RawMessage(`null`), // delete on a reducer-managed field
+	}
+	reducers := map[string]Reducer{"total": ReducerAdd}
+	merged, err := MergeState(state, changes, reducers)
+	if assert.NoError(err) {
+		data, _ := marshalAny(merged["keep"])
+		assert.Expect(string(data), "1")
+		_, dropPresent := merged["drop"]
+		assert.False(dropPresent) // dropped, not carried as null
+		_, totalPresent := merged["total"]
+		assert.False(totalPresent) // reducer field honored the delete
+	}
+}
+
 func TestMergeState_NilInputs(t *testing.T) {
 	assert := testarossa.For(t)
 

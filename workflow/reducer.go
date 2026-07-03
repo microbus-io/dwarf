@@ -69,7 +69,9 @@ func (r Reducer) Reduce(existing, incoming any) (any, error) {
 
 // MergeState applies changes on top of state, using the provided reducers for
 // fields that have one. Fields without a registered reducer use replace
-// semantics (last write wins).
+// semantics (last write wins). A cleared change (JSON null, from Flow.Delete or
+// Set(k, nil)) deletes the key from the merged result regardless of reducer, so
+// a delete never survives as a null tombstone in materialized state.
 func MergeState(state any, changes any, reducers map[string]Reducer) (map[string]any, error) {
 	stateMap, err := toAnyMap(state)
 	if err != nil {
@@ -82,6 +84,10 @@ func MergeState(state any, changes any, reducers map[string]Reducer) (map[string
 	merged := make(map[string]any, len(stateMap)+len(changesMap))
 	maps.Copy(merged, stateMap)
 	for k, v := range changesMap {
+		if isCleared(v) {
+			delete(merged, k)
+			continue
+		}
 		existing, exists := merged[k]
 		reducer := reducers[k]
 		if !exists || reducer == "" || reducer == ReducerReplace {
