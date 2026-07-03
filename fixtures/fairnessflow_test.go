@@ -120,5 +120,37 @@ func TestFairnessflow(t *testing.T) {
 			}
 		}
 		assert.True(firstLight < lastHeavy)
+
+		// Weighted 4:1 share (the point of FairnessWeight): heavy (weight 4) is dispatched preferentially
+		// over light (weight 1), so heavy work clusters earlier in the dispatch order. The earlier assertions
+		// (all 80 complete, some interleaving) would still pass if weights were ignored and the two keys
+		// interleaved evenly - these two checks are what actually pin the ratio. If the 4:1 semantics
+		// regressed to 1:1, mean dispatch indices would converge (~39.5 each) and the early window would be
+		// ~even, failing both. The thresholds are loose relative to the observed signal (meanHeavy~26.5 vs
+		// meanLight~54.5; first-25 heavy:light ~20:4) so ordinary scheduler jitter never trips them.
+		var sumHeavy, sumLight int
+		var earlyHeavy, earlyLight int
+		const earlyWindow = 25
+		for i, tag := range got {
+			switch tag {
+			case "heavy":
+				sumHeavy += i
+				if i < earlyWindow {
+					earlyHeavy++
+				}
+			case "light":
+				sumLight += i
+				if i < earlyWindow {
+					earlyLight++
+				}
+			}
+		}
+		meanHeavy := float64(sumHeavy) / float64(heavyCount)
+		meanLight := float64(sumLight) / float64(lightCount)
+		t.Logf("meanHeavyIdx=%.1f meanLightIdx=%.1f earlyHeavy=%d earlyLight=%d", meanHeavy, meanLight, earlyHeavy, earlyLight)
+		assert.True(meanLight-meanHeavy >= 10,
+			"weighted 4:1 share too weak (may have regressed toward 1:1): meanHeavyIdx=%.1f meanLightIdx=%.1f", meanHeavy, meanLight)
+		assert.True(earlyHeavy >= 2*earlyLight,
+			"heavy (weight 4) should dominate the first %d dispatches ~4:1: earlyHeavy=%d earlyLight=%d", earlyWindow, earlyHeavy, earlyLight)
 	})
 }

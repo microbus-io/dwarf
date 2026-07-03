@@ -266,18 +266,20 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 	return globalBand, atBand, nil
 }
 
-// runRefill replaces the candidate cache with a fresh priority+fairness batch.
+// runRefill replaces the candidate cache with a fresh priority+fairness batch drawn from the single
+// globally-minimum due band.
 func (e *Engine) runRefill(ctx context.Context) {
 	capacity := e.cache.capacity()
 	batch := make([]job, 0, capacity)
 
-	prevBand := -1
+	// One band per refill: scanPriorityBand returns the strict global-minimum due band's rows (or MaxInt
+	// when nothing is due). The earlier per-band advance loop was vestige of the removed saturation gating,
+	// which could post-filter a band's rows to empty and force a scan of the next band up; without that
+	// filter a non-MaxInt band always yields rows (every row makes a fairness-key bucket), so the scan runs
+	// exactly once - lower bands stay materialized only after the current one drains, by design.
 	chosenBand := math.MaxInt
-	for {
-		band, rows, err := e.scanPriorityBand(ctx, prevBand)
-		if err != nil || band == math.MaxInt {
-			break
-		}
+	band, rows, err := e.scanPriorityBand(ctx, -1)
+	if err == nil && band != math.MaxInt {
 		type keyBucket struct {
 			weight    float64
 			oldestAge float64
@@ -296,11 +298,6 @@ func (e *Engine) runRefill(ctx context.Context) {
 				kb.weight = c.weight
 			}
 			kb.steps = append(kb.steps, c)
-		}
-		if len(byKey) == 0 {
-			e.logger.DebugContext(ctx, "Refill band saturated, advancing", "band", band, "rows", len(rows))
-			prevBand = band
-			continue
 		}
 		e.logger.DebugContext(ctx, "Refill selecting", "band", band, "distinctKeys", len(order))
 		// Record this refill's selected band and its distinct-fairness-key count for the
@@ -343,7 +340,6 @@ func (e *Engine) runRefill(ctx context.Context) {
 			batch = append(batch, job{stepID: c.stepID, shard: c.shard})
 		}
 		chosenBand = band
-		break
 	}
 
 	e.logger.DebugContext(ctx, "Refill batch", "size", len(batch))
