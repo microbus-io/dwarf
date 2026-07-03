@@ -42,10 +42,10 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	assert.Error(e.SetDebugLogger())
 	assert.Error(e.SetMeterProvider(nil))
 	assert.Error(e.SetTracerProvider(nil))
+	assert.Error(e.SetNumShards(2)) // shard count is immutable after Startup
 
 	// Live: succeed after Startup.
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 	assert.NoError(e.SetDefaultPriority(5))
 	assert.NoError(e.SetMaxOpenConns(4))
-	assert.NoError(e.SetNumShards(1)) // <= current: no-op, no error
 }

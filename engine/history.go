@@ -736,16 +736,38 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		}
 
 		return db.Transact(ctx, func(tx *sequel.Tx) error {
-			// The id list is embedded directly (trusted integers from our own SELECT, so no bind params -
-			// which dodges the per-driver parameter-count ceiling, e.g. SQL Server's 2100); the purgeCap keeps
-			// it small enough for one statement. Delete each matched root's whole subgraph tree - its steps,
-			// the root, and its descendants. root_flow_id is the tree-membership index (a root points at
-			// itself, descendants inherit it) and is single-shard by construction, so root_flow_id IN (roots)
-			// is exactly the tree. Steps first (the subquery reads the flow rows), then the roots (counted,
-			// status-reguarded against the SELECT->DELETE running race), then the descendants (terminal once
-			// their root is, so the reguard rarely matters).
-			ids := intCSV(flowIDs)
-			_, err := tx.ExecContext(ctx,
+			// Re-filter to non-running roots INSIDE the tx: the candidate SELECT ran outside it, so a Resume in
+			// between can flip a root running, and deleting its steps while the guard keeps its row strands it.
+			candidates := intCSV(flowIDs)
+			prows, err := tx.QueryContext(ctx,
+				"SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+candidates+") AND status<>?",
+				workflow.StatusRunning,
+			)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			var purgeIDs []int
+			for prows.Next() {
+				var fid int
+				if err := prows.Scan(&fid); err != nil {
+					prows.Close()
+					return errors.Trace(err)
+				}
+				purgeIDs = append(purgeIDs, fid)
+			}
+			prows.Close()
+			if err := prows.Err(); err != nil {
+				return errors.Trace(err)
+			}
+			if len(purgeIDs) == 0 {
+				return nil
+			}
+
+			// Steps before roots (the subquery reads the flow rows) before descendants (roots gone, so
+			// root_flow_id then matches only subtrees). ids are trusted integers embedded as literals to dodge
+			// the per-driver bind-param ceiling. status<>running guards a Resume racing into this tx.
+			ids := intCSV(purgeIDs)
+			_, err = tx.ExecContext(ctx,
 				"DELETE FROM dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN ("+ids+"))",
 			)
 			if err != nil {
@@ -760,7 +782,6 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			}
 			n, _ := res.RowsAffected()
 			perShardDeleted[shardIdx] = int(n)
-			// Roots are gone now, so root_flow_id IN (roots) matches only the descendant subtrees.
 			_, err = tx.ExecContext(ctx,
 				"DELETE FROM dwarf_flows WHERE root_flow_id IN ("+ids+") AND status<>?",
 				workflow.StatusRunning,

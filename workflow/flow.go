@@ -503,13 +503,17 @@ func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxInt
 		// Give up if we've crossed the horizon, or if the next attempt's delay alone would overshoot it -
 		// no point parking for a wait we already know lands past the deadline. nextDelay mirrors the delay
 		// the engine computes for this attempt (min(initialDelay * delayMultiplier^attempt, maxIntervalDelay)).
+		// Clamp in float space, and stop multiplying at the cap, so nextDelay never overflows int64 ns.
 		nextDelay := float64(initialDelay)
 		if delayMultiplier > 0 {
 			for range f.attempt {
+				if maxIntervalDelay > 0 && nextDelay >= float64(maxIntervalDelay) {
+					break
+				}
 				nextDelay *= delayMultiplier
 			}
 		}
-		if maxIntervalDelay > 0 && time.Duration(nextDelay) > maxIntervalDelay {
+		if maxIntervalDelay > 0 && nextDelay > float64(maxIntervalDelay) {
 			nextDelay = float64(maxIntervalDelay)
 		}
 		if time.Since(f.stepCreatedAt)+time.Duration(nextDelay) >= giveUpAfter {

@@ -120,17 +120,16 @@ Configuration is applied through `Set*` methods, each returning an `error` rathe
 every setter can surface an error). They split into two groups by whether the knob can change safely on a running
 engine:
 
-- **Live** (take effect immediately, callable any time): `SetNumShards`, `SetMaxOpenConns`, `SetWorkersPerConn`,
+- **Live** (take effect immediately, callable any time): `SetMaxOpenConns`, `SetWorkersPerConn`,
   `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
   existing flow keeps the budget/priority frozen at its own `Create`); `SetMaxOpenConns` (the per-shard connection
   ceiling) and `SetWorkersPerConn` (the pool-sizing divisor) re-apply the sizing formula to every live shard
-  (`applyConnPoolSizes` per shard; sequel's pool setters are hot/atomic - see "Connection pool sizing"); `SetNumShards`
-  opens+migrates the added shards and re-sizes existing shards' pools to the new shard count (see "Database
-  Sharding" - grow-only at runtime).
-- **Construction-time only** (return an error if called after `Startup`): `SetDSN`, `SetWorkers`, `SetHost`,
-  `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying these on a
-  running engine would mean reopening live connections (`SetDSN`), resizing the worker pool + candidate cache
-  (`SetWorkers`), or re-resolving a frozen provider - so the setter **rejects** it with an explicit error rather
+  (`applyConnPoolSizes` per shard; sequel's pool setters are hot/atomic - see "Connection pool sizing").
+- **Construction-time only** (return an error if called after `Startup`): `SetDSN`, `SetWorkers`, `SetNumShards`,
+  `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying
+  these on a running engine would mean reopening live connections (`SetDSN`), resizing the worker pool + candidate
+  cache (`SetWorkers`), changing a shard count that flow keys already encode (`SetNumShards` - see "Database
+  Sharding"), or re-resolving a frozen provider - so the setter **rejects** it with an explicit error rather
   than silently no-op'ing. The error wording is `"<what> cannot be changed after Startup"`.
 
 For the observability providers specifically (`SetLogger`/`SetMeterProvider`/`SetTracerProvider`): the engine
@@ -786,11 +785,11 @@ Transitions are evaluated after a task completes successfully:
 4. Multiple matches -> all taken in parallel (fan-out).
 5. No matches -> the flow completes.
 
-**Error transitions** are evaluated when a task returns an error. Only `onError` transitions from the failed task are
-considered. If one matches, the error is serialized as a `TracedError` into state field `onErr` and the handler task
-becomes the next step; the failed step is marked `completed` with its changes preserved. If the task was in a
-fan-out, all siblings are cancelled. If no error transition matches, the flow fails via `failStep`. Error transitions
-can have `when` but not `forEach` or `withGoto`.
+**Error transitions.** When a task returns an error, the failed task's `onError` transition fires and preempts any
+other transition (`onError` is exclusive with `when`/`forEach`/`withGoto`, so it is unconditional). The error is
+serialized as a `TracedError` into state field `onErr`, the handler task becomes the next step, the failed step is
+marked `completed` with its changes preserved, and any fan-out siblings are cancelled. If there is no `onError`
+transition, the step fails via `failStep`.
 
 **Fan-out sibling constraint:** `Graph.Validate()` enforces that fan-out siblings have the same set of non-goto,
 non-error outgoing transition targets, because the engine evaluates outgoing transitions from only the last sibling
@@ -1101,8 +1100,8 @@ Rough sizing:
 | MariaDB/MySQL (RC) | 200-500 | 4-8 |
 | MariaDB/MySQL (RR) | 50-200 | 8-16 |
 
-`NumShards` can grow at runtime via `SetNumShards`; it cannot shrink (old shards drain naturally). New flows land on
-new shards; existing flows stay on their original shard.
+`NumShards` is fixed for the engine's life (`SetNumShards` is construction-time only); changing it requires a
+coordinated restart of every replica - see "Shard count is immutable at runtime" below.
 
 **Shard-per-server is the recommended production topology.** Put each shard on its **own database server** - the
 `%d` in the DSN goes in the **hostname**, not the database name:
@@ -1165,11 +1164,10 @@ resets each connection's idle clock, so a steadily-loaded shard keeps its core w
 `sequel.DB`. They are **skipped for SQLite**, whose in-memory test databases are dropped the instant their last
 connection closes. They are a production win (long-lived replicas); they never fire during the fast test suite.
 
-**Live re-sizing.** `SetWorkersPerConn`, `SetMaxOpenConns`, and `SetNumShards` (growth) all re-apply the formula to
-every open shard by looping `applyConnPoolSizes` over the live shards - growth shrinks each existing shard's share
-because the divisor changed.
-Sizing each shard at open uses the *target* `numShards` (set before any shard opens), so initial shards are sized for
-the final count with no post-startup pass.
+**Live re-sizing.** `SetWorkersPerConn` and `SetMaxOpenConns` re-apply the formula to every open shard by looping
+`applyConnPoolSizes` over the live shards. The shard count itself is not a live knob (`SetNumShards` is
+construction-time only), so it never triggers a re-size: each shard is sized once at open using the final `numShards`
+(set before any shard opens), and stays that size for the engine's life.
 
 ### Flow Scheduling (priority / fairness)
 
@@ -1679,14 +1677,14 @@ different servers' clocks, and by `flow_id` alone is broken (a shard with fewer 
 an opaque cursor encoding each shard's smallest-returned `flow_id`. `List` is strict by design: any shard error fails
 the whole call (the per-shard debug path is `ShardInfo` + `List(Shard=N)`).
 
-**Dynamic expansion:** `SetNumShards` can increase at runtime - new shards are opened, migrated, and immediately
-available; shrinking is rejected (old shards drain naturally). `expandShards` is the internal primitive behind it,
-and is **append-only** (a target at or below the live count is a no-op) and **concurrency-safe**: `expandLock`
-serializes callers, the slow open+migrate I/O runs *outside* `dbsLock`, and each freshly-migrated shard is appended
-under `dbsLock`, so the hot path (`dbsLock.RLock`) only ever sees fully-ready shards. Before Startup it is a no-op
-(shards open at Startup). Growth then re-sizes every *existing* shard's connection pool, since the shard count is the
-pool-sizing divisor (see "Connection pool sizing"). It is **test-mode-agnostic**: `openDatabaseShard` wraps each new
-shard in an isolated test database when the engine is in test mode, exactly as at startup.
+**Shard count is immutable at runtime.** `SetNumShards` is construction-time only: it records the target before
+`Startup` (which opens+migrates exactly that many shards) and is **rejected** on a running engine, so `numDBShards()`
+never changes after `Startup`. Callers therefore size per-shard state from `numDBShards()` and index it by shard with
+no concurrency concern. Changing the count needs a **coordinated restart** (a maintenance window), because it is not
+safe to grow live: a flow key encodes its shard (`{shard}-{id}-{token}`), so a flow created on a newly-added shard is
+unroutable (404) on any replica still at the old count - and there is no cross-replica agreement on the count nor any
+rebalancing of existing flows (they stay on their original shard). Doing dynamic growth *correctly* - lockstep count
+across replicas plus rebalancing - is a larger problem left unsolved; until then the count is fixed per process.
 
 **DSN format:** when `NumShards > 1`, the DSN must contain `%d` (replaced with the shard index). In test mode the
 default DSN carries `%d` too, so each shard's `%d` selects a separate in-memory SQLite database; per-test isolation

@@ -52,7 +52,9 @@ func (e *Engine) numDBShards() int {
 	return n
 }
 
-// onEachShard fans op out over every shard concurrently using an errgroup.
+// onEachShard fans op out over every shard concurrently using an errgroup. The shard count is fixed for the
+// engine's life (SetNumShards is construction-time only), so a caller may size per-shard state from
+// numDBShards() and index it by the shard arg without racing a concurrent change.
 func (e *Engine) onEachShard(ctx context.Context, op func(ctx context.Context, db *sequel.DB, shard int) error) error {
 	numShards := e.numDBShards()
 	if numShards == 1 {
@@ -96,44 +98,6 @@ func (e *Engine) openDatabase(ctx context.Context) error {
 		}
 		e.dbs = append(e.dbs, db)
 	}
-	return nil
-}
-
-// expandShards reconciles the open shards up to the current numShards target, opening+migrating any not yet
-// live. Append-only and concurrency-safe: expandLock serializes callers, open+migrate runs outside dbsLock,
-// and each ready shard is appended under dbsLock so the hot path only sees fully-ready shards. No-op before
-// Startup or when the target is at/below the live count.
-func (e *Engine) expandShards(ctx context.Context) error {
-	if !e.started.Load() {
-		return nil
-	}
-	e.expandLock.Lock()
-	defer e.expandLock.Unlock()
-
-	target := int(e.numShards.Load())
-	e.dbsLock.RLock()
-	current := len(e.dbs)
-	e.dbsLock.RUnlock()
-	if target <= current {
-		return nil
-	}
-
-	for i := current + 1; i <= target; i++ {
-		db, err := e.openDatabaseShard(ctx, i)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		e.dbsLock.Lock()
-		e.dbs = append(e.dbs, db)
-		e.dbsLock.Unlock()
-	}
-	// The shard count is the pool-sizing divisor, so growth shrinks every shard's share: resize the
-	// pre-existing shards down too (the newly opened ones were already sized for the new count at open).
-	e.dbsLock.RLock()
-	for _, db := range e.dbs {
-		e.applyConnPoolSizes(db)
-	}
-	e.dbsLock.RUnlock()
 	return nil
 }
 

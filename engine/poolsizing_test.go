@@ -88,28 +88,3 @@ func TestPoolSizing_LiveResize(t *testing.T) {
 	assert.Error(e.SetWorkersPerConn(0)) // must be >= 1
 	assert.Error(e.SetMaxOpenConns(0))   // must be >= 1
 }
-
-// TestPoolSizing_ShardGrowthResizesExisting pins that growing the shard count shrinks the PRE-EXISTING
-// shards' pools too (the shard count is the sizing divisor, so each shard's share drops).
-func TestPoolSizing_ShardGrowthResizesExisting(t *testing.T) {
-	assert := testarossa.For(t)
-
-	e := NewEngine()
-	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetNumShards(2))
-	e.RunInTest(t)
-
-	// 2 shards: idle=ceil(64/2/8)=4, open=min(10,8)=8.
-	for i := 1; i <= 2; i++ {
-		db, _ := e.shard(i)
-		assert.Equal(8, db.DB.Stats().MaxOpenConnections, "shard %d open at 2 shards", i)
-	}
-
-	// Grow to 8 shards: idle=2, open=min(6,8)=6 - the original two shards must resize down to 6.
-	assert.NoError(e.SetNumShards(8))
-	for i := 1; i <= 8; i++ {
-		db, err := e.shard(i)
-		assert.NoError(err)
-		assert.Equal(6, db.DB.Stats().MaxOpenConnections, "shard %d open at 8 shards", i)
-	}
-}

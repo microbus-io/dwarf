@@ -141,38 +141,6 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 	return candidates, nil
 }
 
-// evaluateErrorTransitions determines the error handler task to route to when a task fails.
-func evaluateErrorTransitions(graph *workflow.Graph, currentTask string, flow *workflow.RawFlow) ([]nextStep, error) {
-	stateMap := make(map[string]any, len(flow.RawState()))
-	for k, v := range flow.RawState() {
-		if raw, ok := v.(json.RawMessage); ok {
-			var val any
-			json.Unmarshal(raw, &val)
-			stateMap[k] = val
-		} else {
-			stateMap[k] = v
-		}
-	}
-
-	for _, tr := range graph.Transitions() {
-		if tr.From != currentTask || !tr.OnError {
-			continue
-		}
-		taken := true
-		if tr.When != "" {
-			match, err := boolexp.Eval(tr.When, stateMap)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			taken = match
-		}
-		if taken {
-			return []nextStep{{taskName: tr.To}}, nil
-		}
-	}
-	return nil, nil
-}
-
 // fanInPredecessorTasks returns the distinct task node names that transition into
 // fanInTask via a normal (non-goto, non-error) transition.
 func fanInPredecessorTasks(graph *workflow.Graph, fanInTask string) []string {

@@ -257,19 +257,21 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	var resultFlow *workflow.RawFlow
 	errorRouted := false
+	var errorTarget string
 
 	if execErr != nil {
 		// The engine never inspects status codes or error text: a task that wants to back off (rate limit,
 		// transient unavailability) reads its own signal and arms flow.Retry. Any error that reaches here is
 		// terminal for this attempt - routed via the graph's onError transition if one exists, else it fails
 		// the step.
-		if _, ok := graph.ErrorTransition(taskName); ok {
+		if tr, ok := graph.ErrorTransition(taskName); ok {
 			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowURL, "error", execErr)
 			tracedErr := errors.Convert(execErr)
 			resultFlow = workflow.NewRawFlow()
 			resultFlow.SetRawState(state)
 			resultFlow.Set("onErr", tracedErr)
 			errorRouted = true
+			errorTarget = tr.To
 		} else {
 			e.failStep(ctx, shardNum, stepID, flowID, flowToken, execErr, taskName)
 			return errors.Trace(execErr)
@@ -395,13 +397,17 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// on repeated attempts. maxDelay caps the backoff component, not the total.
 		retrySleepMs := sleepDur.Milliseconds()
 		{
+			// Clamp in float space, and stop multiplying at the cap, so delay never overflows int64 ns.
 			delay := float64(initialDelay)
 			if multiplier > 0 {
 				for range attempt {
+					if maxDelay > 0 && delay >= float64(maxDelay) {
+						break
+					}
 					delay *= multiplier
 				}
 			}
-			if maxDelay > 0 && time.Duration(delay) > maxDelay {
+			if maxDelay > 0 && delay > float64(maxDelay) {
 				delay = float64(maxDelay)
 			}
 			retrySleepMs += time.Duration(delay).Milliseconds()
@@ -460,13 +466,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Evaluate transitions
 	var nextTasks []nextStep
 	if errorRouted {
-		nextTasks, err = evaluateErrorTransitions(graph, taskName, resultFlow)
+		nextTasks = []nextStep{{taskName: errorTarget}}
 	} else {
 		nextTasks, err = evaluateTransitions(graph, taskName, resultFlow)
-	}
-	if err != nil {
-		e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
-		return errors.Trace(err)
+		if err != nil {
+			e.failStep(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			return errors.Trace(err)
+		}
 	}
 
 	var realTasks []nextStep
@@ -484,7 +490,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if fanInTarget == "" {
 			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, notifyOnStop, baggageJSON, workflowURL)
 		}
-		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 	}
 
 	if cohortSize == 0 {
@@ -721,7 +727,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 }
 
 // fireFanInDirect creates the fan-in step immediately for an empty-cohort case.
-func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget, fanInURL string, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) error {
+func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget, fanInURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) error {
 	var fanInStepID int64
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
@@ -732,7 +738,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		var ourState, ourChanges map[string]any
 		unmarshalJSONMap(ourStateJSON, &ourState)
 		unmarshalJSONMap(ourChangesJSON, &ourChanges)
-		mergedState, _ := workflow.MergeState(ourState, ourChanges, nil)
+		mergedState, _ := workflow.MergeState(ourState, ourChanges, graph.Reducers())
 		mergedJSON, _ := json.Marshal(mergedState)
 
 		nextStepDepth := stepDepth + 1

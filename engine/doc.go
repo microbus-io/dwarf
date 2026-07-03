@@ -34,10 +34,10 @@ limitations under the License.
 //	if err != nil { ... }
 //	defer eng.Shutdown(ctx)
 //
-// Each Set* method returns an error. The live ones (SetNumShards, SetMaxOpenConns, SetWorkersPerConn,
+// Each Set* method returns an error. The live ones (SetMaxOpenConns, SetWorkersPerConn,
 // SetTimeBudget, SetDefaultPriority) take effect immediately on a running engine; the construction-time-only
-// ones (SetDSN, SetWorkers, SetHost, SetLogger, SetMeterProvider, SetTracerProvider) return an error if
-// called after Startup.
+// ones (SetDSN, SetWorkers, SetNumShards, SetHost, SetLogger, SetMeterProvider, SetTracerProvider) return an
+// error if called after Startup.
 //
 // # Host
 //

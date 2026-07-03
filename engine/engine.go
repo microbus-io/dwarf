@@ -90,12 +90,8 @@ type Engine struct {
 	// Database
 	dbs     []*sequel.DB
 	dbsLock sync.RWMutex
-	// expandLock serializes ExpandShards so two concurrent calls cannot both observe the same shard
-	// count and each open the same new shard. The slow open+migrate I/O runs under this lock but
-	// outside dbsLock, so it never blocks the hot path (which only takes dbsLock).
-	expandLock sync.Mutex
 	// testHashedID is the hashed test database id when the engine was started in test mode (RunInTest),
-	// empty in production. openDatabaseShard reads it (at startup and on later expandShards growth) to wrap
+	// empty in production. openDatabaseShard reads it at startup to wrap
 	// each shard in an isolated test database. Written once during single-threaded startup before
 	// started.Store(true), read only after started.Load()==true, so the atomic started flag is the
 	// happens-before barrier.
@@ -178,18 +174,18 @@ func (e *Engine) SetDSN(dsn string) error {
 	return nil
 }
 
-// SetNumShards sets the number of database shards and, on a running engine, brings any added shards online
-// (open + migrate) in one call, returning any error from opening/migrating them. New flows spread onto the
-// added shards immediately; existing flows stay on their original shard.
-//
-// The count may only grow at runtime: a value at or below the current live shard count records the new
-// target but removes nothing (old shards drain naturally; an actual reduction takes effect only on a
-// restart, where Startup opens just numShards shards). Concurrency-safe - the open+migrate work is
-// serialized internally and runs off the hot path. Before Startup it simply records the target (no shards
-// are open yet). It takes no ctx because the underlying open+migrate path is not ctx-cancellable.
+// SetNumShards sets the number of database shards. Construction-time only: shards are opened and migrated at
+// Startup at this count, and the count is immutable for the engine's life, so a call on a running engine is
+// rejected. Changing the shard count requires a coordinated restart (a maintenance window): each flow key
+// encodes its shard, so a live/piecemeal change would leave flows on a newly-added shard unroutable (404) on
+// any replica still at the old count. Safe live shard growth (rebalancing + cross-replica agreement) is a
+// larger problem left unsolved for now.
 func (e *Engine) SetNumShards(num int) error {
+	if e.started.Load() {
+		return errSetAfterStartup("number of shards")
+	}
 	e.numShards.Store(int32(num))
-	return e.expandShards(context.Background())
+	return nil
 }
 
 // SetWorkers sets the number of worker goroutines. Construction-time only: the pool is spawned at Startup
@@ -353,7 +349,7 @@ func (e *Engine) SetInTest(name string) error {
 	// Hash the name to a short, bounded id so the testing-database name sequel derives stays within the
 	// strictest SQL identifier limit (Postgres 63 / MySQL 64), whatever the name's length. A non-empty
 	// testHashedID is also what switches openDatabaseShard onto the isolated-test open path. It is set before
-	// initRuntime flips started, so the atomic started flag publishes it to expandShards's later reads.
+	// initRuntime flips started, so it is in place before any shard opens.
 	sum := sha256.Sum256([]byte(name))
 	e.testHashedID = hex.EncodeToString(sum[:])[:16]
 	return nil

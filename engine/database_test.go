@@ -45,10 +45,9 @@ func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
 	assert.Equal(0, count)
 }
 
-// TestSetNumShards covers runtime shard expansion (R7): before Startup SetNumShards just records the
-// target (applied when the shards open), and on a running engine it opens+migrates the added shards. It
-// also asserts the guards: idempotent at the same target, and shrink (a lower target) leaves the live
-// shards in place rather than dropping them.
+// TestSetNumShards covers the construction-time-only shard count: before Startup SetNumShards records the
+// target (applied when the shards open at Startup), and on a running engine it is rejected - the count is
+// immutable for the engine's life (changing it needs a coordinated restart, since flow keys encode the shard).
 func TestSetNumShards(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -65,12 +64,8 @@ func TestSetNumShards(t *testing.T) {
 	e.RunInTest(t)
 	assert.Equal(2, e.numDBShards())
 
-	// On a running engine, SetNumShards opens+migrates the added shards.
-	assert.NoError(e.SetNumShards(4))
-	assert.Equal(4, e.numDBShards())
-
-	// The freshly-opened shards are migrated and usable in isolation.
-	for _, n := range []int{3, 4} {
+	// Both shards are migrated and usable in isolation.
+	for _, n := range []int{1, 2} {
 		db, err := e.shard(n)
 		assert.NoError(err)
 		var count int
@@ -79,13 +74,9 @@ func TestSetNumShards(t *testing.T) {
 		assert.Equal(0, count)
 	}
 
-	// Idempotent: re-setting the same target adds nothing.
-	assert.NoError(e.SetNumShards(4))
-	assert.Equal(4, e.numDBShards())
-
-	// Shrink is unsupported: a lower target leaves the live shards in place.
-	assert.NoError(e.SetNumShards(2))
-	assert.Equal(4, e.numDBShards())
+	// On a running engine, SetNumShards is rejected and the count is unchanged.
+	assert.Error(e.SetNumShards(4))
+	assert.Equal(2, e.numDBShards())
 }
 
 func TestDatabase_ShardOutOfRange(t *testing.T) {
