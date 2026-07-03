@@ -619,8 +619,11 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 		}
 		var resolvedThreadID int
 		err := db.QueryRowContext(ctx, "SELECT thread_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", threadFlowID, threadFlowToken).Scan(&resolvedThreadID)
-		if err != nil {
+		if err == sql.ErrNoRows {
 			return "", "", nil, 0, errors.New("flow not found", http.StatusNotFound)
+		}
+		if err != nil {
+			return "", "", nil, 0, errors.Trace(err)
 		}
 		conditions = append(conditions, "f.thread_id=?")
 		args = append(args, resolvedThreadID)
@@ -840,8 +843,11 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	var threadToken string
 	var surgraphFlowID int
 	err = db.QueryRowContext(ctx, "SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&threadID, &threadToken, &surgraphFlowID)
-	if err != nil {
+	if err == sql.ErrNoRows {
 		return "", errors.New("flow not found", http.StatusNotFound)
+	}
+	if err != nil {
+		return "", errors.Trace(err)
 	}
 	// A subgraph child runs in its own thread (subgraphs never join the parent's continuation chain), so
 	// continuing one would spin up a detached top-level flow from the subgraph's final state - not a thread
@@ -861,8 +867,11 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		"SELECT status, final_state, graph, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms, notify_on_stop FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 		threadID,
 	).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs, &notifyOnStop)
-	if err != nil {
+	if err == sql.ErrNoRows {
 		return "", errors.New("no flows found in thread", http.StatusNotFound)
+	}
+	if err != nil {
+		return "", errors.Trace(err)
 	}
 	flowStatus = strings.TrimSpace(flowStatus)
 	if flowStatus != workflow.StatusCompleted {

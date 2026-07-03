@@ -542,11 +542,18 @@ alone. Reproduced as ~1-in-40 timeouts of `fixtures/sleepretrycomposeflow_test.g
 `processStep` is the hot path. Independent queries within it run in parallel (errgroup-style) to minimize latency on a
 remote database:
 
-- **Claim UPDATE + step SELECT** - the lease-acquiring UPDATE and the step-data SELECT run concurrently where the
-  driver lacks RETURNING (MySQL); the UPDATE only mutates `status`/`lease_expires`/`started_at`, the SELECT reads
-  stable columns, so they race-read safely. The lease size comes from the in-memory `TimeBudget` config, not the step
-  row, removing the dependency that forced a serial pre-SELECT. On pgx/sqlite/mssql the claim and read are one
-  round-trip via `RETURNING`/`OUTPUT`.
+- **Claim UPDATE + step SELECT** - on pgx/sqlite/mssql the claim and read are **one** round-trip via
+  `RETURNING`/`OUTPUT`, which reads the row *as updated* in the same statement - always a consistent snapshot.
+  MySQL lacks RETURNING, so it is two statements, and they run **serially, not in parallel** (claim first, read only
+  on a successful claim). Parallelizing them on separate connections is **unsafe**: the read pulls columns a
+  concurrent `Resume`/`flow.Retry`/subgraph-completion mutates (`resume_data`, `subgraph_result`, `attempt`,
+  `interrupt_done`, `subgraph_done`) in the *same* transaction that flips the step to `pending`, so with independent
+  snapshots the read could observe the pre-transition row (empty `resume_data`) while the claim observes the committed
+  `pending` row and succeeds - delivering an **empty resume payload** to the task. Those columns are *not* stable
+  against a concurrent pending-setter (an earlier "the SELECT reads only stable columns" rationale was wrong).
+  Claiming first guarantees the subsequent read's snapshot is after the claim commit - hence after the
+  pending-setter's commit; a lost claim (`n==0`) skips the read entirely and returns. The lease size comes from the
+  step row's own `time_budget_ms` (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
 - **Flow data** - runs after the claim+read, since it needs the `flow_id`.
 - **Fan-in sibling counts** - the unfinished and failed sibling COUNT queries run concurrently.
 - **Subgraph status counts** - the active and completed subgraph COUNT queries run concurrently.

@@ -494,15 +494,26 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childSt
 	reDispatchParent := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatchParent = false
-		tx.ExecContext(ctx,
+		// Write-first (the failed-child-step UPDATE) per the flow-terminating-transaction rule; a discarded
+		// error here or below would commit a half-failed child while still re-dispatching the parent.
+		_, err := tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
 			workflow.StatusFailed, parkedNone, errMsg, childStepID,
 		)
-		childFinalState, _, _ := e.computeFinalState(ctx, tx, childFlowID)
-		tx.ExecContext(ctx,
+		if err != nil {
+			return errors.Trace(err)
+		}
+		childFinalState, _, err := e.computeFinalState(ctx, tx, childFlowID)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		_, err = tx.ExecContext(ctx,
 			"UPDATE dwarf_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
 			workflow.StatusFailed, errMsg, childFinalState, childFlowID, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 		)
+		if err != nil {
+			return errors.Trace(err)
+		}
 		res, err := tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
 			workflow.StatusPending, parkedNone, errMsg, parentStepID, workflow.StatusRunning, parkedSubgraph,

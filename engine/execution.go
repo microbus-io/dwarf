@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"maps"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
@@ -102,39 +101,33 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			n = 1
 		}
 	default:
-		// MySQL: parallel claim + read
-		var claimErr, readErr error
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			res, e := db.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
-					" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
-					" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
-				workflow.StatusRunning, leaseMarginMs, stepID, workflow.StatusPending, parkedNone,
-			)
-			if e != nil {
-				claimErr = e
-				return
-			}
-			n, _ = res.RowsAffected()
-		}()
-		go func() {
-			defer wg.Done()
-			e := db.QueryRowContext(ctx,
+		// MySQL lacks RETURNING, so claim and read are two statements. They must run SERIALLY, not in
+		// parallel: the read pulls columns a concurrent Resume/flow.Retry/subgraph-completion mutates
+		// (resume_data, subgraph_result, attempt, interrupt_done, subgraph_done) in the SAME transaction
+		// that flips the step to pending. On separate connections with independent snapshots, the read
+		// could observe the pre-transition row (empty resume_data) while the claim observes the committed
+		// pending row and succeeds - delivering an empty resume payload to the task. Claiming first, then
+		// reading only on a successful claim, guarantees the read's snapshot is after the claim commit (and
+		// thus after the pending-setter's commit). A lost claim skips the read entirely (n==0 returns below).
+		res, e := db.ExecContext(ctx,
+			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
+				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
+				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
+			workflow.StatusRunning, leaseMarginMs, stepID, workflow.StatusPending, parkedNone,
+		)
+		if e != nil {
+			err = e
+			break
+		}
+		n, _ = res.RowsAffected()
+		if n == 1 {
+			e = db.QueryRowContext(ctx,
 				"SELECT step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at FROM dwarf_steps WHERE step_id=?",
 				stepID,
 			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
 			if e != nil && e != sql.ErrNoRows {
-				readErr = e
+				err = e
 			}
-		}()
-		wg.Wait()
-		if claimErr != nil {
-			err = claimErr
-		} else if readErr != nil {
-			err = readErr
 		}
 	}
 	if err != nil {

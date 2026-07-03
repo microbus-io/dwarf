@@ -285,6 +285,11 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 				" WHERE flow_id=? AND status=? ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)",
 			flowID, workflow.StatusInterrupted,
 		).Scan(&stepStateJSON, &stepChangesJSON, &interruptPayloadJSON)
+		// A missing interrupted step (ErrNoRows) is a tolerated race - report empty state; a real DB
+		// error must not masquerade as that empty state.
+		if err != nil && err != sql.ErrNoRows {
+			return nil, errors.Trace(err)
+		}
 		if err == nil {
 			var stepState, stepChanges map[string]any
 			unmarshalJSONMap(stepStateJSON, &stepState)
