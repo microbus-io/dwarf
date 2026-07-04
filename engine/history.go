@@ -261,7 +261,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	// past it.
 	var ownChildFlow int
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?",
+		"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 		stepID,
 	).Scan(&ownChildFlow)
 	if err != nil && err != sql.ErrNoRows {
@@ -340,7 +340,7 @@ func (e *Engine) skipSurgraphForward(ctx context.Context, db *sequel.DB, id int)
 	for id > 0 {
 		var childFlow int
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?",
+			"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 			id,
 		).Scan(&childFlow)
 		if err == sql.ErrNoRows {
@@ -375,7 +375,7 @@ func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, id int
 	for id > 0 {
 		var childFlow int
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?",
+			"SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 			id,
 		).Scan(&childFlow)
 		if err == sql.ErrNoRows {
