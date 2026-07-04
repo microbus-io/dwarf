@@ -316,6 +316,24 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		}
 	}
 
+	// A kept non-rewind step that is still non-terminal (running/pending) is a straggler: a fan-out sibling
+	// that had not settled when the origin terminalized, or a step of a Cancel that raced. Unlike an
+	// interrupted step (an invariant violation, rejected above), this is a legitimate window - but the origin
+	// froze its outcome with that branch in flight, so the fork must freeze it too. Copied verbatim it would
+	// (a) let lease recovery reset its stale-leased `running` row to pending and re-dispatch it in the running
+	// fork - a surprise duplicate execution - and (b) as a cohort member count as neither an arrival nor a
+	// failure, wedging the fork's fan-in forever. Normalize it to cancelled: the keep-meta update makes the
+	// cohort recompute below count it as an arrival (so the fan-in still converges), and the cloned rows are
+	// frozen after the inserts.
+	var stragglers []int
+	for i := range keep {
+		s := &keep[i]
+		if s.oldID != rewind && s.status != workflow.StatusCompleted && s.status != workflow.StatusFailed && s.status != workflow.StatusCancelled {
+			s.status = workflow.StatusCancelled
+			stragglers = append(stragglers, s.oldID)
+		}
+	}
+
 	// Copy kept steps (all columns DB-side, native timestamps), overriding flow_id, a fresh token, and the
 	// flow's scheduling. The leaf fork step is inserted `created` (gated); all others keep their status.
 	idMap := make(map[int]int, len(keep))
@@ -347,6 +365,19 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		_, err = tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET predecessor_id=?, successor_id=?, lineage_id=?, time_budget_ms=? WHERE step_id=?",
 			idMap[s.predID], idMap[s.succID], idMap[s.lineageID], flowBudget, idMap[s.oldID],
+		)
+		if err != nil {
+			return 0, nil, errors.Trace(err)
+		}
+	}
+
+	// Freeze the cloned straggler rows: cancelled + cleared park/lease, so lease recovery (running-only) and
+	// the selection scan both ignore them (terminal implies parkedNone). The INSERT above copied their origin
+	// status/lease verbatim; this is the DB counterpart of the keep-meta normalization done earlier.
+	for _, oldID := range stragglers {
+		_, err = tx.ExecContext(ctx,
+			"UPDATE dwarf_steps SET status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+			workflow.StatusCancelled, parkedNone, idMap[oldID],
 		)
 		if err != nil {
 			return 0, nil, errors.Trace(err)

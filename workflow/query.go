@@ -54,8 +54,9 @@ type Query struct {
 	// Cursor is the opaque pagination cursor returned as NextCursor by the previous List call.
 	Cursor string `json:"cursor,omitzero"`
 	// Search is a case-insensitive substring matched against workflow_url, workflow_name, current
-	// task_name, error, and cancel_reason. LIKE wildcards (%, _) in the value are escaped and matched
-	// literally, so "a_b" matches only "a_b" (not "axb") and "50%" matches only a literal "50%".
+	// task_name, error, cancel_reason, and the flow key. The match is a substring (the term is wrapped in
+	// %...%); LIKE wildcards (%, _) in the value itself are escaped and matched literally, so "a_b" matches
+	// only "a_b" (not "axb") and "50%" matches only a literal "50%".
 	Search string `json:"search,omitzero"`
 	Limit  int    `json:"limit,omitzero"`
 }
