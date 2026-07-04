@@ -863,7 +863,22 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget, fanInURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) error {
 	var fanInStepID int64
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
-		tx.ExecContext(ctx, "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=?", flowID)
+		fanInStepID = 0
+		// Write-first, guarded on non-terminal status - the same lock-grab the transition tx uses. If a
+		// concurrent Cancel/failStep terminalized this flow, the guard yields zero rows and this becomes a
+		// clean no-op; without it we would insert a pending fan-in step and overwrite step_id on a terminal
+		// flow (orphan work reaped only later by the claim-time terminal-flow guard). `touch` always changes
+		// value, so RowsAffected reflects the WHERE match on every driver.
+		flowRes, flowErr := tx.ExecContext(ctx,
+			"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			flowID,
+		)
+		if flowErr != nil {
+			return errors.Trace(flowErr)
+		}
+		if n, _ := flowRes.RowsAffected(); n == 0 {
+			return nil
+		}
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=0 WHERE step_id=?", stepID)
 
 		var ourStateJSON, ourChangesJSON string
@@ -891,6 +906,11 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 	})
 	if err != nil {
 		return errors.Trace(err)
+	}
+	if fanInStepID == 0 {
+		// The terminal-status guard bailed - the flow was cancelled/failed concurrently, no fan-in step
+		// was inserted, nothing to dispatch.
+		return nil
 	}
 
 	if sleepDur > 0 {
