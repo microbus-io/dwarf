@@ -114,7 +114,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	var newRootFlowID int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		cc.newLeafStepID = 0
-		id, cloneErr := e.cloneSubtree(ctx, tx, cc, rootFlowID, 0, 0, true)
+		id, cloneErr := e.cloneTree(ctx, tx, cc, rootFlowID)
 		if cloneErr != nil {
 			return errors.Trace(cloneErr)
 		}
@@ -155,18 +155,56 @@ type forkClone struct {
 	newRootFlowID   int // the cloned root's flow_id; descendants inherit it as their root_flow_id
 }
 
-// cloneSubtree clones originFlowID into a new flow under the given new-surgraph context, then recurses into
-// its kept subgraph-caller children. Returns the new flow id. A flow on the rewind chain keeps everything
-// above its rewind step and is set running; an off-path completed-prefix subgraph (rewind 0) is cloned
-// whole and keeps its status.
-func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone, originFlowID, newSurgFlowID, newSurgStepID int, isRoot bool) (int, error) {
+// forkChild is a queued subgraph-caller child awaiting clone: its origin flow plus the new-surgraph context
+// (the parent's freshly-cloned flow id and caller step id) it hangs under. Carrying only three ints keeps the
+// worklist tiny regardless of how much state each cloned flow holds.
+type forkChild struct {
+	originFlowID  int
+	newSurgFlowID int
+	newSurgStepID int
+	isRoot        bool
+}
+
+// cloneTree clones the whole terminal tree rooted at rootFlowID into a fresh flow tree and returns the new
+// root's flow id. It walks the tree with an explicit LIFO worklist rather than recursion: each flow is cloned
+// to completion by cloneOneFlow, which returns its kept subgraph-caller children to enqueue. Only ONE flow's
+// clone state (its step metadata, id map, and that flow's graph/baggage JSON) is live at a time, and the
+// goroutine stack stays O(1) at any nesting depth. Depth-proportional recursion here would instead hold every
+// ancestor's clone state simultaneously and, at pathological depth, overflow the goroutine stack - which is
+// fatal (unrecoverable by errors.CatchPanic, unlike a host-call panic). Children are pushed in reverse so they
+// pop in discovery order (DFS preorder, matching the former recursion), keeping cloned-id assignment stable.
+func (e *Engine) cloneTree(ctx context.Context, tx *sequel.Tx, cc *forkClone, rootFlowID int) (int, error) {
+	stack := []forkChild{{originFlowID: rootFlowID, isRoot: true}}
+	var rootNewID int
+	for len(stack) > 0 {
+		it := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		newFlowID, children, err := e.cloneOneFlow(ctx, tx, cc, it.originFlowID, it.newSurgFlowID, it.newSurgStepID, it.isRoot)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		if it.isRoot {
+			rootNewID = newFlowID
+		}
+		for i := len(children) - 1; i >= 0; i-- {
+			stack = append(stack, children[i])
+		}
+	}
+	return rootNewID, nil
+}
+
+// cloneOneFlow clones a single flow (originFlowID) into a new flow under the given new-surgraph context and
+// returns the new flow id plus its kept subgraph-caller children for cloneTree to enqueue. A flow on the
+// rewind chain keeps everything above its rewind step and is set running; an off-path completed-prefix
+// subgraph (rewind 0) is cloned whole and keeps its status.
+func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone, originFlowID, newSurgFlowID, newSurgStepID int, isRoot bool) (int, []forkChild, error) {
 	rewind := cc.rewindByFlow[originFlowID] // 0 => full clone (off-path completed prefix subgraph)
 
 	pruned := map[int]bool{}
 	if rewind != 0 {
 		sub, err := e.collectDAGSubtree(ctx, tx, originFlowID, rewind)
 		if err != nil {
-			return 0, errors.Trace(err)
+			return 0, nil, errors.Trace(err)
 		}
 		for _, m := range sub {
 			pruned[m.stepID] = true
@@ -180,7 +218,7 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		originFlowID,
 	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &baggageJSON, &traceParent, &notifyOnStop, &deleteOnCompletion)
 	if err != nil {
-		return 0, errors.Trace(err)
+		return 0, nil, errors.Trace(err)
 	}
 	status = strings.TrimSpace(status)
 
@@ -204,7 +242,7 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		randomIdentifier(16), workflowURL, workflowName, graphJSON, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, notifyOnStop, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget,
 	)
 	if err != nil {
-		return 0, errors.Trace(err)
+		return 0, nil, errors.Trace(err)
 	}
 	newFlowID := int(newFlowID64)
 	if isRoot {
@@ -214,13 +252,13 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET flow_token=?, thread_id=?, thread_token=?, root_flow_id=? WHERE flow_id=?",
 			cc.rootFlowToken, cc.threadID, cc.threadToken, newFlowID, newFlowID)
 		if err != nil {
-			return 0, errors.Trace(err)
+			return 0, nil, errors.Trace(err)
 		}
 	} else {
 		// Subgraph flows are their own thread but share the cloned root's tree-membership id.
 		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET thread_id=?, root_flow_id=? WHERE flow_id=?", newFlowID, cc.newRootFlowID, newFlowID)
 		if err != nil {
-			return 0, errors.Trace(err)
+			return 0, nil, errors.Trace(err)
 		}
 	}
 
@@ -228,7 +266,7 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	childByCaller := map[int]int{}
 	crows, err := tx.QueryContext(ctx, "SELECT flow_id, surgraph_step_id FROM dwarf_flows WHERE surgraph_flow_id=? ORDER BY flow_id", originFlowID)
 	if err != nil {
-		return 0, errors.Trace(err)
+		return 0, nil, errors.Trace(err)
 	}
 	for crows.Next() {
 		var cFlow, cCaller int
@@ -246,7 +284,7 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		originFlowID,
 	)
 	if err != nil {
-		return 0, errors.Trace(err)
+		return 0, nil, errors.Trace(err)
 	}
 	var keep []stepMeta
 	for mrows.Next() {
@@ -268,7 +306,7 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// arrive - wedging the fork permanently at its fan-in. Reject the fork loudly rather than silently wedge.
 	for _, s := range keep {
 		if s.status == workflow.StatusInterrupted && s.oldID != rewind {
-			return 0, errors.New("cannot fork: tree holds an unresolved interrupted step (%d) off the fork path", s.oldID, http.StatusConflict)
+			return 0, nil, errors.New("cannot fork: tree holds an unresolved interrupted step (%d) off the fork path", s.oldID, http.StatusConflict)
 		}
 	}
 
@@ -292,7 +330,7 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			)
 		}
 		if err != nil {
-			return 0, errors.Trace(err)
+			return 0, nil, errors.Trace(err)
 		}
 		idMap[s.oldID] = int(newID)
 	}
@@ -305,7 +343,7 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			idMap[s.predID], idMap[s.succID], idMap[s.lineageID], flowBudget, idMap[s.oldID],
 		)
 		if err != nil {
-			return 0, errors.Trace(err)
+			return 0, nil, errors.Trace(err)
 		}
 	}
 
@@ -336,19 +374,19 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		}
 		_, err = tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals=?, cohort_failures=? WHERE step_id=?", arrivals, failures, idMap[s.oldID])
 		if err != nil {
-			return 0, errors.Trace(err)
+			return 0, nil, errors.Trace(err)
 		}
 	}
 
-	// Recurse into kept subgraph-caller children, skipping the leaf fork step (it re-spawns a fresh child).
+	// Collect kept subgraph-caller children for the worklist (skipping the leaf fork step, which re-spawns a
+	// fresh child). cloneTree processes them iteratively, so nesting depth costs no goroutine stack.
+	var children []forkChild
 	for _, s := range keep {
 		childFlow, ok := childByCaller[s.oldID]
 		if !ok || (isLeafFlow && s.oldID == cc.leafStepID) {
 			continue
 		}
-		if _, err = e.cloneSubtree(ctx, tx, cc, childFlow, newFlowID, idMap[s.oldID], false); err != nil {
-			return 0, errors.Trace(err)
-		}
+		children = append(children, forkChild{originFlowID: childFlow, newSurgFlowID: newFlowID, newSurgStepID: idMap[s.oldID]})
 	}
 
 	// Apply the rewind treatment.
@@ -369,7 +407,7 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			)
 		}
 		if err != nil {
-			return 0, errors.Trace(err)
+			return 0, nil, errors.Trace(err)
 		}
 	}
 
@@ -379,11 +417,11 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			workflow.StatusRunning, idMap[rewind], newFlowID,
 		)
 		if err != nil {
-			return 0, errors.Trace(err)
+			return 0, nil, errors.Trace(err)
 		}
 	}
 
-	return newFlowID, nil
+	return newFlowID, children, nil
 }
 
 func mergeWithOverrides(originalJSON string, overrides any) (string, error) {

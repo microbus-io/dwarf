@@ -501,7 +501,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			args = append(args, scArgs...)
 		}
 		args = append(args, perShardLimit)
-		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_url, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key, f.surgraph_flow_id" +
+		stmt := "SELECT f.flow_id, f.flow_token, f.thread_id, f.thread_token, f.workflow_url, f.workflow_name, f.status, s.task_name, f.error, f.cancel_reason, f.created_at, f.started_at, f.updated_at, f.priority, f.fairness_key, f.surgraph_flow_id, f.trace_parent" +
 			" FROM dwarf_flows f" + joinSQL +
 			" WHERE " + strings.Join(conditions, " AND ") +
 			" ORDER BY f.flow_id DESC LIMIT_OFFSET(?, 0)"
@@ -513,14 +513,15 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 		var shardRows []listRow
 		for rows.Next() {
 			var lr listRow
-			var flowToken, threadToken, flowError, cancelReason string
+			var flowToken, threadToken, flowError, cancelReason, traceParent string
 			var threadID, surgraphFlowID int
 			var taskName sql.NullString
-			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowURL, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey, &surgraphFlowID)
+			err = rows.Scan(&lr.flowID, &flowToken, &threadID, &threadToken, &lr.summary.WorkflowURL, &lr.summary.WorkflowName, &lr.summary.Status, &taskName, &flowError, &cancelReason, &lr.summary.CreatedAt, &lr.summary.StartedAt, &lr.summary.UpdatedAt, &lr.summary.Priority, &lr.summary.FairnessKey, &surgraphFlowID, &traceParent)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			lr.summary.Subgraph = surgraphFlowID != 0
+			lr.summary.TraceID = traceIDFromParent(traceParent)
 			lr.summary.FlowKey = fmt.Sprintf("%d-%d-%s", shardIdx, lr.flowID, strings.TrimSpace(flowToken))
 			lr.summary.ThreadKey = fmt.Sprintf("%d-%d-%s", shardIdx, threadID, strings.TrimSpace(threadToken))
 			lr.summary.Status = strings.TrimSpace(lr.summary.Status)
@@ -714,9 +715,16 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	if query.IncludeSubgraphs {
 		return 0, errors.New("purge cannot include subgraphs; a subgraph child is purged with its root", http.StatusBadRequest)
 	}
-	// Cap the matched-root count per call so the per-shard id list embedded into the DELETE statements stays
-	// small (a single statement, no batching). A caller trimming more loops Purge until it returns 0.
-	const purgeCap = 1000
+	// Cap the matched-root count per call so the per-shard id list embedded into each DELETE's `IN (...)`
+	// predicate stays well under the size where the optimizer struggles. This is not just a slow-plan concern:
+	// on SQL Server a large enough literal IN-list can *fail* to plan outright (errors 8623 "query processor
+	// ran out of internal resources" / 8632 "expression services limit reached"), a hard error rather than a
+	// slow query - which is why there is a hard cap. That failure regime is in the tens of thousands of terms;
+	// 4096 keeps an order-of-magnitude of headroom under it while still purging in useful batches. It is a
+	// single unbatched statement (ids embedded as integer literals via intCSV, so the per-driver bind-param
+	// ceiling - SQL Server 2100 / older SQLite 999 - does not apply; the ceiling here is IN-list planning, not
+	// statement size). A caller trimming more loops Purge until it returns 0.
+	const purgeCap = 4096
 	limit := query.Limit
 	if limit <= 0 || limit > purgeCap {
 		limit = purgeCap

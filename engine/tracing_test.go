@@ -170,3 +170,13 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 	assert.Equal(1, strings.Count(gotID, "-"), "correlation id has exactly two segments (shard-flowID), no token")
 	assert.NotEqual(flowKey, gotID, "workflow.id must not be the capability-bearing flowKey")
 }
+
+func TestTraceIDFromParent(t *testing.T) {
+	assert := testarossa.For(t)
+	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+	assert.Equal(traceID, traceIDFromParent("00-"+traceID+"-00f067aa0ba902b7-01"), "well-formed W3C traceparent")
+	assert.Equal(traceID, traceIDFromParent("  00-"+traceID+"-00f067aa0ba902b7-01  "), "tolerates surrounding whitespace")
+	assert.Zero(traceIDFromParent(""), "empty (no tracer configured) yields empty")
+	assert.Zero(traceIDFromParent("garbage"), "no hyphen yields empty")
+	assert.Zero(traceIDFromParent("00-tooshort-00f067aa0ba902b7-01"), "non-32-hex trace-id yields empty")
+}

@@ -79,6 +79,28 @@ A consequence of having no breaker is no probe *election*: each parked step is i
 independently on its own backoff. The trade is the breaker's coordinated backlog release (instant unblock the moment
 one probe succeeds) for zero engine-side policy and no shared-state machinery to coordinate across replicas.
 
+### Size and count limits are the host's job, not the engine's
+
+The engine enforces **no** size or count bound anywhere - not on initial state, `baggage`, the per-flow-frozen
+graph JSON, interrupt/resume payloads, `forEach` fan-out width (one step row + full state snapshot per array
+element), or subgraph nesting depth. This is the **same structural reason** as backpressure and the absent
+time-budget ceiling: the sizing that matters is workload-defined and keyed on identity the engine cannot see.
+A cap that fits a small control flow would reject a document-processing workflow that legitimately channels
+tens of megabytes of state per flow, and picking one number for both is impossible - so the engine refuses to
+own the number. The host holds the caller/tenant identity a quota turns on, so it enforces limits where that
+context lives: reject an over-large `initialState`/`Baggage` before `Create`, cap a `forEach` source array in
+an author-space entry task, bound retention (recall `Purge` deletes ≤4096 roots/call, so a retention job
+loops). For a **pass-through host** that adds no policy of its own, the obligation flows through to the
+application using that host - it is not silently absorbed anywhere.
+
+Subgraph nesting depth is the one axis that was *also* a latent crash vector, now closed: `Fork` clones the
+tree with an **explicit LIFO worklist** (`cloneTree` drives `cloneOneFlow` per flow), not recursion, so
+arbitrarily deep nesting costs O(1) goroutine stack and only one flow's clone state is live at a time. The
+former recursive `cloneSubtree` held every ancestor's clone state (including each flow's `graph`/`baggage`
+JSON) on the stack at once and, at pathological depth, could overflow the goroutine stack - fatal, since a Go
+stack overflow is *not* recoverable by `errors.CatchPanic`, unlike a host-call panic. Deep nesting now costs
+only bounded storage (one flow row + step rows per level), which falls back under the host-quota rule above.
+
 ### Configuration (`Set*` methods)
 
 Configuration is applied through `Set*` methods, each returning an `error` rather than chaining a `*Engine` (so
@@ -160,24 +182,25 @@ scheduling and baggage (and forces notify-on-stop off). The fork point may be **
 root flow or deep inside a subgraph (so an execution-DAG UI can fork from any clickable node). Returns the new
 flow's key.
 
-*Copy-only-keep, recursive.* `surgraphChain(forkStepFlow)` yields `rewindByFlow`: each flow on the path
+*Copy-only-keep, iterative tree walk.* `surgraphChain(forkStepFlow)` yields `rewindByFlow`: each flow on the path
 root→fork-flow maps to its rewind step (the leaf fork step in its own flow; the caller step in each ancestor). Per
 cloned flow, only the steps that are **not** strict DAG-descendants of that flow's rewind step are copied
 (everything, for an off-path completed-prefix subgraph); a per-step `INSERT…SELECT` copies all columns DB-side
 (native timestamps) under a fresh `flow_id`/`step_token`, building an old→new id map; predecessor/successor/lineage
 references are remapped (a ref to a pruned step → 0); cohort `arrivals`/`failures` are recomputed on cloned spawns
 from the cloned members' terminal states, **excluding the rewound branch** (so the existing fan-in path converges/
-fails the fork with no special escalation). It recurses into kept subgraph-caller children, skipping the leaf fork
-step (which re-spawns a fresh child).
+fails the fork with no special escalation). `cloneTree` drives this per flow (`cloneOneFlow`) over an explicit
+LIFO worklist of kept subgraph-caller children, skipping the leaf fork step (which re-spawns a fresh child) -
+iterative rather than recursive so nesting depth costs O(1) goroutine stack (see "Size and count limits").
 
-*Interrupted-kept-step guard.* `cloneSubtree` copies a kept step's status verbatim, so a kept `interrupted`
+*Interrupted-kept-step guard.* `cloneOneFlow` copies a kept step's status verbatim, so a kept `interrupted`
 step would clone into the running fork as an orphan - unresumable (`Resume` needs the flow `interrupted`, but the
 fork is `running`) and, as a cohort member, uncountable at fan-in (the cohort recompute scores `interrupted` as
 neither arrival nor failure), wedging the fork permanently. This *cannot* arise from a valid origin: an interrupt
 forces the whole surgraph chain non-terminal (up to the root), and Fork rejects a non-terminal root - so a
 terminal fork origin never holds an interrupted step (a failed branch of a cohort that also has an interrupted
 branch rests the flow `interrupted`, not `failed`, because the cohort can never fully arrive). The guard is
-therefore defense-in-depth against a broken invariant: cloneSubtree rejects the fork with 409 if any kept
+therefore defense-in-depth against a broken invariant: cloneOneFlow rejects the fork with 409 if any kept
 (non-rewind) step is `interrupted`, turning a would-be silent permanent wedge into a loud, clean, transactional
 failure that never mutates the origin. The rewind steps themselves (leaf fork step, re-parked ancestor callers)
 are exempt - they are reset/re-parked, so forking *at* an interrupted step is fine.
@@ -614,8 +637,12 @@ Transitions are evaluated after a task completes successfully:
 
 **Error transitions.** When a task returns an error, the failed task's `onError` transition fires and preempts any
 other transition (`onError` is exclusive with `when`/`forEach`/`withGoto`, so it is unconditional). The error is
-serialized as a `TracedError` into state field `onErr`, the handler task becomes the next step, and the failed step
-is marked `completed` with its changes preserved. Fan-out siblings are **not** cancelled - the errored branch
+serialized as a `TracedError` into state field `onErr` **with its stack frames stripped** (`Stack=nil` on a
+shallow copy, so the shared error object keeps its stack for logs) - `onErr` rides into `changes`->`final_state`
+and is readable by any flow reader (`History`/`Snapshot`/`List`), and internal stack traces are code-structure
+disclosure; the handler still gets the message, status code, trace id and properties for routing. The handler task
+becomes the next step, and the failed step is marked `completed` with its changes preserved. (The `error` *column*
+already carries only `err.Error()` - the message, no frames.) Fan-out siblings are **not** cancelled - the errored branch
 continues down its handler path and rejoins the cohort as a normal arrival (convergence is by cohort arrivals, not by
 cancellation). If there is no `onError` transition, the step fails via `failStep`.
 
@@ -704,7 +731,7 @@ immutable** thereafter:
 - A subgraph child **inherits** the parent's `root_flow_id` (`createSubgraphFlow` reads it alongside the inherited
   scheduling/budget and passes it into `createWithGraph`).
 - A `Fork` clone is a fresh self-contained tree: the new root is its **own** root, and the fork's cloned subgraph
-  descendants inherit the **new** root's id (`cloneSubtree` stamps `cc.newRootFlowID`, set right after the root
+  descendants inherit the **new** root's id (`cloneOneFlow` stamps `cc.newRootFlowID`, set right after the root
   insert and before any descendant recurses). The fork does **not** inherit the origin's `root_flow_id`.
 
 Single-shard by construction: subgraph flows have parent-shard affinity, so a whole tree lives on one shard and
@@ -1146,6 +1173,13 @@ key (`signalStop`/`notifyStatusChange`, never leaves the process). No log line e
 ctx-correlated span anyway). Any new span/log/metric that names a flow must use `flowCorrelationID`, never
 the raw key.
 
+**`List` surfaces the flow's trace id.** `FlowSummary.TraceID` is the 32-hex W3C trace-id parsed from the
+`trace_parent` column (`traceIDFromParent`), empty when no tracer was configured. It is a **token-free
+correlation value** (like `flowCorrelationID`, not a capability), safe to surface so an operator can pivot from
+a listed flow to its trace backend - consistent with the trace-read < data-read privilege boundary above. It is
+*not* the OTEL span attribute (`workflow.id` stays the `{shard}-{flowID}` correlation id); it is a distinct,
+read-only observability field on the list projection.
+
 **No correlationID→key lookup, by design.** The correlation id is deliberately *not* a valid engine key
 (no operation accepts it) and the engine offers **no** operation that resolves it back to a key - that
 would be a capability-minting oracle, re-leaking through the back door exactly what dropping the token
@@ -1225,15 +1259,18 @@ For operator-driven retention:
 - **`Purge(Query)`** bulk-deletes flows matching the query, except running. Same `Query` shape as `List` (Status,
   WorkflowURL, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit); it **rejects**
   `IncludeSubgraphs` with 400 (a subgraph child is purged only as part of its root's tree). Capped at `purgeCap`
-  (**1000**) **root** flows per call; returns the count deleted (`deleted <= Limit`). It **selects root flows only**
+  (**4096**) **root** flows per call; returns the count deleted (`deleted <= Limit`). It **selects root flows only**
   but **deletes each matched root's whole subgraph subtree** (root, steps, and all subgraph descendants), keyed on
   the `root_flow_id` tree-membership index. Done per matched-root batch in one transaction: delete the trees' steps
   (`flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (roots))`), then the roots (counted,
   status-reguarded against the SELECT→DELETE running race), then the descendants (`root_flow_id IN (roots)`, now
   matching only subtrees since the roots are gone). The matched-root ids are **embedded as integer literals, not bind
-  params** (trusted ids from the engine's own SELECT), dodging the per-driver parameter-count ceiling (SQL Server
-  2100, older SQLite 999); `purgeCap` keeps the id list small enough for one statement per shard, so there is no
-  batching. (An earlier revision deleted only the matched root + its own steps, permanently orphaning subgraph
+  params** (trusted ids from the engine's own SELECT), which also sidesteps the per-driver bind-param ceiling
+  (SQL Server 2100, older SQLite 999). `purgeCap` (4096) bounds the id count so each `IN (...)` predicate stays
+  plannable: beyond a size a large literal IN-list doesn't just plan slowly but can make **SQL Server fail to
+  plan** (errors 8623/8632) - a hard error, not a slow query. That regime is in the tens of thousands of
+  terms; 4096 keeps order-of-magnitude headroom while still purging in useful batches, one statement per shard
+  with no batching. (An earlier revision deleted only the matched root + its own steps, permanently orphaning subgraph
   descendants - unreachable by a later Purge, which selects roots only, or by `Delete`, which rejects a child key.
   Cascading per root also keeps the matched set stable across the three deletes - a single self-referential
   `DELETE … WHERE flow_id IN (SELECT … FROM dwarf_flows …)` cannot, because MySQL forbids deleting from a table named

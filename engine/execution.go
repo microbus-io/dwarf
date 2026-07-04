@@ -286,9 +286,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if tr, ok := graph.ErrorTransition(taskName); ok {
 			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowURL, "error", execErr)
 			tracedErr := errors.Convert(execErr)
+			// Persist the error into flow state WITHOUT its stack frames. onErr rides into changes ->
+			// final_state and is readable by any flow reader (History/Snapshot/List), and internal stack
+			// traces are code-structure disclosure. The onError handler still gets the message, status
+			// code, trace id and properties for routing - only the frames are dropped. Shallow-copy so the
+			// shared error object keeps its stack (e.g. for the debug log above / a later failStep).
+			redactedErr := *tracedErr
+			redactedErr.Stack = nil
 			resultFlow = workflow.NewRawFlow()
 			resultFlow.SetRawState(state)
-			resultFlow.Set("onErr", tracedErr)
+			resultFlow.Set("onErr", &redactedErr)
 			errorRouted = true
 			errorTarget = tr.To
 		} else {

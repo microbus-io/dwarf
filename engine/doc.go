@@ -82,8 +82,27 @@ limitations under the License.
 //
 // List and Search return keys, tokens included. Exposing them to a principal is equivalent to granting the
 // write capability for every flow they return, so a host must gate them by ownership and never surface
-// them to less-than-fully-trusted callers. The inbound peer entry point DeliverSignal is unauthenticated
+// them to less-than-fully-trusted callers. Key exposure is also transitive across an execution tree: Step
+// and History navigation resolve and return the keys of neighboring steps, crossing flow boundaries into
+// parent and subgraph-child flows, so a single step key reaches the whole tree (each neighbor key both
+// discloses that step's state and can seed a Fork). Authorizing introspection by one flow's ownership is
+// therefore insufficient when the caller holds any step key in that tree; treat the tree (its root) as the
+// authorization unit, or restrict these surfaces to fully-trusted operators. The inbound peer entry point DeliverSignal is unauthenticated
 // by the engine; authenticating replica-to-replica transport is the host's responsibility. Operations on
 // an unknown or mismatched key return a uniform not-found (no existence oracle), but that is a hardening
 // detail, not a substitute for host authorization.
+//
+// # Resource limits
+//
+// The engine imposes no size or count limits — not on initial state, baggage, the frozen graph JSON,
+// interrupt/resume payloads, forEach fan-out width (one step row per array element), or subgraph nesting
+// depth. This is deliberate, the same division of labor as backpressure and time budgets: state size is
+// workload-defined (a document-processing workflow may legitimately carry tens of megabytes per flow), and no
+// single cap fits both that and a small control flow. Bounding resource use is therefore the host's job — it
+// holds the caller identity and tenancy the engine cannot see. A host enforces quotas where it has that
+// context: reject an over-large initial state or Baggage before Create, cap forEach input arrays in author
+// space, and bound its own retention (Purge deletes at most 4096 roots per call, so a retention job loops).
+// For a pass-through host that adds no policy of its own, this obligation flows through to the application
+// using that host. (Deep subgraph nesting is bounded storage, not a crash vector: Fork clones the tree
+// iteratively, so nesting depth costs no goroutine stack.)
 package engine

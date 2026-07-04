@@ -26,7 +26,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestFork_RejectsInterruptedKeptStep pins the cloneSubtree guard: a KEPT interrupted step (one off the
+// TestFork_RejectsInterruptedKeptStep pins the cloneOneFlow guard: a KEPT interrupted step (one off the
 // fork's rewind path) must make Fork reject loudly rather than clone the interrupted step verbatim into a
 // running fork and wedge it (unresumable, and - as a cohort member - unable to ever fan-in).
 //

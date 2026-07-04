@@ -38,6 +38,10 @@ type FlowSummary struct {
 	Priority int `json:"priority,omitzero"`
 	// FairnessKey is the flow's scheduling fairness bucket, resolved at Create.
 	FairnessKey string `json:"fairnessKey,omitzero"`
+	// TraceID is the flow's distributed-trace id (the 32-hex trace-id parsed from its stored W3C
+	// traceparent), or empty when no tracer was configured at Create. Surfaced for correlating a listed
+	// flow with its trace backend; it is a token-free correlation value, not a capability.
+	TraceID string `json:"traceID,omitzero"`
 	// Subgraph is true when this flow is a subgraph child (it has a parent caller step), false for a
 	// top-level/root flow. A list returns roots only unless Query.Subgraph opts subgraph children in.
 	Subgraph bool `json:"subgraph,omitzero"`

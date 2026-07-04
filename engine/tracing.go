@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -75,6 +76,18 @@ func extractTraceParent(ctx context.Context) string {
 	carrier := propagation.HeaderCarrier{}
 	traceProp.Inject(ctx, carrier)
 	return carrier.Get("Traceparent")
+}
+
+// traceIDFromParent extracts the 32-hex trace id from a stored W3C traceparent
+// ("version-traceid-spanid-flags"), for correlating a flow with its trace backend. Returns "" when the
+// string is empty (no tracer configured) or malformed - never errors, since it feeds a best-effort
+// observability field, not a control path.
+func traceIDFromParent(traceParent string) string {
+	parts := strings.Split(strings.TrimSpace(traceParent), "-")
+	if len(parts) < 2 || len(parts[1]) != 32 {
+		return ""
+	}
+	return parts[1]
 }
 
 // injectTraceParent deserializes a W3C traceparent string into ctx so spans created from the returned
