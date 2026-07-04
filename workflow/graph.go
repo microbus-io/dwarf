@@ -330,6 +330,7 @@ func (g *Graph) Validate() error {
 			return errors.New("SetFanIn cannot mark END in graph '%s'", g.name)
 		}
 	}
+	onErrorFrom := make(map[string]bool, len(g.nodes))
 	for _, tr := range g.transitions {
 		if tr.From == END {
 			return errors.New("transition out of END to '%s' in graph '%s'; END is terminal and has no outgoing transitions", tr.To, g.name)
@@ -348,6 +349,15 @@ func (g *Graph) Validate() error {
 		}
 		if tr.OnError && (tr.ForEach != "" || tr.WithGoto) {
 			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine onError with forEach or withGoto", tr.From, tr.To, g.name)
+		}
+		if tr.OnError && tr.When != "" {
+			return errors.New("onError transition from '%s' to '%s' in graph '%s' cannot have a 'when' expression; onError is unconditional (it fires whenever the source task errors)", stripProto(tr.From), stripProto(tr.To), g.name)
+		}
+		if tr.OnError {
+			if onErrorFrom[tr.From] {
+				return errors.New("node '%s' in graph '%s' has more than one onError transition; only one is allowed (ErrorTransition takes the first)", stripProto(tr.From), g.name)
+			}
+			onErrorFrom[tr.From] = true
 		}
 		if tr.Switch && (tr.ForEach != "" || tr.WithGoto || tr.OnError) {
 			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine switch with forEach, withGoto, or onError", stripProto(tr.From), stripProto(tr.To), g.name)

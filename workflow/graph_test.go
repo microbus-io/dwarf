@@ -165,6 +165,38 @@ func TestGraph_Validate(t *testing.T) {
 	assert.Error(g7.Validate())
 }
 
+// TestGraph_ValidateOnError pins the two onError guards: a node may declare at most one onError transition
+// (ErrorTransition takes the first, so a second would silently never fire), and an onError transition cannot
+// carry a 'when' (onError is unconditional). The 'when' case is only reachable via a hand-crafted graph -
+// AddTransitionOnError never sets When - so it is built by appending a raw Transition.
+func TestGraph_ValidateOnError(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// A single onError is fine.
+	ok := NewGraph("Test")
+	ok.AddTransition("svc/a", END)
+	ok.AddTransitionOnError("svc/a", "svc/h")
+	ok.AddTransition("svc/h", END)
+	assert.NoError(ok.Validate())
+
+	// Two onError transitions from the same node are rejected.
+	dup := NewGraph("Test")
+	dup.AddTransition("svc/a", END)
+	dup.AddTransitionOnError("svc/a", "svc/h1")
+	dup.AddTransition("svc/h1", END)
+	dup.AddTransitionOnError("svc/a", "svc/h2")
+	dup.AddTransition("svc/h2", END)
+	assert.Error(dup.Validate())
+
+	// An onError transition carrying a 'when' (hand-crafted) is rejected.
+	cond := NewGraph("Test")
+	cond.AddTransition("svc/a", END)
+	cond.SetEndpoint("svc/h", "svc/h")
+	cond.AddTransition("svc/h", END)
+	cond.transitions = append(cond.transitions, Transition{From: "svc/a", To: "svc/h", OnError: true, When: "x > 0"})
+	assert.Error(cond.Validate())
+}
+
 // TestGraph_ValidateFanOutConvergence pins that all branches of one fan-out must converge on the SAME
 // fan-in node. The cohort shares a spawn step and the cohort-resolution path selects the fan-in from
 // whichever sibling completes last, so divergent fan-in targets make the convergence node
