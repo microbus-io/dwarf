@@ -140,10 +140,21 @@ origin flow's, and subgraph children inherit the parent's. So there is no `opts`
 one of those operations *is* choosing "inherit." The explicit-policy escape hatch for a continuation is
 `Create` with `FlowOptions.ThreadKey` set (join an existing thread but specify policy yourself).
 
-**Create** - Creates a flow **and runs it**. Calls `LoadGraph` to fetch the graph, then inserts the flow row
-(already `running`) and its entry-point step (`pending`) in one transaction and rings the doorbell - returning a
-running flow's key. The graph JSON is frozen at creation. There is no separate start call; `created` is never an
-externally-visible resting state. `FlowOptions.ThreadKey` (optional) joins the new flow into an existing thread
+**Create** - Creates a flow **and runs it**. Calls `LoadGraph` to fetch the graph, **validates it**
+(`graph.Validate()` after a nil check), then inserts the flow row (already `running`) and its entry-point
+step (`pending`) in one transaction and rings the doorbell - returning a running flow's key. The graph JSON is
+frozen at creation. There is no separate start call; `created` is never an externally-visible resting state.
+
+*Create-time validation is load-bearing, not just doc-hygiene.* A `LoadGraph` returning `(nil, nil)` is a
+clean 404 here (it would otherwise nil-deref in `EntryPoint()`); a structurally invalid graph is a 400. And
+`Validate()`'s **side effect populates `fanOutToFanIn`**, which the empty-`forEach` fan-in shortcut reads via
+`graph.FanInFor` - so without validation an empty `forEach` silently *completes the flow* instead of firing
+the fan-in, skipping every downstream task (silent data loss). Because the validated graph (including that
+populated map) is frozen into the flow's graph JSON, every later dispatch sees it; validation is once per
+create, never per step. The **subgraph-spawn** path validates identically (a nil/invalid child graph fails the
+caller step like any `LoadGraph` error), so the child's `fanOutToFanIn` is populated before its JSON is frozen.
+One consequence for graph authors: a graph with no explicit transition to `END` (relying on "no matching
+transition completes the flow") is now rejected at `Create` - `Validate` requires an explicit `END` edge. `FlowOptions.ThreadKey` (optional) joins the new flow into an existing thread
 (any flowKey in that thread; a bad/stale key 404s). The engine has **no creation-time delay** (no `StartAt`):
 every flow runs as soon as it is created. A flow that should wait runs author-side - an entry **gate** task that
 calls `flow.Sleep(until)` for a one-shot durable delay, or an interrupt-first entry task + `Resume` (staged

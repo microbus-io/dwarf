@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/http"
 	"strings"
 	"time"
 
@@ -396,6 +397,19 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
 		if lerr != nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, lerr, taskName)
+			return errors.Trace(err)
+		}
+		// Same create-time guarantees for a subgraph child: reject a nil or structurally invalid child graph
+		// (failing the caller step like any LoadGraph error), and let Validate populate the child's
+		// fanOutToFanIn before createSubgraphFlow freezes its JSON.
+		if subgraphGraph == nil {
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+				errors.New("subgraph graph not found: %s", subgraphURL, http.StatusNotFound), taskName)
+			return errors.Trace(err)
+		}
+		if verr := subgraphGraph.Validate(); verr != nil {
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+				errors.New("invalid subgraph graph %s: %v", subgraphURL, verr, http.StatusBadRequest), taskName)
 			return errors.Trace(err)
 		}
 		// Persist the task's changes AND park the caller step in one UPDATE, BEFORE the child flow is made

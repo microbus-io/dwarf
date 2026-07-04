@@ -51,6 +51,17 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	// A host that returns (nil, nil) is a not-found, not a nil-deref: guard before EntryPoint/Validate.
+	if graph == nil {
+		return "", errors.New("workflow graph not found: %s", workflowURL, http.StatusNotFound)
+	}
+	// Validate at create (documented behavior). Besides rejecting a structurally invalid graph up front,
+	// Validate's side effect populates fanOutToFanIn - which the empty-forEach fan-in path (FanInFor) reads
+	// - and that map is frozen into the graph JSON below, so every dispatch of this flow sees it. Cheap:
+	// once per create, never per step.
+	if verr := graph.Validate(); verr != nil {
+		return "", errors.New("invalid workflow graph %s: %v", workflowURL, verr, http.StatusBadRequest)
+	}
 
 	// FlowOptions.ThreadKey joins an existing thread: the shard is encoded in the key, and the new flow
 	// adopts that flow's thread_id/thread_token (a mid-thread flow's thread_id is not its own flow_id).

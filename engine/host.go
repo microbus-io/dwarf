@@ -43,7 +43,9 @@ import (
 type Host interface {
 	// LoadGraph fetches a workflow graph definition by its URL (the addressable resolve key passed to
 	// Create). The flow's opaque baggage rides on ctx; read it with workflow.BaggageFrom(ctx) if loading
-	// is identity-dependent (authz, per-actor graphs).
+	// is identity-dependent (authz, per-actor graphs). The engine validates the returned graph
+	// (graph.Validate) at Create and at subgraph spawn, so the host need not: returning (nil, nil) yields a
+	// 404 and a structurally invalid graph a 400, rather than a later dispatch-time failure.
 	LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error)
 
 	// ExecuteTask executes a single task within a workflow. taskURL is the task's dispatch URL (the real

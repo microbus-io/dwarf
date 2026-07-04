@@ -121,6 +121,7 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	g.AddTransition("Work", "J")        // normal: straight to fan-in
 	g.AddTransitionGoto("Work", "Deep") // goto: extend this branch one level deeper
 	g.AddTransition("Deep", "J")
+	g.AddTransition("J", workflow.END)
 	proxy.HandleGraph("depthfanin.verify:428/g", g)
 
 	// gate1 holds element 1's shallow branch (Work -> J, depth 2) until the deep branch (Work -> Deep -> J,
