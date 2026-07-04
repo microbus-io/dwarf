@@ -23,12 +23,11 @@ import (
 )
 
 // Host is the contract between the dwarf engine and the surrounding host application. The engine owns no
-// transport of its own; it reaches workflow graphs and tasks, reports flow stops, and carries
-// cross-replica coordination signals exclusively through the host. Register it once via Engine.SetHost.
+// transport of its own; it reaches workflow graphs and tasks and carries cross-replica coordination
+// signals exclusively through the host. Register it once via Engine.SetHost.
 //
-// A host MUST implement LoadGraph and ExecuteTask. The remaining two methods are optional: an
-// implementation may do nothing in them when it has no flow-stop notification need (FlowStopped) or runs
-// single-replica with no cross-replica coordination (SignalPeers).
+// A host MUST implement LoadGraph and ExecuteTask. SignalPeers is optional: an implementation may do
+// nothing in it when it runs single-replica with no cross-replica coordination.
 //
 // Cross-replica signal contract (SignalPeers): the engine funnels all of its coordination signals
 // (work doorbells, flow-stop wakes) through this one method. op is a routing key the host may use as a
@@ -61,13 +60,6 @@ type Host interface {
 	// a task that ignores it can only be recovered by lease expiry, not cancelled.
 	ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error
 
-	// FlowStopped is fired when a flow stops (completed, failed, cancelled, interrupted), but only for a
-	// flow created with FlowOptions.NotifyOnStop=true. flowKey identifies the stopped flow (it is not part
-	// of the outcome). The flow's opaque baggage rides on ctx (read it with workflow.BaggageFrom(ctx)); the
-	// host decides where/how to deliver the notification from it - the engine traffics in no delivery
-	// address. Optional: a host with no notification need does nothing.
-	FlowStopped(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome)
-
 	// SignalPeers delivers a cross-replica coordination signal to the other replicas. op is an opaque
 	// routing key (usable as a topic); payload is opaque bytes the engine already serialized. The host
 	// ships (op, payload) to peers and on the receiving side calls Engine.DeliverSignal(ctx, op,
@@ -83,5 +75,4 @@ func (noopHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, er
 func (noopHost) ExecuteTask(ctx context.Context, name string, flow *workflow.Flow) error {
 	return nil
 }
-func (noopHost) FlowStopped(context.Context, string, *workflow.FlowOutcome) {}
-func (noopHost) SignalPeers(context.Context, string, []byte)                {}
+func (noopHost) SignalPeers(context.Context, string, []byte) {}

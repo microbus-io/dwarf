@@ -922,16 +922,16 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 			return errors.Trace(err)
 		}
 
-		// The new turn inherits the latest completed turn's full policy (scheduling, baggage, notify).
+		// The new turn inherits the latest completed turn's full policy (scheduling, baggage).
 		// Exclude debug forks: a Fork shares the thread_id for List grouping but must never become a
 		// production Continue's base (forked_from_step<>0 marks a fork).
 		var flowStatus, finalStateJSON, graphJSON, workflowURL, baggageJSON, fairnessKey string
-		var priority, timeBudgetMs, notifyOnStop int
+		var priority, timeBudgetMs int
 		var fairnessWeight float64
 		err := tx.QueryRowContext(ctx,
-			"SELECT status, final_state, graph, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms, notify_on_stop FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			"SELECT status, final_state, graph, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 			threadID,
-		).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs, &notifyOnStop)
+		).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
 		if err == sql.ErrNoRows {
 			return errors.New("no flows found in thread", http.StatusNotFound)
 		}
@@ -976,10 +976,6 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		if timeBudget <= 0 {
 			timeBudget = e.taskTimeBudget()
 		}
-		nOnStop := 0
-		if notifyOnStop != 0 {
-			nOnStop = 1
-		}
 		newWorkflowURL = workflowURL
 
 		// A Continue turn starts its own trace (fresh detached root span, empty parent) and no surgraph
@@ -996,7 +992,6 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 			entryPoint:     entryPoint,
 			entryURL:       dispatchURLOf(&graph, entryPoint),
 			timeBudgetMs:   timeBudget.Milliseconds(),
-			notifyOnStop:   nOnStop,
 			threadID:       threadID,
 			threadToken:    threadToken,
 			priority:       priority,

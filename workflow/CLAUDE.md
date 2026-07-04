@@ -84,8 +84,8 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
 - **`flow.Goto(target)`** - override transition routing: skip normal evaluation and follow the `withGoto` transition
   to `target`, if registered. Goto transitions are never taken during normal evaluation.
 - **`flow.Interrupt(payload)`** - pause and park the flow. The payload is stored in `interrupt_payload` and propagated
-  up the surgraph chain. The task should return normally after. The engine sets the flow `interrupted` and fires the
-  `FlowStopped` callback when the root flow's `notify_on_stop` is set.
+  up the surgraph chain. The task should return normally after. The engine sets the flow `interrupted`; a caller
+  wanting to be told resumes via `Await` or an orchestrating workflow (the engine has no stop callback).
 
 **Single-park guard.** A step parks at most once - interrupt XOR subgraph, never both and never the other kind on
 re-entry. `processStep` enforces this after the task returns: a competing-signals check fails the step if more than

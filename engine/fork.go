@@ -213,11 +213,11 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	}
 
 	var status, workflowURL, workflowName, graphJSON, baggageJSON, traceParent string
-	var notifyOnStop, deleteOnCompletion int
+	var deleteOnCompletion int
 	err := tx.QueryRowContext(ctx,
-		"SELECT status, workflow_url, workflow_name, graph, baggage, trace_parent, notify_on_stop, delete_on_completion FROM dwarf_flows WHERE flow_id=?",
+		"SELECT status, workflow_url, workflow_name, graph, baggage, trace_parent, delete_on_completion FROM dwarf_flows WHERE flow_id=?",
 		originFlowID,
-	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &baggageJSON, &traceParent, &notifyOnStop, &deleteOnCompletion)
+	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &baggageJSON, &traceParent, &deleteOnCompletion)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
@@ -234,13 +234,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	if isRoot {
 		newStatus = workflow.StatusCreated // gate; flipped to running below once this flow is mapped
 		forkedFromStep, newTrace = cc.leafStepID, cc.rootTraceParent
-		notifyOnStop, deleteOnCompletion = 0, 0
+		deleteOnCompletion = 0
 	}
 
 	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id",
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, notify_on_stop, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		keys.RandomIdentifier(16), workflowURL, workflowName, graphJSON, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, notifyOnStop, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		keys.RandomIdentifier(16), workflowURL, workflowName, graphJSON, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget,
 	)
 	if err != nil {
 		return 0, nil, errors.Trace(err)

@@ -21,6 +21,8 @@ Then dip into the topic guides as you need them:
 
 - **[Engine operations](operations.md)** — every method on the engine: creating, running, inspecting,
   pausing/resuming, cancelling, forking, continuing a thread, and retention.
+- **[Detecting completion](detecting-completion.md)** — the two ways to learn a flow's outcome (`Await` vs.
+  orchestration) and how to make follow-up delivery reliable.
 - **[Fan-out & subgraphs](fan-out-and-subgraphs.md)** — running work in parallel and calling
   sub-workflows.
 - **[Scheduling & reliability](scheduling-and-reliability.md)** — priority, fairness, retries, and

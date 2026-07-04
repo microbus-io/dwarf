@@ -574,7 +574,6 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 		}
 		resolved.FairnessKey = opts.FairnessKey
 		resolved.Baggage = opts.Baggage
-		resolved.NotifyOnStop = opts.NotifyOnStop
 		resolved.DeleteOnCompletion = opts.DeleteOnCompletion
 		resolved.ThreadKey = opts.ThreadKey
 		if opts.TimeBudget > 0 {
@@ -587,7 +586,7 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 // --- Public API ---
 
 // Create creates a new flow for a workflow and starts it, returning the running flow's key. opts carries
-// the flow's policy (scheduling, NotifyOnStop, DeleteOnCompletion, Baggage, ThreadKey); nil uses defaults.
+// the flow's policy (scheduling, DeleteOnCompletion, Baggage, ThreadKey); nil uses defaults.
 // For a flow that must wait for an external trigger, have the entry task call flow.Interrupt and resume it
 // with Resume (which, unlike a separate start, also delivers a payload).
 func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
@@ -672,7 +671,7 @@ func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, 
 }
 
 // Continue creates a new flow from the latest completed flow in a thread, inheriting that flow's policy
-// (scheduling, baggage, notify-on-stop) - it does not take FlowOptions. For a turn with different policy,
+// (scheduling, baggage) - it does not take FlowOptions. For a turn with different policy,
 // use Create with FlowOptions.ThreadKey.
 func (e *Engine) Continue(ctx context.Context, threadKey string, additionalState any) (string, error) {
 	return e.continueFlow(ctx, threadKey, additionalState)

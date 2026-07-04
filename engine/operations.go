@@ -137,7 +137,6 @@ type flowSeed struct {
 	entryPoint         string
 	entryURL           string
 	timeBudgetMs       int64
-	notifyOnStop       int
 	deleteOnCompletion int
 	surgraphFlowID     int
 	surgraphStepID     int
@@ -157,9 +156,9 @@ type flowSeed struct {
 // latest turn, so both share exactly one copy of the insert SQL.
 func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, err error) {
 	newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, notify_on_stop, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, started_at)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
-		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.notifyOnStop, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, started_at)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
+		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs,
 	)
 	if err != nil {
 		return 0, 0, errors.Trace(err)
@@ -244,10 +243,6 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	if timeBudget <= 0 {
 		timeBudget = e.taskTimeBudget()
 	}
-	notifyOnStop := 0
-	if opts.NotifyOnStop {
-		notifyOnStop = 1
-	}
 	deleteOnCompletion := 0
 	if opts.DeleteOnCompletion {
 		deleteOnCompletion = 1
@@ -271,7 +266,6 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		entryPoint:         entryPoint,
 		entryURL:           entryURL,
 		timeBudgetMs:       timeBudget.Milliseconds(),
-		notifyOnStop:       notifyOnStop,
 		deleteOnCompletion: deleteOnCompletion,
 		surgraphFlowID:     surgraphFlowID,
 		surgraphStepID:     surgraphStepID,
@@ -610,20 +604,6 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		return errors.Trace(err)
 	}
 
-	rootIdx := len(surgraphFlowIDs) - 1
-	rootCompositeID := surgraphCompositeIDs[rootIdx]
-	var rootNotifyOnStop bool
-	var rootBaggageJSON string
-	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", surgraphFlowIDs[rootIdx]).Scan(&rootNotifyOnStop, &rootBaggageJSON)
-	if rootNotifyOnStop {
-		var finalState map[string]any
-		json.Unmarshal([]byte(finalStates[rootIdx]), &finalState)
-		e.fireFlowStopped(ctx, rootCompositeID, rootBaggageJSON, &workflow.FlowOutcome{
-			Status:       workflow.StatusCancelled,
-			State:        finalState,
-			CancelReason: reason,
-		})
-	}
 	for _, cid := range allCompositeIDs {
 		e.logger.InfoContext(ctx, "Flow status transition", "to", workflow.StatusCancelled)
 		e.signalStop(ctx, cid, workflow.StatusCancelled)

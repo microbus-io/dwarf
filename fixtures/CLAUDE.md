@@ -55,5 +55,5 @@ convention. A fixture asserting over the **full** flow set (`List`/`Purge`/`Shar
 - its engine sees only its own flows.
 
 A fixture needing a **non-default topology** (`SetNumShards`, `SetTimeBudget`, a specific `SetWorkers` count) or
-**host singletons** (`OnFlowStopped`, multi-replica `AddPeer`/peers, a custom host wrapping `TestProxy`) configures
+**host singletons** (multi-replica `AddPeer`/peers, a custom host wrapping `TestProxy`) configures
 them on its own engine/proxy before `RunInTest` - the same per-test ownership, just with non-default knobs.

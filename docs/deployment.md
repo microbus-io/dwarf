@@ -104,7 +104,7 @@ pure pipe that never inspects `op` or `payload`:
 
 ```go
 type Host interface {
-    // ... required LoadGraph / ExecuteTask, plus optional FlowStopped ...
+    // ... required LoadGraph / ExecuteTask ...
 
     // op is a routing key (usable as a topic); payload is opaque bytes. Ship (op, payload) to OTHER
     // replicas; on receipt call eng.DeliverSignal(ctx, op, payload).

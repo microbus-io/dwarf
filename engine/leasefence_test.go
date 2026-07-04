@@ -43,8 +43,8 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		testarossa.For(t).NoError(err)
 		// flow_id is auto-increment; the first insert on a fresh per-test DB is flow_id=1 on every driver.
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, notify_on_stop, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			"ftok", "u", "W", "{}", workflow.StatusRunning, 1, 1, 0, 1000,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			"ftok", "u", "W", "{}", workflow.StatusRunning, 1, 1, 1000,
 		)
 		testarossa.For(t).NoError(err)
 		// lease_expires is set well into the future so the engine's own lease-recovery poll (running under
@@ -105,6 +105,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 //   - force-expires that step's lease and runs pollPendingSteps so a free worker re-claims it (generation
 //     N+1) and re-runs it to completion, driving the flow to a terminal outcome,
 //   - awaits that terminal outcome, then returns a release func the caller invokes to unblock the zombie.
+//
 // The zombie's late writes then carry the stale generation N and must be fenced. taskCalls counts dispatches
 // of the blocking task (ends at 2: zombie + owner).
 func zombieDispatch(t *testing.T, eng *Engine, flowURL, blockTaskName string, taskCalls *atomic.Int64,
@@ -206,7 +207,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	time.Sleep(1 * time.Second)
 	var bSteps int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='B'", flowID).Scan(&bSteps))
-	assert.Equal(1, bSteps)             // exactly one successor, not a zombie-inserted duplicate
+	assert.Equal(1, bSteps)               // exactly one successor, not a zombie-inserted duplicate
 	assert.Equal(int64(1), bCalls.Load()) // B executed exactly once
 	assert.Equal(int64(2), aCalls.Load()) // A ran twice by design (zombie + owner re-dispatch)
 }
@@ -276,8 +277,8 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	time.Sleep(1 * time.Second) // let the released zombie attempt its fenced write
 	var arrivals, size, jSteps int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT cohort_arrivals, cohort_size FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&arrivals, &size))
-	assert.Equal(2, size)                 // two branches spawned
-	assert.Equal(2, arrivals)             // both arrived exactly once; the zombie did not add a third
+	assert.Equal(2, size)     // two branches spawned
+	assert.Equal(2, arrivals) // both arrived exactly once; the zombie did not add a third
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='J'", flowID).Scan(&jSteps))
 	assert.Equal(1, jSteps)               // fan-in fired exactly once
 	assert.Equal(int64(1), jCalls.Load()) // J executed exactly once

@@ -63,24 +63,10 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	return e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, 0, "", callerTraceParent, &inherited, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID)
 }
 
-// fireFlowStopped invokes the host's FlowStopped callback with the flow's baggage on the context, so the
-// host can resolve the notification target from it. Callers guard on the flow's notify_on_stop opt-in.
-func (e *Engine) fireFlowStopped(ctx context.Context, flowKey string, baggageJSON string, outcome *workflow.FlowOutcome) {
-	var baggage map[string]any
-	unmarshalJSONMap(baggageJSON, &baggage)
-	err := errors.CatchPanic(func() error {
-		e.host.FlowStopped(workflow.ContextWithBaggage(ctx, baggage), flowKey, outcome)
-		return nil
-	})
-	if err != nil {
-		e.logger.ErrorContext(ctx, "FlowStopped callback panicked", "error", err)
-	}
-}
-
 // completeFlowSequential marks a flow completed when no successor exists.
-func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID int, notifyOnStop bool, baggageJSON, workflowURL string) error {
+func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID int, workflowURL string) error {
 	e.logger.DebugContext(ctx, "Flow completed", "flow", workflowURL)
-	_, err := e.completeFlow(ctx, shardNum, flowID, flowToken, notifyOnStop, baggageJSON)
+	_, err := e.completeFlow(ctx, shardNum, flowID, flowToken)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -199,7 +185,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, flow
 }
 
 // completeFlow transitions a flow to completed and propagates to surgraph.
-func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flowToken string, notifyOnStop bool, baggageJSON string) (bool, error) {
+func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flowToken string) (bool, error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -256,7 +242,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// read landed between the status=completed commit and the delete saw a `completed` outcome instead
 		// of the intended uniform 404 (await's first snapshot, before it ever waits on signalStop, is the
 		// common way to hit it). Folding the delete in removes the window entirely. Root-only
-		// (surgraph_flow_id=0); the FlowStopped notification below still fires with the computed outcome.
+		// (surgraph_flow_id=0).
 		if completed && deleteOnCompletion && surgraphFlowID == 0 {
 			descendants, derr := e.allDescendantSubgraphFlows(ctx, tx, flowID)
 			if derr != nil {
@@ -294,15 +280,6 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusCompleted)
 	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
-
-	if notifyOnStop {
-		var finalState map[string]any
-		json.Unmarshal([]byte(finalStateJSON), &finalState)
-		e.fireFlowStopped(ctx, compositeID, baggageJSON, &workflow.FlowOutcome{
-			Status: workflow.StatusCompleted,
-			State:  finalState,
-		})
-	}
 
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
 	e.signalEnqueue(ctx, 0, 0) // Wake peers
@@ -474,11 +451,10 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		return false, nil
 	}
 
-	// A subgraph child does not fire the FlowStopped callback (notify_on_stop is root-only) and delivers its
-	// failure to the parent's flow.Subgraph call for re-dispatch - but it has still stopped, so wake any Await
-	// on the child key (legal read-only introspection), locally and on peers, exactly as the top-level path
-	// below does. Without this signalStop, Await(childKey) blocks until its context deadline despite the child
-	// being terminal.
+	// A subgraph child delivers its failure to the parent's flow.Subgraph call for re-dispatch - but it has
+	// still stopped, so wake any Await on the child key (legal read-only introspection), locally and on peers,
+	// exactly as the top-level path below does. Without this signalStop, Await(childKey) blocks until its
+	// context deadline despite the child being terminal.
 	if isSubgraphChild {
 		e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken)), workflow.StatusFailed)
 		if reDispatchParent {
@@ -489,18 +465,6 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusFailed)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))
-	var notifyOnStop bool
-	var baggageJSON string
-	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&notifyOnStop, &baggageJSON)
-	if notifyOnStop {
-		var finalState map[string]any
-		json.Unmarshal([]byte(finalStateJSON), &finalState)
-		e.fireFlowStopped(ctx, compositeID, baggageJSON, &workflow.FlowOutcome{
-			Status: workflow.StatusFailed,
-			State:  finalState,
-			Error:  errMsg,
-		})
-	}
 	e.signalStop(ctx, compositeID, workflow.StatusFailed)
 	return false, nil
 }

@@ -37,15 +37,10 @@ type FlowOptions struct {
 	// SetTimeBudget default. Frozen at Create and immutable for the flow's life; a per-task default, not a
 	// flow-wide deadline.
 	TimeBudget time.Duration `json:"timeBudget,omitzero"`
-	// NotifyOnStop requests that the host's FlowStopped callback fire when this flow stops
-	// (completed/failed/cancelled/interrupted). The engine persists the intent and, at stop time,
-	// invokes FlowStopped with the flow's Baggage on the context - the host decides where/how to deliver
-	// the notification from that baggage. When false (the default) FlowStopped is never called for the
-	// flow. Set at Create (which also runs the flow; there is no separate Start).
-	NotifyOnStop bool `json:"notifyOnStop,omitzero"`
 	// DeleteOnCompletion deletes the flow as soon as it completes successfully - for fire-and-forget jobs
 	// whose output is not retained. Failed and cancelled flows are kept. A completed flow cannot be queried
-	// afterward (Await/Snapshot return "flow not found"); use NotifyOnStop to receive the outcome.
+	// afterward (Await/Snapshot return "flow not found"). To observe the outcome, wrap the work in an
+	// orchestrating workflow whose final task reports it, or Await the flow before it is reaped.
 	DeleteOnCompletion bool `json:"deleteOnCompletion,omitzero"`
 	// Baggage is opaque, host-defined context (identity/claims, tenant, locale, ...) carried with the
 	// flow. The engine never interprets it: it is set once here, stored on the flow, inherited by

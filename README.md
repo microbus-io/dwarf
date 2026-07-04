@@ -80,8 +80,7 @@ scheduler) stay out of those builds.
 ## The host model
 
 The engine reaches the outside world through a single `Host` interface, registered once with
-`SetHost`. Only the first two methods are required; an implementation does nothing in the rest when it
-has no stop-notification need or runs single-replica.
+`SetHost`. The first two methods are required; `SignalPeers` does nothing for a single-replica host.
 
 ```go
 type Host interface {
@@ -91,10 +90,6 @@ type Host interface {
 
     // Required. Execute one task. The Flow carrier arrives with its input state populated; write outputs.
     ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error
-
-    // Optional. Fired when a flow stops, for flows created with FlowOptions.NotifyOnStop.
-    // The flow's baggage is on ctx; resolve where to deliver from it (the engine carries no address).
-    FlowStopped(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome)
 
     // Optional. Ship one cross-replica coordination signal to the other replicas (no-op for
     // single-replica). op is a routing key; payload is opaque bytes. Peers hand it back via
@@ -158,6 +153,7 @@ Full guides live in [`docs/`](docs/):
 - [Building graphs](docs/graphs.md) — transitions, conditions, fan-out, error handling, reducers
 - [Writing tasks](docs/tasks.md) — the Flow carrier, state, control signals, baggage, error handling
 - [Engine operations](docs/operations.md) — create, run, inspect, resume, cancel, fork, continue, retain
+- [Detecting completion](docs/detecting-completion.md) — `Await` vs. orchestration, and how to deliver reliably
 - [Fan-out & subgraphs](docs/fan-out-and-subgraphs.md) — parallelism, dynamic `forEach`, calling sub-workflows
 - [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, retries, recovery
 - [Observability](docs/observability.md) — logs, metrics, tracing

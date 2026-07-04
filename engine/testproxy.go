@@ -31,15 +31,14 @@ type TaskHandler func(ctx context.Context, flow *workflow.Flow) error
 
 // TestProxy routes graph fetches and task dispatches to registered handlers. It implements the Host
 // interface for use with Engine.SetHost / Engine.RunInTest: LoadGraph and ExecuteTask dispatch to the
-// registered handlers, FlowStopped invokes an optional callback set via OnFlowStopped, and SignalPeers
-// relays to the peer engines registered with AddPeer (none by default, i.e. single-replica). For a
-// multi-replica test, give each replica its own proxy and AddPeer the other engines.
+// registered handlers, and SignalPeers relays to the peer engines registered with AddPeer (none by
+// default, i.e. single-replica). For a multi-replica test, give each replica its own proxy and AddPeer
+// the other engines.
 type TestProxy struct {
-	mu          sync.RWMutex
-	graphs      map[string]*workflow.Graph
-	tasks       map[string]TaskHandler
-	flowStopped func(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome)
-	peers       []*Engine
+	mu     sync.RWMutex
+	graphs map[string]*workflow.Graph
+	tasks  map[string]TaskHandler
+	peers  []*Engine
 }
 
 // NewTestProxy creates a new test proxy with empty handler registries.
@@ -66,14 +65,6 @@ func (p *TestProxy) HandleTask(name string, handler TaskHandler) {
 	p.tasks[name] = handler
 }
 
-// OnFlowStopped registers a callback invoked by FlowStopped (only for flows created with
-// FlowOptions.NotifyOnStop). Nil (the default) makes FlowStopped a no-op. The flow's baggage is on the ctx.
-func (p *TestProxy) OnFlowStopped(cb func(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome)) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.flowStopped = cb
-}
-
 // LoadGraph implements Host.
 func (p *TestProxy) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
 	p.mu.RLock()
@@ -94,16 +85,6 @@ func (p *TestProxy) ExecuteTask(ctx context.Context, taskURL string, flow *workf
 		return errors.New("task not found: %s", taskURL, http.StatusNotFound)
 	}
 	return h(ctx, flow)
-}
-
-// FlowStopped implements Host; it invokes the callback set via OnFlowStopped, if any.
-func (p *TestProxy) FlowStopped(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome) {
-	p.mu.RLock()
-	cb := p.flowStopped
-	p.mu.RUnlock()
-	if cb != nil {
-		cb(ctx, flowKey, outcome)
-	}
 }
 
 // AddPeer registers a peer engine that SignalPeers relays to, standing in for the bus in a

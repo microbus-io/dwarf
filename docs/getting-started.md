@@ -103,9 +103,8 @@ func (h *myHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.F
 	return dispatch(ctx, taskName, f) // your local table / RPC / bus
 }
 
-// Optional methods (no-ops for a single-replica host with no stop-notification need):
-func (h *myHost) FlowStopped(context.Context, string, *workflow.FlowOutcome) {}
-func (h *myHost) SignalPeers(context.Context, string, []byte)                {}
+// Optional method (a no-op for a single-replica host):
+func (h *myHost) SignalPeers(context.Context, string, []byte) {}
 
 eng := dwarf.NewEngine()
 eng.SetDSN("postgres://user:pass@db:5432/dwarf")

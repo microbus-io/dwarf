@@ -18,9 +18,7 @@ package fixtures
 
 import (
 	"context"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
@@ -76,19 +74,11 @@ func TestContinueflow(t *testing.T) {
 }
 
 // TestContinueInheritsThreadPolicy verifies a Continue turn (which no longer takes FlowOptions) inherits
-// the thread's policy: scheduling priority (not reset to the engine default) and notify-on-stop.
+// the thread's policy: scheduling priority (not reset to the engine default).
 func TestContinueInheritsThreadPolicy(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	var mu sync.Mutex
-	stopped := map[string]bool{}
-	proxy.OnFlowStopped(func(ctx context.Context, flowKey string, outcome *workflow.FlowOutcome) {
-		mu.Lock()
-		stopped[flowKey] = true
-		mu.Unlock()
-	})
-
 	g := workflow.NewGraph("Policy")
 	g.SetEndpoint("T", "continuepolicy.verify:428/t")
 	g.AddTransition("T", workflow.END)
@@ -100,9 +90,9 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 	eng.RunInTest(t)
 	assert := testarossa.For(t)
 
-	// Turn 1 with a distinctive priority (7, not the engine default of 100) and notify-on-stop.
+	// Turn 1 with a distinctive priority (7, not the engine default of 100).
 	turn1, err := eng.Create(ctx, "continuepolicy.verify:428/g", map[string]any{},
-		&workflow.FlowOptions{Priority: 7, NotifyOnStop: true})
+		&workflow.FlowOptions{Priority: 7})
 	assert.NoError(err)
 	_, err = eng.Await(ctx, turn1)
 	assert.NoError(err)
@@ -124,20 +114,6 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 		}
 	}
 	assert.True(found)
-
-	// Notify-on-stop inherited: FlowStopped fired for turn 2.
-	deadline := time.Now().Add(2 * time.Second)
-	var got bool
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		got = stopped[turn2]
-		mu.Unlock()
-		if got {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	assert.True(got)
 }
 
 // TestCreateWithThreadKeyJoinsThread verifies FlowOptions.ThreadKey places a new flow into an existing

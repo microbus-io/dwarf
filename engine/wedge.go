@@ -208,8 +208,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 // why the child is orphaned). It mirrors Cancel's transaction shape (write-first step cancel, per-flow
 // computeFinalState, one CASE flow-cancel) but does not error on a zero-row flow update: the child may have
 // terminalized concurrently between the sweep's SELECT and this write, which is a benign no-op, not a 409.
-// No FlowStopped notification fires - subgraph children never notify (notify_on_stop is root-only), and this
-// whole subtree is descendants of an already-terminal root.
+// This whole subtree is descendants of an already-terminal root.
 func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlowID int, childFlowToken string) error {
 	db, err := e.db.Shard(shard)
 	if err != nil {

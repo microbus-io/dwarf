@@ -72,7 +72,7 @@ func ParseStepKey(stepKey string) (shardNum int, stepID int, stepToken string, e
 // deliberately NOT a valid engine key: no operation accepts it, and the engine offers no
 // correlationID->key lookup, so a trace/log reader cannot escalate it into the flow's write capability.
 // Every place a flow identifier crosses into an observability sink must use this, never the token-bearing
-// key (which belongs only on the task carrier, the FlowStopped callback, and in-memory waiter matching).
+// key (which belongs only on the task carrier and in-memory waiter matching).
 func CorrelationID(shardNum, flowID int) string {
 	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(flowID)
 }

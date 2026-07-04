@@ -44,18 +44,12 @@ invocable unit.
 > failure surfaces as `outcome.Status == "failed"` with `outcome.Error` set — so you never have to
 > disambiguate "the workflow rejected my input" from "the engine is down."
 
-### Stop notifications
+### Detecting completion
 
-```go
-// To be notified on stop instead of blocking on Await, opt in at Create:
-flowKey, _ := eng.Create(ctx, workflowURL, state, &workflow.FlowOptions{NotifyOnStop: true})
-```
-
-When a flow is created with `FlowOptions.NotifyOnStop`, the engine invokes your host's
-`FlowStopped(ctx, flowKey, outcome)` when the flow stops — useful for push notification instead of blocking
-on `Await`. The engine carries no delivery address: the flow's baggage rides on the callback's `ctx`
-(`workflow.BaggageFrom(ctx)`), so your host decides where to deliver (e.g. read a target you stored in
-baggage at `Create`).
+The engine has **no** stop-notification callback. To learn a flow's outcome you either **`Await`** it
+(below) or **compose** the notification into the workflow itself (an orchestrating graph whose follow-up
+tasks report the outcome). The two approaches and when to use each are covered in
+[Detecting flow completion](detecting-completion.md).
 
 ### Deferring work
 
@@ -96,8 +90,8 @@ type FlowOutcome struct {
 }
 ```
 
-The flow key is **not** on the outcome — it is delivered separately: you passed it to `Snapshot`/`Await`,
-`Run` returns it alongside the outcome, and `FlowStopped` receives it as its own argument.
+The flow key is **not** on the outcome — it is delivered separately: you passed it to `Snapshot`/`Await`, or
+`Run` returns it alongside the outcome.
 
 Side-channel fields are populated only for the matching status.
 
@@ -146,7 +140,7 @@ newFlowKey, err := eng.Fork(ctx, stepKey, map[string]any{"amount": 0})
 
 `Cancel` aborts a running or interrupted flow (and its subgraph hierarchy). `Fork`'s step may be
 **any recorded step**, including one inside a subgraph; the clone re-runs from that step and bubbles back up
-to the root. The fork inherits the origin flow's scheduling and baggage, forces notify-on-stop off, and does
+to the root. The fork inherits the origin flow's scheduling and baggage, and does
 not auto-delete. Because the fork is an ordinary new flow, recover a partially-failed fan-out by forking one
 failed branch at a time.
 
@@ -161,8 +155,8 @@ nextKey, err := eng.Continue(ctx, threadKey, additionalState)
 
 The `threadKey` is any flow key in the thread (the original `Create` key works). The prior turn's final
 state passes through, merged with `additionalState` using the graph's reducers. `Continue` inherits the
-thread's policy from the latest completed flow — priority, fairness, time budget, baggage, and
-notify-on-stop. The new flow is returned already `running`. (To join a thread but set policy explicitly
+thread's policy from the latest completed flow — priority, fairness, time budget, and baggage. The new flow
+is returned already `running`. (To join a thread but set policy explicitly
 instead of inheriting it, use `Create`/`Run` with `FlowOptions.ThreadKey`.)
 
 ## Retention

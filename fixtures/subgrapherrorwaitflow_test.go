@@ -30,8 +30,8 @@ import (
 )
 
 // TestSubgraphErrorWaitflow pins that a failing subgraph child wakes an Await already blocked on its (read-only)
-// child key. A subgraph child does not fire the FlowStopped callback (that is root-only), but it is still a legal
-// introspection target, so a flow-stop must broadcast to its Await waiters. The child here captures its own key,
+// child key. A subgraph child is a legal introspection target, so a flow-stop must broadcast to its Await
+// waiters. The child here captures its own key,
 // then blocks so the test can register an Await while the child is still running; releasing it fails the child.
 // The Await must be woken by the failure's signalStop, not left to time out against its context deadline.
 func TestSubgraphErrorWaitflow(t *testing.T) {

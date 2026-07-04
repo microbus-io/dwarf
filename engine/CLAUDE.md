@@ -7,9 +7,9 @@
 
 ### The Host interface (how the engine reaches the outside world)
 
-The graph/task/notify/peer seam is a single **`Host`** interface, registered once via `SetHost`; the
+The graph/task/peer seam is a single **`Host`** interface, registered once via `SetHost`; the
 observability providers below are injected separately. A host must implement `LoadGraph` and `ExecuteTask`;
-`FlowStopped` and `SignalPeers` may be no-ops. The interface methods:
+`SignalPeers` may be a no-op. The interface methods:
 
 - **`LoadGraph(ctx, workflowURL string) (*workflow.Graph, error)`** - fetches a workflow graph by name.
   Called at `Create` (and on subgraph spawn); the graph JSON is then frozen on the flow row. The flow's opaque
@@ -20,11 +20,6 @@ observability providers below are injected separately. A host must implement `Lo
   graph's `onError` transition if one exists, else the step fails. A **panic** in the in-process handler is caught at
   the call boundary and treated as such an error (see "Host-call panic isolation"). The engine never sniffs status
   codes or error text; a task backing off on a transient failure detects that itself and arms `flow.Retry`.
-- **`FlowStopped(ctx, flowKey string, outcome *workflow.FlowOutcome)`** - fired when a flow stops
-  (completed/failed/cancelled/interrupted) for a flow created with `FlowOptions.NotifyOnStop=true`. `flowKey`
-  identifies the stopped flow (it is *not* part of the outcome). The engine traffics in no delivery address:
-  the flow's opaque baggage rides on `ctx` (`workflow.BaggageFrom(ctx)`) and the host resolves where/how to
-  deliver from it. Optional: a host with no stop-notification need does nothing here.
 - **`SignalPeers(ctx, op string, payload []byte)`** - delivers one cross-replica coordination signal to the
   other replicas, all fire-and-forget. `op` is an opaque routing key (usable as a topic); `payload` is opaque bytes
   the engine already serialized. The host ships `(op, payload)` to peers and, on the receiving side, hands them back
@@ -133,7 +128,7 @@ is real complexity for a need that does not arise in practice.
 These are methods on `*engine.Engine`.
 
 **Policy is set once at genesis and inherited by derivation; the operation is the inherit-vs-default selector.**
-A flow's policy (priority, fairness, time budget, baggage, notify-on-stop, thread membership) is authored
+A flow's policy (priority, fairness, time budget, baggage, thread membership) is authored
 explicitly via `FlowOptions` only at **genesis** - `Create`/`Run`. **Derived** operations carry policy from
 their source rather than taking `FlowOptions`: `Continue` inherits the thread's policy, `Fork` inherits the
 origin flow's, and subgraph children inherit the parent's. So there is no `opts` on `Continue`/`Fork`; choosing
@@ -190,7 +185,7 @@ subgraph-child key is rejected with 400 - see "Subgraph keys are read-only"). Ta
 stateOverrides)` clones a terminal flow's execution tree up to a chosen step into a brand-new,
 self-contained **root** flow, then re-runs from that step (optionally with `stateOverrides` merged onto it). The
 original is never mutated. It takes no `FlowOptions` - as a derived operation it inherits the origin flow's
-scheduling and baggage (and forces notify-on-stop off). The fork point may be **any recorded step** - in the
+scheduling and baggage. The fork point may be **any recorded step** - in the
 root flow or deep inside a subgraph (so an execution-DAG UI can fork from any clickable node). Returns the new
 flow's key.
 
@@ -259,7 +254,7 @@ exclusion keeps a debug `Fork` (which shares the thread's `thread_id` for `List`
 production continuation base. The prior turn's `final_state` passes through unfiltered as the new flow's initial
 state; a workflow author wanting narrower carryover scrubs with an entry adapter task using
 `flow.Delete`/`Transform`. As a **derived** operation `Continue` takes no `FlowOptions`: it **inherits the
-thread's policy** (priority/fairness/budget/baggage/notify) from the latest turn; a caller wanting different policy
+thread's policy** (priority/fairness/budget/baggage) from the latest turn; a caller wanting different policy
 uses `Create` with `FlowOptions.ThreadKey` (explicit policy, same thread).
 
 *Concurrent Continue is serialized by a thread-anchor lock, so exactly one wins.* The latest-turn read
@@ -335,8 +330,7 @@ introspection + `List`-by-subgraph-URL still working).
 ### FlowOutcome and side-channel signals
 
 `Snapshot`, `Await`, and `Run` return a `*workflow.FlowOutcome` (`Run` also returns the `flowKey` separately;
-`Snapshot`/`Await` callers already hold it). The same struct is the `FlowStopped` payload (with `flowKey` as a
-separate callback arg). The shape:
+`Snapshot`/`Await` callers already hold it). The shape:
 
 ```go
 type FlowOutcome struct {
@@ -348,8 +342,8 @@ type FlowOutcome struct {
 }
 ```
 
-The flow key is delivered separately, not on the outcome: the caller passed it to `Snapshot`/`Await`, `Run`
-returns it, and `FlowStopped` receives it as an argument.
+The flow key is delivered separately, not on the outcome: the caller passed it to `Snapshot`/`Await`, or `Run`
+returns it.
 
 Side-channel fields are populated only for the matching status. `Run`'s Go-level `error` return is reserved for
 infrastructure failures (DB, timeout); a *workflow failure* surfaces as `Status == "failed"` with `Error` set, so
@@ -360,23 +354,15 @@ snapshot *at the time of the interrupt* and `InterruptPayload` as the raw `flow.
 the payload into `State` was lossy (the caller could not tell workflow state from the resume request). Callers wanting
 the merged view call `workflow.MergeState(out.State, out.InterruptPayload, graph.Reducers())` themselves.
 
-### Flow Stop Notifications
+### Flow-stop notification is not an engine concern
 
-When a flow is created with `FlowOptions.NotifyOnStop=true`, the engine invokes the `FlowStopped` callback with a
-`*workflow.FlowOutcome` when the flow stops - terminal (`completed`/`failed`/`cancelled`) or `interrupted`. This
-matches the statuses `Await` returns on. The outcome carries the same fields as a `Snapshot`/`Await` return at the
-stop point. Delivery is fire-and-forget; flow execution never blocks on it.
-
-The engine carries **no delivery address** - that is a transport concern owned by the host. Instead the flow's
-opaque baggage rides on the `FlowStopped` ctx (`workflow.BaggageFrom(ctx)`), and the host resolves where to deliver
-from it (e.g. a host adapter stuffs the caller's address into baggage at `Create` and reads it back here). The
-persisted gate is a single `notify_on_stop` flag on the flow row; `notify_on_stop` is honored on the **root** flow
-only (subgraph flows do not notify directly - interrupt/cancel notifications query the root's flag + baggage via the
-surgraph chain). As a Create-time policy it follows the genesis/derivation rule: `Continue` **inherits** the
-thread's flag (a multi-turn caller keeps being notified without re-specifying), while `Fork` forces it **off** (a
-debug clone never notifies; a caller wanting a fork's outcome uses `Await`/`Snapshot`). Keeping the delivery
-address out of the engine is deliberate: a hostname the engine merely stored and handed back verbatim is exactly
-what baggage already carries, so the engine stays transport-agnostic.
+The engine has **no** stop-notification mechanism: there is no `FlowStopped` callback, no `NotifyOnStop`
+option, and no `notify_on_stop` column (all removed). A caller that wants to learn a flow's outcome either
+**`Await`s** it (blocking, bridges the workflow clock to a synchronous caller) or **composes** the
+notification into the workflow itself - an orchestrating graph whose final task reports the outcome to the
+upstream (with `flow.Retry` for durable delivery). This keeps notification policy and transport entirely in
+the host/author, matching the engine's "carry facts, not policy" posture (baggage, signals). See `_FLOWSTOP.md`
+for the rationale and the follow-on plans (cancel/interrupt-as-error, deferred deletion).
 
 ### Execution Model
 
@@ -782,8 +768,7 @@ child output is **not** merged into the parent's `changes`.
 **Failure back to the parent (a subgraph child fails exactly like a top-level flow, never eagerly).** When a
 task inside a subgraph child errors with no `onError`, the child's failure is surfaced to the parent's
 `flow.Subgraph` call as the `err` return (carried in `subgraph_error`, re-dispatching the parked caller step -
-`deliverFlowFailureToParent`), rather than notifying directly (`notify_on_stop` is root-only). That root-only
-rule governs only the `FlowStopped` **callback**, *not* `Await`: the child still `signalStop`s its own failure
+`deliverFlowFailureToParent`). The child still `signalStop`s its own failure
 (a subgraph-child key is a legal read-only `Await`/`Snapshot` target), so a blocked `Await(childKey)` wakes on
 the signal instead of idling to the lost-wake poll backstop - `failStep`'s subgraph-child branch signals exactly
 as the top-level path does. The load-bearing
@@ -1201,12 +1186,9 @@ segment is a random token that is a *bearer write-capability* (`Resume`/`Cancel`
 data - so stamping the key onto every span would hand a write capability for every traced flow to every
 trace reader. The correlation id uniquely identifies the flow ({shard} disambiguates the per-shard
 sequential id) for grouping/pivoting/log-join, but grants nothing. The same rule governs logs and metric
-labels: the token appears only on the task carrier (`flow.SetFlowKey`, trusted task code), in the
-`FlowStopped` callback (the flow's identity handed to the trusted host), and as an in-memory waiter-match
-key (`signalStop`/`notifyStatusChange`, never leaves the process). No log line emits a flow key at all -
-`fireFlowStopped`'s panic log records only the error (a token-free identifier would be redundant with the
-ctx-correlated span anyway). Any new span/log/metric that names a flow must use `keys.CorrelationID`, never
-the raw key.
+labels: the token appears only on the task carrier (`flow.SetFlowKey`, trusted task code) and as an
+in-memory waiter-match key (`signalStop`/`notifyStatusChange`, never leaves the process). No log line emits a
+flow key at all. Any new span/log/metric that names a flow must use `keys.CorrelationID`, never the raw key.
 
 **`List` surfaces the flow's trace id.** `FlowSummary.TraceID` is the 32-hex W3C trace-id parsed from the
 `trace_parent` column (`traceIDFromParent`), empty when no tracer was configured. It is a **token-free
@@ -1270,8 +1252,8 @@ be relevant after it ends." So retention is either operator-driven or an explici
   `completed` state, which is what makes the uniform 404 hold for *every* reader (an earlier design deleted in a
   *separate* transaction after the completion commit, leaving a window where a `Snapshot`/`Await` read - most easily
   `Await`'s **first snapshot**, before it blocks - saw a transient `completed` outcome instead of 404). The
-  `dwarf_flows_terminated` metric and any `FlowStopped` notification fire *after* the commit from values captured
-  before the delete (so observability and the full outcome survive); `signalStop` then wakes blocked `Await`s, which
+  `dwarf_flows_terminated` metric fires *after* the commit from values captured
+  before the delete (so observability survives); `signalStop` then wakes blocked `Await`s, which
   re-snapshot a gone row and 404. A failed completion transaction rolls back whole - no partial delete, no stray
   `completed` row. **Await contract: once it completes, the flow is gone everywhere - uniformly.** `Snapshot`/`History`
   and a blocking `Await`/`Run` return "flow not found" (404) regardless of timing; for an `Await` that 404 *is* the
@@ -1279,8 +1261,9 @@ be relevant after it ends." So retention is either operator-driven or an explici
   `failed`/`cancelled` disposable flow is *not* deleted, so `Await` returns its real terminal outcome (a 404
   specifically means "completed"). Uniform 404 was chosen over a translated `completed` outcome (timing-dependent) and
   over a step-pruned tombstone (which moves the inconsistency to `History` and, by keeping `final_state`, leaks the
-  private data the deletion exists to remove). Callers wanting the outcome use `NotifyOnStop` (whose `FlowOutcome` is
-  computed before the delete).
+  private data the deletion exists to remove). A caller wanting a disposable flow's outcome composes it into the
+  workflow (a final task that reports it) or `Await`s before completion. (Planned: deferred deletion via a
+  `delete_after_ms` grace window makes the outcome `Await`-observable - see `_DELETING.md`.)
 
 For operator-driven retention:
 
@@ -1341,8 +1324,8 @@ only at the worker loop):
   return. The subgraph-spawn site runs inside `processStep`, so without this it would wedge the caller step
   exactly like `ExecuteTask`; the `Create` site fails the `Create` call cleanly instead of unwinding into the
   host's own frame.
-- **`FlowStopped`** / **`SignalPeers`** (`completion.go` / `peers.go`) - both fire-and-forget; the panic is
-  caught and logged at error level only, so it can never derail flow completion/cancel or the calling operation.
+- **`SignalPeers`** (`peers.go`) - fire-and-forget; the panic is
+  caught and logged at error level only, so it can never derail the calling operation.
 
 The worker-loop and refiller `CatchPanic` wrappers stay as **defense-in-depth** for panics in *engine* code
 (transition evaluation, fan-in, etc.) outside any host call. `fixtures/panicflow_test.go` pins both task-panic

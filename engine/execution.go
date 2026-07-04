@@ -182,16 +182,15 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Read flow data
 	var flowToken, flowStatus, workflowURL, graphJSON, baggageJSON, traceParent string
-	var notifyOnStop bool
 	var flowCreatedAt, flowUpdatedAt time.Time
 	var flowPriority int
 	var flowFairnessKey string
 	var flowFairnessWeight float64
 	var flowTimeBudgetMs int
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, notify_on_stop, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=?",
+		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &notifyOnStop, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs)
+	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -564,13 +563,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if isPushTransition && cohortSize == 0 {
 		fanInTarget := graph.FanInFor(taskName)
 		if fanInTarget == "" {
-			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, notifyOnStop, baggageJSON, workflowURL)
+			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, workflowURL)
 		}
 		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 	}
 
 	if cohortSize == 0 {
-		return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, notifyOnStop, baggageJSON, workflowURL)
+		return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, workflowURL)
 	}
 
 	cohortSpawnID := lineageID
@@ -599,7 +598,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	var newStepIDs []int
 	flowFailed := false
-	var flowFailedErr, flowFailedFinalState string
 	// When the failing flow is a subgraph child, its failure is delivered to the parent's flow.Subgraph
 	// call rather than notified directly (see failStep). Captured in the transaction, acted on after it.
 	flowFailedParentStepID := 0
@@ -614,7 +612,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		newStepIDs = newStepIDs[:0]
 		flowFailed = false
-		flowFailedErr, flowFailedFinalState = "", ""
 		flowFailedParentStepID, flowFailedReDispatchParent = 0, false
 
 		// Write-first: take the flow row's lock before any step, guarded on non-terminal status. If a
@@ -719,8 +716,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 						finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
 					)
 					flowFailed = true
-					flowFailedErr = sampleErr
-					flowFailedFinalState = finalStateJSON
 					// The cohort fully resolved here (this branch completed last), so every sibling has
 					// settled - nothing is stranded. If this flow is a subgraph child, deliver the failure
 					// to the parked parent caller step rather than notifying directly.
@@ -753,22 +748,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	if flowFailed {
 		if flowFailedParentStepID != 0 {
-			// Subgraph child: delivered to the parent's flow.Subgraph call; no direct notify (root-only).
+			// Subgraph child: delivered to the parent's flow.Subgraph call.
 			if flowFailedReDispatchParent {
 				e.enqueueStep(ctx, shardNum, flowFailedParentStepID)
 			}
 			return nil
 		}
 		compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
-		if notifyOnStop {
-			var finalState map[string]any
-			json.Unmarshal([]byte(flowFailedFinalState), &finalState)
-			e.fireFlowStopped(ctx, compositeID, baggageJSON, &workflow.FlowOutcome{
-				Status: workflow.StatusFailed,
-				State:  finalState,
-				Error:  flowFailedErr,
-			})
-		}
 		e.signalStop(ctx, compositeID, workflow.StatusFailed)
 		return nil
 	}
@@ -869,21 +855,6 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 
 	for _, compositeID := range chainCompositeIDs {
 		e.signalStop(ctx, compositeID, workflow.StatusInterrupted)
-	}
-
-	rootCompositeID := chainCompositeIDs[len(chainCompositeIDs)-1]
-	rootFlowID := chainFlowIDs[len(chainFlowIDs)-1]
-	var rootNotifyOnStop bool
-	var rootBaggageJSON, rootStatus string
-	db.QueryRowContext(ctx, "SELECT notify_on_stop, baggage, status FROM dwarf_flows WHERE flow_id=?", rootFlowID).Scan(&rootNotifyOnStop, &rootBaggageJSON, &rootStatus)
-	// The interrupt UPDATEs above are guarded to running/interrupted, so a racing Cancel can win and leave
-	// the flow cancelled. Notify only if it actually interrupted, else a spurious interrupted callback fires
-	// alongside Cancel's own cancelled one.
-	if rootNotifyOnStop && strings.TrimSpace(rootStatus) == workflow.StatusInterrupted {
-		e.fireFlowStopped(ctx, rootCompositeID, rootBaggageJSON, &workflow.FlowOutcome{
-			Status:           workflow.StatusInterrupted,
-			InterruptPayload: interruptPayload,
-		})
 	}
 	return nil
 }

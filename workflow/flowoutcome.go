@@ -17,9 +17,8 @@ limitations under the License.
 package workflow
 
 // FlowOutcome carries the status and side-channel signals of a flow at a moment in time.
-// Returned by Snapshot, Await, and Run, and fired as the payload of the OnFlowStopped event.
-// Side-channel fields are populated only for the matching Status; for example InterruptPayload
-// is populated only when Status is "interrupted".
+// Returned by Snapshot, Await, and Run. Side-channel fields are populated only for the matching
+// Status; for example InterruptPayload is populated only when Status is "interrupted".
 type FlowOutcome struct {
 	// Status is the flow's current lifecycle status: created, running, interrupted, completed, failed, or cancelled.
 	Status string `json:"status,omitzero"`
