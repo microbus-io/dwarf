@@ -5,7 +5,7 @@ go 1.26.3
 tool github.com/microbus-io/copyrighter
 
 require (
-	github.com/microbus-io/boolexp v1.1.1
+	github.com/microbus-io/boolexp v1.1.2
 	github.com/microbus-io/errors v1.0.1
 	github.com/microbus-io/sequel v1.10.5
 	github.com/microbus-io/testarossa v0.7.3
