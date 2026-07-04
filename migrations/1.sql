@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     created_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     started_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
+    touch                TINYINT      NOT NULL DEFAULT 0,
     PRIMARY KEY (flow_id),
     INDEX idx_dwarf_flows_status (status, updated_at),
     INDEX idx_dwarf_flows_workflow_url (workflow_url),
@@ -79,6 +80,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     created_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW_UTC(),
     started_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW_UTC(),
     updated_at           TIMESTAMPTZ  NOT NULL DEFAULT NOW_UTC(),
+    touch                SMALLINT     NOT NULL DEFAULT 0,
     PRIMARY KEY (flow_id)
 );
 
@@ -129,6 +131,7 @@ CREATE TABLE dwarf_flows (
     created_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
     started_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
     updated_at           DATETIME2(3)  NOT NULL DEFAULT NOW_UTC(),
+    touch                TINYINT       NOT NULL DEFAULT 0,
     PRIMARY KEY (flow_id)
 );
 
@@ -178,7 +181,8 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     time_budget_ms       INTEGER      NOT NULL DEFAULT 0,
     created_at           DATETIME     NOT NULL DEFAULT NOW_UTC(),
     started_at           DATETIME     NOT NULL DEFAULT NOW_UTC(),
-    updated_at           DATETIME     NOT NULL DEFAULT NOW_UTC()
+    updated_at           DATETIME     NOT NULL DEFAULT NOW_UTC(),
+    touch                INTEGER      NOT NULL DEFAULT 0
 );
 
 -- DRIVER: sqlite

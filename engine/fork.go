@@ -121,8 +121,8 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		newRootFlowID = id
 		// Mapping complete - flip the gated leaf step created->pending. The flow chain is already running.
 		_, txErr := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-			workflow.StatusPending, cc.newLeafStepID, workflow.StatusCreated,
+			"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusCreated+"'",
+			workflow.StatusPending, cc.newLeafStepID,
 		)
 		return errors.Trace(txErr)
 	})
@@ -375,7 +375,7 @@ func (e *Engine) cloneSubtree(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 
 	if isRoot {
 		_, err = tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, step_id=?, started_at=NOW_UTC(), updated_at=NOW_UTC() WHERE flow_id=?",
+			"UPDATE dwarf_flows SET status=?, step_id=?, started_at=NOW_UTC(), updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
 			workflow.StatusRunning, idMap[rewind], newFlowID,
 		)
 		if err != nil {

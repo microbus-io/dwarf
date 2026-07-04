@@ -34,9 +34,12 @@ func TestHandleInterrupt_SkipsNotifyWhenCancelWon(t *testing.T) {
 	insert := func(t *testing.T, e *Engine, flowStatus, stepStatus string) {
 		db, err := e.shard(1)
 		testarossa.For(t).NoError(err)
+		// Do not supply flow_id: it is an IDENTITY/auto-increment column, and an explicit value is
+		// rejected on SQL Server (IDENTITY_INSERT OFF). On the fresh per-test DB the first insert is
+		// flow_id=1 on every driver - the id the handleInterrupt call below and root_flow_id rely on.
 		_, err = db.ExecContext(ctx,
-			"INSERT INTO dwarf_flows (flow_id, flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, notify_on_stop, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			1, "ftok", "u", "W", "{}", flowStatus, 1, 1, 1, 1000,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, notify_on_stop, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"ftok", "u", "W", "{}", flowStatus, 1, 1, 1, 1000,
 		)
 		testarossa.For(t).NoError(err)
 		_, err = db.ExecContext(ctx,

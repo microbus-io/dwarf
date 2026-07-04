@@ -146,8 +146,8 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 	}
 
 	merged, found, err := merge(
-		"SELECT state, changes FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status=? ORDER BY step_id",
-		flowID, workflow.StatusCompleted,
+		"SELECT state, changes FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='"+workflow.StatusCompleted+"' ORDER BY step_id",
+		flowID,
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -216,7 +216,10 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// already marked completed by processStep, the lease recovery (which only resets running rows)
 		// cannot re-dispatch it, leaving the flow stranded 'running' with all steps terminal (an orphan
 		// flow). Mirrors advanceFlow and the fan-in transaction, which write first for the same reason.
-		_, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
+		// Lock-grab flips the non-indexed `touch`, not `updated_at`: the flow's `updated_at` moves only
+		// on the genuine status transition below, so idx_dwarf_flows_status is not churned twice per
+		// completion. `touch` always changes, so a later RowsAffected check stays meaningful.
+		_, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=?", flowID)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -236,9 +239,8 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		finalStateJSON = fs
 		workflowURL = wf
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+			"UPDATE dwarf_flows SET status=?, final_state=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 			workflow.StatusCompleted, finalStateJSON, flowID,
-			workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -333,8 +335,8 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		// the just-cancelled row. The guard also subsumes the "step still live" check — a step that is no
 		// longer running/parked matches no row — and the rows-affected gate keeps Enqueue off a no-op.
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
-			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID, workflow.StatusRunning, parkedSubgraph,
+			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
+			workflow.StatusPending, parkedNone, resultJSON, surgraphStepID, parkedSubgraph,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -424,9 +426,8 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 				return errors.Trace(err)
 			}
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+				"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 				finalStateJSON, workflow.StatusFailed, errMsg, flowID,
-				workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 			)
 			if isSubgraphChild {
 				var derr error
@@ -548,8 +549,8 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childSt
 			return errors.Trace(err)
 		}
 		_, err = tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
-			workflow.StatusFailed, errMsg, childFinalState, childFlowID, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
+			"UPDATE dwarf_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			workflow.StatusFailed, errMsg, childFinalState, childFlowID,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -578,8 +579,8 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 		return false, nil
 	}
 	res, err := tx.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=? AND parked=?",
-		workflow.StatusPending, parkedNone, errMsg, parentStepID, workflow.StatusRunning, parkedSubgraph,
+		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
+		workflow.StatusPending, parkedNone, errMsg, parentStepID, parkedSubgraph,
 	)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -677,8 +678,8 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	// Each tree flow's interrupted leaf: order in SQL, take the first row per flow_id in memory.
 	interruptedLeafByFlow := map[int]int{}
 	srows, err := db.QueryContext(ctx,
-		"SELECT flow_id, step_id FROM dwarf_steps WHERE status=? AND flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)) ORDER BY flow_id, updated_at, step_id",
-		workflow.StatusInterrupted, flowID,
+		"SELECT flow_id, step_id FROM dwarf_steps WHERE status='"+workflow.StatusInterrupted+"' AND flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)) ORDER BY flow_id, updated_at, step_id",
+		flowID,
 	)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
@@ -785,17 +786,16 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		if len(parkStepIDs) > 0 {
 			parkPlaceholders := strings.Repeat("?,", len(parkStepIDs)-1) + "?"
 			parkArgs := append([]any{workflow.StatusRunning, parkedSubgraph}, parkStepIDs...)
-			parkArgs = append(parkArgs, workflow.StatusInterrupted)
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status=?", parkArgs...)
+			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+parkPlaceholders+") AND status='"+workflow.StatusInterrupted+"'", parkArgs...)
 		}
 
-		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-			workflow.StatusPending, resumeDataJSON, leafStepID, workflow.StatusInterrupted)
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
+			workflow.StatusPending, resumeDataJSON, leafStepID)
 
 		for _, chainFlowID := range chainFlowIDs {
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id=? AND status=? AND (SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status=?)=0",
-				workflow.StatusRunning, chainFlowID, workflow.StatusInterrupted, chainFlowID, workflow.StatusInterrupted,
+				"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' AND (SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"')=0",
+				workflow.StatusRunning, chainFlowID, chainFlowID,
 			)
 		}
 		return nil

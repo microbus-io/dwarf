@@ -185,8 +185,7 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 	err = e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
 			"SELECT priority, COUNT(*), DATE_DIFF_MILLIS(NOW_UTC(), MIN(created_at)) FROM dwarf_steps"+
-				" WHERE status=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() GROUP BY priority",
-			workflow.StatusPending,
+				" WHERE status='"+workflow.StatusPending+"' AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() GROUP BY priority",
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -239,8 +238,8 @@ func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error)
 	perShard := make([]map[string]int, numShards+1)
 	err := e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
-			"SELECT task_url, COUNT(*) FROM dwarf_steps WHERE status=? AND parked=? GROUP BY task_url",
-			workflow.StatusRunning, parkedNone,
+			"SELECT task_url, COUNT(*) FROM dwarf_steps WHERE status='"+workflow.StatusRunning+"' AND parked=? GROUP BY task_url",
+			parkedNone,
 		)
 		if err != nil {
 			return errors.Trace(err)

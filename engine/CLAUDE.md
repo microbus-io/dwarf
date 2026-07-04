@@ -872,7 +872,19 @@ broadcast-only-on-terminal-stops policy.
 - **Write-first transactions** - `advanceFlow` does an `UPDATE` as the first operation to immediately acquire a write
   lock. On MySQL/Postgres this serializes concurrent workers (like `SELECT ... FOR UPDATE`). On SQLite with
   `cache=shared`, starting with a write avoids the deadlock where two read-first deferred transactions both hold
-  SHARED locks and neither can upgrade. **Every flow-terminating transaction must be write-first for the same
+  SHARED locks and neither can upgrade. **The write-first `UPDATE dwarf_flows` flips the non-indexed `touch` column
+  (`touch=1-touch`), not `updated_at`.** The lock acquisition is identical, but `updated_at` sits in
+  `idx_dwarf_flows_status (status, updated_at)`, so bumping it on every step transition moved a running flow's index
+  entry once per step (the flow-row is written twice per transition tx - the open lock-grab and the closing `step_id`
+  advance - so it was two moves). Flipping `touch` (indexed by nothing) takes the lock, keeps `updated_at` = the
+  flow's last genuine *status* transition, and confines `idx_dwarf_flows_status` churn to actual status changes; on
+  Postgres the grab becomes HOT-eligible. `touch=1-touch` (not a `SET col=col` self-assign) is deliberate: it always
+  changes the value, so the terminal-status `RowsAffected()==0` guard on the open UPDATE
+  (`WHERE ... status NOT IN (terminal)`) still fires correctly on MySQL, which counts *changed* rows. Every
+  `UPDATE dwarf_flows` flips `touch`; the status-transition writes flip it alongside `updated_at=NOW_UTC()`, the
+  intra-flow-progress writes flip only it. (This applies to `dwarf_flows` only - `dwarf_steps` has no such per-step
+  churn: a step row is short-lived and its `updated_at` moves track its own `pending→running→terminal` transitions,
+  which are genuine and unavoidable.) **Every flow-terminating transaction must be write-first for the same
   reason**, and the failure mode is worse than a transient error: the terminal step is marked `completed` by
   `processStep` *before* the disposition runs, so if the disposition's `Transact` exhausts its retries and errors,
   lease recovery (which only resets `running` rows) can't re-dispatch the now-`completed` step - the flow strands

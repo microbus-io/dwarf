@@ -18,9 +18,11 @@ package engine
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -93,6 +95,51 @@ func TestQuery_WorkflowName(t *testing.T) {
 	remaining, _, err := e.List(ctx, workflow.Query{})
 	assert.NoError(err)
 	assert.Equal(betas, len(remaining))
+}
+
+// TestQuery_StatusFilter pins the Query.Status filter: a valid status narrows to matching flows, a valid
+// status with no matches returns empty, and an unknown status is rejected 400 (it is inlined as a literal
+// after validation, so an invalid value must never reach the SQL string).
+func TestQuery_StatusFilter(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("StatusFlow")
+	g.SetEndpoint("A", "qs.verify:0/a")
+	g.AddTransition("A", workflow.END)
+	proxy.HandleGraph("qs.verify:0/g", g)
+	proxy.HandleTask("qs.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	e.RunInTest(t)
+
+	const n = 3
+	for range n {
+		k, err := e.Create(ctx, "qs.verify:0/g", nil, nil)
+		assert.NoError(err)
+		_, err = e.Await(ctx, k)
+		assert.NoError(err)
+	}
+
+	// Valid status with matches.
+	completed, _, err := e.List(ctx, workflow.Query{Status: workflow.StatusCompleted})
+	assert.NoError(err)
+	assert.Equal(n, len(completed))
+	for _, s := range completed {
+		assert.Equal(workflow.StatusCompleted, s.Status)
+	}
+
+	// Valid status with no matches (all flows completed, none failed).
+	failed, _, err := e.List(ctx, workflow.Query{Status: workflow.StatusFailed})
+	assert.NoError(err)
+	assert.Equal(0, len(failed))
+
+	// An unknown status is rejected before it can reach the (literal-inlined) SQL.
+	_, _, err = e.List(ctx, workflow.Query{Status: "bogus'; DROP TABLE dwarf_flows;--"})
+	assert.Error(err)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 }
 
 // TestQuery_SearchEscapesWildcards pins that Search treats a caller-supplied LIKE metacharacter as a

@@ -98,8 +98,8 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 
 	e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		res, err := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE status=? AND parked=0 AND lease_expires<=NOW_UTC()",
-			workflow.StatusPending, workflow.StatusRunning,
+			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE status='"+workflow.StatusRunning+"' AND parked=0 AND lease_expires<=NOW_UTC()",
+			workflow.StatusPending,
 		)
 		if err == nil {
 			if recovered, _ := res.RowsAffected(); recovered > 0 {
@@ -111,8 +111,8 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 		var nearestMs sql.NullFloat64
 		if err := db.QueryRowContext(ctx,
 			"SELECT DATE_DIFF_MILLIS(MIN(not_before), NOW_UTC()) FROM dwarf_steps"+
-				" WHERE status=? AND parked=0 AND not_before>NOW_UTC() AND not_before<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND lease_expires<=NOW_UTC()",
-			workflow.StatusPending, maxPollInterval.Milliseconds(),
+				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before>NOW_UTC() AND not_before<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND lease_expires<=NOW_UTC()",
+			maxPollInterval.Milliseconds(),
 		).Scan(&nearestMs); err != nil && err != sql.ErrNoRows {
 			shardErr = true
 		}
@@ -121,10 +121,12 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 			shardNearestDelay = time.Duration(nearestMs.Float64 * float64(time.Millisecond))
 		}
 
+		// Existence probe: is any due pending step waiting? The ORDER BY is not for ordering (any match
+		// suffices) - it is REQUIRED because LIMIT_OFFSET compiles to OFFSET/FETCH on SQL Server, a
+		// syntax error without an ORDER BY. Do not remove it to "optimize" the existence check.
 		var dueExists sql.NullInt64
 		err = db.QueryRowContext(ctx,
-			"SELECT 1 FROM dwarf_steps WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() ORDER BY step_id LIMIT_OFFSET(1, 0)",
-			workflow.StatusPending,
+			"SELECT 1 FROM dwarf_steps WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() ORDER BY step_id LIMIT_OFFSET(1, 0)",
 		).Scan(&dueExists)
 		if err != nil && err != sql.ErrNoRows {
 			shardErr = true
@@ -138,8 +140,8 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 		var leaseMs sql.NullFloat64
 		if err := db.QueryRowContext(ctx,
 			"SELECT DATE_DIFF_MILLIS(MIN(lease_expires), NOW_UTC()) FROM dwarf_steps"+
-				" WHERE status=? AND parked=0 AND lease_expires>NOW_UTC() AND lease_expires<=DATE_ADD_MILLIS(NOW_UTC(), ?)",
-			workflow.StatusRunning, maxPollInterval.Milliseconds(),
+				" WHERE status='"+workflow.StatusRunning+"' AND parked=0 AND lease_expires>NOW_UTC() AND lease_expires<=DATE_ADD_MILLIS(NOW_UTC(), ?)",
+			maxPollInterval.Milliseconds(),
 		).Scan(&leaseMs); err != nil && err != sql.ErrNoRows {
 			shardErr = true
 		}
@@ -208,11 +210,11 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 	err := e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
 			"SELECT step_id, task_url, fairness_key, fairness_weight, priority, DATE_DIFF_MILLIS(NOW_UTC(), created_at) FROM dwarf_steps"+
-				" WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?"+
+				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?"+
 				" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
-				" WHERE status=? AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?)"+
+				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?)"+
 				" ORDER BY step_id",
-			workflow.StatusPending, prevBand, workflow.StatusPending, prevBand,
+			prevBand, prevBand,
 		)
 		if err != nil {
 			return errors.Trace(err)

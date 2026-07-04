@@ -29,11 +29,12 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `delete_on_completion` | Set from `FlowOptions.DeleteOnCompletion` at `Create`; `1` makes the flow delete itself (and cascade to subgraph descendants) the instant it reaches `completed`. Root-only (not inherited by children); `failed`/`cancelled`/`interrupted` flows are never auto-deleted. See "Data Retention" |
 | `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Delete`/`Transform` |
 | `forked_from_step` | `Fork` provenance: the *original* fork-point `step_id` this flow was cloned from; `0` for a non-fork flow. Subsumes the origin flow id (derivable via the step's `flow_id`) and pins the exact divergence node. `Continue` excludes forks via `forked_from_step=0`. See "Fork" |
-| `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. A `Fork` clone is a new flow with its own `created_at` = fork time. **Deliberately unindexed**: no query filters or orders on it (`List`/`Purge` age filters anchor on `updated_at` - the correct "time since the flow last did anything/finished" retention signal - and the fairness `ageMs` only *projects* `NOW - created_at` while ordering by `step_id`). A `created_at` index would be pure write amplification; if a "created in window X" analytics filter is ever added, add the index with the `Query` field then |
+| `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. A `Fork` clone is a new flow with its own `created_at` = fork time. **Deliberately unindexed**: no query filters or orders on it (`List`/`Purge` age filters anchor on `updated_at` - which for a terminal flow is its finish time, the correct "time since finished" retention signal, and only terminal flows are purged - and the fairness `ageMs` only *projects* `NOW - created_at` while ordering by `step_id`). A `created_at` index would be pure write amplification; if a "created in window X" analytics filter is ever added, add the index with the `Query` field then |
 | `started_at` | UTC time this attempt began dispatching. Stamped when the flow goes `running` at `Create` (and by `Fork` when the clone goes live); there is no separate `Start`. Distinct from `created_at`, which is the row's INSERT moment. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
-| `updated_at` | UTC time of the last status transition. Surfaced to tasks via `Flow.UpdatedAt()` |
+| `updated_at` | UTC time of the last **status transition** (`created`→`running`→terminal, `running`↔`interrupted`). Surfaced to tasks via `Flow.UpdatedAt()`. It is **not** bumped on intra-flow step progress: a running flow advancing through N steps leaves `updated_at` fixed at its go-`running` time - the per-step flow-row writes (transition-tx open+advance, `completeFlow`/fan-in lock-grab) flip the non-indexed `touch` column instead, so the running band of `idx_dwarf_flows_status` does not churn once per step (it moves only when the flow's own status changes). Consequence: for a **running** flow `updated_at ≈ started_at` (so `FlowSummary.Duration()` reads ~0 until it stops); for a **terminal** flow it is the finish time (Duration = total runtime, and `Purge`/`List` `OlderThan` = "time since finished" - both correct, since only terminal flows are retention targets) |
+| `touch` | Churn-avoidance toggle (`SMALLINT`, `0`/`1`). Carries **no meaning** and is never SELECTed - it exists only so a flow-row write can (a) acquire the row's write lock without moving the `(status, updated_at)` index entry, and (b) guarantee a value change so `RowsAffected()` reflects the `WHERE` match on every driver (MySQL's default "changed rows" count included). **Every** `UPDATE dwarf_flows` flips it (`touch=1-touch`); the intra-flow-progress writes flip *only* it (no `updated_at`), the status-transition writes flip it *alongside* `updated_at=NOW_UTC()`. A self-assign (`SET col=col`) was rejected for (b): MySQL reports 0 rows changed when no value differs, which would silently break the terminal-status `RowsAffected==0` guards |
 | `priority` | Scheduling priority, integer >= 1, lower runs first. Resolved at `Create` from `FlowOptions` else `SetDefaultPriority`; inherited unchanged by `Continue`/subgraph. Immutable |
-| `fairness_key` | Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable |
+| `fairness_key` | Fairness bucket. From `FlowOptions`, else the host-supplied key, else `''`. Immutable. **Deliberately unindexed on `dwarf_flows`** (it *is* indexed on `dwarf_steps` as the hot selection key). The only reader on the flows table is the `List`/`Purge` `Query.FairnessKey` filter (the documented "list tenant X" path), a cold per-shard scan on a warm operator path - not worth a secondary-index entry per insert against the write-amplification budget. If tenant-scoped listing ever becomes a routine operational path, add `(fairness_key, flow_id)` with the filter then. A status-less `OlderThan` purge scans for the same reason (`idx_dwarf_flows_status` is unusable without the `status` prefix), and is intentionally left as-is: a standalone `updated_at` index would amplify writes on a churny column - exactly the cost the dropped `created_at` indexes carried. `workflow_name`/`priority` filters are likewise deliberately unindexed |
 | `fairness_weight` | Relative dispatch share of the `fairness_key`. From `FlowOptions`, else `1` |
 | `error` | Task error string for `failed` flows. Written by `failStep` to the **failing flow only** (`WHERE flow_id=? AND status NOT IN (terminal)`, so first-failure-wins on that flow). Cross-subgraph failure does **not** write the whole chain in one UPDATE - it bubbles up level-by-level: when a subgraph child fails (via cohort accounting, never eagerly - see "Failure back to the parent"), `deliverFlowFailureToParent` surfaces the error to the parked caller step (`subgraph_error`), whose task re-fails on re-dispatch, writing `error` on the parent flow, and so on to the root. (`deliverSubgraphError` does the same re-dispatch from the wedge sweep only.) Surfaced as `FlowOutcome.Error` |
 | `cancel_reason` | Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
@@ -100,7 +101,7 @@ without fragmentation or excessive write amplification.
 | Index | Columns | Purpose |
 |---|---|---|
 | PK | `(flow_id)` | Row lookups by flow ID |
-| `idx_dwarf_flows_status` | `(status, updated_at)` | `List` by status |
+| `idx_dwarf_flows_status` | `(status, updated_at)` | `List` by status; the `OlderThan`/`NewerThan` age range; the orphan/wedge sweep age guards. Its running band no longer churns per step: intra-flow flow-row writes flip the non-indexed `touch` column, not `updated_at`, so a running flow's entry moves only on a genuine status transition (see the `updated_at`/`touch` catalog rows) |
 | `idx_dwarf_flows_workflow_url` | `(workflow_url)` | `List` by workflow URL |
 | `idx_dwarf_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
 | `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite/mssql | Walking the subgraph chain |
@@ -116,6 +117,48 @@ without fragmentation or excessive write amplification.
 | `idx_dwarf_steps_status` | `(status, updated_at)` - partial `WHERE status IN ('pending','running')` on pgx | `pollPendingSteps` recovery and pending discovery |
 | `idx_dwarf_steps_selection` | `(status, parked, priority, fairness_key)` - partial on pgx/mssql/sqlite, full on mysql | Two-level priority+fairness candidate selection. The `parked` second column excludes parked rows without an in-memory filter |
 | `idx_dwarf_steps_saturation` | `(status, parked, task_url)` - partial as above | Per-task in-flight count for the `dwarf_task_concurrency_running` gauge. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
+
+### Status predicates are inlined literals, not bound parameters
+
+Every `status` comparison in a **`WHERE`** clause inlines the `workflow.Status*` constant into the SQL string
+(`"...WHERE status='"+workflow.StatusRunning+"'..."`, `"... status IN ('"+workflow.StatusCreated+"', ...)"`)
+rather than binding it (`status=?`). This is load-bearing for index usability, not a style choice:
+
+- **SQL Server refuses a filtered index for a parameterized predicate.** The step indexes are filtered
+  `WHERE status IN ('pending','running')` (mssql) / partial (pgx/sqlite). SQL Server compiles one cached plan
+  that must be valid for *every* parameter value - and since a filtered index omits rows (`status='completed'`
+  is not in it), a plan that used it could return wrong results for some `@status`, so the optimizer **rejects
+  the filtered index and scans** (a full clustered-index scan on the hot refiller band scan, lease recovery, and
+  the saturation gauge). A **literal** `status='pending'` is provably a subset of the filter, so the index is
+  used. (`OPTION (RECOMPILE)` also works but recompiles every execution - wrong for hot queries.) SQLite's
+  partial-index prover has the same gap; Postgres is safe via custom plans but a literal is deterministic and
+  never worse. MySQL runs these indexes unfiltered (no partial-index support), so a literal is neutral there.
+- **Safe to concatenate:** the values are `workflow.Status*` **constants** the engine controls. The one
+  caller-supplied filter (`List`/`Purge`'s `Query.Status`, `history.go`) is validated with
+  `workflow.IsValidStatus` **before** it is inlined and rejected `400` otherwise, so only a known constant -
+  never arbitrary input - reaches the SQL string; there is no injection surface. Inlining is the fix chosen over
+  unfiltering the mssql indexes, which would bloat them with the unbounded terminal-step history the partial
+  index exists to exclude. Note the `List` win is *not* the filtered-index case (`idx_dwarf_flows_status` is
+  unfiltered): there a parameter defeats the seek because the `ORDER BY flow_id DESC` + `LIMIT` under a
+  density-average estimate makes the optimizer clustered-scan for a *rare* status; the literal lets it read the
+  histogram and seek. Same fix, different reason.
+
+**Two deliberate exceptions stay bound (`?`):** (1) `SET status=?` **assignments** (an assignment is not a
+predicate and never selects an index); (2) a `WHERE` predicate whose status is a runtime *variable* on a
+PK-keyed statement (the lock-contention recovery reset in `execution.go`, `WHERE step_id=? AND status=?` with a
+computed `fromStatus`) - PK seek, no index to help, and the value is not a literal. A new query comparing
+`status` in a `WHERE` must inline the constant (validating first if the value is caller-supplied) unless it
+falls in one of these two.
+
+### `LIMIT_OFFSET` requires an `ORDER BY` on SQL Server
+
+`sequel`'s `LIMIT_OFFSET(limit, offset)` macro compiles to `LIMIT … OFFSET …` on mysql/pgx/sqlite but to
+`OFFSET … ROWS FETCH NEXT … ROWS ONLY` on **mssql**, and SQL Server's `OFFSET/FETCH` is a **syntax error
+without a preceding `ORDER BY`**. So every `LIMIT_OFFSET` statement must carry an `ORDER BY` - **even a pure
+existence probe** (`SELECT 1 … LIMIT_OFFSET(1, 0)`) where the ordering is semantically irrelevant (any match
+suffices). The `ORDER BY step_id` on the refiller's due-exists probe (`scheduling.go`) looks removable and is
+not; a review that flagged it as "needless" missed the mssql requirement. Do not strip an `ORDER BY` from a
+`LIMIT_OFFSET` query. (If a cheap order is wanted, `step_id` - the PK - is the natural choice.)
 
 ### MySQL Column Defaults
 

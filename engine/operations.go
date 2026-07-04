@@ -206,7 +206,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 			rfid = int(newFlowID)
 		}
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET thread_id=?, thread_token=?, step_id=?, root_flow_id=?, updated_at=NOW_UTC() WHERE flow_id=?",
+			"UPDATE dwarf_flows SET thread_id=?, thread_token=?, step_id=?, root_flow_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
 			tid, ttok, newStepID, rfid, newFlowID,
 		)
 		return nil
@@ -281,8 +281,8 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 		// length (loops/gotos) without indicating which interrupt resolves next.
 		err = db.QueryRowContext(ctx,
 			"SELECT state, changes, interrupt_payload FROM dwarf_steps"+
-				" WHERE flow_id=? AND status=? ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)",
-			flowID, workflow.StatusInterrupted,
+				" WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)",
+			flowID,
 		).Scan(&stepStateJSON, &stepChangesJSON, &interruptPayloadJSON)
 		// A missing interrupted step (ErrNoRows) is a tolerated race - report empty state; a real DB
 		// error must not masquerade as that empty state.
@@ -484,18 +484,16 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
 		stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
-		stepArgs = append(stepArgs, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning)
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?, ?, ?)",
+			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
 			stepArgs...,
 		)
 
 		if len(surgraphStepIDs) > 0 {
 			surgraphStepPlaceholders := strings.Repeat("?,", len(surgraphStepIDs)-1) + "?"
 			surgraphStepArgs := append([]any{workflow.StatusCancelled, parkedNone}, surgraphStepIDs...)
-			surgraphStepArgs = append(surgraphStepArgs, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning)
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+surgraphStepPlaceholders+") AND status IN (?, ?, ?, ?)",
+				"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+surgraphStepPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
 				surgraphStepArgs...,
 			)
 		}
@@ -517,9 +515,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		caseClause += " END"
 		flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
 		flowArgs = append(flowArgs, allFlowIDs...)
-		flowArgs = append(flowArgs, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled)
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN (?, ?, ?)",
+			"UPDATE dwarf_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 			flowArgs...,
 		)
 		if err != nil {
@@ -606,8 +603,8 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 			// no partial delete that would orphan a live child's parent.
 			var runningChildren int
 			err = tx.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM dwarf_flows WHERE flow_id IN ("+ph+") AND status=?",
-				append(append([]any{}, args...), workflow.StatusRunning)...,
+				"SELECT COUNT(*) FROM dwarf_flows WHERE flow_id IN ("+ph+") AND status='"+workflow.StatusRunning+"'",
+				args...,
 			).Scan(&runningChildren)
 			if err != nil {
 				return errors.Trace(err)
@@ -621,8 +618,8 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 
 		tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id=?", flowID)
 		tx.ExecContext(ctx,
-			"DELETE FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND status<>?",
-			flowID, flowToken, workflow.StatusRunning,
+			"DELETE FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND status<>'"+workflow.StatusRunning+"'",
+			flowID, flowToken,
 		)
 		return nil
 	}))

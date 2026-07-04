@@ -628,8 +628,14 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 	conditions := []string{subgraphCond}
 	var args []any
 	if query.Status != "" {
-		conditions = append(conditions, "f.status=?")
-		args = append(args, query.Status)
+		// Inline the status as a literal (like every other status predicate) so SQL Server reads the
+		// histogram and index-seeks a rare status instead of a clustered scan driven by the ORDER BY
+		// flow_id DESC + LIMIT under a parameter's density-average estimate. Validated against the known
+		// set first, so only an engine constant - never caller input - is concatenated (no injection).
+		if !workflow.IsValidStatus(query.Status) {
+			return "", "", nil, 0, errors.New("invalid status filter: %q", query.Status, http.StatusBadRequest)
+		}
+		conditions = append(conditions, "f.status='"+query.Status+"'")
 	}
 	if query.WorkflowURL != "" {
 		conditions = append(conditions, "f.workflow_url=?")
@@ -743,9 +749,9 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			where += " AND " + sc
 			args = append(args, scArgs...)
 		}
-		args = append(args, workflow.StatusRunning, perShardLimit)
+		args = append(args, perShardLimit)
 		selectIDs := "SELECT DISTINCT f.flow_id FROM dwarf_flows f" + joinSQL +
-			" WHERE " + where + " AND f.status<>? ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
+			" WHERE " + where + " AND f.status<>'" + workflow.StatusRunning + "' ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, selectIDs, args...)
 		if err != nil {
 			return errors.Trace(err)
@@ -774,8 +780,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			// between can flip a root running, and deleting its steps while the guard keeps its row strands it.
 			candidates := intCSV(flowIDs)
 			prows, err := tx.QueryContext(ctx,
-				"SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+candidates+") AND status<>?",
-				workflow.StatusRunning,
+				"SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+candidates+") AND status<>'"+workflow.StatusRunning+"'",
 			)
 			if err != nil {
 				return errors.Trace(err)
@@ -808,8 +813,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 				return errors.Trace(err)
 			}
 			res, err := tx.ExecContext(ctx,
-				"DELETE FROM dwarf_flows WHERE flow_id IN ("+ids+") AND status<>?",
-				workflow.StatusRunning,
+				"DELETE FROM dwarf_flows WHERE flow_id IN ("+ids+") AND status<>'"+workflow.StatusRunning+"'",
 			)
 			if err != nil {
 				return errors.Trace(err)
@@ -817,8 +821,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			n, _ := res.RowsAffected()
 			perShardDeleted[shardIdx] = int(n)
 			_, err = tx.ExecContext(ctx,
-				"DELETE FROM dwarf_flows WHERE root_flow_id IN ("+ids+") AND status<>?",
-				workflow.StatusRunning,
+				"DELETE FROM dwarf_flows WHERE root_flow_id IN ("+ids+") AND status<>'"+workflow.StatusRunning+"'",
 			)
 			if err != nil {
 				return errors.Trace(err)

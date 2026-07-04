@@ -103,9 +103,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		err = db.QueryRowContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
-				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
+				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
 				" RETURNING step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at",
-			workflow.StatusRunning, leaseMarginMs, stepID, workflow.StatusPending, parkedNone,
+			workflow.StatusRunning, leaseMarginMs, stepID, parkedNone,
 		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
@@ -117,8 +117,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at"+
-				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
-			workflow.StatusRunning, leaseMarginMs, stepID, workflow.StatusPending, parkedNone,
+				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
+			workflow.StatusRunning, leaseMarginMs, stepID, parkedNone,
 		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
@@ -137,8 +137,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		res, e := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
-				" WHERE step_id=? AND status=? AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
-			workflow.StatusRunning, leaseMarginMs, stepID, workflow.StatusPending, parkedNone,
+				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
+			workflow.StatusRunning, leaseMarginMs, stepID, parkedNone,
 		)
 		if e != nil {
 			err = e
@@ -384,8 +384,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// status=running guard parks no row (n==0) if the step was concurrently cancelled; the error is
 		// checked so a lost park fails the step rather than stranding it.
 		parkRes, err := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-			string(changesJSON), parkedSubgraph, stepID, workflow.StatusRunning,
+			"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"'",
+			string(changesJSON), parkedSubgraph, stepID,
 		)
 		if err != nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
@@ -452,8 +452,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		var rewound bool
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			res, execErr := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='' WHERE step_id=? AND status=?",
-				workflow.StatusPending, string(changesJSON), attempt+1, retrySleepMs, stepID, workflow.StatusRunning,
+				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='' WHERE step_id=? AND status='"+workflow.StatusRunning+"'",
+				workflow.StatusPending, string(changesJSON), attempt+1, retrySleepMs, stepID,
 			)
 			if execErr != nil {
 				return errors.Trace(execErr)
@@ -490,8 +490,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 	gotoTarget := resultFlow.GotoRequested()
 	stepRes, err := db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, changes=?, goto_next=?, updated_at=NOW_UTC() WHERE step_id=? AND status!=?",
-		workflow.StatusCompleted, string(changesJSON), gotoTarget, stepID, workflow.StatusCancelled,
+		"UPDATE dwarf_steps SET status=?, changes=?, goto_next=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"'",
+		workflow.StatusCompleted, string(changesJSON), gotoTarget, stepID,
 	)
 	if err != nil {
 		return errors.Trace(err)
@@ -585,9 +585,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// rollback), the guard yields zero rows and the transition becomes a clean no-op. Without it, the tx
 		// would insert pending successors into an already-terminal flow — orphan work only reaped later by the
 		// claim-time terminal-flow guard. The completed step is left as a harmless tail on the final flow.
+		// The lock-grab flips the non-indexed `touch` column, not `updated_at`: a running flow's
+		// `updated_at` now moves only on a genuine status transition, so the running band of
+		// idx_dwarf_flows_status is not churned once per step. `touch` always changes value, so
+		// RowsAffected still reflects the WHERE match (the terminal guard below) on every driver.
 		flowRes, flowErr := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
-			flowID, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
+			"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			flowID,
 		)
 		if flowErr != nil {
 			return errors.Trace(flowErr)
@@ -661,8 +665,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 				if failFlow {
 					var sampleErr string
 					tx.QueryRowContext(ctx,
-						"SELECT error FROM dwarf_steps WHERE flow_id=? AND status=? AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
-						flowID, workflow.StatusFailed,
+						"SELECT error FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusFailed+"' AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
+						flowID,
 					).Scan(&sampleErr)
 					sampleErr = strings.TrimSpace(sampleErr)
 					if sampleErr == "" {
@@ -673,9 +677,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 						return errors.Trace(cfsErr)
 					}
 					tx.ExecContext(ctx,
-						"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC() WHERE flow_id=? AND status NOT IN (?, ?, ?)",
+						"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 						finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
-						workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 					)
 					flowFailed = true
 					flowFailedErr = sampleErr
@@ -702,7 +705,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			nextFlowStepID = newStepIDs[0]
 		}
 		if !flowFailed {
-			tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", nextFlowStepID, flowID)
+			tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", nextFlowStepID, flowID)
 		}
 		return nil
 	})
@@ -760,9 +763,8 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
 		stepArgs := []any{stepID, string(changesJSON), stepID, workflow.StatusInterrupted, parkedNone}
 		stepArgs = append(stepArgs, allStepIDs...)
-		stepArgs = append(stepArgs, workflow.StatusRunning, workflow.StatusInterrupted)
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN (?, ?)",
+			"UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
 			stepArgs...,
 		)
 
@@ -787,9 +789,8 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 
 		flowPlaceholders := strings.Repeat("?,", len(chainFlowIDs)-1) + "?"
 		flowArgs := append([]any{workflow.StatusInterrupted}, chainFlowIDs...)
-		flowArgs = append(flowArgs, workflow.StatusRunning, workflow.StatusInterrupted)
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?)",
+			"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
 			flowArgs...,
 		)
 		return nil
@@ -823,7 +824,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget, fanInURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) error {
 	var fanInStepID int64
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
-		tx.ExecContext(ctx, "UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", flowID)
+		tx.ExecContext(ctx, "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=?", flowID)
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=0 WHERE step_id=?", stepID)
 
 		var ourStateJSON, ourChangesJSON string
@@ -846,7 +847,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 			return errors.Trace(err)
 		}
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET successor_id=? WHERE step_id=?", int(fanInStepID), stepID)
-		tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, updated_at=NOW_UTC() WHERE flow_id=?", int(fanInStepID), flowID)
+		tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", int(fanInStepID), flowID)
 		return nil
 	})
 	if err != nil {

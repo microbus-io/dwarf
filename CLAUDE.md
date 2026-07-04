@@ -51,6 +51,11 @@ matching one before working there:**
   *preserves* during changes-accumulation. (`workflow/CLAUDE.md`; enforced at `execution.go`)
 - **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
+- **Status literals, not binds:** in a `WHERE` clause, inline the status constant
+  (`"...WHERE status='"+workflow.StatusRunning+"'..."`), never bind it (`status=?`) - a bound status defeats the
+  SQL Server / SQLite filtered index (and, for `List`'s `ORDER BY ... LIMIT`, the cardinality estimate). A
+  caller-supplied status (`List`/`Query.Status`) is validated with `workflow.IsValidStatus` then inlined.
+  Exception: `SET status=?` assignments stay bound. (`migrations/CLAUDE.md`)
 
 ### Core Concepts
 

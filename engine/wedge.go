@@ -72,10 +72,9 @@ func (e *Engine) sweepWedgedParks(ctx context.Context, db *sequel.DB, shard int)
 func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, shard int, minAge time.Duration) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT s.step_id, s.flow_id FROM dwarf_steps s"+
-			" WHERE s.parked=? AND s.status=? AND s.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
-			" AND NOT EXISTS (SELECT 1 FROM dwarf_flows f WHERE f.surgraph_step_id=s.step_id AND f.status IN (?, ?, ?))",
-		parkedSubgraph, workflow.StatusRunning, -minAge.Milliseconds(),
-		workflow.StatusCreated, workflow.StatusRunning, workflow.StatusInterrupted,
+			" WHERE s.parked=? AND s.status='"+workflow.StatusRunning+"' AND s.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
+			" AND NOT EXISTS (SELECT 1 FROM dwarf_flows f WHERE f.surgraph_step_id=s.step_id AND f.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))",
+		parkedSubgraph, -minAge.Milliseconds(),
 	)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "Wedge sweep: querying parked subgraph steps", "shard", shard, "error", err)
@@ -159,12 +158,10 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 	rows, err := db.QueryContext(ctx,
 		"SELECT c.flow_id, c.flow_token FROM dwarf_flows c"+
 			" JOIN dwarf_flows p ON p.flow_id=c.surgraph_flow_id"+
-			" WHERE c.surgraph_flow_id>0 AND c.status IN (?, ?, ?)"+
+			" WHERE c.surgraph_flow_id>0 AND c.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
 			" AND c.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
-			" AND p.status IN (?, ?, ?)",
-		workflow.StatusCreated, workflow.StatusRunning, workflow.StatusInterrupted,
+			" AND p.status IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 		-minAge.Milliseconds(),
-		workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled,
 	)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "Wedge sweep: querying orphaned subgraph children", "shard", shard, "error", err)
@@ -222,9 +219,8 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
 		// Write-first (the step-cancel UPDATE) per the flow-terminating-transaction rule.
 		stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
-		stepArgs = append(stepArgs, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning)
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN (?, ?, ?, ?)",
+			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
 			stepArgs...,
 		)
 
@@ -245,9 +241,8 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 		caseClause += " END"
 		flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
 		flowArgs = append(flowArgs, allFlowIDs...)
-		flowArgs = append(flowArgs, workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled)
 		_, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN (?, ?, ?)",
+			"UPDATE dwarf_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 			flowArgs...,
 		)
 		return errors.Trace(err)
@@ -273,10 +268,9 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 func (e *Engine) detectOrphanedFlows(ctx context.Context, db *sequel.DB, shard int) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT f.flow_id FROM dwarf_flows f"+
-			" WHERE f.status=? AND f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
-			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN (?, ?, ?, ?))",
-		workflow.StatusRunning, -orphanFlowThreshold.Milliseconds(),
-		workflow.StatusCreated, workflow.StatusPending, workflow.StatusRunning, workflow.StatusInterrupted,
+			" WHERE f.status='"+workflow.StatusRunning+"' AND f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
+			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))",
+		-orphanFlowThreshold.Milliseconds(),
 	)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "Orphan detection: querying running flows", "shard", shard, "error", err)
