@@ -512,12 +512,18 @@ func (e *Engine) allDescendantSubgraphFlows(ctx context.Context, db sequel.Execu
 	childrenByParent := map[int][]int{}
 	for rows.Next() {
 		var id, parent int
-		rows.Scan(&id, &parent)
+		if err := rows.Scan(&id, &parent); err != nil {
+			rows.Close()
+			return nil, errors.Trace(err)
+		}
 		if parent != 0 {
 			childrenByParent[parent] = append(childrenByParent[parent], id)
 		}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, errors.Trace(err)
+	}
 
 	var collected []int
 	queue := []int{flowID}

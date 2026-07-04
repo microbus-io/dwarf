@@ -325,6 +325,9 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 				fs.NextKey = key
 			}
 		}
+		if err := nrows.Err(); err != nil {
+			return nil, errors.Trace(err)
+		}
 	}
 	return fs, nil
 }

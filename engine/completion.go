@@ -640,7 +640,10 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 	for rows.Next() {
 		var id, parent int
 		var token, status string
-		rows.Scan(&id, &token, &parent, &status)
+		if err := rows.Scan(&id, &token, &parent, &status); err != nil {
+			rows.Close()
+			return nil, nil, errors.Trace(err)
+		}
 		status = strings.TrimSpace(status)
 		term := status == workflow.StatusCompleted || status == workflow.StatusFailed || status == workflow.StatusCancelled
 		byID[id] = node{token: strings.TrimSpace(token), terminal: term}
@@ -649,6 +652,11 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 		}
 	}
 	rows.Close()
+	// A truncated read (mid-stream error) would make the tree walk act on a partial tree; this is a
+	// non-tx read (no Transact latch backstops it), so the check is explicit.
+	if err := rows.Err(); err != nil {
+		return nil, nil, errors.Trace(err)
+	}
 
 	queue := []int{flowID}
 	for len(queue) > 0 {
@@ -692,13 +700,19 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	for frows.Next() {
 		var id, ssid int
 		var token, status string
-		frows.Scan(&id, &token, &ssid, &status)
+		if err := frows.Scan(&id, &token, &ssid, &status); err != nil {
+			frows.Close()
+			return nil, nil, nil, errors.Trace(err)
+		}
 		tokenByID[id] = strings.TrimSpace(token)
 		if ssid != 0 && strings.TrimSpace(status) == workflow.StatusInterrupted {
 			childByCallerStep[ssid] = id
 		}
 	}
 	frows.Close()
+	if err := frows.Err(); err != nil {
+		return nil, nil, nil, errors.Trace(err)
+	}
 
 	// Each tree flow's interrupted leaf: order in SQL, take the first row per flow_id in memory.
 	interruptedLeafByFlow := map[int]int{}
@@ -711,12 +725,18 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	}
 	for srows.Next() {
 		var fid, sid int
-		srows.Scan(&fid, &sid)
+		if err := srows.Scan(&fid, &sid); err != nil {
+			srows.Close()
+			return nil, nil, nil, errors.Trace(err)
+		}
 		if _, seen := interruptedLeafByFlow[fid]; !seen {
 			interruptedLeafByFlow[fid] = sid // first row per flow_id = earliest updated_at, step_id
 		}
 	}
 	srows.Close()
+	if err := srows.Err(); err != nil {
+		return nil, nil, nil, errors.Trace(err)
+	}
 
 	flowIDs = []any{flowID}
 	compositeFlowIDs = []string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)}
@@ -861,10 +881,16 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 	for rows.Next() {
 		var id, sfid, ssid int
 		var token string
-		rows.Scan(&id, &token, &sfid, &ssid)
+		if err := rows.Scan(&id, &token, &sfid, &ssid); err != nil {
+			rows.Close()
+			return nil, nil, nil, errors.Trace(err)
+		}
 		byID[id] = fnode{token: strings.TrimSpace(token), surgFlowID: sfid, surgStepID: ssid}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, nil, errors.Trace(err)
+	}
 
 	flowIDs = []any{flowID}
 	compositeFlowIDs = []string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)}

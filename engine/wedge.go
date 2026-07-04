@@ -94,6 +94,10 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		hits = append(hits, w)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		e.logger.ErrorContext(ctx, "Wedge sweep: iterating parked subgraph steps", "shard", shard, "error", err)
+		return
+	}
 
 	for _, w := range hits {
 		// The latest child for this caller step decides the disposition; older children are completed
@@ -183,6 +187,10 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 		hits = append(hits, o)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		e.logger.ErrorContext(ctx, "Wedge sweep: iterating orphaned subgraph children", "shard", shard, "error", err)
+		return
+	}
 
 	for _, o := range hits {
 		e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child whose parent is terminal",
