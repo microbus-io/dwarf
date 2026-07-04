@@ -50,13 +50,26 @@ type ShardSummary struct {
 
 const (
 	maxPollInterval     = 5 * time.Minute
-	leaseMargin         = 30 * time.Second
 	backlogPollInterval = 1 * time.Minute
 
 	// pollErrorRetryInterval caps the wake delay after a sizing query in pollPendingSteps fails, so a
 	// transient DB error (e.g. a momentary connection-limit rejection) triggers a prompt re-poll instead
 	// of the timer sleeping for maxPollInterval while a due step sits undispatched.
 	pollErrorRetryInterval = 1 * time.Second
+
+	parkedNone     = 0
+	parkedSubgraph = 1
+)
+
+// The recovery-timing knobs below are vars, not consts, ONLY so white-box tests in the engine package can
+// shorten them (override in the test, restore via t.Cleanup) to exercise lease recovery / the wedge sweep /
+// orphan detection without waiting minutes. Production keeps the defaults. Same rationale as
+// awaitPollInterval. Do NOT read these in a context that requires a constant expression.
+var (
+	// leaseMargin is added to a step's own time_budget_ms when the claim CAS sizes lease_expires, so the
+	// crash-recovery lease always outlasts the ExecuteTask deadline (which is time_budget_ms). A crashed
+	// worker is thus recovered no sooner than budget+leaseMargin.
+	leaseMargin = 30 * time.Second
 
 	// wedgeSweepInterval is the cadence of the dedicated recovery goroutine that runs the defense-in-depth
 	// parked-step wedge sweep. It is kept off the frequently-nudged poll path because the sweep's scans are
@@ -71,9 +84,6 @@ const (
 	// It sits far beyond the sub-second gap between a step completing and its successor committing, so a
 	// flow merely between steps is never flagged.
 	orphanFlowThreshold = 5 * time.Minute
-
-	parkedNone     = 0
-	parkedSubgraph = 1
 )
 
 // awaitPollInterval bounds how long an Await can block past the moment the flow actually stops when the
