@@ -82,11 +82,22 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 	t.Fatalf("flow %s was not deleted within %s", flowKey, timeout)
 }
 
-// TestDeleteOnCompletion_DeletesOnSuccess asserts a flow created with DeleteOnCompletion deletes itself
-// (and its steps) once it completes successfully.
-func TestDeleteOnCompletion_DeletesOnSuccess(t *testing.T) {
+// shortenDeletion overrides the deletion grace / reaper cadence for a test and restores them after. Must be
+// called before RunInTest (the reaper reads reapInterval at startup; completeFlow reads deletionGrace at
+// completion). Engine tests run sequentially, so mutating these package vars is safe.
+func shortenDeletion(t *testing.T, grace, interval time.Duration) {
+	t.Helper()
+	og, oi := deletionGrace, reapInterval
+	deletionGrace, reapInterval = grace, interval
+	t.Cleanup(func() { deletionGrace, reapInterval = og, oi })
+}
+
+// TestDeleteOnCompletion_ReaperDeletesOnSuccess asserts a flow created with DeleteOnCompletion is removed (row
+// and steps) by the background reaper once its grace window elapses.
+func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
+	shortenDeletion(t, time.Millisecond, 20*time.Millisecond)
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -108,11 +119,13 @@ func TestDeleteOnCompletion_DeletesOnSuccess(t *testing.T) {
 	waitFlowDeleted(t, e, fk, 5*time.Second)
 }
 
-// TestDeleteOnCompletion_AwaitReturns404 asserts Await on a disposable flow blocks until it finishes and
-// then returns 404 - the flow is gone, and that 404 is the completion signal (uniform regardless of timing).
-func TestDeleteOnCompletion_AwaitReturns404(t *testing.T) {
+// TestDeleteOnCompletion_OutcomeObservableThenReaped asserts the new deferred-deletion contract: a disposable
+// flow stays `completed` for the grace window so Await/Snapshot serve its outcome, then the reaper removes it
+// and reads 404. A long reapInterval keeps the background reaper out; the test forces one reap pass itself.
+func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
+	shortenDeletion(t, time.Millisecond, time.Hour) // due ~immediately, but only the manual reap fires
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -131,35 +144,97 @@ func TestDeleteOnCompletion_AwaitReturns404(t *testing.T) {
 	fk, err := e.Create(ctx, "doc/await", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
 
-	_, err = e.Await(ctx, fk)
-	assert.Error(err)
-	assert.Equal(404, errors.StatusCode(err))
+	// The outcome is observable during the grace window (Await returns completed, not 404).
+	out, err := e.Await(ctx, fk)
+	assert.NoError(err)
+	if assert.NotNil(out) {
+		assert.Equal(workflow.StatusCompleted, out.Status)
+		assert.Equal(true, out.State["done"])
+	}
 
-	// A second Await yields the same 404 - uniform, not timing-dependent.
+	// Force a reap pass (the flow is due), then it is gone: Await/Snapshot 404, uniformly.
+	time.Sleep(5 * time.Millisecond)
+	e.reapDueFlows(ctx)
+
 	_, err = e.Await(ctx, fk)
-	assert.Error(err)
+	assert.Equal(404, errors.StatusCode(err))
+	_, err = e.Snapshot(ctx, fk)
 	assert.Equal(404, errors.StatusCode(err))
 }
 
-// TestDeleteOnCompletion_RunReturns404 asserts Run on a disposable flow returns 404 once it completes.
-func TestDeleteOnCompletion_RunReturns404(t *testing.T) {
+// TestDeleteOnCompletion_RunReturnsOutcome asserts Run on a disposable flow returns the completed outcome
+// (observable during the grace window), not a 404.
+func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
+	shortenDeletion(t, time.Millisecond, time.Hour)
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "doc/run-a")
 	g.AddTransition("A", workflow.END)
 	proxy.HandleGraph("doc/run", g)
-	proxy.HandleTask("doc/run-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	proxy.HandleTask("doc/run-a", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetBool("done", true)
+		return nil
+	})
 
 	e := NewEngine()
 	e.SetHost(proxy)
 	e.RunInTest(t)
 
-	_, _, err := e.Run(ctx, "doc/run", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
-	assert.Error(err)
-	assert.Equal(404, errors.StatusCode(err))
+	_, out, err := e.Run(ctx, "doc/run", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
+	assert.NoError(err)
+	if assert.NotNil(out) {
+		assert.Equal(workflow.StatusCompleted, out.Status)
+		assert.Equal(true, out.State["done"])
+	}
+}
+
+// TestPurge_ReaperRemovesTree pins the operator path: Purge marks a root (it does not delete inline), and the
+// reaper then removes the root AND its subgraph child (keyed on root_flow_id) - the no-orphan guarantee. A
+// long reapInterval keeps the background reaper out; the test forces one reap pass.
+func TestPurge_ReaperRemovesTree(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	shortenDeletion(t, time.Millisecond, time.Hour)
+
+	proxy := NewTestProxy()
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("Run", "pr/run")
+	parent.AddTransition("Run", workflow.END)
+	proxy.HandleGraph("pr/parent", parent)
+	inner := workflow.NewGraph("Inner")
+	inner.SetEndpoint("X", "pr/x")
+	inner.AddTransition("X", workflow.END)
+	proxy.HandleGraph("pr/inner", inner)
+	proxy.HandleTask("pr/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	proxy.HandleTask("pr/run", func(ctx context.Context, f *workflow.Flow) error {
+		var out map[string]any
+		yield, err := f.Subgraph("pr/inner", map[string]any{}, &out)
+		if yield || err != nil {
+			return err
+		}
+		return nil
+	})
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	e.RunInTest(t)
+
+	fk, _, err := e.Run(ctx, "pr/parent", nil, nil)
+	assert.NoError(err)
+	shardNum, _, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	assert.Equal(2, shardFlowCount(t, e, shardNum)) // root + subgraph child
+
+	n, err := e.Purge(ctx, workflow.Query{WorkflowURL: "pr/parent"})
+	assert.NoError(err)
+	assert.Equal(1, n) // one root marked
+
+	time.Sleep(5 * time.Millisecond) // let the 1ms delete_after_ms elapse (in-memory SQLite is sub-ms)
+	e.reapDueFlows(ctx)
+	assert.Equal(0, shardFlowCount(t, e, shardNum)) // root and child both removed - no orphan
 }
 
 // TestDeleteOnCompletion_KeepsFailedFlow asserts a failed flow is retained even with DeleteOnCompletion set
@@ -195,12 +270,12 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 	assert.Equal(1, n)
 }
 
-// TestDeleteOnCompletion_CascadesSubgraph asserts that when a disposable root flow completes, the delete
-// cascades into its subgraph descendants - the child is swept by the root's cascade (it carries no flag of
-// its own).
-func TestDeleteOnCompletion_CascadesSubgraph(t *testing.T) {
+// TestDeleteOnCompletion_ReaperCascadesSubgraph asserts that when a disposable root flow completes, the reaper
+// removes it AND its subgraph descendants (keyed on root_flow_id; the child carries no flag of its own).
+func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
+	shortenDeletion(t, time.Millisecond, 20*time.Millisecond)
 
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("Parent")
@@ -234,7 +309,7 @@ func TestDeleteOnCompletion_CascadesSubgraph(t *testing.T) {
 	shardNum, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
-	// Root completes and deletes itself plus the subgraph child - no flows remain.
+	// Root completes; the reaper then removes it plus the subgraph child - no flows remain.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if shardFlowCount(t, e, shardNum) == 0 {
@@ -245,21 +320,23 @@ func TestDeleteOnCompletion_CascadesSubgraph(t *testing.T) {
 	assert.Equal(0, shardFlowCount(t, e, shardNum))
 }
 
-// TestDeleteOnCompletion_AwaitReturns404UnderConcurrency hammers many disposable flows concurrently to
-// pin the uniform-404 contract under contention. It regresses two defects: (1) the per-flow delete ran in
-// a transaction separate from the completion commit, leaving an observable window where Await's first
-// snapshot saw a transient `completed` outcome instead of 404; and (2) on SQLite that separate delete was
-// read-first and could deadlock under load, failing best-effort and leaving a stray completed row. Both
-// surfaced here as Awaits returning a non-404 outcome. The fix folds the delete into the completion
-// transaction (atomic running -> gone). Before the fix this failed reliably; after, every Await 404s.
-func TestDeleteOnCompletion_AwaitReturns404UnderConcurrency(t *testing.T) {
+// TestDeleteOnCompletion_OutcomeObservableUnderConcurrency hammers many disposable flows concurrently to pin
+// the deferred-deletion contract under contention: every Await must return the completed outcome cleanly (the
+// flow stays observable during its grace window). A long reapInterval keeps the reaper from removing any flow
+// mid-test, so a missing/errored outcome would signal a real defect (torn completion write, lost outcome).
+func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	ctx := context.Background()
+	shortenDeletion(t, deletionGrace, time.Hour) // reaper effectively off for the test's duration
+
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "doc/conc-a")
 	g.AddTransition("A", workflow.END)
 	proxy.HandleGraph("doc/conc", g)
-	proxy.HandleTask("doc/conc-a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	proxy.HandleTask("doc/conc-a", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetBool("done", true)
+		return nil
+	})
 
 	e := NewEngine()
 	e.SetHost(proxy)
@@ -269,7 +346,7 @@ func TestDeleteOnCompletion_AwaitReturns404UnderConcurrency(t *testing.T) {
 	const workers = 8
 	const perWorker = 25
 	var wg sync.WaitGroup
-	var notGone atomic.Int64
+	var bad atomic.Int64
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
@@ -277,17 +354,17 @@ func TestDeleteOnCompletion_AwaitReturns404UnderConcurrency(t *testing.T) {
 			for i := 0; i < perWorker; i++ {
 				fk, err := e.Create(ctx, "doc/conc", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 				if err != nil {
-					notGone.Add(1)
+					bad.Add(1)
 					continue
 				}
-				// A disposable flow is gone once completed, so Await blocks until completion then 404s.
-				if _, err := e.Await(ctx, fk); errors.StatusCode(err) != 404 {
-					notGone.Add(1)
+				out, err := e.Await(ctx, fk)
+				if err != nil || out == nil || out.Status != workflow.StatusCompleted || out.State["done"] != true {
+					bad.Add(1)
 				}
 			}
 		}()
 	}
 	wg.Wait()
-	testarossa.For(t).Equal(int64(0), notGone.Load(),
-		"every disposable Await must return 404 (flow gone); a non-404 means a stray completed row")
+	testarossa.For(t).Equal(int64(0), bad.Load(),
+		"every disposable Await must return the completed outcome during the grace window")
 }

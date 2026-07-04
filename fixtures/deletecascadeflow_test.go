@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -118,15 +119,21 @@ func TestDeletecascadeflow(t *testing.T) {
 	_, err = eng.Step(ctx, grandchildKey)
 	assert.NoError(err)
 
-	// Delete the root flow.
+	// Delete the root flow. Delete schedules the whole tree for the reaper (it stamps the root, and the reaper
+	// removes root + descendants keyed on root_flow_id); it does not delete inline. The observable public
+	// contract is that the flow is logically gone: History 404s and it drops out of List. The physical tree
+	// removal is covered by the engine-package reaper tests.
 	err = eng.Delete(ctx, flowKey)
 	assert.NoError(err)
 
-	// The root and every subgraph descendant are gone.
-	_, err = eng.Snapshot(ctx, flowKey)
-	assert.Error(err)
-	_, err = eng.Step(ctx, childKey)
-	assert.Error(err)
-	_, err = eng.Step(ctx, grandchildKey)
-	assert.Error(err)
+	_, err = eng.History(ctx, flowKey)
+	if assert.Error(err) {
+		assert.Equal(404, errors.StatusCode(err))
+	}
+	roots, _, err := eng.List(ctx, workflow.Query{IncludeSubgraphs: true})
+	if assert.NoError(err) {
+		for _, s := range roots {
+			assert.NotEqual(flowKey, s.FlowKey)
+		}
+	}
 }

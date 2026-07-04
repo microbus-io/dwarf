@@ -1239,60 +1239,66 @@ The engine does not auto-purge flows on a timer: every row remains potentially-r
 rejected for two reasons: a clock-triggered delete reaps rows out from under those resurrection paths (a flow `failed`
 for 30 days may still be wanted as a `Fork` source; one `interrupted` for 30 days is awaiting a human), and no single
 duration fits both a 1-hour batch and a 30-day approval. The author also cannot know at `Create` "how long will this
-be relevant after it ends." So retention is either operator-driven or an explicit author opt-in:
+be relevant after it ends." So retention is either operator-driven or an explicit author opt-in.
 
-- **`FlowOptions.DeleteOnCompletion`** - the author declares a flow fire-and-forget (durable-execution jobs that retry
-  until success against a SaaS / under backpressure, whose output and history are not needed). The engine deletes the
-  flow and its subgraph descendants the instant it reaches `completed` - an *event* trigger on success, not a clock,
-  so there is no duration to pick and the resurrection paths are preserved: `failed`/`cancelled`/`interrupted` flows
-  are **never** auto-deleted (a failed disposable job is exactly the one to keep as a `Fork` source). Honored on
-  the **root** flow only (`surgraph_flow_id=0`), not inherited by children; the delete reuses `Delete`'s cascade to
-  sweep descendants. The delete happens **inside the same transaction that marks the flow `completed`**
-  (`completeFlow`), so a disposable flow transitions `running` -> gone **atomically** - there is never a committed
-  `completed` state, which is what makes the uniform 404 hold for *every* reader (an earlier design deleted in a
-  *separate* transaction after the completion commit, leaving a window where a `Snapshot`/`Await` read - most easily
-  `Await`'s **first snapshot**, before it blocks - saw a transient `completed` outcome instead of 404). The
-  `dwarf_flows_terminated` metric fires *after* the commit from values captured
-  before the delete (so observability survives); `signalStop` then wakes blocked `Await`s, which
-  re-snapshot a gone row and 404. A failed completion transaction rolls back whole - no partial delete, no stray
-  `completed` row. **Await contract: once it completes, the flow is gone everywhere - uniformly.** `Snapshot`/`History`
-  and a blocking `Await`/`Run` return "flow not found" (404) regardless of timing; for an `Await` that 404 *is* the
-  completion signal (waiting still works: an `Await` started mid-run blocks until finish, then 404s). A
-  `failed`/`cancelled` disposable flow is *not* deleted, so `Await` returns its real terminal outcome (a 404
-  specifically means "completed"). Uniform 404 was chosen over a translated `completed` outcome (timing-dependent) and
-  over a step-pruned tombstone (which moves the inconsistency to `History` and, by keeping `final_state`, leaks the
-  private data the deletion exists to remove). A caller wanting a disposable flow's outcome composes it into the
-  workflow (a final task that reports it) or `Await`s before completion. (Planned: deferred deletion via a
-  `delete_after_ms` grace window makes the outcome `Await`-observable - see `_DELETING.md`.)
+**Deletion is deferred: mark, then reap.** No path deletes rows inline. `DeleteOnCompletion`, `Delete`, and `Purge`
+all **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
+a dedicated **reaper** goroutine (`reaperLoop`, ~1min ticker) later removes the whole subtree set-based, keyed on
+`root_flow_id`. This closes the old strand race (a `Delete`/`Purge` deleting steps while a `Resume` revives the flow)
+by construction - no rows are deleted where a lifecycle op could interleave (see "Deletion race gate" below) - and
+makes a disposable flow's **outcome observable** during its grace window.
 
-For operator-driven retention:
+- **`FlowOptions.DeleteOnCompletion`** - the author declares a flow fire-and-forget (durable-execution jobs whose
+  output and history are not needed). On success `completeFlow` stamps `delete_after_ms = deletionGrace` (hardcoded
+  **1 min**; a per-flow duration would be retention policy, out of scope) **in the same transaction** that marks the
+  flow `completed`. An *event* trigger on success, not a clock: `failed`/`cancelled`/`interrupted` flows are **never**
+  scheduled (a failed disposable job is exactly the one to keep as a `Fork` source). Root-only (`surgraph_flow_id=0`),
+  not inherited by children (the reaper sweeps descendants via `root_flow_id`). During the grace window the flow stays
+  `completed` and its **outcome is observable**: `Snapshot`/`Await`/`Run` return the completed `FlowOutcome` - this is
+  how a caller learns a disposable flow's result now that there is no stop callback. It is nonetheless *logically*
+  gone: excluded from `List`, and `History` 404s (the full step detail is what the flow is discarding). After the
+  window the reaper removes it and reads 404. (`Snapshot`/`Await` deliberately serve the outcome rather than 404 - a
+  hard-immediate-404 for a redaction-critical `Delete` is a deferred sub-decision.)
 
-- **`Delete(flowKey)`** removes one flow and its steps in a transaction, **cascading into the flow's subgraph
-  descendants recursively** (`allDescendantSubgraphFlows`, same-shard via parent-shard affinity) - a subgraph child's
-  only inbound reference is its now-deleted surgraph step, so leaving it would strand it. Refuses a running flow (409),
-  and likewise refuses the whole cascade if any descendant is still running (no partial delete that orphans a live
-  child's parent). Thread descendants (separate `Continue` flows) are *not* swept - they are independent resurrectable
-  flows, not children. (In practice a non-running root has no running descendant - subgraph children are terminal when
-  the parent is - so the descendant guard is defense against a race.)
-- **`Purge(Query)`** bulk-deletes flows matching the query, except running. Same `Query` shape as `List` (Status,
-  WorkflowURL, ThreadKey, TaskName, FairnessKey, Priority, OlderThan, Shard, Limit); it **rejects**
-  `IncludeSubgraphs` with 400 (a subgraph child is purged only as part of its root's tree). Capped at `purgeCap`
-  (**4096**) **root** flows per call; returns the count deleted (`deleted <= Limit`). It **selects root flows only**
-  but **deletes each matched root's whole subgraph subtree** (root, steps, and all subgraph descendants), keyed on
-  the `root_flow_id` tree-membership index. Done per matched-root batch in one transaction: delete the trees' steps
-  (`flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (roots))`), then the roots (counted,
-  status-reguarded against the SELECT→DELETE running race), then the descendants (`root_flow_id IN (roots)`, now
-  matching only subtrees since the roots are gone). The matched-root ids are **embedded as integer literals, not bind
-  params** (trusted ids from the engine's own SELECT), which also sidesteps the per-driver bind-param ceiling
-  (SQL Server 2100, older SQLite 999). `purgeCap` (4096) bounds the id count so each `IN (...)` predicate stays
-  plannable: beyond a size a large literal IN-list doesn't just plan slowly but can make **SQL Server fail to
-  plan** (errors 8623/8632) - a hard error, not a slow query. That regime is in the tens of thousands of
-  terms; 4096 keeps order-of-magnitude headroom while still purging in useful batches, one statement per shard
-  with no batching. (An earlier revision deleted only the matched root + its own steps, permanently orphaning subgraph
-  descendants - unreachable by a later Purge, which selects roots only, or by `Delete`, which rejects a child key.
-  Cascading per root also keeps the matched set stable across the three deletes - a single self-referential
-  `DELETE … WHERE flow_id IN (SELECT … FROM dwarf_flows …)` cannot, because MySQL forbids deleting from a table named
-  in its own subquery and the capped root set vanishes once the roots are deleted.)
+For operator-driven retention (both mark, do not delete inline):
+
+- **`Delete(flowKey)`** stamps `delete_after_ms = 1` (due immediately) on the root after the read-guards (404 on
+  unknown key, 400 on a subgraph-child key, 409 on a `running` flow). An `interrupted` flow is terminalized in the
+  same UPDATE (`status = CASE WHEN 'interrupted' THEN 'cancelled' ELSE status END`) - deleting a pending approval
+  *is* cancelling it. Already-scheduled (`delete_after_ms > 0`) is idempotent-success. The reaper sweeps the subtree.
+- **`Purge(Query)`** marks all matching roots with one set-based UPDATE per shard: it `SELECT DISTINCT`s candidate
+  roots (`f.surgraph_flow_id=0 AND f.status<>'running' AND f.delete_after_ms=0`, capped at `purgeCap` **4096**, ids
+  embedded as integer literals to dodge the per-driver bind-param ceiling), then
+  `UPDATE ... SET delete_after_ms=1, status=CASE WHEN 'interrupted' THEN 'cancelled' ELSE status END WHERE flow_id
+  IN (ids) AND status<>'running' AND delete_after_ms=0`. Returns the count **marked** (reaped shortly after). Same
+  `Query` shape as `List`; **rejects** `IncludeSubgraphs` with 400.
+
+**The reaper** (`reapDueFlows`, `reaper.go`) runs on its own dedicated goroutine + ~1min ticker (a single goroutine,
+inherently non-overlapping), drained via `reaperStop` in `drainRuntime`. Per shard it loops `purgeCap`-sized batches:
+`SELECT` due roots (`delete_after_ms>0 AND surgraph_flow_id=0 AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW`),
+then a two-statement tree delete (`DELETE dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE
+root_flow_id IN (ids))`, then `DELETE dwarf_flows WHERE root_flow_id IN (ids)`) - set-based, **no N+1**, removing each
+root plus its descendants. It checks `reaperStop` between batches so `Shutdown` aborts a long drain promptly (between
+whole-tree deletes, never mid-statement). No startup/shutdown/wake passes: deletion is latency-tolerant, so a flow
+that came due while a replica was down is removed on the next tick (single-replica) or by a peer's tick. Backed by a
+partial index `idx_dwarf_flows_delete_after WHERE delete_after_ms > 0` (full on mysql) that narrows the due scan to
+the small in-window subset. (`deletionGrace`/`reapInterval` are `var` not `const` only so a test can shorten them -
+engine-package tests force a reap via `reapDueFlows`; fixtures verify the observable public contract via `List`/
+`History`/`Snapshot`.)
+
+**Deletion race gate.** Because deletion is now an *orthogonal column*, not a status, stamping `delete_after_ms`
+alone does not serialize against `Resume`. The invariant that keeps the old strand bug closed is
+**`delete_after_ms > 0 ⟹ terminal status`**, and the reaper reaps only terminal-rooted trees: DeleteOnCompletion
+stamps a `completed` root (immutable); `Delete`/`Purge` of a terminal flow stamp an immutable row; `Delete`/`Purge`
+of an `interrupted` flow flip it to `cancelled` in the same UPDATE, mutually exclusive with `Resume`'s
+`WHERE status='interrupted'` (row lock; exactly one wins, loser 409s). So a live `delete_after_ms` never coexists
+with a resumable flow, and no steps are ever deleted where a `Resume` could interleave.
+
+**Reads/derivations of a `delete_after_ms > 0` flow.** `Snapshot`/`Await` serve the outcome (the observability win);
+`List` and `History` exclude it; `Continue` **skips** deleting turns (its latest-turn query adds `delete_after_ms=0`,
+so it builds on the latest *undeleted* turn - the copy is safe even if the source is later reaped); `Fork` **409s**
+(it names a specific doomed flow, unlike `Continue`'s search); `Cancel`/`Resume` 409 (terminal); `Delete` is
+idempotent-success.
 
 Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the current
 step's `task_name` (excludes fan-out flows, `step_id=0`). `Query.OlderThan`/`NewerThan` are database-anchored

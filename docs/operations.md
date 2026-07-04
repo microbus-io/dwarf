@@ -165,9 +165,13 @@ The engine never auto-purges — every flow is potentially resurrectable (resume
 retention explicitly:
 
 ```go
-err := eng.Delete(ctx, flowKey)          // remove one flow and its steps (refuses a running flow)
-count, err := eng.Purge(ctx, query)      // bulk-delete matching flows (except running), capped at 1000
+err := eng.Delete(ctx, flowKey)          // schedule one flow (and its subtree) for deletion; refuses a running flow
+count, err := eng.Purge(ctx, query)      // schedule matching flows (except running) for deletion, capped at 4096
 ```
+
+`Delete` and `Purge` **mark** flows for deletion (they do not delete inline); a background reaper removes each
+flow's whole subgraph subtree shortly after. The marked flow drops out of `List` and `History` immediately, so
+it is logically gone even though the row lingers briefly. `Purge` returns the count of roots marked.
 
 `Purge` takes the same `workflow.Query` as `List`. `OlderThan` / `NewerThan` are database-anchored and
 compose (e.g. "completed, older than 30 days"):
@@ -178,6 +182,10 @@ eng.Purge(ctx, workflow.Query{
     OlderThan: 30 * 24 * time.Hour,
 })
 ```
+
+A flow created with `FlowOptions.DeleteOnCompletion` schedules its own deletion when it completes successfully
+(failed/cancelled flows are kept). Its outcome stays observable via `Await`/`Snapshot` for a short grace window
+before the reaper removes it — so a fire-and-forget caller can still `Run` it and read the result.
 
 ## Operational
 

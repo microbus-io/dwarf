@@ -75,19 +75,24 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 
 	// Validate the root (the fork's identity) is terminal and gather the root-flow overrides.
 	var rootStatus, rootWorkflowURL, rootThreadToken string
-	var rootThreadID, rootPriority, rootTimeBudgetMs int
+	var rootThreadID, rootPriority, rootTimeBudgetMs, rootDeleteAfterMs int
 	var rootFairnessKey string
 	var rootFairnessWeight float64
 	err = db.QueryRowContext(ctx,
-		"SELECT status, workflow_url, thread_id, thread_token, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=?",
+		"SELECT status, workflow_url, thread_id, thread_token, priority, fairness_key, fairness_weight, time_budget_ms, delete_after_ms FROM dwarf_flows WHERE flow_id=?",
 		rootFlowID,
-	).Scan(&rootStatus, &rootWorkflowURL, &rootThreadID, &rootThreadToken, &rootPriority, &rootFairnessKey, &rootFairnessWeight, &rootTimeBudgetMs)
+	).Scan(&rootStatus, &rootWorkflowURL, &rootThreadID, &rootThreadToken, &rootPriority, &rootFairnessKey, &rootFairnessWeight, &rootTimeBudgetMs, &rootDeleteAfterMs)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
 	rootStatus = strings.TrimSpace(rootStatus)
 	if rootStatus != workflow.StatusCompleted && rootStatus != workflow.StatusFailed && rootStatus != workflow.StatusCancelled {
 		return "", errors.New("can only fork a terminal flow (status: %s)", rootStatus, http.StatusConflict)
+	}
+	// A flow scheduled for deletion is on its way out; unlike Continue (which searches for a base), Fork names
+	// a specific step, so naming a doomed flow is an error, not a fallback.
+	if rootDeleteAfterMs > 0 {
+		return "", errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
 	}
 
 	mergedLeafState, err := mergeWithOverrides(forkStepState, stateOverrides)

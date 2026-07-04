@@ -225,48 +225,24 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		}
 		finalStateJSON = fs
 		workflowURL = wf
+		// A DeleteOnCompletion root schedules its own deletion by stamping delete_after_ms = deletionGrace, so
+		// the reaper removes it (and its subgraph descendants, keyed on root_flow_id) after the grace window.
+		// It is NOT deleted inline: the flow stays `completed` for the window so its outcome is
+		// Await/Snapshot-observable (an inline delete would 404 the caller). Root-only (surgraph_flow_id=0);
+		// the stamp is part of the same status transition, so delete_after_ms > 0 always implies terminal.
+		deleteAfterMs := 0
+		if deleteOnCompletion && surgraphFlowID == 0 {
+			deleteAfterMs = int(deletionGrace.Milliseconds())
+		}
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, final_state=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
-			workflow.StatusCompleted, finalStateJSON, flowID,
+			"UPDATE dwarf_flows SET status=?, final_state=?, delete_after_ms=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			workflow.StatusCompleted, finalStateJSON, deleteAfterMs, flowID,
 		)
 		if err != nil {
 			return errors.Trace(err)
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
 			completed = true
-		}
-
-		// A DeleteOnCompletion root deletes itself (and its subgraph descendants) in this SAME transaction,
-		// so the flow transitions running -> gone atomically with no committed `completed` state in between.
-		// Doing it as a separate post-completion delete left an observable window: a Snapshot/Await whose
-		// read landed between the status=completed commit and the delete saw a `completed` outcome instead
-		// of the intended uniform 404 (await's first snapshot, before it ever waits on signalStop, is the
-		// common way to hit it). Folding the delete in removes the window entirely. Root-only
-		// (surgraph_flow_id=0).
-		if completed && deleteOnCompletion && surgraphFlowID == 0 {
-			descendants, derr := e.allDescendantSubgraphFlows(ctx, tx, flowID)
-			if derr != nil {
-				return errors.Trace(derr)
-			}
-			if len(descendants) > 0 {
-				ph := strings.Repeat("?,", len(descendants)-1) + "?"
-				args := make([]any, 0, len(descendants))
-				for _, id := range descendants {
-					args = append(args, id)
-				}
-				if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN ("+ph+")", args...); err != nil {
-					return errors.Trace(err)
-				}
-				if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id IN ("+ph+")", args...); err != nil {
-					return errors.Trace(err)
-				}
-			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id=?", flowID); err != nil {
-				return errors.Trace(err)
-			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id=?", flowID); err != nil {
-				return errors.Trace(err)
-			}
 		}
 		return nil
 	})

@@ -44,8 +44,10 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	// delete_after_ms=0 excludes a flow scheduled for deletion: History is the full step detail a disposable
+	// flow is discarding, so it 404s during the grace window (Snapshot/Await still serve the outcome).
 	var exists int
-	err = db.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&exists)
+	err = db.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND delete_after_ms=0", flowID, flowToken).Scan(&exists)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("flow not found", http.StatusNotFound)
 	}
@@ -494,7 +496,8 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 		if restrictShardNum != 0 && shardIdx != restrictShardNum {
 			return nil
 		}
-		conditions := []string{whereSQL}
+		// Exclude flows scheduled for deletion (delete_after_ms>0): they are logically gone, awaiting the reaper.
+		conditions := []string{whereSQL, "f.delete_after_ms=0"}
 		args := append([]any(nil), baseArgs...)
 		if cur, ok := perShardCursor[shardIdx]; ok {
 			conditions = append(conditions, "f.flow_id<?")
@@ -762,8 +765,13 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			args = append(args, scArgs...)
 		}
 		args = append(args, perShardLimit)
+		// Purge MARKS, it does not delete: select candidate roots (not running, not already scheduled), then
+		// stamp delete_after_ms=1 (due immediately) so the reaper removes each tree on its next pass. Deleting
+		// nothing inline is what closes the old strand race - and the stamp UPDATE re-guards status<>running
+		// under the row lock, so a Resume racing in after this SELECT either wins (row is running, excluded) or
+		// loses (we stamp, and its interrupted CAS then finds cancelled). No lock-first re-selection needed.
 		selectIDs := "SELECT DISTINCT f.flow_id FROM dwarf_flows f" + joinSQL +
-			" WHERE " + where + " AND f.status<>'" + workflow.StatusRunning + "' ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
+			" WHERE " + where + " AND f.status<>'" + workflow.StatusRunning + "' AND f.delete_after_ms=0 ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, selectIDs, args...)
 		if err != nil {
 			return errors.Trace(err)
@@ -787,57 +795,20 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			return nil
 		}
 
+		// One set-based UPDATE per shard. The CASE terminalizes any interrupted root (interrupted -> cancelled)
+		// in the same write, preserving the Resume gate. ids are trusted integers embedded as literals to dodge
+		// the per-driver bind-param ceiling. The count returned is roots MARKED (reaped shortly after).
+		ids := intCSV(flowIDs)
 		return db.Transact(ctx, func(tx *sequel.Tx) error {
-			// Re-filter to non-running roots INSIDE the tx: the candidate SELECT ran outside it, so a Resume in
-			// between can flip a root running, and deleting its steps while the guard keeps its row strands it.
-			candidates := intCSV(flowIDs)
-			prows, err := tx.QueryContext(ctx,
-				"SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+candidates+") AND status<>'"+workflow.StatusRunning+"'",
-			)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			var purgeIDs []int
-			for prows.Next() {
-				var fid int
-				if err := prows.Scan(&fid); err != nil {
-					prows.Close()
-					return errors.Trace(err)
-				}
-				purgeIDs = append(purgeIDs, fid)
-			}
-			prows.Close()
-			if err := prows.Err(); err != nil {
-				return errors.Trace(err)
-			}
-			if len(purgeIDs) == 0 {
-				return nil
-			}
-
-			// Steps before roots (the subquery reads the flow rows) before descendants (roots gone, so
-			// root_flow_id then matches only subtrees). ids are trusted integers embedded as literals to dodge
-			// the per-driver bind-param ceiling. status<>running guards a Resume racing into this tx.
-			ids := intCSV(purgeIDs)
-			_, err = tx.ExecContext(ctx,
-				"DELETE FROM dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN ("+ids+"))",
-			)
-			if err != nil {
-				return errors.Trace(err)
-			}
 			res, err := tx.ExecContext(ctx,
-				"DELETE FROM dwarf_flows WHERE flow_id IN ("+ids+") AND status<>'"+workflow.StatusRunning+"'",
+				"UPDATE dwarf_flows SET delete_after_ms=1, status=CASE WHEN status='"+workflow.StatusInterrupted+"' THEN '"+workflow.StatusCancelled+"' ELSE status END"+
+					" WHERE flow_id IN ("+ids+") AND status<>'"+workflow.StatusRunning+"' AND delete_after_ms=0",
 			)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			n, _ := res.RowsAffected()
 			perShardDeleted[shardIdx] = int(n)
-			_, err = tx.ExecContext(ctx,
-				"DELETE FROM dwarf_flows WHERE root_flow_id IN ("+ids+") AND status<>'"+workflow.StatusRunning+"'",
-			)
-			if err != nil {
-				return errors.Trace(err)
-			}
 			return nil
 		})
 	})
@@ -929,7 +900,9 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		var priority, timeBudgetMs int
 		var fairnessWeight float64
 		err := tx.QueryRowContext(ctx,
-			"SELECT status, final_state, graph, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			// delete_after_ms=0 skips turns scheduled for deletion, so Continue builds on the latest UNDELETED
+			// turn even when the newest turn is on its way out (its state was copied here before the reap).
+			"SELECT status, final_state, graph, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 AND delete_after_ms=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 			threadID,
 		).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs)
 		if err == sql.ErrNoRows {

@@ -75,11 +75,12 @@ func TestDeleteRunningflow(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-	// Now that the flow is terminal, Delete succeeds and the flow is gone.
+	// Now that the flow is terminal, Delete succeeds: it schedules the flow for the reaper (logically gone).
+	// History 404s during the grace window (Snapshot still serves the outcome until the reaper removes it).
 	err = eng.Delete(ctx, flowKey)
 	assert.NoError(err)
 
-	_, err = eng.Snapshot(ctx, flowKey)
+	_, err = eng.History(ctx, flowKey)
 	assert.Error(err)
 	assert.Equal(404, errors.StatusCode(err))
 }

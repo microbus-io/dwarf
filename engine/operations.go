@@ -381,8 +381,8 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	return out, nil
 }
 
-// await blocks until a flow stops. A completed DeleteOnCompletion flow is gone, so await returns its 404 as
-// the completion signal.
+// await blocks until a flow stops. A DeleteOnCompletion flow stays `completed` (outcome observable) for the
+// deletion grace window, then the reaper removes it and await 404s.
 func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	stopped := func(s string) bool {
 		return s != "" && s != workflow.StatusCreated && s != workflow.StatusPending && s != workflow.StatusRunning
@@ -611,7 +611,11 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	return nil
 }
 
-// deleteFlow removes a flow and its steps.
+// deleteFlow schedules a flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete rows
+// inline. It stamps delete_after_ms=1 (due immediately) on the root; the reaper removes the whole tree on its
+// next pass. An interrupted flow is terminalized (interrupted -> cancelled) in the same UPDATE, which is
+// mutually exclusive with a racing Resume (WHERE status<>'running', re-checked under the row lock), so the
+// old strand race (delete steps while Resume revives) is gone by construction - no lock-first selection needed.
 func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -624,60 +628,34 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 
 	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
 		var flowStatus string
-		var surgraphFlowID int
+		var surgraphFlowID, deleteAfterMs int
 		err := tx.QueryRowContext(ctx,
-			"SELECT status, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+			"SELECT status, surgraph_flow_id, delete_after_ms FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 			flowID, flowToken,
-		).Scan(&flowStatus, &surgraphFlowID)
+		).Scan(&flowStatus, &surgraphFlowID, &deleteAfterMs)
 		if err == sql.ErrNoRows {
 			return errors.New("flow not found", http.StatusNotFound)
 		}
 		if err != nil {
 			return errors.Trace(err)
 		}
-		// Delete cascades down the subgraph tree only; deleting a subgraph child directly would strand its
-		// parent's surgraph step (a dangling reference). It must be addressed by the root flow key, which
-		// sweeps the whole tree; a subgraph child key is read-only (introspection/Fork only).
+		// A subgraph child cannot be deleted directly (its parent's surgraph step would dangle). Address the
+		// tree by the root key; the reaper removes descendants via root_flow_id. A child key is read-only.
 		if surgraphFlowID != 0 {
 			return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
 		}
 		if strings.TrimSpace(flowStatus) == workflow.StatusRunning {
 			return errors.New("cannot delete a running flow; cancel it first", http.StatusConflict)
 		}
-
-		// Delete cascades to the flow's subgraph descendants, recursively, so deleting a flow does not
-		// strand its children (whose only inbound reference is the now-deleted surgraph step). Subgraph
-		// children have parent-shard affinity, so all descendants live on this same shard/transaction.
-		descendants, err := e.allDescendantSubgraphFlows(ctx, tx, flowID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if len(descendants) > 0 {
-			ph := strings.Repeat("?,", len(descendants)-1) + "?"
-			args := make([]any, 0, len(descendants))
-			for _, id := range descendants {
-				args = append(args, id)
-			}
-			// Refuse the whole cascade if any descendant is still running, mirroring the root guard -
-			// no partial delete that would orphan a live child's parent.
-			var runningChildren int
-			err = tx.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM dwarf_flows WHERE flow_id IN ("+ph+") AND status='"+workflow.StatusRunning+"'",
-				args...,
-			).Scan(&runningChildren)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if runningChildren > 0 {
-				return errors.New("cannot delete a flow with a running subgraph descendant; cancel it first", http.StatusConflict)
-			}
-			tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN ("+ph+")", args...)
-			tx.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id IN ("+ph+")", args...)
+		if deleteAfterMs > 0 {
+			return nil // already scheduled - idempotent
 		}
 
-		tx.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id=?", flowID)
+		// Stamp due-now; terminalize an interrupted flow in the same write (the Resume gate). status<>'running'
+		// re-guards a Resume that raced in after the SELECT: it either wins (row is running -> 0 rows here, a
+		// benign lost delete, flow stays alive) or loses (we stamp; its interrupted CAS then finds cancelled).
 		tx.ExecContext(ctx,
-			"DELETE FROM dwarf_flows WHERE flow_id=? AND flow_token=? AND status<>'"+workflow.StatusRunning+"'",
+			"UPDATE dwarf_flows SET delete_after_ms=1, status=CASE WHEN status='"+workflow.StatusInterrupted+"' THEN '"+workflow.StatusCancelled+"' ELSE status END WHERE flow_id=? AND flow_token=? AND status<>'"+workflow.StatusRunning+"' AND delete_after_ms=0",
 			flowID, flowToken,
 		)
 		return nil

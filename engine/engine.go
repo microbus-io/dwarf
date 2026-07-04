@@ -86,6 +86,23 @@ var (
 	orphanFlowThreshold = 5 * time.Minute
 )
 
+// deletionGrace and reapInterval are var (not const) only so a test can shorten them; do NOT read them in a
+// context that requires a constant expression.
+//
+// deletionGrace is how long a DeleteOnCompletion flow lingers after completing before the reaper removes it -
+// the window during which its outcome stays Await/Snapshot-observable. Hardcoded (not configurable via public
+// API: a per-flow duration would be retention policy, out of scope). Operator Delete/Purge stamp 1ms instead
+// (due immediately) since no reader is awaiting an observability window.
+//
+// reapInterval is the cadence of the dedicated reaper goroutine that deletes flows whose delete_after_ms
+// window has elapsed. A plain ticker, single goroutine (inherently non-overlapping); deletion is
+// latency-tolerant, so there is no wake/startup/shutdown special pass - a due flow is removed on the next tick
+// (or by a peer replica). ~1min matches deletionGrace.
+var (
+	deletionGrace = 1 * time.Minute
+	reapInterval  = 1 * time.Minute
+)
+
 // awaitPollInterval bounds how long an Await can block past the moment the flow actually stops when the
 // in-memory wake is lost - a worker crash between the terminal commit and signalStop, a dropped peer
 // broadcast, or a no-op SignalPeers on a multi-replica host. signalStop is the fast path; this periodic
@@ -153,6 +170,10 @@ type Engine struct {
 	// off the hot poll path.
 	recoveryStop   chan struct{}
 	recoveryWorker sync.WaitGroup
+
+	// Reaper goroutine: deletes flows whose delete_after_ms window has elapsed, on its own ~1min ticker.
+	reaperStop   chan struct{}
+	reaperWorker sync.WaitGroup
 
 	// Wait registry for Await
 	waitersLock sync.Mutex
@@ -442,6 +463,7 @@ func (e *Engine) initRuntime() {
 	e.wakeTimer = make(chan struct{}, 1)
 	e.timerStop = make(chan struct{})
 	e.recoveryStop = make(chan struct{})
+	e.reaperStop = make(chan struct{})
 	e.nextPoll = time.Now()
 	e.graphCache = lru.New[graphCacheKey, *workflow.Graph](4096, 15*time.Minute)
 	e.waiters = nil
@@ -480,6 +502,11 @@ func (e *Engine) initRuntime() {
 		defer e.recoveryWorker.Done()
 		e.recoveryLoop(e.lifetimeCtx)
 	}()
+	e.reaperWorker.Add(1)
+	go func() {
+		defer e.reaperWorker.Done()
+		e.reaperLoop(e.lifetimeCtx)
+	}()
 	e.requestRefill()
 }
 
@@ -501,6 +528,12 @@ func (e *Engine) drainRuntime() {
 		close(e.recoveryStop)
 	}
 	e.recoveryWorker.Wait()
+	// The reaper only deletes rows (never requestRefill), so its drain order relative to the refiller does
+	// not matter; stop it here and let an in-progress pass finish its current tree-delete and exit.
+	if e.reaperStop != nil {
+		close(e.reaperStop)
+	}
+	e.reaperWorker.Wait()
 	if e.refillStop != nil {
 		close(e.refillStop)
 	}
@@ -641,8 +674,9 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 	return e.deleteFlow(ctx, flowKey)
 }
 
-// Purge deletes flows matching a query, their subflows, and their step history.
-// No more than 1000 flows are deleted at a time. Iterate to delete more.
+// Purge marks flows matching a query (and their subgraph subtrees) for deletion; a background reaper removes
+// them shortly after. Marked flows are excluded from List/History immediately. Returns the count of roots
+// marked - no more than 4096 per call; iterate to mark more. Running flows are skipped.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (int, error) {
 	return e.purge(ctx, query)
 }

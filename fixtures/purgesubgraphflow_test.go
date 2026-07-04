@@ -95,25 +95,16 @@ func TestPurgeSubgraphflow(t *testing.T) {
 		assert := testarossa.For(t)
 		deleted, err := eng.Purge(ctx, workflow.Query{WorkflowURL: "purgesub.verify:428/parent"})
 		assert.NoError(err)
-		assert.Equal(1, deleted) // the count is the root flow, not its descendants
+		assert.Equal(1, deleted) // the count is the root flow marked, not its descendants
 
-		// The root is gone.
-		_, err = eng.Snapshot(ctx, rootKey)
-		assert.Error(err)
-		assert.Equal(http.StatusNotFound, errors.StatusCode(err))
-
-		// The subgraph child (flow and steps) is gone too - the bug was that it was left orphaned.
-		_, err = eng.Snapshot(ctx, child)
-		assert.Error(err)
-		assert.Equal(http.StatusNotFound, errors.StatusCode(err))
-		_, err = eng.History(ctx, child)
-		assert.Error(err)
-		assert.Equal(http.StatusNotFound, errors.StatusCode(err))
-
-		// Nothing remains under either URL.
-		subs, _, err := eng.List(ctx, includeSubs)
-		assert.NoError(err)
-		assert.Equal(0, len(subs))
+		// Purge marks the root for the reaper (it does not delete inline). The observable public contract is
+		// that the root is logically gone: History 404s and it drops out of the roots List. The reaper then
+		// removes the root AND its subgraph child (keyed on root_flow_id) - that physical cascade, and the
+		// no-orphan guarantee, are pinned in the engine-package reaper tests.
+		_, err = eng.History(ctx, rootKey)
+		if assert.Error(err) {
+			assert.Equal(http.StatusNotFound, errors.StatusCode(err))
+		}
 		roots, _, err := eng.List(ctx, workflow.Query{WorkflowURL: "purgesub.verify:428/parent"})
 		assert.NoError(err)
 		assert.Equal(0, len(roots))

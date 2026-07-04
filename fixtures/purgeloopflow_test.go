@@ -153,20 +153,18 @@ func TestPurgeLoopflow(t *testing.T) {
 		}
 	}
 
-	// Exactly the 7 roots were counted; the subgraph child is not counted separately.
+	// Exactly the 7 roots were counted (marked for deletion); the subgraph child is not counted separately.
+	// Purge marks (delete_after_ms=1), it does not delete inline; the reaper removes the trees. The observable
+	// public contract is that the completed roots drop out of List. Per-flow physical removal (and the subtree
+	// cascade) is covered by the engine-package reaper tests.
 	assert.Equal(roots, totalDeleted)
 
-	// No completed root of the batch remains.
+	// No completed root of the batch is listable any more.
 	for _, fk := range rootKeys {
-		_, err := eng.Snapshot(ctx, fk)
+		_, err := eng.History(ctx, fk)
 		if assert.Error(err) {
 			assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 		}
-	}
-	// The subgraph child was swept with its root's tree.
-	_, err = eng.Snapshot(ctx, child)
-	if assert.Error(err) {
-		assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 	}
 
 	// List of completed flows is now empty (this engine sees only its own flows).
