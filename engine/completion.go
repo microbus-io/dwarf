@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -716,7 +717,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 
 // resume continues a flow paused by flow.Interrupt, delivering resume data to the leaf interrupt park.
 func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
-	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
 	}

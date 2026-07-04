@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -65,7 +66,7 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shard, flowID, _, err := parseFlowKey(flowKey)
+	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}

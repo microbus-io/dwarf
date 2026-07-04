@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -115,7 +116,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shard, parentFlowID, _, err := parseFlowKey(flowKey)
+	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}

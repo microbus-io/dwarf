@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -195,7 +196,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Parse graph, reusing the cached parse — graphJSON is frozen at flow creation, so every step of
 	// the same flow sees identical bytes.
-	graphKey := graphCacheKey{shard: shardNum, flowID: flowID}
+	graphKey := graphCacheKey{shard: shardNum, flowID: flowID} // scopes the cache by shard, since flow_id is only unique within a shard
 	graph, cached := e.graphCache.Load(graphKey)
 	if !cached {
 		graph = &workflow.Graph{}
@@ -256,7 +257,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	taskCtx, taskSpan := e.tracer.Start(taskCtx, taskName,
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
-			attribute.String("workflow.id", flowCorrelationID(shardNum, flowID)),
+			attribute.String("workflow.id", keys.CorrelationID(shardNum, flowID)),
 			attribute.String("workflow.name", workflowURL),
 		),
 	)
@@ -626,7 +627,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			newStepID, err := tx.InsertReturnID(ctx, "step_id",
 				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-				flowID, nextStepDepth, randomIdentifier(16), next.taskName, nextURL, string(stepStateJSON), workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
+				flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, string(stepStateJSON), workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
 			)
 			if err != nil {
 				return errors.Trace(err)
@@ -848,7 +849,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id",
 			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-			flowID, nextStepDepth, randomIdentifier(16), fanInTarget, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
+			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -947,7 +948,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
 		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
 			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-		flowID, fanInDepth, randomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
+		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
 	)
 	if err != nil {
 		return 0, errors.Trace(err)

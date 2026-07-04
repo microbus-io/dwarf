@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package lru
 
 import (
 	"testing"
@@ -26,7 +26,7 @@ import (
 func TestLRUCache_HitMiss(t *testing.T) {
 	assert := testarossa.For(t)
 
-	c := newLRUCache[int, string](4, 0)
+	c := New[int, string](4, 0)
 	_, ok := c.Load(1)
 	assert.False(ok)
 
@@ -45,7 +45,7 @@ func TestLRUCache_HitMiss(t *testing.T) {
 func TestLRUCache_EvictsLeastRecentlyUsed(t *testing.T) {
 	assert := testarossa.For(t)
 
-	c := newLRUCache[int, string](2, 0)
+	c := New[int, string](2, 0)
 	c.Store(1, "a")
 	c.Store(2, "b")
 	// Touch 1 so 2 becomes the least-recently-used.
@@ -65,7 +65,7 @@ func TestLRUCache_EvictsLeastRecentlyUsed(t *testing.T) {
 func TestLRUCache_TTLExpiry(t *testing.T) {
 	assert := testarossa.For(t)
 
-	c := newLRUCache[int, string](8, 20*time.Millisecond)
+	c := New[int, string](8, 20*time.Millisecond)
 	c.Store(1, "a")
 	v, ok := c.Load(1)
 	assert.True(ok)
@@ -79,7 +79,7 @@ func TestLRUCache_TTLExpiry(t *testing.T) {
 func TestLRUCache_ZeroMaxEntriesNoEvict(t *testing.T) {
 	assert := testarossa.For(t)
 
-	c := newLRUCache[int, int](0, 0)
+	c := New[int, int](0, 0)
 	for i := range 1000 {
 		c.Store(i, i)
 	}

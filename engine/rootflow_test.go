@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -77,7 +78,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
-	shard, parentFlowID, _, err := parseFlowKey(flowKey)
+	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -138,12 +139,12 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 		return
 	}
 
-	shard, forkFlowID, _, err := parseFlowKey(forkKey)
+	shard, forkFlowID, _, err := keys.ParseFlowKey(forkKey)
 	if !assert.NoError(err) {
 		return
 	}
 	// The fork is its own root, distinct from the origin.
-	_, originFlowID, _, _ := parseFlowKey(flowKey)
+	_, originFlowID, _, _ := keys.ParseFlowKey(flowKey)
 	assert.Equal(forkFlowID, rootFlowIDOf(t, e, shard, forkFlowID))
 	assert.NotEqual(originFlowID, rootFlowIDOf(t, e, shard, forkFlowID))
 }
@@ -180,7 +181,7 @@ func TestRootFlowID_ContinueStartsFreshRoot(t *testing.T) {
 		return
 	}
 
-	shard, nextFlowID, _, err := parseFlowKey(nextKey)
+	shard, nextFlowID, _, err := keys.ParseFlowKey(nextKey)
 	if !assert.NoError(err) {
 		return
 	}

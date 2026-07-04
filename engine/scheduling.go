@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/candidatecache"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -33,19 +34,19 @@ import (
 // workerLoop pops candidates from the cache and executes them.
 func (e *Engine) workerLoop(ctx context.Context) {
 	for {
-		j, ok, needRefill := e.cache.pop()
+		j, ok, needRefill := e.cache.Pop()
 		if needRefill {
 			e.requestRefill()
 		}
 		if !ok {
 			return
 		}
-		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.stepID, "shard", j.shard, "needRefill", needRefill)
+		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.StepID, "shard", j.Shard, "needRefill", needRefill)
 		err := errors.CatchPanic(func() error {
-			return e.processStep(ctx, j.stepID, j.shard)
+			return e.processStep(ctx, j.StepID, j.Shard)
 		})
 		if err != nil {
-			e.logger.ErrorContext(ctx, "Failed to process step", "stepID", j.stepID, "error", err)
+			e.logger.ErrorContext(ctx, "Failed to process step", "stepID", j.StepID, "error", err)
 		}
 		e.requestRefill()
 	}
@@ -271,8 +272,8 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 // runRefill replaces the candidate cache with a fresh priority+fairness batch drawn from the single
 // globally-minimum due band.
 func (e *Engine) runRefill(ctx context.Context) {
-	capacity := e.cache.capacity()
-	batch := make([]job, 0, capacity)
+	capacity := e.cache.Capacity()
+	batch := make([]candidatecache.Job, 0, capacity)
 
 	// One band per refill: scanPriorityBand returns the strict global-minimum due band's rows (or MaxInt
 	// when nothing is due). The earlier per-band advance loop was vestige of the removed saturation gating,
@@ -339,7 +340,7 @@ func (e *Engine) runRefill(ctx context.Context) {
 			kb := byKey[bestKey]
 			c := kb.steps[0]
 			kb.steps = kb.steps[1:]
-			batch = append(batch, job{stepID: c.stepID, shard: c.shard})
+			batch = append(batch, candidatecache.Job{StepID: c.stepID, Shard: c.shard})
 		}
 		chosenBand = band
 	}
@@ -348,5 +349,5 @@ func (e *Engine) runRefill(ctx context.Context) {
 	// The floor is the cached batch's actual band so the doorbell's priority-preemption decision
 	// (head-insert when a strictly more important step arrives) is made against the right threshold.
 	// chosenBand stays MaxInt when no band was selected (empty batch), matching the empty-cache case.
-	e.cache.refill(batch, chosenBand)
+	e.cache.Refill(batch, chosenBand)
 }

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -185,7 +186,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 
 	for _, o := range hits {
 		e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child whose parent is terminal",
-			"shard", shard, "childFlow", flowCorrelationID(shard, o.flowID))
+			"shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID))
 		if rerr := e.cancelOrphanedSubtree(ctx, shard, o.flowID, o.token); rerr != nil {
 			e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child", "shard", shard, "childFlow", o.flowID, "error", rerr)
 			continue
@@ -285,7 +286,7 @@ func (e *Engine) detectOrphanedFlows(ctx context.Context, db *sequel.DB, shard i
 		}
 		// Token-free correlation id: this is an operator alarm, not a capability. See "Tracing".
 		e.logger.ErrorContext(ctx, "Orphaned flow: running with all steps terminal and no successor",
-			"flow", flowCorrelationID(shard, flowID))
+			"flow", keys.CorrelationID(shard, flowID))
 	}
 	if err := rows.Err(); err != nil {
 		e.logger.ErrorContext(ctx, "Orphan detection: iterating running flows", "shard", shard, "error", err)

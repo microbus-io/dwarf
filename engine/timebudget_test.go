@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -29,7 +30,7 @@ import (
 // flowBudgetMs reads the frozen per-flow budget off the flow row.
 func flowBudgetMs(t *testing.T, e *Engine, flowKey string) int {
 	t.Helper()
-	shardNum, flowID, _, err := parseFlowKey(flowKey)
+	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	testarossa.For(t).NoError(err)
 	db, err := e.shard(shardNum)
 	testarossa.For(t).NoError(err)
@@ -42,7 +43,7 @@ func flowBudgetMs(t *testing.T, e *Engine, flowKey string) int {
 // entryStepBudgetMs reads the entry step's denormalized budget.
 func entryStepBudgetMs(t *testing.T, e *Engine, flowKey string) int {
 	t.Helper()
-	shardNum, flowID, _, err := parseFlowKey(flowKey)
+	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	testarossa.For(t).NoError(err)
 	db, err := e.shard(shardNum)
 	testarossa.For(t).NoError(err)
@@ -124,7 +125,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 
 	<-started // the entry step is now running and leased
 
-	shardNum, flowID, _, err := parseFlowKey(fk)
+	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.shard(shardNum)
 	assert.NoError(err)
@@ -182,7 +183,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
 	// The child flow (surgraph_flow_id > 0) carries the parent's 45s budget, not the 30s default.
-	shardNum, _, _, err := parseFlowKey(fk)
+	shardNum, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.shard(shardNum)
 	assert.NoError(err)

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -37,7 +38,7 @@ import (
 // The design is a copy-only-keep clone, re-parking ancestor callers up the surgraph chain, a created->pending
 // crash-gate, and uniform scheduling resolution.
 func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides any) (string, error) {
-	shardNum, forkStepID, forkStepToken, err := parseStepKey(stepKey)
+	shardNum, forkStepID, forkStepToken, err := keys.ParseStepKey(stepKey)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -101,7 +102,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		leafStepID:      forkStepID,
 		mergedLeafState: mergedLeafState,
 		rewindByFlow:    rewindByFlow,
-		rootFlowToken:   randomIdentifier(16),
+		rootFlowToken:   keys.RandomIdentifier(16),
 		rootTraceParent: e.mintWorkflowSpan(ctx, rootWorkflowURL, ""), // detached, like Continue
 		threadID:        rootThreadID,
 		threadToken:     strings.TrimSpace(rootThreadToken),
@@ -239,7 +240,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id",
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, notify_on_stop, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms)"+
 			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		randomIdentifier(16), workflowURL, workflowName, graphJSON, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, notifyOnStop, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget,
+		keys.RandomIdentifier(16), workflowURL, workflowName, graphJSON, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, notifyOnStop, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget,
 	)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
@@ -320,13 +321,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			newID, err = tx.InsertReturnID(ctx, "step_id",
 				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, changes, interrupt_payload, status, goto_next, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at)"+
 					" SELECT ?, step_depth, ?, task_name, task_url, state, changes, interrupt_payload, ?, goto_next, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at FROM dwarf_steps WHERE step_id=?",
-				newFlowID, randomIdentifier(16), workflow.StatusCreated, flowPriority, flowFairnessKey, flowFairnessWeight, s.oldID,
+				newFlowID, keys.RandomIdentifier(16), workflow.StatusCreated, flowPriority, flowFairnessKey, flowFairnessWeight, s.oldID,
 			)
 		} else {
 			newID, err = tx.InsertReturnID(ctx, "step_id",
 				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, changes, interrupt_payload, status, goto_next, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at)"+
 					" SELECT ?, step_depth, ?, task_name, task_url, state, changes, interrupt_payload, status, goto_next, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at FROM dwarf_steps WHERE step_id=?",
-				newFlowID, randomIdentifier(16), flowPriority, flowFairnessKey, flowFairnessWeight, s.oldID,
+				newFlowID, keys.RandomIdentifier(16), flowPriority, flowFairnessKey, flowFairnessWeight, s.oldID,
 			)
 		}
 		if err != nil {

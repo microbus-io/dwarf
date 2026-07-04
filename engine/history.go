@@ -29,13 +29,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 )
 
 func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowStep, error) {
-	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -160,7 +161,7 @@ func assembleHistory(flowID int, childByCaller map[int]subgraphChild, stepsByFlo
 }
 
 func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, error) {
-	shardNum, stepID, stepToken, err := parseStepKey(stepKey)
+	shardNum, stepID, stepToken, err := keys.ParseStepKey(stepKey)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -398,7 +399,7 @@ func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, id int
 }
 
 func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, string, error) {
-	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
@@ -647,7 +648,7 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 		args = append(args, query.WorkflowName)
 	}
 	if query.ThreadKey != "" {
-		threadShardNum, threadFlowID, threadFlowToken, parseErr := parseFlowKey(query.ThreadKey)
+		threadShardNum, threadFlowID, threadFlowToken, parseErr := keys.ParseFlowKey(query.ThreadKey)
 		if parseErr != nil {
 			return "", "", nil, 0, errors.Trace(parseErr)
 		}
@@ -872,7 +873,7 @@ func (e *Engine) shardInfo(ctx context.Context) ([]ShardSummary, error) {
 }
 
 func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalState any) (string, error) {
-	shardNum, flowID, flowToken, err := parseFlowKey(threadKey)
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(threadKey)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

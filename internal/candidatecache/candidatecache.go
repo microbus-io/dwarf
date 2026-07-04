@@ -14,35 +14,38 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+// Package candidatecache holds the per-replica bounded set of step candidates produced by the
+// engine's refiller. It is a hint cache, not a work queue: entries confer no ownership, so a stale
+// or duplicated candidate is harmless. The engine claims the underlying step via CAS before running it.
+package candidatecache
 
 import (
 	"math"
 	"sync"
 )
 
-// job holds a step ID and its shard index for the worker pool.
-type job struct {
-	stepID int
-	shard  int
+// Job holds a step ID and its shard index for the worker pool.
+type Job struct {
+	StepID int
+	Shard  int
 }
 
-// candidateCache is a small, per-replica bounded set of step candidates produced
-// by the refiller's two-level priority+fairness selection. It is NOT a work
-// queue: it holds hints, not ownership. Workers pop a candidate and atomically
-// CAS-acquire the step before executing, so a stale or duplicated candidate is
+// Cache is a small, per-replica bounded set of step candidates produced by the refiller's two-level
+// priority+fairness selection. It is NOT a work queue: it holds hints, not ownership. Workers pop a
+// candidate and atomically CAS-acquire the step before executing, so a stale or duplicated candidate is
 // harmless (the loser of the CAS simply pops the next one).
-type candidateCache struct {
+type Cache struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
-	items    []job
+	items    []Job
 	floor    int // best (lowest) priority represented; math.MaxInt when empty
 	size     int // capacity, equal to the worker count
 	lowWater int // pop below this requests a refill so draining overlaps refill
 	closed   bool
 }
 
-func (c *candidateCache) init(workers int) {
+// Init sizes the cache to twice the worker count and resets it for reuse.
+func (c *Cache) Init(workers int) {
 	c.cond = sync.NewCond(&c.mu)
 	c.items = nil
 	c.floor = math.MaxInt
@@ -51,18 +54,21 @@ func (c *candidateCache) init(workers int) {
 	c.closed = false
 }
 
-func (c *candidateCache) capacity() int {
+// Capacity returns the cache's bound (twice the worker count).
+func (c *Cache) Capacity() int {
 	return c.size
 }
 
-func (c *candidateCache) pop() (j job, ok bool, needRefill bool) {
+// Pop removes and returns the front candidate, blocking until one is available or the cache closes.
+// needRefill signals that the cache has drained to its low-water mark so draining overlaps refill.
+func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 	c.mu.Lock()
 	for len(c.items) == 0 && !c.closed {
 		c.cond.Wait()
 	}
 	if len(c.items) == 0 {
 		c.mu.Unlock()
-		return job{}, false, false
+		return Job{}, false, false
 	}
 	j = c.items[0]
 	c.items = c.items[1:]
@@ -75,7 +81,8 @@ func (c *candidateCache) pop() (j job, ok bool, needRefill bool) {
 	return j, true, needRefill
 }
 
-func (c *candidateCache) refill(batch []job, floor int) {
+// Refill replaces the cache contents with batch at the given priority floor and wakes all waiters.
+func (c *Cache) Refill(batch []Job, floor int) {
 	c.mu.Lock()
 	if c.closed || len(batch) == 0 {
 		c.mu.Unlock()
@@ -87,7 +94,10 @@ func (c *candidateCache) refill(batch []job, floor int) {
 	c.cond.Broadcast()
 }
 
-func (c *candidateCache) offer(j job, priority int) (needRefill bool) {
+// Offer front-loads a single higher-priority candidate. It returns needRefill=true when the cache is
+// empty (the caller should refill); a candidate whose priority is no better than the current floor is
+// dropped.
+func (c *Cache) Offer(j Job, priority int) (needRefill bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -99,7 +109,7 @@ func (c *candidateCache) offer(j job, priority int) (needRefill bool) {
 	if priority >= c.floor {
 		return false
 	}
-	c.items = append([]job{j}, c.items...)
+	c.items = append([]Job{j}, c.items...)
 	if len(c.items) > c.size {
 		c.items = c.items[:c.size]
 	}
@@ -108,13 +118,15 @@ func (c *candidateCache) offer(j job, priority int) (needRefill bool) {
 	return true
 }
 
-func (c *candidateCache) len() int {
+// Len returns the number of buffered candidates.
+func (c *Cache) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.items)
 }
 
-func (c *candidateCache) close() {
+// Close permanently unblocks all waiters. Offer/Refill become no-ops after close.
+func (c *Cache) Close() {
 	if c.cond == nil {
 		return
 	}

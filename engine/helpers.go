@@ -17,61 +17,13 @@ limitations under the License.
 package engine
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"net/http"
-	"strconv"
-	"strings"
-
-	"github.com/microbus-io/errors"
 )
 
-// parseFlowKey extracts the shard, numeric flow ID and flow token from a composite flow key.
-// Format: "{shard}-{flowID}-{token}" with a 1-based shard.
-func parseFlowKey(flowKey string) (shardNum int, flowID int, flowToken string, err error) {
-	parts := strings.SplitN(flowKey, "-", 3)
-	if len(parts) != 3 {
-		return 0, 0, "", errors.New("invalid flow ID", http.StatusBadRequest)
-	}
-	shardNum64, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || shardNum64 < 1 {
-		return 0, 0, "", errors.New("invalid flow ID", http.StatusBadRequest)
-	}
-	flowID64, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return 0, 0, "", errors.New("invalid flow ID", http.StatusBadRequest)
-	}
-	return int(shardNum64), int(flowID64), parts[2], nil
-}
-
-// parseStepKey extracts the shard, numeric step ID and step token from a composite step key.
-// Format: "{shard}-{stepID}-{token}" with a 1-based shard.
-func parseStepKey(stepKey string) (shardNum int, stepID int, stepToken string, err error) {
-	parts := strings.SplitN(stepKey, "-", 3)
-	if len(parts) != 3 {
-		return 0, 0, "", errors.New("invalid step key", http.StatusBadRequest)
-	}
-	shardNum64, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || shardNum64 < 1 {
-		return 0, 0, "", errors.New("invalid step key", http.StatusBadRequest)
-	}
-	stepID64, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return 0, 0, "", errors.New("invalid step key", http.StatusBadRequest)
-	}
-	return int(shardNum64), int(stepID64), parts[2], nil
-}
-
-// flowCorrelationID is the non-secret, capability-free flow identifier for telemetry (spans, logs,
-// metrics): the flowKey with its random token segment omitted. It uniquely identifies the flow for
-// correlation - {shard} disambiguates the per-shard sequential flow_id - but grants nothing. It is
-// deliberately NOT a valid engine key: no operation accepts it, and the engine offers no
-// correlationID->key lookup, so a trace/log reader cannot escalate it into the flow's write capability.
-// Every place a flow identifier crosses into an observability sink must use this, never the token-bearing
-// key (which belongs only on the task carrier, the FlowStopped callback, and in-memory waiter matching).
-func flowCorrelationID(shardNum, flowID int) string {
-	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(flowID)
+// graphCacheKey scopes the per-flow graph cache by shard, since flow_id is only unique within a shard.
+type graphCacheKey struct {
+	shard  int
+	flowID int
 }
 
 // unmarshalJSONMap parses a JSON string into a map. Empty or "{}" input yields a nil map.
@@ -80,11 +32,4 @@ func unmarshalJSONMap(jsonStr string, out *map[string]any) {
 		return
 	}
 	json.Unmarshal([]byte(jsonStr), out)
-}
-
-// randomIdentifier generates a random hex string of the given byte length.
-func randomIdentifier(n int) string {
-	b := make([]byte, n/2+1)
-	rand.Read(b)
-	return hex.EncodeToString(b)[:n]
 }

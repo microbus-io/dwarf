@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -70,7 +72,7 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 // shard is encoded in the key; the thread_id/thread_token are read from the referenced flow (which may be
 // mid-thread, so its thread_id differs from its own flow_id). Verifies the flow exists (token-checked).
 func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum, threadID int, threadToken string, err error) {
-	shardNum, flowID, flowToken, err := parseFlowKey(threadKey)
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(threadKey)
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
 	}
@@ -143,8 +145,8 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		return "", errors.Trace(err)
 	}
 
-	flowToken := randomIdentifier(16)
-	stepToken := randomIdentifier(16)
+	flowToken := keys.RandomIdentifier(16)
+	stepToken := keys.RandomIdentifier(16)
 	// opts.TimeBudget is resolved (create/continue) or inherited (subgraph). Fall back to the
 	// live default only as defense for an unresolved path.
 	timeBudget := opts.TimeBudget
@@ -226,7 +228,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 
 // snapshot returns the current outcome of a flow.
 func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
-	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -425,7 +427,7 @@ func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 		e.logger.DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
 		return
 	}
-	ring := e.cache.offer(job{stepID: stepID, shard: shard}, priority)
+	ring := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
 	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "ring", ring)
 	if ring {
 		e.requestRefill()
@@ -434,7 +436,7 @@ func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 
 // cancel aborts a flow and its entire surgraph chain + descendants.
 func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
-	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -554,7 +556,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 
 // deleteFlow removes a flow and its steps.
 func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
-	shardNum, flowID, flowToken, err := parseFlowKey(flowKey)
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
 	}

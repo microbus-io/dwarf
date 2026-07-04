@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -64,7 +65,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
-	shard, _, _, err := parseFlowKey(flowKey)
+	shard, _, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -101,7 +102,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 // mustFlowToken extracts the flow token component of a flow key.
 func mustFlowToken(t *testing.T, flowKey string) string {
 	t.Helper()
-	_, _, token, err := parseFlowKey(flowKey)
+	_, _, token, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		t.Fatalf("parseFlowKey: %v", err)
 	}

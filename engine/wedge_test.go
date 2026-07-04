@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -106,7 +107,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	shard, parentFlowID, _, err := parseFlowKey(flowKey)
+	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -225,7 +226,7 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusInterrupted, out.Status) {
 		return
 	}
-	shard, parentFlowID, _, err := parseFlowKey(parentKey)
+	shard, parentFlowID, _, err := keys.ParseFlowKey(parentKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -253,7 +254,7 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	_, healthyParentID, _, err := parseFlowKey(healthyKey)
+	_, healthyParentID, _, err := keys.ParseFlowKey(healthyKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -338,7 +339,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, orphanOut.Status) {
 		return
 	}
-	shard, orphanFlowID, _, err := parseFlowKey(orphanKey)
+	shard, orphanFlowID, _, err := keys.ParseFlowKey(orphanKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -352,7 +353,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	_, healthyFlowID, _, err := parseFlowKey(healthyKey)
+	_, healthyFlowID, _, err := keys.ParseFlowKey(healthyKey)
 	if !assert.NoError(err) {
 		return
 	}
@@ -374,7 +375,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	assert.Len(seen, 1, "exactly one flow should be flagged as orphaned")
 	if len(seen) == 1 {
 		// The alarm logs the token-free correlation id (SEC2), never the capability-bearing flowKey.
-		assert.Equal(flowCorrelationID(shard, orphanFlowID), seen[0], "the flagged flow is the forged orphan, not the healthy blocked flow")
+		assert.Equal(keys.CorrelationID(shard, orphanFlowID), seen[0], "the flagged flow is the forged orphan, not the healthy blocked flow")
 		assert.NotEqual(orphanKey, seen[0], "the logged id carries no token")
 	}
 }

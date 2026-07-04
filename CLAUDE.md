@@ -42,6 +42,10 @@ matching one before working there:**
   SQL-authoring gotchas.
 - **`fixtures/CLAUDE.md`** - the test harness: `RunInTest`/`SetInTest` test mode, the per-test-engine +
   no-`t.Parallel` connection-load rule, and `TestProxy` conventions.
+- **`internal/keys/CLAUDE.md`** - the flow/step key *format* (`{shard}-{id}-{token}`), token entropy (why 64-bit),
+  and the token-free `CorrelationID` derivation. (The engine-side enforcement/posture stays in `engine/CLAUDE.md`.)
+- **`internal/candidatecache/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
+  `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL - godoc only, no design doc.)
 
 **Landmines that radiate into engine code - obey these even though the full detail now lives in a package doc:**
 

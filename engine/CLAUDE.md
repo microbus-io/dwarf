@@ -347,7 +347,7 @@ what baggage already carries, so the engine stays transport-agnostic.
 ### Execution Model
 
 The engine uses a **queue-as-cache execution model** with a configurable worker pool (`SetWorkers`) and a single
-refiller goroutine per replica. The in-memory `candidateCache` is bounded and holds *hints*, not ownership. Each
+refiller goroutine per replica. The in-memory `candidatecache.Cache` is bounded and holds *hints*, not ownership. Each
 worker pops a candidate and calls `processStep`:
 
 1. Reserve the step (atomic CAS `UPDATE ... WHERE step_id=? AND status='pending' AND parked=parkedNone AND
@@ -385,7 +385,7 @@ is proportional to weight and independent of backlog depth or shard layout. Stri
 higher-priority band starves lower bands by design.
 
 **Queue-as-cache, doorbell, single-slot refiller.** The enqueue signal carries no step to a queue; it is a **doorbell**
-(`candidateCache.offer`). It resolves the announced step's priority *and* `not_before` in one PK lookup (off the
+(`candidatecache.Cache.Offer`). It resolves the announced step's priority *and* `not_before` in one PK lookup (off the
 selection path). If `not_before` is in the future the doorbell short-circuits into `shortenNextPoll(not_before)` -
 the work is not due, nothing to preempt, the cache stays untouched; the local poll timer wakes at the right moment.
 This is also how cross-replica delayed-start propagates: every replica receiving the doorbell pulls its poll timer
@@ -825,7 +825,8 @@ loader sees the same decoded shape every dispatch will.
 ### Keys are capabilities, not authorization
 
 A flow/step key (`{shard}-{id}-{token}`) is an **unguessable bearer capability**, not an authorization
-decision - the host-facing contract is in `doc.go`; this is the *why* and the entropy decision. The engine
+decision - the host-facing contract is in `doc.go`; the key *format* and the token-entropy decision are in
+`internal/keys/CLAUDE.md`; this section is the engine-side *enforcement* and posture. The engine
 holds no authN/authZ, no rate limiting, and no notion of caller identity: its only vantage is the flow
 reference and the task URL. Ownership and tenancy - the axes any real access-control check turns on - are
 structurally invisible to it, the same reason it owns no backpressure (see "Backpressure is the task's or
@@ -842,18 +843,9 @@ capability-URL patterns (a "resume your approval" link). What it is **not** is a
 logged, or shared key is a full write capability for that one flow. The amplifier is therefore `List`/
 `Search`, which return keys wholesale (a separate concern) - not the token itself.
 
-**Why 64-bit, and why not widen.** `randomIdentifier(16)` is 16 hex chars = **64 bits** of `crypto/rand`.
-That is adequate *because the token is never a standalone lookup*: every gate is `WHERE flow_id=? AND
-flow_token=?` (and `step_id=? AND step_token=?`) - verified across the codebase; the only token-only
-`WHERE`s are in tests. So the token has no birthday/collision surface (the unique id disambiguates rows) -
-it only has to resist *targeted* guessing of one specific row's token. Targeted online guessing of 64 bits
-of `crypto/rand`, even at an implausible sustained 1M attempts/sec against one `flow_id`, is ~300,000
-years expected; offline is impossible (no oracle). Widening to 128-bit (a periodically-suggested review
-item) buys no security against any realistic threat - the capability-URL leak channels (email, logs,
-referrer) are unaffected by token width and want short-TTL/single-use, a host concern - while doubling the
-visible random tail on every printed key. So keep 64-bit; revisit only if a concrete driver appears (a
-future token-only lookup, or an offline-exposed capability URL). If it is ever widened, the `CHAR(16)`
-columns must grow in lockstep and `randomIdentifier`'s argument with them.
+**Token entropy (64-bit) and the every-gate-is-`flow_id`+`flow_token` invariant that makes it adequate** live in
+`internal/keys/CLAUDE.md`. Load-bearing for this section: the token is never a standalone lookup, so a leaked key
+is a full write capability for exactly one flow and nothing more.
 
 **Related engine-side hardening (all verified, none a substitute for host authz):** uniform not-found on
 key mismatch (no existence oracle); telemetry carries only the token-free correlation id and there is no
@@ -1160,7 +1152,7 @@ metrics: spans need cross-replica continuity, metrics don't).
   (`recordSpanError` → `RecordError`+`SetStatus(codes.Error)`) when the executor returns one.
 
 **Telemetry carries the token-free correlation id, never the flowKey.** `workflow.id` is
-`flowCorrelationID(shard, flowID)` = `"{shard}-{flowID}"`, **not** the flowKey. The flowKey's third
+`keys.CorrelationID(shard, flowID)` = `"{shard}-{flowID}"`, **not** the flowKey. The flowKey's third
 segment is a random token that is a *bearer write-capability* (`Resume`/`Cancel`/`Fork`/… gate only on
 `flow_id`+`flow_token`), and a trace backend is typically readable far more broadly than the workflow
 data - so stamping the key onto every span would hand a write capability for every traced flow to every
@@ -1170,12 +1162,12 @@ labels: the token appears only on the task carrier (`flow.SetFlowKey`, trusted t
 `FlowStopped` callback (the flow's identity handed to the trusted host), and as an in-memory waiter-match
 key (`signalStop`/`notifyStatusChange`, never leaves the process). No log line emits a flow key at all -
 `fireFlowStopped`'s panic log records only the error (a token-free identifier would be redundant with the
-ctx-correlated span anyway). Any new span/log/metric that names a flow must use `flowCorrelationID`, never
+ctx-correlated span anyway). Any new span/log/metric that names a flow must use `keys.CorrelationID`, never
 the raw key.
 
 **`List` surfaces the flow's trace id.** `FlowSummary.TraceID` is the 32-hex W3C trace-id parsed from the
 `trace_parent` column (`traceIDFromParent`), empty when no tracer was configured. It is a **token-free
-correlation value** (like `flowCorrelationID`, not a capability), safe to surface so an operator can pivot from
+correlation value** (like `keys.CorrelationID`, not a capability), safe to surface so an operator can pivot from
 a listed flow to its trace backend - consistent with the trace-read < data-read privilege boundary above. It is
 *not* the OTEL span attribute (`workflow.id` stays the `{shard}-{flowID}` correlation id); it is a distinct,
 read-only observability field on the list projection.

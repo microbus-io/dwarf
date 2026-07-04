@@ -144,7 +144,7 @@ type observableGauges struct {
 // concurrency_running) are summed at the metrics backend across replicas.
 func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observableGauges) error {
 	// Local in-memory gauges - no DB.
-	o.ObserveInt64(g.queueDepth, int64(e.cache.len()))
+	o.ObserveInt64(g.queueDepth, int64(e.cache.Len()))
 
 	// Fairness keys: the most recent refill's distinct-key count for the band it selected.
 	e.lastRefillLock.Lock()

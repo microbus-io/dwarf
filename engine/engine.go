@@ -30,6 +30,8 @@ import (
 
 	"log/slog"
 
+	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -118,7 +120,7 @@ type Engine struct {
 	testHashedID string
 
 	// Candidate cache and worker pool
-	cache      candidateCache
+	cache      candidatecache.Cache
 	workerPool sync.WaitGroup
 
 	// Single-slot refiller
@@ -150,7 +152,7 @@ type Engine struct {
 
 	// Per-flow parsed-graph cache. The graph JSON is frozen at flow creation, so processStep reuses
 	// the parsed *workflow.Graph across the flow's steps instead of re-unmarshalling it each step.
-	graphCache *lruCache[graphCacheKey, *workflow.Graph]
+	graphCache *lru.Cache[graphCacheKey, *workflow.Graph]
 
 	// Lifecycle
 	started        atomic.Bool
@@ -420,14 +422,14 @@ func (e *Engine) RunInTest(t *testing.T) {
 // initRuntime starts all goroutines and initializes runtime state.
 func (e *Engine) initRuntime() {
 	e.lifetimeCtx, e.lifetimeCancel = context.WithCancel(context.Background())
-	e.cache.init(int(e.workers.Load()))
+	e.cache.Init(int(e.workers.Load()))
 	e.refillTrigger = make(chan struct{}, 1)
 	e.refillStop = make(chan struct{})
 	e.wakeTimer = make(chan struct{}, 1)
 	e.timerStop = make(chan struct{})
 	e.recoveryStop = make(chan struct{})
 	e.nextPoll = time.Now()
-	e.graphCache = newLRUCache[graphCacheKey, *workflow.Graph](4096, 15*time.Minute)
+	e.graphCache = lru.New[graphCacheKey, *workflow.Graph](4096, 15*time.Minute)
 	e.waiters = nil
 	e.started.Store(true)
 
@@ -473,7 +475,7 @@ func (e *Engine) drainRuntime() {
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()
-	e.cache.close()
+	e.cache.Close()
 	e.workerPool.Wait()
 	if e.timerStop != nil {
 		close(e.timerStop)
