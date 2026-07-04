@@ -684,9 +684,10 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	for {
 		leaf, ok := interruptedLeafByFlow[cur]
 		if !ok {
-			// An interrupted flow on the descent always has an interrupted step; its absence is the
-			// degenerate case the per-flow leaf SELECT used to surface as ErrNoRows.
-			return nil, nil, nil, errors.Trace(sql.ErrNoRows)
+			// An interrupted flow on the descent always has an interrupted step; its absence means a
+			// concurrent Resume already resolved this leaf (a double-Resume race). Surface it as a 409,
+			// not a raw ErrNoRows (which resume() would trace into an opaque 500).
+			return nil, nil, nil, errors.New("flow is not paused at an interrupt", http.StatusConflict)
 		}
 		stepIDs = append(stepIDs, leaf)
 		child, ok := childByCallerStep[leaf]
@@ -748,7 +749,15 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	parkStepIDs = append(parkStepIDs, downStepIDs[:len(downStepIDs)-1]...)
 
 	var leafInterruptDone bool
-	db.QueryRowContext(ctx, "SELECT interrupt_done FROM dwarf_steps WHERE step_id=?", leafStepID).Scan(&leafInterruptDone)
+	err = db.QueryRowContext(ctx, "SELECT interrupt_done FROM dwarf_steps WHERE step_id=?", leafStepID).Scan(&leafInterruptDone)
+	// ErrNoRows means the leaf step is gone (a concurrent Resume/state change) - a 409, not a false one.
+	// Any other scan error is a real DB failure; surface it rather than masking it as "not paused" (409).
+	if err == sql.ErrNoRows {
+		return errors.New("flow is not paused at an interrupt", http.StatusConflict)
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
 	if !leafInterruptDone {
 		return errors.New("flow is not paused at an interrupt", http.StatusConflict)
 	}
