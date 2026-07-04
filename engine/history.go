@@ -979,7 +979,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	}
 
 	flowKey := fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, newFlowToken)
-	e.logger.DebugContext(ctx, "Flow continued and started", "flow", newWorkflowURL)
+	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", newWorkflowURL)
 	e.metricFlowStarted(ctx, newWorkflowURL)
 	// Ring the doorbell so a replica with spare capacity claims the entry step immediately.
 	e.enqueueStep(ctx, shardNum, int(newStepID))

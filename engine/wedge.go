@@ -112,7 +112,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		case err == sql.ErrNoRows:
 			// The child flow is gone (e.g. deleted/purged): fail the caller so the flow can terminate.
 			e.logger.ErrorContext(ctx, "Wedge sweep: parked subgraph caller has no child flow; failing it",
-				"shard", shard, "step", w.stepID, "flow", w.flowID)
+				"shard", shard, "step", w.stepID, "flow", keys.CorrelationID(shard, w.flowID))
 			if rerr := e.deliverSubgraphError(ctx, shard, 0, 0, w.stepID, errors.New("subgraph flow not found (wedge recovery)")); rerr != nil {
 				e.logger.ErrorContext(ctx, "Wedge sweep: failing orphaned subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)
 				continue
@@ -123,7 +123,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		default:
 			childStatus = strings.TrimSpace(childStatus)
 			e.logger.ErrorContext(ctx, "Wedge sweep: reviving wedged subgraph caller",
-				"shard", shard, "step", w.stepID, "childFlow", childFlowID, "childStatus", childStatus)
+				"shard", shard, "step", w.stepID, "childFlow", keys.CorrelationID(shard, childFlowID), "childStatus", childStatus)
 			var rerr error
 			if childStatus == workflow.StatusCompleted {
 				rerr = e.completeSurgraphFlow(ctx, shard, w.flowID, w.stepID, childFinalState)
@@ -196,7 +196,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 		e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child whose parent is terminal",
 			"shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID))
 		if rerr := e.cancelOrphanedSubtree(ctx, shard, o.flowID, o.token); rerr != nil {
-			e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child", "shard", shard, "childFlow", o.flowID, "error", rerr)
+			e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child", "shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID), "error", rerr)
 			continue
 		}
 		e.metricStepUnwedged(ctx, "orphaned_child")

@@ -260,7 +260,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Execute the task. The step's time_budget_ms bounds the executor call's context deadline; the
 	// surrounding DB work keeps using the undeadlined ctx so persistence is never cut short.
-	e.logger.DebugContext(ctx, "Executing task", "task", taskName, "flow", workflowURL)
+	e.logger.DebugContext(ctx, "Executing task", "task", taskName, "workflow", workflowURL)
 	dispatchURL := dispatchURLOf(graph, taskName)
 	taskCtx := workflow.ContextWithBaggage(ctx, baggage)
 
@@ -301,7 +301,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// terminal for this attempt - routed via the graph's onError transition if one exists, else it fails
 		// the step.
 		if tr, ok := graph.ErrorTransition(taskName); ok {
-			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowURL, "error", execErr)
+			e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", workflowURL, "error", execErr)
 			tracedErr := errors.Convert(execErr)
 			// Persist the error into flow state WITHOUT its stack frames. onErr rides into changes ->
 			// final_state and is readable by any flow reader (History/Snapshot/List), and internal stack
@@ -377,14 +377,14 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Handle interrupt
 	if interruptPayload, interrupted := resultFlow.InterruptRequested(); interrupted {
-		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "flow", workflowURL)
+		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "workflow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
 		return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowToken, changesJSON, interruptPayload)
 	}
 
 	// Handle subgraph
 	if subgraphURL, subgraphInput, subgraphRequested := resultFlow.SubgraphRequested(); subgraphRequested {
-		e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "flow", workflowURL, "subgraph", subgraphURL)
+		e.logger.DebugContext(ctx, "Task requested subgraph", "task", taskName, "workflow", workflowURL, "subgraph", subgraphURL)
 		// Bound the subgraph LoadGraph by the caller flow's budget (the create-time LoadGraph uses the caller's ctx).
 		loadCtx, loadCancel := context.WithTimeout(workflow.ContextWithBaggage(ctx, baggage), time.Duration(flowTimeBudgetMs)*time.Millisecond)
 		var subgraphGraph *workflow.Graph
@@ -452,7 +452,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Handle retry
 	if initialDelay, multiplier, maxDelay, retryRequested := resultFlow.RetryRequested(); retryRequested {
-		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "flow", workflowURL, "step", stepID, "attempt", attempt)
+		e.logger.DebugContext(ctx, "Task retried", "task", taskName, "workflow", workflowURL, "step", stepID, "attempt", attempt)
 		// Sleep is the floor and the backoff adds on top: total = Sleep + min(backoff, maxDelay). This lets a
 		// task set a precise wait (e.g. a downstream's Retry-After via Sleep) and still get exponential backoff
 		// on repeated attempts. maxDelay caps the backoff component, not the total.
@@ -519,10 +519,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	// Complete the step
 	if errorRouted {
-		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "flow", workflowURL)
+		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, "error_routed")
 	} else {
-		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "flow", workflowURL)
+		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "workflow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted)
 	}
 	gotoTarget := resultFlow.GotoRequested()
@@ -668,7 +668,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 		if isPushTransition {
 			tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=? WHERE step_id=?", cohortSize, stepID)
-			e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", flowID, "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
+			e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(shardNum, flowID), "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
 		}
 
 		if fanInArrivals > 0 {

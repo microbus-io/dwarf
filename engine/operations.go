@@ -289,7 +289,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	}
 
 	flowKey = fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, flowToken)
-	e.logger.DebugContext(ctx, "Flow created and started", "flow", workflowURL, "task", entryPoint)
+	e.logger.DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)
 	e.metricFlowStarted(ctx, workflowURL)
 	// Ring the doorbell so a replica with spare capacity claims the entry step immediately, rather than
 	// waiting for the backstop poll. A missed doorbell is recovered by pollPendingSteps.
@@ -604,8 +604,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		return errors.Trace(err)
 	}
 
-	for _, cid := range allCompositeIDs {
-		e.logger.InfoContext(ctx, "Flow status transition", "to", workflow.StatusCancelled)
+	for i, cid := range allCompositeIDs {
+		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, allFlowIDs[i].(int)), "to", workflow.StatusCancelled)
 		e.signalStop(ctx, cid, workflow.StatusCancelled)
 	}
 	return nil

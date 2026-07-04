@@ -65,7 +65,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 
 // completeFlowSequential marks a flow completed when no successor exists.
 func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID int, workflowURL string) error {
-	e.logger.DebugContext(ctx, "Flow completed", "flow", workflowURL)
+	e.logger.DebugContext(ctx, "Flow completed", "workflow", workflowURL)
 	_, err := e.completeFlow(ctx, shardNum, flowID, flowToken)
 	if err != nil {
 		return errors.Trace(err)
@@ -253,7 +253,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		return false, nil
 	}
 
-	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusCompleted)
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusCompleted)
 	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 
@@ -439,7 +439,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		return false, nil
 	}
 
-	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusFailed)
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusFailed)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))
 	e.signalStop(ctx, compositeID, workflow.StatusFailed)
 	return false, nil
