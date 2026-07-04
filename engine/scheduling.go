@@ -282,6 +282,15 @@ func (e *Engine) runRefill(ctx context.Context) {
 	// exactly once - lower bands stay materialized only after the current one drains, by design.
 	chosenBand := math.MaxInt
 	band, rows, err := e.scanPriorityBand(ctx, -1)
+	if err != nil {
+		// The scan failed (typically a transient DB error), so this refill produces an empty batch and
+		// every worker blocks in Pop. Swallowing the error would leave that stall unretried until the
+		// next doorbell or the backlog backstop (up to a minute). Log it and re-poll soon - the same
+		// pollErrorRetryInterval (1s) policy pollPendingSteps applies to its own sizing-query failures -
+		// so the doorbell fires again and the refiller retries once the blip clears.
+		e.logger.ErrorContext(ctx, "Scanning priority band for refill", "error", err)
+		e.shortenNextPoll(time.Now().Add(pollErrorRetryInterval))
+	}
 	if err == nil && band != math.MaxInt {
 		type keyBucket struct {
 			weight    float64

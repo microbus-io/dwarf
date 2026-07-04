@@ -470,6 +470,13 @@ again, and let the step dispatch once the blip clears. The clamp is the engine's
 errors; it never *retries the connection* (that is left to the layer holding the resource - the task or host), it
 just refuses to convert an unknown backlog into a long sleep.
 
+**The refiller applies the same clamp.** `runRefill`'s `scanPriorityBand` can fail on the same transient DB error,
+and swallowing it is the mirror wedge: the cache refills **empty**, every worker blocks in `Pop`, and nothing retries
+until the next doorbell or the backlog backstop (up to 1m). So `runRefill` logs the scan error and
+`shortenNextPoll(now + pollErrorRetryInterval)` (1s) - the doorbell fires again promptly and the refiller re-scans
+once the blip clears, rather than idling the whole replica on a momentary blip. Same policy, same 1s interval as the
+poll clamp above.
+
 The timer waits on the `nextPoll` deadline, shortened to the nearest future `not_before` (`flow.Sleep` / retry
 backoff) so a due step wakes the replica even when no doorbell arrives. The timer loop (`timerLoop`) runs
 `pollPendingSteps` on the adaptive interval.
