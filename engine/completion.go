@@ -364,20 +364,28 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 // returned so processStep's recovery defer sees a lock-contention error and rewinds the step
 // (running→pending) for immediate re-dispatch, instead of leaving it stranded running until lease expiry
 // (budget+leaseMargin, minutes past the poll cadence). When failStep succeeds the original failure reason
-// is returned unchanged (the step is already terminal, so the defer's guarded reset is a no-op). All
-// failStep call sites in processStep go through this so the defer covers every fail path uniformly.
-func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, flowID int, flowToken string, taskErr error, taskName string) error {
-	if ferr := e.failStep(ctx, shardNum, stepID, flowID, flowToken, taskErr, taskName); ferr != nil {
+// is returned unchanged (the step is already terminal, so the defer's guarded reset is a no-op). When the
+// dispatch's lease was re-granted to a peer (failStep's fenced step UPDATE matched zero rows), nil is
+// returned so processStep abandons quietly - the peer owns the step and will settle it. All failStep call
+// sites in processStep go through this so the defer covers every fail path uniformly.
+func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowToken string, taskErr error, taskName string) error {
+	fenced, ferr := e.failStep(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, taskErr, taskName)
+	if ferr != nil {
 		return errors.Trace(ferr)
+	}
+	if fenced {
+		return nil
 	}
 	return errors.Trace(taskErr)
 }
 
-// failStep handles a task failure.
-func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID int, flowToken string, taskErr error, taskName string) error {
+// failStep handles a task failure. It returns fenced=true (with a nil error) when the dispatch's lease was
+// re-granted to a peer - its fenced step UPDATE matched zero rows, so it wrote nothing and the caller must
+// abandon quietly rather than fail a flow the peer is healthily re-executing (see "Lease fencing").
+func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSeq int, flowID int, flowToken string, taskErr error, taskName string) (fenced bool, err error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Trace(err)
 	}
 
 	// A subgraph child's failure is surfaced to the parent's flow.Subgraph call (via the parked caller step,
@@ -389,7 +397,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 	// them. parentStepID>0 iff this flow is a subgraph child.
 	parentStepID, isSubgraphChild, err := e.dynamicSubgraphParent(ctx, db, flowID)
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Trace(err)
 	}
 
 	var stepLineageID int
@@ -398,7 +406,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 		stepID,
 	).Scan(&stepLineageID)
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Trace(err)
 	}
 
 	errMsg := taskErr.Error()
@@ -406,13 +414,25 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 	reDispatchParent := false
 	var finalStateJSON string
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		fenced = false
 		failFlow = stepLineageID == 0
 		finalStateJSON = ""
 		reDispatchParent = false
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=?",
-			workflow.StatusFailed, parkedNone, errMsg, stepID,
+		// Fence the fail on our lease generation: a zombie whose lease was re-granted to a peer must not
+		// fail the flow (its unguarded predecessor was finding #1's "late error → healthy-flow kill"). This
+		// is the first write in the transaction, so a zero-row match means nothing was written - commit the
+		// empty tx and report fenced so the caller abandons without failing the flow the peer is re-running.
+		res, uerr := tx.ExecContext(ctx,
+			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=? AND lease_seq=?",
+			workflow.StatusFailed, parkedNone, errMsg, stepID, leaseSeq,
 		)
+		if uerr != nil {
+			return errors.Trace(uerr)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			fenced = true
+			return nil
+		}
 		if !failFlow {
 			var err error
 			failFlow, err = e.propagateCohortFailure(ctx, tx, stepLineageID)
@@ -441,13 +461,17 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 		return nil
 	})
 	if err != nil {
-		return errors.Trace(err)
+		return false, errors.Trace(err)
+	}
+	if fenced {
+		// Lease re-granted to a peer; we wrote nothing. The peer owns this step and settles it.
+		return true, nil
 	}
 	// The step is now failed regardless of whether the whole flow fails - count it.
 	e.metricStepExecuted(ctx, taskName, workflow.StatusFailed)
 
 	if !failFlow {
-		return nil
+		return false, nil
 	}
 
 	// A subgraph child does not fire the FlowStopped callback (notify_on_stop is root-only) and delivers its
@@ -460,7 +484,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 		if reDispatchParent {
 			e.enqueueStep(ctx, shardNum, parentStepID)
 		}
-		return nil
+		return false, nil
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", flowID, "to", workflow.StatusFailed)
@@ -478,7 +502,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID 
 		})
 	}
 	e.signalStop(ctx, compositeID, workflow.StatusFailed)
-	return nil
+	return false, nil
 }
 
 // propagateCohortFailure bumps a spawn step's cohort_arrivals and cohort_failures.

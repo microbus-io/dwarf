@@ -50,6 +50,13 @@ type Host interface {
 	// downstream address), not the graph node name. The flow carrier has its state pre-populated; the
 	// executor should call the task and let it write changes to the flow. The flow's opaque baggage rides
 	// on ctx - read it with workflow.BaggageFrom(ctx) (e.g. to mint a token).
+	//
+	// Execution is at-least-once and may be concurrent: a task can run more than once, and if a worker's
+	// lease is lost while it is still running (a task that overruns its ctx deadline, or a forward DB-clock
+	// step past the lease) a second worker re-runs it in parallel. The engine guarantees the flow's
+	// persisted state reflects exactly one execution, but exactly-once side effects are the task's
+	// responsibility - tasks must be idempotent. Honor the ctx deadline (it bounds the step's time budget);
+	// a task that ignores it can only be recovered by lease expiry, not cancelled.
 	ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error
 
 	// FlowStopped is fired when a flow stops (completed, failed, cancelled, interrupted), but only for a

@@ -39,6 +39,14 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// progress (transitions / fan-in / flow completion) is committed in a separate transaction. If
 	// that later commit fails, the recovery defer rolls the step back so it re-dispatches.
 	var stepMarkedComplete bool
+	// leaseSeq is this dispatch's lease generation, read from the claim CAS below (bumped on every
+	// claim, so a claimed step always carries lease_seq>=1; the Go zero value 0 means "not captured").
+	// Declared before the defer so the recovery reset can fence on it. Every post-execution write to
+	// this step carries `AND lease_seq=?`, so a worker whose lease was lost and re-granted to a peer -
+	// a slow task overran budget+leaseMargin, or the DB wall clock stepped forward past lease_expires
+	// while this worker's monotonic ctx deadline had not fired - writes zero rows and abandons quietly
+	// instead of corrupting or terminalizing the peer's healthy re-execution. See "Lease fencing".
+	var leaseSeq int
 	defer func() {
 		if err == nil {
 			return
@@ -70,11 +78,19 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			return
 		}
 		if db, derr := e.db.Shard(shardNum); derr == nil {
+			// Fence the reset on our lease generation so a zombie (lease already re-granted to a peer)
+			// cannot rewind the peer's freshly-claimed step. leaseSeq==0 means we failed before capturing
+			// it (a claim/read error microseconds after claiming, before any ExecuteTask ran) - there a
+			// peer cannot have stolen the lease yet, so the reset stays unfenced to preserve prompt
+			// recovery; every reset that follows an execution has leaseSeq>0 and is fenced.
+			resetSQL := "UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?"
+			resetArgs := []any{workflow.StatusPending, stepID, fromStatus}
+			if leaseSeq > 0 {
+				resetSQL += " AND lease_seq=?"
+				resetArgs = append(resetArgs, leaseSeq)
+			}
 			db.Transact(ctx, func(tx *sequel.Tx) error {
-				_, terr := tx.ExecContext(ctx,
-					"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
-					workflow.StatusPending, stepID, fromStatus,
-				)
+				_, terr := tx.ExecContext(ctx, resetSQL, resetArgs...)
 				return terr
 			})
 		}
@@ -102,12 +118,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	switch db.DriverName() {
 	case "pgx", "sqlite":
 		err = db.QueryRowContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
+			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
-				" RETURNING step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at",
+				" RETURNING step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq",
 			workflow.StatusRunning, leaseMarginMs, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -115,12 +131,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 	case "mssql":
 		err = db.QueryRowContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
+			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
-				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at"+
+				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
 			workflow.StatusRunning, leaseMarginMs, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -136,7 +152,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// reading only on a successful claim, guarantees the read's snapshot is after the claim commit (and
 		// thus after the pending-setter's commit). A lost claim skips the read entirely (n==0 returns below).
 		res, e := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), updated_at=NOW_UTC(),"+
+			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
 			workflow.StatusRunning, leaseMarginMs, stepID, parkedNone,
@@ -148,9 +164,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		n, _ = res.RowsAffected()
 		if n == 1 {
 			e = db.QueryRowContext(ctx,
-				"SELECT step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at FROM dwarf_steps WHERE step_id=?",
+				"SELECT step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq FROM dwarf_steps WHERE step_id=?",
 				stepID,
-			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt)
+			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
 			if e != nil && e != sql.ErrNoRows {
 				err = e
 			}
@@ -202,7 +218,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		graph = &workflow.Graph{}
 		err = json.Unmarshal([]byte(graphJSON), graph)
 		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 		e.graphCache.Store(graphKey, graph)
@@ -300,7 +316,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			errorRouted = true
 			errorTarget = tr.To
 		} else {
-			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, execErr, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, execErr, taskName)
 			return errors.Trace(err)
 		}
 	} else {
@@ -343,7 +359,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 		if signalCount > 1 {
 			err = errors.New("task '%s' set multiple competing control signals", taskName)
-			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 	}
@@ -354,7 +370,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		_, _, subgraphArmed := resultFlow.SubgraphRequested()
 		if (interruptArmed || subgraphArmed) && (interruptDone || subgraphDone) {
 			err = errors.New("task '%s' armed a second park on an already-resolved step", taskName)
-			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 	}
@@ -363,7 +379,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if interruptPayload, interrupted := resultFlow.InterruptRequested(); interrupted {
 		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "flow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
-		return e.handleInterrupt(ctx, shardNum, db, stepID, flowID, flowToken, changesJSON, interruptPayload)
+		return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowToken, changesJSON, interruptPayload)
 	}
 
 	// Handle subgraph
@@ -379,7 +395,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		})
 		loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
 		if lerr != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, lerr, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, lerr, taskName)
 			return errors.Trace(err)
 		}
 		// Persist the task's changes AND park the caller step in one UPDATE, BEFORE the child flow is made
@@ -392,11 +408,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// status=running guard parks no row (n==0) if the step was concurrently cancelled; the error is
 		// checked so a lost park fails the step rather than stranding it.
 		parkRes, err := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"'",
-			string(changesJSON), parkedSubgraph, stepID,
+			"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
+			string(changesJSON), parkedSubgraph, stepID, leaseSeq,
 		)
 		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 		if n, _ := parkRes.RowsAffected(); n == 0 {
@@ -412,7 +428,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// createSubgraphFlow inserts the child already surgraph-linked and running, so no separate start.
 		_, err = e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphURL, subgraphGraph, childInputState, baggageJSON, callerTraceParent)
 		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 		e.metricStepExecuted(ctx, taskName, "subgraph")
@@ -460,8 +476,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		var rewound bool
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			res, execErr := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='' WHERE step_id=? AND status='"+workflow.StatusRunning+"'",
-				workflow.StatusPending, string(changesJSON), attempt+1, retrySleepMs, stepID,
+				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='' WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
+				workflow.StatusPending, string(changesJSON), attempt+1, retrySleepMs, stepID, leaseSeq,
 			)
 			if execErr != nil {
 				return errors.Trace(execErr)
@@ -473,7 +489,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			return errors.Trace(e.deleteSubgraphFlowsRootedAt(ctx, tx, stepID))
 		})
 		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 		if !rewound {
@@ -498,8 +514,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 	gotoTarget := resultFlow.GotoRequested()
 	stepRes, err := db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, changes=?, goto_next=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"'",
-		workflow.StatusCompleted, string(changesJSON), gotoTarget, stepID,
+		"UPDATE dwarf_steps SET status=?, changes=?, goto_next=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"' AND lease_seq=?",
+		workflow.StatusCompleted, string(changesJSON), gotoTarget, stepID, leaseSeq,
 	)
 	if err != nil {
 		return errors.Trace(err)
@@ -516,7 +532,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	} else {
 		nextTasks, err = evaluateTransitions(graph, taskName, resultFlow)
 		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, flowID, flowToken, err, taskName)
+			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
 	}
@@ -751,14 +767,21 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	return nil
 }
 
+// errLeaseFenced is an in-transaction sentinel: a post-execution write found the dispatch's lease had
+// been re-granted to a peer, so the transaction must roll back and the worker must abandon quietly. It is
+// never surfaced - callers detect it via a captured `fenced` bool and return nil. See "Lease fencing".
+var errLeaseFenced = errors.New("dispatch lease fenced")
+
 // handleInterrupt pauses a flow for external input.
-func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.DB, stepID int, flowID int, flowToken string, changesJSON []byte, interruptPayload map[string]any) error {
+func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.DB, stepID, leaseSeq int, flowID int, flowToken string, changesJSON []byte, interruptPayload map[string]any) error {
 	chainFlowIDs, chainStepIDs, chainCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowToken)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
+	fenced := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		fenced = false
 		// Steps-first-then-flow lock ordering, matching resume and Cancel (which walk this same surgraph
 		// chain). Interrupt is non-terminating, so it carries no write-first orphan obligation; the only
 		// requirement is that the first statement be a write (satisfied here, keeping SQLite's shared-lock
@@ -775,6 +798,24 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 			"UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
 			stepArgs...,
 		)
+
+		// Lease fence. The combined UPDATE above locked and re-parked the whole chain (in PK order, before
+		// any flow row - the ordering the comment guards), but a zombie whose leaf lease was re-granted to a
+		// peer must not be allowed to interrupt the chain: flipping the ancestor callers out of
+		// parkedSubgraph would strand the parent's revive. The combined UPDATE leaves lease_seq untouched, so
+		// a peer's re-claim shows up here as a bumped generation on the leaf; on mismatch we roll the entire
+		// interrupt back (undoing the ancestor re-park) and abandon. The check reads the leaf inside the tx
+		// (not a same-table subquery, which MySQL rejects on an UPDATE target) after the lock is held. A leaf
+		// merely reset to pending by lease recovery keeps our generation (recovery does not bump lease_seq),
+		// so the benign before-a-peer-claims case still proceeds and the peer re-does it correctly on claim.
+		var curLeaseSeq int
+		if serr := tx.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE step_id=?", stepID).Scan(&curLeaseSeq); serr != nil {
+			return errors.Trace(serr)
+		}
+		if curLeaseSeq != leaseSeq {
+			fenced = true
+			return errLeaseFenced
+		}
 
 		if len(interruptPayload) > 0 {
 			payloadJSON, _ := json.Marshal(interruptPayload)
@@ -804,6 +845,11 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		return nil
 	})
 	if err != nil {
+		if fenced {
+			// Our lease was re-granted to a peer mid-execution; the peer owns this step and re-runs the
+			// interrupt. Abandon quietly - not an error (see "Lease fencing").
+			return nil
+		}
 		return errors.Trace(err)
 	}
 

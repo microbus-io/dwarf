@@ -900,59 +900,117 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	}
 	threadToken = strings.TrimSpace(threadToken)
 
-	// The new turn inherits the latest completed turn's full policy (scheduling, baggage, notify-on-stop).
-	// Exclude debug forks: a Fork shares the thread_id for List grouping but must never become a
-	// production Continue's base (forked_from_step<>0 marks a fork).
-	var flowStatus, finalStateJSON, graphJSON, workflowURL, baggageJSON, fairnessKey string
-	var priority, timeBudgetMs, notifyOnStop int
-	var fairnessWeight float64
-	err = db.QueryRowContext(ctx,
-		"SELECT status, final_state, graph, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms, notify_on_stop FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
-		threadID,
-	).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs, &notifyOnStop)
-	if err == sql.ErrNoRows {
-		return "", errors.New("no flows found in thread", http.StatusNotFound)
-	}
+	// Create the new turn atomically with a re-check of the thread's latest turn, all under a write-first
+	// lock on the thread anchor row (flow_id == threadID). Without the lock, two concurrent Continues on
+	// one thread could both read turn N as the latest completed turn and both insert a successor - silently
+	// branching a thread that is meant to be linear. The lock serializes them: the winner inserts its new
+	// (running) turn; every other concurrent Continue then reads THAT running turn as the latest and is
+	// rejected with 409 (a next turn is already in flight). This makes the outcome deterministic - exactly
+	// one Continue succeeds per race - rather than timing-dependent. touch is the non-indexed lock-grab
+	// column, so the anchor's updated_at stays frozen at its own last status transition; and because
+	// interrupt/cancel/resume never lock a thread SIBLING's rows, this anchor lock cannot cycle with them.
+	newFlowToken := keys.RandomIdentifier(16)
+	newStepToken := keys.RandomIdentifier(16)
+	var newFlowID, newStepID int64
+	var newWorkflowURL string
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		// Write-first: grab the thread anchor's row lock to serialize concurrent Continues on this thread.
+		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=?", threadID); err != nil {
+			return errors.Trace(err)
+		}
+
+		// The new turn inherits the latest completed turn's full policy (scheduling, baggage, notify).
+		// Exclude debug forks: a Fork shares the thread_id for List grouping but must never become a
+		// production Continue's base (forked_from_step<>0 marks a fork).
+		var flowStatus, finalStateJSON, graphJSON, workflowURL, baggageJSON, fairnessKey string
+		var priority, timeBudgetMs, notifyOnStop int
+		var fairnessWeight float64
+		err := tx.QueryRowContext(ctx,
+			"SELECT status, final_state, graph, workflow_url, baggage, priority, fairness_key, fairness_weight, time_budget_ms, notify_on_stop FROM dwarf_flows WHERE thread_id=? AND forked_from_step=0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			threadID,
+		).Scan(&flowStatus, &finalStateJSON, &graphJSON, &workflowURL, &baggageJSON, &priority, &fairnessKey, &fairnessWeight, &timeBudgetMs, &notifyOnStop)
+		if err == sql.ErrNoRows {
+			return errors.New("no flows found in thread", http.StatusNotFound)
+		}
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if strings.TrimSpace(flowStatus) != workflow.StatusCompleted {
+			return errors.New("latest flow in thread is not completed (status: %s)", strings.TrimSpace(flowStatus), http.StatusConflict)
+		}
+
+		var finalState map[string]any
+		if err := json.Unmarshal([]byte(finalStateJSON), &finalState); err != nil {
+			return errors.Trace(err)
+		}
+		var graph workflow.Graph
+		if err := json.Unmarshal([]byte(graphJSON), &graph); err != nil {
+			return errors.Trace(err)
+		}
+		entryPoint := graph.EntryPoint()
+		if entryPoint == "" {
+			return errors.New("workflow has no entry point", http.StatusBadRequest)
+		}
+		mergedState, err := workflow.MergeState(finalState, additionalState, graph.Reducers())
+		if err != nil {
+			return errors.Trace(err)
+		}
+		mergedStateJSON, err := json.Marshal(mergedState)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		// Inherit the thread's baggage; DeleteOnCompletion is forced off (a disposable flow deletes itself,
+		// so it could never have been a Continue source). A turn wanting different policy uses Create with
+		// FlowOptions.ThreadKey instead.
+		var inheritedBaggage map[string]any
+		unmarshalJSONMap(baggageJSON, &inheritedBaggage)
+		baggageOut, err := json.Marshal(inheritedBaggage)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		timeBudget := time.Duration(timeBudgetMs) * time.Millisecond
+		if timeBudget <= 0 {
+			timeBudget = e.taskTimeBudget()
+		}
+		nOnStop := 0
+		if notifyOnStop != 0 {
+			nOnStop = 1
+		}
+		newWorkflowURL = workflowURL
+
+		// A Continue turn starts its own trace (fresh detached root span, empty parent) and no surgraph
+		// linkage (threadID/threadToken carried, surgraph/root ids left 0 to self-root).
+		seed := flowSeed{
+			workflowURL:    workflowURL,
+			workflowName:   graph.Name(),
+			graphJSON:      graphJSON,
+			baggageJSON:    string(baggageOut),
+			stateJSON:      string(mergedStateJSON),
+			traceParent:    e.mintWorkflowSpan(ctx, workflowURL, ""),
+			flowToken:      newFlowToken,
+			stepToken:      newStepToken,
+			entryPoint:     entryPoint,
+			entryURL:       dispatchURLOf(&graph, entryPoint),
+			timeBudgetMs:   timeBudget.Milliseconds(),
+			notifyOnStop:   nOnStop,
+			threadID:       threadID,
+			threadToken:    threadToken,
+			priority:       priority,
+			fairnessKey:    fairnessKey,
+			fairnessWeight: fairnessWeight,
+		}
+		newFlowID, newStepID, err = insertFlowTx(ctx, tx, seed)
+		return err
+	})
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	flowStatus = strings.TrimSpace(flowStatus)
-	if flowStatus != workflow.StatusCompleted {
-		return "", errors.New("latest flow in thread is not completed (status: %s)", flowStatus, http.StatusConflict)
-	}
 
-	var finalState map[string]any
-	err = json.Unmarshal([]byte(finalStateJSON), &finalState)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	var graph workflow.Graph
-	err = json.Unmarshal([]byte(graphJSON), &graph)
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-
-	mergedState, err := workflow.MergeState(finalState, additionalState, graph.Reducers())
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-
-	// Inherit the thread's policy. A multi-turn conversation keeps the original caller's scheduling,
-	// identity (baggage), and notify-on-stop across turns. DeleteOnCompletion is forced off (a disposable
-	// flow deletes itself, so it could never have been a Continue source). A turn that needs different
-	// policy uses Create with FlowOptions.ThreadKey instead.
-	var inheritedBaggage map[string]any
-	unmarshalJSONMap(baggageJSON, &inheritedBaggage)
-	opts := &workflow.FlowOptions{
-		Priority:       priority,
-		FairnessKey:    fairnessKey,
-		FairnessWeight: fairnessWeight,
-		TimeBudget:     time.Duration(timeBudgetMs) * time.Millisecond,
-		NotifyOnStop:   notifyOnStop != 0,
-		Baggage:        inheritedBaggage,
-	}
-
-	// A Continue turn starts its own trace (fresh root span), so pass an empty trace_parent and no surgraph
-	// linkage. Create-sugar: it creates-and-runs, returning a running flow.
-	return e.createWithGraph(ctx, shardNum, workflowURL, &graph, mergedState, threadID, threadToken, "", opts, 0, 0, 0, 0)
+	flowKey := fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, newFlowToken)
+	e.logger.DebugContext(ctx, "Flow continued and started", "flow", newWorkflowURL)
+	e.metricFlowStarted(ctx, newWorkflowURL)
+	// Ring the doorbell so a replica with spare capacity claims the entry step immediately.
+	e.enqueueStep(ctx, shardNum, int(newStepID))
+	return flowKey, nil
 }

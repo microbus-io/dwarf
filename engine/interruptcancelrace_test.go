@@ -63,7 +63,7 @@ func TestHandleInterrupt_SkipsNotifyWhenCancelWon(t *testing.T) {
 
 		db, err := e.db.Shard(1)
 		assert.NoError(err)
-		err = e.handleInterrupt(ctx, 1, db, 1, 1, "ftok", []byte("{}"), map[string]any{"k": "v"})
+		err = e.handleInterrupt(ctx, 1, db, 1, 0, 1, "ftok", []byte("{}"), map[string]any{"k": "v"})
 		assert.NoError(err)
 		assert.Nil(got) // no spurious interrupted callback
 	})
@@ -82,7 +82,7 @@ func TestHandleInterrupt_SkipsNotifyWhenCancelWon(t *testing.T) {
 
 		db, err := e.db.Shard(1)
 		assert.NoError(err)
-		err = e.handleInterrupt(ctx, 1, db, 1, 1, "ftok", []byte("{}"), map[string]any{"k": "v"})
+		err = e.handleInterrupt(ctx, 1, db, 1, 0, 1, "ftok", []byte("{}"), map[string]any{"k": "v"})
 		assert.NoError(err)
 		if assert.NotNil(got) {
 			assert.Equal(workflow.StatusInterrupted, got.Status)

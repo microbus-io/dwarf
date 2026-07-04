@@ -251,6 +251,28 @@ state; a workflow author wanting narrower carryover scrubs with an entry adapter
 thread's policy** (priority/fairness/budget/baggage/notify) from the latest turn; a caller wanting different policy
 uses `Create` with `FlowOptions.ThreadKey` (explicit policy, same thread).
 
+*Concurrent Continue is serialized by a thread-anchor lock, so exactly one wins.* The latest-turn read
+(`find latest non-fork flow`), the completed-check, and the new-turn insert run in **one transaction**
+(`continueFlow`), opened **write-first on the thread anchor row** (`UPDATE dwarf_flows SET touch=1-touch WHERE
+flow_id=threadID` - the same lock-grab idiom as the flow-advancing transactions). Without the lock, two
+concurrent `Continue`s on one thread can both read turn N as the latest completed turn and both insert a
+successor, **silently branching a thread that is meant to be linear** - a benign-but-wrong TOCTOU hole between
+check and insert (no corruption; the invariant sweep stays clean, but the thread's continuation base becomes
+ambiguous for the *next* Continue). The anchor lock closes it deterministically: the winner inserts its new
+`running` turn; every other concurrent Continue then reads **that** running turn as the latest, fails the
+completed-check, and returns **409**. So the outcome is "exactly one succeeds per race," not timing-dependent.
+`touch` is the non-indexed lock-grab column, so the anchor's `updated_at` stays frozen (it is a terminal flow),
+and because interrupt/cancel/resume never lock a thread *sibling*'s rows, this anchor lock cannot cycle with
+them. Determinism caveat: it also requires the winner's turn to still be `running` when the losers re-check - it
+is, because the new turn is inserted `running` and only completes after its entry task runs; a test proving the
+"exactly one" contract must keep that entry task from completing during the race (see
+`fixtures/concurrentcontinueflow_test.go`). The insert half is shared with `Create`/subgraph spawn via
+`insertFlowTx` (one copy of the flow+entry-step INSERTs); `Continue` differs only by wrapping it in the
+lock-and-recheck transaction. Edge case: if the thread anchor row (`flow_id == thread_id`) was `Delete`d while
+later turns remain, the write-first UPDATE matches no row and the serialization degrades to the old racy
+behavior for that thread - still safe, just non-deterministic; continuing via a deleted anchor *key* already
+404s, so this only affects continuing via a surviving later-turn key on a thread whose original root was removed.
+
 **Run** - Create + Await in one call, returning `(flowKey string, *workflow.FlowOutcome, error)` -
 the new flow's key alongside its outcome (the key is the flow's identity, not part of the outcome; callers
 need it for later `History`/`Resume`/`Fork`). Error semantics are phase-split: a **create** failure
@@ -614,6 +636,73 @@ reason `priority`/`fairness` are denormalized there. Consequence: a *crashed* wo
 step's `budget + leaseMargin`, so a flow's budget directly bounds its worst-case crash-recovery latency - which is the
 practical reason a host caps the budget. (The earlier config-sized lease and its "decrease `TimeBudget` mid-flight"
 re-dispatch trade-off are retired: each step's lease now follows its own frozen budget.)
+
+### Lease fencing (`lease_seq`) — at-least-once, never state corruption
+
+**Execution is at-least-once and may be concurrent; the fence guarantees only that the flow's persisted
+state reflects exactly one execution.** Lease recovery re-dispatches a step whose `lease_expires` passed,
+but nothing can distinguish a *crashed* worker from a merely *slow* one (failure detection over an async
+boundary is unreliable), so the engine must let a second worker start in both cases — the task body can run
+twice, and under lease loss the two runs can overlap. That is the standard durable-workflow contract:
+**tasks must be idempotent.** Exactly-once *side effects* are impossible for the engine to provide (it does
+not own the task's downstream), the same structural reason it disclaims backpressure and resource control.
+
+What the engine *does* guarantee is that a late/slow worker (a "zombie") can never **corrupt or terminalize**
+a flow the current owner is healthily re-executing. Two triggers open the zombie window, and only the first
+is a task contract violation:
+
+- The task ignores its `ExecuteTask` ctx deadline and runs past `budget + leaseMargin`.
+- The **DB wall clock steps forward** past `lease_expires` (NTP correction, VM migration) while the worker's
+  own **monotonic** ctx timer — unaffected by the DB clock — has not fired. No ctx discipline can close this.
+
+The lease is `budget + leaseMargin` (30s) while the ctx deadline is `budget`, so a *cooperative* task always
+returns and writes inside the margin, before its lease can expire — the common case never enters the window.
+
+**The fence.** `dwarf_steps.lease_seq` is the lease **generation**, `lease_seq = lease_seq + 1` in the claim
+CAS (and returned via the same `RETURNING`/`OUTPUT`/serial read that loads the step). Every post-execution
+write to the *dispatched step* carries `AND lease_seq=?` with the generation the claim returned. A zombie
+holds a stale generation (the current owner's claim bumped it), so its write matches **zero rows** and it
+**bails with `nil`** — the same benign lost-race as losing the claim CAS itself (which also returns `nil`).
+Returning an *error* instead would be actively wrong: it would spin `processStep`'s recovery defer (whose own
+reset must also be fenced) and log an ERROR for a normal, expected lease-protocol outcome. The predicate is a
+genuine `WHERE` filter (not a value-changing `SET`), so `RowsAffected` reflects the real match on **every**
+driver, MySQL included — no `touch`-column trick needed on steps.
+
+**`lease_seq` is bumped only where a lease is *granted* — the claim CAS.** `pollPendingSteps`' expired-lease
+reset (`running`→`pending`) leaves it untouched: the reset does not grant a lease, it only makes the step
+claimable, and the next claim bumps the generation. Consequence: a step reset-but-not-yet-reclaimed still
+carries the prior worker's generation, so that worker's write is *not* fenced — but this is the benign
+"before a peer re-claims" case (the peer's claim CAS still arbitrates: it cannot claim until `pending`, and
+once it does it bumps the generation and redoes the work correctly). The dangerous case — a peer already
+re-claimed and is running concurrently — is exactly the one the bumped generation fences.
+
+**One gate per path; downstream is protected by the gate, not separately fenced.** Each post-execution path
+has exactly one fenced write to the dispatched step, and everything after it is safe:
+
+- **complete / goto / fan-out / fan-in-direct / flow-complete** — gated by the completion UPDATE
+  (`WHERE step_id=? AND status!='cancelled' AND lease_seq=?`). Past it the step is `completed`, so no peer can
+  re-claim (claim needs `pending`); the entire transition transaction — successor inserts, `cohort_arrivals`
+  bumps, `successor_id` writes, `fireFanInDirect`, `completeFlowSequential`, `insertFanInStep` — needs no fence.
+- **fail** (`failStep`) — gated by the step-fail UPDATE, the transaction's first write, so a zero-row match
+  wrote nothing: it commits the empty tx and returns `fenced=true`, and `failAndReturn` surfaces `nil` so the
+  flow the peer is re-running is never failed. This is finding-#1's "late error → healthy-flow kill", closed.
+- **retry** and **subgraph park** — gated by their `status='running' AND lease_seq=?` UPDATE (both already
+  bailed on zero rows); their in-tx follow-ups (`deleteSubgraphFlowsRootedAt`, child spawn) are protected by
+  the gate's row lock.
+- **interrupt** (`handleInterrupt`) — the leaf fence needs care: the combined step UPDATE must run **first**
+  and lock the whole surgraph chain in PK order (matching `resume`'s lock order — the D2-deadlock guard), so
+  the fence cannot be the leaf's first write. Instead the combined UPDATE runs unchanged, then an **in-tx read
+  of the leaf's `lease_seq`** decides: on mismatch the whole transaction **rolls back** (undoing the ancestor
+  re-park, which would otherwise flip callers out of `parkedSubgraph` and strand the parent revive) via the
+  `errLeaseFenced` sentinel, and the caller returns `nil`. The check reads the leaf directly rather than a
+  same-table subquery, which MySQL rejects on an `UPDATE` target.
+- **recovery defer reset** — fenced with `AND lease_seq=?` so a zombie's `err`-path reset cannot rewind the
+  peer's freshly-claimed step. Skipped when the captured generation is `0` (a claim/read error *before* any
+  execution, where no peer can have stolen the lease yet — keeps prompt pre-execution recovery unfenced).
+
+Writes to *other* rows (a shared cohort spawn step, the flow row, child flows) are not the zombie's ownership
+to prove and are already arbitrated by the transition-tx flow-row lock-grab; the terminal-flow reap at claim
+time (`status=flowStatus WHERE step_id=?`) converges to the frozen outcome idempotently and is left unfenced.
 
 ### Flow lifetime is the workflow author's responsibility
 

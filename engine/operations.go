@@ -111,6 +111,86 @@ func baggageMap(v any) map[string]any {
 	return m
 }
 
+// flowSeed carries the precomputed, retry-stable values for inserting one new flow plus its entry step.
+// It is built outside the transaction (tokens, spans, marshalled JSON) so a lock-contention retry of the
+// insert closure reuses the same values rather than rerolling tokens.
+type flowSeed struct {
+	workflowURL        string
+	workflowName       string
+	graphJSON          string
+	baggageJSON        string
+	stateJSON          string
+	traceParent        string
+	flowToken          string
+	stepToken          string
+	entryPoint         string
+	entryURL           string
+	timeBudgetMs       int64
+	notifyOnStop       int
+	deleteOnCompletion int
+	surgraphFlowID     int
+	surgraphStepID     int
+	callerStepDepth    int
+	threadID           int
+	threadToken        string
+	rootFlowID         int
+	priority           int
+	fairnessKey        string
+	fairnessWeight     float64
+}
+
+// insertFlowTx inserts the flow row (already `running`) and its entry step (`pending`, immediately
+// claimable), then fixes thread_id/step_id/root_flow_id - the shared write-half of every creation path,
+// run inside the caller's transaction. Returns the new flow and step ids. createWithGraph wraps it in a
+// bare transaction; continueFlow wraps it in a transaction that first locks the thread and re-checks the
+// latest turn, so both share exactly one copy of the insert SQL.
+func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, err error) {
+	newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, notify_on_stop, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, started_at)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
+		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.notifyOnStop, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs,
+	)
+	if err != nil {
+		return 0, 0, errors.Trace(err)
+	}
+
+	// Entry step is pending and immediately claimable (not_before=NOW, lease_expires=NOW). Its depth
+	// continues from the caller: callerStepDepth+1 (1 for a top-level flow, where callerStepDepth is 0).
+	// A flow that should wait before running uses an entry gate task with flow.Sleep, not a creation-time
+	// delay.
+	newStepID, err = tx.InsertReturnID(ctx, "step_id",
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?)",
+		newFlowID, s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight,
+	)
+	if err != nil {
+		return 0, 0, errors.Trace(err)
+	}
+
+	// Derive the thread from the new flow inside the closure so a retry (with a new flow_id) recomputes
+	// it rather than reusing the prior attempt's id.
+	tid, ttok := s.threadID, s.threadToken
+	if tid == 0 {
+		tid = int(newFlowID)
+		ttok = s.flowToken
+	}
+	// root_flow_id is the denormalized tree-membership index: a top-level flow (rootFlowID==0) is its
+	// own root; a subgraph child inherits the parent's root. Written once here, immutable thereafter, so
+	// a whole tree is reachable by `WHERE root_flow_id=?` without a recursive surgraph walk.
+	rfid := s.rootFlowID
+	if rfid == 0 {
+		rfid = int(newFlowID)
+	}
+	_, err = tx.ExecContext(ctx,
+		"UPDATE dwarf_flows SET thread_id=?, thread_token=?, step_id=?, root_flow_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
+		tid, ttok, newStepID, rfid, newFlowID,
+	)
+	if err != nil {
+		return 0, 0, errors.Trace(err)
+	}
+	return newFlowID, newStepID, nil
+}
+
 // createWithGraph is the shared creation path for Create, Continue, and subgraph children. It inserts the
 // flow (already `running`) and its entry step (`pending`, immediately claimable) in one transaction, then
 // rings the doorbell - so a flow always creates-and-runs; there is no externally-visible `created` resting
@@ -168,50 +248,36 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	}
 	entryURL := dispatchURLOf(graph, entryPoint)
 
+	seed := flowSeed{
+		workflowURL:        workflowURL,
+		workflowName:       graph.Name(),
+		graphJSON:          string(graphJSON),
+		baggageJSON:        string(baggageJSON),
+		stateJSON:          string(stateJSON),
+		traceParent:        traceParent,
+		flowToken:          flowToken,
+		stepToken:          stepToken,
+		entryPoint:         entryPoint,
+		entryURL:           entryURL,
+		timeBudgetMs:       timeBudget.Milliseconds(),
+		notifyOnStop:       notifyOnStop,
+		deleteOnCompletion: deleteOnCompletion,
+		surgraphFlowID:     surgraphFlowID,
+		surgraphStepID:     surgraphStepID,
+		callerStepDepth:    callerStepDepth,
+		threadID:           threadID,
+		threadToken:        threadToken,
+		rootFlowID:         rootFlowID,
+		priority:           opts.Priority,
+		fairnessKey:        opts.FairnessKey,
+		fairnessWeight:     opts.FairnessWeight,
+	}
+
 	var newFlowID, newStepID int64
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		var err error
-		newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, notify_on_stop, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, started_at)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
-			flowToken, workflowURL, graph.Name(), string(graphJSON), string(baggageJSON), traceParent, workflow.StatusRunning, surgraphFlowID, surgraphStepID, notifyOnStop, deleteOnCompletion, opts.Priority, opts.FairnessKey, opts.FairnessWeight, timeBudget.Milliseconds(),
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-
-		// Entry step is pending and immediately claimable (not_before=NOW, lease_expires=NOW). Its depth
-		// continues from the caller: callerStepDepth+1 (1 for a top-level flow, where callerStepDepth is 0).
-		// A flow that should wait before running uses an entry gate task with flow.Sleep, not a creation-time
-		// delay.
-		newStepID, err = tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?)",
-			newFlowID, callerStepDepth+1, stepToken, entryPoint, entryURL, string(stateJSON), workflow.StatusPending, timeBudget.Milliseconds(), opts.Priority, opts.FairnessKey, opts.FairnessWeight,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-
-		// Derive the thread from the new flow inside the closure so a retry (with a new flow_id) recomputes
-		// it rather than reusing the prior attempt's id.
-		tid, ttok := threadID, threadToken
-		if tid == 0 {
-			tid = int(newFlowID)
-			ttok = flowToken
-		}
-		// root_flow_id is the denormalized tree-membership index: a top-level flow (rootFlowID==0) is its
-		// own root; a subgraph child inherits the parent's root. Written once here, immutable thereafter, so
-		// a whole tree is reachable by `WHERE root_flow_id=?` without a recursive surgraph walk.
-		rfid := rootFlowID
-		if rfid == 0 {
-			rfid = int(newFlowID)
-		}
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET thread_id=?, thread_token=?, step_id=?, root_flow_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
-			tid, ttok, newStepID, rfid, newFlowID,
-		)
-		return nil
+		newFlowID, newStepID, err = insertFlowTx(ctx, tx, seed)
+		return err
 	})
 	if err != nil {
 		return "", errors.Trace(err)
