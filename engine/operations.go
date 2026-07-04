@@ -62,7 +62,7 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 			return "", errors.Trace(err)
 		}
 	} else {
-		shardNum = rand.IntN(e.numDBShards()) + 1
+		shardNum = rand.IntN(e.db.NumShards()) + 1
 	}
 	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, initialState, threadID, threadToken, "", opts, 0, 0, 0, 0)
 	return flowKey, errors.Trace(err)
@@ -76,7 +76,7 @@ func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum,
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
 	}
@@ -162,7 +162,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		deleteOnCompletion = 1
 	}
 
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -232,7 +232,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -414,7 +414,7 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 	priority := math.MaxInt
 	var notBeforeDelayMs sql.NullFloat64
-	db, err := e.shard(shard)
+	db, err := e.db.Shard(shard)
 	if err == nil {
 		db.QueryRowContext(ctx,
 			"SELECT priority, DATE_DIFF_MILLIS(not_before, NOW_UTC()) FROM dwarf_steps WHERE step_id=?",
@@ -440,7 +440,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if err != nil {
 		return errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -560,7 +560,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}

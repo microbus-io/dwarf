@@ -36,7 +36,7 @@ func waitFlowStatus(t *testing.T, e *Engine, flowKey, want string, timeout time.
 	t.Helper()
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	testarossa.For(t).NoError(err)
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	testarossa.For(t).NoError(err)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -53,7 +53,7 @@ func waitFlowStatus(t *testing.T, e *Engine, flowKey, want string, timeout time.
 // shardFlowCount returns the number of flows on a shard.
 func shardFlowCount(t *testing.T, e *Engine, shardNum int) int {
 	t.Helper()
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	testarossa.For(t).NoError(err)
 	var n int
 	db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_flows").Scan(&n)
@@ -65,7 +65,7 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 	t.Helper()
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	testarossa.For(t).NoError(err)
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	testarossa.For(t).NoError(err)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -188,7 +188,7 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 	// The failed flow row is still present (not auto-deleted).
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
 	var n int
 	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&n)

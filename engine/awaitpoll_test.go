@@ -70,7 +70,7 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.shard(shard)
+	db, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}

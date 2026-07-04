@@ -32,7 +32,7 @@ func flowBudgetMs(t *testing.T, e *Engine, flowKey string) int {
 	t.Helper()
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	testarossa.For(t).NoError(err)
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	testarossa.For(t).NoError(err)
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&ms)
@@ -45,7 +45,7 @@ func entryStepBudgetMs(t *testing.T, e *Engine, flowKey string) int {
 	t.Helper()
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	testarossa.For(t).NoError(err)
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	testarossa.For(t).NoError(err)
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_steps WHERE flow_id=? ORDER BY step_id LIMIT_OFFSET(1, 0)", flowID).Scan(&ms)
@@ -127,7 +127,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
 	var leaseRemainingMs float64
 	var budgetMs int
@@ -185,7 +185,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	// The child flow (surgraph_flow_id > 0) carries the parent's 45s budget, not the 30s default.
 	shardNum, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
 	var childBudgetMs int
 	err = db.QueryRowContext(ctx, "SELECT time_budget_ms FROM dwarf_flows WHERE surgraph_flow_id > 0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)").Scan(&childBudgetMs)

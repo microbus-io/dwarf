@@ -72,7 +72,7 @@ func TestPoolSizing_LiveResize(t *testing.T) {
 
 	// 4 shards, workers=64, workersPerConn=8, cap=8 -> idle=2, open=min(6,8)=6.
 	for i := 1; i <= 4; i++ {
-		db, err := e.shard(i)
+		db, err := e.db.Shard(i)
 		assert.NoError(err)
 		assert.Equal(6, db.DB.Stats().MaxOpenConnections, "shard %d open at wpc=8", i)
 	}
@@ -81,7 +81,7 @@ func TestPoolSizing_LiveResize(t *testing.T) {
 	// idle=ceil(64/4/2)=8, open=min(18,8)=8.
 	assert.NoError(e.SetWorkersPerConn(2))
 	for i := 1; i <= 4; i++ {
-		db, _ := e.shard(i)
+		db, _ := e.db.Shard(i)
 		assert.Equal(8, db.DB.Stats().MaxOpenConnections, "shard %d open after SetWorkersPerConn(2)", i)
 	}
 

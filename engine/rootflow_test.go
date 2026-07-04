@@ -28,7 +28,7 @@ import (
 // rootFlowIDOf reads the denormalized root_flow_id column for a flow id.
 func rootFlowIDOf(t *testing.T, e *Engine, shard, flowID int) int {
 	t.Helper()
-	db, err := e.shard(shard)
+	db, err := e.db.Shard(shard)
 	if err != nil {
 		t.Fatalf("shard: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 	assert.Equal(parentFlowID, rootFlowIDOf(t, e, shard, parentFlowID))
 
 	// The subgraph child inherits the parent's root_flow_id.
-	db, _ := e.shard(shard)
+	db, _ := e.db.Shard(shard)
 	var childFlowID, childRoot int
 	err = db.QueryRowContext(ctx,
 		"SELECT flow_id, root_flow_id FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID,

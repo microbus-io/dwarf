@@ -32,7 +32,7 @@ func TestHandleInterrupt_SkipsNotifyWhenCancelWon(t *testing.T) {
 	ctx := context.Background()
 
 	insert := func(t *testing.T, e *Engine, flowStatus, stepStatus string) {
-		db, err := e.shard(1)
+		db, err := e.db.Shard(1)
 		testarossa.For(t).NoError(err)
 		// Do not supply flow_id: it is an IDENTITY/auto-increment column, and an explicit value is
 		// rejected on SQL Server (IDENTITY_INSERT OFF). On the fresh per-test DB the first insert is
@@ -61,7 +61,7 @@ func TestHandleInterrupt_SkipsNotifyWhenCancelWon(t *testing.T) {
 		// The flow is already cancelled (a Cancel won the race); the interrupt UPDATEs match nothing.
 		insert(t, e, workflow.StatusCancelled, workflow.StatusCancelled)
 
-		db, err := e.shard(1)
+		db, err := e.db.Shard(1)
 		assert.NoError(err)
 		err = e.handleInterrupt(ctx, 1, db, 1, 1, "ftok", []byte("{}"), map[string]any{"k": "v"})
 		assert.NoError(err)
@@ -80,7 +80,7 @@ func TestHandleInterrupt_SkipsNotifyWhenCancelWon(t *testing.T) {
 		// The flow is running; the interrupt transitions it to interrupted and must notify.
 		insert(t, e, workflow.StatusRunning, workflow.StatusRunning)
 
-		db, err := e.shard(1)
+		db, err := e.db.Shard(1)
 		assert.NoError(err)
 		err = e.handleInterrupt(ctx, 1, db, 1, 1, "ftok", []byte("{}"), map[string]any{"k": "v"})
 		assert.NoError(err)

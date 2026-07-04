@@ -35,7 +35,7 @@ import (
 // caller step's step_depth, so the child's entry step (and thus its whole subtree) is numbered as a
 // continuation of the caller (callerStepDepth+1).
 func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, callerTraceParent string) (string, error) {
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -200,7 +200,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, flow
 
 // completeFlow transitions a flow to completed and propagates to surgraph.
 func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flowToken string, notifyOnStop bool, baggageJSON string) (bool, error) {
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
@@ -319,7 +319,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 
 // completeSurgraphFlow re-dispatches a parked surgraph step after its child completes.
 func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, subgraphFinalStateJSON string) error {
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -375,7 +375,7 @@ func (e *Engine) failAndReturn(ctx context.Context, shardNum int, stepID int, fl
 
 // failStep handles a task failure.
 func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, flowID int, flowToken string, taskErr error, taskName string) error {
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -528,7 +528,7 @@ func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowI
 
 // deliverSubgraphError fails a dynamic subgraph child and re-dispatches the parent.
 func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childStepID int, childFlowID int, parentStepID int, taskErr error) error {
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -596,7 +596,7 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 // terminal node), one round-trip regardless of depth. root_flow_id gives tree membership; surgraph_flow_id
 // gives the parent/child structure the BFS walks.
 func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int) (flowIDs []any, compositeFlowIDs []string, err error) {
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
@@ -651,7 +651,7 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 // so a Snapshot reports exactly the interrupt the next Resume resolves. Descent is keyed on surgraph_step_id
 // (the caller step's PK), never depth, which is ambiguous when parallel subgraph callers share a depth.
 func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flowID int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
@@ -721,7 +721,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -817,7 +817,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 // one round-trip regardless of nesting depth, vs the former two queries per level. root_flow_id gives the tree
 // membership; the surgraph links give the parent/caller structure the walk follows.
 func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, flowToken string) (flowIDs []any, stepIDs []any, compositeFlowIDs []string, err error) {
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}

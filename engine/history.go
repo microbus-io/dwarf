@@ -40,7 +40,7 @@ func (e *Engine) history(ctx context.Context, flowKey string) ([]workflow.FlowSt
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -165,7 +165,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -403,7 +403,7 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
@@ -449,7 +449,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	if limit <= 0 {
 		limit = 100
 	}
-	numShards := e.numDBShards()
+	numShards := e.db.NumShards()
 
 	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, subgraphCondition(query.IncludeSubgraphs))
 	if err != nil {
@@ -487,7 +487,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	}
 	perShard := make([][]listRow, numShards+1)
 
-	err = e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
+	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
 		if restrictShardNum != 0 && shardIdx != restrictShardNum {
 			return nil
 		}
@@ -621,7 +621,7 @@ func subgraphCondition(includeSubgraphs bool) string {
 // queryClauses builds the shared WHERE/JOIN for list and purge. subgraphCond is the surgraph_flow_id
 // predicate the caller chose: list honors Query.Subgraph, purge always passes roots-only.
 func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgraphCond string) (string, string, []any, int, error) {
-	numShards := e.numDBShards()
+	numShards := e.db.NumShards()
 	if query.Shard < 0 || query.Shard > numShards {
 		return "", "", nil, 0, errors.New("invalid shard", http.StatusBadRequest)
 	}
@@ -652,7 +652,7 @@ func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgrap
 		if parseErr != nil {
 			return "", "", nil, 0, errors.Trace(parseErr)
 		}
-		db, dErr := e.shard(threadShardNum)
+		db, dErr := e.db.Shard(threadShardNum)
 		if dErr != nil {
 			return "", "", nil, 0, errors.Trace(dErr)
 		}
@@ -730,7 +730,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	if limit <= 0 || limit > purgeCap {
 		limit = purgeCap
 	}
-	numShards := e.numDBShards()
+	numShards := e.db.NumShards()
 
 	// Purge selects root flows only and deletes each matched root's whole subgraph subtree (below).
 	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, "f.surgraph_flow_id=0")
@@ -748,7 +748,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	}
 
 	perShardDeleted := make([]int, numShards+1)
-	err = e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
+	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
 		if restrictShardNum != 0 && shardIdx != restrictShardNum {
 			return nil
 		}
@@ -849,9 +849,9 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 }
 
 func (e *Engine) shardInfo(ctx context.Context) ([]ShardSummary, error) {
-	numShards := e.numDBShards()
+	numShards := e.db.NumShards()
 	results := make([]ShardSummary, numShards+1)
-	e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
+	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
 		results[shardIdx].Shard = shardIdx
 		start := time.Now()
 		var one int
@@ -877,7 +877,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

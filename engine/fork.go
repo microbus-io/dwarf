@@ -42,7 +42,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

@@ -41,7 +41,7 @@ func (e *Engine) recoveryLoop(ctx context.Context) {
 		case <-e.recoveryStop:
 			return
 		case <-ticker.C:
-			e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+			e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 				e.sweepWedgedParks(ctx, db, shard)
 				e.detectOrphanedFlows(ctx, db, shard)
 				return nil
@@ -203,7 +203,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 // No FlowStopped notification fires - subgraph children never notify (notify_on_stop is root-only), and this
 // whole subtree is descendants of an already-terminal root.
 func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlowID int, childFlowToken string) error {
-	db, err := e.shard(shard)
+	db, err := e.db.Shard(shard)
 	if err != nil {
 		return errors.Trace(err)
 	}

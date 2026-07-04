@@ -110,8 +110,9 @@ engine:
 - **Live** (take effect immediately, callable any time): `SetMaxOpenConns`, `SetWorkersPerConn`,
   `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
   existing flow keeps the budget/priority frozen at its own `Create`); `SetMaxOpenConns` (the per-shard connection
-  ceiling) and `SetWorkersPerConn` (the pool-sizing divisor) re-apply the sizing formula to every live shard
-  (`applyConnPoolSizes` per shard; sequel's pool setters are hot/atomic - see "Connection pool sizing").
+  ceiling) and `SetWorkersPerConn` (the pool-sizing divisor) recompute the sizing formula (`poolSizes`) and push the
+  two results to every live shard via `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`; sequel's pool setters are
+  hot/atomic - see "Connection pool sizing").
 - **Construction-time only** (return an error if called after `Startup`): `SetDSN`, `SetWorkers`, `SetNumShards`,
   `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying
   these on a running engine would mean reopening live connections (`SetDSN`), resizing the worker pool + candidate
@@ -121,8 +122,8 @@ engine:
 
 For the observability providers specifically (`SetLogger`/`SetMeterProvider`/`SetTracerProvider`): the engine
 resolves the logger/tracer/meter once at startup (the logger feeds the worker hot path and is read lock-free; the
-meter registers an async gauge callback) and wires all three into every shard's sequel DB in
-`configureDBTelemetry`. Hot-swapping a provider on a live engine is deliberately unsupported: a half-hot version
+meter registers an async gauge callback) and passes all three into `ShardSet.Open` (via `database.Config`), which
+wires them into every shard's sequel DB. Hot-swapping a provider on a live engine is deliberately unsupported: a half-hot version
 that only re-pointed the DBs (sequel's setters are atomic/hot) but left the engine's own logger/tracer/metrics
 frozen would be inconsistent, and a full-hot version (atomic logger + tracer re-resolve + meter rebuild/Unregister)
 is real complexity for a need that does not arise in practice.
@@ -875,7 +876,7 @@ re-blocks on a channel nobody will signal again, and escapes only when its own c
 to a full `awaitPollInterval` later, when a ticker re-snapshot happens to hit the now-closed DB. The sentinel send
 is non-blocking (`select … default`): a real stop status already buffered on the channel wins, and the waiter
 returns that outcome instead (the snapshot at the loop top catches it). Shutdown drains waiters *before*
-`closeDatabase`, so the sentinel path never touches a closed DB. Pinned by `fixtures/awaitshutdownflow_test.go`.
+`e.db.Close()`, so the sentinel path never touches a closed DB. Pinned by `fixtures/awaitshutdownflow_test.go`.
 
 **Cross-replica `Await`.** A flow created on one replica but completed on another wakes a local `Await` only via the
 `SignalPeers` broadcast (op `statusChange`). Every flow-stop site calls an internal `signalStop` helper that does the
@@ -924,68 +925,15 @@ broadcast-only-on-terminal-stops policy.
 
 ### Database Choice and Configuration
 
-The engine speaks four SQL dialects via `sequel`: SQLite, MySQL/MariaDB, PostgreSQL, SQL Server. They behave very
-differently under the concurrent INSERT/UPDATE load. Pick by deployment shape.
-
-**PostgreSQL - recommended for production.** MVCC means concurrent INSERTs do not lock each other on secondary
-indexes; no gap locks at default `READ COMMITTED`; the fan-out/fan-in pattern runs deadlock-free at any worker
-concurrency. Use Postgres 13+ for `JSONB` and partial indexes. For throughput, raise `max_connections` to at least
-`(NumShards * MaxOpenConnsPerShard * replicas)` and `shared_buffers` to ~25% of host RAM.
-
-**MySQL / MariaDB - supported, expect tuning.** InnoDB at default `REPEATABLE READ` takes next-key (row + gap) locks
-on every secondary-index touch; two concurrent flow creations on a shard can deadlock on overlapping index ranges.
-`createWithGraph` retries on `sequel.IsLockContentionError`, hiding most, but a sustained deadlock rate degrades
-throughput. To minimize: `transaction-isolation = READ-COMMITTED` (drops gap locks; the largest single reduction);
-`innodb_autoinc_lock_mode = 2` with `binlog_format = ROW`; `innodb_lock_wait_timeout` 5-10s; keep
-`innodb_deadlock_detect = ON`. Per-shard databases: `SetDSN` must contain `%d` when `NumShards > 1` and every shard
-DB must exist before startup (the engine migrates schema but does not `CREATE DATABASE`). MariaDB 10.5+ for `JSON`.
-
-**SQL Server.** Enable `READ_COMMITTED_SNAPSHOT ON` per shard database for Postgres-like non-blocking reads and
-near-zero deadlock risk. No other tuning mandatory.
-
-**SQLite - testing and single-instance dev only.** Single-writer means deadlocks are structurally impossible (writes
-serialize) but throughput tops out at one transaction at a time. Used automatically by `RunInTest` with an empty DSN.
-The injected `busy_timeout` keeps workers from immediately failing on `SQLITE_BUSY` during fan-out; do not remove it.
-Do not run SQLite in production.
-
-**Sharding guidance.** `SetNumShards` partitions flows across databases (or schemas). Shard count should equal or
-exceed steady-state concurrent flow-creating threads divided by the per-shard write contention the engine tolerates.
-Rough sizing:
-
-| Engine | Concurrent INSERT/sec per shard before contention | Suggested NumShards |
-|---|---|---|
-| PostgreSQL | 1000+ | 1-4 |
-| SQL Server (RCSI) | 500-1000 | 2-4 |
-| MariaDB/MySQL (RC) | 200-500 | 4-8 |
-| MariaDB/MySQL (RR) | 50-200 | 8-16 |
-
-`NumShards` is fixed for the engine's life (`SetNumShards` is construction-time only); changing it requires a
-coordinated restart of every replica - see "Shard count is immutable at runtime" below.
-
-**Shard-per-server is the recommended production topology.** Put each shard on its **own database server** - the
-`%d` in the DSN goes in the **hostname**, not the database name:
-
-```
-# PROD (distributed): %d in the hostname - one server per shard
-postgres://user:pass@db-shard-%d.internal:5432/dwarf?sslmode=disable
-
-# test/dev (co-located): %d in the database name - shards as databases on one server
-postgres://user:pass@127.0.0.1:5432/dwarf_%d?sslmode=disable
-```
-
-The connection budget is a **per-server** property. With distributed shards each server hosts one shard per replica,
-so it sees only `replicas × perShardPool` connections - **shard count never multiplies a server's load**, and the
-per-shard ceiling (`SetMaxOpenConns`) *is* the per-server budget. With co-located shards (all shards as databases on
-one server) the server sees `replicas × shards × perShardPool`, so the `× shards` multiplier can overrun the server's
-`max_connections` under parallel load - which is why co-located is for test/dev/single-instance only. Both forms are
-transparent to the engine and sequel: the DSN is just `fmt.Sprintf`'d with the shard index and each shard gets its own
-independent pool, so moving `%d` is purely a deployment choice (zero code change). The engine migrates schema but does
-**not** `CREATE DATABASE` or provision servers - those must exist.
+Choosing a SQL dialect (Postgres/MySQL/SQL Server/SQLite tradeoffs under concurrent write load), the shard-count
+guidance table, the shard-per-server production topology, and the per-server connection-budget reasoning all live in
+`internal/database/CLAUDE.md`. The engine-side concern is the connection **pool sizing** — the *formula*, which is
+engine policy — below.
 
 **Connection pool sizing - worker-proportional, shard-aware.** The per-shard pool is **derived from the worker
 pool**, not a flat constant, because a worker holds a connection only during the short DB segments of `processStep`
 (the long `ExecuteTask` call holds none), so connection *demand* is bounded by the workers, not the shard count.
-`calcConnPoolSizes` (in `database.go`) computes, per shard:
+`calcConnPoolSizes` (in `poolsize.go`) computes, per shard:
 
 ```
 idle    = max(2, ceil(workers / shards / workersPerConn))   // demand-sized; the 2 is poolFloor
@@ -1014,18 +962,13 @@ idle    = min(idle, maxOpen)                                 // clamp idle to a 
   headroom. The "avoid reconnect churn" goal the old equal-sizing served is now met by the warm idle core plus the
   recycle/drain timers below.
 
-**Idle drain & lifetime recycle (hard-coded, server drivers only).** Each pool is also given a **2-minute
-`ConnMaxIdleTime`** (idle connections drain after a quiet spell, releasing server connections post-burst; reuse
-resets each connection's idle clock, so a steadily-loaded shard keeps its core warm) and a **1-hour
-`ConnMaxLifetime`** (every connection recycles at that age - sheds stale connections, lets LB/DNS/failover rebalance;
-~one reconnect/connection/hour). These are constants, not knobs, set via the `*sql.DB` methods promoted through
-`sequel.DB`. They are **skipped for SQLite**, whose in-memory test databases are dropped the instant their last
-connection closes. They are a production win (long-lived replicas); they never fire during the fast test suite.
+The idle-drain / lifetime-recycle connection timers (`ConnMaxIdleTime` / `ConnMaxLifetime`, server-drivers only)
+are a database-layer mechanism — see `internal/database/CLAUDE.md`.
 
-**Live re-sizing.** `SetWorkersPerConn` and `SetMaxOpenConns` re-apply the formula to every open shard by looping
-`applyConnPoolSizes` over the live shards. The shard count itself is not a live knob (`SetNumShards` is
-construction-time only), so it never triggers a re-size: each shard is sized once at open using the final `numShards`
-(set before any shard opens), and stays that size for the engine's life.
+**Live re-sizing.** `SetWorkersPerConn` and `SetMaxOpenConns` recompute the formula (`poolSizes`) and push the two
+resulting integers to every open shard via `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. The shard count itself is
+not a live knob (`SetNumShards` is construction-time only), so it never triggers a re-size: each shard is sized once
+at open using the final `numShards` (set before any shard opens), and stays that size for the engine's life.
 
 ### Flow Scheduling (priority / fairness)
 
@@ -1503,29 +1446,16 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
 ### Database Sharding
 
 `SetNumShards` (default 1) distributes flows across databases to scale write throughput and reduce index contention.
+The sharding *mechanics* — the 1-indexed `Shard(n)` translation, the always-parallel `OnEach` cross-shard fan-out,
+the not-shard-fault-tolerant contract, and the DSN `%d` format / test-mode resolution — live in
+`internal/database/CLAUDE.md`. This section is the engine-side *semantics*.
 
-**Shards are 1-indexed.** Valid indices are `1..NumShards`; `0` is a sentinel meaning "no shard / all shards" (used by
-`Query.Shard`). The DSN's `%d`, the leading number in flow keys (`{shard}-{flowID}-{token}`), the `Query.Shard`
-filter, and `ShardInfo` all use 1-based indexing. Internally `e.dbs` is a 0-based slice and `e.shard(n)` translates
-with a bounds check.
-
-**Shard routing:** external flow IDs encode the shard; every operation parses it and routes via `e.shard(n)`.
+**Shard routing & encoding:** external flow IDs encode the shard (`{shard}-{flowID}-{token}`); every operation parses
+it and routes via `e.db.Shard(n)`. Indices are 1-based (`1..NumShards`); `0` is the "no shard / all shards" sentinel
+used by `Query.Shard`.
 
 **Shard affinity:** subgraph flows are created on the parent's shard (avoids cross-shard references during
 subgraph completion and history reconstruction). Only top-level flow creation picks a random shard.
-
-**Cross-shard fan-out is always parallel, never sequential.** Any operation touching every shard builds a per-shard
-job slice and runs them in parallel. A sequential per-shard loop would grow total latency linearly with `NumShards`
-(at 8 shards a 10ms-per-shard query becomes 80ms wall-clock); the parallel shape stays at single-shard latency
-regardless of shard count.
-
-**Not shard-fault-tolerant by design.** Every cross-shard fan-out site fails the whole call on any shard's error. A
-partial-tolerance attempt was rejected: real outages mostly manifest as hangs, not errors; classifying "shard down"
-vs transient/data errors is driver-specific and brittle; and a helper that *claims* partial tolerance only in a
-narrow subset of failure modes lies to operators about resilience. The cross-shard fan-out sites share one helper
-(`onEachShard`), invoked once per shard with the resolved DB and the 1-based index; any non-nil return fails the whole
-call. Each caller retries on its next natural cycle (`pollPendingSteps` next tick, `scanPriorityBand` next refill), so
-a transient hiccup heals within one cycle and a persistent outage degrades loudly.
 
 **`List` uses per-shard pagination, not cross-shard global order.** Each shard returns up to `ceil(limit/numShards)`
 rows by its own `flow_id DESC`; the aggregate is shard-grouped. Cross-shard ordering by `created_at` would compare
@@ -1534,15 +1464,11 @@ an opaque cursor encoding each shard's smallest-returned `flow_id`. `List` is st
 the whole call (the per-shard debug path is `ShardInfo` + `List(Shard=N)`).
 
 **Shard count is immutable at runtime.** `SetNumShards` is construction-time only: it records the target before
-`Startup` (which opens+migrates exactly that many shards) and is **rejected** on a running engine, so `numDBShards()`
-never changes after `Startup`. Callers therefore size per-shard state from `numDBShards()` and index it by shard with
-no concurrency concern. Changing the count needs a **coordinated restart** (a maintenance window), because it is not
-safe to grow live: a flow key encodes its shard (`{shard}-{id}-{token}`), so a flow created on a newly-added shard is
-unroutable (404) on any replica still at the old count - and there is no cross-replica agreement on the count nor any
-rebalancing of existing flows (they stay on their original shard). Doing dynamic growth *correctly* - lockstep count
-across replicas plus rebalancing - is a larger problem left unsolved; until then the count is fixed per process.
-
-**DSN format:** when `NumShards > 1`, the DSN must contain `%d` (replaced with the shard index). In test mode the
-default DSN carries `%d` too, so each shard's `%d` selects a separate in-memory SQLite database; per-test isolation
-comes from the hashed test id folded into the database name (see "SQLite Testing Support" in `fixtures/CLAUDE.md`), not from the shard index.
+`Startup` (which opens+migrates exactly that many shards) and is **rejected** on a running engine, so `e.db.NumShards()`
+never changes after `Startup`. Callers therefore size per-shard state from `e.db.NumShards()` and index it by shard
+with no concurrency concern. Changing the count needs a **coordinated restart** (a maintenance window), because it is
+not safe to grow live: a flow key encodes its shard (`{shard}-{id}-{token}`), so a flow created on a newly-added shard
+is unroutable (404) on any replica still at the old count - and there is no cross-replica agreement on the count nor
+any rebalancing of existing flows (they stay on their original shard). Doing dynamic growth *correctly* - lockstep
+count across replicas plus rebalancing - is a larger problem left unsolved; until then the count is fixed per process.
 

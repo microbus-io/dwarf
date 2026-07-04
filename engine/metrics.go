@@ -179,10 +179,10 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 // observePendingByBand returns, across all shards, the count of due pending steps per priority band
 // and the age in seconds of the oldest due pending step per band (max across shards).
 func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestSecByBand map[int]int, err error) {
-	numShards := e.numDBShards()
+	numShards := e.db.NumShards()
 	pendingPerShard := make([]map[int]int, numShards+1)
 	agePerShard := make([]map[int]int, numShards+1)
-	err = e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
 			"SELECT priority, COUNT(*), DATE_DIFF_MILLIS(NOW_UTC(), MIN(created_at)) FROM dwarf_steps"+
 				" WHERE status='"+workflow.StatusPending+"' AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() GROUP BY priority",
@@ -234,9 +234,9 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 // countRunningByTask returns the cluster-wide (this replica's shards) count of running steps per task
 // URL (the downstream identity the saturation/concurrency view keys on).
 func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error) {
-	numShards := e.numDBShards()
+	numShards := e.db.NumShards()
 	perShard := make([]map[string]int, numShards+1)
-	err := e.onEachShard(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
 			"SELECT task_url, COUNT(*) FROM dwarf_steps WHERE status='"+workflow.StatusRunning+"' AND parked=? GROUP BY task_url",
 			parkedNone,

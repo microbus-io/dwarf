@@ -38,10 +38,14 @@ matching one before working there:**
   operation, the execution/scheduling model, fan-out/fan-in, subgraphs, crash recovery, metrics/tracing, and sharding.
 - **`workflow/CLAUDE.md`** - the `workflow.Flow` carrier and pure types: state model, control signals
   (`flow.Retry`/`Sleep`/`Goto`/`Interrupt`/`Subgraph`), task self-identity, and the `FlowRenderer`.
-- **`migrations/CLAUDE.md`** - schema: the `dwarf_flows`/`dwarf_steps` column catalog, indexing strategy, and the
+- **`internal/migrations/CLAUDE.md`** - schema: the `dwarf_flows`/`dwarf_steps` column catalog, indexing strategy, and the
   SQL-authoring gotchas.
 - **`fixtures/CLAUDE.md`** - the test harness: `RunInTest`/`SetInTest` test mode, the per-test-engine +
   no-`t.Parallel` connection-load rule, and `TestProxy` conventions.
+- **`internal/database/CLAUDE.md`** - the sharded SQL connections (`ShardSet`): SQL-dialect guidance, shard-count
+  sizing + shard-per-server topology, the connection lifecycle, and the sharding *mechanics* (1-indexed routing,
+  parallel `OnEach` fan-out, DSN/test-mode resolution). The pool-sizing *formula* and sharding *semantics* stay in
+  `engine/CLAUDE.md`.
 - **`internal/keys/CLAUDE.md`** - the flow/step key *format* (`{shard}-{id}-{token}`), token entropy (why 64-bit),
   and the token-free `CorrelationID` derivation. (The engine-side enforcement/posture stays in `engine/CLAUDE.md`.)
 - **`internal/candidatecache/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
@@ -49,8 +53,8 @@ matching one before working there:**
 
 **Landmines that radiate into engine code - obey these even though the full detail now lives in a package doc:**
 
-- **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`migrations/CLAUDE.md`)
-- **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`migrations/CLAUDE.md`)
+- **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`internal/migrations/CLAUDE.md`)
+- **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
 - **State delete:** `flow.Delete`/`Set(k,nil)` writes a JSON `null` that `MergeState` *drops* on materialization but
   *preserves* during changes-accumulation. (`workflow/CLAUDE.md`; enforced at `execution.go`)
 - **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
@@ -59,7 +63,7 @@ matching one before working there:**
   (`"...WHERE status='"+workflow.StatusRunning+"'..."`), never bind it (`status=?`) - a bound status defeats the
   SQL Server / SQLite filtered index (and, for `List`'s `ORDER BY ... LIMIT`, the cardinality estimate). A
   caller-supplied status (`List`/`Query.Status`) is validated with `workflow.IsValidStatus` then inlined.
-  Exception: `SET status=?` assignments stay bound. (`migrations/CLAUDE.md`)
+  Exception: `SET status=?` assignments stay bound. (`internal/migrations/CLAUDE.md`)
 
 ### Core Concepts
 

@@ -69,7 +69,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if fromStatus == "" {
 			return
 		}
-		if db, derr := e.shard(shardNum); derr == nil {
+		if db, derr := e.db.Shard(shardNum); derr == nil {
 			db.Transact(ctx, func(tx *sequel.Tx) error {
 				_, terr := tx.ExecContext(ctx,
 					"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status=?",
@@ -80,7 +80,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 		e.shortenNextPoll(time.Now())
 	}()
-	db, err := e.shard(shardNum)
+	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
 	}

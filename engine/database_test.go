@@ -32,7 +32,7 @@ func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
 	e.RunInTest(t)
 
 	// Verify the schema was created by querying the flows table.
-	db, err := e.shard(1)
+	db, err := e.db.Shard(1)
 	assert.NoError(err)
 	var count int
 	err = db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_flows").Scan(&count)
@@ -56,17 +56,17 @@ func TestSetNumShards(t *testing.T) {
 	pre := NewEngine()
 	pre.SetHost(noopHost{})
 	assert.NoError(pre.SetNumShards(2))
-	assert.Equal(0, pre.numDBShards())
+	assert.Equal(0, pre.db.NumShards())
 
 	e := NewEngine()
 	e.SetHost(noopHost{})
 	assert.NoError(e.SetNumShards(2)) // recorded now, applied by RunInTest
 	e.RunInTest(t)
-	assert.Equal(2, e.numDBShards())
+	assert.Equal(2, e.db.NumShards())
 
 	// Both shards are migrated and usable in isolation.
 	for _, n := range []int{1, 2} {
-		db, err := e.shard(n)
+		db, err := e.db.Shard(n)
 		assert.NoError(err)
 		var count int
 		err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&count)
@@ -76,7 +76,7 @@ func TestSetNumShards(t *testing.T) {
 
 	// On a running engine, SetNumShards is rejected and the count is unchanged.
 	assert.Error(e.SetNumShards(4))
-	assert.Equal(2, e.numDBShards())
+	assert.Equal(2, e.db.NumShards())
 }
 
 func TestDatabase_ShardOutOfRange(t *testing.T) {
@@ -86,11 +86,11 @@ func TestDatabase_ShardOutOfRange(t *testing.T) {
 	e.SetHost(noopHost{})
 	e.RunInTest(t)
 
-	_, err := e.shard(0)
+	_, err := e.db.Shard(0)
 	assert.Error(err)
-	_, err = e.shard(2)
+	_, err = e.db.Shard(2)
 	assert.Error(err)
-	_, err = e.shard(1)
+	_, err = e.db.Shard(1)
 	assert.NoError(err)
 }
 
@@ -102,7 +102,7 @@ func TestDatabase_EachShardSingleShard(t *testing.T) {
 	e.RunInTest(t)
 
 	var visited []int
-	err := e.onEachShard(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
+	err := e.db.OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
 		visited = append(visited, shard)
 		return nil
 	})

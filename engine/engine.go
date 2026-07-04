@@ -31,10 +31,10 @@ import (
 	"log/slog"
 
 	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
-	"github.com/microbus-io/sequel"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -110,13 +110,11 @@ type Engine struct {
 	workersPerConn  atomic.Int32 // workers assumed to share one connection; the pool-sizing divisor
 
 	// Database
-	dbs     []*sequel.DB
-	dbsLock sync.RWMutex
+	db database.ShardSet
 	// testHashedID is the hashed test database id when the engine was started in test mode (RunInTest),
-	// empty in production. openDatabaseShard reads it at startup to wrap
-	// each shard in an isolated test database. Written once during single-threaded startup before
-	// started.Store(true), read only after started.Load()==true, so the atomic started flag is the
-	// happens-before barrier.
+	// empty in production. It becomes Config.TestID at Open, wrapping each shard in an isolated test
+	// database. Written once during single-threaded startup before started.Store(true), read only after
+	// started.Load()==true, so the atomic started flag is the happens-before barrier.
 	testHashedID string
 
 	// Candidate cache and worker pool
@@ -245,11 +243,9 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 		return errors.New("max open connections must be >= 1", http.StatusBadRequest)
 	}
 	e.maxOpenConns.Store(int32(n))
-	e.dbsLock.RLock()
-	for _, db := range e.dbs {
-		e.applyConnPoolSizes(db)
-	}
-	e.dbsLock.RUnlock()
+	idle, open := e.poolSizes()
+	e.db.SetMaxIdleConns(idle)
+	e.db.SetMaxOpenConns(open)
 	return nil
 }
 
@@ -260,11 +256,9 @@ func (e *Engine) SetWorkersPerConn(n int) error {
 		return errors.New("workers per connection must be >= 1", http.StatusBadRequest)
 	}
 	e.workersPerConn.Store(int32(n))
-	e.dbsLock.RLock()
-	for _, db := range e.dbs {
-		e.applyConnPoolSizes(db)
-	}
-	e.dbsLock.RUnlock()
+	idle, open := e.poolSizes()
+	e.db.SetMaxIdleConns(idle)
+	e.db.SetMaxOpenConns(open)
 	return nil
 }
 
@@ -349,7 +343,17 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if e.host == nil {
 		return errors.New("host is required")
 	}
-	err := e.openDatabase(ctx)
+	idle, open := e.poolSizes()
+	err := e.db.Open(ctx, database.Config{
+		DSN:            e.dsn.Load().(string),
+		NumShards:      int(e.numShards.Load()),
+		TestID:         e.testHashedID,
+		Logger:         e.logger,
+		TracerProvider: e.tracerProvider,
+		MeterProvider:  e.meterProvider,
+		MaxIdleConns:   idle,
+		MaxOpenConns:   open,
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -365,7 +369,7 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	e.drainRuntime()
-	e.closeDatabase()
+	e.db.Close()
 	return nil
 }
 
@@ -381,8 +385,8 @@ func (e *Engine) SetInTest(name string) error {
 	}
 	// Hash the name to a short, bounded id so the testing-database name sequel derives stays within the
 	// strictest SQL identifier limit (Postgres 63 / MySQL 64), whatever the name's length. A non-empty
-	// testHashedID is also what switches openDatabaseShard onto the isolated-test open path. It is set before
-	// initRuntime flips started, so it is in place before any shard opens.
+	// testHashedID becomes Config.TestID, which switches the ShardSet's open path onto the isolated-test
+	// path. It is set before initRuntime flips started, so it is in place before any shard opens.
 	sum := sha256.Sum256([]byte(name))
 	e.testHashedID = hex.EncodeToString(sum[:])[:16]
 	return nil

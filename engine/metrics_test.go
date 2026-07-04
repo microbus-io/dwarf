@@ -83,7 +83,7 @@ func TestCountRunningByTask_ExcludesParked(t *testing.T) {
 	eng.SetHost(noopHost{})
 	eng.RunInTest(t)
 
-	db, err := eng.shard(1)
+	db, err := eng.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}

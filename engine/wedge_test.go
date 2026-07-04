@@ -111,7 +111,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.shard(shard)
+	db, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
@@ -230,7 +230,7 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.shard(shard)
+	db, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
@@ -343,7 +343,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.shard(shard)
+	db, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
