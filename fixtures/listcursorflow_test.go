@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
-Multi-shard List cursor walk (see _MORETESTS.md D3). List uses per-shard pagination, not a
+Multi-shard List cursor walk. List uses per-shard pagination, not a
 cross-shard global order: each shard returns up to ceil(limit/numShards) rows by its own
 flow_id DESC and the opaque cursor encodes every shard's smallest-returned flow_id. This pins
 that a cursor walk across a 3-shard engine visits exactly the created set once (no duplicates,

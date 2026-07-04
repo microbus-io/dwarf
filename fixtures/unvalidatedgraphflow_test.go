@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
-Create-time graph validation (see _MORETESTS.md A3, _FABLE_REVIEW2.md finding 3). The engine now
+Create-time graph validation. The engine now
 calls graph.Validate() at Create (and at subgraph spawn), as docs/graphs.md promises. This pins the
 three consequences:
   - Validate's side effect populates fanOutToFanIn, which the empty-forEach fan-in path (FanInFor)

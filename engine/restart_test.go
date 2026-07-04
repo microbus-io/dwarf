@@ -28,7 +28,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestRestartSurvival (see _MORETESTS.md B1) is the headline durability proof: a flow survives the death of
+// TestRestartSurvival is the headline durability proof: a flow survives the death of
 // its engine. "Restart" is modelled as a genuine full Shutdown of engine 1 followed by a fresh Startup of
 // engine 2 against the *same on-disk database* (a file-backed SQLite DSN, so the data outlives the gap with
 // no overlap between the engines). Each variant rests the flow in a non-running state before the restart
@@ -36,7 +36,7 @@ import (
 // since Shutdown drains in-flight workers by contract (a hard kill of a running worker is the lease-recovery
 // path, pinned separately by TestLeaseRecovery_EndToEnd and the leasefence tests). Every variant asserts
 // exactly-once execution per step (shared counters across both engines), the correct final state, and a clean
-// C1 invariant sweep.
+// invariant sweep.
 func TestRestartSurvival(t *testing.T) {
 	ctx := context.Background()
 

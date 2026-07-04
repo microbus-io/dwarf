@@ -71,25 +71,13 @@ func TestSoakflow(t *testing.T) {
 	proxy.HandleTask("soakflow.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
 		branch := f.GetInt("branch") % 5
 		f.SetInt("branch", branch)
-		fanWidth := f.GetInt("fanWidth")
-		if fanWidth < 1 {
-			fanWidth = 1
-		}
-		if fanWidth > 6 {
-			fanWidth = 6
-		}
+		fanWidth := min(max(f.GetInt("fanWidth"), 1), 6)
 		items := make([]int, fanWidth)
 		for i := range items {
 			items[i] = i
 		}
 		f.Set("items", items)
-		loops := f.GetInt("loops")
-		if loops < 0 {
-			loops = 0
-		}
-		if loops > 5 {
-			loops = 5
-		}
+		loops := min(max(f.GetInt("loops"), 0), 5)
 		f.SetInt("loopsLeft", loops)
 		return nil
 	})

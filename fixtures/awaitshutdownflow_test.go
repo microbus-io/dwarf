@@ -26,7 +26,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestAwaitShutdownflow pins the shutdown sentinel for Await (finding D6). A waiter blocked on a flow that is
+// TestAwaitShutdownflow pins the shutdown sentinel for Await. A waiter blocked on a flow that is
 // still running when the engine shuts down must be released with an error, not left spinning: drainRuntime
 // wakes each waiter once, and before the fix it sent an empty string that Await treats as "re-snapshot", so a
 // non-stopped flow's waiter re-blocked on a channel no goroutine would ever signal again and only escaped when

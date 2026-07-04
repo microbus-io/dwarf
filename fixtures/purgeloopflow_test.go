@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
-Purge drain loop (see _MORETESTS.md D2). Purge is capped per call and returns a count of matched
+Purge drain loop. Purge is capped per call and returns a count of matched
 ROOT flows, so a retention job loops until it returns 0. This pins that contract: with a small
 Limit, repeated Purge calls drain the whole matched set; the total returned equals the number of
 root flows (a subgraph child is deleted as part of its root's tree but does not add to the count);

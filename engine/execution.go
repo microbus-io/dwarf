@@ -40,32 +40,19 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// progress (transitions / fan-in / flow completion) is committed in a separate transaction. If
 	// that later commit fails, the recovery defer rolls the step back so it re-dispatches.
 	var stepMarkedComplete bool
-	// leaseSeq is this dispatch's lease generation, read from the claim CAS below (bumped on every
-	// claim, so a claimed step always carries lease_seq>=1; the Go zero value 0 means "not captured").
-	// Declared before the defer so the recovery reset can fence on it. Every post-execution write to
-	// this step carries `AND lease_seq=?`, so a worker whose lease was lost and re-granted to a peer -
-	// a slow task overran budget+leaseMargin, or the DB wall clock stepped forward past lease_expires
-	// while this worker's monotonic ctx deadline had not fired - writes zero rows and abandons quietly
-	// instead of corrupting or terminalizing the peer's healthy re-execution. See "Lease fencing".
+	// leaseSeq is this dispatch's lease generation, read from the claim CAS below (0 = not captured).
+	// Every post-execution write to the dispatched step carries `AND lease_seq=?` to fence it.
 	var leaseSeq int
 	defer func() {
 		if err == nil {
 			return
 		}
 		// Reset a step that processStep left in a non-pending state so recovery can re-dispatch it,
-		// then re-poll. Two mutually-exclusive cases per step:
-		//   running→pending    a lock-contention error left the step leased mid-processStep. Without
-		//                       the reset it keeps its full lease (TimeBudget+margin), stranding the
-		//                       flow until lease expiry, minutes past the poll cadence.
+		// then re-poll. Two mutually-exclusive cases per step, selected by from-status:
+		//   running→pending    a lock-contention error left the step leased mid-processStep.
 		//   completed→pending  the step was marked `completed` but the follow-up transaction that
 		//                       inserts successors / bumps cohort_arrivals / completes the flow failed
-		//                       to commit (Transact exhausted its contention retries, or a non-retryable
-		//                       DB error). A `completed` step with no successor wedges the flow forever:
-		//                       it is invisible to lease recovery (running-only), the parked-step wedge
-		//                       sweep (parkedSubgraph-only), and the running→pending reset above.
-		//                       Re-dispatch re-runs the task and re-evaluates transitions; the failed
-		//                       transaction already rolled back its partial writes, so the re-run starts
-		//                       clean.
+		//                       to commit. Re-dispatch re-runs the task and re-evaluates transitions.
 		// Both are guarded on the from-status for idempotency and retried via Transact since this
 		// recovery can itself race a contention storm; the reset UPDATE losing that race is the residual
 		// wedge that detectOrphanedFlows surfaces.
@@ -268,7 +255,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// trace_parent), and place it on the executor's context so the task's downstream spans nest under it.
 	// The span is named by the task; no-op unless a TracerProvider is configured. workflow.id carries the
 	// token-free correlation id, never the flowKey: a trace backend is typically readable far more broadly
-	// than the workflow data, and the key is a bearer write-capability (see "Tracing" in CLAUDE.md).
+	// than the workflow data, and the key is a bearer write-capability.
 	taskCtx = injectTraceParent(taskCtx, traceParent)
 	taskCtx, taskSpan := e.tracer.Start(taskCtx, taskName,
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -616,7 +603,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 		// Write-first: take the flow row's lock before any step, guarded on non-terminal status. If a
 		// concurrent Cancel/failStep terminalized this flow after the step was marked completed but before
-		// this transition committed (the D3 Cancel-vs-transition window, and the retry after a lock-contention
+		// this transition committed (the Cancel-vs-transition window, and the retry after a lock-contention
 		// rollback), the guard yields zero rows and the transition becomes a clean no-op. Without it, the tx
 		// would insert pending successors into an already-terminal flow — orphan work only reaped later by the
 		// claim-time terminal-flow guard. The completed step is left as a harmless tail on the final flow.
@@ -785,7 +772,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		// Steps-first-then-flow lock ordering, matching resume and Cancel (which walk this same surgraph
 		// chain). Interrupt is non-terminating, so it carries no write-first orphan obligation; the only
 		// requirement is that the first statement be a write (satisfied here, keeping SQLite's shared-lock
-		// upgrade deadlock closed). Ordering steps before flows removes the D2 cycle with a concurrent
+		// upgrade deadlock closed). Ordering steps before flows removes the cycle with a concurrent
 		// resume, which holds the chain step rows and wants the chain flow rows: acquiring in the same order
 		// on both sides means one blocks rather than deadlocks. The flow-first transition/completion cluster
 		// (advanceFlow, completeFlow) is unaffected — it shares only the single flow row with this path (it
@@ -979,10 +966,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	// The fan-in sits one level below the DEEPEST cohort branch, not merely below the last sibling to
 	// complete - branch lengths can differ (loops, gotos, varying chains), so step_depth must reflect the
 	// deepest path the flow took. nextStepDepth (last-completer+1) is the floor for the defensive empty case.
-	fanInDepth := maxCohortDepth + 1
-	if fanInDepth < nextStepDepth {
-		fanInDepth = nextStepDepth
-	}
+	fanInDepth := max(maxCohortDepth+1, nextStepDepth)
 
 	// Drop per-branch forEach bookkeeping
 	for _, tr := range graph.Transitions() {

@@ -78,10 +78,7 @@ type ShardSet struct {
 // the shards already opened this attempt (so a partial failure leaks no connections and leaves the set empty
 // for a clean retry) and returns the error. Not safe to call concurrently with itself; call once at startup.
 func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
-	numShards := cfg.NumShards
-	if numShards < 1 {
-		numShards = 1
-	}
+	numShards := max(cfg.NumShards, 1)
 	for i := 1; i <= numShards; i++ {
 		db, err := s.openShard(cfg, i)
 		if err != nil {
@@ -197,16 +194,14 @@ func (s *ShardSet) OnEach(ctx context.Context, op func(ctx context.Context, db *
 	var wg sync.WaitGroup
 	for i := 1; i <= numShards; i++ {
 		si := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			db, err := s.Shard(si)
 			if err != nil {
 				errs[si] = err
 				return
 			}
 			errs[si] = op(ctx, db, si)
-		}()
+		})
 	}
 	wg.Wait()
 	for _, err := range errs {

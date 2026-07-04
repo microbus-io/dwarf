@@ -29,9 +29,8 @@ type FlowSummary struct {
 	Error        string    `json:"error,omitzero"`
 	CancelReason string    `json:"cancelReason,omitzero"`
 	CreatedAt    time.Time `json:"createdAt,omitzero"`
-	// StartedAt is when this attempt began dispatching (stamped when the flow goes running at
-	// Create, or when a Fork clone goes live). Distinct from CreatedAt, the row's INSERT moment.
-	// Use StartedAt for duration metrics; CreatedAt for "when did this flow first appear."
+	// Use StartedAt for duration metrics; CreatedAt for when the flow first appeared. StartedAt is
+	// when this attempt began dispatching, distinct from CreatedAt, when the row was first created.
 	StartedAt time.Time `json:"startedAt,omitzero"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 	// Priority is the flow's scheduling priority (>= 1, lower runs first), resolved at Create.

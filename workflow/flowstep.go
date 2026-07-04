@@ -25,8 +25,8 @@ type FlowStep struct {
 	StepDepth int    `json:"stepDepth,omitzero"`
 	TaskName  string `json:"taskName,omitzero"`
 	Attempt   int    `json:"attempt,omitzero"`
-	// PredecessorID and SuccessorID are the shard-local step ids of this step's neighbors in
-	// the execution DAG. 0 means no such edge (entry / exit step).
+	// PredecessorID and SuccessorID are this step's neighbors in the execution DAG.
+	// 0 means no such edge (entry / exit step).
 	PredecessorID int `json:"predecessorID,omitzero"`
 	SuccessorID   int `json:"successorID,omitzero"`
 	// PrevKey and NextKey are the external step keys of the resolved navigation neighbors,
@@ -47,7 +47,7 @@ type FlowStep struct {
 	Error     string    `json:"error,omitzero"`
 	CreatedAt time.Time `json:"createdAt,omitzero"`
 	// StartedAt is when the worker first dispatched the current attempt of this step.
-	// Use HasStarted to gate reads; on a not-yet-leased row it carries the INSERT-time default.
+	// Use HasStarted to gate reads.
 	StartedAt time.Time `json:"startedAt,omitzero"`
 	UpdatedAt time.Time `json:"updatedAt,omitzero"`
 }

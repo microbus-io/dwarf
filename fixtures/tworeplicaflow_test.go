@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
-Two-replica contention (see _MORETESTS.md B3). Two engines share one database (a shared in-memory
+Two-replica contention. Two engines share one database (a shared in-memory
 SQLite DSN), each with its own TestProxy and workers, wired as peers both ways. This pins the
 claim-CAS exactly-once guarantee under real cross-replica contention: every step of every flow runs
 exactly once no matter which replica claims it. A second subtest proves the cross-replica Await wake
@@ -56,7 +56,6 @@ func TestTwoReplicaflow(t *testing.T) {
 		testarossa.NoError(t, g.Validate())
 		p.HandleGraph("tworeplica.verify:428/chain", g)
 		for task, url := range map[string]string{"A": "tworeplica.verify:428/a", "B": "tworeplica.verify:428/b", "C": "tworeplica.verify:428/c"} {
-			task := task
 			p.HandleTask(url, func(ctx context.Context, f *workflow.Flow) error {
 				counters[task].Add(1)
 				return nil

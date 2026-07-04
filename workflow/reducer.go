@@ -322,9 +322,7 @@ func reduceMerge(existing, incoming any) (any, error) {
 	if a == nil {
 		a = make(map[string]json.RawMessage, len(b))
 	}
-	for k, v := range b {
-		a[k] = v
-	}
+	maps.Copy(a, b)
 	result, err := json.Marshal(a)
 	return json.RawMessage(result), errors.Trace(err)
 }

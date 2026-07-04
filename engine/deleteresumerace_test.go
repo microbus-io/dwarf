@@ -29,7 +29,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestDeleteResumeRace pins review finding 2: the orphan state "a `running` flow with zero step rows" is
+// TestDeleteResumeRace pins that the orphan state "a `running` flow with zero step rows" is
 // unreachable however a Delete or Purge races a Resume on an interrupted flow. Deferred deletion closes the
 // window by construction - Delete/Purge no longer delete steps inline (they mark `delete_after_ms` and flip
 // `interrupted -> cancelled` under the flow-row lock, mutually exclusive with Resume's `WHERE

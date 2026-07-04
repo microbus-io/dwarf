@@ -26,9 +26,7 @@ const (
 	StatusCancelled   = "cancelled"   // Flow was cancelled by the user
 )
 
-// IsValidStatus reports whether s is one of the defined flow/step statuses. Callers that inline a
-// caller-supplied status into a query (the engine's List/Purge filter) gate on this first, so only a
-// known constant - never arbitrary input - reaches the SQL string.
+// IsValidStatus reports whether s is one of the defined flow/step statuses.
 func IsValidStatus(s string) bool {
 	switch s {
 	case StatusCreated, StatusPending, StatusRunning, StatusInterrupted,

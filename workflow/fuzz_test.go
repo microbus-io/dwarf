@@ -148,8 +148,8 @@ func FuzzEscapeMermaid(f *testing.F) {
 //
 // KNOWN FAILING INPUT: boolexp v1.1.1 infinite-loops on ")(" (a close paren before an open paren):
 // evaluateBoolExp's paren-resolution loop sets parenStart but never finds a matching close, nets
-// parenDepth to 0 (so the invalid-parenthesis guard misses it), and re-runs forever. See
-// _FUZZ_FINDINGS.md. This target will fail until boolexp is fixed; that failure is the point.
+// parenDepth to 0 (so the invalid-parenthesis guard misses it), and re-runs forever.
+// This target will fail until boolexp is fixed; that failure is the point.
 func FuzzWhenExpression(f *testing.F) {
 	f.Add(`amount > 100 && status == "ok"`, []byte(`{"amount":200,"status":"ok"}`))
 	f.Add(`x =~ "a+b*"`, []byte(`{"x":"aab"}`))
@@ -170,7 +170,7 @@ func FuzzWhenExpression(f *testing.F) {
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
-			t.Fatalf("boolexp hung on expr %q (see _FUZZ_FINDINGS.md: the %q infinite-loop class)", expr, ")(")
+			t.Fatalf("boolexp hung on expr %q (the %q infinite-loop class)", expr, ")(")
 		}
 	})
 }

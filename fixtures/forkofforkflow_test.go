@@ -28,8 +28,8 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestForkOfForkflow walks the failed-fan-out partial-recovery pattern the docs call *the* use of Fork
-// (engine/CLAUDE.md "Fork"): fork one failed branch at a time, each fork re-failing cleanly via cohort
+// TestForkOfForkflow walks the failed-fan-out partial-recovery pattern that is *the* use of Fork:
+// fork one failed branch at a time, each fork re-failing cleanly via cohort
 // accounting until every failed branch is fixed. Graph: A -> {X, Y} -> J (fan-in). Both X and Y fail (no
 // onError) on the first run, so the flow fails. Fixing X and forking from X's step re-runs X but the fork
 // still fails because Y's cloned failure keeps cohort_failures>0. Fixing Y and forking again from the fork's

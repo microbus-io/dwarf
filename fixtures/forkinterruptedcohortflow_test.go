@@ -122,7 +122,7 @@ func TestForkInterruptedCohortFlow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusInterrupted, snap.Status)
 
-		// Forking the failed branch (the finding's scenario) is rejected: its root flow is non-terminal, so the
+		// Forking the failed branch (this scenario) is rejected: its root flow is non-terminal, so the
 		// interrupted sibling can never be cloned into a running fork.
 		if !assert.NotEqual("", aKey) {
 			return

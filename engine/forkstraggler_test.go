@@ -27,7 +27,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestForkStraggler_NormalizedToCancelled pins review finding 7: a kept non-terminal (running/pending) step
+// TestForkStraggler_NormalizedToCancelled pins that a kept non-terminal (running/pending) step
 // off the fork path - a straggler sibling that had not settled when the origin terminalized - is normalized
 // to cancelled in the fork, not copied verbatim. Copied verbatim it would (a) be re-dispatched by lease
 // recovery in the running fork and (b) as a cohort member wedge the fork's fan-in. The state is a race the

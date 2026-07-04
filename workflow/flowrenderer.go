@@ -231,10 +231,7 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 		if isSubgraphCaller {
 			if isTerminalStepStatus(s.Status) && s.HasStarted() && !s.UpdatedAt.IsZero() && !s.StartedAt.IsZero() {
 				if subDur, ok := subgraphWallTime(s.SubHistory); ok {
-					net := s.UpdatedAt.Sub(s.StartedAt) - subDur
-					if net < 0 {
-						net = 0
-					}
+					net := max(s.UpdatedAt.Sub(s.StartedAt)-subDur, 0)
 					label += "\n" + flowFormatDuration(net)
 				}
 			}
@@ -315,10 +312,7 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 		if from.UpdatedAt.IsZero() || !to.HasStarted() || to.StartedAt.IsZero() {
 			return ""
 		}
-		d := to.StartedAt.Sub(from.UpdatedAt)
-		if d < 0 {
-			d = 0
-		}
+		d := max(to.StartedAt.Sub(from.UpdatedAt), 0)
 		return flowFormatDuration(d)
 	}
 	addEdge := func(fromID, toID int) {
@@ -398,15 +392,8 @@ func flowClassDefLine(b *strings.Builder, name, fill, text, stroke, extra string
 	fmt.Fprintf(b, "    classDef %s %s\n", name, strings.Join(parts, ","))
 }
 
-// mermaidEscaper neutralizes every Mermaid metacharacter in an author-controlled string (task and
-// workflow names, titles, when-expressions) before it is emitted into a label, edge text, or subgraph
-// title. Mermaid honors no backslash escaping inside labels, so Go %q is the wrong tool: a raw " ends
-// the label and lets the remainder inject node/edge/click syntax, and <, >, ` pass through into the
-// host's HTML-rendered label (an XSS/markup vector). Each is rewritten to its Mermaid numeric/named
-// character reference (#NN; / #quot;), which renders as the literal glyph. '#' is escaped first so an
-// input that already contains a "#quot;"-shaped substring cannot survive as a live reference:
-// strings.NewReplacer does a single non-overlapping left-to-right pass, so the references we emit are
-// never re-scanned. Every sink wraps the result in its own quotes; this handles the label *content*.
+// mermaidEscaper rewrites Mermaid metacharacters to numeric character references; '#' must be escaped
+// first so an already-#-shaped reference in the input cannot survive as a live one.
 var mermaidEscaper = strings.NewReplacer(
 	"#", "#35;",
 	"\"", "#quot;",

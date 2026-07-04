@@ -229,8 +229,7 @@ func (e *Engine) SetDSN(dsn string) error {
 // Startup at this count, and the count is immutable for the engine's life, so a call on a running engine is
 // rejected. Changing the shard count requires a coordinated restart (a maintenance window): each flow key
 // encodes its shard, so a live/piecemeal change would leave flows on a newly-added shard unroutable (404) on
-// any replica still at the old count. Safe live shard growth (rebalancing + cross-replica agreement) is a
-// larger problem left unsolved for now.
+// any replica still at the old count.
 func (e *Engine) SetNumShards(num int) error {
 	if e.started.Load() {
 		return errSetAfterStartup("number of shards")
@@ -242,9 +241,8 @@ func (e *Engine) SetNumShards(num int) error {
 	return nil
 }
 
-// SetWorkers sets the number of worker goroutines. Construction-time only: the pool is spawned at Startup
-// at this count, and live resizing (spawning/retiring workers and resizing the candidate cache) is not
-// supported, so a call on a running engine is rejected.
+// SetWorkers sets the number of worker goroutines. Construction-time only: the pool size is fixed at
+// Startup, so a call on a running engine is rejected.
 func (e *Engine) SetWorkers(n int) error {
 	if e.started.Load() {
 		return errSetAfterStartup("workers")
@@ -320,12 +318,10 @@ func (e *Engine) SetMeterProvider(mp metric.MeterProvider) error {
 
 // SetTracerProvider sets the OpenTelemetry TracerProvider the engine builds its spans from. Defaults to
 // the global otel.GetTracerProvider() (the no-op provider unless the host configures the OTEL SDK). The
-// engine mints the root "workflow" span at Create (persisted to the dwarf-owned trace_parent column) and a
-// per-step span in processStep, parented to the reconstructed root and placed on the TaskExecutor's
-// context so the task's downstream spans nest under it. The host injects only the provider - no span code,
-// no trace_parent handling. Spans are created under the "github.com/microbus-io/dwarf" scope; the
-// provider's Resource carries the host's identity. Construction-time only - the engine resolves the tracer
-// once at Startup.
+// engine emits one span per flow and one span per task, nested to mirror the call structure, under the
+// "github.com/microbus-io/dwarf" scope; the provider's Resource carries the host's identity. The host
+// injects only the provider - it writes no span or context code. Construction-time only - the engine
+// resolves the tracer once at Startup.
 func (e *Engine) SetTracerProvider(tp trace.TracerProvider) error {
 	if e.started.Load() {
 		return errSetAfterStartup("tracer provider")
@@ -339,8 +335,8 @@ func (e *Engine) SetTracerProvider(tp trace.TracerProvider) error {
 // otelslog bridge - can correlate each record with the active step span. A host routes logs to OTEL by
 // passing a logger whose handler bridges there. Defaults to a discard logger: until a logger is injected
 // the engine (and its sequel DB layer) stay silent rather than writing to the application-owned
-// slog.Default(). A nil logger resets to that silent default. Construction-time only - the engine wires
-// the logger into the worker hot path and the shard DBs at Startup, and reads it lock-free thereafter.
+// slog.Default(). A nil logger resets to that silent default. Construction-time only - the engine resolves
+// the logger once at Startup.
 func (e *Engine) SetLogger(l *slog.Logger) error {
 	if e.started.Load() {
 		return errSetAfterStartup("logger")
@@ -407,7 +403,7 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 // SetInTest puts the engine into test mode keyed by name, so a subsequent Startup opens per-name isolated,
 // auto-dropped databases (via sequel.CreateTestingDatabase) instead of the configured ones. Construction-
 // time only. It is the *testing.T-free counterpart to RunInTest, for a host running under an external test
-// harness that has no *testing.T but a stable isolation key such as its plane: every engine sharing the
+// harness that has no *testing.T but a stable per-test isolation key: every engine sharing the
 // same name resolves to the same isolated databases, so the replicas of a multi-replica test app converge
 // on one set. RunInTest(t) is SetInTest(t.Name()) plus Startup and a t.Cleanup shutdown.
 func (e *Engine) SetInTest(name string) error {
@@ -481,32 +477,22 @@ func (e *Engine) initRuntime() {
 
 	numWorkers := int(e.workers.Load())
 	for range numWorkers {
-		e.workerPool.Add(1)
-		go func() {
-			defer e.workerPool.Done()
+		e.workerPool.Go(func() {
 			e.workerLoop(e.lifetimeCtx)
-		}()
+		})
 	}
-	e.timerWorker.Add(1)
-	go func() {
-		defer e.timerWorker.Done()
+	e.timerWorker.Go(func() {
 		e.timerLoop(e.lifetimeCtx)
-	}()
-	e.refiller.Add(1)
-	go func() {
-		defer e.refiller.Done()
+	})
+	e.refiller.Go(func() {
 		e.refillerLoop(e.lifetimeCtx)
-	}()
-	e.recoveryWorker.Add(1)
-	go func() {
-		defer e.recoveryWorker.Done()
+	})
+	e.recoveryWorker.Go(func() {
 		e.recoveryLoop(e.lifetimeCtx)
-	}()
-	e.reaperWorker.Add(1)
-	go func() {
-		defer e.reaperWorker.Done()
+	})
+	e.reaperWorker.Go(func() {
 		e.reaperLoop(e.lifetimeCtx)
-	}()
+	})
 	e.requestRefill()
 }
 

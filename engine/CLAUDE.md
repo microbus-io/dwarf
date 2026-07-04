@@ -361,8 +361,7 @@ option, and no `notify_on_stop` column (all removed). A caller that wants to lea
 **`Await`s** it (blocking, bridges the workflow clock to a synchronous caller) or **composes** the
 notification into the workflow itself - an orchestrating graph whose final task reports the outcome to the
 upstream (with `flow.Retry` for durable delivery). This keeps notification policy and transport entirely in
-the host/author, matching the engine's "carry facts, not policy" posture (baggage, signals). See `_FLOWSTOP.md`
-for the rationale and the follow-on plans (cancel/interrupt-as-error, deferred deletion).
+the host/author, matching the engine's "carry facts, not policy" posture (baggage, signals).
 
 ### Execution Model
 
@@ -689,7 +688,7 @@ has exactly one fenced write to the dispatched step, and everything after it is 
   bumps, `successor_id` writes, `fireFanInDirect`, `completeFlowSequential`, `insertFanInStep` — needs no fence.
 - **fail** (`failStep`) — gated by the step-fail UPDATE, the transaction's first write, so a zero-row match
   wrote nothing: it commits the empty tx and returns `fenced=true`, and `failAndReturn` surfaces `nil` so the
-  flow the peer is re-running is never failed. This is finding-#1's "late error → healthy-flow kill", closed.
+  flow the peer is re-running is never failed. This closes the "late error → healthy-flow kill" case.
 - **retry** and **subgraph park** — gated by their `status='running' AND lease_seq=?` UPDATE (both already
   bailed on zero rows); their in-tx follow-ups (`deleteSubgraphFlowsRootedAt`, child spawn) are protected by
   the gate's row lock.
@@ -1400,7 +1399,7 @@ ordering was wrong:
   obligation - its only write-first requirement is that the *first* statement be a write (the `UPDATE dwarf_steps`
   satisfies it, keeping the SQLite deadlock closed). It is deliberately steps-first to match `Resume`/`Cancel`,
   which walk the *same* surgraph chain, so the two never lock that chain's flow+step rows in opposite order (the
-  former D2 cycle, now eliminated).
+  former deadlock cycle, now eliminated).
 
 `Create` inserts the flow row, then the entry step, then updates the flow (`created→running`) - flow-row-first in
 statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it

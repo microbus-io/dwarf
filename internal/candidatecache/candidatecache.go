@@ -30,10 +30,7 @@ type Job struct {
 	Shard  int
 }
 
-// Cache is a small, per-replica bounded set of step candidates produced by the refiller's two-level
-// priority+fairness selection. It is NOT a work queue: it holds hints, not ownership. Workers pop a
-// candidate and atomically CAS-acquire the step before executing, so a stale or duplicated candidate is
-// harmless (the loser of the CAS simply pops the next one).
+// Cache is a bounded per-replica set of step candidates - hints, not ownership.
 type Cache struct {
 	mu       sync.Mutex
 	cond     *sync.Cond

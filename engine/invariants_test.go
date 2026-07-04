@@ -24,7 +24,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// assertInvariants (see _MORETESTS.md C1) is the reusable end-of-test sweep that proves a workload never
+// assertInvariants is the reusable end-of-test sweep that proves a workload never
 // *created* any of the states the background wedge sweep / orphan detector exist to catch. It runs a fixed
 // set of structural checks by direct SQL against every shard and must be called only after the workload has
 // quiesced (all Awaits returned), because several checks are transiently violated mid-flight (a straggler

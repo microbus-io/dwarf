@@ -49,7 +49,7 @@ func TestDeepsubgraphflow(t *testing.T) {
 
 	// Intermediate levels: each is a single task that calls the next level as a subgraph and wraps the
 	// returned v, so the root's final v reflects every level it passed through.
-	for i := 0; i < depth; i++ {
+	for i := range depth {
 		gURL := "deepnest.verify:0/g" + strconv.Itoa(i)
 		taskURL := "deepnest.verify:0/call" + strconv.Itoa(i)
 		g := workflow.NewGraph("G" + strconv.Itoa(i))

@@ -34,10 +34,10 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// TestChaosSoak (see _MORETESTS.md C2) mechanizes hunting for the bug class findings 1/2/4 belong to: it
+// TestChaosSoak mechanizes hunting for the lease-fence and Delete/Purge-vs-Resume bug class: it
 // runs a mixed workload of three graph shapes while a chaos goroutine fires random lifecycle operations
 // (Cancel/Resume/Snapshot/History/Fork/Delete/duplicate DeliverSignal) at random flows, then drives every
-// flow to terminal and asserts (a) nothing wedged - every Await returns - (b) the C1 structural invariants
+// flow to terminal and asserts (a) nothing wedged - every Await returns - (b) the structural invariants
 // are clean, and (c) the dwarf_steps_unwedged "latent bug" alarm never fired. The RNG seed is logged so a
 // failure reproduces (DWARF_SOAK_SEED overrides it).
 func TestChaosSoak(t *testing.T) {
@@ -125,9 +125,7 @@ func TestChaosSoak(t *testing.T) {
 	stop := make(chan struct{})
 	var chaosWG sync.WaitGroup
 	for range 2 {
-		chaosWG.Add(1)
-		go func() {
-			defer chaosWG.Done()
+		chaosWG.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -161,7 +159,7 @@ func TestChaosSoak(t *testing.T) {
 				}
 				time.Sleep(time.Duration(roll(3)+1) * time.Millisecond)
 			}
-		}()
+		})
 	}
 
 	time.Sleep(4 * time.Second)

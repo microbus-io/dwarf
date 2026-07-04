@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"sort"
 	"strconv"
@@ -463,7 +464,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 
 	perShardCursor := map[int]int{}
 	if query.Cursor != "" {
-		for _, part := range strings.Split(query.Cursor, ",") {
+		for part := range strings.SplitSeq(query.Cursor, ",") {
 			s, fid, ok := strings.Cut(part, "=")
 			if !ok {
 				return nil, "", errors.New("malformed cursor", http.StatusBadRequest)
@@ -480,10 +481,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	singleShard := restrictShardNum != 0
 	perShardLimit := limit
 	if !singleShard && numShards > 0 {
-		perShardLimit = (limit + numShards - 1) / numShards
-		if perShardLimit < 1 {
-			perShardLimit = 1
-		}
+		perShardLimit = max((limit+numShards-1)/numShards, 1)
 	}
 
 	type listRow struct {
@@ -545,9 +543,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	}
 
 	nextPerShard := map[int]int{}
-	for s, fid := range perShardCursor {
-		nextPerShard[s] = fid
-	}
+	maps.Copy(nextPerShard, perShardCursor)
 	var flows []workflow.FlowSummary
 	for s := 1; s <= numShards; s++ {
 		rows := perShard[s]
@@ -747,10 +743,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	singleShard := restrictShardNum != 0
 	perShardLimit := limit
 	if !singleShard && numShards > 0 {
-		perShardLimit = (limit + numShards - 1) / numShards
-		if perShardLimit < 1 {
-			perShardLimit = 1
-		}
+		perShardLimit = max((limit+numShards-1)/numShards, 1)
 	}
 
 	perShardDeleted := make([]int, numShards+1)

@@ -77,7 +77,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	var bRuns int32
+	var bRuns atomic.Int32
 
 	g := workflow.NewGraph("Linear")
 	g.SetEndpoint("A", "forkflow.verify:428/a")
@@ -90,7 +90,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 		return nil
 	})
 	proxy.HandleTask("forkflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error {
-		atomic.AddInt32(&bRuns, 1)
+		bRuns.Add(1)
 		f.SetString("bSaw", f.GetString("seed"))
 		return nil
 	})
@@ -108,7 +108,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 	assert.Equal("orig", outcome.State["bSaw"])
-	assert.Equal(int32(1), atomic.LoadInt32(&bRuns))
+	assert.Equal(int32(1), bRuns.Load())
 
 	bKey := stepKeyByTask(t, eng, originKey, "B")
 	assert.NotEqual("", bKey)
@@ -123,7 +123,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	// The fork re-ran B (and C) with the override.
 	assert.Equal("forked", forkOutcome.State["bSaw"])
 	assert.Equal(true, forkOutcome.State["done"])
-	assert.Equal(int32(2), atomic.LoadInt32(&bRuns))
+	assert.Equal(int32(2), bRuns.Load())
 
 	// The original is unchanged and still its own completed flow.
 	origAfter, err := eng.Snapshot(ctx, originKey)

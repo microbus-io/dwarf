@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -192,8 +193,8 @@ func (e *Engine) cloneTree(ctx context.Context, tx *sequel.Tx, cc *forkClone, ro
 		if it.isRoot {
 			rootNewID = newFlowID
 		}
-		for i := len(children) - 1; i >= 0; i-- {
-			stack = append(stack, children[i])
+		for _, c := range slices.Backward(children) {
+			stack = append(stack, c)
 		}
 	}
 	return rootNewID, nil

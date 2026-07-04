@@ -31,7 +31,7 @@ import (
 
 // TestLeaseFence_FailStep pins that failStep's post-execution write is fenced on the dispatch's lease
 // generation (lease_seq): a zombie worker holding a stale generation cannot terminalize a flow the current
-// owner is healthily re-executing (finding #1's "late error → healthy-flow kill"), while the current owner
+// owner is healthily re-executing (the "late error → healthy-flow kill" race), while the current owner
 // still fails it normally.
 func TestLeaseFence_FailStep(t *testing.T) {
 	ctx := context.Background()
@@ -99,7 +99,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 	})
 }
 
-// zombieDispatch drives the real dispatch path into the finding-#1 lease-loss race and returns once a peer
+// zombieDispatch drives the real dispatch path into the late-error healthy-flow-kill lease-loss race and returns once a peer
 // worker has re-claimed and completed the flow while the first ("zombie") dispatch is still blocked. It:
 //   - blocks the named task's FIRST dispatch on a release channel (so it sits running under generation N),
 //   - force-expires that step's lease and runs pollPendingSteps so a free worker re-claims it (generation
@@ -147,7 +147,7 @@ func zombieDispatch(t *testing.T, eng *Engine, flowURL, blockTaskName string, ta
 	return flowKey, outcome
 }
 
-// TestLeaseFence_CompletionNoDuplicateSuccessor pins finding #1's "late success → duplicate successors"
+// TestLeaseFence_CompletionNoDuplicateSuccessor pins the "late success → duplicate successors"
 // variant: a zombie whose completion UPDATE carries a stale lease_seq must not re-complete its step nor
 // insert a second successor for the flow a peer already advanced. A -> B -> END; A's first dispatch is the
 // zombie, a peer re-runs A to completion (creating exactly one B), then the zombie is released and its
@@ -212,7 +212,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	assert.Equal(int64(2), aCalls.Load()) // A ran twice by design (zombie + owner re-dispatch)
 }
 
-// TestLeaseFence_CohortNoDoubleArrival pins finding #1's fan-out variant: a zombie branch whose completion
+// TestLeaseFence_CohortNoDoubleArrival pins the fan-out variant: a zombie branch whose completion
 // is fenced must not bump cohort_arrivals a second time (which would overshoot cohort_size and re-fire the
 // fan-in). A -> {X, Y} -> J (fan-in) -> END; X's first dispatch is the zombie, a peer re-runs X so the
 // cohort resolves and J fires exactly once, then the released zombie's fenced arrival must be a no-op.

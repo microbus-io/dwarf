@@ -29,7 +29,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// TestLeaseRecovery_EndToEnd is the end-to-end proof of lease-based crash recovery (see _MORETESTS.md B2):
+// TestLeaseRecovery_EndToEnd is the end-to-end proof of lease-based crash recovery:
 // a worker "crashes" mid-task (its first execution never returns), its lease expires, pollPendingSteps
 // resets the step, and a free worker re-executes it to completion. It asserts the whole path heals - the
 // flow completes on the second execution - and pins two properties: the dwarf_steps_recovered metric fires,

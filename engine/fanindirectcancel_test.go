@@ -27,7 +27,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestFanInDirectCancel_NoExtendCancelledFlow pins review finding 4: the empty-cohort direct fan-in path
+// TestFanInDirectCancel_NoExtendCancelledFlow pins the empty-cohort direct fan-in path
 // (fireFanInDirect) must not extend a flow a concurrent Cancel already terminalized. The window is the
 // completed-step-then-cancel race - the spawn step is marked `completed` by processStep, then the flow is
 // cancelled, then the worker reaches fireFanInDirect against the now-cancelled flow. Without the terminal-status

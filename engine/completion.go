@@ -372,7 +372,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		finalStateJSON = ""
 		reDispatchParent = false
 		// Fence the fail on our lease generation: a zombie whose lease was re-granted to a peer must not
-		// fail the flow (its unguarded predecessor was finding #1's "late error → healthy-flow kill"). This
+		// fail the flow (an unguarded write here is the "late error → healthy-flow kill" hazard). This
 		// is the first write in the transaction, so a zero-row match means nothing was written - commit the
 		// empty tx and report fenced so the caller abandons without failing the flow the peer is re-running.
 		res, uerr := tx.ExecContext(ctx,

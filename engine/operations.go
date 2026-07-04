@@ -34,7 +34,7 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// Create creates a new flow for a workflow without starting it.
+// create inserts a new flow for a workflow and runs it.
 func (e *Engine) create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	if workflowURL == "" {
 		return "", errors.New("workflow URL is required", http.StatusBadRequest)
@@ -579,17 +579,18 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 			finalStates[i] = fs
 		}
 
-		caseClause := "CASE"
+		var caseClause strings.Builder
+		caseClause.WriteString("CASE")
 		var flowArgs []any
 		for i, fid := range allFlowIDs {
-			caseClause += " WHEN flow_id=? THEN ?"
+			caseClause.WriteString(" WHEN flow_id=? THEN ?")
 			flowArgs = append(flowArgs, fid, finalStates[i])
 		}
-		caseClause += " END"
+		caseClause.WriteString(" END")
 		flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
 		flowArgs = append(flowArgs, allFlowIDs...)
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 			flowArgs...,
 		)
 		if err != nil {

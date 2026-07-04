@@ -32,10 +32,9 @@ func calcConnPoolSizes(workers, shards, workersPerConn, cap int) (idle, open int
 	denom := shards * workersPerConn
 	idle = (workers + denom - 1) / denom // ceil(workers / (shards*workersPerConn))
 	idle = max(idle, 2)                  // at least 2 connections per shard
-	open = idle*2 + 2                    // warm core + burst headroom
-	if open > cap {
-		open = cap
-	}
+	open = min(
+		// warm core + burst headroom
+		idle*2+2, cap)
 	if idle > open { // a tight ceiling can pull open below the formula idle
 		idle = open
 	}

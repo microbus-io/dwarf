@@ -98,13 +98,9 @@ func (r *GraphRenderer) WithLinks(paramName string) *GraphRenderer {
 func (r *GraphRenderer) Render() (string, error) {
 	var b strings.Builder
 	if r.titleLabel {
-		// Mermaid frontmatter: title and themeCSS are quoted YAML scalars so names/CSS with
-		// colons, braces, and '#' stay valid. The author-controlled graph name is additionally
-		// escapeMermaid'd (it strips every " so plain quotes suffice, and neutralizes < > ` that
-		// %q would pass through into the rendered caption). themeCSS is host-controlled and kept as
-		// %q. The built-in themes ignore titleColor on the flowchart caption, so paint
-		// .flowchartTitleText directly with the theme cyan (primary) - it reads on light and dark
-		// backgrounds (and tracks the CSS var in var() mode).
+		// The author-controlled graph name is painted into .flowchartTitleText (the built-in themes
+		// ignore titleColor on the flowchart caption). themeCSS is host-controlled and kept
+		// YAML-quoted via %q.
 		titleCSS := fmt.Sprintf(".flowchartTitleText { fill: %s; }", r.primaryFill)
 		fmt.Fprintf(&b, "---\ntitle: \"%s\"\nconfig:\n  themeCSS: %q\n---\n", escapeMermaid(r.g.name), titleCSS)
 	}
@@ -310,8 +306,8 @@ func hostOf(s string) string {
 	if !ok {
 		return ""
 	}
-	if i := strings.IndexByte(after, '/'); i >= 0 {
-		return after[:i]
+	if before, _, ok := strings.Cut(after, "/"); ok {
+		return before
 	}
 	return after
 }
@@ -322,9 +318,9 @@ func stripHostPort(s, ownHost string) string {
 		return s
 	}
 	host, path := after, ""
-	if i := strings.IndexByte(after, '/'); i >= 0 {
-		host = after[:i]
-		path = after[i+1:]
+	if before, after0, ok := strings.Cut(after, "/"); ok {
+		host = before
+		path = after0
 	}
 	if ownHost == "" || host == ownHost {
 		return path

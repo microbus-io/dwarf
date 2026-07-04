@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
-Concurrent Continue on one thread (see _MORETESTS.md D1). Continue bases a new turn on the thread's
+Concurrent Continue on one thread. Continue bases a new turn on the thread's
 latest non-fork flow and rejects with 409 if that latest flow is not completed. continueFlow runs
 that check and the new-turn insert in ONE transaction under a write-first lock on the thread anchor
 row, so concurrent Continues on one thread are serialized deterministically: exactly one succeeds and

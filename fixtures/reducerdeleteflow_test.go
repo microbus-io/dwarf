@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
-Reducer-managed delete at fan-in (see _MORETESTS.md D5). A branch's flow.Delete writes a cleared
+Reducer-managed delete at fan-in. A branch's flow.Delete writes a cleared
 (JSON null) change; at fan-in the cohort members fold in fan_out_ordinal order via MergeState with
 the field's reducer, and MergeState DROPS a cleared key regardless of reducer. So the outcome is
 order-dependent:

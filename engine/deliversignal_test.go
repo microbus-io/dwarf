@@ -52,8 +52,8 @@ func (r *enqueueRecorder) all() [][]byte {
 	return out
 }
 
-// TestDeliverSignal_IdempotentAndSpoofSafe pins the documented trust-boundary claim (see _MORETESTS.md B4
-// and DeliverSignal's godoc): duplicate and spoofed peer signals are harmless. A doorbell is a hint, never
+// TestDeliverSignal_IdempotentAndSpoofSafe pins the documented trust-boundary claim (see
+// DeliverSignal's godoc): duplicate and spoofed peer signals are harmless. A doorbell is a hint, never
 // an ownership grant - the claim CAS arbitrates - so replaying a real enqueue 100x, firing enqueues for
 // completed/nonexistent steps and invalid shards, and a statusChange for an unknown key must not re-execute
 // any task nor panic. DeliverSignal returns an error only for genuinely malformed input (bad JSON, unknown

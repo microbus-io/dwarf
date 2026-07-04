@@ -13,20 +13,24 @@ single **injected `Host` interface** (plus separately injected observability pro
 transport. A host application (for example a microservice) wires that interface to its own transport, identity, and
 observability. Where this doc refers to "the host" or "the adapter," it means that wrapping layer.
 
-> **Documentation convention.** Keep all prose and code comments host-agnostic. Dwarf is standalone; though it sits
-> downstream of a specific framework in this repo, it must never name or assume that host (not the Fabric, the Foreman,
-> or their types like `sub.TimeBudget` or a "plane"). Use **"host"** for the upstream layer and describe what it *does*
-> (mints a token, enforces a per-call deadline, shares a per-test isolation key), not which product does it.
+## Documentation conventions
 
-> **Audience convention (where each kind of prose lives).**
-> - **Godoc on exported identifiers** is the host developer's API doc: what the call does, its contract, args, returns,
->   errors, and caller invariants. Focused on use, not implementation.
-> - **Internal rationale - the *why* behind the mechanics - belongs here in CLAUDE.md by default.** Prefer adding to the
->   relevant section here over expanding a godoc comment.
-> - **Unexported/inline comments** carry agent-facing notes that must sit *next to the code* - a non-obvious ordering
->   constraint, an invariant a future edit could break. Keep them short.
-> - **Avoid lengthy rationale in code.** If a comment grows into paragraphs, move the rationale here and leave a terse note.
-> - **Do not refer to CLAUDE.md from code.** Comments stand on their own; CLAUDE.md references code, never the reverse.
+**Host-agnostic prose.** Keep all prose and code comments host-agnostic. Dwarf is standalone; though it sits
+downstream of a specific framework in this repo, it must never name or assume that host (not the Fabric, the Foreman,
+or their types like `sub.TimeBudget` or a "plane"). Use **"host"** for the upstream layer and describe what it *does*
+(mints a token, enforces a per-call deadline, shares a per-test isolation key), not which product does it.
+
+**Audience (who each kind of prose is for, and where it lives).**
+- **CLAUDE.md files** in this project are for the agent working on the Dwarf codebase.
+- **`docs/` and `README.md`** are for users and agents of the upstream project.
+- **Godoc comments** on public structs, functions, and packages are for upstream users and agents. They should
+  therefore not go into implementation details, and instead focus on how to use the API.
+- **Private comments** in the code should remain concise. They should not repeat what the code is already doing
+  unless it is not obvious on its own. They should include design rationale or a pitfall warning when it is specific
+  to that location.
+- **Cross-cutting design rationale** should generally be placed in the appropriate CLAUDE.md.
+- **No prose should refer to ephemeral working documents** - e.g. "finding A2" or "_PLAN.md".
+- **Comments in the code should not refer to CLAUDE.md.** The agent reads CLAUDE.md implicitly.
 
 ## Where the design docs live
 

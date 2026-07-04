@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
-Search literal-wildcard pin (see _MORETESTS.md D7). Query.Search escapes the LIKE metacharacters
+Search literal-wildcard pin. Query.Search escapes the LIKE metacharacters
 (% and _) in the caller's term, so a search matches the term LITERALLY rather than being steered
 into an unbounded wildcard scan: "a_b" matches only "a_b" (not "axb"), and "50%" matches only
 "50%off". This pins that escaping and guards the workflow/query.go Search godoc wording.

@@ -347,11 +347,9 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	const perWorker = 25
 	var wg sync.WaitGroup
 	var bad atomic.Int64
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < perWorker; i++ {
+	for range workers {
+		wg.Go(func() {
+			for range perWorker {
 				fk, err := e.Create(ctx, "doc/conc", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 				if err != nil {
 					bad.Add(1)
@@ -362,7 +360,7 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 					bad.Add(1)
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	testarossa.For(t).Equal(int64(0), bad.Load(),

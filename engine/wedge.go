@@ -240,17 +240,18 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 			finalStates[i] = fs
 		}
 
-		caseClause := "CASE"
+		var caseClause strings.Builder
+		caseClause.WriteString("CASE")
 		var flowArgs []any
 		for i, fid := range allFlowIDs {
-			caseClause += " WHEN flow_id=? THEN ?"
+			caseClause.WriteString(" WHEN flow_id=? THEN ?")
 			flowArgs = append(flowArgs, fid, finalStates[i])
 		}
-		caseClause += " END"
+		caseClause.WriteString(" END")
 		flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
 		flowArgs = append(flowArgs, allFlowIDs...)
 		_, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET final_state="+caseClause+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 			flowArgs...,
 		)
 		return errors.Trace(err)
