@@ -395,6 +395,9 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	var finalStateJSON string
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		fenced = false
+		// A trunk step (lineage_id==0) has no concurrent sibling, so its failure fails the flow at once.
+		// A fan-out branch (lineage_id!=0) instead defers to cohort accounting below: siblings run to
+		// completion and the flow fails only once the whole cohort arrives with cohort_failures>0.
 		failFlow = stepLineageID == 0
 		finalStateJSON = ""
 		reDispatchParent = false

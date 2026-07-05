@@ -454,7 +454,13 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 			}
 		case <-ticker.C:
 		case <-ctx.Done():
-			return nil, errors.Trace(ctx.Err(), http.StatusRequestTimeout)
+			// The ctx ended before the flow stopped. Return the current non-terminal outcome (Stopped() is
+			// false) rather than an error; the public Await turns a not-stopped result into a timeout error,
+			// while Poll returns it as-is so a caller can re-poll.
+			if outcome != nil {
+				return outcome, nil
+			}
+			return &workflow.FlowOutcome{Status: workflow.StatusRunning}, nil
 		}
 	}
 }
@@ -714,12 +720,15 @@ func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, 
 	}
 	outcome, err = e.await(ctx, flowKey)
 	if err != nil {
-		// await usually fails because the caller's ctx expired (timeout/cancel). The flow is durable and
-		// already running on the engine's own worker lifetime, independent of this call - so do NOT tear it
-		// down. Cancelling here would destroy healthy, in-progress work (a durable retry-until-success job
-		// especially) just because the caller stopped waiting - an availability footgun. Return the flowKey
-		// with the error instead, so the caller keeps a handle to re-Await/Snapshot/Cancel on its own terms.
 		return flowKey, nil, errors.Trace(err)
+	}
+	if !outcome.Stopped() {
+		// The caller's ctx expired before the flow stopped. The flow is durable and already running on the
+		// engine's own worker lifetime, independent of this call - so do NOT tear it down. Cancelling here
+		// would destroy healthy, in-progress work (a durable retry-until-success job especially) just because
+		// the caller stopped waiting - an availability footgun. Return the flowKey with a timeout error
+		// instead, so the caller keeps a handle to re-Await/Snapshot/Cancel on its own terms.
+		return flowKey, nil, errors.Trace(ctx.Err(), http.StatusRequestTimeout)
 	}
 	return flowKey, outcome, nil
 }

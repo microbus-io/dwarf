@@ -658,8 +658,24 @@ func (e *Engine) ShardInfo(ctx context.Context) ([]ShardSummary, error) {
 	return e.shardInfo(ctx)
 }
 
-// Await blocks until a flow stops.
+// Await blocks until a flow stops, or until the ctx expires (which returns an error).
 func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
+	outcome, err := e.await(ctx, flowKey)
+	if err != nil {
+		return nil, err
+	}
+	if !outcome.Stopped() {
+		// await returned a non-terminal outcome only because the ctx ended before the flow stopped.
+		return nil, errors.Trace(ctx.Err(), http.StatusRequestTimeout)
+	}
+	return outcome, nil
+}
+
+// Poll returns a flow's current outcome, blocking up to the ctx deadline for it to stop. Unlike Await, a ctx
+// timeout is not an error: it returns the current non-terminal outcome, whose Stopped() reports false, so a
+// caller bridging an open-ended flow to a bounded request (e.g. an HTTP poll) can answer within its budget and
+// re-poll. A real failure still returns an error.
+func (e *Engine) Poll(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	return e.await(ctx, flowKey)
 }
 

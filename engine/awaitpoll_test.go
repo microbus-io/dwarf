@@ -119,3 +119,63 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 	}
 	rel()
 }
+
+// TestPoll_RunningThenStopped pins the difference between Poll and Await on a deadline: while the flow is still
+// running, Poll returns a non-terminal outcome with no error (so a caller can re-poll), whereas Await turns the
+// same deadline into a timeout error. Once the flow stops, Poll returns the terminal outcome.
+func TestPoll_RunningThenStopped(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	proxy := NewTestProxy()
+	release := make(chan struct{})
+	var once sync.Once
+	rel := func() { once.Do(func() { close(release) }) }
+	defer rel()
+
+	g := workflow.NewGraph("PollTest")
+	g.SetEndpoint("Block", "polltest.verify:0/block")
+	g.AddTransition("Block", workflow.END)
+	proxy.HandleGraph("polltest.verify:0/g", g)
+	proxy.HandleTask("polltest.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	e.awaitPollInterval = 20 * time.Millisecond
+	e.RunInTest(t)
+
+	flowKey, err := e.Create(ctx, "polltest.verify:0/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// While the flow is blocked, Poll with a short deadline returns a running outcome and no error.
+	pollCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	out, perr := e.Poll(pollCtx, flowKey)
+	cancel()
+	assert.NoError(perr)
+	if assert.True(out != nil, "Poll returned a nil outcome") {
+		assert.False(out.Stopped(), "a still-running flow must not be Stopped()")
+	}
+
+	// Await with the same short deadline instead surfaces a timeout error.
+	awaitCtx, cancel2 := context.WithTimeout(ctx, 150*time.Millisecond)
+	_, aerr := e.Await(awaitCtx, flowKey)
+	cancel2()
+	assert.Error(aerr)
+
+	// Release the flow; Poll then returns the terminal outcome.
+	rel()
+	out, perr = e.Poll(ctx, flowKey)
+	assert.NoError(perr)
+	if assert.True(out != nil, "Poll returned a nil outcome after completion") {
+		assert.True(out.Stopped())
+		assert.Equal(workflow.StatusCompleted, out.Status)
+	}
+}

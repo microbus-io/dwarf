@@ -33,3 +33,18 @@ type FlowOutcome struct {
 	// CancelReason is the reason string passed to Cancel(flowKey, reason). Populated when Status is "cancelled".
 	CancelReason string `json:"cancelReason,omitzero"`
 }
+
+// Stopped reports whether the flow has stopped - reached any status other than not-yet-started (created,
+// pending) or actively running. A running outcome returned by Poll (Stopped() == false) means the flow has
+// not stopped yet and the caller should poll again.
+func (o *FlowOutcome) Stopped() bool {
+	if o == nil {
+		return false
+	}
+	switch o.Status {
+	case "", StatusCreated, StatusPending, StatusRunning:
+		return false
+	default:
+		return true
+	}
+}
