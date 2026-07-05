@@ -69,8 +69,11 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 			default:
 			}
 			rows, err := db.QueryContext(ctx,
+				// ORDER BY flow_id is not for ordering (the tree delete is set-based and order-agnostic) - it is
+				// REQUIRED because LIMIT_OFFSET compiles to OFFSET/FETCH on SQL Server, which rejects it without a
+				// preceding ORDER BY ("Invalid usage of the option NEXT in the FETCH statement"). flow_id is the PK.
 				"SELECT flow_id FROM dwarf_flows WHERE delete_after_ms>0 AND surgraph_flow_id=0"+
-					" AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW_UTC() LIMIT_OFFSET(?, 0)",
+					" AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW_UTC() ORDER BY flow_id LIMIT_OFFSET(?, 0)",
 				reapBatch,
 			)
 			// faultReapSelectErr treats this due-root scan as errored (sibling to faultReapMidTree, which covers
