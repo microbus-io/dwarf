@@ -575,7 +575,7 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 	// re-armed - the wedge shape (caller running+parkedSubgraph with a terminal child) that
 	// recoverWedgedSubgraphParks must backstop. Returning (false, nil), not an error, so the child's
 	// terminalization is NOT rolled back (an error would retry and deliver, producing no wedge).
-	if e.isFault(faultDeliverFailureErr) {
+	if e.deliverFailureLost(ctx, tx, parentStepID) {
 		return false, nil
 	}
 	res, err := tx.ExecContext(ctx,

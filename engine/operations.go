@@ -39,6 +39,18 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if workflowURL == "" {
 		return "", errors.New("workflow URL is required", http.StatusBadRequest)
 	}
+	// Reject a negative priority/weight rather than silently coercing it to the default (resolveFlowOptions
+	// treats <=0 as "unset"): a negative value is a caller bug, and swallowing it hides it. 0 stays "use the
+	// engine default" for both, so this only rejects genuinely-invalid input. Genesis-only (Create/Run);
+	// derived ops (Continue/Fork/subgraph) inherit already-validated values and take no FlowOptions.
+	if opts != nil {
+		if opts.Priority < 0 {
+			return "", errors.New("priority must be >= 0", http.StatusBadRequest)
+		}
+		if opts.FairnessWeight < 0 {
+			return "", errors.New("fairness weight must be >= 0", http.StatusBadRequest)
+		}
+	}
 	opts = e.resolveFlowOptions(opts)
 	// The create-time GraphLoader sees the baggage on ctx in the same decoded shape every dispatch will.
 	loaderCtx := workflow.ContextWithBaggage(ctx, baggageMap(opts.Baggage))

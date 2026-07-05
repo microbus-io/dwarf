@@ -284,3 +284,251 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	assert.Equal(int64(1), jCalls.Load()) // J executed exactly once
 	assert.Equal(int64(2), xCalls.Load()) // X ran twice by design (zombie + owner re-dispatch)
 }
+
+// TestLeaseFence_RecoveryResetFenced pins the fence on the processStep recovery defer's own reset - the one
+// guarding the recovery machinery itself, previously reasoned-only (the leaseSeq>0 gate). Distinct from
+// faultRecoveryResetErr (which tests the reset *failing*): this proves a zombie's reset (completed->pending)
+// carrying a stale lease generation matches zero rows, so it cannot rewind a peer's freshly-claimed step.
+//
+// The completed->pending reset fires when a step is marked `completed` but its follow-up transition
+// transaction then fails; the defer rolls it back so it re-dispatches. A real peer can never re-claim a
+// `completed` step, so the race the fence defends against is unreachable in production - the test manufactures
+// its precondition: freeze the zombie at the reset (its step `completed` under generation N), force the step
+// back to `pending` (as lease recovery would) so a peer re-claims it (bumping to N+1) and drives the flow to
+// completion, then release the zombie. Its reset, fenced on generation N, must be a no-op.
+func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	var aCalls atomic.Int64
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("LF-RR")
+	g.SetEndpoint("A", "lfrr/a")
+	g.SetEndpoint("B", "lfrr/b")
+	g.AddTransition("A", "B")
+	g.AddTransition("B", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("lfrr/g", g)
+	proxy.HandleTask("lfrr/a", func(ctx context.Context, f *workflow.Flow) error { aCalls.Add(1); return nil })
+	proxy.HandleTask("lfrr/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	eng := NewEngine()
+	assert.NoError(eng.SetWorkers(3))
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
+
+	// The first (zombie) dispatch of A completes, its transition tx fails (one-shot fault), and the recovery
+	// defer freezes at the reset checkpoint with A `completed` under generation N.
+	eng.injectFault(faultKey(faultTransitionCommit, "A"))
+	eng.setBreakpoint(checkpointBeforeRecoveryReset)
+
+	flowKey, err := eng.Create(ctx, "lfrr/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	cpWaitFor(t, eng, checkpointBeforeRecoveryReset, 15*time.Second)
+
+	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := eng.db.Shard(shardNum)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// Manufacture the peer re-claim the reset fence guards against. Lease recovery resets a lost-lease step
+	// running->pending WITHOUT bumping lease_seq; here the step is `completed`, so we force the same pending
+	// state directly (the completed->pending reset a real peer can never trigger on its own). The peer's claim
+	// then bumps the generation to N+1 and, with the one-shot fault already consumed, drives A->B->END.
+	res, err := db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET status='"+workflow.StatusPending+"', lease_expires=NOW_UTC() WHERE flow_id=? AND task_name='A' AND status='"+workflow.StatusCompleted+"'",
+		flowID)
+	assert.NoError(err)
+	if n, _ := res.RowsAffected(); !assert.Equal(int64(1), n) { // the zombie really did mark A completed
+		return
+	}
+	eng.pollPendingSteps(ctx) // ring the doorbell so a free worker re-claims the now-pending A
+
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	outcome, err := eng.Await(awaitCtx, flowKey)
+	if !assert.NoError(err) || !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+
+	// Snapshot the peer's A (completed under N+1) before releasing the zombie.
+	var beforeStatus string
+	var beforeSeq int
+	assert.NoError(db.QueryRowContext(ctx,
+		"SELECT status, lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&beforeStatus, &beforeSeq))
+	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(beforeStatus))
+
+	// Release the zombie: its reset carries the stale generation N and must match zero rows.
+	eng.clearBreakpoint(checkpointBeforeRecoveryReset)
+
+	// A broken fence would rewind A completed->pending within milliseconds and re-dispatch it a third time
+	// after the flow already completed; the settle window makes the fence's zero-row match observable.
+	time.Sleep(1 * time.Second)
+
+	var afterStatus string
+	var afterSeq int
+	assert.NoError(db.QueryRowContext(ctx,
+		"SELECT status, lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&afterStatus, &afterSeq))
+	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(afterStatus)) // peer's step untouched, not rewound
+	assert.Equal(beforeSeq, afterSeq)                                      // generation unchanged by the fenced reset
+	assert.Equal(int64(2), aCalls.Load())                                  // zombie + peer only, never a third dispatch
+	assertInvariants(t, eng)
+}
+
+// TestLeaseFence_RetryRewindFenced pins the retry-rewind fence: a zombie whose task armed flow.Retry must not
+// rewind (completed -> pending) a step the current owner already drove to completion. The retry UPDATE is gated
+// on `status='running' AND lease_seq=?`, so the zombie's stale generation matches zero rows and its follow-up
+// (the deleteSubgraphFlowsRootedAt reap + re-dispatch) never runs. A -> END; A's first dispatch is the zombie, a
+// peer re-runs A (arming a *real* retry, then completing), then the released zombie's fenced rewind is a no-op.
+func TestLeaseFence_RetryRewindFenced(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	var aCalls atomic.Int64
+	aStarted := make(chan struct{}, 1)
+	aRelease := make(chan struct{})
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("LF-Retry")
+	g.SetEndpoint("A", "lfr/a")
+	g.AddTransition("A", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("lfr/g", g)
+	proxy.HandleTask("lfr/a", func(ctx context.Context, f *workflow.Flow) error {
+		switch aCalls.Add(1) {
+		case 1:
+			// The first (zombie) dispatch blocks until the peer has finished the flow, then arms a retry whose
+			// rewind must be fenced by the stale lease_seq.
+			aStarted <- struct{}{}
+			<-aRelease
+			f.Retry(0, 1.0, 0, 0)
+			return nil
+		case 2:
+			// The peer (current owner) drives a real, immediate retry, rewinding the step and re-dispatching.
+			f.Retry(0, 1.0, 0, 0)
+			return nil
+		default:
+			return nil // the re-dispatch after the real retry completes the flow
+		}
+	})
+
+	eng := NewEngine()
+	assert.NoError(eng.SetWorkers(3))
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
+
+	flowKey, outcome := zombieDispatch(t, eng, "lfr/g", "A", &aCalls, aStarted, aRelease)
+	if !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+
+	// Release the zombie; its late retry rewind carries the stale lease_seq and must match zero rows (no rewind
+	// of the completed step, no reap, no re-dispatch).
+	close(aRelease)
+
+	_, flowID, _, err := keys.ParseFlowKey(flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := eng.db.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+	// A broken fence rewinds the completed step to pending within milliseconds; the settle window makes the
+	// absence of that rewind meaningful.
+	time.Sleep(1 * time.Second)
+	var aStatus string
+	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStatus))
+	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(aStatus)) // still completed, not rewound to pending
+	assert.Equal(int64(3), aCalls.Load())                              // zombie + peer retry + peer completion; the fenced zombie did not re-dispatch a 4th
+	assertInvariants(t, eng)                                           // a broken fence would leave a completed flow with a pending step (check #1)
+}
+
+// TestLeaseFence_SubgraphParkFenced pins the subgraph-park fence: a zombie whose task armed flow.Subgraph must not
+// park its step (running -> running+parkedSubgraph) and spawn a *second* child for a flow the current owner already
+// completed. The park UPDATE is gated on `status='running' AND lease_seq=?`, so the zombie's stale generation
+// matches zero rows and createSubgraphFlow never runs. A (calls a subgraph) -> END; A's first dispatch is the
+// zombie, a peer re-runs A so the real child spawns and completes, then the released zombie's fenced park is a no-op.
+func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	var aCalls, cCalls atomic.Int64
+	aStarted := make(chan struct{}, 1)
+	aRelease := make(chan struct{})
+
+	proxy := NewTestProxy()
+	parent := workflow.NewGraph("LF-SubPark")
+	parent.SetEndpoint("A", "lfs/a")
+	parent.AddTransition("A", workflow.END)
+	assert.NoError(parent.Validate())
+	proxy.HandleGraph("lfs/g", parent)
+	child := workflow.NewGraph("LF-SubParkChild")
+	child.SetEndpoint("C", "lfs/c")
+	child.AddTransition("C", workflow.END)
+	assert.NoError(child.Validate())
+	proxy.HandleGraph("lfs/child", child)
+	proxy.HandleTask("lfs/a", func(ctx context.Context, f *workflow.Flow) error {
+		if aCalls.Add(1) == 1 {
+			// The first (zombie) dispatch blocks until the peer has finished the flow, then arms a subgraph whose
+			// park must be fenced by the stale lease_seq (so it spawns no second child).
+			aStarted <- struct{}{}
+			<-aRelease
+		}
+		yield, err := f.Subgraph("lfs/child", nil, nil)
+		if err != nil {
+			return err
+		}
+		if yield {
+			return nil
+		}
+		return nil // re-entry after the child completed
+	})
+	proxy.HandleTask("lfs/c", func(ctx context.Context, f *workflow.Flow) error {
+		cCalls.Add(1)
+		return nil
+	})
+
+	eng := NewEngine()
+	assert.NoError(eng.SetWorkers(3))
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
+
+	flowKey, outcome := zombieDispatch(t, eng, "lfs/g", "A", &aCalls, aStarted, aRelease)
+	if !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+
+	// Release the zombie; its late park carries the stale lease_seq and must match zero rows (no re-park, no
+	// second child flow).
+	close(aRelease)
+
+	_, flowID, _, err := keys.ParseFlowKey(flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := eng.db.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+	// A broken fence parks the completed caller and spawns a duplicate child within milliseconds; settle first.
+	time.Sleep(1 * time.Second)
+	var children int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=? AND surgraph_flow_id<>0", flowID).Scan(&children))
+	assert.Equal(1, children) // exactly one subgraph child, not a zombie-spawned duplicate
+	var aStatus string
+	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStatus))
+	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(aStatus)) // caller still completed, not re-parked
+	assert.Equal(int64(1), cCalls.Load())                              // the child task ran exactly once
+	assertInvariants(t, eng)
+}

@@ -367,6 +367,88 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	}
 }
 
+// TestFaultSite_DeliverFailureLost_DeepSubgraph extends the single-level TestFaultSite_DeliverFailureErr
+// to a depth-2 subgraph: Root(Call1) -> Mid(Call2) -> Leaf(X, fails). It proves the wedge sweep composes across
+// nesting - a lost failure-delivery at each level wedges that level's caller, and recoverWedgedSubgraphParks
+// re-drives deliverSubgraphError UP two levels to the root:
+//
+//	Leaf X fails -> deliver to Call2 LOST      => Call2 wedges (running+parkedSubgraph, Leaf terminal)
+//	sweep recovers Call2 -> Mid re-fails
+//	Mid fails    -> deliver to Call1 LOST      => Call1 wedges
+//	sweep recovers Call1 -> Root fails         => tree terminalizes
+//
+// The fault is scoped by the parked caller's task name, so each level's FIRST delivery (the natural one) is
+// dropped while its second (the sweep-driven re-delivery) goes through - letting BOTH levels genuinely wedge,
+// not just the deepest. Asserts the root terminalizes, dwarf_steps_unwedged{park_type=subgraph} fired once per
+// level (==2), and the tree ends structurally clean.
+func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	proxy := NewTestProxy()
+	root := workflow.NewGraph("Root")
+	root.SetEndpoint("Call1", "ftbdeep/call1")
+	root.AddTransition("Call1", workflow.END)
+	proxy.HandleGraph("ftbdeep/root", root)
+	mid := workflow.NewGraph("Mid")
+	mid.SetEndpoint("Call2", "ftbdeep/call2")
+	mid.AddTransition("Call2", workflow.END)
+	proxy.HandleGraph("ftbdeep/mid", mid)
+	leaf := workflow.NewGraph("Leaf")
+	leaf.SetEndpoint("X", "ftbdeep/x")
+	leaf.AddTransition("X", workflow.END)
+	proxy.HandleGraph("ftbdeep/leaf", leaf)
+	proxy.HandleTask("ftbdeep/call1", subgraphTask("ftbdeep/mid"))
+	proxy.HandleTask("ftbdeep/call2", subgraphTask("ftbdeep/leaf"))
+	// The leaf task fails with no onError, so the leaf child flow fails and delivers up the chain.
+	proxy.HandleTask("ftbdeep/x", func(ctx context.Context, f *workflow.Flow) error {
+		return errors.New("leaf boom")
+	})
+
+	e := NewEngine()
+	assert.NoError(e.SetWorkers(4))
+	e.SetHost(proxy)
+	reader := withManualReader(e)
+	e.RunInTest(t)
+
+	// Drop each level's FIRST failure-delivery independently (scoped by the parked caller's task name). Each
+	// caller's sweep-driven re-delivery (the second consult of its scope) succeeds, so the sweep can recover it.
+	e.injectFault(faultKey(faultDeliverFailureErr, "Call2"))
+	e.injectFault(faultKey(faultDeliverFailureErr, "Call1"))
+	fk, err := e.Create(ctx, "ftbdeep/root", nil, nil)
+	assert.NoError(err)
+	shard, rootFlowID, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	db, err := e.db.Shard(shard)
+	assert.NoError(err)
+
+	// First wedge forms during normal execution: the leaf child fails, but its delivery to Call2 is lost, so
+	// Call2 (in the mid child) is stuck running+parkedSubgraph with a terminal child.
+	got := waitUntil(t, 5*time.Second, func() bool {
+		return countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE workflow_url='ftbdeep/leaf' AND status='"+workflow.StatusFailed+"'") == 1
+	})
+	assert.True(got, "expected the leaf child to fail and Call2 to wedge")
+
+	// Drive the sweep (minAge 0 bypasses the steady-state age guard). Pass 1 recovers Call2, which re-fails the
+	// mid child, whose delivery to Call1 is then lost (Call1 wedges); a later pass recovers Call1, which re-fails
+	// the root. Each pass re-queries the wedged set, so the newly-formed Call1 wedge needs its own pass - hence
+	// the driven loop rather than a single sweep call.
+	got = waitUntil(t, 15*time.Second, func() bool {
+		e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
+		return countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusFailed+"'", rootFlowID) == 1
+	})
+	assert.True(got, "expected the sweep to propagate the failure up both levels to the root")
+	waitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
+
+	// The two wedges (Call2, Call1) were each unwedged exactly once, and the tree ends structurally clean.
+	assertInvariants(t, e)
+	var rm metricdata.ResourceMetrics
+	if assert.NoError(reader.Collect(ctx, &rm)) {
+		unwedged, ok := sumCounter(rm, "dwarf_steps_unwedged", "park_type", "subgraph")
+		assert.True(ok, "expected dwarf_steps_unwedged{park_type=subgraph} to have fired")
+		assert.Equal(int64(2), unwedged, "the sweep should have unwedged a caller at each of the two levels")
+	}
+}
+
 // TestFaultSite_ReapSelectErr pins the reaper's resilience to a transient due-root SELECT failure (sibling to
 // faultReapMidTree, which covers the delete half): the pass logs and bails without deleting, and the NEXT
 // pass reaps cleanly.

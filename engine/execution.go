@@ -77,6 +77,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 				resetSQL += " AND lease_seq=?"
 				resetArgs = append(resetArgs, leaseSeq)
 			}
+			// Test checkpoint: a breakpoint here freezes a zombie between capturing its (stale) reset and
+			// running it, so a test can let a peer re-claim+bump the step first and prove the lease_seq fence
+			// makes the zombie's reset a zero-row no-op (never rewinding the peer's freshly-claimed step).
+			e.checkpoint(ctx, checkpointBeforeRecoveryReset)
 			db.Transact(ctx, func(tx *sequel.Tx) error {
 				// faultRecoveryResetErr makes this last-resort reset itself fail (a non-retryable error, as if
 				// it lost to a contention storm), so the step stays `completed` and the flow strands `running`
@@ -849,6 +853,12 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		var curLeaseSeq int
 		if serr := tx.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE step_id=?", stepID).Scan(&curLeaseSeq); serr != nil {
 			return errors.Trace(serr)
+		}
+		// faultInterruptStaleWrite forces the generation to look re-granted (as a real zombie would, after a peer
+		// re-claimed the leaf), so the fence trips and the WHOLE transaction rolls back - undoing the ancestor
+		// re-park - and the worker abandons. The only fence in the engine that rolls back rather than no-ops.
+		if e.isFault(faultInterruptStaleWrite) {
+			curLeaseSeq = leaseSeq + 1
 		}
 		if curLeaseSeq != leaseSeq {
 			fenced = true

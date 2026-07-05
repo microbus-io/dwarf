@@ -16,7 +16,12 @@ limitations under the License.
 
 package engine
 
-import "context"
+import (
+	"context"
+	"strings"
+
+	"github.com/microbus-io/sequel"
+)
 
 // This file holds two test-only instrumentation seams a white-box test in this package uses to exercise
 // recovery/race paths deterministically, without DB forging or timing hammers. Both are inert in production:
@@ -61,17 +66,18 @@ const (
 	faultSignalPeersPanic = "signalPeersPanic" // the host SignalPeers call panics (host-call panic isolation)
 
 	// Process-wide (no scope):
-	faultDropSignalStop    = "dropSignalStop"    // signalStop delivers nothing (lost terminal wake)
-	faultDropDoorbell      = "dropDoorbell"      // the enqueue doorbell is dropped (lost wake)
-	faultRecoveryResetErr  = "recoveryResetErr"  // the processStep recovery defer's own reset UPDATE errors
-	faultReapMidTree       = "reapMidTree"       // the reaper errors after deleting steps, before flows
-	faultReapSelectErr     = "reapSelectErr"     // the reaper's due-root SELECT errors
-	faultRefillScanErr     = "refillScanErr"     // the refiller's priority-band scan errors
-	faultPollSizingErr     = "pollSizingErr"     // the poll's pending-sizing query is treated as errored
-	faultDeliverFailureErr = "deliverFailureErr" // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery)
-	faultCancelCommit      = "cancelCommit"      // the Cancel transaction errors
-	faultResumeCommit      = "resumeCommit"      // the Resume transaction errors
-	faultForkCommit        = "forkCommit"        // the Fork clone transaction errors
+	faultInterruptStaleWrite = "interruptStaleWrite" // handleInterrupt's in-tx leaf lease_seq read is forced to mismatch (zombie)
+	faultDropSignalStop      = "dropSignalStop"      // signalStop delivers nothing (lost terminal wake)
+	faultDropDoorbell        = "dropDoorbell"        // the enqueue doorbell is dropped (lost wake)
+	faultRecoveryResetErr    = "recoveryResetErr"    // the processStep recovery defer's own reset UPDATE errors
+	faultReapMidTree         = "reapMidTree"         // the reaper errors after deleting steps, before flows
+	faultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
+	faultRefillScanErr       = "refillScanErr"       // the refiller's priority-band scan errors
+	faultPollSizingErr       = "pollSizingErr"       // the poll's pending-sizing query is treated as errored
+	faultDeliverFailureErr   = "deliverFailureErr"   // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery); unscoped, or scoped by the parked caller's task name for per-level control
+	faultCancelCommit        = "cancelCommit"        // the Cancel transaction errors
+	faultResumeCommit        = "resumeCommit"        // the Resume transaction errors
+	faultForkCommit          = "forkCommit"          // the Fork clone transaction errors
 )
 
 // faultKey builds a scoped fault key: "<fault>:<scope>[:<scope>...]". The test side uses it to arm a
@@ -108,6 +114,27 @@ func (e *Engine) isFault(fault string, scope ...string) bool {
 		e.faults[name] = n - 1
 	}
 	return true
+}
+
+// deliverFailureLost consults faultDeliverFailureErr, the seam that simulates a subgraph child's
+// failure-delivery to its parked caller being lost (wedging the caller for recoverWedgedSubgraphParks to
+// backstop). It fires either unscoped (the single-level lost-delivery pin) OR scoped to the parked caller's task name,
+// so a multi-level test drops the delivery at one chosen level while the other level's succeeds - each caller
+// task's FIRST delivery is lost and its sweep-driven re-delivery goes through, letting a depth-N tree wedge
+// (and unwedge) at every level. Inert in production: the underTest gate short-circuits before the scope
+// SELECT, so a live binary runs neither the query nor any consult.
+func (e *Engine) deliverFailureLost(ctx context.Context, tx sequel.Executor, parentStepID int) bool {
+	if !e.underTest {
+		return false
+	}
+	if e.isFault(faultDeliverFailureErr) {
+		return true
+	}
+	var taskName string
+	if err := tx.QueryRowContext(ctx, "SELECT task_name FROM dwarf_steps WHERE step_id=?", parentStepID).Scan(&taskName); err != nil {
+		return false
+	}
+	return e.isFault(faultDeliverFailureErr, strings.TrimSpace(taskName))
 }
 
 // injectFault arms the named fault to fire once (additive: calling twice fires twice).
@@ -162,6 +189,7 @@ const (
 	checkpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // completeFlow(), just before its transaction's status-gate write
 	checkpointBeforeDeleteWrite       = "beforeDeleteWrite"       // deleteFlow(), just before its transaction's delete-stamp/interrupted-CAS write
 	checkpointBeforeReviveWrite       = "beforeReviveWrite"       // completeSurgraphFlow(), just before its transaction's caller-revive write
+	checkpointBeforeRecoveryReset     = "beforeRecoveryReset"     // processStep recovery defer, just before its fenced step-reset transaction
 
 	// Lifecycle rendezvous (fired at an event, used with waitFor - not a freeze site): lets a test wait for
 	// exact engine progress instead of polling status / sleeping.
