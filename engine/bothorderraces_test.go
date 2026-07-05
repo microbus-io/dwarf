@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// CP-E: both-order interleavings. A race with two legal outcomes is pinned in BOTH directions
+// Both-order interleavings. A race with two legal outcomes is pinned in BOTH directions
 // deterministically by freezing the racing operations at checkpoints and releasing them in a chosen order -
 // where a probabilistic loop only ever samples "whichever won this time". These use the checkpoint seam's
 // setBreakpoint on one or two sites to drive each order.
@@ -115,7 +115,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 // at their pre-transaction checkpoints, released in a chosen order. Both gate on the flow being `interrupted`,
 // so exactly one wins the CAS: released Resume-first the flow revives (running) and Delete 409s (running
 // flow); released Delete-first the flow cancels and Resume's gate write finds it no longer interrupted and
-// rolls back with an honest 409. The Delete-wins direction mirrors the existing (single-freeze) DD-1 pin; the
+// rolls back with an honest 409. The Delete-wins direction mirrors the existing (single-freeze) TestDeleteResumeRace pin; the
 // Resume-wins direction is the untested mirror.
 func TestDeleteVsResume_BothOrders(t *testing.T) {
 	// newGate builds an interrupted flow whose gate task, on resume, BLOCKS on gateBlock - so a resumed flow

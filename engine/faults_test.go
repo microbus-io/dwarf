@@ -59,7 +59,7 @@ func linear2(proxy *TestProxy, prefix string, calls map[string]*int) {
 	}
 }
 
-// awaitNextStop (CP-D) arms a race-free rendezvous for the NEXT flow stop (completed/failed/cancelled/
+// awaitNextStop arms a race-free rendezvous for the NEXT flow stop (completed/failed/cancelled/
 // interrupted), replacing a status poll / sleep with an exact wait. Call it BEFORE the action that triggers
 // the stop; the returned wait blocks until a flow has reached its (post-commit) signalStop, then releases the
 // engine. Because the breakpoint is armed now, it cannot miss a stop that fires before the wait - immune to

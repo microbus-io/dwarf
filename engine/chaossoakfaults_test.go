@@ -32,12 +32,12 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// TestChaosSoak_Faults (FT-F) layers random test-only fault injection over the chaos soak: alongside the
+// TestChaosSoak_Faults layers random test-only fault injection over the chaos soak: alongside the
 // random lifecycle operations (Cancel/Resume/Fork/Delete/DeliverSignal) a fault goroutine continuously arms
 // random recovery faults - transition/completion-commit failures, lock contention, stale-lease zombie writes,
 // dropped wakes, a lost subgraph revive, a refiller scan error (and, under longsoak, a mid-tree reaper abort)
 // - scoped to random live task names. This exercises *recovery interacting with chaos*, the surface where the
-// sharpest residue bugs hide (the ones the DD-1/lease-fence findings belonged to).
+// sharpest residue bugs hide (deferred-deletion and lease-fence races).
 //
 // The faults are all cleared before the drain, so termination is deterministic: after draining every flow to
 // terminal, the same asserts as the fault-free soak must hold - every Await returns (no permanent wedge), the

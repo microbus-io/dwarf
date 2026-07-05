@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// FT-C: the per-fault tests in faults_test.go use a linear one- or two-node graph, but the interesting
+// The per-fault tests in faults_test.go use a linear one- or two-node graph, but the interesting
 // recovery bugs live where recovery meets fan-out, subgraphs, and repetition. These tests drive the *same*
 // faults through those compositions and assert recovery is not just eventually-terminal but leaves a clean
 // world (assertFaultRecoveryClean: invariants + the wedge alarm silent), with cohort/subgraph/repetition
@@ -303,7 +303,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
 	waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
-	// The tree ends structurally clean. Unlike the other FT-C cases, the wedge alarm is *expected* to have
+	// The tree ends structurally clean. Unlike the other composition cases in this file, the wedge alarm is *expected* to have
 	// fired exactly once here - this test's whole point is that a genuinely-wedged caller was recovered by the
 	// sweep (not the normal revive path), so assert the counter is 1 rather than 0.
 	assertInvariants(t, e)

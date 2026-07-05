@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// FT-B: new fault sites, each ending a "documented but untested" recovery gap. Every test arms one of the
+// New fault sites, each ending a "documented but untested" recovery gap. Every test arms one of the
 // new faults (debug.go) and drives the exact recovery path it exists to exercise - the residual orphan hole,
 // a subgraph-spawn failure, an atomic lifecycle-transaction rollback, host-panic isolation, a lost
 // failure-delivery backstopped by the wedge sweep, and the reaper's SELECT-error resilience.
@@ -355,7 +355,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
 	waitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
 
-	// Unlike the other FT-B faults, this one drives a step into a genuinely-wedged state on purpose, so the
+	// Unlike the other faults in this file, this one drives a step into a genuinely-wedged state on purpose, so the
 	// always-on alarm SHOULD fire exactly once - proving the backstop engaged. The structural invariants must
 	// still be clean afterward.
 	assertInvariants(t, e)
