@@ -359,7 +359,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	}
 
 	// Backdate both flows past orphanFlowThreshold (DB clock, native format), and flip the orphan to running.
-	pastMs := -(orphanFlowThreshold + time.Minute).Milliseconds()
+	pastMs := -(e.orphanFlowThreshold + time.Minute).Milliseconds()
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_flows SET status=?, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
 		workflow.StatusRunning, pastMs, orphanFlowID)

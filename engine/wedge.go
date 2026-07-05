@@ -34,7 +34,7 @@ import (
 // scans are heavy and the wedge condition it guards against is latency-tolerant. A plain ticker - no
 // nudging - so the sweep runs at most once per wedgeSweepInterval.
 func (e *Engine) recoveryLoop(ctx context.Context) {
-	ticker := time.NewTicker(wedgeSweepInterval)
+	ticker := time.NewTicker(e.wedgeSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -59,8 +59,8 @@ func (e *Engine) recoveryLoop(ctx context.Context) {
 // replica sweeping the same shard. A nonzero dwarf_steps_unwedged means a latent bug let a step wedge
 // - the sweep papered over the effect but the cause is worth finding.
 func (e *Engine) sweepWedgedParks(ctx context.Context, db *sequel.DB, shard int) {
-	e.recoverWedgedSubgraphParks(ctx, db, shard, parkWedgeThreshold)
-	e.recoverOrphanedSubgraphChildren(ctx, db, shard, parkWedgeThreshold)
+	e.recoverWedgedSubgraphParks(ctx, db, shard, e.parkWedgeThreshold)
+	e.recoverOrphanedSubgraphChildren(ctx, db, shard, e.parkWedgeThreshold)
 }
 
 // recoverWedgedSubgraphParks finds parkedSubgraph caller steps whose child flow can no longer revive them -
@@ -279,7 +279,7 @@ func (e *Engine) detectOrphanedFlows(ctx context.Context, db *sequel.DB, shard i
 		"SELECT f.flow_id FROM dwarf_flows f"+
 			" WHERE f.status='"+workflow.StatusRunning+"' AND f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))",
-		-orphanFlowThreshold.Milliseconds(),
+		-e.orphanFlowThreshold.Milliseconds(),
 	)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "Orphan detection: querying running flows", "shard", shard, "error", err)

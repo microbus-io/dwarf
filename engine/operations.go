@@ -48,6 +48,9 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		graph, lerr = e.host.LoadGraph(loaderCtx, workflowURL)
 		return lerr
 	})
+	if err == nil && e.isFault(faultKey(faultLoadGraph, workflowURL)) {
+		err = errors.New("injected fault: "+faultKey(faultLoadGraph, workflowURL), http.StatusInternalServerError)
+	}
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -417,7 +420,7 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 	// deadline (forever on a deadline-less ctx) while the flow already sits stopped in the DB. The ticker
 	// is the safety net: re-snapshot every awaitPollInterval even absent a notification, so the worst-case
 	// hang past the actual stop is bounded by that interval rather than unbounded.
-	ticker := time.NewTicker(awaitPollInterval)
+	ticker := time.NewTicker(e.awaitPollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -448,6 +451,11 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 // peer replicas so their Await callers wake too. Use it at every flow-stop site (completed, failed,
 // cancelled, interrupted); non-terminal transitions (running) need only the local notifyStatusChange.
 func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) {
+	// faultDropSignalStop simulates a lost terminal wake (worker crash between commit and signal, dropped
+	// broadcast, no-op SignalPeers) so a test can prove Await still returns via its periodic re-snapshot.
+	if e.isFault(faultDropSignalStop) {
+		return
+	}
 	e.notifyStatusChange(flowKey, status)
 	e.signalStatusChange(ctx, flowKey, status)
 }
@@ -477,6 +485,11 @@ func (e *Engine) notifyStatusChange(flowKey string, status string) {
 // inbound peer signal): re-broadcasting an inbound doorbell would echo back to the sender and storm.
 // That path uses the local-only handleEnqueue primitive.
 func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
+	// faultDropDoorbell simulates a lost work doorbell so a test can prove the pending step is still picked
+	// up by the pollPendingSteps backstop rather than stranding.
+	if e.isFault(faultDropDoorbell) {
+		return
+	}
 	e.handleEnqueue(ctx, shard, stepID)
 	e.signalEnqueue(ctx, shard, stepID)
 }

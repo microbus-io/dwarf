@@ -109,6 +109,13 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 		}
 		shardErr := err != nil
 
+		// faultPollSizingErr simulates a transient sizing-query failure so the test proves the poll clamps
+		// nextPoll to pollErrorRetryInterval (re-poll soon) instead of sleeping maxPollInterval on an
+		// unknown backlog.
+		if e.isFault(faultPollSizingErr) {
+			shardErr = true
+		}
+
 		var nearestMs sql.NullFloat64
 		if err := db.QueryRowContext(ctx,
 			"SELECT DATE_DIFF_MILLIS(MIN(not_before), NOW_UTC()) FROM dwarf_steps"+
@@ -202,6 +209,11 @@ type candidateRow struct {
 
 // scanPriorityBand returns the rows of the next priority band above prevBand.
 func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []candidateRow, error) {
+	// faultRefillScanErr simulates the priority-band scan failing so the test proves runRefill logs and
+	// shortens the next poll (re-scan soon) instead of refilling empty and idling every worker.
+	if e.isFault(faultRefillScanErr) {
+		return prevBand, nil, errors.New("injected fault: " + faultRefillScanErr)
+	}
 	type shardResult struct {
 		band int
 		rows []candidateRow

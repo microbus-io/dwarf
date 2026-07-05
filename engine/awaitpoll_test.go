@@ -33,10 +33,6 @@ import (
 // running flow, then forges the terminal commit directly in the DB (bypassing signalStop entirely), and
 // asserts Await still wakes via its periodic re-snapshot rather than hanging until ctx (here, forever).
 func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
-	old := awaitPollInterval
-	awaitPollInterval = 20 * time.Millisecond
-	defer func() { awaitPollInterval = old }()
-
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -60,6 +56,8 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 
 	e := NewEngine()
 	e.SetHost(proxy)
+	// Read once when Await builds its ticker, so set it before Startup.
+	e.awaitPollInterval = 20 * time.Millisecond
 	e.RunInTest(t)
 
 	flowKey, err := e.Create(ctx, "awaitpoll.verify:0/g", nil, nil)

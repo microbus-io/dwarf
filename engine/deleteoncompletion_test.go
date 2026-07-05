@@ -82,14 +82,12 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 	t.Fatalf("flow %s was not deleted within %s", flowKey, timeout)
 }
 
-// shortenDeletion overrides the deletion grace / reaper cadence for a test and restores them after. Must be
-// called before RunInTest (the reaper reads reapInterval at startup; completeFlow reads deletionGrace at
-// completion). Engine tests run sequentially, so mutating these package vars is safe.
-func shortenDeletion(t *testing.T, grace, interval time.Duration) {
-	t.Helper()
-	og, oi := deletionGrace, reapInterval
-	deletionGrace, reapInterval = grace, interval
-	t.Cleanup(func() { deletionGrace, reapInterval = og, oi })
+// shortenDeletion overrides the engine's deletion grace / reaper cadence. Must be called after NewEngine
+// and before RunInTest (the reaper reads reapInterval at Startup; completeFlow reads deletionGrace at
+// completion). Per-engine fields, so there is nothing to restore.
+func shortenDeletion(e *Engine, grace, interval time.Duration) {
+	e.deletionGrace = grace
+	e.reapInterval = interval
 }
 
 // TestDeleteOnCompletion_ReaperDeletesOnSuccess asserts a flow created with DeleteOnCompletion is removed (row
@@ -97,7 +95,6 @@ func shortenDeletion(t *testing.T, grace, interval time.Duration) {
 func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	shortenDeletion(t, time.Millisecond, 20*time.Millisecond)
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -111,6 +108,7 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 
 	e := NewEngine()
 	e.SetHost(proxy)
+	shortenDeletion(e, time.Millisecond, 20*time.Millisecond)
 	e.RunInTest(t)
 
 	fk, err := e.Create(ctx, "doc/solo", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
@@ -125,7 +123,6 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	shortenDeletion(t, time.Millisecond, time.Hour) // due ~immediately, but only the manual reap fires
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -139,6 +136,7 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 
 	e := NewEngine()
 	e.SetHost(proxy)
+	shortenDeletion(e, time.Millisecond, time.Hour) // due ~immediately, but only the manual reap fires
 	e.RunInTest(t)
 
 	fk, err := e.Create(ctx, "doc/await", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
@@ -167,7 +165,6 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	shortenDeletion(t, time.Millisecond, time.Hour)
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -181,6 +178,7 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 
 	e := NewEngine()
 	e.SetHost(proxy)
+	shortenDeletion(e, time.Millisecond, time.Hour)
 	e.RunInTest(t)
 
 	_, out, err := e.Run(ctx, "doc/run", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
@@ -197,7 +195,6 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 func TestPurge_ReaperRemovesTree(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	shortenDeletion(t, time.Millisecond, time.Hour)
 
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("Parent")
@@ -220,6 +217,7 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 
 	e := NewEngine()
 	e.SetHost(proxy)
+	shortenDeletion(e, time.Millisecond, time.Hour)
 	e.RunInTest(t)
 
 	fk, _, err := e.Run(ctx, "pr/parent", nil, nil)
@@ -275,7 +273,6 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	shortenDeletion(t, time.Millisecond, 20*time.Millisecond)
 
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("Parent")
@@ -302,6 +299,7 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 
 	e := NewEngine()
 	e.SetHost(proxy)
+	shortenDeletion(e, time.Millisecond, 20*time.Millisecond)
 	e.RunInTest(t)
 
 	fk, err := e.Create(ctx, "doc/sg-parent", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
@@ -326,7 +324,6 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 // mid-test, so a missing/errored outcome would signal a real defect (torn completion write, lost outcome).
 func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	ctx := context.Background()
-	shortenDeletion(t, deletionGrace, time.Hour) // reaper effectively off for the test's duration
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -341,6 +338,9 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	e := NewEngine()
 	e.SetHost(proxy)
 	e.SetWorkers(8)
+	// Keep grace at the production default and the reaper effectively off, so no flow is removed mid-test
+	// and a missing/errored outcome would signal a real defect.
+	shortenDeletion(e, time.Minute, time.Hour)
 	e.RunInTest(t)
 
 	const workers = 8

@@ -196,6 +196,12 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	completed := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
+		// faultCompleteFlowCommit fails the flow-completion transaction after processStep has already
+		// marked the terminal step completed, so the test proves the write-first ordering + recovery defer
+		// keep the flow from stranding `running` with every step terminal. Non-retryable (a plain error).
+		if e.isFault(faultCompleteFlowCommit) {
+			return errors.New("injected fault: " + faultCompleteFlowCommit)
+		}
 		// Write-first: take the flow row's write lock before computeFinalState's reads. Without this the
 		// transaction is read-first (SELECT graph + terminal steps, then UPDATE), and on SQLite with
 		// cache=shared two concurrent completions both hold SHARED locks and deadlock on the upgrade to
@@ -232,7 +238,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// the stamp is part of the same status transition, so delete_after_ms > 0 always implies terminal.
 		deleteAfterMs := 0
 		if deleteOnCompletion && surgraphFlowID == 0 {
-			deleteAfterMs = int(deletionGrace.Milliseconds())
+			deleteAfterMs = int(e.deletionGrace.Milliseconds())
 		}
 		res, err := tx.ExecContext(ctx,
 			"UPDATE dwarf_flows SET status=?, final_state=?, delete_after_ms=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
@@ -272,6 +278,13 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 
 // completeSurgraphFlow re-dispatches a parked surgraph step after its child completes.
 func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, subgraphFinalStateJSON string) error {
+	// faultSubgraphReviveLost simulates the revive being lost after the child went terminal (the wedge the
+	// parked-step sweep exists to catch): the caller step stays running+parkedSubgraph with no live child,
+	// so the test proves recoverWedgedSubgraphParks re-drives the release. Returns nil so the caller path
+	// believes it succeeded, exactly as a lost revive would look.
+	if e.isFault(faultSubgraphReviveLost) {
+		return nil
+	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)

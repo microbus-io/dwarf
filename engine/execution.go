@@ -90,7 +90,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 	// Lease = the step's own time_budget_ms (added in the claim UPDATE below) + a fixed margin, so it always
 	// outlasts the ExecuteTask deadline. Only the margin is bound; the per-step budget comes from the column.
-	leaseMarginMs := int(leaseMargin.Milliseconds())
+	leaseMarginMs := int(e.leaseMargin.Milliseconds())
 
 	// Claim the step and read its data in one round-trip where the driver supports RETURNING.
 	var n int64
@@ -274,8 +274,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// A panic in the in-process host is caught here so it flows through the normal error disposition
 	// rather than wedging this leased step until lease expiry.
 	execErr := errors.CatchPanic(func() error {
+		// faultPanicExecuteTask panics inside the wrapper so it exercises the host-call panic isolation
+		// (caught here, routed as a normal task error), scoped to this task name.
+		if e.isFault(faultKey(faultPanicExecuteTask, taskName)) {
+			panic("injected fault: " + faultKey(faultPanicExecuteTask, taskName))
+		}
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	})
+	if execErr == nil && e.isFault(faultKey(faultExecuteTask, taskName)) {
+		execErr = errors.New("injected fault: "+faultKey(faultExecuteTask, taskName), http.StatusInternalServerError)
+	}
 	recordSpanError(taskSpan, execErr)
 
 	var resultFlow *workflow.RawFlow
@@ -380,6 +388,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			subgraphGraph, e2 = e.host.LoadGraph(loadCtx, subgraphURL)
 			return e2
 		})
+		if lerr == nil && e.isFault(faultKey(faultLoadGraph, subgraphURL)) {
+			lerr = errors.New("injected fault: "+faultKey(faultLoadGraph, subgraphURL), http.StatusInternalServerError)
+		}
 		loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
 		if lerr != nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, lerr, taskName)
@@ -513,9 +524,17 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted)
 	}
 	gotoTarget := resultFlow.GotoRequested()
+	// faultLeaseStaleWrite makes this completion write carry a stale lease generation, exactly as a zombie
+	// worker (whose lease was re-granted to a peer) would. The fence must reject it (zero rows -> benign
+	// no-op below), so the step stays claimable and lease recovery re-runs it cleanly - the test proves a
+	// late/slow worker's write can never corrupt or terminalize a flow a peer is healthily re-executing.
+	writeSeq := leaseSeq
+	if e.isFault(faultKey(faultLeaseStaleWrite, taskName)) {
+		writeSeq = leaseSeq - 1
+	}
 	stepRes, err := db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status=?, changes=?, goto_next=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"' AND lease_seq=?",
-		workflow.StatusCompleted, string(changesJSON), gotoTarget, stepID, leaseSeq,
+		workflow.StatusCompleted, string(changesJSON), gotoTarget, stepID, writeSeq,
 	)
 	if err != nil {
 		return errors.Trace(err)
@@ -600,6 +619,18 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		newStepIDs = newStepIDs[:0]
 		flowFailed = false
 		flowFailedParentStepID, flowFailedReDispatchParent = 0, false
+
+		// faultContention returns a retryable lock-contention error (consumed on the first attempt), so the
+		// test proves Transact rolls back and re-runs the closure to a clean commit. faultTransitionCommit
+		// returns a non-retryable error, so the tx fails after the step was already marked completed and the
+		// processStep recovery defer must reset it (completed->pending) and re-dispatch. Both are scoped to
+		// the completing task and checked before the flow-row write, so a fired fault rolls back nothing.
+		if e.isFault(faultKey(faultContention, taskName)) {
+			return errors.New("database is locked (injected fault: " + faultKey(faultContention, taskName) + ")")
+		}
+		if e.isFault(faultKey(faultTransitionCommit, taskName)) {
+			return errors.New("injected fault: " + faultKey(faultTransitionCommit, taskName))
+		}
 
 		// Write-first: take the flow row's lock before any step, guarded on non-terminal status. If a
 		// concurrent Cancel/failStep terminalized this flow after the step was marked completed but before

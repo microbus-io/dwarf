@@ -61,55 +61,12 @@ const (
 	parkedSubgraph = 1
 )
 
-// The recovery-timing knobs below are vars, not consts, ONLY so white-box tests in the engine package can
-// shorten them (override in the test, restore via t.Cleanup) to exercise lease recovery / the wedge sweep /
-// orphan detection without waiting minutes. Production keeps the defaults. Same rationale as
-// awaitPollInterval. Do NOT read these in a context that requires a constant expression.
-var (
-	// leaseMargin is added to a step's own time_budget_ms when the claim CAS sizes lease_expires, so the
-	// crash-recovery lease always outlasts the ExecuteTask deadline (which is time_budget_ms). A crashed
-	// worker is thus recovered no sooner than budget+leaseMargin.
-	leaseMargin = 30 * time.Second
-
-	// wedgeSweepInterval is the cadence of the dedicated recovery goroutine that runs the defense-in-depth
-	// parked-step wedge sweep. It is kept off the frequently-nudged poll path because the sweep's scans are
-	// heavy and latency-tolerant. parkWedgeThreshold is the minimum age a parked step must reach before the
-	// sweep treats it as wedged - comfortably beyond normal subgraph-completion latency, so steady-state
-	// operation never trips a false positive.
-	wedgeSweepInterval = 5 * time.Minute
-	parkWedgeThreshold = 5 * time.Minute
-
-	// orphanFlowThreshold is the minimum age a `running` flow with no non-terminal step must reach
-	// before the recovery loop reports it as orphaned (stranded by a failed post-completion transition).
-	// It sits far beyond the sub-second gap between a step completing and its successor committing, so a
-	// flow merely between steps is never flagged.
-	orphanFlowThreshold = 5 * time.Minute
-)
-
-// deletionGrace and reapInterval are var (not const) only so a test can shorten them; do NOT read them in a
-// context that requires a constant expression.
-//
-// deletionGrace is how long a DeleteOnCompletion flow lingers after completing before the reaper removes it -
-// the window during which its outcome stays Await/Snapshot-observable. Hardcoded (not configurable via public
-// API: a per-flow duration would be retention policy, out of scope). Operator Delete/Purge stamp 1ms instead
-// (due immediately) since no reader is awaiting an observability window.
-//
-// reapInterval is the cadence of the dedicated reaper goroutine that deletes flows whose delete_after_ms
-// window has elapsed. A plain ticker, single goroutine (inherently non-overlapping); deletion is
-// latency-tolerant, so there is no wake/startup/shutdown special pass - a due flow is removed on the next tick
-// (or by a peer replica). ~1min matches deletionGrace.
-var (
-	deletionGrace = 1 * time.Minute
-	reapInterval  = 1 * time.Minute
-)
-
-// awaitPollInterval bounds how long an Await can block past the moment the flow actually stops when the
-// in-memory wake is lost - a worker crash between the terminal commit and signalStop, a dropped peer
-// broadcast, or a no-op SignalPeers on a multi-replica host. signalStop is the fast path; this periodic
-// re-snapshot is the safety net, so it is coarse enough to add negligible steady-state query load while
-// still bounding the worst-case waiter hang (otherwise unbounded on a deadline-less ctx). A var, not a
-// const, only so tests can shorten it.
-var awaitPollInterval = 5 * time.Second
+// The recovery/await/reap timing knobs (leaseMargin, wedgeSweepInterval, parkWedgeThreshold,
+// orphanFlowThreshold, deletionGrace, reapInterval, awaitPollInterval) are per-engine fields on Engine
+// (defaulted in NewEngine), not package globals. They are effectively constants in production - read-only
+// after NewEngine - but a white-box test in this package shortens one directly (e.g. e.reapInterval = 20ms,
+// before Startup for the two read once at Startup) to exercise a recovery/await/reap path without waiting
+// minutes. The rationale for what each bounds stays at its field declaration and consult site.
 
 // awaitShutdownSignal is the sentinel drainRuntime sends on each Await waiter channel so a blocked await
 // returns a shutdown error instead of re-snapshotting and re-blocking on a channel that will never be
@@ -187,6 +144,24 @@ type Engine struct {
 	started        atomic.Bool
 	lifetimeCtx    context.Context
 	lifetimeCancel context.CancelFunc
+
+	// Recovery/await/reap timing. Effectively constants in production (defaulted in NewEngine, then
+	// read-only); a white-box test shortens one directly, before Startup for the two read once at Startup
+	// (reapInterval, wedgeSweepInterval), so an otherwise minutes-long path is observable.
+	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
+	awaitPollInterval   time.Duration // Await lost-wake re-snapshot cadence (5s)
+	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
+	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
+	orphanFlowThreshold time.Duration // min age before a stepless running flow is reported orphaned (5m)
+	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
+	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
+
+	// Fault injection (test-only; see faults.go). underTest is testing.Testing() cached once in NewEngine
+	// so isFault is a lock-free bool read in production. faults maps an armed fault name to its remaining
+	// fire count, guarded by faultsLock.
+	underTest  bool
+	faultsLock sync.Mutex
+	faults     map[string]int
 }
 
 // NewEngine creates a new workflow engine.
@@ -202,6 +177,14 @@ func NewEngine() *Engine {
 	e.defaultPriority.Store(100)
 	e.maxOpenConns.Store(8)
 	e.workersPerConn.Store(8)
+	e.leaseMargin = 30 * time.Second
+	e.awaitPollInterval = 5 * time.Second
+	e.wedgeSweepInterval = 5 * time.Minute
+	e.parkWedgeThreshold = 5 * time.Minute
+	e.orphanFlowThreshold = 5 * time.Minute
+	e.deletionGrace = 1 * time.Minute
+	e.reapInterval = 1 * time.Minute
+	e.underTest = testing.Testing()
 	return e
 }
 

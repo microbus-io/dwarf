@@ -30,7 +30,7 @@ import (
 // was down is removed on the next tick here, or by a peer replica's reaper. Drained via reaperStop in
 // drainRuntime; a pass in progress finishes its current tree-delete (checked between batches) and exits.
 func (e *Engine) reaperLoop(ctx context.Context) {
-	ticker := time.NewTicker(reapInterval)
+	ticker := time.NewTicker(e.reapInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -95,6 +95,12 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 					"DELETE FROM dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN ("+ids+"))",
 				); err != nil {
 					return errors.Trace(err)
+				}
+				// faultReapMidTree aborts after the steps delete but before the flows delete, so the whole
+				// tree-delete rolls back atomically. The test proves a mid-tree failure leaves the tree intact
+				// (not a half-deleted flow with no steps) and the next reap pass removes it cleanly.
+				if e.isFault(faultReapMidTree) {
+					return errors.New("injected fault: " + faultReapMidTree)
 				}
 				if _, err := tx.ExecContext(ctx,
 					"DELETE FROM dwarf_flows WHERE root_flow_id IN ("+ids+")",
