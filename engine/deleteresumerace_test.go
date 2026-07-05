@@ -96,6 +96,36 @@ func TestDeleteResumeRace(t *testing.T) {
 		assert.True(steps >= 1)
 	}
 
+	// assertResumeHonest pins the Resume-vs-Delete race: Resume must not falsely report success for a resume the racing
+	// Delete/Cancel preempted. The two operations serialize on the root-flow row (Resume's gate write and
+	// Delete's interrupted->cancelled flip both key on `WHERE status='interrupted'`), so exactly one wins. If
+	// Resume returned nil it genuinely took effect - the flow moved to `running` (and on from there), so a
+	// Delete that flipped it to `cancelled` must have 409'd, and the flow is never `cancelled` here. A false
+	// success (the pre-fix bug) would show up as a `cancelled` flow after a nil Resume.
+	assertResumeHonest := func(t *testing.T, flowKey string, resumeErr error) {
+		if resumeErr != nil {
+			return // Resume reported a conflict/not-found - honest, nothing to prove
+		}
+		assert := testarossa.For(t)
+		shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
+		if !assert.NoError(err) {
+			return
+		}
+		db, err := e.db.Shard(shardNum)
+		if !assert.NoError(err) {
+			return
+		}
+		var status string
+		err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status)
+		if err == sql.ErrNoRows {
+			return // reaped after a genuine resume+complete then delete - not a false success
+		}
+		if !assert.NoError(err) {
+			return
+		}
+		assert.NotEqual(workflow.StatusCancelled, strings.TrimSpace(status))
+	}
+
 	// createInterrupted creates a flow and blocks until it rests `interrupted`.
 	createInterrupted := func(t *testing.T) string {
 		assert := testarossa.For(t)
@@ -131,11 +161,13 @@ func TestDeleteResumeRace(t *testing.T) {
 			if flowKey == "" {
 				return
 			}
+			var resumeErr error
 			race(
 				func() { _ = e.Delete(ctx, flowKey) },
-				func() { _ = e.Resume(ctx, flowKey, nil) },
+				func() { resumeErr = e.Resume(ctx, flowKey, nil) },
 			)
 			assertNoOrphan(t, flowKey)
+			assertResumeHonest(t, flowKey, resumeErr)
 		}
 	})
 
@@ -145,11 +177,13 @@ func TestDeleteResumeRace(t *testing.T) {
 			if flowKey == "" {
 				return
 			}
+			var resumeErr error
 			race(
 				func() { _, _ = e.Purge(ctx, workflow.Query{Status: workflow.StatusInterrupted}) },
-				func() { _ = e.Resume(ctx, flowKey, nil) },
+				func() { resumeErr = e.Resume(ctx, flowKey, nil) },
 			)
 			assertNoOrphan(t, flowKey)
+			assertResumeHonest(t, flowKey, resumeErr)
 		}
 	})
 }

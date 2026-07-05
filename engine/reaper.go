@@ -49,6 +49,16 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 // root-only; Delete/Purge stamp roots), and the surgraph_flow_id=0 guard makes that explicit, so deleting by
 // root_flow_id removes each root plus its descendants. The between-batch reaperStop check lets Shutdown abort
 // a long drain promptly - between whole-tree deletes, never mid-statement.
+//
+// The tree delete is unconditional on descendant status: it removes every flow with root_flow_id IN(ids)
+// regardless of whether a descendant is still non-terminal. deleteFlow's 409 guards only the root's own status
+// (a non-terminal root is never stamped), so a due tree's root is always terminal - but a descendant can still
+// be a live orphan (the residue of the Cancel-vs-spawn race, a running child whose parent already terminalized;
+// see recoverOrphanedSubgraphChildren). Deleting that running orphan is safe: it is a bug-state row the wedge
+// sweep would cancel anyway, and a worker mid-dispatch on it simply no-ops via the lease fence (its claim/write
+// matches zero rows once the row is gone). So the reaper does not reguard on descendant status; whichever of the
+// reaper and the wedge sweep reaches the orphan first wins, both removing it cleanly. This is a deliberate
+// behavior change from the old inline deleteFlow, which 409'd if any descendant was running.
 func (e *Engine) reapDueFlows(ctx context.Context) {
 	const reapBatch = 4096
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {

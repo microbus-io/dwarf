@@ -48,7 +48,7 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		graph, lerr = e.host.LoadGraph(loaderCtx, workflowURL)
 		return lerr
 	})
-	if err == nil && e.isFault(faultKey(faultLoadGraph, workflowURL)) {
+	if err == nil && e.isFault(faultLoadGraph, workflowURL) {
 		err = errors.New("injected fault: "+faultKey(faultLoadGraph, workflowURL), http.StatusInternalServerError)
 	}
 	if err != nil {
@@ -658,6 +658,11 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		if surgraphFlowID != 0 {
 			return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
 		}
+		// The 409 guards only the ROOT's status; a running subgraph descendant does not block the delete. The
+		// reaper later removes the whole root_flow_id tree regardless of descendant status - safe because the
+		// only running descendant a terminal-rooted tree can hold is a live orphan (Cancel-vs-spawn residue) the
+		// wedge sweep would cancel anyway, and a worker mid-dispatch on it no-ops via the lease fence. This is a
+		// deliberate change from the old inline delete, which 409'd on any running descendant (see reapDueFlows).
 		if strings.TrimSpace(flowStatus) == workflow.StatusRunning {
 			return errors.New("cannot delete a running flow; cancel it first", http.StatusConflict)
 		}

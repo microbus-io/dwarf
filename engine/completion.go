@@ -713,6 +713,11 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	}
 }
 
+// errResumeLost is an in-transaction sentinel: the root flow was terminalized by a concurrent
+// Delete/Cancel between resume's pre-tx status read and its own writes, so the transaction must roll
+// back (undoing the step re-park/leaf-reset) and the caller must 409 rather than falsely report success.
+var errResumeLost = errors.New("resume lost to a concurrent terminalization")
+
 // resume continues a flow paused by flow.Interrupt, delivering resume data to the leaf interrupt park.
 func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
@@ -785,7 +790,16 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		}
 	}
 
+	// Test-only checkpoint: a breakpoint here lets a test freeze resume before its transaction so a racing
+	// Delete/Cancel can commit its interrupted->cancelled flip deterministically, then confirm the gate write
+	// below rolls this transaction back (409) instead of falsely succeeding. Placed *before* the transaction,
+	// not mid-tx: on SQLite the racing Delete would deadlock against this transaction's write lock if frozen
+	// inside it. No-op in production.
+	e.checkpoint(ctx, checkpointResumeBeforeFlowWrite)
+
+	lost := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		lost = false
 		allStepIDs := append([]any{leafStepID}, parkStepIDs...)
 		clearPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload='{}' WHERE step_id IN ("+clearPlaceholders+")", allStepIDs...)
@@ -799,6 +813,26 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
 			workflow.StatusPending, resumeDataJSON, leafStepID)
 
+		// Race gate against a concurrent Delete/Cancel. The step writes above are unconditional (their
+		// WHERE status='interrupted' still matches, because Delete/Cancel terminalize the flow row without
+		// touching steps), so without this gate a Delete that flipped the root interrupted→cancelled first
+		// would let resume re-park ancestors and reset the leaf, then match 0 rows on the flow update below,
+		// and still return success - a resume that did not take effect reported as if it had, leaving a
+		// transient cancelled-flow-with-non-terminal-steps until the reaper mops it. The root flow row is the
+		// serialization point: this guarded write takes its lock and confirms it is still interrupted (touch
+		// flips unconditionally, so RowsAffected reflects the status match on every driver, MySQL included).
+		// A zero-row match means Delete/Cancel won - roll the whole transaction back and 409, mutually
+		// exclusive with Delete/Cancel's own WHERE status='interrupted'. flowID is always the root here
+		// (subgraph-child keys were rejected above), which is exactly the row Delete/Cancel terminalize.
+		res, gerr := tx.ExecContext(ctx, "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID)
+		if gerr != nil {
+			return errors.Trace(gerr)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			lost = true
+			return errResumeLost
+		}
+
 		for _, chainFlowID := range chainFlowIDs {
 			tx.ExecContext(ctx,
 				"UPDATE dwarf_flows SET status=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' AND (SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"')=0",
@@ -807,6 +841,9 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		}
 		return nil
 	})
+	if lost {
+		return errors.New("flow is not interrupted", http.StatusConflict)
+	}
 	if err != nil {
 		return errors.Trace(err)
 	}

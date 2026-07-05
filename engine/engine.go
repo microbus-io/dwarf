@@ -156,12 +156,15 @@ type Engine struct {
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
 
-	// Fault injection (test-only; see faults.go). underTest is testing.Testing() cached once in NewEngine
-	// so isFault is a lock-free bool read in production. faults maps an armed fault name to its remaining
-	// fire count, guarded by faultsLock.
-	underTest  bool
-	faultsLock sync.Mutex
-	faults     map[string]int
+	// Test-only instrumentation seams (see debug.go). underTest is testing.Testing() cached once in
+	// NewEngine so every consult is a lock-free bool read in production. faults maps an armed fault name to
+	// its remaining fire count. waitFors holds tests blocked in waitFor(name); breakpoints holds armed
+	// setBreakpoint(name) freezes. All guarded by faultsLock.
+	underTest   bool
+	faultsLock  sync.Mutex
+	faults      map[string]int
+	waitFors    map[string][]chan struct{}
+	breakpoints map[string]*breakpoint
 }
 
 // NewEngine creates a new workflow engine.

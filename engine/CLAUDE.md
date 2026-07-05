@@ -1286,7 +1286,17 @@ then a two-statement tree delete (`DELETE dwarf_steps WHERE flow_id IN (SELECT f
 root_flow_id IN (ids))`, then `DELETE dwarf_flows WHERE root_flow_id IN (ids)`) - set-based, **no N+1**, removing each
 root plus its descendants. It checks `reaperStop` between batches so `Shutdown` aborts a long drain promptly (between
 whole-tree deletes, never mid-statement). No startup/shutdown/wake passes: deletion is latency-tolerant, so a flow
-that came due while a replica was down is removed on the next tick (single-replica) or by a peer's tick. Backed by a
+that came due while a replica was down is removed on the next tick (single-replica) or by a peer's tick.
+
+**The tree delete is unconditional on descendant status - a deliberate change from the old inline `deleteFlow`.**
+The former `deleteFlow` returned 409 if *any* subgraph descendant was `running`; the deferred path stamps only the
+root (whose own status is 409-guarded, so a non-terminal root is never stamped) and the reaper deletes the whole
+`root_flow_id` tree regardless of descendant status. The only running descendant a terminal-rooted tree can hold is
+the **orphaned-child residue** (the Cancel-vs-spawn race: a live child whose parent already terminalized - see
+`recoverOrphanedSubgraphChildren`), a bug-state row the wedge sweep would cancel anyway. Deleting it is safe: a
+worker mid-dispatch on the orphan no-ops via the lease fence (claim/write matches zero rows once the tree is gone),
+so no strand and no corruption. Whichever of the reaper and the wedge sweep reaches the orphan first wins. The
+reaper therefore does **not** reguard on descendant status. Backed by a
 partial index `idx_dwarf_flows_delete_after WHERE delete_after_ms > 0` (full on mysql) that narrows the due scan to
 the small in-window subset. (`deletionGrace`/`reapInterval` are `var` not `const` only so a test can shorten them -
 engine-package tests force a reap via `reapDueFlows`; fixtures verify the observable public contract via `List`/
@@ -1297,8 +1307,22 @@ alone does not serialize against `Resume`. The invariant that keeps the old stra
 **`delete_after_ms > 0 ⟹ terminal status`**, and the reaper reaps only terminal-rooted trees: DeleteOnCompletion
 stamps a `completed` root (immutable); `Delete`/`Purge` of a terminal flow stamp an immutable row; `Delete`/`Purge`
 of an `interrupted` flow flip it to `cancelled` in the same UPDATE, mutually exclusive with `Resume`'s
-`WHERE status='interrupted'` (row lock; exactly one wins, loser 409s). So a live `delete_after_ms` never coexists
+**root-flow gate** (row lock; exactly one wins, loser 409s). So a live `delete_after_ms` never coexists
 with a resumable flow, and no steps are ever deleted where a `Resume` could interleave.
+
+The mutual exclusion is not automatic - `resume`'s step writes (leaf `→pending`, ancestor re-park) are
+*unconditional* on `WHERE status='interrupted'` at the **step** level, and `Delete`/`Cancel` terminalize the
+**flow** row without touching steps, so those step writes still match after a `Delete` won. Left ungated,
+`resume` would re-park + reset the leaf, match 0 rows on its `→running` flow update (the flow is now
+`cancelled`), and still return success - a resume that did not take effect reported as if it had, leaving a
+transient cancelled-flow-with-non-terminal-steps until the reaper mops it. So `resume`'s transaction carries a
+dedicated **gate write** on the root flow (`UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=<root> AND
+status='interrupted'`) after its step writes: a zero-row match means `Delete`/`Cancel` terminalized the root
+first, so the whole transaction rolls back (undoing the step writes) and `resume` returns 409. `touch` flips
+unconditionally, so `RowsAffected` reflects the status match on every driver (MySQL included), and the write is
+placed *after* the step writes to preserve `resume`'s steps-first lock order (shared with `Cancel`). This gate is
+distinct from the `→running` chain-flow update, which legitimately matches 0 rows when a *sibling* interrupt
+still holds the flow (fan-out resume-one-at-a-time), so it cannot serve as the race gate.
 
 **Reads/derivations of a `delete_after_ms > 0` flow.** `Snapshot`/`Await` serve the outcome (the observability win);
 `List` and `History` exclude it; `Continue` **skips** deleting turns (its latest-turn query adds `delete_after_ms=0`,
@@ -1566,4 +1590,23 @@ not safe to grow live: a flow key encodes its shard (`{shard}-{id}-{token}`), so
 is unroutable (404) on any replica still at the old count - and there is no cross-replica agreement on the count nor
 any rebalancing of existing flows (they stay on their original shard). Doing dynamic growth *correctly* - lockstep
 count across replicas plus rebalancing - is a larger problem left unsolved; until then the count is fixed per process.
+
+## Test-only instrumentation seams (`engine/debug.go`)
+
+Recovery and race paths are hard to trigger on demand (a lost revive, a commit that loses to a contention storm, a
+Delete landing in a one-statement window inside another operation's transaction). Rather than forge DB rows or
+hammer timing, the engine carries **two white-box seams** a same-package test uses to drive those paths
+deterministically:
+
+- **Fault injection** makes a site *misbehave* - a test arms a named fault, the engine consults it at a strategic
+  site and simulates the failure (a synthetic error, a dropped signal/doorbell, a stale `lease_seq`, a reap aborted
+  mid-tree).
+- **Execution checkpoints** make a site *observable and pausable* - `waitFor(name)` blocks the test until the
+  engine reaches a named point; `setBreakpoint`/`clearBreakpoint` freeze the engine there until released. They
+  compose to drive a concurrent op into a precise window with no timing hammer.
+
+**Both are inert in production by construction:** every consult short-circuits on `!e.underTest` (cached from
+`testing.Testing()` in `NewEngine`), so a production binary pays a single bool read per site and neither seam can
+arm or fire. The mechanism, the centralized fault/checkpoint names, and the race-free `waitFor`/breakpoint
+coordination live in `debug.go`.
 

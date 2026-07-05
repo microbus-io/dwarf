@@ -276,12 +276,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	execErr := errors.CatchPanic(func() error {
 		// faultPanicExecuteTask panics inside the wrapper so it exercises the host-call panic isolation
 		// (caught here, routed as a normal task error), scoped to this task name.
-		if e.isFault(faultKey(faultPanicExecuteTask, taskName)) {
+		if e.isFault(faultPanicExecuteTask, taskName) {
 			panic("injected fault: " + faultKey(faultPanicExecuteTask, taskName))
 		}
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	})
-	if execErr == nil && e.isFault(faultKey(faultExecuteTask, taskName)) {
+	if execErr == nil && e.isFault(faultExecuteTask, taskName) {
 		execErr = errors.New("injected fault: "+faultKey(faultExecuteTask, taskName), http.StatusInternalServerError)
 	}
 	recordSpanError(taskSpan, execErr)
@@ -388,7 +388,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			subgraphGraph, e2 = e.host.LoadGraph(loadCtx, subgraphURL)
 			return e2
 		})
-		if lerr == nil && e.isFault(faultKey(faultLoadGraph, subgraphURL)) {
+		if lerr == nil && e.isFault(faultLoadGraph, subgraphURL) {
 			lerr = errors.New("injected fault: "+faultKey(faultLoadGraph, subgraphURL), http.StatusInternalServerError)
 		}
 		loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
@@ -529,7 +529,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// no-op below), so the step stays claimable and lease recovery re-runs it cleanly - the test proves a
 	// late/slow worker's write can never corrupt or terminalize a flow a peer is healthily re-executing.
 	writeSeq := leaseSeq
-	if e.isFault(faultKey(faultLeaseStaleWrite, taskName)) {
+	if e.isFault(faultLeaseStaleWrite, taskName) {
 		writeSeq = leaseSeq - 1
 	}
 	stepRes, err := db.ExecContext(ctx,
@@ -625,10 +625,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// returns a non-retryable error, so the tx fails after the step was already marked completed and the
 		// processStep recovery defer must reset it (completed->pending) and re-dispatch. Both are scoped to
 		// the completing task and checked before the flow-row write, so a fired fault rolls back nothing.
-		if e.isFault(faultKey(faultContention, taskName)) {
+		if e.isFault(faultContention, taskName) {
 			return errors.New("database is locked (injected fault: " + faultKey(faultContention, taskName) + ")")
 		}
-		if e.isFault(faultKey(faultTransitionCommit, taskName)) {
+		if e.isFault(faultTransitionCommit, taskName) {
 			return errors.New("injected fault: " + faultKey(faultTransitionCommit, taskName))
 		}
 

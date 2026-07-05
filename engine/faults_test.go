@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// White-box tests for the fault-injection seam (faults.go). Each arms a named fault and asserts the engine
+// White-box tests for the fault-injection seam (debug.go). Each arms a named fault and asserts the engine
 // takes the recovery/routing path it exists to guard, without DB forging or timing races.
 package engine
 
