@@ -17,7 +17,7 @@ outcome, err := eng.Await(ctx, flowKey)
 ```
 
 `Await` blocks until the flow stops (`completed`/`failed`/`cancelled`/`interrupted`) and returns the outcome.
-It wakes on a status-change signal, not polling.
+It wakes on a status-change signal, with a periodic re-check as a backstop in case the signal is lost.
 
 **Good for:** a request/response caller that holds the `flowKey` and can wait; tests; short flows.
 

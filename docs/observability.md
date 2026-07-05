@@ -40,14 +40,14 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 |---|---|---|---|---|
 | `dwarf_flows_started` | counter | `workflow` | flows started | `dwarf_flows_started_total` |
 | `dwarf_flows_terminated` | counter | `workflow`, `status` | flows reaching a terminal status | `dwarf_flows_terminated_total` |
-| `dwarf_steps_executed` | counter | `task`, `status` | steps executed, by disposition | `dwarf_steps_executed_total` |
+| `dwarf_steps_executed` | counter | `task_name`, `status` | steps executed, by disposition | `dwarf_steps_executed_total` |
 | `dwarf_steps_recovered` | counter | — | steps recovered after a lease expiry | `dwarf_steps_recovered_total` |
-| `dwarf_steps_unwedged` | counter | — | wedged subgraph parks recovered by the sweep | `dwarf_steps_unwedged_total` |
+| `dwarf_steps_unwedged` | counter | `park_type` | wedged subgraph parks recovered by the sweep | `dwarf_steps_unwedged_total` |
 | `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
 | `dwarf_steps_pending` | gauge | `priority` | due pending steps per priority band | `dwarf_steps_pending` |
 | `dwarf_steps_oldest_pending_age_seconds` | gauge | `priority` | age of the oldest due pending step | `dwarf_steps_oldest_pending_age_seconds` |
 | `dwarf_steps_fairness_keys` | gauge | `priority` | distinct fairness keys in the last refill | `dwarf_steps_fairness_keys` |
-| `dwarf_task_concurrency_running` | gauge | `task` | running steps per task | `dwarf_task_concurrency_running` |
+| `dwarf_task_concurrency_running` | gauge | `task_url` | running steps per task | `dwarf_task_concurrency_running` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state
 at collection time. Gauges emit **per replica** — sum them at the backend for cluster-wide totals. Labels

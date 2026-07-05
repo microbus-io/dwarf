@@ -84,7 +84,7 @@ func TestGreeting(t *testing.T) {
 
 In production you replace `TestProxy` with your own `Host`, point the engine at a real
 database with `SetDSN`, and manage its lifecycle explicitly. A standalone host need only implement the
-two required methods — the optional peer/notify methods can be no-ops:
+two required methods — the optional `SignalPeers` method can be a no-op:
 
 ```go
 type myHost struct {

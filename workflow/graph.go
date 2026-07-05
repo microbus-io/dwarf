@@ -164,8 +164,8 @@ func (g *Graph) AddTransitionWhen(from, to string, when string) {
 // SetFanIn is not required.
 //
 // A node that uses Switch transitions must declare every successful-path outgoing
-// transition as Switch (the validator rejects mixing Switch with When/plain/ForEach/Goto
-// from the same source). OnError transitions are orthogonal and remain allowed.
+// transition as Switch (the validator rejects mixing Switch with When/plain/ForEach
+// from the same source). OnError and Goto transitions are orthogonal and remain allowed.
 func (g *Graph) AddTransitionSwitch(from, to string, when string) {
 	g.autoRegister(from)
 	g.autoRegister(to)

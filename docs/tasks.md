@@ -157,7 +157,7 @@ func approve(ctx context.Context, f *workflow.Flow) error {
 ```
 
 On the first call the flow goes to `interrupted`, the payload is surfaced to whoever is awaiting it, and
-the engine fires the stop notification. When the operator calls `eng.Resume(flowKey, data)`, the task
+the engine fires the stop notification. When the operator calls `eng.Resume(ctx, flowKey, data)`, the task
 re-runs and `Interrupt` returns `(false, nil)` with the caller's data unmarshaled into your `&resume`
 pointer. The resume data is delivered through that pointer — it is **not** merged into state. See
 [Engine operations → Resume](operations.md#resume).

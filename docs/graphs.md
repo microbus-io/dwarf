@@ -70,7 +70,7 @@ g.AddTransitionSwitch("Router", "HandleLow", "true") // catch-all
 
 Because only one branch ever runs, switch branches need no fan-in. A node that uses switch transitions must
 declare *every* success-path outgoing edge as switch — the validator rejects mixing switch with
-when/plain/forEach/goto from the same source. (Error transitions are orthogonal and still allowed.)
+when/plain/forEach from the same source. (Error and goto transitions are orthogonal and still allowed.)
 
 ### Static fan-out (`fanOut`)
 

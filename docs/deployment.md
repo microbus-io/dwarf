@@ -6,9 +6,10 @@ configuration, and running multiple replicas.
 ## Configuration
 
 All configuration is set with `Set*` methods, each returning an `error`. They split by whether the knob can
-change on a running engine: the **live** ones (`SetNumShards`, `SetMaxOpenConns`, `SetTimeBudget`,
+change on a running engine: the **live** ones (`SetMaxOpenConns`, `SetWorkersPerConn`, `SetTimeBudget`,
 `SetDefaultPriority`) take effect immediately, even after `Startup`; the **construction-time-only** ones
-(`SetDSN`, `SetWorkers`, and the dependency-injection setters below) are rejected if called after `Startup`.
+(`SetDSN`, `SetNumShards`, `SetWorkers`, and the dependency-injection setters below) are rejected if called
+after `Startup`.
 
 | Method | Default | Purpose |
 |---|---|---|
@@ -17,7 +18,8 @@ change on a running engine: the **live** ones (`SetNumShards`, `SetMaxOpenConns`
 | `SetWorkers(n)` | 64 | Per-replica worker concurrency cap |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
-| `SetMaxOpenConns(n)` | 8 | Max open DB connections per shard (idle == open) |
+| `SetMaxOpenConns(n)` | 8 | Per-shard hard ceiling on open DB connections |
+| `SetWorkersPerConn(n)` | 8 | Assumed workers sharing one connection (pool size derives from this) |
 
 Dependency injection (set before `Startup`): `SetHost`, `SetLogger`, `SetMeterProvider`,
 `SetTracerProvider`.
@@ -73,8 +75,9 @@ Rules:
 - Shards are **1-indexed**. The shard appears as the leading number of a flow key (`{shard}-{flowID}-{token}`).
 - When `NumShards > 1`, the DSN **must contain `%d`**, replaced with the shard index. Every shard database
   must exist before startup — the engine migrates the schema but does not `CREATE DATABASE`.
-- `NumShards` can **grow** at runtime (new shards open, migrate, and become available immediately) but
-  cannot shrink (old shards drain naturally — new flows land on new shards, existing flows stay put).
+- `NumShards` is fixed for the engine's life: it is read once at `Startup` (when shards are opened and
+  migrated) and rejected after. Each flow key encodes its shard, so changing the count requires a
+  coordinated restart (a maintenance window), not a live/piecemeal change.
 - New top-level flows pick a random shard; subgraph flows stay on the parent's shard.
 
 ```go
@@ -84,11 +87,14 @@ eng.SetNumShards(4)
 
 ## Connection pool
 
-`SetMaxOpenConns` (default 8 per shard, with `MaxIdle == MaxOpen`) sizes each shard's pool. Workers spend
-most of their time waiting on the `ExecuteTask` call, not holding a SQL connection, so a small absolute
-number suffices. Keeping idle == open matters more than the absolute number: under bursty load, close/reopen
-churn (TCP + TLS + auth per cycle) dominates query time. Pool 8 is a good default; much larger regresses
-(pool-mutex contention with no usable extra concurrency). Tune explicitly only for a different workload mix.
+Each shard's pool is derived from the worker count: idle ≈ `ceil(workers / (shards × SetWorkersPerConn))`
+(at least 2), and open ≈ `idle×2 + 2`, both clamped by the `SetMaxOpenConns` ceiling (default 8 per shard).
+So in the default single-shard configuration idle and open both land at 8, but they diverge as you add
+shards or raise the ceiling. Workers spend most of their time waiting on the `ExecuteTask` call, not holding
+a SQL connection, so a small absolute number suffices. Keeping a warm idle floor matters more than the
+absolute ceiling: under bursty load, close/reopen churn (TCP + TLS + auth per cycle) dominates query time.
+The defaults are a good starting point; a much larger ceiling regresses (pool-mutex contention with no usable
+extra concurrency). Tune explicitly only for a different workload mix.
 
 ## Running multiple replicas
 
