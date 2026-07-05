@@ -451,6 +451,10 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 // peer replicas so their Await callers wake too. Use it at every flow-stop site (completed, failed,
 // cancelled, interrupted); non-terminal transitions (running) need only the local notifyStatusChange.
 func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) {
+	// Test rendezvous: a flow just reached a committed stop (this runs post-commit). Placed before the
+	// drop-fault below so it fires even when the wake itself is dropped - a test waiting on "the flow stopped"
+	// should observe the DB-committed stop regardless of wake delivery. Inert in production.
+	e.checkpoint(ctx, checkpointFlowStopped)
 	// faultDropSignalStop simulates a lost terminal wake (worker crash between commit and signal, dropped
 	// broadcast, no-op SignalPeers) so a test can prove Await still returns via its periodic re-snapshot.
 	if e.isFault(faultDropSignalStop) {

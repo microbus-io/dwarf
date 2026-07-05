@@ -303,6 +303,10 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	if strings.TrimSpace(resultJSON) == "" {
 		resultJSON = "{}"
 	}
+	// Test checkpoint: a breakpoint here freezes the worker after the child completed but before the caller
+	// revive, so a test can Cancel the caller in exactly the window the revive's running+parkedSubgraph guard
+	// exists to survive (the revive must not resurrect the just-cancelled caller).
+	e.checkpoint(ctx, checkpointBeforeReviveWrite)
 	reDispatch := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatch = false

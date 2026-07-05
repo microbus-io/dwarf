@@ -161,6 +161,11 @@ const (
 	checkpointBeforeRetryRewind       = "beforeRetryRewind"       // processStep, before the flow.Retry rewind transaction
 	checkpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // completeFlow(), just before its transaction's status-gate write
 	checkpointBeforeDeleteWrite       = "beforeDeleteWrite"       // deleteFlow(), just before its transaction's delete-stamp/interrupted-CAS write
+	checkpointBeforeReviveWrite       = "beforeReviveWrite"       // completeSurgraphFlow(), just before its transaction's caller-revive write
+
+	// Lifecycle rendezvous (fired at an event, used with waitFor - not a freeze site): lets a test wait for
+	// exact engine progress instead of polling status / sleeping.
+	checkpointFlowStopped = "flowStopped" // signalStop(), a flow just reached a stop (completed/failed/cancelled/interrupted)
 )
 
 // breakpoint is one armed breakpoint: release is closed by clearBreakpoint to let the frozen engine proceed;

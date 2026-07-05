@@ -33,19 +33,6 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// waitForCheckpoint blocks until the engine reaches (or is already frozen at) the named checkpoint, failing
-// the test on timeout rather than hanging to the suite deadline.
-func waitForCheckpoint(t *testing.T, e *Engine, name string, timeout time.Duration) {
-	t.Helper()
-	reached := make(chan struct{})
-	go func() { e.waitFor(name); close(reached) }()
-	select {
-	case <-reached:
-	case <-time.After(timeout):
-		t.Fatalf("engine never reached checkpoint %q", name)
-	}
-}
-
 // TestCancelVsTransition_Deterministic pins the transition tx's write-first terminal-status guard: a Cancel
 // that terminalizes a flow after its step was marked completed but before the transition transaction runs
 // must make the transition a clean no-op - no successor step is inserted into the cancelled flow, and no
@@ -74,7 +61,7 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 	e.setBreakpoint(checkpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cvt/g", nil, nil)
 	assert.NoError(err)
-	waitForCheckpoint(t, e, checkpointBeforeTransitionTx, 10*time.Second)
+	cpWaitFor(t, e, checkpointBeforeTransitionTx, 10*time.Second)
 
 	// Cancel wins while A's transition is held: the flow goes cancelled under the flow-row lock.
 	assert.NoError(e.Cancel(ctx, fk, "test"))
@@ -138,7 +125,7 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 	e.setBreakpoint(checkpointAfterCallerPark)
 	fk, err := e.Create(ctx, "cvs/parent", nil, nil)
 	assert.NoError(err)
-	waitForCheckpoint(t, e, checkpointAfterCallerPark, 10*time.Second)
+	cpWaitFor(t, e, checkpointAfterCallerPark, 10*time.Second)
 
 	// Cancel the tree while the child does not yet exist: teardown works from a scan taken before the child.
 	assert.NoError(e.Cancel(ctx, fk, "test"))
@@ -210,7 +197,7 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 	e.setBreakpoint(checkpointBeforeRetryRewind)
 	fk, err := e.Create(ctx, "rrc/g", nil, nil)
 	assert.NoError(err)
-	waitForCheckpoint(t, e, checkpointBeforeRetryRewind, 10*time.Second)
+	cpWaitFor(t, e, checkpointBeforeRetryRewind, 10*time.Second)
 
 	// Cancel wins: A's running step is flipped cancelled under the cancel transaction.
 	assert.NoError(e.Cancel(ctx, fk, "test"))

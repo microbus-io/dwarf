@@ -59,6 +59,21 @@ func linear2(proxy *TestProxy, prefix string, calls map[string]*int) {
 	}
 }
 
+// awaitNextStop (CP-D) arms a race-free rendezvous for the NEXT flow stop (completed/failed/cancelled/
+// interrupted), replacing a status poll / sleep with an exact wait. Call it BEFORE the action that triggers
+// the stop; the returned wait blocks until a flow has reached its (post-commit) signalStop, then releases the
+// engine. Because the breakpoint is armed now, it cannot miss a stop that fires before the wait - immune to
+// both the "a background poll drove it first" race a bare waitFor carries and the "slow CI missed the window"
+// flake a poll loop carries. It catches the FIRST stop, so use it in single-flow-of-interest windows.
+func awaitNextStop(t *testing.T, e *Engine) func() {
+	t.Helper()
+	e.setBreakpoint(checkpointFlowStopped)
+	return func() {
+		cpWaitFor(t, e, checkpointFlowStopped, 10*time.Second)
+		e.clearBreakpoint(checkpointFlowStopped)
+	}
+}
+
 // --- Dispatch faults (scoped by task name) ---
 
 func TestFault_ExecuteTask(t *testing.T) {
@@ -238,11 +253,15 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	// terminalizes the flow. The first dispatch's write is fenced out; once its lease lapses the poll
 	// backstop resets the step and it re-runs (fault consumed) to a clean completion, so A ran twice.
 	e.injectFault(faultKey(faultLeaseStaleWrite, "A"))
+	// Rendezvous on the clean re-run's completion (armed before Create: the fenced first dispatch never stops,
+	// so the first - and only - stop is the recovered completion, caught whichever poll drives it).
+	waitDone := awaitNextStop(t, e)
 	fk, err := e.Create(ctx, "flease/g", nil, nil)
 	assert.NoError(err)
-	time.Sleep(400 * time.Millisecond) // > lease (300ms): the fenced dispatch ran, its lease has lapsed
-	e.pollPendingSteps(ctx)            // the lease-recovery backstop
-	waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	time.Sleep(400 * time.Millisecond) // inherent wall-clock: the 300ms lease must lapse before recovery re-runs A
+	e.pollPendingSteps(ctx)            // the lease-recovery backstop (the background poll may also drive it)
+	waitDone()
+	assert.Equal(workflow.StatusCompleted, flowStatus(t, e, fk))
 	assert.Equal(2, runs)
 }
 
@@ -324,6 +343,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	// terminal child. The wedge sweep must re-drive the release. Arm, create, wait for the wedge, then
 	// invoke the sweep with minAge 0 (bypassing the steady-state age guard) and the parent completes.
 	e.injectFault(faultSubgraphReviveLost)
+	waitChild := awaitNextStop(t, e) // rendezvous on the child's completion (the first stop; parent is parked)
 	fk, err := e.Create(ctx, "fsub/parent", nil, nil)
 	assert.NoError(err)
 	shard, _, _, err := keys.ParseFlowKey(fk)
@@ -331,18 +351,13 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	db, err := e.db.Shard(shard)
 	assert.NoError(err)
 
-	// Wait until the child has gone terminal (the caller is now wedged).
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		var n int
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id<>0 AND status='"+workflow.StatusCompleted+"'").Scan(&n)
-		if n > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// The child has now gone terminal; its revive is (faultily) lost, so the caller is wedged.
+	waitChild()
+	// Rendezvous on the parent's completion after the sweep re-drives the release (armed before the sweep).
+	waitParent := awaitNextStop(t, e)
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0) // the sweep, no age guard
-	waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	waitParent()
+	assert.Equal(workflow.StatusCompleted, flowStatus(t, e, fk))
 }
 
 func TestFault_ReapMidTree(t *testing.T) {
@@ -360,12 +375,13 @@ func TestFault_ReapMidTree(t *testing.T) {
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
 	e.RunInTest(t)
 
+	waitDone := awaitNextStop(t, e) // rendezvous on completion instead of polling status
 	fk, err := e.Create(ctx, "freap/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	waitFlowStatus(t, e, fk, workflow.StatusCompleted, 5*time.Second)
+	waitDone()
 	shard, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	time.Sleep(5 * time.Millisecond) // let the 1ms window elapse
+	time.Sleep(5 * time.Millisecond) // inherent wall-clock: let the 1ms deletion window elapse
 
 	// Reap aborts mid-tree (after steps, before flows) and rolls back: the tree is left intact, not a
 	// half-deleted flow. The next reap pass (fault consumed) removes it cleanly.

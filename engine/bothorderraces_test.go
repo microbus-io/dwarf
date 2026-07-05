@@ -23,6 +23,7 @@ package engine
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,18 +33,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// cpWaitFor blocks until the engine reaches (or is already frozen at) the named checkpoint, failing the test
-// on timeout rather than hanging to the suite deadline.
-func cpWaitFor(t *testing.T, e *Engine, name string, timeout time.Duration) {
-	t.Helper()
-	reached := make(chan struct{})
-	go func() { e.waitFor(name); close(reached) }()
-	select {
-	case <-reached:
-	case <-time.After(timeout):
-		t.Fatalf("engine never reached checkpoint %q", name)
-	}
-}
+// cpWaitFor lives in checkpointhelpers_test.go (shared by every checkpoint-driven test).
 
 // flowStatus reads a flow's current status by key.
 func flowStatus(t *testing.T, e *Engine, flowKey string) string {
@@ -225,4 +215,106 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		assert.Equal(workflow.StatusCancelled, flowStatus(t, e, fk)) // Delete won
 		assertInvariants(t, e)
 	})
+}
+
+// TestConcurrentInterrupt_FirstWriterWins pins the interrupt-payload first-writer-wins guard: when two
+// fan-out siblings inside a subgraph both interrupt, their propagations up the surgraph chain both target the
+// SHARED ancestor (the parent's subgraph-caller step), and the guard (interrupt_payload='{}') keeps the
+// second from clobbering the payload the first already wrote there.
+//
+// Unlike the two races above, the two interrupts hit the *same* payload-write site, and clearBreakpoint
+// releases every arrival at that site together - so the checkpoint seam cannot order two arrivals at one site.
+// The deterministic order is instead imposed at the task level: branch IX interrupts immediately, branch IY
+// blocks until the test confirms IX's payload landed on the shared ancestor, then interrupts - so IX is always
+// the first writer and IY always the guarded no-op writer.
+func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	yGate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(yGate) }) }
+	t.Cleanup(release)
+
+	proxy := NewTestProxy()
+	// Parent: one subgraph caller. Its Call step is the shared ancestor both child branches interrupt up to.
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("Call", "cip/call")
+	parent.AddTransition("Call", workflow.END)
+	assert.NoError(parent.Validate())
+	proxy.HandleGraph("cip/parent", parent)
+	// Child: fan-out Split -> {IX, IY} -> J. Both branches interrupt with distinct payloads.
+	child := workflow.NewGraph("Child")
+	child.SetEndpoint("Split", "cip/split")
+	child.SetEndpoint("IX", "cip/ix")
+	child.SetEndpoint("IY", "cip/iy")
+	child.SetEndpoint("J", "cip/j")
+	child.SetFanIn("J")
+	child.AddTransition("Split", "IX")
+	child.AddTransition("Split", "IY")
+	child.AddTransition("IX", "J")
+	child.AddTransition("IY", "J")
+	child.AddTransition("J", workflow.END)
+	assert.NoError(child.Validate())
+	proxy.HandleGraph("cip/child", child)
+
+	proxy.HandleTask("cip/call", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Subgraph("cip/child", nil, nil)
+		if yield || err != nil {
+			return err
+		}
+		return nil
+	})
+	proxy.HandleTask("cip/split", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	// IX interrupts immediately - the first writer.
+	proxy.HandleTask("cip/ix", func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(map[string]any{"branch": "X"}, nil)
+		return err
+	})
+	// IY interrupts only after the test releases it (once IX has committed) - the guarded no-op writer.
+	proxy.HandleTask("cip/iy", func(ctx context.Context, f *workflow.Flow) error {
+		<-yGate
+		_, err := f.Interrupt(map[string]any{"branch": "Y"}, nil)
+		return err
+	})
+	proxy.HandleTask("cip/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	e.RunInTest(t)
+
+	fk, err := e.Create(ctx, "cip/parent", nil, nil)
+	assert.NoError(err)
+	shard, parentFlowID, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	db, err := e.db.Shard(shard)
+	assert.NoError(err)
+
+	callPayload := func() string {
+		var p string
+		db.QueryRowContext(ctx, "SELECT interrupt_payload FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", parentFlowID).Scan(&p)
+		return strings.TrimSpace(p)
+	}
+
+	// IX's interrupt propagates its payload onto the shared Call step (the first writer wins it).
+	got := waitUntil(t, 10*time.Second, func() bool {
+		p := callPayload()
+		return p != "" && p != "{}"
+	})
+	assert.True(got, "IX's interrupt never set the shared ancestor payload")
+	assert.True(strings.Contains(callPayload(), "X"), "first writer (IX) should own the ancestor payload")
+
+	// Release IY: its interrupt now reaches the payload write, but the guard (interrupt_payload='{}') matches
+	// zero rows on the already-written Call step - a no-op.
+	release()
+	got = waitUntil(t, 10*time.Second, func() bool {
+		return countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE task_name='IY' AND status='"+workflow.StatusInterrupted+"'") == 1
+	})
+	assert.True(got, "IY never interrupted")
+
+	// The guard held: the shared ancestor still carries IX's payload, uncorrupted by IY.
+	p := callPayload()
+	assert.True(strings.Contains(p, "X"), "ancestor payload should still be IX's, got %q", p)
+	assert.True(!strings.Contains(p, "Y"), "IY must not have clobbered the shared ancestor payload, got %q", p)
+	assertInvariants(t, e)
 }
