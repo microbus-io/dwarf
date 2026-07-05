@@ -158,6 +158,7 @@ Full guides live in [`docs/`](docs/):
 - [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, retries, recovery
 - [Observability](docs/observability.md) — logs, metrics, tracing
 - [Deployment](docs/deployment.md) — database choice, sharding, config, multi-replica
+- [Benchmarks](docs/benchmark.md) — throughput & latency per dialect and shard count, and how to run them
 - [Testing](docs/testing.md) — `RunInTest` and `TestProxy`
 
 API reference: [pkg.go.dev/github.com/microbus-io/dwarf](https://pkg.go.dev/github.com/microbus-io/dwarf).

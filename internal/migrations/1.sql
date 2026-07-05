@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     trace_parent         VARCHAR(128) NOT NULL DEFAULT '',
     delete_on_completion TINYINT      NOT NULL DEFAULT 0,
     delete_after_ms      INT          NOT NULL DEFAULT 0,
-    final_state          TEXT         NOT NULL DEFAULT ('{}'),
+    final_state          JSON         NOT NULL DEFAULT ('{}'),
     error                TEXT         NOT NULL DEFAULT (''),
     cancel_reason        TEXT         NOT NULL DEFAULT (''),
     priority             INT          NOT NULL DEFAULT 5,
