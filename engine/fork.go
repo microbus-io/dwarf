@@ -121,6 +121,12 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	var newRootFlowID int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		cc.newLeafStepID = 0
+		// faultForkCommit fails this transaction once, before the clone runs, so the test proves the whole
+		// clone rolls back atomically (origin byte-identical, zero partial clone rows) and a retry then
+		// forks cleanly - pinning Fork's "crash mid-clone rolls back, origin never mutated" claim.
+		if e.isFault(faultForkCommit) {
+			return errors.New("injected fault: " + faultForkCommit)
+		}
 		id, cloneErr := e.cloneTree(ctx, tx, cc, rootFlowID)
 		if cloneErr != nil {
 			return errors.Trace(cloneErr)

@@ -47,6 +47,12 @@ func (e *Engine) emitSignal(ctx context.Context, op signalOp, payload any) {
 		return
 	}
 	err = errors.CatchPanic(func() error {
+		// faultSignalPeersPanic simulates the host's SignalPeers panicking, so the test can prove the
+		// boundary CatchPanic swallows it (logged below) and flow completion / Await are unaffected. Scoped
+		// by op so a test targets the terminal statusChange wake without also tripping enqueue doorbells.
+		if e.isFault(faultSignalPeersPanic, string(op)) {
+			panic("injected fault: " + faultKey(faultSignalPeersPanic, string(op)))
+		}
 		e.host.SignalPeers(ctx, string(op), data)
 		return nil
 	})

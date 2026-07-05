@@ -73,6 +73,13 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 					" AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW_UTC() LIMIT_OFFSET(?, 0)",
 				reapBatch,
 			)
+			// faultReapSelectErr treats this due-root scan as errored (sibling to faultReapMidTree, which covers
+			// the delete half), so the test proves the pass logs and bails without deleting and the NEXT pass
+			// reaps cleanly - the reaper's resilience to a transient SELECT blip.
+			if err == nil && e.isFault(faultReapSelectErr) {
+				rows.Close()
+				err = errors.New("injected fault: " + faultReapSelectErr)
+			}
 			if err != nil {
 				e.logger.ErrorContext(ctx, "Reaper: selecting due flows", "shard", shard, "error", err)
 				return nil

@@ -52,16 +52,26 @@ const (
 	faultCompleteFlowCommit = "completeFlowCommit" // the flow-completion transaction errors
 	faultContention         = "contention"         // a dispatch transaction returns a lock-contention error
 	faultLeaseStaleWrite    = "leaseStaleWrite"    // the completion write carries a stale lease_seq (zombie)
+	faultSubgraphSpawnErr   = "subgraphSpawnErr"   // createSubgraphFlow errors after the caller step parked
 
 	// Scoped by workflow URL of the subgraph child:
 	faultSubgraphReviveLost = "subgraphReviveLost" // completeSurgraphFlow skips reviving the parked caller
 
+	// Scoped by signal op (enqueue / statusChange):
+	faultSignalPeersPanic = "signalPeersPanic" // the host SignalPeers call panics (host-call panic isolation)
+
 	// Process-wide (no scope):
-	faultDropSignalStop = "dropSignalStop" // signalStop delivers nothing (lost terminal wake)
-	faultDropDoorbell   = "dropDoorbell"   // the enqueue doorbell is dropped (lost wake)
-	faultReapMidTree    = "reapMidTree"    // the reaper errors after deleting steps, before flows
-	faultRefillScanErr  = "refillScanErr"  // the refiller's priority-band scan errors
-	faultPollSizingErr  = "pollSizingErr"  // the poll's pending-sizing query is treated as errored
+	faultDropSignalStop    = "dropSignalStop"    // signalStop delivers nothing (lost terminal wake)
+	faultDropDoorbell      = "dropDoorbell"      // the enqueue doorbell is dropped (lost wake)
+	faultRecoveryResetErr  = "recoveryResetErr"  // the processStep recovery defer's own reset UPDATE errors
+	faultReapMidTree       = "reapMidTree"       // the reaper errors after deleting steps, before flows
+	faultReapSelectErr     = "reapSelectErr"     // the reaper's due-root SELECT errors
+	faultRefillScanErr     = "refillScanErr"     // the refiller's priority-band scan errors
+	faultPollSizingErr     = "pollSizingErr"     // the poll's pending-sizing query is treated as errored
+	faultDeliverFailureErr = "deliverFailureErr" // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery)
+	faultCancelCommit      = "cancelCommit"      // the Cancel transaction errors
+	faultResumeCommit      = "resumeCommit"      // the Resume transaction errors
+	faultForkCommit        = "forkCommit"        // the Fork clone transaction errors
 )
 
 // faultKey builds a scoped fault key: "<fault>:<scope>[:<scope>...]". The test side uses it to arm a
@@ -145,7 +155,12 @@ func (e *Engine) clearFault(name string) {
 // Checkpoint site names live here, next to the primitives; the consult site lives at the point it marks,
 // calling checkpoint().
 const (
-	checkpointResumeBeforeFlowWrite = "resumeBeforeFlowWrite" // resume(), just before its transaction's flow-status gate write
+	checkpointResumeBeforeFlowWrite   = "resumeBeforeFlowWrite"   // resume(), just before its transaction's flow-status gate write
+	checkpointBeforeTransitionTx      = "beforeTransitionTx"      // processStep, after the step is marked completed, before the transition transaction
+	checkpointAfterCallerPark         = "afterCallerPark"         // processStep, after the subgraph caller step is parked, before createSubgraphFlow
+	checkpointBeforeRetryRewind       = "beforeRetryRewind"       // processStep, before the flow.Retry rewind transaction
+	checkpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // completeFlow(), just before its transaction's status-gate write
+	checkpointBeforeDeleteWrite       = "beforeDeleteWrite"       // deleteFlow(), just before its transaction's delete-stamp/interrupted-CAS write
 )
 
 // breakpoint is one armed breakpoint: release is closed by clearBreakpoint to let the frozen engine proceed;

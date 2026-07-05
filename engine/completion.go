@@ -35,6 +35,12 @@ import (
 // caller step's step_depth, so the child's entry step (and thus its whole subtree) is numbered as a
 // continuation of the caller (callerStepDepth+1).
 func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, callerTraceParent string) (string, error) {
+	// faultSubgraphSpawnErr simulates the spawn failing after the caller step already parked (processStep's
+	// park-then-create ordering): no child is inserted, and the caller must be failed cleanly (failAndReturn)
+	// rather than left parked forever. Scoped by the child workflow URL.
+	if e.isFault(faultSubgraphSpawnErr, subgraphWorkflowURL) {
+		return "", errors.New("injected fault: "+faultKey(faultSubgraphSpawnErr, subgraphWorkflowURL), http.StatusInternalServerError)
+	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return "", errors.Trace(err)
@@ -194,6 +200,10 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	var surgraphFlowID, surgraphStepID int
 	var deleteOnCompletion bool
 	completed := false
+	// Test checkpoint: a breakpoint here freezes completion just before its transaction (holding no lock, so a
+	// racing Cancel can commit), letting a test drive the completeFlow-vs-Cancel race in either order. Placed
+	// before the transaction, not inside, for the same SQLite-deadlock reason as checkpointResumeBeforeFlowWrite.
+	e.checkpoint(ctx, checkpointBeforeCompleteFlowWrite)
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
 		// faultCompleteFlowCommit fails the flow-completion transaction after processStep has already
@@ -556,6 +566,14 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 	if parentStepID == 0 {
 		return false, nil
 	}
+	// faultDeliverFailureErr simulates this re-dispatch being lost: the child still commits terminal (this
+	// runs inside its terminating tx, after the flow row was marked failed), but the parked caller is never
+	// re-armed - the wedge shape (caller running+parkedSubgraph with a terminal child) that
+	// recoverWedgedSubgraphParks must backstop. Returning (false, nil), not an error, so the child's
+	// terminalization is NOT rolled back (an error would retry and deliver, producing no wedge).
+	if e.isFault(faultDeliverFailureErr) {
+		return false, nil
+	}
 	res, err := tx.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
 		workflow.StatusPending, parkedNone, errMsg, parentStepID, parkedSubgraph,
@@ -800,6 +818,11 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	lost := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		lost = false
+		// faultResumeCommit fails this transaction once, before any write, so the test proves it rolls back
+		// atomically (the flow stays interrupted, its steps untouched) and a retry then resumes cleanly.
+		if e.isFault(faultResumeCommit) {
+			return errors.New("injected fault: " + faultResumeCommit)
+		}
 		allStepIDs := append([]any{leafStepID}, parkStepIDs...)
 		clearPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload='{}' WHERE step_id IN ("+clearPlaceholders+")", allStepIDs...)

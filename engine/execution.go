@@ -78,6 +78,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 				resetArgs = append(resetArgs, leaseSeq)
 			}
 			db.Transact(ctx, func(tx *sequel.Tx) error {
+				// faultRecoveryResetErr makes this last-resort reset itself fail (a non-retryable error, as if
+				// it lost to a contention storm), so the step stays `completed` and the flow strands `running`
+				// with every step terminal - the residual orphan hole that only detectOrphanedFlows surfaces.
+				// Process-wide (no scope): taskName is declared after this defer, so it is not in scope here.
+				if e.isFault(faultRecoveryResetErr) {
+					return errors.New("injected fault: " + faultRecoveryResetErr)
+				}
 				_, terr := tx.ExecContext(ctx, resetSQL, resetArgs...)
 				return terr
 			})
@@ -429,6 +436,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if n, _ := parkRes.RowsAffected(); n == 0 {
 			return nil
 		}
+		// Test checkpoint: a breakpoint here freezes the worker after the caller step is parked but before the
+		// child flow is inserted, so a test can Cancel the tree in exactly the window that produces an orphaned
+		// subgraph child (the recoverOrphanedSubgraphChildren case).
+		e.checkpoint(ctx, checkpointAfterCallerPark)
 		childInputState := subgraphInput
 		if childInputState == nil {
 			childInputState = map[string]any{}
@@ -484,6 +495,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// delete the now-terminal tree's subgraph children. So rewind first under the guard and reap (and
 		// re-dispatch) only when it actually rewound a still-running step; a lost guard (n==0) leaves the step
 		// terminal - the Cancel already cancelled its children - and returns without reaping or re-dispatching.
+		// Test checkpoint: a breakpoint here freezes the worker before the rewind, so a test can Cancel the flow
+		// (terminalizing this running step) in exactly the window the status='running' rewind guard protects.
+		e.checkpoint(ctx, checkpointBeforeRetryRewind)
 		var rewound bool
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			res, execErr := tx.ExecContext(ctx,
@@ -608,6 +622,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// call rather than notified directly (see failStep). Captured in the transaction, acted on after it.
 	flowFailedParentStepID := 0
 	flowFailedReDispatchParent := false
+
+	// Test checkpoint: a breakpoint here freezes the worker after the step is marked completed but before
+	// the transition transaction, so a test can Cancel the flow in exactly the window the transition's
+	// write-first terminal-status guard exists to survive (the transition must become a no-op, inserting no
+	// successors into the cancelled flow).
+	e.checkpoint(ctx, checkpointBeforeTransitionTx)
 
 	// The transition (insert next steps, then advance or fail the flow) runs as one retryable
 	// transaction. Under pessimistic locking it can deadlock with a concurrent worker, and a deadlocked

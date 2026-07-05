@@ -568,6 +568,11 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	reason = strings.TrimSpace(reason)
 	finalStates := make([]string, len(allFlowIDs))
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		// faultCancelCommit fails this transaction once, before any write, so the test proves it rolls back
+		// atomically (the tree is untouched) and a retry then cancels cleanly.
+		if e.isFault(faultCancelCommit) {
+			return errors.New("injected fault: " + faultCancelCommit)
+		}
 		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
 		stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
 		tx.ExecContext(ctx,
@@ -640,6 +645,10 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		return errors.Trace(err)
 	}
 
+	// Test checkpoint: a breakpoint here freezes Delete just before its transaction (holding no lock, so a
+	// racing Resume can commit), letting a test drive the Delete-vs-Resume race in either order. Placed before
+	// the transaction, not inside, for the same SQLite-deadlock reason as checkpointResumeBeforeFlowWrite.
+	e.checkpoint(ctx, checkpointBeforeDeleteWrite)
 	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
 		var flowStatus string
 		var surgraphFlowID, deleteAfterMs int
