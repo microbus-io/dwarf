@@ -427,7 +427,12 @@ func TestFault_PollSizingErr(t *testing.T) {
 	// A sizing-query failure must clamp the next poll to pollErrorRetryInterval (re-poll soon) rather than
 	// sleeping maxPollInterval on an unknown backlog. Drive one poll with the fault armed and assert the
 	// scheduled wake is near-term, not minutes out.
-	e.injectFault(faultPollSizingErr)
+	//
+	// Arm the fault sticky (1<<20), not one-shot: RunInTest starts the background timerLoop, which also
+	// calls pollPendingSteps and would consume a one-shot faultPollSizingErr out from under this explicit
+	// poll - leaving our poll unclamped and writing maxPollInterval (a MySQL-timing flake). Held armed,
+	// whichever poll runs still clamps, so nextPoll is reliably near-term.
+	e.injectFaultN(faultPollSizingErr, 1<<20)
 	e.pollPendingSteps(ctx)
 
 	e.nextPollLock.Lock()
