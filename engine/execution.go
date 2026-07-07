@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -80,13 +81,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			// Test checkpoint: a breakpoint here freezes a zombie between capturing its (stale) reset and
 			// running it, so a test can let a peer re-claim+bump the step first and prove the lease_seq fence
 			// makes the zombie's reset a zero-row no-op (never rewinding the peer's freshly-claimed step).
-			e.checkpoint(ctx, checkpointBeforeRecoveryReset)
+			e.seams.Checkpoint(ctx, checkpointBeforeRecoveryReset)
 			db.Transact(ctx, func(tx *sequel.Tx) error {
 				// faultRecoveryResetErr makes this last-resort reset itself fail (a non-retryable error, as if
 				// it lost to a contention storm), so the step stays `completed` and the flow strands `running`
 				// with every step terminal - the residual orphan hole that only detectOrphanedFlows surfaces.
 				// Process-wide (no scope): taskName is declared after this defer, so it is not in scope here.
-				if e.isFault(faultRecoveryResetErr) {
+				if e.seams.IsFault(faultRecoveryResetErr) {
 					return errors.New("injected fault: " + faultRecoveryResetErr)
 				}
 				_, terr := tx.ExecContext(ctx, resetSQL, resetArgs...)
@@ -211,16 +212,19 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Parse graph, reusing the cached parse — graphJSON is frozen at flow creation, so every step of
 	// the same flow sees identical bytes.
 	graphKey := graphCacheKey{shard: shardNum, flowID: flowID} // scopes the cache by shard, since flow_id is only unique within a shard
-	graph, cached := e.graphCache.Load(graphKey)
+	cg, cached := e.graphCache.Load(graphKey)
 	if !cached {
-		graph = &workflow.Graph{}
-		err = json.Unmarshal([]byte(graphJSON), graph)
+		parsed := &workflow.Graph{}
+		err = json.Unmarshal([]byte(graphJSON), parsed)
 		if err != nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
-		e.graphCache.Store(graphKey, graph)
+		// Derive the fan-in routing map once per flow and cache it with the graph; it is not persisted.
+		cg = &cachedGraph{graph: parsed, fanIn: faninmap.New(parsed)}
+		e.graphCache.Store(graphKey, cg)
 	}
+	graph := cg.graph
 
 	// Build the Flow carrier
 	var state map[string]any
@@ -287,13 +291,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	execErr := errors.CatchPanic(func() error {
 		// faultPanicExecuteTask panics inside the wrapper so it exercises the host-call panic isolation
 		// (caught here, routed as a normal task error), scoped to this task name.
-		if e.isFault(faultPanicExecuteTask, taskName) {
-			panic("injected fault: " + faultKey(faultPanicExecuteTask, taskName))
+		if e.seams.IsFault(faultPanicExecuteTask, taskName) {
+			panic("injected fault: " + faultPanicExecuteTask + " " + taskName)
 		}
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	})
-	if execErr == nil && e.isFault(faultExecuteTask, taskName) {
-		execErr = errors.New("injected fault: "+faultKey(faultExecuteTask, taskName), http.StatusInternalServerError)
+	if execErr == nil && e.seams.IsFault(faultExecuteTask, taskName) {
+		execErr = errors.New("injected fault: "+faultExecuteTask+" "+taskName, http.StatusInternalServerError)
 	}
 	recordSpanError(taskSpan, execErr)
 
@@ -399,8 +403,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			subgraphGraph, e2 = e.host.LoadGraph(loadCtx, subgraphURL)
 			return e2
 		})
-		if lerr == nil && e.isFault(faultLoadGraph, subgraphURL) {
-			lerr = errors.New("injected fault: "+faultKey(faultLoadGraph, subgraphURL), http.StatusInternalServerError)
+		if lerr == nil && e.seams.IsFault(faultLoadGraph, subgraphURL) {
+			lerr = errors.New("injected fault: "+faultLoadGraph+" "+subgraphURL, http.StatusInternalServerError)
 		}
 		loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
 		if lerr != nil {
@@ -408,8 +412,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			return errors.Trace(err)
 		}
 		// Same create-time guarantees for a subgraph child: reject a nil or structurally invalid child graph
-		// (failing the caller step like any LoadGraph error), and let Validate populate the child's
-		// fanOutToFanIn before createSubgraphFlow freezes its JSON.
+		// (failing the caller step like any LoadGraph error). Validation is pure; the child's fan-in map is
+		// derived per flow at dispatch (internal/faninmap), not frozen into its JSON.
 		if subgraphGraph == nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
 				errors.New("subgraph graph not found: %s", subgraphURL, http.StatusNotFound), taskName)
@@ -443,7 +447,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// Test checkpoint: a breakpoint here freezes the worker after the caller step is parked but before the
 		// child flow is inserted, so a test can Cancel the tree in exactly the window that produces an orphaned
 		// subgraph child (the recoverOrphanedSubgraphChildren case).
-		e.checkpoint(ctx, checkpointAfterCallerPark)
+		e.seams.Checkpoint(ctx, checkpointAfterCallerPark)
 		childInputState := subgraphInput
 		if childInputState == nil {
 			childInputState = map[string]any{}
@@ -501,7 +505,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// terminal - the Cancel already cancelled its children - and returns without reaping or re-dispatching.
 		// Test checkpoint: a breakpoint here freezes the worker before the rewind, so a test can Cancel the flow
 		// (terminalizing this running step) in exactly the window the status='running' rewind guard protects.
-		e.checkpoint(ctx, checkpointBeforeRetryRewind)
+		e.seams.Checkpoint(ctx, checkpointBeforeRetryRewind)
 		var rewound bool
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			res, execErr := tx.ExecContext(ctx,
@@ -547,7 +551,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// no-op below), so the step stays claimable and lease recovery re-runs it cleanly - the test proves a
 	// late/slow worker's write can never corrupt or terminalize a flow a peer is healthily re-executing.
 	writeSeq := leaseSeq
-	if e.isFault(faultLeaseStaleWrite, taskName) {
+	if e.seams.IsFault(faultLeaseStaleWrite, taskName) {
 		writeSeq = leaseSeq - 1
 	}
 	stepRes, err := db.ExecContext(ctx,
@@ -585,7 +589,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	cohortSize := len(realTasks)
 
 	if isPushTransition && cohortSize == 0 {
-		fanInTarget := graph.FanInFor(taskName)
+		fanInTarget := cg.fanIn.For(taskName)
 		if fanInTarget == "" {
 			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, workflowURL)
 		}
@@ -631,7 +635,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// the transition transaction, so a test can Cancel the flow in exactly the window the transition's
 	// write-first terminal-status guard exists to survive (the transition must become a no-op, inserting no
 	// successors into the cancelled flow).
-	e.checkpoint(ctx, checkpointBeforeTransitionTx)
+	e.seams.Checkpoint(ctx, checkpointBeforeTransitionTx)
 
 	// The transition (insert next steps, then advance or fail the flow) runs as one retryable
 	// transaction. Under pessimistic locking it can deadlock with a concurrent worker, and a deadlocked
@@ -649,11 +653,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// returns a non-retryable error, so the tx fails after the step was already marked completed and the
 		// processStep recovery defer must reset it (completed->pending) and re-dispatch. Both are scoped to
 		// the completing task and checked before the flow-row write, so a fired fault rolls back nothing.
-		if e.isFault(faultContention, taskName) {
-			return errors.New("database is locked (injected fault: " + faultKey(faultContention, taskName) + ")")
+		if e.seams.IsFault(faultContention, taskName) {
+			return errors.New("database is locked (injected fault: " + faultContention + " " + taskName + ")")
 		}
-		if e.isFault(faultTransitionCommit, taskName) {
-			return errors.New("injected fault: " + faultKey(faultTransitionCommit, taskName))
+		if e.seams.IsFault(faultTransitionCommit, taskName) {
+			return errors.New("injected fault: " + faultTransitionCommit + " " + taskName)
 		}
 
 		// Write-first: take the flow row's lock before any step, guarded on non-terminal status. If a
@@ -857,7 +861,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		// faultInterruptStaleWrite forces the generation to look re-granted (as a real zombie would, after a peer
 		// re-claimed the leaf), so the fence trips and the WHOLE transaction rolls back - undoing the ancestor
 		// re-park - and the worker abandons. The only fence in the engine that rolls back rather than no-ops.
-		if e.isFault(faultInterruptStaleWrite) {
+		if e.seams.IsFault(faultInterruptStaleWrite) {
 			curLeaseSeq = leaseSeq + 1
 		}
 		if curLeaseSeq != leaseSeq {

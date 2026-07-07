@@ -83,7 +83,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 
 	// Break the worker's terminal wake for the rest of the test: every signalStop on the worker (local notify
 	// + peer broadcast) delivers nothing, so the awaiter can learn the outcome only by re-snapshotting the DB.
-	worker.injectFaultN(faultDropSignalStop, 1<<20)
+	worker.seams.InjectN(1<<20, faultDropSignalStop)
 
 	fk, err := awaiter.Create(ctx, "xrwake/g", nil, nil)
 	if !assert.NoError(err) {
@@ -137,7 +137,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	repA.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 400ms
 	assert.NoError(repA.Startup(ctx))
 
-	repA.injectFault(faultKey(faultLeaseStaleWrite, "A"))
+	repA.seams.Inject(faultLeaseStaleWrite, "A")
 	fk, err := repA.Create(ctx, "xrrec/g", nil, nil)
 	if !assert.NoError(err) {
 		repA.Shutdown(ctx)

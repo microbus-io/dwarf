@@ -114,7 +114,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	// Drop the child's terminal wake: with faultDropSignalStop armed, the child's failStep signalStop delivers
 	// nothing. The fault fires once and is consumed on the child's (first) stop, so the root's later wake is
 	// unaffected.
-	e.injectFault(faultDropSignalStop)
+	e.seams.Inject(faultDropSignalStop)
 	close(release) // the child now fails via failStep's subgraph-child path, whose signalStop is dropped
 
 	// Despite the lost signal, Await(childKey) must still return - the only remaining wake path is the periodic

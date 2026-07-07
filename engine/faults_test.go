@@ -67,10 +67,10 @@ func linear2(proxy *TestProxy, prefix string, calls map[string]*int) {
 // flake a poll loop carries. It catches the FIRST stop, so use it in single-flow-of-interest windows.
 func awaitNextStop(t *testing.T, e *Engine) func() {
 	t.Helper()
-	e.setBreakpoint(checkpointFlowStopped)
+	e.seams.Break(checkpointFlowStopped)
 	return func() {
 		cpWaitFor(t, e, checkpointFlowStopped, 10*time.Second)
-		e.clearBreakpoint(checkpointFlowStopped)
+		e.seams.Resume(checkpointFlowStopped)
 	}
 }
 
@@ -101,12 +101,12 @@ func TestFault_ExecuteTask(t *testing.T) {
 	e.RunInTest(t)
 
 	// No onError -> the injected failure fails the flow.
-	e.injectFault(faultKey(faultExecuteTask, "Work"))
+	e.seams.Inject(faultExecuteTask, "Work")
 	if out := boundedRun(t, e, "fexec/bare"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusFailed, out.Status)
 	}
 	// With onError -> routed to the handler and the flow completes. Fault consumed, so re-arm.
-	e.injectFault(faultKey(faultExecuteTask, "Work"))
+	e.seams.Inject(faultExecuteTask, "Work")
 	if out := boundedRun(t, e, "fexec/handled"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		assert.Equal("yes", out.State["rescued"])
@@ -131,7 +131,7 @@ func TestFault_PanicExecuteTask(t *testing.T) {
 	e.RunInTest(t)
 
 	// A panic in the host call is caught at the boundary and fails the step (no wedge/crash-loop).
-	e.injectFault(faultKey(faultPanicExecuteTask, "Boom"))
+	e.seams.Inject(faultPanicExecuteTask, "Boom")
 	if out := boundedRun(t, e, "fpanic/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusFailed, out.Status)
 	}
@@ -155,7 +155,7 @@ func TestFault_LoadGraph(t *testing.T) {
 	e.RunInTest(t)
 
 	// Armed: Create fails (the graph "cannot be loaded"). Disarmed: it creates and completes.
-	e.injectFault(faultKey(faultLoadGraph, "floadg/g"))
+	e.seams.Inject(faultLoadGraph, "floadg/g")
 	_, err := e.Create(ctx, "floadg/g", nil, nil)
 	assert.Error(err)
 	assert.Equal(500, errors.StatusCode(err))
@@ -179,7 +179,7 @@ func TestFault_TransitionCommit(t *testing.T) {
 
 	// A's transition transaction fails once, after A was marked completed: the recovery defer must reset A
 	// and re-dispatch, so the flow still completes and A ran twice.
-	e.injectFault(faultKey(faultTransitionCommit, "A"))
+	e.seams.Inject(faultTransitionCommit, "A")
 	if out := boundedRun(t, e, "ftrans/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -199,7 +199,7 @@ func TestFault_Contention(t *testing.T) {
 
 	// A's transition transaction returns a lock-contention error once: Transact retries the closure to a
 	// clean commit, transparently - the flow completes and A ran only once (retry is inside the tx).
-	e.injectFault(faultKey(faultContention, "A"))
+	e.seams.Inject(faultContention, "A")
 	if out := boundedRun(t, e, "fcont/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -224,7 +224,7 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 	// The flow-completion transaction fails once after the terminal step was marked completed: the recovery
 	// defer resets it and re-dispatches, so the flow still completes (no `running` orphan with all steps
 	// terminal).
-	e.injectFault(faultCompleteFlowCommit)
+	e.seams.Inject(faultCompleteFlowCommit)
 	if out := boundedRun(t, e, "fcfc/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -252,7 +252,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	// step stays claimable and lease recovery re-runs it cleanly - a stale write never corrupts or
 	// terminalizes the flow. The first dispatch's write is fenced out; once its lease lapses the poll
 	// backstop resets the step and it re-runs (fault consumed) to a clean completion, so A ran twice.
-	e.injectFault(faultKey(faultLeaseStaleWrite, "A"))
+	e.seams.Inject(faultLeaseStaleWrite, "A")
 	// Rendezvous on the clean re-run's completion (armed before Create: the fenced first dispatch never stops,
 	// so the first - and only - stop is the recovered completion, caught whichever poll drives it).
 	waitDone := awaitNextStop(t, e)
@@ -283,7 +283,7 @@ func TestFault_DropSignalStop(t *testing.T) {
 
 	// The terminal wake is dropped, so Await cannot rely on the signal; it must return via its periodic
 	// re-snapshot of the DB-committed stop.
-	e.injectFault(faultDropSignalStop)
+	e.seams.Inject(faultDropSignalStop)
 	if out := boundedRun(t, e, "fsig/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -305,7 +305,7 @@ func TestFault_DropDoorbell(t *testing.T) {
 
 	// The create-time doorbell is dropped, so the entry step sits pending until the poll backstop rings the
 	// local doorbell. Drive the backstop directly, then the flow completes.
-	e.injectFault(faultDropDoorbell)
+	e.seams.Inject(faultDropDoorbell)
 	fk, err := e.Create(ctx, "fdoor/g", nil, nil)
 	assert.NoError(err)
 	e.pollPendingSteps(ctx) // the backstop that recovers a lost doorbell
@@ -342,7 +342,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	// The child's revive of the parked caller is lost: the caller wedges running+parkedSubgraph with a
 	// terminal child. The wedge sweep must re-drive the release. Arm, create, wait for the wedge, then
 	// invoke the sweep with minAge 0 (bypassing the steady-state age guard) and the parent completes.
-	e.injectFault(faultSubgraphReviveLost)
+	e.seams.Inject(faultSubgraphReviveLost)
 	waitChild := awaitNextStop(t, e) // rendezvous on the child's completion (the first stop; parent is parked)
 	fk, err := e.Create(ctx, "fsub/parent", nil, nil)
 	assert.NoError(err)
@@ -385,7 +385,7 @@ func TestFault_ReapMidTree(t *testing.T) {
 
 	// Reap aborts mid-tree (after steps, before flows) and rolls back: the tree is left intact, not a
 	// half-deleted flow. The next reap pass (fault consumed) removes it cleanly.
-	e.injectFault(faultReapMidTree)
+	e.seams.Inject(faultReapMidTree)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard)) // rolled back - still present
 
@@ -410,7 +410,7 @@ func TestFault_RefillScanErr(t *testing.T) {
 
 	// The refiller's band scan errors once. Instead of refilling empty and idling every worker forever, it
 	// logs and shortens the next poll, so the flow is still dispatched and completes (just after a re-scan).
-	e.injectFault(faultRefillScanErr)
+	e.seams.Inject(faultRefillScanErr)
 	if out := boundedRun(t, e, "frefill/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -432,7 +432,7 @@ func TestFault_PollSizingErr(t *testing.T) {
 	// calls pollPendingSteps and would consume a one-shot faultPollSizingErr out from under this explicit
 	// poll - leaving our poll unclamped and writing maxPollInterval (a MySQL-timing flake). Held armed,
 	// whichever poll runs still clamps, so nextPoll is reliably near-term.
-	e.injectFaultN(faultPollSizingErr, 1<<20)
+	e.seams.InjectN(1<<20, faultPollSizingErr)
 	e.pollPendingSteps(ctx)
 
 	e.nextPollLock.Lock()

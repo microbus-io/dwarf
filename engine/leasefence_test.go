@@ -320,8 +320,8 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 
 	// The first (zombie) dispatch of A completes, its transition tx fails (one-shot fault), and the recovery
 	// defer freezes at the reset checkpoint with A `completed` under generation N.
-	eng.injectFault(faultKey(faultTransitionCommit, "A"))
-	eng.setBreakpoint(checkpointBeforeRecoveryReset)
+	eng.seams.Inject(faultTransitionCommit, "A")
+	eng.seams.Break(checkpointBeforeRecoveryReset)
 
 	flowKey, err := eng.Create(ctx, "lfrr/g", nil, nil)
 	if !assert.NoError(err) {
@@ -367,7 +367,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(beforeStatus))
 
 	// Release the zombie: its reset carries the stale generation N and must match zero rows.
-	eng.clearBreakpoint(checkpointBeforeRecoveryReset)
+	eng.seams.Resume(checkpointBeforeRecoveryReset)
 
 	// A broken fence would rewind A completed->pending within milliseconds and re-dispatch it a third time
 	// after the flow already completed; the settle window makes the fence's zero-row match observable.

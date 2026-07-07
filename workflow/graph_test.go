@@ -594,9 +594,7 @@ func TestLineage_SimpleFanOutFanIn(t *testing.T) {
 	g.AddTransition("b", "join")
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
-	assert.NoError(g.Validate())
-	assert.Equal("join", g.FanInFor("s"))
-}
+	assert.NoError(g.Validate())}
 
 func TestLineage_NestedFanOutFanIn(t *testing.T) {
 	assert := testarossa.For(t)
@@ -616,8 +614,6 @@ func TestLineage_NestedFanOutFanIn(t *testing.T) {
 	g.SetFanIn("innerJoin")
 	g.SetFanIn("outerJoin")
 	assert.NoError(g.Validate())
-	assert.Equal("innerJoin", g.FanInFor("outer1"))
-	assert.Equal("outerJoin", g.FanInFor("s"))
 }
 
 func TestLineage_ForEachThenFanIn(t *testing.T) {
@@ -628,9 +624,7 @@ func TestLineage_ForEachThenFanIn(t *testing.T) {
 	g.AddTransition("a", "join")
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
-	assert.NoError(g.Validate())
-	assert.Equal("join", g.FanInFor("s"))
-}
+	assert.NoError(g.Validate())}
 
 func TestLineage_ConditionalWhenFanIn(t *testing.T) {
 	assert := testarossa.For(t)
@@ -642,9 +636,7 @@ func TestLineage_ConditionalWhenFanIn(t *testing.T) {
 	g.AddTransition("b", "join")
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
-	assert.NoError(g.Validate())
-	assert.Equal("join", g.FanInFor("s"))
-}
+	assert.NoError(g.Validate())}
 
 func TestLineage_AliasedNodesInDifferentScopes(t *testing.T) {
 	assert := testarossa.For(t)
@@ -789,9 +781,7 @@ func TestLineage_FanOutDirectlyToFanIn(t *testing.T) {
 	g.AddTransition("a", "join")
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
-	assert.NoError(g.Validate())
-	assert.Equal("join", g.FanInFor("s"))
-}
+	assert.NoError(g.Validate())}
 
 func TestLineage_SetFanInOnUnknownNodeRejected(t *testing.T) {
 	assert := testarossa.For(t)
@@ -826,7 +816,6 @@ func TestLineage_FanInFlagSurvivesJSONRoundTrip(t *testing.T) {
 
 	assert.Expect(restored.IsFanIn("join"), true)
 	assert.Expect(restored.IsFanIn("a"), false)
-	assert.Equal("join", restored.FanInFor("s"))
 }
 
 func TestGraph_SwitchValid(t *testing.T) {

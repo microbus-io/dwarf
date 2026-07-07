@@ -91,8 +91,8 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	// A completes (marked `completed`), the flow-completion tx fails (faultCompleteFlowCommit), then the
 	// recovery defer's reset also fails (faultRecoveryResetErr) - so A never returns to `pending` and the flow
 	// never completes. Both fire once.
-	e.injectFault(faultCompleteFlowCommit)
-	e.injectFault(faultRecoveryResetErr)
+	e.seams.Inject(faultCompleteFlowCommit)
+	e.seams.Inject(faultRecoveryResetErr)
 	fk, err := e.Create(ctx, "ftbreset/g", nil, nil)
 	assert.NoError(err)
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
@@ -138,7 +138,7 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 
 	// The caller parks, then createSubgraphFlow errors (no child inserted): failAndReturn must fail the caller
 	// step (un-parked) and the flow, not strand it parked.
-	e.injectFault(faultKey(faultSubgraphSpawnErr, "ftbspawn/child"))
+	e.seams.Inject(faultSubgraphSpawnErr, "ftbspawn/child")
 	fk, out := batteryRun(t, e, "ftbspawn/parent")
 	assert.Equal(workflow.StatusFailed, out.Status)
 
@@ -199,7 +199,7 @@ func TestFaultSite_CancelCommit(t *testing.T) {
 	assert.NoError(err)
 
 	// The Cancel transaction fails once: Cancel errors and nothing changed (still interrupted).
-	e.injectFault(faultCancelCommit)
+	e.seams.Inject(faultCancelCommit)
 	err = e.Cancel(ctx, fk, "boom")
 	assert.Error(err)
 	assert.Equal(1, countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
@@ -228,7 +228,7 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	assert.NoError(err)
 
 	// The Resume transaction fails once: Resume errors and the flow is still interrupted (leaf still parked).
-	e.injectFault(faultResumeCommit)
+	e.seams.Inject(faultResumeCommit)
 	err = e.Resume(ctx, fk, nil)
 	assert.Error(err)
 	assert.Equal(1, countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
@@ -265,7 +265,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	forkStepKey := fmt.Sprintf("%d-%d-%s", shard, aStepID, aStepToken)
 
 	// The clone transaction fails once: Fork errors, the origin is byte-identical, and no clone rows exist.
-	e.injectFault(faultForkCommit)
+	e.seams.Inject(faultForkCommit)
 	_, err = e.Fork(ctx, forkStepKey, nil)
 	assert.Error(err)
 	assert.Equal(originFS, readFinalState(t, e, originKey), "origin final_state mutated by a rolled-back Fork")
@@ -302,7 +302,7 @@ func TestFaultSite_SignalPeersPanic(t *testing.T) {
 
 	// Every statusChange broadcast panics inside the CatchPanic boundary; the local waiter wake (separate from
 	// the peer broadcast) still delivers, so Await returns the completed outcome.
-	e.injectFaultN(faultKey(faultSignalPeersPanic, string(signalOpStatusChange)), 1000)
+	e.seams.InjectN(1000, faultSignalPeersPanic, string(signalOpStatusChange))
 	_, out := batteryRun(t, e, "ftbpanic/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assertFaultRecoveryClean(t, e, reader)
@@ -336,7 +336,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 
 	// The child fails, but its re-dispatch of the parked caller is lost: the caller wedges running+parkedSubgraph
 	// with a terminal (failed) child.
-	e.injectFault(faultDeliverFailureErr)
+	e.seams.Inject(faultDeliverFailureErr)
 	fk, err := e.Create(ctx, "ftbdeliver/parent", nil, nil)
 	assert.NoError(err)
 	shard, _, _, err := keys.ParseFlowKey(fk)
@@ -412,8 +412,8 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 
 	// Drop each level's FIRST failure-delivery independently (scoped by the parked caller's task name). Each
 	// caller's sweep-driven re-delivery (the second consult of its scope) succeeds, so the sweep can recover it.
-	e.injectFault(faultKey(faultDeliverFailureErr, "Call2"))
-	e.injectFault(faultKey(faultDeliverFailureErr, "Call1"))
+	e.seams.Inject(faultDeliverFailureErr, "Call2")
+	e.seams.Inject(faultDeliverFailureErr, "Call1")
 	fk, err := e.Create(ctx, "ftbdeep/root", nil, nil)
 	assert.NoError(err)
 	shard, rootFlowID, _, err := keys.ParseFlowKey(fk)
@@ -475,7 +475,7 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	time.Sleep(5 * time.Millisecond) // let the 1ms window elapse
 
 	// The due-root SELECT errors: the pass bails without deleting, so the flow is still present.
-	e.injectFault(faultReapSelectErr)
+	e.seams.Inject(faultReapSelectErr)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard)) // not deleted - the scan bailed
 

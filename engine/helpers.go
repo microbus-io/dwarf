@@ -18,12 +18,23 @@ package engine
 
 import (
 	"encoding/json"
+
+	"github.com/microbus-io/dwarf/internal/faninmap"
+	"github.com/microbus-io/dwarf/workflow"
 )
 
 // graphCacheKey scopes the per-flow graph cache by shard, since flow_id is only unique within a shard.
 type graphCacheKey struct {
 	shard  int
 	flowID int
+}
+
+// cachedGraph is the per-flow parsed graph paired with its derived fan-in map. The fan-in map is a pure
+// function of the graph, not persisted with it, so it is computed once when a flow's graph is first parsed
+// and cached alongside - amortizing the O(V+E) analysis across every step of the flow.
+type cachedGraph struct {
+	graph *workflow.Graph
+	fanIn *faninmap.Map
 }
 
 // unmarshalJSONMap parses a JSON string into a map. Empty or "{}" input yields a nil map.

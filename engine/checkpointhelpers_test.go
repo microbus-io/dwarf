@@ -26,7 +26,7 @@ import (
 func cpWaitFor(t *testing.T, e *Engine, name string, timeout time.Duration) {
 	t.Helper()
 	reached := make(chan struct{})
-	go func() { e.waitFor(name); close(reached) }()
+	go func() { e.seams.Wait(name); close(reached) }()
 	select {
 	case <-reached:
 	case <-time.After(timeout):

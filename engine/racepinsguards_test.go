@@ -58,7 +58,7 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 	e.RunInTest(t)
 
 	// Freeze A after it is marked completed, before it inserts B.
-	e.setBreakpoint(checkpointBeforeTransitionTx)
+	e.seams.Break(checkpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cvt/g", nil, nil)
 	assert.NoError(err)
 	cpWaitFor(t, e, checkpointBeforeTransitionTx, 10*time.Second)
@@ -67,7 +67,7 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 	assert.NoError(e.Cancel(ctx, fk, "test"))
 
 	// Release A: its transition tx's guard (status NOT IN terminal) matches zero rows and inserts nothing.
-	e.clearBreakpoint(checkpointBeforeTransitionTx)
+	e.seams.Resume(checkpointBeforeTransitionTx)
 	waitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
@@ -122,7 +122,7 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 	t.Cleanup(func() { close(xRelease) })
 
 	// Freeze the caller after it parked, before createSubgraphFlow inserts the child.
-	e.setBreakpoint(checkpointAfterCallerPark)
+	e.seams.Break(checkpointAfterCallerPark)
 	fk, err := e.Create(ctx, "cvs/parent", nil, nil)
 	assert.NoError(err)
 	cpWaitFor(t, e, checkpointAfterCallerPark, 10*time.Second)
@@ -131,7 +131,7 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 	assert.NoError(e.Cancel(ctx, fk, "test"))
 
 	// Release the caller: createSubgraphFlow now inserts the child under the already-cancelled parent - orphan.
-	e.clearBreakpoint(checkpointAfterCallerPark)
+	e.seams.Resume(checkpointAfterCallerPark)
 
 	shardNum, parentFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
@@ -194,7 +194,7 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 	e.RunInTest(t)
 
 	// Freeze A before its retry rewind.
-	e.setBreakpoint(checkpointBeforeRetryRewind)
+	e.seams.Break(checkpointBeforeRetryRewind)
 	fk, err := e.Create(ctx, "rrc/g", nil, nil)
 	assert.NoError(err)
 	cpWaitFor(t, e, checkpointBeforeRetryRewind, 10*time.Second)
@@ -203,7 +203,7 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 	assert.NoError(e.Cancel(ctx, fk, "test"))
 
 	// Release A: the rewind's status='running' guard matches zero rows, so the cancelled step is not revived.
-	e.clearBreakpoint(checkpointBeforeRetryRewind)
+	e.seams.Resume(checkpointBeforeRetryRewind)
 	waitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)

@@ -35,6 +35,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
+	"github.com/microbus-io/seamster"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -138,7 +139,7 @@ type Engine struct {
 
 	// Per-flow parsed-graph cache. The graph JSON is frozen at flow creation, so processStep reuses
 	// the parsed *workflow.Graph across the flow's steps instead of re-unmarshalling it each step.
-	graphCache *lru.Cache[graphCacheKey, *workflow.Graph]
+	graphCache *lru.Cache[graphCacheKey, *cachedGraph]
 
 	// Lifecycle
 	started        atomic.Bool
@@ -156,15 +157,9 @@ type Engine struct {
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
 
-	// Test-only instrumentation seams (see debug.go). underTest is testing.Testing() cached once in
-	// NewEngine so every consult is a lock-free bool read in production. faults maps an armed fault name to
-	// its remaining fire count. waitFors holds tests blocked in waitFor(name); breakpoints holds armed
-	// setBreakpoint(name) freezes. All guarded by faultsLock.
-	underTest   bool
-	faultsLock  sync.Mutex
-	faults      map[string]int
-	waitFors    map[string][]chan struct{}
-	breakpoints map[string]*breakpoint
+	// Test-only instrumentation seams (see debug.go), delegated to a seamster.Seamster constructed enabled
+	// under testing.Testing() in NewEngine. Every consult is a lock-free bool read in production.
+	seams *seamster.Seamster
 }
 
 // NewEngine creates a new workflow engine.
@@ -187,7 +182,7 @@ func NewEngine() *Engine {
 	e.orphanFlowThreshold = 5 * time.Minute
 	e.deletionGrace = 1 * time.Minute
 	e.reapInterval = 1 * time.Minute
-	e.underTest = testing.Testing()
+	e.seams = seamster.New(testing.Testing())
 	return e
 }
 
@@ -447,7 +442,7 @@ func (e *Engine) initRuntime() {
 	e.recoveryStop = make(chan struct{})
 	e.reaperStop = make(chan struct{})
 	e.nextPoll = time.Now()
-	e.graphCache = lru.New[graphCacheKey, *workflow.Graph](4096, 15*time.Minute)
+	e.graphCache = lru.New[graphCacheKey, *cachedGraph](4096, 15*time.Minute)
 	e.waiters = nil
 	e.started.Store(true)
 

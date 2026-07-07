@@ -107,14 +107,14 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 
 		// Freeze the child's worker just before its completeFlow transaction (X is already marked completed, the
 		// caller is running+parkedSubgraph).
-		e.setBreakpoint(checkpointBeforeCompleteFlowWrite)
+		e.seams.Break(checkpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
 		cpWaitFor(t, e, checkpointBeforeCompleteFlowWrite, 10*time.Second)
 
 		// Release completion FIRST: the child completes and completeSurgraphFlow revives the caller, which
 		// re-dispatches and blocks (running).
-		e.clearBreakpoint(checkpointBeforeCompleteFlowWrite)
+		e.seams.Resume(checkpointBeforeCompleteFlowWrite)
 		select {
 		case <-callResumed:
 		case <-time.After(10 * time.Second):
@@ -136,7 +136,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		e, url, _, _ := newEngine(t, "csvc2")
 
 		// Freeze the child at the same window.
-		e.setBreakpoint(checkpointBeforeCompleteFlowWrite)
+		e.seams.Break(checkpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
 		cpWaitFor(t, e, checkpointBeforeCompleteFlowWrite, 10*time.Second)
@@ -149,7 +149,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		// Release completion: the child's status-gate (status NOT IN terminal) matches zero rows - a clean no-op.
 		// completeFlow returns completed=false, so completeSurgraphFlow never runs and the cancelled caller is not
 		// resurrected to pending.
-		e.clearBreakpoint(checkpointBeforeCompleteFlowWrite)
+		e.seams.Resume(checkpointBeforeCompleteFlowWrite)
 
 		// Give the released worker a moment to (wrongly) revive the caller, then confirm nothing did: the flow
 		// stays cancelled, the caller stays cancelled, and no orphan/wedge shape was created.

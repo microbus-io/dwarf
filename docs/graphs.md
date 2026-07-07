@@ -166,7 +166,9 @@ if err != nil {
 ## Inspection
 
 Read-only inspectors include `Name`, `EntryPoint`, `Nodes`, `Transitions`, `Reducers`, `URLOf`,
-`IsFanIn`, `IsFanOutSource`, and `FanInFor`. Graphs marshal to and from JSON
-(`MarshalJSON`/`UnmarshalJSON`), which is how the engine freezes a graph onto a flow.
+`IsFanIn`, and `IsFanOutSource`. A graph carries only its definition; the fan-out-to-fan-in routing map
+is an engine-side optimization derived from the definition (see `internal/faninmap`), not part of the
+graph. Graphs marshal to and from JSON (`MarshalJSON`/`UnmarshalJSON`), which is how the engine freezes a
+graph onto a flow.
 
 Next: [Writing tasks](tasks.md).

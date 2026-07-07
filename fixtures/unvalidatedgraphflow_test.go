@@ -15,12 +15,12 @@ limitations under the License.
 */
 
 /*
-Create-time graph validation. The engine now
-calls graph.Validate() at Create (and at subgraph spawn), as docs/graphs.md promises. This pins the
-three consequences:
-  - Validate's side effect populates fanOutToFanIn, which the empty-forEach fan-in path (FanInFor)
-    reads - so an UNVALIDATED fan-out graph with an empty forEach fires the fan-in and runs downstream
-    tasks, instead of silently completing early (data loss).
+Create-time graph validation and fan-in routing. The engine calls graph.Validate() at Create (and at
+subgraph spawn), as docs/graphs.md promises, and derives the fan-out/fan-in routing map from the graph
+definition at dispatch (internal/faninmap). This pins three consequences:
+  - An empty-forEach fan-out still fires its fan-in and runs the downstream tasks, instead of silently
+    completing early (data loss). The engine computes the fan-in target from the graph structure at
+    dispatch, so correct routing does not depend on the author having called Validate.
   - A host returning (nil, nil) from LoadGraph is a clean 404 at Create, not a nil-deref panic.
   - A structurally invalid graph is rejected at Create with a 4xx.
 */
@@ -49,8 +49,8 @@ func (nilGraphHost) LoadGraph(ctx context.Context, url string) (*workflow.Graph,
 func TestUnvalidatedGraphflow(t *testing.T) {
 	ctx := context.Background()
 
-	// The engine validates an unvalidated graph at Create, populating fanOutToFanIn, so an empty forEach
-	// fires the fan-in and runs the downstream task rather than silently completing the flow early.
+	// The engine validates an unvalidated graph at Create and derives its fan-in routing at dispatch, so an
+	// empty forEach fires the fan-in and runs the downstream task rather than silently completing early.
 	t.Run("engine_validates_so_empty_foreach_fires_fanin", func(t *testing.T) {
 		assert := testarossa.For(t)
 		proxy := engine.NewTestProxy()
@@ -66,8 +66,8 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		g.AddTransition("Work", "Join")
 		g.AddTransition("Join", "After")
 		g.AddTransition("After", workflow.END)
-		// DELIBERATELY do not call g.Validate() here - the engine must validate at Create and populate
-		// fanOutToFanIn itself.
+		// DELIBERATELY do not call g.Validate() here - the engine validates at Create, and the fan-in
+		// routing is derived from the graph structure at dispatch regardless.
 		proxy.HandleGraph("unvalidated.verify:428/g", g)
 		proxy.HandleTask("unvalidated.verify:428/spawn", func(ctx context.Context, f *workflow.Flow) error { return nil })
 		proxy.HandleTask("unvalidated.verify:428/work", func(ctx context.Context, f *workflow.Flow) error { workRuns.Add(1); return nil })

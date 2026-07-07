@@ -38,8 +38,8 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	// faultSubgraphSpawnErr simulates the spawn failing after the caller step already parked (processStep's
 	// park-then-create ordering): no child is inserted, and the caller must be failed cleanly (failAndReturn)
 	// rather than left parked forever. Scoped by the child workflow URL.
-	if e.isFault(faultSubgraphSpawnErr, subgraphWorkflowURL) {
-		return "", errors.New("injected fault: "+faultKey(faultSubgraphSpawnErr, subgraphWorkflowURL), http.StatusInternalServerError)
+	if e.seams.IsFault(faultSubgraphSpawnErr, subgraphWorkflowURL) {
+		return "", errors.New("injected fault: "+faultSubgraphSpawnErr+" "+subgraphWorkflowURL, http.StatusInternalServerError)
 	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
@@ -203,13 +203,13 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	// Test checkpoint: a breakpoint here freezes completion just before its transaction (holding no lock, so a
 	// racing Cancel can commit), letting a test drive the completeFlow-vs-Cancel race in either order. Placed
 	// before the transaction, not inside, for the same SQLite-deadlock reason as checkpointResumeBeforeFlowWrite.
-	e.checkpoint(ctx, checkpointBeforeCompleteFlowWrite)
+	e.seams.Checkpoint(ctx, checkpointBeforeCompleteFlowWrite)
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
 		// faultCompleteFlowCommit fails the flow-completion transaction after processStep has already
 		// marked the terminal step completed, so the test proves the write-first ordering + recovery defer
 		// keep the flow from stranding `running` with every step terminal. Non-retryable (a plain error).
-		if e.isFault(faultCompleteFlowCommit) {
+		if e.seams.IsFault(faultCompleteFlowCommit) {
 			return errors.New("injected fault: " + faultCompleteFlowCommit)
 		}
 		// Write-first: take the flow row's write lock before computeFinalState's reads. Without this the
@@ -292,7 +292,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	// parked-step sweep exists to catch): the caller step stays running+parkedSubgraph with no live child,
 	// so the test proves recoverWedgedSubgraphParks re-drives the release. Returns nil so the caller path
 	// believes it succeeded, exactly as a lost revive would look.
-	if e.isFault(faultSubgraphReviveLost) {
+	if e.seams.IsFault(faultSubgraphReviveLost) {
 		return nil
 	}
 	db, err := e.db.Shard(shardNum)
@@ -306,7 +306,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	// Test checkpoint: a breakpoint here freezes the worker after the child completed but before the caller
 	// revive, so a test can Cancel the caller in exactly the window the revive's running+parkedSubgraph guard
 	// exists to survive (the revive must not resurrect the just-cancelled caller).
-	e.checkpoint(ctx, checkpointBeforeReviveWrite)
+	e.seams.Checkpoint(ctx, checkpointBeforeReviveWrite)
 	reDispatch := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatch = false
@@ -820,14 +820,14 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	// below rolls this transaction back (409) instead of falsely succeeding. Placed *before* the transaction,
 	// not mid-tx: on SQLite the racing Delete would deadlock against this transaction's write lock if frozen
 	// inside it. No-op in production.
-	e.checkpoint(ctx, checkpointResumeBeforeFlowWrite)
+	e.seams.Checkpoint(ctx, checkpointResumeBeforeFlowWrite)
 
 	lost := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		lost = false
 		// faultResumeCommit fails this transaction once, before any write, so the test proves it rolls back
 		// atomically (the flow stays interrupted, its steps untouched) and a retry then resumes cleanly.
-		if e.isFault(faultResumeCommit) {
+		if e.seams.IsFault(faultResumeCommit) {
 			return errors.New("injected fault: " + faultResumeCommit)
 		}
 		allStepIDs := append([]any{leafStepID}, parkStepIDs...)

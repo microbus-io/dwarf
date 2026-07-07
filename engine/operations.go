@@ -60,8 +60,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		graph, lerr = e.host.LoadGraph(loaderCtx, workflowURL)
 		return lerr
 	})
-	if err == nil && e.isFault(faultLoadGraph, workflowURL) {
-		err = errors.New("injected fault: "+faultKey(faultLoadGraph, workflowURL), http.StatusInternalServerError)
+	if err == nil && e.seams.IsFault(faultLoadGraph, workflowURL) {
+		err = errors.New("injected fault: "+faultLoadGraph+" "+workflowURL, http.StatusInternalServerError)
 	}
 	if err != nil {
 		return "", errors.Trace(err)
@@ -70,10 +70,10 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if graph == nil {
 		return "", errors.New("workflow graph not found: %s", workflowURL, http.StatusNotFound)
 	}
-	// Validate at create (documented behavior). Besides rejecting a structurally invalid graph up front,
-	// Validate's side effect populates fanOutToFanIn - which the empty-forEach fan-in path (FanInFor) reads
-	// - and that map is frozen into the graph JSON below, so every dispatch of this flow sees it. Cheap:
-	// once per create, never per step.
+	// Validate at create (documented behavior): reject a structurally invalid graph up front. Validation is
+	// pure - the fan-in convergence it checks is computed into a local map and not stored on the graph. The
+	// engine derives that map per flow at dispatch (internal/faninmap), so only the author's definition is
+	// serialized into the flow's graph JSON below.
 	if verr := graph.Validate(); verr != nil {
 		return "", errors.New("invalid workflow graph %s: %v", workflowURL, verr, http.StatusBadRequest)
 	}
@@ -472,10 +472,10 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 	// Test rendezvous: a flow just reached a committed stop (this runs post-commit). Placed before the
 	// drop-fault below so it fires even when the wake itself is dropped - a test waiting on "the flow stopped"
 	// should observe the DB-committed stop regardless of wake delivery. Inert in production.
-	e.checkpoint(ctx, checkpointFlowStopped)
+	e.seams.Checkpoint(ctx, checkpointFlowStopped)
 	// faultDropSignalStop simulates a lost terminal wake (worker crash between commit and signal, dropped
 	// broadcast, no-op SignalPeers) so a test can prove Await still returns via its periodic re-snapshot.
-	if e.isFault(faultDropSignalStop) {
+	if e.seams.IsFault(faultDropSignalStop) {
 		return
 	}
 	e.notifyStatusChange(flowKey, status)
@@ -509,7 +509,7 @@ func (e *Engine) notifyStatusChange(flowKey string, status string) {
 func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	// faultDropDoorbell simulates a lost work doorbell so a test can prove the pending step is still picked
 	// up by the pollPendingSteps backstop rather than stranding.
-	if e.isFault(faultDropDoorbell) {
+	if e.seams.IsFault(faultDropDoorbell) {
 		return
 	}
 	e.handleEnqueue(ctx, shard, stepID)
@@ -592,7 +592,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		// faultCancelCommit fails this transaction once, before any write, so the test proves it rolls back
 		// atomically (the tree is untouched) and a retry then cancels cleanly.
-		if e.isFault(faultCancelCommit) {
+		if e.seams.IsFault(faultCancelCommit) {
 			return errors.New("injected fault: " + faultCancelCommit)
 		}
 		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
@@ -670,7 +670,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	// Test checkpoint: a breakpoint here freezes Delete just before its transaction (holding no lock, so a
 	// racing Resume can commit), letting a test drive the Delete-vs-Resume race in either order. Placed before
 	// the transaction, not inside, for the same SQLite-deadlock reason as checkpointResumeBeforeFlowWrite.
-	e.checkpoint(ctx, checkpointBeforeDeleteWrite)
+	e.seams.Checkpoint(ctx, checkpointBeforeDeleteWrite)
 	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
 		var flowStatus string
 		var surgraphFlowID, deleteAfterMs int

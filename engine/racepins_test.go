@@ -79,12 +79,12 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 
 	// Freeze resume at the checkpoint before its transaction, then launch it. waitFor returns once resume is
 	// frozen there (whether it arrives before or after this waitFor).
-	e.setBreakpoint(checkpointResumeBeforeFlowWrite)
+	e.seams.Break(checkpointResumeBeforeFlowWrite)
 	resumeDone := make(chan error, 1)
 	go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 
 	waited := make(chan struct{})
-	go func() { e.waitFor(checkpointResumeBeforeFlowWrite); close(waited) }()
+	go func() { e.seams.Wait(checkpointResumeBeforeFlowWrite); close(waited) }()
 	select {
 	case <-waited:
 	case <-time.After(10 * time.Second):
@@ -97,7 +97,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 
 	// Release Resume: its transaction now runs, the gate write finds the flow no longer interrupted, and the
 	// whole transaction rolls back.
-	e.clearBreakpoint(checkpointResumeBeforeFlowWrite)
+	e.seams.Resume(checkpointResumeBeforeFlowWrite)
 	select {
 	case resumeErr := <-resumeDone:
 		assert.Error(resumeErr)

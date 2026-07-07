@@ -79,7 +79,7 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 			// faultReapSelectErr treats this due-root scan as errored (sibling to faultReapMidTree, which covers
 			// the delete half), so the test proves the pass logs and bails without deleting and the NEXT pass
 			// reaps cleanly - the reaper's resilience to a transient SELECT blip.
-			if err == nil && e.isFault(faultReapSelectErr) {
+			if err == nil && e.seams.IsFault(faultReapSelectErr) {
 				rows.Close()
 				err = errors.New("injected fault: " + faultReapSelectErr)
 			}
@@ -119,7 +119,7 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 				// faultReapMidTree aborts after the steps delete but before the flows delete, so the whole
 				// tree-delete rolls back atomically. The test proves a mid-tree failure leaves the tree intact
 				// (not a half-deleted flow with no steps) and the next reap pass removes it cleanly.
-				if e.isFault(faultReapMidTree) {
+				if e.seams.IsFault(faultReapMidTree) {
 					return errors.New("injected fault: " + faultReapMidTree)
 				}
 				if _, err := tx.ExecContext(ctx,

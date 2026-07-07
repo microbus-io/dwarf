@@ -74,7 +74,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so lease recovery re-dispatches fast
 	e.RunInTest(t)
 
-	e.injectFault(faultInterruptStaleWrite)
+	e.seams.Inject(faultInterruptStaleWrite)
 	fk, err := e.Create(ctx, "fisw/parent", nil, nil)
 	assert.NoError(err)
 

@@ -59,7 +59,6 @@ type Graph struct {
 	transitions   []Transition
 	reducers      map[string]Reducer
 	fanInNodes    map[string]bool
-	fanOutToFanIn map[string]string // populated by Validate
 }
 
 // NewGraph creates a new workflow graph with the given display name. The name is a human-friendly
@@ -261,12 +260,6 @@ func (g *Graph) HasFanIn() bool {
 	return len(g.fanInNodes) > 0
 }
 
-// FanInFor returns the fan-in node that pops the frame pushed by a fan-out at the named
-// source, or "" if the source is not a fan-out. Populated by Validate.
-func (g *Graph) FanInFor(fanOutSource string) string {
-	return g.fanOutToFanIn[fanOutSource]
-}
-
 // IsFanOutSource reports whether the named node has 2+ non-goto/non-error outgoing
 // transitions, or any forEach outgoing transition. Switch transitions are exclusive
 // (only one branch ever fires) and therefore do not count toward fan-out.
@@ -422,10 +415,12 @@ func (g *Graph) Validate() error {
 	return g.validateLineage()
 }
 
-// validateLineage runs when SetFanIn is declared.
-// Side effect: populates g.fanOutToFanIn.
+// validateLineage checks fan-out/fan-in convergence: every fan-out's branches must converge on the same
+// fan-in, every branch must pop its frame before END, and no node may be reached with two different lineage
+// stacks. It builds a local fan-out->fan-in map to run these checks and stores nothing on the graph; the
+// engine derives the same map at dispatch (internal/faninmap) for routing.
 func (g *Graph) validateLineage() error {
-	g.fanOutToFanIn = make(map[string]string)
+	fanOutToFanIn := make(map[string]string)
 
 	isFanOutSource := make(map[string]bool, len(g.nodes))
 	for _, t := range g.nodes {
@@ -502,13 +497,13 @@ func (g *Graph) validateLineage() error {
 				// step, and the cohort-resolution path picks the fan-in from whichever sibling completes
 				// last - so divergent fan-in targets make the convergence node nondeterministic. A prior
 				// mapping to a different fan-in is that divergence.
-				if prior, ok := g.fanOutToFanIn[fanOutSource]; ok && prior != tr.To {
+				if prior, ok := fanOutToFanIn[fanOutSource]; ok && prior != tr.To {
 					return errors.New(
 						"fan-out source '%s' in graph '%s' has branches converging on different fan-in nodes ('%s' and '%s'); all siblings of a fan-out must converge on the same fan-in",
 						stripProto(fanOutSource), g.name, stripProto(prior), stripProto(tr.To),
 					)
 				}
-				g.fanOutToFanIn[fanOutSource] = tr.To
+				fanOutToFanIn[fanOutSource] = tr.To
 			case fromIsFanOut:
 				nextStack = append(stackCopy(fromStack), from)
 			default:
@@ -540,7 +535,7 @@ func (g *Graph) validateLineage() error {
 	}
 
 	for source := range isFanOutSource {
-		if _, ok := g.fanOutToFanIn[source]; !ok {
+		if _, ok := fanOutToFanIn[source]; !ok {
 			return errors.New(
 				"fan-out source '%s' in graph '%s' has no fan-in node downstream; mark the convergence node with SetFanIn",
 				stripProto(source), g.name,
@@ -577,15 +572,13 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		Tasks         []jsonTask         `json:"tasks"`
 		Transitions   []Transition       `json:"transitions"`
 		Reducers      map[string]Reducer `json:"reducers,omitzero"`
-		FanOutToFanIn map[string]string  `json:"fanOutToFanIn,omitzero"`
 	}
 	jg := jsonGraph{
-		Name:          g.name,
-		EntryPoint:    g.entryPoint,
-		Tasks:         jsonTasks,
-		Transitions:   g.transitions,
-		Reducers:      g.reducers,
-		FanOutToFanIn: g.fanOutToFanIn,
+		Name:        g.name,
+		EntryPoint:  g.entryPoint,
+		Tasks:       jsonTasks,
+		Transitions: g.transitions,
+		Reducers:    g.reducers,
 	}
 	if jg.Tasks == nil {
 		jg.Tasks = []jsonTask{}
@@ -609,7 +602,6 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 		Tasks         []jsonTask         `json:"tasks"`
 		Transitions   []Transition       `json:"transitions"`
 		Reducers      map[string]Reducer `json:"reducers,omitzero"`
-		FanOutToFanIn map[string]string  `json:"fanOutToFanIn,omitzero"`
 	}
 	var jg jsonGraph
 	err := json.Unmarshal(data, &jg)
@@ -635,6 +627,5 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	}
 	g.transitions = jg.Transitions
 	g.reducers = jg.Reducers
-	g.fanOutToFanIn = jg.FanOutToFanIn
 	return nil
 }

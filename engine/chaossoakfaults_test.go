@@ -158,16 +158,17 @@ func TestChaosSoak_Faults(t *testing.T) {
 	taskNodes := []string{"A", "B", "C", "D", "S", "P", "Q", "R", "J", "P0", "CA", "CB", "CC"}
 
 	var armedMu sync.Mutex
-	armed := map[string]bool{}
+	armed := map[string]string{}
 	armRandomFault := func() {
 		fs := faultSpecs[rng.intn(len(faultSpecs))]
-		name := fs.name
-		if fs.scoped {
-			name = faultKey(fs.name, taskNodes[rng.intn(len(taskNodes))])
-		}
-		eng.injectFaultN(name, 1)
 		armedMu.Lock()
-		armed[name] = true
+		if fs.scoped {
+			eng.seams.Inject(fs.name, taskNodes[rng.intn(len(taskNodes))])
+			armed[fs.name] = taskNodes[rng.intn(len(taskNodes))]
+		} else {
+			eng.seams.Inject(fs.name)
+			armed[fs.name] = ""
+		}
 		armedMu.Unlock()
 	}
 
@@ -237,8 +238,12 @@ func TestChaosSoak_Faults(t *testing.T) {
 
 	// Disarm every fault before draining, so termination is deterministic (no leftover fault fires mid-drain).
 	armedMu.Lock()
-	for name := range armed {
-		eng.clearFault(name)
+	for name, scope := range armed {
+		if scope != "" {
+			eng.seams.Withdraw(name, scope)
+		} else {
+			eng.seams.Withdraw(name)
+		}
 	}
 	armedMu.Unlock()
 

@@ -54,8 +54,8 @@ func TestFanInDirectCancel_NoExtendCancelledFlow(t *testing.T) {
 	g.AddTransitionForEach("Spawn", "Work", "items", "item")
 	g.AddTransition("Work", "Join")
 	g.AddTransition("Join", workflow.END)
-	// Validate populates fanOutToFanIn so an empty forEach routes to Join (fireFanInDirect) rather than
-	// completing at the source.
+	// The engine derives the fan-in routing at dispatch so an empty forEach routes to Join (fireFanInDirect)
+	// rather than completing at the source. Validate here just asserts the graph is well-formed.
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("fidc/g", g)
 

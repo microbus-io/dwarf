@@ -73,7 +73,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		e, url := newEngine(t, "cfvc1")
 
 		// Freeze the worker just before completeFlow's transaction (A is already marked completed).
-		e.setBreakpoint(checkpointBeforeCompleteFlowWrite)
+		e.seams.Break(checkpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
 		cpWaitFor(t, e, checkpointBeforeCompleteFlowWrite, 10*time.Second)
@@ -83,7 +83,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 
 		// Release completion: its status-gate write (status NOT IN terminal) matches zero rows - a clean no-op,
 		// the flow stays cancelled.
-		e.clearBreakpoint(checkpointBeforeCompleteFlowWrite)
+		e.seams.Resume(checkpointBeforeCompleteFlowWrite)
 		waitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
 		assert.Equal(workflow.StatusCancelled, flowStatus(t, e, fk))
 		assertInvariants(t, e)
@@ -95,11 +95,11 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		e, url := newEngine(t, "cfvc2")
 
 		// Freeze at the same window, then release completion FIRST so the flow completes.
-		e.setBreakpoint(checkpointBeforeCompleteFlowWrite)
+		e.seams.Break(checkpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
 		cpWaitFor(t, e, checkpointBeforeCompleteFlowWrite, 10*time.Second)
-		e.clearBreakpoint(checkpointBeforeCompleteFlowWrite)
+		e.seams.Resume(checkpointBeforeCompleteFlowWrite)
 		waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 		// Cancel now arrives on a terminal flow: it 409s and the flow stays completed.
@@ -164,8 +164,8 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		fk := createInterrupted(t, e, "dvr1/g")
 
 		// Freeze both operations before their transactions, then launch them.
-		e.setBreakpoint(checkpointResumeBeforeFlowWrite)
-		e.setBreakpoint(checkpointBeforeDeleteWrite)
+		e.seams.Break(checkpointResumeBeforeFlowWrite)
+		e.seams.Break(checkpointBeforeDeleteWrite)
 		resumeDone := make(chan error, 1)
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
@@ -175,11 +175,11 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 
 		// Resume wins: released first, it flips interrupted->running and returns cleanly (the gate re-dispatches
 		// and blocks, so the flow rests running).
-		e.clearBreakpoint(checkpointResumeBeforeFlowWrite)
+		e.seams.Resume(checkpointResumeBeforeFlowWrite)
 		assert.NoError(<-resumeDone)
 
 		// Delete now sees a running flow -> 409, and never stamps deletion.
-		e.clearBreakpoint(checkpointBeforeDeleteWrite)
+		e.seams.Resume(checkpointBeforeDeleteWrite)
 		delErr := <-deleteDone
 		assert.Error(delErr)
 		assert.Equal(409, errors.StatusCode(delErr))
@@ -193,8 +193,8 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		e, _ := newGate(t, "dvr2")
 		fk := createInterrupted(t, e, "dvr2/g")
 
-		e.setBreakpoint(checkpointResumeBeforeFlowWrite)
-		e.setBreakpoint(checkpointBeforeDeleteWrite)
+		e.seams.Break(checkpointResumeBeforeFlowWrite)
+		e.seams.Break(checkpointBeforeDeleteWrite)
 		resumeDone := make(chan error, 1)
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
@@ -203,12 +203,12 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		cpWaitFor(t, e, checkpointBeforeDeleteWrite, 10*time.Second)
 
 		// Delete wins: released first, it flips interrupted->cancelled and stamps deletion, returning cleanly.
-		e.clearBreakpoint(checkpointBeforeDeleteWrite)
+		e.seams.Resume(checkpointBeforeDeleteWrite)
 		assert.NoError(<-deleteDone)
 
 		// Resume now finds the flow no longer interrupted: its gate write matches zero rows, the whole
 		// transaction rolls back, and it returns an honest 409 (not a silent success).
-		e.clearBreakpoint(checkpointResumeBeforeFlowWrite)
+		e.seams.Resume(checkpointResumeBeforeFlowWrite)
 		resErr := <-resumeDone
 		assert.Error(resErr)
 		assert.Equal(409, errors.StatusCode(resErr))

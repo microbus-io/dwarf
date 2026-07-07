@@ -97,7 +97,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 
 	// X's transition transaction fails once after X was marked completed: the recovery defer resets X and
 	// re-dispatches it, so X runs twice, but the cohort arrival is bumped only by the successful commit.
-	e.injectFault(faultKey(faultTransitionCommit, "X"))
+	e.seams.Inject(faultTransitionCommit, "X")
 	fk, out := batteryRun(t, e, "fcfan/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
@@ -153,7 +153,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 
 	// X's transition (X->Y) inside the child fails once after X was marked completed: the recovery defer resets
 	// X and re-dispatches, so the child proceeds to Y->END and completes, then the parent revives.
-	e.injectFault(faultKey(faultTransitionCommit, "X"))
+	e.seams.Inject(faultTransitionCommit, "X")
 	_, out := batteryRun(t, e, "fcsub/parent")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
@@ -183,7 +183,7 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 	// A's transition fails 3 times in a row; each failure drives one recovery-defer reset + re-dispatch. A runs
 	// N+1 = 4 times; B once; the flow still completes with an identical final_state.
 	*calls["a"], *calls["b"] = 0, 0
-	e.injectFaultN(faultKey(faultTransitionCommit, "A"), 3)
+	e.seams.InjectN(3, faultTransitionCommit, "A")
 	fk, out := batteryRun(t, e, "fcrep/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal(baseFS, readFinalState(t, e, fk), "final_state diverged from the no-fault baseline")
@@ -212,8 +212,8 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	e.RunInTest(t)
 
 	// Drop the create-time doorbell AND the terminal signalStop: neither wake reaches its consumer.
-	e.injectFault(faultDropDoorbell)
-	e.injectFault(faultDropSignalStop)
+	e.seams.Inject(faultDropDoorbell)
+	e.seams.Inject(faultDropSignalStop)
 	fk, err := e.Create(ctx, "fcwake/g", nil, nil)
 	assert.NoError(err)
 
@@ -280,7 +280,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 
 	// The first completeSurgraphFlow to run is the deepest (l3 reviving l2's caller): drop that one revive so
 	// l2's caller wedges running+parkedSubgraph with a terminal child.
-	e.injectFault(faultSubgraphReviveLost)
+	e.seams.Inject(faultSubgraphReviveLost)
 	fk, err := e.Create(ctx, "fcdeep/root", nil, nil)
 	assert.NoError(err)
 	shard, _, _, err := keys.ParseFlowKey(fk)
