@@ -781,8 +781,9 @@ task inside a subgraph child errors with no `onError`, the child's failure is su
 `flow.Subgraph` call as the `err` return (carried in `subgraph_error`, re-dispatching the parked caller step -
 `deliverFlowFailureToParent`). The child still `signalStop`s its own failure
 (a subgraph-child key is a legal read-only `Await`/`Snapshot` target), so a blocked `Await(childKey)` wakes on
-the signal instead of idling to the lost-wake poll backstop - `failStep`'s subgraph-child branch signals exactly
-as the top-level path does. The load-bearing
+the signal instead of idling to the lost-wake poll backstop - **both** child-settle paths signal: `failStep`'s
+subgraph-child branch (a failing last-arriver) and the transition path's cohort-fail branch in `processStep` (a
+completing last-arriver resolving a cohort with failures), each exactly as the top-level path does. The load-bearing
 rule is *when*: the child flow fails only **when it actually fails as a flow** - which, for a child with an
 internal fan-out, means **after its cohort fully resolves**, running the *same* `cohort_failures` accounting a
 top-level flow runs (`failStep` for a failing last-arriver, the `processStep` cohort-arrival path for a
@@ -803,7 +804,8 @@ calls it. Defense in depth for any residual orphan (e.g. the Cancel-vs-spawn rac
 sibling is parked on a live grandchild, then converging to a clean terminal tree with the branch error surfaced
 to the root. `fixtures/subgrapherrorwaitflow_test.go` pins the `Await(childKey)` wake: an `Await` registered on a
 still-running child returns promptly (well under the poll interval) when the child fails, proving the signal, not
-the backstop, woke it.
+the backstop, woke it. `fixtures/subgraphcohortfailwaitflow_test.go` pins the same wake for the other settle
+path (a completing last-arriver resolving a failed cohort).
 
 ### Surgraph Step Identification
 
@@ -982,6 +984,20 @@ on the `awaitPollInterval` re-snapshot (above) to notice the DB-committed stop -
 that avoids that up-to-5s wait, while the poll is the backstop when a broadcast is dropped (or a host leaves
 `SignalPeers` a no-op). Non-terminal (`running`) transitions are notified locally only, matching the
 broadcast-only-on-terminal-stops policy.
+
+**The stop broadcast is gated on the `awaited` flag - a never-awaited flow stops silently.** The `statusChange`
+broadcast exists *only* to wake remote awaiters, so `await` (serving `Await`/`Poll`/`Run`) stamps
+`dwarf_flows.awaited=1` (write-once, `WHERE awaited=0`) before its first snapshot, and `signalStop` takes an
+`awaited` bool and skips `signalStatusChange` when it is false - the local in-memory wake and the flowStopped
+checkpoint run either way (they are free). Each stop site sources the flag with no extra round-trip where a
+flow-row read already exists (`completeFlow` under its write lock; `failStep` via `dynamicSubgraphParent`; the
+cohort-fail path in its in-tx `surgraph_step_id` read), and via one batched `awaitedFlows` `IN`-scan on the
+multi-flow paths (`Cancel`, interrupt propagation, the orphan-subtree sweep). The gate is advisory, never
+load-bearing: an `Await` whose stamp lands after a stop's flag read misses the broadcast but is caught by its own
+`awaitPollInterval` re-snapshot (the same backstop as any lost wake), and an unreadable flag is treated as
+awaited (`awaitedFlows` returns nil on error → broadcast; skipping is only the optimization). The flag is never
+reset and never inherited - `Fork`/`Continue`/subgraph children insert with the default `0`, since their
+awaiters are their own. Pinned by `TestAwaited_GatesStatusChangeBroadcast` (engine package).
 
 ### Write-ordering & lock contention
 

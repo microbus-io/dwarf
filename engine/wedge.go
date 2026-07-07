@@ -259,8 +259,9 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 	if err != nil {
 		return errors.Trace(err)
 	}
-	for _, cid := range allCompositeIDs {
-		e.signalStop(ctx, cid, workflow.StatusCancelled)
+	awaitedSet := e.awaitedFlows(ctx, shard, allFlowIDs)
+	for i, cid := range allCompositeIDs {
+		e.signalStop(ctx, cid, workflow.StatusCancelled, awaitedSet == nil || awaitedSet[allFlowIDs[i].(int)])
 	}
 	return nil
 }

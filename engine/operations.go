@@ -403,6 +403,29 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 		return s != "" && s != workflow.StatusCreated && s != workflow.StatusPending && s != workflow.StatusRunning
 	}
 
+	// Stamp the flow as awaited so its stop sites broadcast the terminal status to peer replicas
+	// (signalStop skips the SignalPeers statusChange for a never-awaited flow - the broadcast's only
+	// purpose is to wake remote awaiters). Stamped before the first snapshot below, so a stop that
+	// commits after the snapshot observes the flag. A stop transaction that read awaited=0 concurrently
+	// with this write may still skip the broadcast; the awaitPollInterval re-snapshot bounds that miss,
+	// exactly as it bounds any other lost wake. Write-once: the awaited=0 guard keeps repeated
+	// Await/Poll calls from re-locking the row.
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	db, err := e.db.Shard(shardNum)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_flows SET awaited=1, touch=1-touch WHERE flow_id=? AND flow_token=? AND awaited=0",
+		flowID, flowToken,
+	)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	ch := make(chan string, 1)
 	e.waitersLock.Lock()
 	if e.waiters == nil {
@@ -468,7 +491,12 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 // signalStop wakes local Await callers waiting on the given flow and broadcasts the stopped status to
 // peer replicas so their Await callers wake too. Use it at every flow-stop site (completed, failed,
 // cancelled, interrupted); non-terminal transitions (running) need only the local notifyStatusChange.
-func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) {
+// awaited is the flow row's awaited flag (set by Await/Poll): when false, the peer broadcast is skipped -
+// its only purpose is to wake remote awaiters, and a never-awaited flow has none. The local wake and the
+// stop checkpoint still run either way (they are free), and a waiter that raced the stop's awaited read
+// is caught by its own periodic re-snapshot. When the flag is unknown (a read failed), pass true -
+// broadcasting is always safe; skipping is only the optimization.
+func (e *Engine) signalStop(ctx context.Context, flowKey string, status string, awaited bool) {
 	// Test rendezvous: a flow just reached a committed stop (this runs post-commit). Placed before the
 	// drop-fault below so it fires even when the wake itself is dropped - a test waiting on "the flow stopped"
 	// should observe the DB-committed stop regardless of wake delivery. Inert in production.
@@ -479,7 +507,44 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 		return
 	}
 	e.notifyStatusChange(flowKey, status)
-	e.signalStatusChange(ctx, flowKey, status)
+	if awaited {
+		e.signalStatusChange(ctx, flowKey, status)
+	}
+}
+
+// awaitedFlows returns the subset of the given flow ids whose awaited flag is set, for gating the
+// signalStop peer broadcast on the multi-flow stop paths (Cancel, interrupt propagation, orphan
+// recovery) with one batched read. On any read error it returns nil, which callers treat as
+// "all awaited" (broadcast; see signalStop).
+func (e *Engine) awaitedFlows(ctx context.Context, shardNum int, flowIDs []any) map[int]bool {
+	if len(flowIDs) == 0 {
+		return map[int]bool{}
+	}
+	db, err := e.db.Shard(shardNum)
+	if err != nil {
+		return nil
+	}
+	placeholders := strings.Repeat("?,", len(flowIDs)-1) + "?"
+	rows, err := db.QueryContext(ctx,
+		"SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+placeholders+") AND awaited=1",
+		flowIDs...,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	awaited := map[int]bool{}
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil
+		}
+		awaited[id] = true
+	}
+	if rows.Err() != nil {
+		return nil
+	}
+	return awaited
 }
 
 // notifyStatusChange wakes up all Await callers waiting on the given flow.
@@ -645,9 +710,10 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		return errors.Trace(err)
 	}
 
+	awaitedSet := e.awaitedFlows(ctx, shardNum, allFlowIDs)
 	for i, cid := range allCompositeIDs {
 		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, allFlowIDs[i].(int)), "to", workflow.StatusCancelled)
-		e.signalStop(ctx, cid, workflow.StatusCancelled)
+		e.signalStop(ctx, cid, workflow.StatusCancelled, awaitedSet == nil || awaitedSet[allFlowIDs[i].(int)])
 	}
 	return nil
 }

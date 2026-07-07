@@ -198,7 +198,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	}
 	var finalStateJSON, workflowURL string
 	var surgraphFlowID, surgraphStepID int
-	var deleteOnCompletion bool
+	var deleteOnCompletion, awaited bool
 	completed := false
 	// Test checkpoint: a breakpoint here freezes completion just before its transaction (holding no lock, so a
 	// racing Cancel can commit), letting a test drive the completeFlow-vs-Cancel race in either order. Placed
@@ -226,12 +226,12 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		if err != nil {
 			return errors.Trace(err)
 		}
-		// Read the surgraph linkage and disposable flag under the write lock - needed both for the post-tx
-		// surgraph revival and for the atomic disposable delete below.
+		// Read the surgraph linkage, disposable flag, and awaited flag under the write lock - needed for
+		// the post-tx surgraph revival, the atomic disposable delete below, and the signalStop broadcast gate.
 		err = tx.QueryRowContext(ctx,
-			"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion FROM dwarf_flows WHERE flow_id=?",
+			"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, awaited FROM dwarf_flows WHERE flow_id=?",
 			flowID,
-		).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion)
+		).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &awaited)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -273,7 +273,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 
-	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
+	e.signalStop(ctx, compositeID, workflow.StatusCompleted, awaited)
 	e.signalEnqueue(ctx, 0, 0) // Wake peers
 
 	if surgraphFlowID != 0 {
@@ -375,7 +375,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// while a sibling branch is still live would strand that sibling and any subgraph descendants it parked
 	// on: the interrupt/resume/cancel tree walks all skip a terminal flow, so nothing could ever release
 	// them. parentStepID>0 iff this flow is a subgraph child.
-	parentStepID, isSubgraphChild, err := e.dynamicSubgraphParent(ctx, db, flowID)
+	parentStepID, isSubgraphChild, awaited, err := e.dynamicSubgraphParent(ctx, db, flowID)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
@@ -462,7 +462,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// exactly as the top-level path below does. Without this signalStop, Await(childKey) blocks until its
 	// context deadline despite the child being terminal.
 	if isSubgraphChild {
-		e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken)), workflow.StatusFailed)
+		e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken)), workflow.StatusFailed, awaited)
 		if reDispatchParent {
 			e.enqueueStep(ctx, shardNum, parentStepID)
 		}
@@ -471,7 +471,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusFailed)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))
-	e.signalStop(ctx, compositeID, workflow.StatusFailed)
+	e.signalStop(ctx, compositeID, workflow.StatusFailed, awaited)
 	return false, nil
 }
 
@@ -504,20 +504,21 @@ func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor,
 	}
 }
 
-// dynamicSubgraphParent reports whether the given flow is a subgraph child.
-func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowID int) (int, bool, error) {
+// dynamicSubgraphParent reports whether the given flow is a subgraph child. It also returns the flow's
+// awaited flag (piggybacked on the same row read) for the signalStop broadcast gate.
+func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowID int) (parentStepID int, isSubgraphChild bool, awaited bool, err error) {
 	var surgraphFlowID, surgraphStepID int
-	err := db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, surgraph_step_id FROM dwarf_flows WHERE flow_id=?",
+	err = db.QueryRowContext(ctx,
+		"SELECT surgraph_flow_id, surgraph_step_id, awaited FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&surgraphFlowID, &surgraphStepID)
+	).Scan(&surgraphFlowID, &surgraphStepID, &awaited)
 	if err != nil {
-		return 0, false, errors.Trace(err)
+		return 0, false, false, errors.Trace(err)
 	}
 	if surgraphFlowID == 0 || surgraphStepID == 0 {
-		return 0, false, nil
+		return 0, false, awaited, nil
 	}
-	return surgraphStepID, true, nil
+	return surgraphStepID, true, awaited, nil
 }
 
 // deliverSubgraphError fails a dynamic subgraph child and re-dispatches the parent.
