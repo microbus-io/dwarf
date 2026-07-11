@@ -67,7 +67,9 @@ func TestPoolSizing_LiveResize(t *testing.T) {
 
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetNumShards(4))
+	for i := 1; i <= 4; i++ {
+		assert.NoError(e.SetShard(i, ""))
+	}
 	e.RunInTest(t)
 
 	// 4 shards, workers=64, workersPerConn=8, cap=8 -> idle=2, open=min(6,8)=6.

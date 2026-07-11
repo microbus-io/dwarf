@@ -84,6 +84,17 @@ const benchChainLen = 3
 // or in-memory SQLite when unset), wired to a linear chain graph of benchChainLen trivial tasks. It uses the
 // default discard logger (NOT RunInTest, which forces stderr Info logging that would dominate the timing) and
 // registers cleanup via b.Cleanup. Returns the engine and the workflow URL to Run.
+// setShards registers numShards test-mode shards (empty DSNs resolve per shard at Startup).
+func setShards(eng *engine.Engine, numShards int) error {
+	for i := 1; i <= numShards; i++ {
+		err := eng.SetShard(i, "")
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 	b.Helper()
 
@@ -117,7 +128,7 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 	if err := eng.SetMaxOpenConns(benchMaxOpenConns); err != nil {
 		b.Fatal(err)
 	}
-	if err := eng.SetNumShards(numShards); err != nil {
+	if err := setShards(eng, numShards); err != nil {
 		b.Fatal(err)
 	}
 	// SetInTest (not RunInTest) so the engine keeps its silent discard logger and no *testing.T logging path.

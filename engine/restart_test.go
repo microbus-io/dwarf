@@ -41,12 +41,12 @@ func TestRestartSurvival(t *testing.T) {
 	ctx := context.Background()
 
 	// mkEngine builds an engine bound to a file DSN under dir (so two engines resolve to the same on-disk DB)
-	// with its own worker count. Not test mode: SetDSN uses the DSN directly and migrations run at Startup
+	// with its own worker count. Not test mode: SetShard uses the DSN directly and migrations run at Startup
 	// (idempotent, so engine 2 re-opening the migrated DB is a no-op).
 	mkEngine := func(t *testing.T, proxy *TestProxy, dir string, workers int) *Engine {
 		e := NewEngine()
 		e.SetHost(proxy)
-		testarossa.For(t).NoError(e.SetDSN(fmt.Sprintf("file:%s/db%%d.sqlite?_pragma=busy_timeout(5000)", dir)))
+		testarossa.For(t).NoError(e.SetShard(1, fmt.Sprintf("file:%s/db%%d.sqlite?_pragma=busy_timeout(5000)", dir)))
 		testarossa.For(t).NoError(e.SetWorkers(workers))
 		return e
 	}

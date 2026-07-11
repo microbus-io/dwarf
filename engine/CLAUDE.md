@@ -108,11 +108,11 @@ engine:
   ceiling) and `SetWorkersPerConn` (the pool-sizing divisor) recompute the sizing formula (`poolSizes`) and push the
   two results to every live shard via `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`; sequel's pool setters are
   hot/atomic - see "Connection pool sizing").
-- **Construction-time only** (return an error if called after `Startup`): `SetDSN`, `SetWorkers`, `SetNumShards`,
+- **Construction-time only** (return an error if called after `Startup`): `SetShard`, `SetWorkers`,
   `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying
-  these on a running engine would mean reopening live connections (`SetDSN`), resizing the worker pool + candidate
-  cache (`SetWorkers`), changing a shard count that flow keys already encode (`SetNumShards` - see "Database
-  Sharding"), or re-resolving a frozen provider - so the setter **rejects** it with an explicit error rather
+  these on a running engine would mean opening live connections and mutating a shard set that flow keys already
+  encode (`SetShard` - see "Database Sharding"), resizing the worker pool + candidate
+  cache (`SetWorkers`), or re-resolving a frozen provider - so the setter **rejects** it with an explicit error rather
   than silently no-op'ing. The error wording is `"<what> cannot be changed after Startup"`.
 
 For the observability providers specifically (`SetLogger`/`SetMeterProvider`/`SetTracerProvider`): the engine
@@ -1079,8 +1079,8 @@ are a database-layer mechanism — see `internal/database/CLAUDE.md`.
 
 **Live re-sizing.** `SetWorkersPerConn` and `SetMaxOpenConns` recompute the formula (`poolSizes`) and push the two
 resulting integers to every open shard via `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. The shard count itself is
-not a live knob (`SetNumShards` is construction-time only), so it never triggers a re-size: each shard is sized once
-at open using the final `numShards` (set before any shard opens), and stays that size for the engine's life.
+not a live knob (`SetShard` is construction-time only), so it never triggers a re-size: each shard is sized once
+at open using the final shard count (set before any shard opens), and stays that size for the engine's life.
 
 ### Flow Scheduling (priority / fairness)
 
@@ -1585,9 +1585,11 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
 
 ### Database Sharding
 
-`SetNumShards` (default 1) distributes flows across databases to scale write throughput and reduce index contention.
-The sharding *mechanics* — the 1-indexed `Shard(n)` translation, the always-parallel `OnEach` cross-shard fan-out,
-the not-shard-fault-tolerant contract, and the DSN `%d` format / test-mode resolution — live in
+`SetShard(index, dsn)` (default: one shard) distributes flows across databases to scale write throughput and reduce
+index contention. Indices are sparse (unique, >= 1, not necessarily contiguous - so arbitrary DSNs like cloud RDS
+hostnames map cleanly, and a future drained shard's index could retire without renumbering). The sharding
+*mechanics* — the sparse index->DB map, the always-parallel `OnEach` cross-shard fan-out,
+the not-shard-fault-tolerant contract, and the DSN/test-mode resolution — live in
 `internal/database/CLAUDE.md`. This section is the engine-side *semantics*.
 
 **Shard routing & encoding:** external flow IDs encode the shard (`{shard}-{flowID}-{token}`); every operation parses
@@ -1603,14 +1605,16 @@ different servers' clocks, and by `flow_id` alone is broken (a shard with fewer 
 an opaque cursor encoding each shard's smallest-returned `flow_id`. `List` is strict by design: any shard error fails
 the whole call (the per-shard debug path is `ShardInfo` + `List(Shard=N)`).
 
-**Shard count is immutable at runtime.** `SetNumShards` is construction-time only: it records the target before
-`Startup` (which opens+migrates exactly that many shards) and is **rejected** on a running engine, so `e.db.NumShards()`
-never changes after `Startup`. Callers therefore size per-shard state from `e.db.NumShards()` and index it by shard
-with no concurrency concern. Changing the count needs a **coordinated restart** (a maintenance window), because it is
-not safe to grow live: a flow key encodes its shard (`{shard}-{id}-{token}`), so a flow created on a newly-added shard
-is unroutable (404) on any replica still at the old count - and there is no cross-replica agreement on the count nor
-any rebalancing of existing flows (they stay on their original shard). Doing dynamic growth *correctly* - lockstep
-count across replicas plus rebalancing - is a larger problem left unsolved; until then the count is fixed per process.
+**The shard set is immutable at runtime.** `SetShard` is construction-time only: it records index->DSN pairs before
+`Startup` (which opens+migrates exactly those shards) and is **rejected** on a running engine, so the set never
+changes after `Startup`. Callers therefore size per-shard state from `e.db.Indices()`/`NumShards()` with no
+concurrency concern - the sparse indices cannot index a slice directly, so per-shard scratch under `OnEach` uses
+`shardOrdinals()` (index -> ordinal position) and writes distinct slice elements, race-free. Changing the set needs a
+**coordinated restart** of every replica (a maintenance window), because it is not safe to grow live: a flow key
+encodes its shard (`{shard}-{id}-{token}`), so a flow created on a shard unknown to a peer replica is unroutable
+(404) there - and there is no cross-replica agreement on the set nor any rebalancing of existing flows (they stay on
+their original shard). Doing dynamic growth *correctly* - cross-replica agreement plus rollout sequencing - was
+designed but deliberately deferred (see `_BENCH.md` history); until then the set is fixed per process.
 
 ## Test-only instrumentation seams (`engine/debug.go`)
 

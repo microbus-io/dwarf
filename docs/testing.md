@@ -57,8 +57,10 @@ you write in production.
 ```go
 eng := dwarf.NewEngine()
 eng.SetHost(proxy)
-eng.SetWorkers(1)   // serialize dispatch to assert ordering
-eng.SetNumShards(4) // each shard gets its own in-memory database
+eng.SetWorkers(1) // serialize dispatch to assert ordering
+for i := 1; i <= 4; i++ {
+	eng.SetShard(i, "") // each shard gets its own in-memory database
+}
 eng.RunInTest(t)
 ```
 
@@ -115,10 +117,10 @@ proxy1, proxy2 := engine.NewTestProxy(), engine.NewTestProxy()
 // register the same graphs/tasks on both...
 eng1 := engine.NewEngine()
 eng1.SetHost(proxy1)
-eng1.SetDSN(sharedDSN)
+eng1.SetShard(1, sharedDSN)
 eng2 := engine.NewEngine()
 eng2.SetHost(proxy2)
-eng2.SetDSN(sharedDSN)
+eng2.SetShard(1, sharedDSN)
 proxy1.AddPeer(eng2)
 proxy2.AddPeer(eng1)
 ```

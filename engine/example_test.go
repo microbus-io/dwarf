@@ -52,7 +52,7 @@ func Example() {
 	graphs["greet"] = g
 
 	eng := engine.NewEngine()
-	eng.SetDSN("postgres://user:pass@localhost:5432/dwarf")
+	eng.SetShard(1, "postgres://user:pass@localhost:5432/dwarf")
 	eng.SetHost(exampleHost{graphs: graphs})
 
 	err := eng.Startup(ctx)

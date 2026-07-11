@@ -28,7 +28,7 @@ limitations under the License.
 // tests, RunInTest replaces Startup/Shutdown with per-test SQLite databases and t.Cleanup.
 //
 //	eng := engine.NewEngine()
-//	eng.SetDSN("postgres://user:pass@host:5432/dwarf")
+//	eng.SetShard(1, "postgres://user:pass@host:5432/dwarf")
 //	eng.SetHost(host)
 //	err := eng.Startup(ctx)
 //	if err != nil { ... }
@@ -36,7 +36,7 @@ limitations under the License.
 //
 // Each Set* method returns an error. The live ones (SetMaxOpenConns, SetWorkersPerConn,
 // SetTimeBudget, SetDefaultPriority) take effect immediately on a running engine; the construction-time-only
-// ones (SetDSN, SetWorkers, SetNumShards, SetHost, SetLogger, SetMeterProvider, SetTracerProvider) return an
+// ones (SetShard, SetWorkers, SetHost, SetLogger, SetMeterProvider, SetTracerProvider) return an
 // error if called after Startup.
 //
 // # Host

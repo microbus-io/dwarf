@@ -218,8 +218,8 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 		band int
 		rows []candidateRow
 	}
-	numShards := e.db.NumShards()
-	results := make([]*shardResult, numShards+1)
+	_, pos := e.shardOrdinals()
+	results := make([]*shardResult, len(pos))
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
 			"SELECT step_id, task_url, fairness_key, fairness_weight, priority, DATE_DIFF_MILLIS(NOW_UTC(), created_at) FROM dwarf_steps"+
@@ -255,7 +255,7 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 			return errors.Trace(err)
 		}
 		if sr != nil {
-			results[shard] = sr
+			results[pos[shard]] = sr
 		}
 		return nil
 	})

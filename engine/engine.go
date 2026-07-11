@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"sync"
@@ -85,9 +86,12 @@ type Engine struct {
 	tracerProvider trace.TracerProvider
 	tracer         trace.Tracer
 
+	// Shard registry (construction-time only): shard index -> DSN. Sparse - indices must be unique and
+	// >= 1 but need not be contiguous. Guarded by shardsLock; empty means one default shard at Startup.
+	shardsLock sync.Mutex
+	shardDSNs  map[int]string
+
 	// Configuration (atomically updated, safe to change after Startup)
-	dsn             atomic.Value // string
-	numShards       atomic.Int32
 	workers         atomic.Int32
 	timeBudgetMs    atomic.Int64
 	defaultPriority atomic.Int32
@@ -168,8 +172,6 @@ func NewEngine() *Engine {
 		logger:         slog.New(slog.DiscardHandler),
 		lastRefillBand: -1,
 	}
-	e.dsn.Store("")
-	e.numShards.Store(1)
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
 	e.defaultPriority.Store(100)
@@ -195,31 +197,43 @@ func errSetAfterStartup(what string) error {
 	return errors.New(what + " cannot be changed after Startup")
 }
 
-// SetDSN sets the SQL data source name. Use "%d" for sharded DSNs; an empty DSN in test mode uses SQLite
-// in-memory. Construction-time only - the shards are opened against the DSN at Startup, so changing it on
-// a running engine (which would require reopening live connections) is rejected.
-func (e *Engine) SetDSN(dsn string) error {
+// SetShard registers a database shard: its index and the DSN of the database it connects to. Call once per
+// shard. Indices must be >= 1 and unique, but need not be contiguous (shards 1 and 99 are fine). The index
+// is encoded into every flow key created on that shard and drives routing, so the index-to-DSN mapping must
+// be identical across all replicas and stable across restarts. When no shard is registered, Startup opens a
+// single default shard 1 (in test mode, an isolated in-memory database; an empty DSN is only valid in test
+// mode). A "%d" in the DSN is substituted with the shard index.
+//
+// Construction-time only: shards are opened and migrated at Startup and the set is immutable for the
+// engine's life, so a call on a running engine is rejected. Changing the shard set requires a coordinated
+// restart of every replica (a maintenance window): a flow created on a shard unknown to a peer replica is
+// unroutable (404) there.
+func (e *Engine) SetShard(index int, dsn string) error {
 	if e.started.Load() {
-		return errSetAfterStartup("DSN")
+		return errSetAfterStartup("shards")
 	}
-	e.dsn.Store(dsn)
+	if index < 1 {
+		return errors.New("shard index must be at least 1")
+	}
+	e.shardsLock.Lock()
+	defer e.shardsLock.Unlock()
+	if _, ok := e.shardDSNs[index]; ok {
+		return errors.New("shard %d is already set", index)
+	}
+	if e.shardDSNs == nil {
+		e.shardDSNs = map[int]string{}
+	}
+	e.shardDSNs[index] = dsn
 	return nil
 }
 
-// SetNumShards sets the number of database shards (must be at least 1). Construction-time only: shards are opened and migrated at
-// Startup at this count, and the count is immutable for the engine's life, so a call on a running engine is
-// rejected. Changing the shard count requires a coordinated restart (a maintenance window): each flow key
-// encodes its shard, so a live/piecemeal change would leave flows on a newly-added shard unroutable (404) on
-// any replica still at the old count.
-func (e *Engine) SetNumShards(num int) error {
-	if e.started.Load() {
-		return errSetAfterStartup("number of shards")
-	}
-	if num < 1 {
-		return errors.New("number of shards must be at least 1")
-	}
-	e.numShards.Store(int32(num))
-	return nil
+// numConfiguredShards returns the number of registered shards (at least 1, matching the single default
+// shard Startup opens when none is registered), for pool sizing.
+func (e *Engine) numConfiguredShards() int {
+	e.shardsLock.Lock()
+	n := len(e.shardDSNs)
+	e.shardsLock.Unlock()
+	return max(n, 1)
 }
 
 // SetWorkers sets the number of worker goroutines. Construction-time only: the pool size is fixed at
@@ -351,10 +365,12 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if e.host == nil {
 		return errors.New("host is required")
 	}
+	e.shardsLock.Lock()
+	shards := maps.Clone(e.shardDSNs)
+	e.shardsLock.Unlock()
 	idle, open := e.poolSizes()
 	err := e.db.Open(ctx, database.Config{
-		DSN:            e.dsn.Load().(string),
-		NumShards:      int(e.numShards.Load()),
+		Shards:         shards,
 		TestID:         e.testHashedID,
 		Logger:         e.logger,
 		TracerProvider: e.tracerProvider,
@@ -550,6 +566,19 @@ func (e *Engine) nudgeTimer() {
 	case e.wakeTimer <- struct{}{}:
 	default:
 	}
+}
+
+// shardOrdinals returns the open shard indices in ascending order plus a map from shard index to its
+// ordinal position. Per-shard scratch under OnEach is sized len(indices) and written at pos[shard], so
+// concurrent shard goroutines write distinct elements (race-free without a lock) even though the sparse
+// shard indices cannot themselves index a slice.
+func (e *Engine) shardOrdinals() (indices []int, pos map[int]int) {
+	indices = e.db.Indices()
+	pos = make(map[int]int, len(indices))
+	for i, idx := range indices {
+		pos[idx] = i
+	}
+	return indices, pos
 }
 
 // taskTimeBudget returns the current time budget for task dispatch.

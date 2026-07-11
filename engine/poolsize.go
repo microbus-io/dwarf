@@ -43,5 +43,5 @@ func calcConnPoolSizes(workers, shards, workersPerConn, cap int) (idle, open int
 
 // poolSizes computes the per-shard idle/open connection sizes from the engine's live config.
 func (e *Engine) poolSizes() (idle, open int) {
-	return calcConnPoolSizes(int(e.workers.Load()), int(e.numShards.Load()), int(e.workersPerConn.Load()), int(e.maxOpenConns.Load()))
+	return calcConnPoolSizes(int(e.workers.Load()), e.numConfiguredShards(), int(e.workersPerConn.Load()), int(e.maxOpenConns.Load()))
 }

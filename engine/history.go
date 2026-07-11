@@ -455,7 +455,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	if limit <= 0 {
 		limit = 100
 	}
-	numShards := e.db.NumShards()
+	indices, pos := e.shardOrdinals()
 
 	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, subgraphCondition(query.IncludeSubgraphs))
 	if err != nil {
@@ -480,15 +480,15 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 
 	singleShard := restrictShardNum != 0
 	perShardLimit := limit
-	if !singleShard && numShards > 0 {
-		perShardLimit = max((limit+numShards-1)/numShards, 1)
+	if !singleShard && len(indices) > 0 {
+		perShardLimit = max((limit+len(indices)-1)/len(indices), 1)
 	}
 
 	type listRow struct {
 		summary workflow.FlowSummary
 		flowID  int
 	}
-	perShard := make([][]listRow, numShards+1)
+	perShard := make([][]listRow, len(indices))
 
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
 		if restrictShardNum != 0 && shardIdx != restrictShardNum {
@@ -535,7 +535,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			lr.summary.CancelReason = strings.TrimSpace(cancelReason)
 			shardRows = append(shardRows, lr)
 		}
-		perShard[shardIdx] = shardRows
+		perShard[pos[shardIdx]] = shardRows
 		return rows.Err()
 	})
 	if err != nil {
@@ -545,8 +545,8 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	nextPerShard := map[int]int{}
 	maps.Copy(nextPerShard, perShardCursor)
 	var flows []workflow.FlowSummary
-	for s := 1; s <= numShards; s++ {
-		rows := perShard[s]
+	for _, s := range indices {
+		rows := perShard[pos[s]]
 		if len(rows) == 0 {
 			continue
 		}
@@ -623,8 +623,7 @@ func subgraphCondition(includeSubgraphs bool) string {
 // queryClauses builds the shared WHERE/JOIN for list and purge. subgraphCond is the surgraph_flow_id
 // predicate the caller chose: list honors Query.Subgraph, purge always passes roots-only.
 func (e *Engine) queryClauses(ctx context.Context, query workflow.Query, subgraphCond string) (string, string, []any, int, error) {
-	numShards := e.db.NumShards()
-	if query.Shard < 0 || query.Shard > numShards {
+	if query.Shard != 0 && !e.db.Has(query.Shard) {
 		return "", "", nil, 0, errors.New("invalid shard", http.StatusBadRequest)
 	}
 	restrictShardNum := query.Shard
@@ -732,7 +731,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 	if limit <= 0 || limit > purgeCap {
 		limit = purgeCap
 	}
-	numShards := e.db.NumShards()
+	indices, pos := e.shardOrdinals()
 
 	// Purge selects root flows only and deletes each matched root's whole subgraph subtree (below).
 	joinSQL, whereSQL, baseArgs, restrictShardNum, err := e.queryClauses(ctx, query, "f.surgraph_flow_id=0")
@@ -742,11 +741,11 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 
 	singleShard := restrictShardNum != 0
 	perShardLimit := limit
-	if !singleShard && numShards > 0 {
-		perShardLimit = max((limit+numShards-1)/numShards, 1)
+	if !singleShard && len(indices) > 0 {
+		perShardLimit = max((limit+len(indices)-1)/len(indices), 1)
 	}
 
-	perShardDeleted := make([]int, numShards+1)
+	perShardDeleted := make([]int, len(pos))
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
 		if restrictShardNum != 0 && shardIdx != restrictShardNum {
 			return nil
@@ -801,7 +800,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 				return errors.Trace(err)
 			}
 			n, _ := res.RowsAffected()
-			perShardDeleted[shardIdx] = int(n)
+			perShardDeleted[pos[shardIdx]] = int(n)
 			return nil
 		})
 	})
@@ -809,34 +808,31 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		return 0, errors.Trace(err)
 	}
 	total := 0
-	for i := 1; i <= numShards; i++ {
-		total += perShardDeleted[i]
+	for _, n := range perShardDeleted {
+		total += n
 	}
 	return total, nil
 }
 
 func (e *Engine) shardInfo(ctx context.Context) ([]ShardSummary, error) {
-	numShards := e.db.NumShards()
-	results := make([]ShardSummary, numShards+1)
+	indices, pos := e.shardOrdinals()
+	results := make([]ShardSummary, len(indices))
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shardIdx int) error {
-		results[shardIdx].Shard = shardIdx
+		r := &results[pos[shardIdx]]
+		r.Shard = shardIdx
 		start := time.Now()
 		var one int
 		err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one)
-		results[shardIdx].LatencyMs = int(time.Since(start) / time.Millisecond)
+		r.LatencyMs = int(time.Since(start) / time.Millisecond)
 		if err != nil {
-			results[shardIdx].Error = err.Error()
+			r.Error = err.Error()
 			return nil
 		}
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps").Scan(&results[shardIdx].Steps)
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&results[shardIdx].Flows)
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps").Scan(&r.Steps)
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows").Scan(&r.Flows)
 		return nil
 	})
-	shards := make([]ShardSummary, 0, numShards)
-	for i := 1; i <= numShards; i++ {
-		shards = append(shards, results[i])
-	}
-	return shards, nil
+	return results, nil
 }
 
 func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalState any) (string, error) {

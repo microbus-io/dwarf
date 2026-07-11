@@ -167,9 +167,9 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 // observePendingByBand returns, across all shards, the count of due pending steps per priority band
 // and the age in seconds of the oldest due pending step per band (max across shards).
 func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestSecByBand map[int]int, err error) {
-	numShards := e.db.NumShards()
-	pendingPerShard := make([]map[int]int, numShards+1)
-	agePerShard := make([]map[int]int, numShards+1)
+	indices, pos := e.shardOrdinals()
+	pendingPerShard := make([]map[int]int, len(indices))
+	agePerShard := make([]map[int]int, len(indices))
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
 			"SELECT priority, COUNT(*), DATE_DIFF_MILLIS(NOW_UTC(), MIN(created_at)) FROM dwarf_steps"+
@@ -197,8 +197,8 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 		if err != nil {
 			return errors.Trace(err)
 		}
-		pendingPerShard[shard] = counts
-		agePerShard[shard] = ages
+		pendingPerShard[pos[shard]] = counts
+		agePerShard[pos[shard]] = ages
 		return nil
 	})
 	if err != nil {
@@ -206,7 +206,7 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 	}
 	countByBand = map[int]int{}
 	oldestSecByBand = map[int]int{}
-	for i := 1; i <= numShards; i++ {
+	for i := range indices {
 		for priority, count := range pendingPerShard[i] {
 			countByBand[priority] += count
 		}
@@ -222,8 +222,8 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 // countRunningByTask returns the cluster-wide (this replica's shards) count of running steps per task
 // URL (the downstream identity the saturation/concurrency view keys on).
 func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error) {
-	numShards := e.db.NumShards()
-	perShard := make([]map[string]int, numShards+1)
+	indices, pos := e.shardOrdinals()
+	perShard := make([]map[string]int, len(indices))
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		rows, err := db.QueryContext(ctx,
 			"SELECT task_url, COUNT(*) FROM dwarf_steps WHERE status='"+workflow.StatusRunning+"' AND parked=? GROUP BY task_url",
@@ -247,14 +247,14 @@ func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		perShard[shard] = m
+		perShard[pos[shard]] = m
 		return nil
 	})
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	total := map[string]int{}
-	for i := 1; i <= numShards; i++ {
+	for i := range indices {
 		for task, count := range perShard[i] {
 			total[task] += count
 		}

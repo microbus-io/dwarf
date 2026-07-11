@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -48,12 +49,13 @@ const sequenceName = "github.com/microbus-io/dwarf"
 // *sql.DB setters (Logger→SetLogger, TracerProvider→SetTracerProvider, MeterProvider→SetMeterProvider,
 // MaxIdleConns→SetMaxIdleConns, MaxOpenConns→SetMaxOpenConns), so the mapping from field to setter is 1:1.
 type Config struct {
-	// DSN is the sequel data source name; "%d" is substituted with the 1-based shard index. In test mode
+	// Shards maps each shard index to the DSN of its database. Indices must be >= 1 but need not be
+	// contiguous (index 0 is the "no shard / all shards" sentinel). A nil/empty map defaults to a single
+	// shard 1 with an empty DSN. A "%d" in a DSN is substituted with the shard index; in test mode
 	// (TestID set) an empty DSN falls back to SEQUEL_TESTING_DSN, then to the SQLite in-memory default.
-	DSN       string
-	NumShards int
+	Shards map[int]string
 	// TestID, when non-empty, wraps each shard via sequel.CreateTestingDatabase into an isolated, auto-dropped
-	// database keyed on (driver, baseDSN, TestID) - the base DSN's %d already distinguishes the shards.
+	// database keyed on (driver, baseDSN, TestID) - the resolved per-shard DSNs already distinguish the shards.
 	TestID string
 
 	Logger         *slog.Logger
@@ -67,48 +69,79 @@ type Config struct {
 }
 
 // ShardSet is the engine's set of open, migrated database shards. The zero value is a usable, empty set. The
-// shard count is fixed for the set's life (established at Open), so a caller may size per-shard state from
-// NumShards() and index it by the shard arg without racing a concurrent change.
+// shard indices are fixed for the set's life (established at Open), so a caller may size per-shard state from
+// Indices()/NumShards() and key it by the shard arg without racing a concurrent change. Indices are sparse:
+// they must be unique and >= 1 but need not be contiguous.
 type ShardSet struct {
-	mu  sync.RWMutex
-	dbs []*sequel.DB
+	mu      sync.RWMutex
+	dbs     map[int]*sequel.DB
+	indices []int // sorted ascending
 }
 
 // Open opens and migrates every shard, applying cfg's pool sizes and telemetry. On any shard failure it closes
 // the shards already opened this attempt (so a partial failure leaks no connections and leaves the set empty
 // for a clean retry) and returns the error. Not safe to call concurrently with itself; call once at startup.
 func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
-	numShards := max(cfg.NumShards, 1)
-	for i := 1; i <= numShards; i++ {
-		db, err := s.openShard(cfg, i)
+	shards := cfg.Shards
+	if len(shards) == 0 {
+		shards = map[int]string{1: ""}
+	}
+	indices := make([]int, 0, len(shards))
+	for idx := range shards {
+		if idx < 1 {
+			return errors.New("shard index must be at least 1")
+		}
+		indices = append(indices, idx)
+	}
+	slices.Sort(indices)
+	dbs := make(map[int]*sequel.DB, len(indices))
+	closeAll := func() {
+		for _, db := range dbs {
+			db.Close()
+		}
+	}
+	seen := make(map[string]int, len(indices))
+	for _, idx := range indices {
+		dsn := resolveShardDSN(cfg, idx, shards[idx])
+		// Two shards resolving to the same database would collapse onto one another - distinct flows would
+		// share flow_id sequences and every cross-shard invariant breaks. Loud error, never silent.
+		if prev, ok := seen[dsn]; ok {
+			closeAll()
+			return errors.New("shards %d and %d resolve to the same DSN", prev, idx)
+		}
+		seen[dsn] = idx
+		db, err := openShard(cfg, dsn)
 		if err != nil {
-			s.Close()
+			closeAll()
 			return errors.Trace(err)
 		}
-		s.dbs = append(s.dbs, db)
+		dbs[idx] = db
 	}
+	s.mu.Lock()
+	s.dbs = dbs
+	s.indices = indices
+	s.mu.Unlock()
 	return nil
 }
 
-// openShard resolves the base DSN (in test mode an unset DSN falls back to SEQUEL_TESTING_DSN, then the SQLite
-// in-memory default), substitutes %d with the shard index, and in test mode wraps the result via
-// sequel.CreateTestingDatabase before opening and migrating.
-func (s *ShardSet) openShard(cfg Config, shardIndex int) (*sequel.DB, error) {
-	dsn := cfg.DSN
-	if cfg.TestID != "" {
-		if dsn == "" {
-			dsn = os.Getenv("SEQUEL_TESTING_DSN")
-		}
+// resolveShardDSN resolves one shard's DSN: in test mode an unset DSN falls back to SEQUEL_TESTING_DSN, then
+// the SQLite in-memory default; a "%d" is substituted with the shard index.
+func resolveShardDSN(cfg Config, shardIndex int, dsn string) string {
+	if cfg.TestID != "" && dsn == "" {
+		dsn = os.Getenv("SEQUEL_TESTING_DSN")
 		if dsn == "" {
 			dsn = "file:dwarf_%d?mode=memory&cache=shared"
 		}
 	}
 	if strings.Contains(dsn, "%d") {
 		dsn = fmt.Sprintf(dsn, shardIndex)
-	} else if shardIndex > 1 {
-		// No %d to distinguish shards, yet this is shard 2+ - every shard would collapse onto one database.
-		return nil, errors.New("DSN must contain %%d when NumShards > 1")
 	}
+	return dsn
+}
+
+// openShard opens and migrates one shard from its resolved DSN, in test mode first wrapping it via
+// sequel.CreateTestingDatabase into an isolated, auto-dropped database.
+func openShard(cfg Config, dsn string) (*sequel.DB, error) {
 	if cfg.TestID != "" {
 		var err error
 		dsn, err = sequel.CreateTestingDatabase("", dsn, cfg.TestID)
@@ -162,14 +195,24 @@ func applyTelemetry(cfg Config, db *sequel.DB) {
 	db.SetMeterProvider(mp)
 }
 
-// Shard returns the database connection for the given 1-based shard index.
+// Shard returns the database connection for the given shard index. An unknown index returns a uniform
+// not-found error: a flow key referencing an unregistered shard must be indistinguishable from a bad key.
 func (s *ShardSet) Shard(n int) (*sequel.DB, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if n < 1 || n > len(s.dbs) {
+	db, ok := s.dbs[n]
+	if !ok {
 		return nil, errors.New("flow not found", http.StatusNotFound)
 	}
-	return s.dbs[n-1], nil
+	return db, nil
+}
+
+// Has reports whether the given shard index is registered.
+func (s *ShardSet) Has(n int) bool {
+	s.mu.RLock()
+	_, ok := s.dbs[n]
+	s.mu.RUnlock()
+	return ok
 }
 
 // NumShards returns the number of open shards.
@@ -180,27 +223,33 @@ func (s *ShardSet) NumShards() int {
 	return n
 }
 
+// Indices returns the open shard indices in ascending order.
+func (s *ShardSet) Indices() []int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.indices)
+}
+
 // OnEach fans op out over every shard concurrently using an errgroup-style wait, returning the first error.
 func (s *ShardSet) OnEach(ctx context.Context, op func(ctx context.Context, db *sequel.DB, shard int) error) error {
-	numShards := s.NumShards()
-	if numShards == 1 {
-		db, err := s.Shard(1)
+	indices := s.Indices()
+	if len(indices) == 1 {
+		db, err := s.Shard(indices[0])
 		if err != nil {
 			return errors.Trace(err)
 		}
-		return errors.Trace(op(ctx, db, 1))
+		return errors.Trace(op(ctx, db, indices[0]))
 	}
-	errs := make([]error, numShards+1)
+	errs := make([]error, len(indices))
 	var wg sync.WaitGroup
-	for i := 1; i <= numShards; i++ {
-		si := i
+	for i, idx := range indices {
 		wg.Go(func() {
-			db, err := s.Shard(si)
+			db, err := s.Shard(idx)
 			if err != nil {
-				errs[si] = err
+				errs[i] = err
 				return
 			}
-			errs[si] = op(ctx, db, si)
+			errs[i] = op(ctx, db, idx)
 		})
 	}
 	wg.Wait()
@@ -237,5 +286,6 @@ func (s *ShardSet) Close() {
 		db.Close()
 	}
 	s.dbs = nil
+	s.indices = nil
 	s.mu.Unlock()
 }

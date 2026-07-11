@@ -8,13 +8,12 @@ configuration, and running multiple replicas.
 All configuration is set with `Set*` methods, each returning an `error`. They split by whether the knob can
 change on a running engine: the **live** ones (`SetMaxOpenConns`, `SetWorkersPerConn`, `SetTimeBudget`,
 `SetDefaultPriority`) take effect immediately, even after `Startup`; the **construction-time-only** ones
-(`SetDSN`, `SetNumShards`, `SetWorkers`, and the dependency-injection setters below) are rejected if called
+(`SetShard`, `SetWorkers`, and the dependency-injection setters below) are rejected if called
 after `Startup`.
 
 | Method | Default | Purpose |
 |---|---|---|
-| `SetDSN(dsn)` | `""` | Database connection string (dialect auto-detected) |
-| `SetNumShards(n)` | 1 | Number of database shards |
+| `SetShard(i, dsn)` | one default shard | Registers shard `i` with its database connection string (dialect auto-detected); call once per shard |
 | `SetWorkers(n)` | 64 | Per-replica worker concurrency cap |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
@@ -60,8 +59,8 @@ time. Used automatically by `RunInTest`. Do not run SQLite in production.
 
 ## Sharding
 
-`SetNumShards` partitions flows across databases (or schemas) to scale write throughput and reduce index
-contention. Rough sizing by tolerated concurrent INSERT/sec per shard:
+Registering multiple shards with `SetShard` partitions flows across databases (or schemas) to scale write
+throughput and reduce index contention. Rough sizing by tolerated concurrent INSERT/sec per shard:
 
 | Engine | INSERT/sec per shard | Suggested shards |
 |---|---|---|
@@ -72,17 +71,21 @@ contention. Rough sizing by tolerated concurrent INSERT/sec per shard:
 
 Rules:
 
-- Shards are **1-indexed**. The shard appears as the leading number of a flow key (`{shard}-{flowID}-{token}`).
-- When `NumShards > 1`, the DSN **must contain `%d`**, replaced with the shard index. Every shard database
-  must exist before startup — the engine migrates the schema but does not `CREATE DATABASE`.
-- `NumShards` is fixed for the engine's life: it is read once at `Startup` (when shards are opened and
-  migrated) and rejected after. Each flow key encodes its shard, so changing the count requires a
-  coordinated restart (a maintenance window), not a live/piecemeal change.
+- Shard indices start at 1 and must be unique, but need **not** be contiguous — `SetShard(1, …)` and
+  `SetShard(99, …)` is valid. The shard appears as the leading number of a flow key
+  (`{shard}-{flowID}-{token}`) and drives routing, so the index→DSN mapping must be **identical across
+  all replicas** and stable across restarts.
+- Every shard database must exist before startup — the engine migrates the schema but does not
+  `CREATE DATABASE`. A `%d` in a DSN is substituted with the shard index (a convenience for patterned
+  hostnames or database names); arbitrary per-shard DSNs need no `%d`.
+- The shard set is fixed for the engine's life: shards are opened and migrated at `Startup`, and
+  `SetShard` is rejected after. Each flow key encodes its shard, so changing the set requires a
+  coordinated restart of every replica (a maintenance window), not a live/piecemeal change.
 - New top-level flows pick a random shard; subgraph flows stay on the parent's shard.
 
 ```go
-eng.SetDSN("postgres://user:pass@db:5432/dwarf_%d?sslmode=disable")
-eng.SetNumShards(4)
+eng.SetShard(1, "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable")
+eng.SetShard(2, "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable")
 ```
 
 ## Connection pool

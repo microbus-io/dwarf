@@ -49,7 +49,9 @@ func TestShardinfoflow(t *testing.T) {
 	const numShards = 3
 	eng := engine.NewEngine()
 	eng.SetHost(proxy)
-	eng.SetNumShards(numShards)
+	for i := 1; i <= numShards; i++ {
+		eng.SetShard(i, "")
+	}
 	eng.RunInTest(t)
 
 	const total = 30

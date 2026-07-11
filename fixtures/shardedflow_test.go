@@ -57,7 +57,9 @@ func TestShardedflow(t *testing.T) {
 	eng := engine.NewEngine()
 	eng.SetHost(proxy)
 	eng.SetWorkers(1)
-	eng.SetNumShards(8)
+	for i := 1; i <= 8; i++ {
+		eng.SetShard(i, "")
+	}
 	eng.RunInTest(t)
 
 	t.Run("strict_priority_across_shards", func(t *testing.T) {

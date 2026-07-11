@@ -21,8 +21,8 @@ opens base `file:dwarf_i?…` - a distinct base per shard, so `CreateTestingData
 and a multi-shard engine never collapses onto one in-memory DB. (An earlier design used a no-`%d` default and folded
 the shard index into the testID to manufacture that difference; with a `%d`-bearing default that fold is redundant
 and was removed.) The consequence is a deliberately-honest sharp edge: a multi-shard run against a `SEQUEL_TESTING_DSN`
-that **lacks `%d`** collapses its shards onto one database and its tests fail - the same "`%d` required when
-`NumShards > 1`" rule the production DSN already obeys, surfaced as a loud failure rather than a silent fold.
+that **lacks `%d`** collapses its shards onto one database - caught loudly at `Open`, which rejects two shards
+resolving to the same DSN rather than silently folding them.
 
 The testID is hashed to a bounded 16 hex chars (SQL identifier limits: Postgres 63 / MySQL 64) before it reaches
 `CreateTestingDatabase`, so an arbitrarily long Go subtest name still yields a valid database name. The hash is
@@ -54,6 +54,6 @@ the test registers handlers; fixture task/graph URLs are namespaced per file (`<
 convention. A fixture asserting over the **full** flow set (`List`/`Purge`/`ShardInfo`) gets a clean database for free
 - its engine sees only its own flows.
 
-A fixture needing a **non-default topology** (`SetNumShards`, `SetTimeBudget`, a specific `SetWorkers` count) or
+A fixture needing a **non-default topology** (multiple `SetShard`s, `SetTimeBudget`, a specific `SetWorkers` count) or
 **host singletons** (multi-replica `AddPeer`/peers, a custom host wrapping `TestProxy`) configures
 them on its own engine/proxy before `RunInTest` - the same per-test ownership, just with non-default knobs.

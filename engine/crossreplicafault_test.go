@@ -64,13 +64,13 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 
 	awaiter := NewEngine()
 	awaiter.SetHost(proxyAwaiter)
-	assert.NoError(awaiter.SetDSN(dsn))
+	assert.NoError(awaiter.SetShard(1, dsn))
 	assert.NoError(awaiter.SetWorkers(0))
 	awaiter.awaitPollInterval = 100 * time.Millisecond // the backstop must be prompt for the test
 
 	worker := NewEngine()
 	worker.SetHost(proxyWorker)
-	assert.NoError(worker.SetDSN(dsn))
+	assert.NoError(worker.SetShard(1, dsn))
 	assert.NoError(worker.SetWorkers(2))
 
 	proxyAwaiter.AddPeer(worker) // awaiter's create-doorbell reaches the worker
@@ -131,7 +131,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	// step stays `running`. A short budget makes the lease expire quickly for B to recover.
 	repA := NewEngine()
 	repA.SetHost(buildProxy())
-	assert.NoError(repA.SetDSN(dsn))
+	assert.NoError(repA.SetShard(1, dsn))
 	assert.NoError(repA.SetWorkers(2))
 	assert.NoError(repA.SetTimeBudget(300 * time.Millisecond))
 	repA.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 400ms
@@ -156,7 +156,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	// Replica B joins on the same DB. Its lease recovery is what will re-drive the step.
 	repB := NewEngine()
 	repB.SetHost(buildProxy())
-	assert.NoError(repB.SetDSN(dsn))
+	assert.NoError(repB.SetShard(1, dsn))
 	assert.NoError(repB.SetWorkers(2))
 	assert.NoError(repB.Startup(ctx))
 	t.Cleanup(func() { repB.Shutdown(ctx) })

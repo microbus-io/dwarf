@@ -52,7 +52,9 @@ func TestListCursorflow(t *testing.T) {
 
 	eng := engine.NewEngine()
 	eng.SetHost(proxy)
-	eng.SetNumShards(3) // test mode gives 3 in-memory shards via the %d DSN default
+	for i := 1; i <= 3; i++ {
+		eng.SetShard(i, "") // test mode gives each shard its own in-memory database
+	}
 	eng.RunInTest(t)
 
 	const total = 25

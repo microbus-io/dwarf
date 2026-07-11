@@ -35,14 +35,13 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	e.RunInTest(t)
 
 	// Construction-time-only: rejected after Startup.
-	assert.Error(e.SetDSN("file:other.sqlite"))
+	assert.Error(e.SetShard(2, "file:other.sqlite")) // shard set is immutable after Startup
 	assert.Error(e.SetWorkers(8))
 	assert.Error(e.SetHost(noopHost{}))
 	assert.Error(e.SetLogger(nil))
 	assert.Error(e.SetDebugLogger())
 	assert.Error(e.SetMeterProvider(nil))
 	assert.Error(e.SetTracerProvider(nil))
-	assert.Error(e.SetNumShards(2)) // shard count is immutable after Startup
 
 	// Live: succeed after Startup.
 	assert.NoError(e.SetTimeBudget(30 * time.Second))

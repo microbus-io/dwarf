@@ -18,11 +18,26 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
+
+// oneTaskHost serves a single-node graph for any workflow URL and no-ops the task, for tests that need a
+// flow to actually run (unlike noopHost, whose nil graph 404s Create).
+type oneTaskHost struct{}
+
+func (oneTaskHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) {
+	g := workflow.NewGraph("OneTask")
+	g.SetEndpoint("Do", "do")
+	g.AddTransition("Do", workflow.END)
+	return g, nil
+}
+func (oneTaskHost) ExecuteTask(ctx context.Context, name string, f *workflow.Flow) error { return nil }
+func (oneTaskHost) SignalPeers(context.Context, string, []byte)                          {}
 
 func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
 	assert := testarossa.For(t)
@@ -45,27 +60,34 @@ func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
 	assert.Equal(0, count)
 }
 
-// TestSetNumShards covers the construction-time-only shard count: before Startup SetNumShards records the
-// target (applied when the shards open at Startup), and on a running engine it is rejected - the count is
-// immutable for the engine's life (changing it needs a coordinated restart, since flow keys encode the shard).
-func TestSetNumShards(t *testing.T) {
+// TestSetShard covers the construction-time-only shard registry: before Startup SetShard records the
+// index->DSN pair (applied when the shards open at Startup), indices may be sparse, duplicates and
+// invalid indices are rejected, and on a running engine SetShard is rejected - the set is immutable for
+// the engine's life (changing it needs a coordinated restart, since flow keys encode the shard).
+func TestSetShard(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	// Before Startup, SetNumShards just records the target (shards open at Startup).
+	// Before Startup, SetShard just records the pair (shards open at Startup).
 	pre := NewEngine()
 	pre.SetHost(noopHost{})
-	assert.NoError(pre.SetNumShards(2))
+	assert.NoError(pre.SetShard(1, ""))
 	assert.Equal(0, pre.db.NumShards())
+	assert.Error(pre.SetShard(1, ""))  // duplicate index
+	assert.Error(pre.SetShard(0, ""))  // index 0 is the "no shard / all shards" sentinel
+	assert.Error(pre.SetShard(-1, "")) // negative index
 
+	// Sparse indices: 2 and 99 need not be contiguous.
 	e := NewEngine()
-	e.SetHost(noopHost{})
-	assert.NoError(e.SetNumShards(2)) // recorded now, applied by RunInTest
+	e.SetHost(oneTaskHost{})
+	assert.NoError(e.SetShard(2, ""))
+	assert.NoError(e.SetShard(99, ""))
 	e.RunInTest(t)
 	assert.Equal(2, e.db.NumShards())
+	assert.Equal([]int{2, 99}, e.db.Indices())
 
-	// Both shards are migrated and usable in isolation.
-	for _, n := range []int{1, 2} {
+	// Both shards are migrated and usable in isolation; unregistered indices route nowhere.
+	for _, n := range []int{2, 99} {
 		db, err := e.db.Shard(n)
 		assert.NoError(err)
 		var count int
@@ -73,9 +95,18 @@ func TestSetNumShards(t *testing.T) {
 		assert.NoError(err, "shard %d has no schema", n)
 		assert.Equal(0, count)
 	}
+	_, err := e.db.Shard(1)
+	assert.Error(err, "index 1 is not registered")
 
-	// On a running engine, SetNumShards is rejected and the count is unchanged.
-	assert.Error(e.SetNumShards(4))
+	// Flows are created on the sparse shards and their keys route back to them.
+	flowKey, _, err := e.Run(ctx, "bench", nil, nil)
+	assert.NoError(err)
+	assert.True(strings.HasPrefix(flowKey, "2-") || strings.HasPrefix(flowKey, "99-"))
+	_, err = e.Snapshot(ctx, flowKey)
+	assert.NoError(err)
+
+	// On a running engine, SetShard is rejected and the set is unchanged.
+	assert.Error(e.SetShard(3, ""))
 	assert.Equal(2, e.db.NumShards())
 }
 

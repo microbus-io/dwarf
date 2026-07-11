@@ -83,7 +83,7 @@ func TestGreeting(t *testing.T) {
 ## Wiring a real engine
 
 In production you replace `TestProxy` with your own `Host`, point the engine at a real
-database with `SetDSN`, and manage its lifecycle explicitly. A standalone host need only implement the
+database with `SetShard`, and manage its lifecycle explicitly. A standalone host need only implement the
 two required methods — the optional `SignalPeers` method can be a no-op:
 
 ```go
@@ -107,7 +107,7 @@ func (h *myHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.F
 func (h *myHost) SignalPeers(context.Context, string, []byte) {}
 
 eng := dwarf.NewEngine()
-eng.SetDSN("postgres://user:pass@db:5432/dwarf")
+eng.SetShard(1, "postgres://user:pass@db:5432/dwarf")
 eng.SetHost(&myHost{graphs: loadGraphRegistry()})
 
 err := eng.Startup(ctx)

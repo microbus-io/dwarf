@@ -88,7 +88,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 			return "", errors.Trace(err)
 		}
 	} else {
-		shardNum = rand.IntN(e.db.NumShards()) + 1
+		indices := e.db.Indices()
+		shardNum = indices[rand.IntN(len(indices))]
 	}
 	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, initialState, threadID, threadToken, "", opts, 0, 0, 0, 0)
 	return flowKey, errors.Trace(err)
