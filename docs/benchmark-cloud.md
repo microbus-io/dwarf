@@ -29,6 +29,8 @@ is `db = k·L + s`:
 
 ## Steps throughput by database tier
 
+![Steps throughput by database tier and connection pool size](benchmark-cloud-tiers.png)
+
 Post-fix engine, workers=512, concurrency 512, fresh DB per point, steps/s:
 
 | | M=8 | M=16 | M=32 | M=48 | M=64 | M=96 | ceiling (mean ± sd, n=3) |
@@ -53,6 +55,8 @@ Post-fix engine, workers=512, concurrency 512, fresh DB per point, steps/s:
 
 ## Latency: it costs connections, not throughput
 
+![Per-step database time vs round-trip latency](benchmark-cloud-latency.png)
+
 Connection-bound regime (M=8), artificial delay added with `tc netem`:
 
 | added delay | measured RTT | steps/s | conn-held ms/step |
@@ -69,6 +73,8 @@ doubles `db` vs same-zone; co-locating the engine with its shard's zone is the s
 
 ## Workers
 
+![Workers vs throughput at two task durations](benchmark-cloud-workers.png)
+
 Throughput in the worker-bound regime is exactly `N/T` (validated to 1%): 32 workers with no-op tasks
 (T ≈ 72 ms at a saturated pool) gave 443 steps/s; with 100 ms task delay (T ≈ 175 ms), 183 steps/s.
 Workers beyond `M × T/db` only deepen the pool queue. With a 100 ms task, the knee moved from ~64–96
@@ -83,6 +89,8 @@ beware benchmarks with repetitive payloads). Byte throughput scales with shards:
 gauge against this ceiling.
 
 ## Scale-out
+
+![Two shards vs one: measured scaling factors](benchmark-cloud-scaleout.png)
 
 Two 8-vCPU shards at saturation: **6,719 steps/s = ×1.81** over one shard (pre-fix engine binaries;
 the residual ~19% is unattributed — host-side or closed-loop artifacts — and worth revisiting at 4
