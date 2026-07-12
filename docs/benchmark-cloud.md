@@ -86,13 +86,13 @@ These runs pin the pool small (M=8) so connections are the binding resource — 
 database time can be read directly as `M ÷ throughput`. Artificial network delay is added on the
 engine host with `tc netem` (a Linux traffic-control tool) so RTT becomes a finely-steppable variable:
 
-| added delay | measured RTT | steps/s | connection-held ms/step |
+| added delay (ms) | measured RTT (ms) | steps/s | connection-held time (ms/step) |
 |---|---|---|---|
-| +0 | 0.28 ms | 1021 | 7.8 |
-| +0.5 | 0.82 ms | 529 | 15.1 |
-| +1 | 1.34 ms | 372 | 21.5 |
-| +2 | 2.35 ms | 244 | 32.8 |
-| +5 | 5.34 ms | 116 | 69.1 |
+| +0 | 0.28 | 1021 | 7.8 |
+| +0.5 | 0.82 | 529 | 15.1 |
+| +1 | 1.34 | 372 | 21.5 |
+| +2 | 2.35 | 244 | 32.8 |
+| +5 | 5.34 | 116 | 69.1 |
 
 The points fall on a straight line (R² ≈ 1): `db = 12.1·RTT + 4.4 ms`. The slope is `k` — each extra
 millisecond of round-trip latency costs one millisecond per database round-trip the step makes, and
