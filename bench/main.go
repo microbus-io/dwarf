@@ -76,7 +76,11 @@ func run() error {
 		payload        = flag.Int("payload", 64*1024, "state-workload payload bytes written per step")
 		taskDelay      = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
 		workers        = flag.Int("workers", 64, "engine worker goroutines")
-		workersPerConn = flag.Int("workers-per-conn", 8, "engine workers assumed to share one DB connection")
+		// Default 1 (not the engine's 8) so -max-open-conns IS the pool size: with the engine default,
+		// calcConnPoolSizes caps the pool at 2*ceil(workers/8)+2 and the -max-open-conns "ceiling" is
+		// silently never reached (e.g. workers=32 -> a 10-conn pool under a 30-conn flag) - the exact trap
+		// that misattributed ~50ms/step of pool queueing to engine overhead in campaign session 1.
+		workersPerConn = flag.Int("workers-per-conn", 1, "engine workers assumed to share one DB connection (1 => -max-open-conns is the actual pool size)")
 		maxOpenConns   = flag.Int("max-open-conns", 30, "engine per-shard open-connection ceiling")
 		concurrency    = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
 		window         = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")

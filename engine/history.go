@@ -446,7 +446,7 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 	if b, ok := maxUpdated.([]byte); ok {
 		maxUpdated = string(b)
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%v", status, count, maxUpdated)))
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s|%d|%v", status, count, maxUpdated))
 	return hex.EncodeToString(sum[:]), status, nil
 }
 
