@@ -44,6 +44,8 @@ type engineMetrics struct {
 	stepsExecuted   metric.Int64Counter
 	stepsRecovered  metric.Int64Counter
 	stepsUnwedged   metric.Int64Counter
+	stateWriteBytes metric.Int64Counter
+	stateReadBytes  metric.Int64Counter
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
 }
@@ -70,11 +72,24 @@ func (e *Engine) initMetrics() error {
 		return c
 	}
 	// Counter instrument names carry no _total suffix; the Prometheus exporter appends it at scrape time.
+	// Unit-denominated counters end with the unit (…_bytes), per the Prometheus naming convention.
 	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started.")
 	m.flowsTerminated = ctr("dwarf_flows_terminated", "Counts flows that have reached a terminal status.")
 	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps recovered by pollPendingSteps after lease expiry.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
+	bytesCtr := func(name, desc string) metric.Int64Counter {
+		c, err := meter.Int64Counter(name, metric.WithDescription(desc), metric.WithUnit("By"))
+		if err != nil {
+			errs = append(errs, errors.Trace(err))
+		}
+		return c
+	}
+	// State byte throughput on the dispatch hot path only: rates here track against the database's
+	// byte-throughput ceiling (disk/WAL), which binds separately from its steps ceiling. Reads/writes by
+	// the introspection APIs (List/History/Snapshot) and flow-row writes (final_state) are not counted.
+	m.stateWriteBytes = bytesCtr("dwarf_state_write_bytes", "Counts payload bytes written to step rows on the execution path, labelled by workflow and by column (state, changes, interrupt_payload).")
+	m.stateReadBytes = bytesCtr("dwarf_state_read_bytes", "Counts payload bytes read from step rows on the execution path, labelled by workflow and by column (state, changes, resume_data, subgraph_result).")
 
 	gauge := func(name, desc, unit string) metric.Int64ObservableGauge {
 		g, err := meter.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit(unit))
@@ -277,6 +292,27 @@ func (e *Engine) metricFlowTerminated(ctx context.Context, workflowURL, status s
 	}
 	e.metrics.flowsTerminated.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("workflow", workflowURL), attribute.String("status", status)))
+}
+
+// The `column` attribute on the byte counters is the dwarf_steps column the bytes moved through -
+// "state" (snapshots), "changes" (task output deltas), "resume_data", "interrupt_payload",
+// "subgraph_result" - bounded cardinality, and lets a chart split task data from engine snapshots from
+// human-in-the-loop payloads. Sum across the attribute for the total.
+
+func (e *Engine) metricStateWriteBytes(ctx context.Context, workflowURL, column string, n int) {
+	if e.metrics == nil || n <= 0 {
+		return
+	}
+	e.metrics.stateWriteBytes.Add(ctx, int64(n), metric.WithAttributes(
+		attribute.String("workflow", workflowURL), attribute.String("column", column)))
+}
+
+func (e *Engine) metricStateReadBytes(ctx context.Context, workflowURL, column string, n int) {
+	if e.metrics == nil || n <= 0 {
+		return
+	}
+	e.metrics.stateReadBytes.Add(ctx, int64(n), metric.WithAttributes(
+		attribute.String("workflow", workflowURL), attribute.String("column", column)))
 }
 
 func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string) {

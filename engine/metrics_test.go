@@ -158,6 +158,23 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	assert.True(ok, "dwarf_steps_executed{status=completed} should be present")
 	assert.Equal(int64(2), executed)
 
+	// State byte throughput: both counters fire on the execution path, labelled by workflow and by the
+	// column the bytes moved through. Even no-op tasks carry at least the empty-object JSON ("{}"), so the
+	// workflow-level sums are strictly positive; per-column, the entry snapshot ("state") and the
+	// completion delta ("changes") must both appear for this two-task linear flow.
+	writeBytes, ok := sumCounter(rm, "dwarf_state_write_bytes", "workflow", "metricsflow.verify:428/g")
+	assert.True(ok, "dwarf_state_write_bytes{workflow} should be present")
+	assert.True(writeBytes > 0, "state write bytes should be positive, got %d", writeBytes)
+	stateW, ok := sumCounter(rm, "dwarf_state_write_bytes", "column", "state")
+	assert.True(ok, "dwarf_state_write_bytes{column=state} should be present")
+	assert.True(stateW > 0)
+	changesW, ok := sumCounter(rm, "dwarf_state_write_bytes", "column", "changes")
+	assert.True(ok, "dwarf_state_write_bytes{column=changes} should be present")
+	assert.True(changesW > 0)
+	readBytes, ok := sumCounter(rm, "dwarf_state_read_bytes", "workflow", "metricsflow.verify:428/g")
+	assert.True(ok, "dwarf_state_read_bytes{workflow} should be present")
+	assert.True(readBytes > 0, "state read bytes should be positive, got %d", readBytes)
+
 	// The queue-depth observable gauge always emits a point at collection time.
 	assert.True(gaugePresent(rm, "dwarf_steps_queue_depth"), "dwarf_steps_queue_depth gauge should be present")
 }

@@ -198,6 +198,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if flowTimeBudgetMs <= 0 {
 		flowTimeBudgetMs = int(e.taskTimeBudget().Milliseconds())
 	}
+	e.metricStateReadBytes(ctx, workflowURL, "state", len(stateJSON))
+	e.metricStateReadBytes(ctx, workflowURL, "changes", len(priorChangesJSON))
+	e.metricStateReadBytes(ctx, workflowURL, "resume_data", len(resumeDataJSON))
+	e.metricStateReadBytes(ctx, workflowURL, "subgraph_result", len(subgraphResultJSON))
 
 	flowStatus = strings.TrimSpace(flowStatus)
 	flowToken = strings.TrimSpace(flowToken)
@@ -389,7 +393,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if interruptPayload, interrupted := resultFlow.InterruptRequested(); interrupted {
 		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "workflow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
-		return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowToken, changesJSON, interruptPayload)
+		return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowToken, workflowURL, changesJSON, interruptPayload)
 	}
 
 	// Handle subgraph
@@ -444,6 +448,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if n, _ := parkRes.RowsAffected(); n == 0 {
 			return nil
 		}
+		e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
 		// Test checkpoint: a breakpoint here freezes the worker after the caller step is parked but before the
 		// child flow is inserted, so a test can Cancel the tree in exactly the window that produces an orphaned
 		// subgraph child (the recoverOrphanedSubgraphChildren case).
@@ -528,6 +533,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if !rewound {
 			return nil
 		}
+		e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
 		if retrySleepMs > 0 {
 			e.shortenNextPoll(time.Now().Add(time.Duration(retrySleepMs) * time.Millisecond))
 		} else {
@@ -566,6 +572,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		return nil
 	}
 	stepMarkedComplete = true
+	e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
 
 	// Evaluate transitions
 	var nextTasks []nextStep
@@ -594,7 +601,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if fanInTarget == "" {
 			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, workflowURL)
 		}
-		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 	}
 
 	if cohortSize == 0 {
@@ -627,6 +634,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 
 	var newStepIDs []int
 	flowFailed := false
+	// State bytes moved by this transition (successor snapshots, fan-in merge), accumulated in the
+	// closure and emitted only after commit (see stateByteCount).
+	var txBytes stateByteCount
 	// When the failing flow is a subgraph child, its failure is delivered to the parent's flow.Subgraph
 	// call rather than notified directly (see failStep). Captured in the transaction, acted on after it.
 	flowFailedParentStepID := 0
@@ -648,6 +658,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		newStepIDs = newStepIDs[:0]
 		flowFailed = false
+		txBytes = stateByteCount{}
 		flowFailedParentStepID, flowFailedReDispatchParent = 0, false
 		flowFailedAwaited = false
 
@@ -708,6 +719,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			if err != nil {
 				return errors.Trace(err)
 			}
+			txBytes.stateWritten += len(stepStateJSON)
 			newStepIDs = append(newStepIDs, int(newStepID))
 		}
 
@@ -732,10 +744,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			}
 			fullyResolved := size > 0 && arrivals >= size
 			if fullyResolved && failures == 0 {
-				fanInStepID, err := e.insertFanInStep(ctx, tx, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+				fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 				if err != nil {
 					return errors.Trace(err)
 				}
+				txBytes.stateWritten += fanInBytes.stateWritten
+				txBytes.stateRead += fanInBytes.stateRead
+				txBytes.changesRead += fanInBytes.changesRead
 				newStepIDs = append(newStepIDs, fanInStepID)
 			} else if fullyResolved && failures > 0 {
 				failFlow := spawnLineageID == 0
@@ -794,6 +809,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if err != nil {
 		return errors.Trace(err)
 	}
+	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)
+	e.metricStateReadBytes(ctx, workflowURL, "state", txBytes.stateRead)
+	e.metricStateReadBytes(ctx, workflowURL, "changes", txBytes.changesRead)
 
 	if flowFailed {
 		if flowFailedParentStepID != 0 {
@@ -827,15 +845,17 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 var errLeaseFenced = errors.New("dispatch lease fenced")
 
 // handleInterrupt pauses a flow for external input.
-func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.DB, stepID, leaseSeq int, flowID int, flowToken string, changesJSON []byte, interruptPayload map[string]any) error {
+func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.DB, stepID, leaseSeq int, flowID int, flowToken string, workflowURL string, changesJSON []byte, interruptPayload map[string]any) error {
 	chainFlowIDs, chainStepIDs, chainCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowToken)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
 	fenced := false
+	payloadLen := 0
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		fenced = false
+		payloadLen = 0
 		// Steps-first-then-flow lock ordering, matching resume and Cancel (which walk this same surgraph
 		// chain). Interrupt is non-terminating, so it carries no write-first orphan obligation; the only
 		// requirement is that the first statement be a write (satisfied here, keeping SQLite's shared-lock
@@ -879,6 +899,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 
 		if len(interruptPayload) > 0 {
 			payloadJSON, _ := json.Marshal(interruptPayload)
+			payloadLen = len(payloadJSON)
 			payloadArgs := []any{string(payloadJSON)}
 			payloadArgs = append(payloadArgs, allStepIDs...)
 			// Guard: write the payload only to chain steps still at the default empty object, so a
@@ -913,6 +934,8 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		return errors.Trace(err)
 	}
 
+	e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
+	e.metricStateWriteBytes(ctx, workflowURL, "interrupt_payload", payloadLen)
 	awaitedSet := e.awaitedFlows(ctx, shardNum, chainFlowIDs)
 	for i, compositeID := range chainCompositeIDs {
 		e.signalStop(ctx, compositeID, workflow.StatusInterrupted, awaitedSet == nil || awaitedSet[chainFlowIDs[i].(int)])
@@ -921,10 +944,12 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 }
 
 // fireFanInDirect creates the fan-in step immediately for an empty-cohort case.
-func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget, fanInURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) error {
+func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) error {
 	var fanInStepID int64
+	var txBytes stateByteCount
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
 		fanInStepID = 0
+		txBytes = stateByteCount{}
 		// Write-first, guarded on non-terminal status - the same lock-grab the transition tx uses. If a
 		// concurrent Cancel/failStep terminalized this flow, the guard yields zero rows and this becomes a
 		// clean no-op; without it we would insert a pending fan-in step and overwrite step_id on a terminal
@@ -944,11 +969,14 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 
 		var ourStateJSON, ourChangesJSON string
 		tx.QueryRowContext(ctx, "SELECT state, changes FROM dwarf_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON)
+		txBytes.stateRead = len(ourStateJSON)
+		txBytes.changesRead = len(ourChangesJSON)
 		var ourState, ourChanges map[string]any
 		unmarshalJSONMap(ourStateJSON, &ourState)
 		unmarshalJSONMap(ourChangesJSON, &ourChanges)
 		mergedState, _ := workflow.MergeState(ourState, ourChanges, graph.Reducers())
 		mergedJSON, _ := json.Marshal(mergedState)
+		txBytes.stateWritten = len(mergedJSON)
 
 		nextStepDepth := stepDepth + 1
 		sleepMs := sleepDur.Milliseconds()
@@ -973,6 +1001,9 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// was inserted, nothing to dispatch.
 		return nil
 	}
+	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)
+	e.metricStateReadBytes(ctx, workflowURL, "state", txBytes.stateRead)
+	e.metricStateReadBytes(ctx, workflowURL, "changes", txBytes.changesRead)
 
 	if sleepDur > 0 {
 		e.shortenNextPoll(time.Now().Add(sleepDur))
@@ -983,14 +1014,26 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 	return nil
 }
 
-// insertFanInStep creates the fan-in step after the cohort completes.
-func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, error) {
+// stateByteCount accumulates state/changes payload bytes moved by a transaction, emitted to the
+// dwarf_state_*_bytes counters by the caller only after the transaction commits (a contention retry
+// re-runs the closure, so inline emission would double-count).
+type stateByteCount struct {
+	stateWritten int // "state" column: snapshots written (successor, fan-in inserts)
+	stateRead    int // "state" column: snapshots read (fan-in spawn/own state)
+	changesRead  int // "changes" column: deltas read (fan-in spawn + cohort members)
+}
+
+// insertFanInStep creates the fan-in step after the cohort completes. It also returns the state bytes it
+// moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot), which
+// the caller emits after its transaction commits.
+func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, stateByteCount, error) {
 	var spawnStateJSON, spawnChangesJSON, spawnTaskName string
 	var spawnLineageID int
 	tx.QueryRowContext(ctx,
 		"SELECT state, changes, lineage_id, task_name FROM dwarf_steps WHERE step_id=?",
 		cohortSpawnID,
 	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnLineageID, &spawnTaskName)
+	bytes := stateByteCount{stateRead: len(spawnStateJSON), changesRead: len(spawnChangesJSON)}
 	var spawnState, spawnChanges map[string]any
 	unmarshalJSONMap(spawnStateJSON, &spawnState)
 	unmarshalJSONMap(spawnChangesJSON, &spawnChanges)
@@ -1011,7 +1054,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 		flowID, cohortSpawnID,
 	)
 	if err != nil {
-		return 0, errors.Trace(err)
+		return 0, stateByteCount{}, errors.Trace(err)
 	}
 	defer rows.Close()
 	maxCohortDepth := 0
@@ -1020,6 +1063,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 		var memberTaskName, status, changesJSON string
 		var depth int
 		rows.Scan(&memberStepID, &memberTaskName, &status, &changesJSON, &depth)
+		bytes.changesRead += len(changesJSON)
 		if depth > maxCohortDepth {
 			maxCohortDepth = depth
 		}
@@ -1054,6 +1098,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	}
 
 	mergedJSON, _ := json.Marshal(merged)
+	bytes.stateWritten = len(mergedJSON)
 	fanInURL := dispatchURLOf(graph, fanInTaskName)
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
 		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
@@ -1061,7 +1106,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
 	)
 	if err != nil {
-		return 0, errors.Trace(err)
+		return 0, stateByteCount{}, errors.Trace(err)
 	}
 
 	// Record the cohort-exit -> fan-in edges, targeting the exit steps by primary key (collected above)
@@ -1078,7 +1123,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 			args...,
 		)
 	}
-	return int(fanInStepID), nil
+	return int(fanInStepID), bytes, nil
 }
 
 // dispatchURLOf resolves a graph node name to its dispatch URL.

@@ -307,6 +307,8 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	flowKey = fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, flowToken)
 	e.logger.DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)
 	e.metricFlowStarted(ctx, workflowURL)
+	// The entry step's initial-state snapshot, written by insertFlowTx above.
+	e.metricStateWriteBytes(ctx, workflowURL, "state", len(seed.stateJSON))
 	// Ring the doorbell so a replica with spare capacity claims the entry step immediately, rather than
 	// waiting for the backstop poll. A missed doorbell is recovered by pollPendingSteps. The entry step
 	// was just inserted due-now with the resolved priority, so the fast-path doorbell applies.

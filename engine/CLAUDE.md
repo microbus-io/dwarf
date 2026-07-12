@@ -1162,7 +1162,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 10 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 12 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so both `Startup` and `RunInTest` get them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
@@ -1176,6 +1176,26 @@ the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_e
 disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered`
 (pollPendingSteps lease recovery), and `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
 nonzero value flags a latent bug). The inline helpers no-op when `e.metrics == nil` (before Startup).
+
+**7 counters** in total: the 5 event counters above plus two byte counters,
+`dwarf_state_write_bytes` / `dwarf_state_read_bytes` (labels `workflow` + `column`, unit `By`) - payload
+bytes the engine writes to / reads from **step rows on the execution path**. The `column` label is the
+dwarf_steps column the bytes moved through (`state` snapshots, `changes` task-output deltas,
+`resume_data`, `interrupt_payload`, `subgraph_result` - bounded cardinality; sum across it for totals),
+so a chart can split task data from engine snapshots from human-in-the-loop payloads. Counted: the claim
+read (state+changes+resume_data+subgraph_result), completion/retry/park/interrupt `changes` writes, the
+interrupt payload write, entry/successor/fan-in `state` snapshot writes, and the fan-in merge's cohort
+reads. Deliberately NOT counted: introspection reads (`List`/`History`/`Snapshot`), flow-row payloads
+(`final_state`, `baggage`, `graph` - per-flow context, not per-step data), Fork's clone (a DB-side
+`INSERT…SELECT`; the bytes never pass through the engine), and the `Resume`/surgraph-revive *writes* of
+`resume_data`/`subgraph_result` (cold paths where the workflow URL is not in hand - those bytes are
+counted on the claim *read* at the re-dispatch they trigger, so every payload is counted in at least one
+direction). The metric exists to track against the database's byte-throughput ceiling (disk/WAL), which
+the cloud benchmarks showed binds separately from its steps ceiling (~46-60 MB/s incompressible on a
+100GB disk vs ~3.3k steps/s on 8 vCPU). Transition-tx byte counts are accumulated in the closure
+(`stateByteCount`) and emitted only after commit - a contention retry re-runs the closure, so counting
+inline would double on every rollback. Unit-denominated instrument names end with the unit (`_bytes`),
+per the Prometheus naming convention.
 
 **Counter instrument names carry no `_total` suffix.** `_total` is a Prometheus naming convention, not an
 OpenTelemetry one: a Prometheus exporter appends it to every counter at the scrape boundary (and
