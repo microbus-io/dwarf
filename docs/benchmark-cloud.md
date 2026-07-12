@@ -1,8 +1,8 @@
 # Cloud benchmarks
 
 `bench/` (the standalone benchmark host in this repository) measured the engine against managed cloud
-PostgreSQL across a real network hop — the production shape the in-repo laptop benchmarks
-(`benchmark.md`) deliberately cannot represent. Four measurement sessions, ~120 valid runs, zero
+PostgreSQL across a real network hop — the production shape the in-repo
+[laptop benchmarks](benchmark.md) deliberately cannot represent. Four measurement sessions, ~120 valid runs, zero
 reliability events (no flow errors, no lease recoveries, no wedges) across all of them.
 
 > **Environment.** Engine host: GCE `c4a-standard-4` (4 vCPU, ARM). Database: Cloud SQL for
@@ -179,13 +179,14 @@ small. Moral, twice over: pool sizing errors masquerade as engine overhead, and 
 ## Known gaps
 
 - **Replicas (R) untested**: the formula's ÷R division and multi-replica coordination await the
-  multi-replica campaign. Adaptive budgeting would eliminate R entirely (`_CONGESTION_DETECTION.md`).
+  multi-replica campaign. An adaptive connection-budgeting design under consideration would eliminate
+  R from configuration entirely.
 - **Disk-size axis unmeasured**: the byte ceiling has one point (100 GB); Cloud SQL scales disk
   throughput with size, so larger disks should raise it — asserted, not measured.
 - **The 1→2 vCPU non-scaling** is hypothesized (WAL-insert-lock), not confirmed.
 - **Small-tier variance** (±40% at 1 vCPU) is unexplained; treat 1-vCPU numbers as indicative.
-- Absolute numbers are one cloud, one dialect (PostgreSQL — the fastest per `benchmark.md`), one
-  region; ratios and shapes are the durable findings.
+- Absolute numbers are one cloud, one dialect (PostgreSQL — the fastest per the
+  [in-repo benchmarks](benchmark.md)), one region; ratios and shapes are the durable findings.
 
 ## Reproducing
 

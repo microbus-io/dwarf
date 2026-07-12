@@ -25,7 +25,7 @@ queue - and on small servers actively collapse throughput) and its new-flow plac
 (capacity-proportional across heterogeneous shards). `VirtualCPUs: 0` falls back to a conservative,
 measured-safe pool of 8 and the most conservative placement weight. `Cordoned: true` excludes a shard
 from new-flow placement (resident flows and their subgraph children/continuations/forks proceed) - for
-retiring or overloaded shards. See `docs/benchmark-cloud.md` for the measurements behind the constants.
+retiring or overloaded shards. See the [cloud benchmarks](benchmark-cloud.md) for the measurements behind the constants.
 
 Dependency injection (set before `Startup`): `SetHost`, `SetLogger`, `SetMeterProvider`,
 `SetTracerProvider`.
@@ -102,7 +102,7 @@ measured knee - beyond it connections only queue inside the database, and on sma
 harm throughput), with a warm idle core of half that. Unknown CPUs (`VirtualCPUs: 0`) fall back to a
 measured-safe pool of 8. `SetMaxOpenConns` is an expert override that pins every shard's pool exactly -
 for benchmarking sweeps or externally-constrained connection budgets - and is otherwise best left
-unset. The measurements behind these constants are in `docs/benchmark-cloud.md`.
+unset. The measurements behind these constants are in the [cloud benchmarks](benchmark-cloud.md).
 
 ## Running multiple replicas
 
