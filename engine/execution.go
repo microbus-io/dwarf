@@ -531,7 +531,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if retrySleepMs > 0 {
 			e.shortenNextPoll(time.Now().Add(time.Duration(retrySleepMs) * time.Millisecond))
 		} else {
-			e.enqueueStep(ctx, shardNum, stepID)
+			// The step was reset in place (same row, same denormalized priority) due now.
+			e.enqueueStepDue(ctx, shardNum, stepID, flowPriority)
 		}
 		e.metricStepExecuted(ctx, taskName, "retried")
 		return nil
@@ -814,7 +815,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if sleepDur > 0 {
 		e.shortenNextPoll(time.Now().Add(sleepDur))
 	} else if len(newStepIDs) > 0 {
-		e.enqueueStep(ctx, shardNum, newStepIDs[0])
+		// Priority is the flow's, just bound into the successor INSERTs; the sleep branch diverged above.
+		e.enqueueStepDue(ctx, shardNum, newStepIDs[0], flowPriority)
 	}
 	return nil
 }
@@ -975,7 +977,8 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 	if sleepDur > 0 {
 		e.shortenNextPoll(time.Now().Add(sleepDur))
 	} else {
-		e.enqueueStep(ctx, shardNum, int(fanInStepID))
+		// Priority was just bound into the fan-in INSERT; the sleep branch diverged above.
+		e.enqueueStepDue(ctx, shardNum, int(fanInStepID), priority)
 	}
 	return nil
 }

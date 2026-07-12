@@ -155,6 +155,7 @@ type Engine struct {
 	// (reapInterval, wedgeSweepInterval), so an otherwise minutes-long path is observable.
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	awaitPollInterval   time.Duration // Await lost-wake re-snapshot cadence (5s)
+	refillPace          time.Duration // pause after a refill that filled the cache (deep backlog); see refillerLoop (20ms)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
 	orphanFlowThreshold time.Duration // min age before a stepless running flow is reported orphaned (5m)
@@ -179,6 +180,7 @@ func NewEngine() *Engine {
 	e.workersPerConn.Store(8)
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
+	e.refillPace = 20 * time.Millisecond
 	e.wedgeSweepInterval = 5 * time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute
 	e.orphanFlowThreshold = 5 * time.Minute

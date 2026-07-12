@@ -407,8 +407,13 @@ is proportional to weight and independent of backlog depth or shard layout. Stri
 higher-priority band starves lower bands by design.
 
 **Queue-as-cache, doorbell, single-slot refiller.** The enqueue signal carries no step to a queue; it is a **doorbell**
-(`candidatecache.Cache.Offer`). It resolves the announced step's priority *and* `not_before` in one PK lookup (off the
-selection path). If `not_before` is in the future the doorbell short-circuits into `shortenNextPoll(not_before)` -
+(`candidatecache.Cache.Offer`). The generic path (`handleEnqueue`) resolves the announced step's priority *and*
+`not_before` in one PK lookup (off the selection path) - but the **hot-path origination sites skip the lookup**
+(`enqueueStepDue`): the completing worker/creator just bound the step's priority into its INSERT/reset and its own
+sleep branch already diverged, so it offers the step directly with the values in hand - one round-trip per completed
+step that re-read a row this replica just wrote. The lookup path remains for the inbound peer doorbell (the signal
+payload stays shard+stepID; a peer resolves due-ness against its own clock) and the cold origination sites
+(surgraph revive, wedge sweep) where the priority is not in hand. If `not_before` is in the future the doorbell short-circuits into `shortenNextPoll(not_before)` -
 the work is not due, nothing to preempt, the cache stays untouched; the local poll timer wakes at the right moment.
 This is also how cross-replica delayed-start propagates: every replica receiving the doorbell pulls its poll timer
 forward, with no separate "wake at T" message. Otherwise the priority drives one of three cache paths. (1) Empty
@@ -448,6 +453,18 @@ that one pioneer step (the first work of a just-opened band, bounded to one per 
 batch). Both costs are smaller than the cross-replica fairness softness the design already accepts. Do not "fix"
 these by flushing, per-item priority tracking, or re-floor-on-pop: each trades the latency win the head-insert
 exists for and only shaves an already-bounded refiller cycle off a path the refiller already backstops.
+
+**Deep-backlog pacing.** After a refill that filled the cache to **capacity** (the deep-backlog signal), the
+refiller pauses `refillPace` (20ms) before consuming the next trigger. Unpaced, the always-armed trigger makes it
+run back-to-back full-backlog scans, and each wholesale replace re-delivers steps whose claim CAS is still in
+flight on another worker - measured at high backlog: ~half of all pops (and their claim round-trips) stale, the
+entire due backlog streamed every few ms. The gate and the bound are both load-bearing: pacing **only on a full
+batch** keeps light load (partial batches) at zero added dispatch latency - a sequential flow's next step never
+waits out a pace; and the pace must stay well under the cache drain time (capacity = 2x workers x one step each),
+or the refiller becomes the throughput ceiling (<= capacity/pace pops/s) - over-pacing measurably inverts the
+gain. Liveness is unchanged: the trigger stays armed through the pause, so a drained-early cache waits at most
+the remainder. Pinned by `engine/refillpace_test.go` (light-load-inert at an absurd 2s pace; deep-backlog drain
+at an over-pace with a single worker).
 
 **Liveness guarantee.** A worker requests a refill *after* `processStep` returns - i.e. after the step left `pending`
 (acquired or completed) - not at pop time. Load-bearing: requesting before the CAS let the refiller re-select the

@@ -73,19 +73,43 @@ func (e *Engine) timerLoop(ctx context.Context) {
 	}
 }
 
-// refillerLoop runs one selection scan per trigger.
+// refillerLoop runs one selection scan per trigger. After a scan that filled the cache to capacity -
+// the deep-backlog regime - it pauses refillPace before consuming the next trigger. Unpaced, the
+// always-armed trigger (workers re-arm it after every step) makes the refiller run back-to-back
+// full-backlog scans, and each wholesale cache replace re-delivers steps whose claim CAS is still in
+// flight on another worker: at high backlog ~half of all pops (and their claim round-trips) were
+// measured stale, and the scan itself streamed the entire due backlog every few ms. Pacing the
+// deep-backlog case lets in-flight claims commit before candidates are re-selected.
+//
+// The gate and the bound are both load-bearing:
+//   - Paced ONLY on a full batch: a partial batch means the backlog fits in the cache (light load),
+//     where pacing would add dispatch latency for nothing - a sequential flow's next step must not
+//     wait out a pace interval. Light-load refills stay immediate.
+//   - refillPace must stay well under the cache's drain time (capacity = 2x workers, each candidate
+//     occupying a worker for a full step), or the refiller itself becomes the throughput ceiling
+//     (<= capacity/pace pops per second): over-pacing was measured to invert the gain. At the default
+//     pace a full cache outlives the pause by a wide margin, and the armed trigger means the next scan
+//     starts the moment the pause ends - a drained-early cache waits at most the remainder.
 func (e *Engine) refillerLoop(ctx context.Context) {
 	for {
 		select {
 		case <-e.refillStop:
 			return
 		case <-e.refillTrigger:
+			var full bool
 			err := errors.CatchPanic(func() error {
-				e.runRefill(ctx)
+				full = e.runRefill(ctx)
 				return nil
 			})
 			if err != nil {
 				e.logger.ErrorContext(ctx, "Refilling candidate cache", "error", err)
+			}
+			if full && e.refillPace > 0 {
+				select {
+				case <-e.refillStop:
+					return
+				case <-time.After(e.refillPace):
+				}
 			}
 		}
 	}
@@ -283,7 +307,9 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 
 // runRefill replaces the candidate cache with a fresh priority+fairness batch drawn from the single
 // globally-minimum due band.
-func (e *Engine) runRefill(ctx context.Context) {
+// runRefill reports whether it filled the cache to capacity - the deep-backlog signal the refiller's
+// pacing gates on.
+func (e *Engine) runRefill(ctx context.Context) (full bool) {
 	capacity := e.cache.Capacity()
 	batch := make([]candidatecache.Job, 0, capacity)
 
@@ -371,4 +397,5 @@ func (e *Engine) runRefill(ctx context.Context) {
 	// (head-insert when a strictly more important step arrives) is made against the right threshold.
 	// chosenBand stays MaxInt when no band was selected (empty batch), matching the empty-cache case.
 	e.cache.Refill(batch, chosenBand)
+	return len(batch) == capacity
 }

@@ -308,8 +308,9 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	e.logger.DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)
 	e.metricFlowStarted(ctx, workflowURL)
 	// Ring the doorbell so a replica with spare capacity claims the entry step immediately, rather than
-	// waiting for the backstop poll. A missed doorbell is recovered by pollPendingSteps.
-	e.enqueueStep(ctx, shardNum, int(newStepID))
+	// waiting for the backstop poll. A missed doorbell is recovered by pollPendingSteps. The entry step
+	// was just inserted due-now with the resolved priority, so the fast-path doorbell applies.
+	e.enqueueStepDue(ctx, shardNum, int(newStepID), seed.priority)
 	return flowKey, nil
 }
 
@@ -579,6 +580,26 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 		return
 	}
 	e.handleEnqueue(ctx, shard, stepID)
+	e.signalEnqueue(ctx, shard, stepID)
+}
+
+// enqueueStepDue is the fast-path doorbell for a step the caller just created or reset for immediate
+// dispatch and whose priority it already holds: it offers the step to the local cache directly, skipping
+// handleEnqueue's PK lookup - one round-trip per completed step on the hot path, re-reading a row this
+// replica just wrote. Use it only where due-ness is certain (the caller's own sleep/not_before branch
+// already diverged) and the priority is the value just bound into the INSERT/reset. The peer broadcast is
+// unchanged: a receiving replica still resolves the step itself in handleEnqueue - the signal payload
+// stays shard+stepID, and a peer shouldn't trust this replica's snapshot of due-ness anyway.
+func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int) {
+	// faultDropDoorbell: see enqueueStep.
+	if e.seams.IsFault(faultDropDoorbell) {
+		return
+	}
+	ring := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "ring", ring)
+	if ring {
+		e.requestRefill()
+	}
 	e.signalEnqueue(ctx, shard, stepID)
 }
 
