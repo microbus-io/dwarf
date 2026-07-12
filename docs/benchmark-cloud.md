@@ -33,18 +33,16 @@ reliability events (no flow errors, no lease recoveries, no wedges) across all o
   throughput).
 - **Repeat runs** — key configurations were run three times (`n=3`); tables report mean ± standard
   deviation for those.
-- **Pre-fix / post-fix engine** — before/after the two engine improvements this campaign produced (see
-  "Validated engine changes" below); post-fix is the engine as shipped.
 
 ## The cost model, with every constant measured
 
 One step costs the engine a slice of database time and a slice of task time. The worker wall time is
 `T = db + exec`, and the database time is linear in the network round-trip: `db = k·L + s`
-(engine-internal time proved negligible — see "History" below). Every constant was measured:
+(engine-internal time was measured and is negligible). Every constant was measured:
 
 | Constant | Value | How measured |
 |---|---|---|
-| `k` — DB round-trips per step | **~12** (~11 with the doorbell fix, one of the engine changes below) | the latency sweep: connection-held time vs RTT is linear with R² ≈ 1 (`db = 12.1·RTT + 4.4 ms`) |
+| `k` — DB round-trips per step | **~11** | the latency sweep: connection-held time vs RTT is linear with R² ≈ 1; the fit measured `db = 12.1·RTT + 4.4 ms` on a build with one extra hot-path round-trip since eliminated |
 | `s` — server-side execution + group-committed fsync | **~4.4 ms** | the latency fit's intercept |
 | `db` at low utilization, same-zone | **7–8 ms/step** | measured at M=8, a deliberately small pool that keeps the database far from saturation (4/8-vCPU tiers) |
 | Connection knee | **~6 × DB vCPUs** (range 4–8) | the tier table below |
@@ -55,7 +53,7 @@ One step costs the engine a slice of database time and a slice of task time. The
 
 ![Steps throughput by database tier and connection pool size](benchmark-cloud-tiers.png)
 
-Post-fix engine; 512 workers; closed-loop concurrency 512; a fresh database per measurement. Rows are
+512 workers; closed-loop concurrency 512; a fresh database per measurement. Rows are
 database tiers, columns are the connection pool size `M`; cells are steps/s. The last column reports
 the tier's peak configuration re-run three times:
 
@@ -124,11 +122,10 @@ written) is the operational gauge against this ceiling.
 
 ![Two shards vs one: measured scaling factors](benchmark-cloud-scaleout.png)
 
-Two 8-vCPU shards (each its own database instance) at saturation: **6,719 steps/s = ×1.81** over a
-single shard. These runs used the pre-fix engine, so the absolute numbers are conservative; the ~19%
-shortfall from perfect ×2 scaling is unattributed (engine-host-side or a closed-loop-load artifact) and
-worth revisiting at four shards. Shard-per-server scales both steps and bytes near-linearly at its
-first test.
+Two 8-vCPU shards (each its own database instance) at saturation scaled to **×1.81** over a single
+shard. The ~19% shortfall from perfect ×2 scaling is unattributed (engine-host-side or a
+closed-loop-load artifact) and worth revisiting at four shards. Shard-per-server scales both steps and
+bytes near-linearly at its first test.
 
 ## The sizing formula
 
@@ -152,29 +149,6 @@ db ≈ 12×0.5 + 4.4 ≈ 10.4 ms; T ≈ 60 ms; N = M × T/db ≈ 48 × 5.8 ≈ 2
 connection pool and its capacity-proportional share of new-flow placement; `SetWorkers` remains the one
 manual knob (deriving it needs the task-time profile, a runtime quantity — see the adaptive design
 below). `SetMaxOpenConns` survives only as an expert override that pins pools exactly.
-
-## Validated engine changes
-
-The campaign's profiling work produced two engine fixes, then validated them with interleaved
-before/after runs on identical infrastructure:
-
-- **Refill pacing**: under deep backlog, the engine's scheduler was re-scanning the full pending
-  backlog every few milliseconds and re-offering steps whose claims were still in flight, wasting
-  ~half of all claim attempts; a short pause after each full refill lets claims land first.
-- **Due-doorbell fast path**: dispatching a just-created step no longer re-reads a row the same
-  replica just wrote, saving one database round-trip per step.
-
-Measured effect: saturated throughput **+11.7%**, connection-bound **+5.1%**, mid-load +2.9%, latency
-improved in all regimes — and the post-fix tier table above shows the gains compound at higher
-connection counts (8-vCPU ceiling 3,262 → 4,596, +41%).
-
-### History: the "50 ms engine overhead" that wasn't
-
-Session 1 measured ~50 ms/step of apparent engine-side time. A profiling investigation attributed it
-to sql.DB pool queueing against a silently mis-derived pool (a ceiling flag that never bound), not
-engine work — worker idle time was 0.00 ms and engine CPU negligible. True engine-internal overhead is
-small. Moral, twice over: pool sizing errors masquerade as engine overhead, and explicit facts
-(`VirtualCPUs`) beat derived guesses.
 
 ## Known gaps
 
