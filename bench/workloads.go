@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"strings"
 
 	"github.com/microbus-io/dwarf/workflow"
 )
@@ -75,8 +74,16 @@ func registerWorkloads(h *benchHost, payloadBytes int) map[string]*workload {
 		fanoutItems[i] = i
 	}
 
-	// state: every step rewrites the payload so each step row carries the full write
-	payload := strings.Repeat("x", payloadBytes)
+	// state: every step rewrites the payload so each step row carries the full write. The payload must be
+	// incompressible: a repeated-character payload TOAST-compresses to ~nothing on the Postgres side, so
+	// MB/s would measure serialization+network while the storage/WAL path idles - random alphanumerics
+	// keep the on-disk and on-wire byte counts honest (alnum only, so JSON escaping doesn't inflate it).
+	const alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	payloadB := make([]byte, payloadBytes)
+	for i := range payloadB {
+		payloadB[i] = alnum[rand.IntN(len(alnum))]
+	}
+	payload := string(payloadB)
 	h.tasks["bench/state"] = func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("data", payload)
 		h.bytesWritten.Add(int64(len(payload)))
