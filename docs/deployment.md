@@ -104,6 +104,13 @@ measured-safe pool of 8. `SetMaxOpenConns` is an expert override that pins every
 for benchmarking sweeps or externally-constrained connection budgets - and is otherwise best left
 unset. The measurements behind these constants are in the [cloud benchmarks](benchmark-cloud.md).
 
+> **Running more than one replica?** The derived pool is per replica and the engine does not know the
+> replica count, so R replicas open up to R × 6 × `VirtualCPUs` connections against one shard —
+> potentially past the knee into the over-connection zone the cap exists to prevent. Until the engine
+> accounts for replicas, divide the budget yourself: on each replica either set
+> `SetMaxOpenConns(6 × VirtualCPUs / R)` as the override, or declare `VirtualCPUs` as the true CPU
+> count divided by R.
+
 ## Running multiple replicas
 
 Dwarf scales horizontally: run many engine replicas against the same shards. Each replica selects and
