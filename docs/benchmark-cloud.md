@@ -46,7 +46,7 @@ One step costs the engine a slice of database time and a slice of task time. The
 | `s` — server-side execution + group-committed fsync | **~4.4 ms** | the latency fit's intercept |
 | `db` at low utilization, same-zone | **7–8 ms/step** | measured at M=8, a deliberately small pool that keeps the database far from saturation (4/8-vCPU tiers) |
 | Connection knee | **~6 × DB vCPUs** (range 4–8) | the tier table below |
-| Steps ceiling `C_db` | see tier table | the tier table at saturation |
+| Steps ceiling `C_db` | [per tier](#steps-throughput-by-database-tier) | the tier table at saturation |
 | Byte ceiling (incompressible payloads) | **~46–60 MB/s** per instance (100 GB disk) | the `state` workload |
 
 ## Steps throughput by database tier
@@ -146,9 +146,11 @@ db ≈ 12×0.5 + 4.4 ≈ 10.4 ms; T ≈ 60 ms; N = M × T/db ≈ 48 × 5.8 ≈ 2
 ≈ min(4600, 4600, C_db ≈ 4600) steps/s — the database binds, as designed.
 
 **The engine applies this automatically**: provide `ShardSpec.VirtualCPUs` and it derives each shard's
-connection pool and its capacity-proportional share of new-flow placement; `SetWorkers` remains the one
-manual knob (deriving it needs the task-time profile, a runtime quantity — see the adaptive design
-below). `SetMaxOpenConns` survives only as an expert override that pins pools exactly.
+connection pool, its capacity-proportional share of new-flow placement, and — in aggregate — the
+default worker count (a generous 8× the summed connection budget, since `T/db` is a runtime quantity
+and idle workers are cheap while an under-provisioned pool caps throughput). `SetWorkers` and
+`SetMaxOpenConns` survive only as expert overrides for tests, benchmark sweeps, and
+externally-constrained hosts.
 
 ## Known gaps
 
@@ -165,7 +167,7 @@ below). `SetMaxOpenConns` survives only as an expert override that pins pools ex
 ## Reproducing
 
 ```sh
-# Provision (GCP; see bench/gcp/provision.sh for knobs), then:
+# Provision on GCP (knobs documented in bench/gcp/provision.sh), then:
 GOOS=linux GOARCH=arm64 go build -o dwarf-bench ./bench
 ./dwarf-bench -dsn 'postgres://USER:PASS@PRIVATE_IP:5432/dwarf?sslmode=disable' \
   -workload linear -workers 512 -max-open-conns 48 \

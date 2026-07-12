@@ -25,7 +25,8 @@ queue - and on small servers actively collapse throughput) and its new-flow plac
 (capacity-proportional across heterogeneous shards). `VirtualCPUs: 0` falls back to a conservative,
 measured-safe pool of 8 and the most conservative placement weight. `Cordoned: true` excludes a shard
 from new-flow placement (resident flows and their subgraph children/continuations/forks proceed) - for
-retiring or overloaded shards. See the [cloud benchmarks](benchmark-cloud.md) for the measurements behind the constants.
+retiring or overloaded shards. The [cloud benchmarks](benchmark-cloud.md) document the measurements
+behind the constants.
 
 Dependency injection (set before `Startup`): `SetHost`, `SetLogger`, `SetMeterProvider`,
 `SetTracerProvider`.
