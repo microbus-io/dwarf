@@ -42,7 +42,7 @@ One step costs the engine a slice of database time and a slice of task time. The
 
 | Constant | Value | How measured |
 |---|---|---|
-| `k` — DB round-trips per step | **~11** | the latency sweep: connection-held time vs RTT is linear with R² ≈ 1; the fit measured `db = 12.1·RTT + 4.4 ms` on a build with one extra hot-path round-trip since eliminated |
+| `k` — DB round-trips per step | **~11** | the slope of connection-held time vs RTT in the latency sweep below |
 | `s` — server-side execution + group-committed fsync | **~4.4 ms** | the latency fit's intercept |
 | `db` at low utilization, same-zone | **7–8 ms/step** | measured at M=8, a deliberately small pool that keeps the database far from saturation (4/8-vCPU tiers) |
 | Connection knee | **~6 × DB vCPUs** (range 4–8) | the tier table below |
@@ -94,9 +94,16 @@ engine host with `tc netem` (a Linux traffic-control tool) so RTT becomes a fine
 | +2 | 2.35 ms | 244 | 32.8 |
 | +5 | 5.34 ms | 116 | 69.1 |
 
-Per-connection throughput halves as `k·L` doubles — and total throughput recovers by raising M (until
-the knee/ceiling). Latency is a connections tax, not an absolute cap. Cross-zone (~1.1 ms) roughly
-doubles `db` vs same-zone; co-locating the engine with its shard's zone is the single cheapest win.
+The points fall on a straight line (R² ≈ 1): `db = 12.1·RTT + 4.4 ms`. The slope is `k` — each extra
+millisecond of round-trip latency costs one millisecond per database round-trip the step makes, and
+this build made ~12 of them. (The engine has since eliminated one of those round-trips when it
+dispatches a freshly created step, so the current count is ~11.) The intercept is `s`, the server-side
+execution and commit time that remains when the network is free.
+
+The practical reading: per-connection throughput halves as `k·L` doubles — and total throughput
+recovers by raising M (until the knee/ceiling), so latency is a connections tax, not an absolute cap.
+Cross-zone placement (~1.1 ms RTT) roughly doubles `db` vs same-zone; co-locating the engine with its
+shard's zone is the single cheapest win available.
 
 ## Workers
 
