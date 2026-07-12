@@ -14,7 +14,7 @@ after `Startup`. `SetMaxOpenConns`, `SetTimeBudget`, and `SetDefaultPriority` ar
 | Method | Default | Purpose |
 |---|---|---|
 | `SetShard(spec)` | one default shard | Registers one shard: `ShardSpec{Index, DSN, VirtualCPUs, Cordoned}`; call once per shard |
-| `SetWorkers(n)` | 64 | Per-replica worker concurrency cap |
+| `SetWorkers(n)` | derived | Expert override: pins worker count (deterministic tests, benchmarks, explicit host bounds). Normally unset - derived as 8x the aggregate connection budget, floor 64 |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
 | `SetMaxOpenConns(n)` | derived | Expert override: pins every shard's pool exactly (benchmarks, external poolers). Normally unset - each shard's pool derives from its `VirtualCPUs` |

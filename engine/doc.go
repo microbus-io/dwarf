@@ -38,7 +38,8 @@ limitations under the License.
 // SetTimeBudget, SetDefaultPriority) take effect immediately on a running engine; the construction-time-only
 // ones (SetShard, SetWorkers, SetHost, SetLogger, SetMeterProvider, SetTracerProvider) return an
 // error if called after Startup. Tuning derives from the facts on ShardSpec (VirtualCPUs drives each
-// shard's connection budget and placement weight); see SetShard.
+// shard's connection budget, its placement weight, and - in aggregate - the default worker count); the
+// SetWorkers/SetMaxOpenConns overrides exist for tests, benchmarks, and externally-constrained hosts.
 //
 // # Host
 //

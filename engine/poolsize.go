@@ -36,6 +36,12 @@ const (
 	// (M=8 ran clean even at 1 vCPU), deliberately conservative - honest ignorance beats a guessed
 	// CPU count whose failure mode is the over-connection collapse.
 	defaultPoolSize = 8
+
+	// workersPerConnBudget derives the default worker count from the aggregate connection budget:
+	// useful workers = conns x T/db, and T/db was measured ~3 for no-op tasks and grows with task time.
+	// 8 is deliberately generous - an over-provisioned worker idles cheaply, an under-provisioned pool
+	// caps throughput below the database's ceiling.
+	workersPerConnBudget = 8
 )
 
 // shardPool returns the idle/open pool sizes for one shard. The explicit SetMaxOpenConns override wins

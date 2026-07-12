@@ -1073,6 +1073,12 @@ engine policy — below.
   replacing derivation. Exists for pool-size benchmarking sweeps and externally-constrained budgets.
 - Heterogeneous fleets get heterogeneous pools: sizing is per shard (`database.ShardConfig`), resolved at
   `Startup` from each spec.
+- **The default worker count derives from the aggregate budget**: `max(64, 8 x sum(per-shard open))`
+  (`workersPerConnBudget`). Workers are shard-agnostic, so the sum is what they feed; the 8 is a generous
+  `T/db` allowance (measured ~3 for no-op tasks, larger with task time) - over-provisioned workers idle
+  cheaply, an under-provisioned pool caps throughput below the DB ceiling. `SetWorkers` is the expert
+  override (deterministic tests use `SetWorkers(1)`; benchmark sweeps; hosts preferring an explicit bound
+  over an `ExecuteTask` semaphore). The zero-config case stays at the historical 64.
 
 **New-flow placement is capacity-weighted (`pickShard`).** Placement is the engine's only load-balancing
 moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks) - so heterogeneous
@@ -1118,11 +1124,12 @@ fan-out). `Fork` resolves scheduling once for the whole cloned tree and binds it
 - **Priority is a property of the flow, not the task or workflow type.** Step order *within* a flow is dictated by the
   graph, not urgency; priority only arbitrates *between* flows competing for workers, so it is resolved once at
   `Create` and immutable (`workflow.FlowOptions` is flow-level for the same reason).
+- **Workers default to the aggregate-budget derivation** (see "Connection pool sizing"); an explicit
+  `SetWorkers` pins the cap. A worker blocked on a `ExecuteTask` call is just a goroutine stack plus a
+  socket, so the derivation errs generous.
 - **Fairness weight is denormalized at `Create`, never resolved on the selection path** (a resolver hook would put
   synchronous I/O on the hot critical section). When a key's steps carry inconsistent weights, the oldest candidate
   step's weight is used; keeping weights consistent for a key is the caller's responsibility.
-- **`Workers` is a generous static cap.** A worker blocked on a `ExecuteTask` call is just a goroutine stack plus a
-  socket, so over-provisioning is cheap.
 - **Completion writes are deliberately not gated by the refiller slot.** That slot bounds selection only; finishing
   in-flight work must outrank starting new work, so the post-execution advance is never serialized behind selection.
 

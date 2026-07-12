@@ -125,3 +125,32 @@ func TestPoolSizing_LiveOverride(t *testing.T) {
 
 	assert.Error(e.SetMaxOpenConns(0)) // must be >= 1
 }
+
+// TestPoolSizing_DerivedWorkers pins the derived default worker count: 8x the aggregate connection
+// budget across shards (workers are shard-agnostic), floored at the historical 64 so the zero-config
+// case is unchanged, and replaced entirely by an explicit SetWorkers.
+func TestPoolSizing_DerivedWorkers(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// Zero-config: single default shard (pool 8) -> max(64, 8*8) = 64, the historical default.
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	e.RunInTest(t)
+	assert.Equal(64, int(e.workers.Load()))
+
+	// An 8-vCPU shard (pool 48) + a 2-vCPU shard (pool 12): max(64, 8*60) = 480.
+	e2 := NewEngine()
+	assert.NoError(e2.SetHost(noopHost{}))
+	assert.NoError(e2.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e2.SetShard(ShardSpec{Index: 2, VirtualCPUs: 2}))
+	e2.RunInTest(t)
+	assert.Equal(480, int(e2.workers.Load()))
+
+	// Explicit SetWorkers pins, regardless of shards.
+	e3 := NewEngine()
+	assert.NoError(e3.SetHost(noopHost{}))
+	assert.NoError(e3.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e3.SetWorkers(2))
+	e3.RunInTest(t)
+	assert.Equal(2, int(e3.workers.Load()))
+}

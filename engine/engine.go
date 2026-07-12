@@ -92,6 +92,7 @@ type Engine struct {
 
 	// Configuration (atomically updated, safe to change after Startup)
 	workers         atomic.Int32
+	workersSet      atomic.Bool // SetWorkers was called: skip the derived default
 	timeBudgetMs    atomic.Int64
 	defaultPriority atomic.Int32
 	maxOpenConns    atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
@@ -249,13 +250,24 @@ func (e *Engine) SetShard(spec ShardSpec) error {
 	return nil
 }
 
-// SetWorkers sets the number of worker goroutines. Construction-time only: the pool size is fixed at
+// SetWorkers is an expert override that pins the number of worker goroutines, replacing the derived
+// default (a generous multiple of the aggregate connection budget across shards - workers are
+// shard-agnostic, so the sum is what they feed). Operators normally never call this: under-provisioned
+// workers cap throughput below the database's ceiling, while the derived default errs on the cheap side
+// (an idle worker is a goroutine stack and a socket). The override exists for deterministic tests
+// (SetWorkers(1) serializes dispatch), benchmark sweeps, and hosts that prefer an explicit concurrency
+// bound over a semaphore in their ExecuteTask. SetWorkers(0) is a valid shape: a replica that creates,
+// awaits, and serves reads but never executes tasks. Construction-time only: the pool size is fixed at
 // Startup, so a call on a running engine is rejected.
 func (e *Engine) SetWorkers(n int) error {
 	if e.started.Load() {
 		return errSetAfterStartup("workers")
 	}
+	if n < 0 {
+		return errors.New("workers must be >= 0", http.StatusBadRequest)
+	}
 	e.workers.Store(int32(n))
+	e.workersSet.Store(true)
 	return nil
 }
 
@@ -383,6 +395,18 @@ func (e *Engine) Startup(ctx context.Context) error {
 		// No shard registered: the single default shard, sized by the same rule (no spec = defaults).
 		idle, open := shardPool(ShardSpec{}, override)
 		shards[1] = database.ShardConfig{MaxIdleConns: idle, MaxOpenConns: open}
+	}
+	if !e.workersSet.Load() {
+		// Derived default: workers feed the aggregate connection budget (they are shard-agnostic), and
+		// the useful count is aggregate-conns x T/db. T/db is a runtime quantity (it includes task time),
+		// so the default uses a deliberately generous 8: erring high costs idle goroutines, erring low
+		// caps throughput below the database ceiling. The floor keeps the zero-config case at the
+		// historical 64. Explicit SetWorkers replaces all of this.
+		total := 0
+		for _, sc := range shards {
+			total += sc.MaxOpenConns
+		}
+		e.workers.Store(int32(max(64, workersPerConnBudget*total)))
 	}
 	err := e.db.Open(ctx, database.Config{
 		Shards:         shards,
