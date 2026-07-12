@@ -102,13 +102,12 @@ Configuration is applied through `Set*` methods, each returning an `error` rathe
 every setter can surface an error). They split into two groups by whether the knob can change safely on a running
 engine:
 
-- **Live** (take effect immediately, callable any time): `SetMaxOpenConns`, `SetWorkersPerConn`,
+- **Live** (take effect immediately, callable any time): `SetMaxOpenConns` (an **expert override** that pins
+  every shard's pool exactly - the benchmarking / external-pooler path; normal deployments never call it),
   `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
-  existing flow keeps the budget/priority frozen at its own `Create`); `SetMaxOpenConns` (the per-shard connection
-  ceiling) and `SetWorkersPerConn` (the pool-sizing divisor) recompute the sizing formula (`poolSizes`) and push the
-  two results to every live shard via `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`; sequel's pool setters are
-  hot/atomic - see "Connection pool sizing").
-- **Construction-time only** (return an error if called after `Startup`): `SetShard`, `SetWorkers`,
+  existing flow keeps the budget/priority frozen at its own `Create`); the override pushes to every live shard via
+  `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns` (sequel's pool setters are hot/atomic).
+- **Construction-time only** (return an error if called after `Startup`): `SetShard(ShardSpec)`, `SetWorkers`,
   `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying
   these on a running engine would mean opening live connections and mutating a shard set that flow keys already
   encode (`SetShard` - see "Database Sharding"), resizing the worker pool + candidate
@@ -1059,45 +1058,39 @@ guidance table, the shard-per-server production topology, and the per-server con
 `internal/database/CLAUDE.md`. The engine-side concern is the connection **pool sizing** — the *formula*, which is
 engine policy — below.
 
-**Connection pool sizing - worker-proportional, shard-aware.** The per-shard pool is **derived from the worker
-pool**, not a flat constant, because a worker holds a connection only during the short DB segments of `processStep`
-(the long `ExecuteTask` call holds none), so connection *demand* is bounded by the workers, not the shard count.
-`calcConnPoolSizes` (in `poolsize.go`) computes, per shard:
+**Connection pool sizing - fact-derived per shard (`poolsize.go`).** The operator provides facts on
+`ShardSpec` and the engine owns the measured constants (cloud benchmark campaign, `docs/benchmark-cloud.md`):
 
-```
-idle    = max(2, ceil(workers / shards / workersPerConn))   // demand-sized; the 2 is poolFloor
-maxOpen = min(idle*2 + 2, perShardCap)                      // warm core + burst headroom, under the ceiling
-idle    = min(idle, maxOpen)                                 // clamp idle to a tight ceiling
-```
+- **`ShardSpec.VirtualCPUs` drives each shard's pool** at the measured knee: `open = 6 x vCPUs`
+  (`connsPerVCPU`; measured range 4-8 across tiers), `idle = open/2` (warm core). Beyond the knee,
+  connections only queue inside the database - and on small servers actively collapse throughput
+  (745 -> 212 steps/s at 1 vCPU between M=16 and M=96), which is why the budget is a hard cap, not an
+  optimization.
+- **`VirtualCPUs = 0` (unknown) falls back to `defaultPoolSize = 8`**, measured safe on every tier. Never
+  guess a CPU count: the over-connection collapse makes a wrong guess actively harmful, while honest
+  ignorance has a validated-safe behavior.
+- **`SetMaxOpenConns` is the expert override**: pins every shard's pool to exactly n (idle = open = n),
+  replacing derivation. Exists for pool-size benchmarking sweeps and externally-constrained budgets.
+- Heterogeneous fleets get heterogeneous pools: sizing is per shard (`database.ShardConfig`), resolved at
+  `Startup` from each spec.
 
-- **`SetWorkersPerConn` (default 8)** is the formula divisor - the assumed workers sharing one connection (its
-  inverse is the DB-hold duty cycle). Raise it for DB-light workloads (remote `ExecuteTask` dominates), lower it for
-  DB-heavy ones. A *larger* value yields a *smaller* pool - the pool is derived from the workers, it is not a cap on
-  them.
-- **`SetMaxOpenConns` (default 8)** is a **per-shard ceiling** (= per-server budget in the distributed topology),
-  not the pool size: the formula sizes the pool and then clamps to this. It **must be ≥ 1** - there is deliberately
-  no "unlimited" sentinel (a `0` to `database/sql` means *unlimited*, a footgun; pass a high value like 1000 for an
-  effectively unbounded ceiling). The default of 8 pins the common single-shard case to exactly `8/8`
-  (`maxIdle == maxOpen == 8`) and keeps the new default **≤ the old flat `8×shards` at every shard count**. Worked
-  table (workers=64, wpc=8, cap=8): `1 shard → 8/8 · 2 → 4/8 · 4 → 2/6 · 8 → 2/6`. The per-replica total grows with
-  shards, correct under distributed PROD (more servers, each within its own budget). A high ceiling is harmless:
-  connections open lazily on demand, and demand is bounded by the worker pool (~`workers` concurrent DB holders per
-  shard), so the pool never opens more than that however high the ceiling - no explicit clamp needed.
-- The pool floor (2) gives each shard a little warm headroom for balls-in-bins distribution variance and per-flow
-  fan-out/subgraph-affinity bursts (a single flow's fan-out concentrates on its one shard). `maxOpen = idle*2 + 2`
-  (the `+2` matches sequel's singleton sizing) supplies burst headroom; connections opened above `idle` during a
-  burst close on return.
-- **`MaxIdle == MaxOpen` no longer holds** (it was the old flat model) - there is now an idle core plus burst
-  headroom. The "avoid reconnect churn" goal the old equal-sizing served is now met by the warm idle core plus the
-  recycle/drain timers below.
+**New-flow placement is capacity-weighted (`pickShard`).** Placement is the engine's only load-balancing
+moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks) - so heterogeneous
+fleets must be loaded in capacity proportion or the smallest shard saturates first while larger ones idle.
+The weight is `capacityWeight(VirtualCPUs)`: proportional to the measured steps/s ceiling (~flat <= 2 vCPUs -
+the 1- and 2-vCPU tiers ceiling near the same throughput - then ~450/vCPU). Unknown-CPU shards get the
+smallest known weight (conservative); all-unknown degrades to uniform. `Cordoned` shards are excluded from
+placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
+shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
+
+The self-tune endgame (adaptive budgets replacing even `VirtualCPUs`, AIMD-style) is designed but deferred -
+see `_CONGESTION_DETECTION.md`.
 
 The idle-drain / lifetime-recycle connection timers (`ConnMaxIdleTime` / `ConnMaxLifetime`, server-drivers only)
 are a database-layer mechanism — see `internal/database/CLAUDE.md`.
 
-**Live re-sizing.** `SetWorkersPerConn` and `SetMaxOpenConns` recompute the formula (`poolSizes`) and push the two
-resulting integers to every open shard via `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. The shard count itself is
-not a live knob (`SetShard` is construction-time only), so it never triggers a re-size: each shard is sized once
-at open using the final shard count (set before any shard opens), and stays that size for the engine's life.
+**Live re-sizing.** Only the `SetMaxOpenConns` override is live (pushes the pinned size to every open shard).
+Derived sizing is fixed at `Startup` from each shard's spec and stays for the engine's life.
 
 ### Flow Scheduling (priority / fairness)
 
@@ -1634,7 +1627,8 @@ it and routes via `e.db.Shard(n)`. Indices are 1-based (`1..NumShards`); `0` is 
 used by `Query.Shard`.
 
 **Shard affinity:** subgraph flows are created on the parent's shard (avoids cross-shard references during
-subgraph completion and history reconstruction). Only top-level flow creation picks a random shard.
+subgraph completion and history reconstruction). Only top-level flow creation picks a shard - a
+capacity-weighted random pick over non-cordoned shards (see "New-flow placement" above).
 
 **`List` uses per-shard pagination, not cross-shard global order.** Each shard returns up to `ceil(limit/numShards)`
 rows by its own `flow_id DESC`; the aggregate is shard-grouped. Cross-shard ordering by `created_at` would compare

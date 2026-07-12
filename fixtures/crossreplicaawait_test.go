@@ -61,11 +61,11 @@ func TestCrossReplicaAwait(t *testing.T) {
 	dsn := "file:xrepl%d?mode=memory&cache=shared"
 	eng1 := engine.NewEngine()
 	eng1.SetHost(proxy1)
-	eng1.SetShard(1, dsn)
+	eng1.SetShard(engine.ShardSpec{Index: 1, DSN: dsn})
 	eng1.SetWorkers(0)
 	eng2 := engine.NewEngine()
 	eng2.SetHost(proxy2)
-	eng2.SetShard(1, dsn)
+	eng2.SetShard(engine.ShardSpec{Index: 1, DSN: dsn})
 	eng2.SetWorkers(2)
 	proxy1.AddPeer(eng2)
 	proxy2.AddPeer(eng1)

@@ -6,19 +6,26 @@ configuration, and running multiple replicas.
 ## Configuration
 
 All configuration is set with `Set*` methods, each returning an `error`. They split by whether the knob can
-change on a running engine: the **live** ones (`SetMaxOpenConns`, `SetWorkersPerConn`, `SetTimeBudget`,
+change on a running engine: the **live** ones (`SetMaxOpenConns`, `SetTimeBudget`,
 `SetDefaultPriority`) take effect immediately, even after `Startup`; the **construction-time-only** ones
 (`SetShard`, `SetWorkers`, and the dependency-injection setters below) are rejected if called
-after `Startup`.
+after `Startup`. `SetMaxOpenConns`, `SetTimeBudget`, and `SetDefaultPriority` are live.
 
 | Method | Default | Purpose |
 |---|---|---|
-| `SetShard(i, dsn)` | one default shard | Registers shard `i` with its database connection string (dialect auto-detected); call once per shard |
+| `SetShard(spec)` | one default shard | Registers one shard: `ShardSpec{Index, DSN, VirtualCPUs, Cordoned}`; call once per shard |
 | `SetWorkers(n)` | 64 | Per-replica worker concurrency cap |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
-| `SetMaxOpenConns(n)` | 8 | Per-shard hard ceiling on open DB connections |
-| `SetWorkersPerConn(n)` | 8 | Assumed workers sharing one connection (pool size derives from this) |
+| `SetMaxOpenConns(n)` | derived | Expert override: pins every shard's pool exactly (benchmarks, external poolers). Normally unset - each shard's pool derives from its `VirtualCPUs` |
+
+Provide `ShardSpec.VirtualCPUs` (the database server's CPU count - a fact off its spec sheet) and the
+engine derives the shard's connection budget (~6x CPUs, the measured knee beyond which connections only
+queue - and on small servers actively collapse throughput) and its new-flow placement weight
+(capacity-proportional across heterogeneous shards). `VirtualCPUs: 0` falls back to a conservative,
+measured-safe pool of 8 and the most conservative placement weight. `Cordoned: true` excludes a shard
+from new-flow placement (resident flows and their subgraph children/continuations/forks proceed) - for
+retiring or overloaded shards. See `docs/benchmark-cloud.md` for the measurements behind the constants.
 
 Dependency injection (set before `Startup`): `SetHost`, `SetLogger`, `SetMeterProvider`,
 `SetTracerProvider`.
@@ -90,14 +97,12 @@ eng.SetShard(2, "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable")
 
 ## Connection pool
 
-Each shard's pool is derived from the worker count: idle ≈ `ceil(workers / (shards × SetWorkersPerConn))`
-(at least 2), and open ≈ `idle×2 + 2`, both clamped by the `SetMaxOpenConns` ceiling (default 8 per shard).
-So in the default single-shard configuration idle and open both land at 8, but they diverge as you add
-shards or raise the ceiling. Workers spend most of their time waiting on the `ExecuteTask` call, not holding
-a SQL connection, so a small absolute number suffices. Keeping a warm idle floor matters more than the
-absolute ceiling: under bursty load, close/reopen churn (TCP + TLS + auth per cycle) dominates query time.
-The defaults are a good starting point; a much larger ceiling regresses (pool-mutex contention with no usable
-extra concurrency). Tune explicitly only for a different workload mix.
+Each shard's pool derives from its `ShardSpec.VirtualCPUs`: open = ~6x the database's CPU count (the
+measured knee - beyond it connections only queue inside the database, and on small servers actively
+harm throughput), with a warm idle core of half that. Unknown CPUs (`VirtualCPUs: 0`) fall back to a
+measured-safe pool of 8. `SetMaxOpenConns` is an expert override that pins every shard's pool exactly -
+for benchmarking sweeps or externally-constrained connection budgets - and is otherwise best left
+unset. The measurements behind these constants are in `docs/benchmark-cloud.md`.
 
 ## Running multiple replicas
 

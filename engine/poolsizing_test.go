@@ -22,71 +22,106 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestPoolFor pins the per-shard pool sizing formula against the documented table and edge cases:
-// idle = max(2, ceil(workers/shards/workersPerConn)), open = min(idle*2+2, cap), idle clamped to open.
-func TestPoolFor(t *testing.T) {
+// TestPoolSizing_ShardPool pins the per-shard pool derivation: the explicit override pins the pool
+// exactly; VirtualCPUs derives the open ceiling at the measured knee (~6x CPUs) with a warm idle core;
+// unknown CPUs fall back to the measured-safe default (8) rather than a guessed CPU count - the
+// over-connection collapse measured on small tiers is why honest ignorance beats a wrong guess.
+func TestPoolSizing_ShardPool(t *testing.T) {
 	assert := testarossa.For(t)
 
 	cases := []struct {
-		workers, shards, wpc, cap int
-		idle, open                int
+		vcpus    int
+		override int
+		idle     int
+		open     int
 	}{
-		// Documented default table: workers=64, workersPerConn=8, cap=8. 1 shard == today's flat 8/8.
-		{64, 1, 8, 8, 8, 8},
-		{64, 2, 8, 8, 4, 8},
-		{64, 4, 8, 8, 2, 6},
-		{64, 8, 8, 8, 2, 6},
-		{64, 16, 8, 8, 2, 6},
-		// High ceiling: the formula governs and idle*2+2 shows through (no clamp to the worker count - the
-		// ceiling is never reached, demand bounds the actual open count).
-		{64, 1, 8, 1000, 8, 18},
-		{64, 2, 8, 1000, 4, 10},
-		{64, 4, 8, 1000, 2, 6},
-		// DB-heavy wpc=1: idle=64, open=130. The ceiling stands; in practice only ~workers ever open.
-		{64, 1, 1, 1000, 64, 130},
-		// A tight ceiling clamps open, and idle is clamped down to open.
-		{64, 1, 8, 1, 1, 1},
-		{64, 1, 8, 4, 4, 4},
-		// A large workersPerConn (DB-light) floors idle at 2.
-		{64, 1, 1000, 8, 2, 6},
-		// The floor also covers a tiny worker pool.
-		{1, 1, 8, 8, 2, 6},
-		// Defensive: shards<1, workersPerConn<1, and cap<1 are all clamped to 1, so the cap dominates -> 1/1.
-		{8, 0, 0, 0, 1, 1},
+		{0, 0, 8, 8},    // unknown CPUs, no override: safe default
+		{1, 0, 3, 6},    // 1 vCPU: knee at 6
+		{2, 0, 6, 12},   // 2 vCPU: knee at 12
+		{8, 0, 24, 48},  // 8 vCPU: knee at 48
+		{8, 30, 30, 30}, // override wins over derived, pinned exactly
+		{0, 5, 5, 5},    // override with unknown CPUs
 	}
 	for _, c := range cases {
-		idle, open := calcConnPoolSizes(c.workers, c.shards, c.wpc, c.cap)
+		idle, open := shardPool(ShardSpec{VirtualCPUs: c.vcpus}, c.override)
 		assert.Equal(c.idle, idle, "idle for %+v", c)
 		assert.Equal(c.open, open, "open for %+v", c)
 	}
 }
 
-// TestPoolSizing_LiveResize pins that SetWorkersPerConn re-sizes every live shard pool immediately.
-func TestPoolSizing_LiveResize(t *testing.T) {
+// TestPoolSizing_CapacityWeight pins the placement-weight curve: flat up to 2 vCPUs (the measured
+// 1- and 2-vCPU tiers ceiling at the same ~745 steps/s), then ~450 steps/s per vCPU.
+func TestPoolSizing_CapacityWeight(t *testing.T) {
+	assert := testarossa.For(t)
+
+	assert.Equal(0, capacityWeight(0)) // unknown: resolved by pickShard
+	assert.Equal(745, capacityWeight(1))
+	assert.Equal(745, capacityWeight(2))
+	assert.Equal(1800, capacityWeight(4))
+	assert.Equal(3600, capacityWeight(8))
+}
+
+// TestPoolSizing_PickShard pins the weighted placement: cordoned shards are never picked, weights
+// follow the capacity curve (an 8-vCPU shard drawing ~4.8x a 1-vCPU shard's flows), and a shard with
+// unknown CPUs gets the smallest known weight.
+func TestPoolSizing_PickShard(t *testing.T) {
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 1}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 2, VirtualCPUs: 8}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 3, VirtualCPUs: 4, Cordoned: true}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 4})) // unknown CPUs -> smallest known weight (745)
+
+	counts := map[int]int{}
+	for range 10000 {
+		idx, err := e.pickShard()
+		assert.NoError(err)
+		counts[idx]++
+	}
+	assert.Equal(0, counts[3], "cordoned shard must never be picked")
+	// Expected proportions: 745 : 3600 : 745 (total 5090). Allow generous slack for randomness.
+	assert.True(counts[2] > counts[1]*3, "8-vCPU shard should draw ~4.8x the 1-vCPU shard (got %d vs %d)", counts[2], counts[1])
+	assert.True(counts[1] > 800 && counts[4] > 800, "low-weight shards still receive flows (got %d, %d)", counts[1], counts[4])
+}
+
+// TestPoolSizing_AllCordoned pins the loud failure: when every shard is cordoned there is nowhere to
+// place a new flow, and pickShard errors rather than silently violating the cordon.
+func TestPoolSizing_AllCordoned(t *testing.T) {
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, Cordoned: true}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 2, Cordoned: true}))
+	_, err := e.pickShard()
+	assert.Error(err)
+}
+
+// TestPoolSizing_LiveOverride pins that SetMaxOpenConns pushes the pinned pool to every live shard
+// immediately (the expert/benchmark path).
+func TestPoolSizing_LiveOverride(t *testing.T) {
 	assert := testarossa.For(t)
 
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
-	for i := 1; i <= 4; i++ {
-		assert.NoError(e.SetShard(i, ""))
+	for i := 1; i <= 2; i++ {
+		assert.NoError(e.SetShard(ShardSpec{Index: i, VirtualCPUs: 1}))
 	}
 	e.RunInTest(t)
 
-	// 4 shards, workers=64, workersPerConn=8, cap=8 -> idle=2, open=min(6,8)=6.
-	for i := 1; i <= 4; i++ {
+	// Derived from VirtualCPUs=1: open = 6.
+	for i := 1; i <= 2; i++ {
 		db, err := e.db.Shard(i)
 		assert.NoError(err)
-		assert.Equal(6, db.DB.Stats().MaxOpenConnections, "shard %d open at wpc=8", i)
+		assert.Equal(6, db.DB.Stats().MaxOpenConnections, "shard %d derived pool", i)
 	}
 
-	// Lower workersPerConn (DB-heavier) -> larger target, clamped by the cap of 8.
-	// idle=ceil(64/4/2)=8, open=min(18,8)=8.
-	assert.NoError(e.SetWorkersPerConn(2))
-	for i := 1; i <= 4; i++ {
+	// Live override pins exactly.
+	assert.NoError(e.SetMaxOpenConns(11))
+	for i := 1; i <= 2; i++ {
 		db, _ := e.db.Shard(i)
-		assert.Equal(8, db.DB.Stats().MaxOpenConnections, "shard %d open after SetWorkersPerConn(2)", i)
+		assert.Equal(11, db.DB.Stats().MaxOpenConnections, "shard %d after override", i)
 	}
 
-	assert.Error(e.SetWorkersPerConn(0)) // must be >= 1
-	assert.Error(e.SetMaxOpenConns(0))   // must be >= 1
+	assert.Error(e.SetMaxOpenConns(0)) // must be >= 1
 }

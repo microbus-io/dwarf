@@ -67,14 +67,11 @@ const benchWorkers = 32
 
 // benchMaxOpenConns is the per-shard connection ceiling. The test default (8) is sized to keep many parallel
 // CI test engines under a server's connection cap; a single benchmark engine wants far more or the pool, not
-// the engine, is what's measured. With benchWorkersPerConn=1 the sizing formula opens ~min(workers/shards*2+2,
+// the engine, is what's measured.
 // this) per shard, so total connections = shards * that stays under PostgreSQL's default max_connections=100
 // even at 4 co-located shards (≈72). MySQL (151) and SQL Server (~32k) have more headroom.
 const benchMaxOpenConns = 30
 
-// benchWorkersPerConn lowers the pool-sizing divisor (default 8) so the per-shard pool tracks the worker count
-// (this workload is DB-heavy: trivial tasks, so nearly all of a step is its DB transaction).
-const benchWorkersPerConn = 1
 
 // benchChainLen is the number of task executions per flow (A -> B -> C -> ... -> END). steps/sec derives from
 // flows/sec times this, so a graph change stays reflected in the reported step rate.
@@ -87,7 +84,7 @@ const benchChainLen = 3
 // setShards registers numShards test-mode shards (empty DSNs resolve per shard at Startup).
 func setShards(eng *engine.Engine, numShards int) error {
 	for i := 1; i <= numShards; i++ {
-		err := eng.SetShard(i, "")
+		err := eng.SetShard(engine.ShardSpec{Index: i})
 		if err != nil {
 			return err
 		}
@@ -120,9 +117,6 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 		b.Fatal(err)
 	}
 	if err := eng.SetWorkers(benchWorkers); err != nil {
-		b.Fatal(err)
-	}
-	if err := eng.SetWorkersPerConn(benchWorkersPerConn); err != nil {
 		b.Fatal(err)
 	}
 	if err := eng.SetMaxOpenConns(benchMaxOpenConns); err != nil {

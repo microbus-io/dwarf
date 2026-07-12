@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/rand/v2"
 	"net/http"
 	"strings"
 	"time"
@@ -88,8 +87,10 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 			return "", errors.Trace(err)
 		}
 	} else {
-		indices := e.db.Indices()
-		shardNum = indices[rand.IntN(len(indices))]
+		shardNum, err = e.pickShard()
+		if err != nil {
+			return "", errors.Trace(err)
+		}
 	}
 	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, initialState, threadID, threadToken, "", opts, 0, 0, 0, 0)
 	return flowKey, errors.Trace(err)

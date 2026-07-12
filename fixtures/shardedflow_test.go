@@ -58,7 +58,7 @@ func TestShardedflow(t *testing.T) {
 	eng.SetHost(proxy)
 	eng.SetWorkers(1)
 	for i := 1; i <= 8; i++ {
-		eng.SetShard(i, "")
+		eng.SetShard(engine.ShardSpec{Index: i})
 	}
 	eng.RunInTest(t)
 

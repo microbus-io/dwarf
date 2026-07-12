@@ -53,7 +53,7 @@ func TestListCursorflow(t *testing.T) {
 	eng := engine.NewEngine()
 	eng.SetHost(proxy)
 	for i := 1; i <= 3; i++ {
-		eng.SetShard(i, "") // test mode gives each shard its own in-memory database
+		eng.SetShard(engine.ShardSpec{Index: i}) // test mode gives each shard its own in-memory database
 	}
 	eng.RunInTest(t)
 

@@ -71,17 +71,17 @@ func TestSetShard(t *testing.T) {
 	// Before Startup, SetShard just records the pair (shards open at Startup).
 	pre := NewEngine()
 	pre.SetHost(noopHost{})
-	assert.NoError(pre.SetShard(1, ""))
+	assert.NoError(pre.SetShard(ShardSpec{Index: 1}))
 	assert.Equal(0, pre.db.NumShards())
-	assert.Error(pre.SetShard(1, ""))  // duplicate index
-	assert.Error(pre.SetShard(0, ""))  // index 0 is the "no shard / all shards" sentinel
-	assert.Error(pre.SetShard(-1, "")) // negative index
+	assert.Error(pre.SetShard(ShardSpec{Index: 1}))  // duplicate index
+	assert.Error(pre.SetShard(ShardSpec{Index: 0}))  // index 0 is the "no shard / all shards" sentinel
+	assert.Error(pre.SetShard(ShardSpec{Index: -1})) // negative index
 
 	// Sparse indices: 2 and 99 need not be contiguous.
 	e := NewEngine()
 	e.SetHost(oneTaskHost{})
-	assert.NoError(e.SetShard(2, ""))
-	assert.NoError(e.SetShard(99, ""))
+	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 99}))
 	e.RunInTest(t)
 	assert.Equal(2, e.db.NumShards())
 	assert.Equal([]int{2, 99}, e.db.Indices())
@@ -106,7 +106,7 @@ func TestSetShard(t *testing.T) {
 	assert.NoError(err)
 
 	// On a running engine, SetShard is rejected and the set is unchanged.
-	assert.Error(e.SetShard(3, ""))
+	assert.Error(e.SetShard(ShardSpec{Index: 3}))
 	assert.Equal(2, e.db.NumShards())
 }
 

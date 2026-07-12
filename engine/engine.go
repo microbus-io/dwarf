@@ -21,7 +21,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
-	"maps"
 	"net/http"
 	"os"
 	"sync"
@@ -86,17 +85,16 @@ type Engine struct {
 	tracerProvider trace.TracerProvider
 	tracer         trace.Tracer
 
-	// Shard registry (construction-time only): shard index -> DSN. Sparse - indices must be unique and
+	// Shard registry (construction-time only): shard index -> spec. Sparse - indices must be unique and
 	// >= 1 but need not be contiguous. Guarded by shardsLock; empty means one default shard at Startup.
 	shardsLock sync.Mutex
-	shardDSNs  map[int]string
+	shardSpecs map[int]ShardSpec
 
 	// Configuration (atomically updated, safe to change after Startup)
 	workers         atomic.Int32
 	timeBudgetMs    atomic.Int64
 	defaultPriority atomic.Int32
-	maxOpenConns    atomic.Int32 // per-shard open ceiling (= per-server budget); <=0 means unbounded
-	workersPerConn  atomic.Int32 // workers assumed to share one connection; the pool-sizing divisor
+	maxOpenConns    atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
 
 	// Database
 	db database.ShardSet
@@ -176,8 +174,6 @@ func NewEngine() *Engine {
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
 	e.defaultPriority.Store(100)
-	e.maxOpenConns.Store(8)
-	e.workersPerConn.Store(8)
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
 	e.refillPace = 20 * time.Millisecond
@@ -199,43 +195,58 @@ func errSetAfterStartup(what string) error {
 	return errors.New(what + " cannot be changed after Startup")
 }
 
-// SetShard registers a database shard: its index and the DSN of the database it connects to. Call once per
-// shard. Indices must be >= 1 and unique, but need not be contiguous (shards 1 and 99 are fine). The index
-// is encoded into every flow key created on that shard and drives routing, so the index-to-DSN mapping must
-// be identical across all replicas and stable across restarts. When no shard is registered, Startup opens a
-// single default shard 1 (in test mode, an isolated in-memory database; an empty DSN is only valid in test
-// mode). A "%d" in the DSN is substituted with the shard index.
+// ShardSpec declares one database shard: the facts about it the operator can readily provide, from
+// which the engine derives its tuning (connection budget, placement weight).
+type ShardSpec struct {
+	// Index identifies the shard. Indices must be >= 1 and unique, but need not be contiguous (shards
+	// 1 and 99 are fine). The index is encoded into every flow key created on the shard and drives
+	// routing, so the index-to-DSN mapping must be identical across all replicas and stable across
+	// restarts.
+	Index int
+	// DSN is the connection string of the shard's database (dialect auto-detected). A "%d" is
+	// substituted with the shard index. An empty DSN is only valid in test mode.
+	DSN string
+	// VirtualCPUs is the CPU count of the shard's database server - a fact off the instance's spec
+	// sheet. When set, it drives the shard's connection budget (the pool is capped near the measured
+	// knee of ~6x the CPU count, beyond which connections only queue - and on small servers actively
+	// harm throughput) and its placement weight (new flows are distributed across shards in proportion
+	// to measured capacity). 0 = unknown: the pool falls back to a conservative default (or the
+	// SetMaxOpenConns override), and the shard is placed with the most conservative weight in the set.
+	VirtualCPUs int
+	// Cordoned excludes the shard from new-flow placement. Everything already resident proceeds
+	// normally: existing flows keep executing, and subgraph children, thread continuations (Continue),
+	// and forks - all shard-pinned - are still created on it. Use for retiring or overloaded shards.
+	Cordoned bool
+}
+
+// SetShard registers a database shard. Call once per shard; see ShardSpec for field semantics. When no
+// shard is registered, Startup opens a single default shard 1 (in test mode, an isolated in-memory
+// database).
 //
 // Construction-time only: shards are opened and migrated at Startup and the set is immutable for the
 // engine's life, so a call on a running engine is rejected. Changing the shard set requires a coordinated
 // restart of every replica (a maintenance window): a flow created on a shard unknown to a peer replica is
 // unroutable (404) there.
-func (e *Engine) SetShard(index int, dsn string) error {
+func (e *Engine) SetShard(spec ShardSpec) error {
 	if e.started.Load() {
 		return errSetAfterStartup("shards")
 	}
-	if index < 1 {
+	if spec.Index < 1 {
 		return errors.New("shard index must be at least 1")
+	}
+	if spec.VirtualCPUs < 0 {
+		return errors.New("virtual CPUs must be >= 0")
 	}
 	e.shardsLock.Lock()
 	defer e.shardsLock.Unlock()
-	if _, ok := e.shardDSNs[index]; ok {
-		return errors.New("shard %d is already set", index)
+	if _, ok := e.shardSpecs[spec.Index]; ok {
+		return errors.New("shard %d is already set", spec.Index)
 	}
-	if e.shardDSNs == nil {
-		e.shardDSNs = map[int]string{}
+	if e.shardSpecs == nil {
+		e.shardSpecs = map[int]ShardSpec{}
 	}
-	e.shardDSNs[index] = dsn
+	e.shardSpecs[spec.Index] = spec
 	return nil
-}
-
-// numConfiguredShards returns the number of registered shards (at least 1, matching the single default
-// shard Startup opens when none is registered), for pool sizing.
-func (e *Engine) numConfiguredShards() int {
-	e.shardsLock.Lock()
-	n := len(e.shardDSNs)
-	e.shardsLock.Unlock()
-	return max(n, 1)
 }
 
 // SetWorkers sets the number of worker goroutines. Construction-time only: the pool size is fixed at
@@ -263,28 +274,19 @@ func (e *Engine) SetDefaultPriority(p int) error {
 	return nil
 }
 
-// SetMaxOpenConns sets the per-shard hard ceiling on open SQL connections.
+// SetMaxOpenConns is an expert override that pins every shard's connection pool to exactly n open (and
+// idle) connections, replacing the per-shard budget the engine derives from ShardSpec.VirtualCPUs.
+// Operators normally never call this - provide VirtualCPUs instead and let the engine size the pool at
+// the measured knee (~6x the database's CPU count). The override exists for benchmarking (pool-size
+// sweeps) and for deployments whose connection budget is constrained by something the engine cannot see
+// (e.g. a shared database or an external pooler). Live: pushes to every open shard immediately.
 func (e *Engine) SetMaxOpenConns(n int) error {
 	if n < 1 {
 		return errors.New("max open connections must be >= 1", http.StatusBadRequest)
 	}
 	e.maxOpenConns.Store(int32(n))
-	idle, open := e.poolSizes()
-	e.db.SetMaxIdleConns(idle)
-	e.db.SetMaxOpenConns(open)
-	return nil
-}
-
-// SetWorkersPerConn sets the assumed number of worker goroutines that share one database connection.
-// The pool size is derived FROM the number of workers, not the other way around.
-func (e *Engine) SetWorkersPerConn(n int) error {
-	if n < 1 {
-		return errors.New("workers per connection must be >= 1", http.StatusBadRequest)
-	}
-	e.workersPerConn.Store(int32(n))
-	idle, open := e.poolSizes()
-	e.db.SetMaxIdleConns(idle)
-	e.db.SetMaxOpenConns(open)
+	e.db.SetMaxIdleConns(n)
+	e.db.SetMaxOpenConns(n)
 	return nil
 }
 
@@ -367,18 +369,27 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if e.host == nil {
 		return errors.New("host is required")
 	}
+	// Per-shard pool sizes: the SetMaxOpenConns override pins every pool; otherwise each shard's budget
+	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools).
+	override := int(e.maxOpenConns.Load())
 	e.shardsLock.Lock()
-	shards := maps.Clone(e.shardDSNs)
+	shards := make(map[int]database.ShardConfig, len(e.shardSpecs))
+	for idx, spec := range e.shardSpecs {
+		idle, open := shardPool(spec, override)
+		shards[idx] = database.ShardConfig{DSN: spec.DSN, MaxIdleConns: idle, MaxOpenConns: open}
+	}
 	e.shardsLock.Unlock()
-	idle, open := e.poolSizes()
+	if len(shards) == 0 {
+		// No shard registered: the single default shard, sized by the same rule (no spec = defaults).
+		idle, open := shardPool(ShardSpec{}, override)
+		shards[1] = database.ShardConfig{MaxIdleConns: idle, MaxOpenConns: open}
+	}
 	err := e.db.Open(ctx, database.Config{
 		Shards:         shards,
 		TestID:         e.testHashedID,
 		Logger:         e.logger,
 		TracerProvider: e.tracerProvider,
 		MeterProvider:  e.meterProvider,
-		MaxIdleConns:   idle,
-		MaxOpenConns:   open,
 	})
 	if err != nil {
 		return errors.Trace(err)

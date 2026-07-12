@@ -46,7 +46,7 @@ func TestRestartSurvival(t *testing.T) {
 	mkEngine := func(t *testing.T, proxy *TestProxy, dir string, workers int) *Engine {
 		e := NewEngine()
 		e.SetHost(proxy)
-		testarossa.For(t).NoError(e.SetShard(1, fmt.Sprintf("file:%s/db%%d.sqlite?_pragma=busy_timeout(5000)", dir)))
+		testarossa.For(t).NoError(e.SetShard(ShardSpec{Index: 1, DSN: fmt.Sprintf("file:%s/db%%d.sqlite?_pragma=busy_timeout(5000)", dir)}))
 		testarossa.For(t).NoError(e.SetWorkers(workers))
 		return e
 	}

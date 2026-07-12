@@ -45,15 +45,23 @@ import (
 // sequenceName namespaces this engine's migrations in sequel_migrations; do not change once deployed.
 const sequenceName = "github.com/microbus-io/dwarf"
 
-// Config is the full open-time configuration of a ShardSet. Field names mirror the corresponding sequel.DB /
-// *sql.DB setters (Logger→SetLogger, TracerProvider→SetTracerProvider, MeterProvider→SetMeterProvider,
-// MaxIdleConns→SetMaxIdleConns, MaxOpenConns→SetMaxOpenConns), so the mapping from field to setter is 1:1.
+// ShardConfig is one shard's open-time configuration: its DSN and its resolved pool sizes. The
+// connection-sizing formula is the caller's concern; this package applies the two integers verbatim.
+type ShardConfig struct {
+	// DSN is the sequel data source name; a "%d" is substituted with the shard index. In test mode
+	// (Config.TestID set) an empty DSN falls back to SEQUEL_TESTING_DSN, then to the SQLite in-memory
+	// default.
+	DSN          string
+	MaxIdleConns int
+	MaxOpenConns int
+}
+
+// Config is the full open-time configuration of a ShardSet.
 type Config struct {
-	// Shards maps each shard index to the DSN of its database. Indices must be >= 1 but need not be
-	// contiguous (index 0 is the "no shard / all shards" sentinel). A nil/empty map defaults to a single
-	// shard 1 with an empty DSN. A "%d" in a DSN is substituted with the shard index; in test mode
-	// (TestID set) an empty DSN falls back to SEQUEL_TESTING_DSN, then to the SQLite in-memory default.
-	Shards map[int]string
+	// Shards maps each shard index to its configuration. Indices must be >= 1 but need not be
+	// contiguous (index 0 is the "no shard / all shards" sentinel). A nil/empty map defaults to a
+	// single shard 1 with an empty DSN and a minimal pool.
+	Shards map[int]ShardConfig
 	// TestID, when non-empty, wraps each shard via sequel.CreateTestingDatabase into an isolated, auto-dropped
 	// database keyed on (driver, baseDSN, TestID) - the resolved per-shard DSNs already distinguish the shards.
 	TestID string
@@ -61,11 +69,6 @@ type Config struct {
 	Logger         *slog.Logger
 	TracerProvider trace.TracerProvider // nil → otel.GetTracerProvider()
 	MeterProvider  metric.MeterProvider // nil → otel.GetMeterProvider()
-
-	// MaxIdleConns / MaxOpenConns are the resolved per-shard pool sizes, computed by the caller and applied
-	// verbatim. The connection-sizing formula is not this package's concern.
-	MaxIdleConns int
-	MaxOpenConns int
 }
 
 // ShardSet is the engine's set of open, migrated database shards. The zero value is a usable, empty set. The
@@ -84,7 +87,7 @@ type ShardSet struct {
 func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 	shards := cfg.Shards
 	if len(shards) == 0 {
-		shards = map[int]string{1: ""}
+		shards = map[int]ShardConfig{1: {MaxIdleConns: 2, MaxOpenConns: 8}}
 	}
 	indices := make([]int, 0, len(shards))
 	for idx := range shards {
@@ -102,7 +105,7 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 	}
 	seen := make(map[string]int, len(indices))
 	for _, idx := range indices {
-		dsn := resolveShardDSN(cfg, idx, shards[idx])
+		dsn := resolveShardDSN(cfg, idx, shards[idx].DSN)
 		// Two shards resolving to the same database would collapse onto one another - distinct flows would
 		// share flow_id sequences and every cross-shard invariant breaks. Loud error, never silent.
 		if prev, ok := seen[dsn]; ok {
@@ -110,7 +113,7 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 			return errors.New("shards %d and %d resolve to the same DSN", prev, idx)
 		}
 		seen[dsn] = idx
-		db, err := openShard(cfg, dsn)
+		db, err := openShard(cfg, dsn, shards[idx])
 		if err != nil {
 			closeAll()
 			return errors.Trace(err)
@@ -141,7 +144,7 @@ func resolveShardDSN(cfg Config, shardIndex int, dsn string) string {
 
 // openShard opens and migrates one shard from its resolved DSN, in test mode first wrapping it via
 // sequel.CreateTestingDatabase into an isolated, auto-dropped database.
-func openShard(cfg Config, dsn string) (*sequel.DB, error) {
+func openShard(cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) {
 	if cfg.TestID != "" {
 		var err error
 		dsn, err = sequel.CreateTestingDatabase("", dsn, cfg.TestID)
@@ -149,7 +152,7 @@ func openShard(cfg Config, dsn string) (*sequel.DB, error) {
 			return nil, errors.Trace(err)
 		}
 	}
-	db, err := openAndMigrate(cfg, dsn)
+	db, err := openAndMigrate(cfg, dsn, sc)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -157,14 +160,14 @@ func openShard(cfg Config, dsn string) (*sequel.DB, error) {
 }
 
 // openAndMigrate opens a single connection, applies pool sizes and telemetry, and runs schema migrations.
-func openAndMigrate(cfg Config, dsn string) (*sequel.DB, error) {
+func openAndMigrate(cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) {
 	const driverName = ""
 	db, err := sequel.Open(driverName, dsn)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	db.SetMaxIdleConns(cfg.MaxIdleConns)
-	db.SetMaxOpenConns(cfg.MaxOpenConns)
+	db.SetMaxIdleConns(sc.MaxIdleConns)
+	db.SetMaxOpenConns(sc.MaxOpenConns)
 	// Drain idle connections and recycle aged ones - but not on SQLite, whose in-memory test databases are
 	// dropped the moment their last connection closes (a closed idle/expired conn would lose the data).
 	if db.DriverName() != "sqlite" {

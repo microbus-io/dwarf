@@ -7,10 +7,11 @@
 > affinity, `List` pagination); `internal/migrations/CLAUDE.md` (the schema this package migrates);
 > `fixtures/CLAUDE.md` (the test-harness rationale behind the DSN resolution `Open` performs).
 
-`ShardSet` owns the `[]*sequel.DB`: it opens+migrates every shard, routes by 1-based index (`Shard`), fans an op
-out over all shards (`OnEach`), applies pool sizes (`SetMaxIdleConns`/`SetMaxOpenConns`), and closes. It receives
-the two resolved pool sizes as integers — the sizing *formula* is engine policy (see the engine doc), not this
-package's concern.
+`ShardSet` owns the shard `map[int]*sequel.DB`: it opens+migrates every shard, routes by index (`Shard`), fans an
+op out over all shards (`OnEach`), applies pool sizes, and closes. Each shard arrives as a `ShardConfig` (DSN +
+resolved per-shard pool sizes) — the sizing *formula* is engine policy (see the engine doc §"Connection pool
+sizing"), not this package's concern; the uniform `SetMaxIdleConns`/`SetMaxOpenConns` remain for the engine's
+live override.
 
 ## Choosing a SQL engine
 

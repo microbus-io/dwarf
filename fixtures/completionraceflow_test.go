@@ -67,8 +67,8 @@ func TestCompletionRaceflow(t *testing.T) {
 
 	eng := engine.NewEngine()
 	eng.SetHost(proxy)
-	eng.SetShard(1, "")
-	eng.SetShard(2, "")
+	eng.SetShard(engine.ShardSpec{Index: 1})
+	eng.SetShard(engine.ShardSpec{Index: 2})
 	eng.SetWorkers(4)
 	eng.RunInTest(t)
 

@@ -50,15 +50,15 @@ import (
 // artifact is the self-contained record of one run: full configuration + environment + results, so
 // aggregation across a sweep is mechanical.
 type artifact struct {
-	Label       string            `json:"label,omitzero"`
-	StartedAt   time.Time         `json:"startedAt"`
-	EndedAt     time.Time         `json:"endedAt"`
-	Config      map[string]any    `json:"config"`
-	Environment map[string]any    `json:"environment"`
-	RTT         rttStats          `json:"rtt"`
-	Results     []stepResult      `json:"results"`
-	Valid       bool              `json:"valid"` // false when recovery/unwedge counters fired
-	Invalidity  string            `json:"invalidity,omitzero"`
+	Label       string         `json:"label,omitzero"`
+	StartedAt   time.Time      `json:"startedAt"`
+	EndedAt     time.Time      `json:"endedAt"`
+	Config      map[string]any `json:"config"`
+	Environment map[string]any `json:"environment"`
+	RTT         rttStats       `json:"rtt"`
+	Results     []stepResult   `json:"results"`
+	Valid       bool           `json:"valid"` // false when recovery/unwedge counters fired
+	Invalidity  string         `json:"invalidity,omitzero"`
 }
 
 func main() {
@@ -71,22 +71,20 @@ func main() {
 
 func run() error {
 	var (
-		dsns           shardFlags
-		workloadName   = flag.String("workload", "linear", "workload: linear, fanout, state, mixed")
-		payload        = flag.Int("payload", 64*1024, "state-workload payload bytes written per step")
-		taskDelay      = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
-		workers        = flag.Int("workers", 64, "engine worker goroutines")
-		// Default 1 (not the engine's 8) so -max-open-conns IS the pool size: with the engine default,
-		// calcConnPoolSizes caps the pool at 2*ceil(workers/8)+2 and the -max-open-conns "ceiling" is
-		// silently never reached (e.g. workers=32 -> a 10-conn pool under a 30-conn flag) - the exact trap
-		// that misattributed ~50ms/step of pool queueing to engine overhead in campaign session 1.
-		workersPerConn = flag.Int("workers-per-conn", 1, "engine workers assumed to share one DB connection (1 => -max-open-conns is the actual pool size)")
-		maxOpenConns   = flag.Int("max-open-conns", 30, "engine per-shard open-connection ceiling")
-		concurrency    = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
-		window         = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
-		warmup         = flag.Duration("warmup", 15*time.Second, "warmup before each measurement window (discarded)")
-		label          = flag.String("label", "", "free-form run label recorded in the artifact")
-		out            = flag.String("out", "", "artifact path (default bench/results/run-<timestamp>.json)")
+		dsns         shardFlags
+		workloadName = flag.String("workload", "linear", "workload: linear, fanout, state, mixed")
+		payload      = flag.Int("payload", 64*1024, "state-workload payload bytes written per step")
+		taskDelay    = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
+		workers      = flag.Int("workers", 64, "engine worker goroutines")
+		// SetMaxOpenConns is the expert override: it pins every shard's pool to exactly this size, which
+		// is what a pool-size sweep needs. (The old workers-per-conn trap - a silently unreached ceiling -
+		// is gone with the formula it belonged to.)
+		maxOpenConns = flag.Int("max-open-conns", 30, "engine per-shard connection pool size (expert override, pinned exactly)")
+		concurrency  = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
+		window       = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
+		warmup       = flag.Duration("warmup", 15*time.Second, "warmup before each measurement window (discarded)")
+		label        = flag.String("label", "", "free-form run label recorded in the artifact")
+		out          = flag.String("out", "", "artifact path (default bench/results/run-<timestamp>.json)")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
 	flag.Parse()
@@ -122,7 +120,7 @@ func run() error {
 
 	eng := engine.NewEngine()
 	for _, sh := range dsns {
-		err = eng.SetShard(sh.index, sh.dsn)
+		err = eng.SetShard(engine.ShardSpec{Index: sh.index, DSN: sh.dsn})
 		if err != nil {
 			return err
 		}
@@ -130,7 +128,6 @@ func run() error {
 	for _, setter := range []error{
 		eng.SetHost(host),
 		eng.SetWorkers(*workers),
-		eng.SetWorkersPerConn(*workersPerConn),
 		eng.SetMaxOpenConns(*maxOpenConns),
 		eng.SetMeterProvider(mp),
 	} {
@@ -155,15 +152,14 @@ func run() error {
 		Label:     *label,
 		StartedAt: time.Now().UTC(),
 		Config: map[string]any{
-			"workload":       *workloadName,
-			"payloadBytes":   *payload,
-			"taskDelayMs":    taskDelay.Milliseconds(),
-			"workers":        *workers,
-			"workersPerConn": *workersPerConn,
-			"maxOpenConns":   *maxOpenConns,
-			"shards":         dsns.redacted(),
-			"windowSec":      window.Seconds(),
-			"warmupSec":      warmup.Seconds(),
+			"workload":     *workloadName,
+			"payloadBytes": *payload,
+			"taskDelayMs":  taskDelay.Milliseconds(),
+			"workers":      *workers,
+			"maxOpenConns": *maxOpenConns,
+			"shards":       dsns.redacted(),
+			"windowSec":    window.Seconds(),
+			"warmupSec":    warmup.Seconds(),
 		},
 		Environment: environment(),
 		Valid:       true,

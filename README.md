@@ -129,7 +129,7 @@ flowKey, err := eng.Create(ctx, "checkout", initialState, &workflow.FlowOptions{
 outcome, err := eng.Await(ctx, flowKey) // Create returns a running flow; there is no separate start call
 ```
 
-The live `Set*` methods (`SetMaxOpenConns`, `SetWorkersPerConn`, `SetTimeBudget`, `SetDefaultPriority`) may
+The live `Set*` methods (`SetMaxOpenConns`, `SetTimeBudget`, `SetDefaultPriority`) may
 be called after `Startup` for hot reconfiguration; the rest are construction-time only.
 
 ## Database support

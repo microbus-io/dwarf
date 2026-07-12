@@ -28,16 +28,17 @@ limitations under the License.
 // tests, RunInTest replaces Startup/Shutdown with per-test SQLite databases and t.Cleanup.
 //
 //	eng := engine.NewEngine()
-//	eng.SetShard(1, "postgres://user:pass@host:5432/dwarf")
+//	eng.SetShard(ShardSpec{Index: 1, DSN: "postgres://user:pass@host:5432/dwarf"})
 //	eng.SetHost(host)
 //	err := eng.Startup(ctx)
 //	if err != nil { ... }
 //	defer eng.Shutdown(ctx)
 //
-// Each Set* method returns an error. The live ones (SetMaxOpenConns, SetWorkersPerConn,
+// Each Set* method returns an error. The live ones (SetMaxOpenConns - an expert override,
 // SetTimeBudget, SetDefaultPriority) take effect immediately on a running engine; the construction-time-only
 // ones (SetShard, SetWorkers, SetHost, SetLogger, SetMeterProvider, SetTracerProvider) return an
-// error if called after Startup.
+// error if called after Startup. Tuning derives from the facts on ShardSpec (VirtualCPUs drives each
+// shard's connection budget and placement weight); see SetShard.
 //
 // # Host
 //
