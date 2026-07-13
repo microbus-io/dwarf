@@ -37,10 +37,16 @@ const (
 	// actively collapses throughput (745 -> 212 steps/s at 1 vCPU between 16 and 96 connections).
 	connsPerVCPU = 6
 
-	// defaultPoolSize is the pool for a shard with unknown VirtualCPUs: measured safe on every tier
-	// (M=8 ran clean even at 1 vCPU), deliberately conservative - honest ignorance beats a guessed
-	// CPU count whose failure mode is the over-connection collapse.
-	defaultPoolSize = 8
+	// defaultVirtualCPUs is assumed when a ShardSpec does not declare VirtualCPUs. Two facts make this
+	// guess safe rather than reckless (the failure mode of a WRONG guess is the over-connection collapse):
+	//   - 2 vCPUs is the FLOOR of every current-generation AWS RDS class (db.t4g/m7g/r7g all start at 2),
+	//     so on RDS the assumption cannot undershoot the real machine.
+	//   - Where smaller machines do exist (Cloud SQL's 1-vCPU db-custom-1-*, and its shared-core tiers),
+	//     the pool this yields (6 x 2 = 12) still sits below their measured knee: the 1-vCPU tier peaked
+	//     at M=16 (856 steps/s) and only collapsed from M=32 up. An operator on such a machine declares
+	//     VirtualCPUs: 1 and gets a pool of 6.
+	// So the cost of the assumption is bounded, and it buys a real default instead of a timid one.
+	defaultVirtualCPUs = 2
 
 	// workersPerConnBudget sizes the RESIDENT worker set (and the candidate cache) from the aggregate
 	// connection budget: dispatch is database-bound, and useful dispatching workers = conns x T/db,
@@ -126,24 +132,30 @@ func probeRTT(ctx context.Context, db *sequel.DB) float64 {
 	return best
 }
 
-// shardPool returns the idle/open pool sizes for one shard. The explicit SetMaxOpenConns override wins
-// (the pool is pinned to exactly that size - the benchmarking/expert path); otherwise VirtualCPUs derives
-// the open ceiling at the measured knee with a warm idle core; otherwise the measured-safe default.
-// The derived budgets are per DATABASE, so they are split across the OBSERVED engine replicas (the
-// peer-discovery count; see peers.go); the override is the operator's exact per-replica number and is
-// never divided.
+// shardPool returns the idle/open pool sizes for one shard: VirtualCPUs (defaulted, see
+// effectiveVirtualCPUs) derives the open ceiling at the measured knee, with a warm idle core of half.
+// The explicit SetMaxOpenConns override wins and pins the pool to exactly that size (the
+// benchmarking/expert path). The derived budgets are per DATABASE, so they are split across the
+// OBSERVED engine replicas (the peer-discovery count; see peers.go); the override is the operator's
+// exact per-replica number and is never divided.
 func shardPool(spec ShardSpec, override int, replicas int) (idle, open int) {
-	replicas = max(1, replicas)
-	switch {
-	case override > 0:
+	if override > 0 {
 		return override, override
-	case spec.VirtualCPUs > 0:
-		open = max(2, connsPerVCPU*spec.VirtualCPUs/replicas)
-		return max(2, open/2), open
-	default:
-		open = max(2, defaultPoolSize/replicas)
-		return open, open
 	}
+	replicas = max(1, replicas)
+	open = max(2, connsPerVCPU*effectiveVirtualCPUs(spec.VirtualCPUs)/replicas)
+	return max(2, open/2), open
+}
+
+// effectiveVirtualCPUs resolves a shard's declared CPU count, substituting defaultVirtualCPUs when the
+// operator did not declare one. The vCPU count is a fact off the machine's spec sheet - something an
+// operator KNOWS rather than guesses - so the default exists for the zero-config case, not as an
+// invitation to leave it unset.
+func effectiveVirtualCPUs(declared int) int {
+	if declared > 0 {
+		return declared
+	}
+	return defaultVirtualCPUs
 }
 
 // recomputePools re-derives every shard's connection pool from the observed replica count and pushes
@@ -177,24 +189,19 @@ func (e *Engine) recomputePools() {
 // capacityWeight maps a shard's VirtualCPUs to its new-flow placement weight, proportional to the
 // measured steps/s ceiling of the tier: ~flat up to 2 vCPUs (1- and 2-vCPU tiers both ceiling near
 // 745 steps/s - raw-CPU proportionality would over-place on 2 vCPUs), then ~450 steps/s per vCPU.
-// 0 (unknown) is resolved by the caller to the most conservative weight in the set.
+// An undeclared count resolves to defaultVirtualCPUs, so every shard carries a positive weight.
 func capacityWeight(virtualCPUs int) int {
-	switch {
-	case virtualCPUs <= 0:
-		return 0
-	case virtualCPUs <= 2:
+	if v := effectiveVirtualCPUs(virtualCPUs); v <= 2 {
 		return 745
-	default:
-		return 450 * virtualCPUs
+	} else {
+		return 450 * v
 	}
 }
 
 // pickShard selects the shard for a new top-level flow: a weighted-random pick over the non-cordoned
 // shards, in proportion to capacityWeight. Placement is the engine's only load-balancing moment (flows
 // are shard-pinned for life), so heterogeneous fleets must be loaded in capacity proportion - uniform
-// placement saturates the smallest shard first while larger ones idle. A shard with unknown
-// VirtualCPUs gets the smallest known weight (conservative: never over-load the shard known least),
-// or a uniform pick when no shard declares CPUs.
+// placement saturates the smallest shard first while larger ones idle.
 func (e *Engine) pickShard() (int, error) {
 	e.shardsLock.Lock()
 	specs := make([]ShardSpec, 0, len(e.shardSpecs))
@@ -207,27 +214,14 @@ func (e *Engine) pickShard() (int, error) {
 		indices := e.db.Indices()
 		return indices[rand.IntN(len(indices))], nil
 	}
-	minKnown := 0
-	for _, spec := range specs {
-		if w := capacityWeight(spec.VirtualCPUs); w > 0 && (minKnown == 0 || w < minKnown) {
-			minKnown = w
-		}
-	}
-	if minKnown == 0 {
-		minKnown = 1 // no shard declares CPUs: uniform
-	}
 	total := 0
 	weights := make([]int, len(specs))
 	for i, spec := range specs {
 		if spec.Cordoned {
 			continue
 		}
-		w := capacityWeight(spec.VirtualCPUs)
-		if w == 0 {
-			w = minKnown
-		}
-		weights[i] = w
-		total += w
+		weights[i] = capacityWeight(spec.VirtualCPUs)
+		total += weights[i]
 	}
 	if total == 0 {
 		return 0, errors.New("all shards are cordoned", http.StatusServiceUnavailable)

@@ -22,8 +22,10 @@ after `Startup`. `SetMaxOpenConns`, `SetTimeBudget`, and `SetDefaultPriority` ar
 Provide `ShardSpec.VirtualCPUs` (the database server's CPU count - a fact off its spec sheet) and the
 engine derives the shard's connection budget (~6x CPUs, the measured knee beyond which connections only
 queue - and on small servers actively collapse throughput) and its new-flow placement weight
-(capacity-proportional across heterogeneous shards). `VirtualCPUs: 0` falls back to a conservative,
-measured-safe pool of 8 and the most conservative placement weight. `Cordoned: true` excludes a shard
+(capacity-proportional across heterogeneous shards). Leave `VirtualCPUs` unset and the engine assumes 2
+— the floor of every current-generation RDS class, and small enough that the resulting pool is still
+safe on the 1-vCPU machines Cloud SQL offers. Declare it: it is a fact off the machine's spec sheet, and
+an 8-vCPU database sized as if it were a 2-vCPU one runs at a fraction of its capacity. `Cordoned: true` excludes a shard
 from new-flow placement (resident flows and their subgraph children/continuations/forks proceed) - for
 retiring or overloaded shards. The [cloud benchmarks](benchmark-cloud.md) document the measurements
 behind the constants.
@@ -98,12 +100,14 @@ eng.SetShard(2, "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable")
 
 ## Connection pool
 
-Each shard's pool derives from its `ShardSpec.VirtualCPUs`: open = ~6x the database's CPU count (the
-measured knee - beyond it connections only queue inside the database, and on small servers actively
-harm throughput), with a warm idle core of half that. Unknown CPUs (`VirtualCPUs: 0`) fall back to a
-measured-safe pool of 8. `SetMaxOpenConns` is an expert override that pins every shard's pool exactly -
-for benchmarking sweeps or externally-constrained connection budgets - and is otherwise best left
-unset. The measurements behind these constants are in the [cloud benchmarks](benchmark-cloud.md).
+Each shard's pool derives from its `ShardSpec.VirtualCPUs`: open = ~6× the database's CPU count (the
+measured knee — beyond it connections only queue inside the database, and on small servers actively
+harm throughput), with a warm idle core of half that. An undeclared count assumes 2 vCPUs (a pool of
+12), which stays under the knee of even a 1-vCPU machine — so a zero-config engine cannot reach the
+collapse zone, but it also cannot use a large database: **declare `VirtualCPUs`.** `SetMaxOpenConns`
+is an expert override that pins every shard's pool exactly — for benchmarking sweeps or
+externally-constrained connection budgets — and is otherwise best left unset. The measurements behind
+these constants are in the [cloud benchmarks](benchmark-cloud.md).
 
 > **Running more than one replica?** The derived budget is a property of the shard's *database*, not
 > of one replica: R replicas each holding the full ~6 × `VirtualCPUs` pool would overshoot the knee R

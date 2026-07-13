@@ -73,8 +73,9 @@ the tier's peak configuration re-run three times:
 - **Over-connection collapses small tiers.** 1 vCPU falls from 856 to 385 steps/s as M grows 16→96;
   4 vCPU shows the onset at M=96. Beyond the knee, connections queue inside PostgreSQL (connection-held
   time grows linearly with M at flat throughput) and then actively harm. This is why the engine treats
-  the connection budget as a hard cap derived from `ShardSpec.VirtualCPUs`, and why an unknown CPU
-  count falls back to a measured-safe pool of 8 rather than a guess.
+  the connection budget as a hard cap derived from `ShardSpec.VirtualCPUs`, and why an undeclared CPU
+  count assumes only 2 vCPUs (a pool of 12 — under the 1-vCPU tier's own knee, so even a wrong
+  assumption cannot reach the collapse zone).
 - **The DB is CPU-bound at the ceiling** (~91–100% DB CPU; disk write-IOPS peaked at half the 100 GB
   budget, refuting a WAL/IOPS explanation). The 1→2 vCPU step scales poorly (a known commit-heavy
   PostgreSQL pattern, suspected WAL-insert-lock serialization; unconfirmed — needs pg wait-event

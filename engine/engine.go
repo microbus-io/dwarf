@@ -248,11 +248,13 @@ type ShardSpec struct {
 	// substituted with the shard index. An empty DSN is only valid in test mode.
 	DSN string
 	// VirtualCPUs is the CPU count of the shard's database server - a fact off the instance's spec
-	// sheet. When set, it drives the shard's connection budget (the pool is capped near the measured
-	// knee of ~6x the CPU count, beyond which connections only queue - and on small servers actively
-	// harm throughput) and its placement weight (new flows are distributed across shards in proportion
-	// to measured capacity). 0 = unknown: the pool falls back to a conservative default (or the
-	// SetMaxOpenConns override), and the shard is placed with the most conservative weight in the set.
+	// sheet. It drives the shard's connection budget (the pool is capped near the measured knee of ~6x
+	// the CPU count, beyond which connections only queue - and on small servers actively harm
+	// throughput) and its placement weight (new flows are distributed across shards in proportion to
+	// measured capacity). Left at 0, the engine assumes 2 - the smallest machine any major cloud sells
+	// as a current-generation instance, so the assumed pool stays safe even if the real machine is
+	// smaller. Declare it: a large database sized as if it were a 2-CPU one runs at a fraction of its
+	// capacity.
 	VirtualCPUs int
 	// Cordoned excludes the shard from new-flow placement. Everything already resident proceeds
 	// normally: existing flows keep executing, and subgraph children, thread continuations (Continue),

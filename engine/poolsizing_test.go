@@ -29,10 +29,11 @@ import (
 
 // TestPoolSizing_ShardPool pins the per-shard pool derivation: the explicit override pins the pool
 // exactly; VirtualCPUs derives the open ceiling at the measured knee (~6x CPUs) with a warm idle core;
-// unknown CPUs fall back to the measured-safe default (8) rather than a guessed CPU count - the
-// over-connection collapse measured on small tiers is why honest ignorance beats a wrong guess. The
-// derived budgets are per database, so the observed replica count splits them; the override is a
-// per-replica exact number and is never divided.
+// an undeclared count assumes defaultVirtualCPUs (2). That assumption is bounded, not reckless: 2 is
+// the floor of every current-gen AWS RDS class, and on the smaller machines that do exist (Cloud SQL's
+// 1-vCPU tier) the resulting pool of 12 still sits under the measured knee (that tier peaked at M=16
+// and only collapsed from M=32). The derived budgets are per database, so the observed replica count
+// splits them; the override is a per-replica exact number and is never divided.
 func TestPoolSizing_ShardPool(t *testing.T) {
 	assert := testarossa.For(t)
 
@@ -43,16 +44,17 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 		idle     int
 		open     int
 	}{
-		{0, 0, 1, 8, 8},    // unknown CPUs, no override: safe default
+		{0, 0, 1, 6, 12},   // undeclared: assume 2 vCPUs -> the 2-vCPU pool
 		{1, 0, 1, 3, 6},    // 1 vCPU: knee at 6
 		{2, 0, 1, 6, 12},   // 2 vCPU: knee at 12
+		{4, 0, 1, 12, 24},  // 4 vCPU: knee at 24
 		{8, 0, 1, 24, 48},  // 8 vCPU: knee at 48
 		{8, 30, 1, 30, 30}, // override wins over derived, pinned exactly
-		{0, 5, 1, 5, 5},    // override with unknown CPUs
+		{0, 5, 1, 5, 5},    // override beats the assumed default too
 		{8, 0, 2, 12, 24},  // replicas split the derived budget: each takes its 1/R share of the knee
 		{8, 0, 3, 8, 16},
 		{1, 0, 4, 2, 2},    // floor: even many replicas keep a usable minimum pool
-		{0, 0, 2, 4, 4},    // the unknown-CPU default splits too
+		{0, 0, 2, 3, 6},    // the assumed default splits across replicas too
 		{8, 30, 4, 30, 30}, // the override is per replica and is never divided
 	}
 	for _, c := range cases {
@@ -171,10 +173,10 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	assert.NoError(e.SetHost(proxy))
 	e.RunInTest(t)
 	resident := e.workersResident.Load()
-	assert.Equal(int32(64), resident, "resident set is the connection-derived dispatch count")
+	assert.Equal(int32(96), resident, "resident set is the connection-derived dispatch count")
 
 	// Start more flows than the resident set can hold concurrently.
-	const flows = 80
+	const flows = 130
 	for range flows {
 		_, err := e.Create(ctx, "grow/g", nil, nil)
 		assert.NoError(err)
@@ -192,11 +194,12 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 }
 
 // TestPoolSizing_CapacityWeight pins the placement-weight curve: flat up to 2 vCPUs (the measured
-// 1- and 2-vCPU tiers ceiling at the same ~745 steps/s), then ~450 steps/s per vCPU.
+// 1- and 2-vCPU tiers ceiling at the same ~745 steps/s), then ~450 steps/s per vCPU. An undeclared
+// count weighs as the assumed default (2 vCPUs), so every shard carries a positive weight.
 func TestPoolSizing_CapacityWeight(t *testing.T) {
 	assert := testarossa.For(t)
 
-	assert.Equal(0, capacityWeight(0)) // unknown: resolved by pickShard
+	assert.Equal(745, capacityWeight(0)) // undeclared: assume 2 vCPUs
 	assert.Equal(745, capacityWeight(1))
 	assert.Equal(745, capacityWeight(2))
 	assert.Equal(1800, capacityWeight(4))
@@ -204,8 +207,8 @@ func TestPoolSizing_CapacityWeight(t *testing.T) {
 }
 
 // TestPoolSizing_PickShard pins the weighted placement: cordoned shards are never picked, weights
-// follow the capacity curve (an 8-vCPU shard drawing ~4.8x a 1-vCPU shard's flows), and a shard with
-// unknown CPUs gets the smallest known weight.
+// follow the capacity curve (an 8-vCPU shard drawing ~4.8x a 1-vCPU shard's flows), and a shard that
+// declares no CPUs is placed as the assumed 2-vCPU default.
 func TestPoolSizing_PickShard(t *testing.T) {
 	assert := testarossa.For(t)
 
@@ -213,7 +216,7 @@ func TestPoolSizing_PickShard(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2, VirtualCPUs: 8}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 3, VirtualCPUs: 4, Cordoned: true}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 4})) // unknown CPUs -> smallest known weight (745)
+	assert.NoError(e.SetShard(ShardSpec{Index: 4})) // undeclared -> the 2-vCPU weight (745)
 
 	counts := map[int]int{}
 	for range 10000 {
@@ -294,15 +297,16 @@ func TestPoolSizing_WorkerCeiling(t *testing.T) {
 func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert := testarossa.For(t)
 
-	// Zero-config: one default shard (pool 8). The max is the ceiling (large - it is set by the 30s
-	// margin, not by the task); the resident set and cache stay at the historical 64.
+	// Zero-config: one default shard (undeclared CPUs -> the assumed 2-vCPU pool of 12). The max is the
+	// ceiling (large - set by the 30s margin, not by the task); the resident set and cache follow the
+	// connection budget: max(64, 8 x 12) = 96.
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
 	e.RunInTest(t)
-	assert.Equal(64, e.workersDispatch, "resident/dispatch set stays connection-derived")
-	assert.Equal(128, e.cache.Capacity(), "cache is 2x the resident set, never 2x the ceiling")
+	assert.Equal(96, e.workersDispatch, "resident/dispatch set stays connection-derived")
+	assert.Equal(192, e.cache.Capacity(), "cache is 2x the resident set, never 2x the ceiling")
 	assert.True(int(e.workers.Load()) > 1000, "the worker max is the lease-margin ceiling (got %d)", e.workers.Load())
-	assert.Equal(int32(64), e.workersResident.Load(), "only the resident set is spawned eagerly")
+	assert.Equal(int32(96), e.workersResident.Load(), "only the resident set is spawned eagerly")
 
 	// An 8-vCPU shard (pool 48) + a 2-vCPU shard (pool 12): dispatch = max(64, 8*60) = 480, and the
 	// ceiling is keyed on the WORST shard (the 2-vCPU pool of 12), never the aggregate.
