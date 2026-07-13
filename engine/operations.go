@@ -164,6 +164,7 @@ type flowSeed struct {
 	priority           int
 	fairnessKey        string
 	fairnessWeight     float64
+	engineID           int64 // creator stamp: the inserting engine's random id (provenance, unindexed)
 }
 
 // insertFlowTx inserts the flow row (already `running`) and its entry step (`pending`, immediately
@@ -173,9 +174,9 @@ type flowSeed struct {
 // latest turn, so both share exactly one copy of the insert SQL.
 func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, newStepID int64, err error) {
 	newFlowID, err = tx.InsertReturnID(ctx, "flow_id",
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, started_at)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
-		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, started_at)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC())",
+		s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, s.baggageJSON, s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID,
 	)
 	if err != nil {
 		return 0, 0, errors.Trace(err)
@@ -186,9 +187,9 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 	// A flow that should wait before running uses an entry gate task with flow.Sleep, not a creation-time
 	// delay.
 	newStepID, err = tx.InsertReturnID(ctx, "step_id",
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?)",
-		newFlowID, s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight, engine_id)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?)",
+		newFlowID, s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID,
 	)
 	if err != nil {
 		return 0, 0, errors.Trace(err)
@@ -293,6 +294,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		priority:           opts.Priority,
 		fairnessKey:        opts.FairnessKey,
 		fairnessWeight:     opts.FairnessWeight,
+		engineID:           e.engineID,
 	}
 
 	var newFlowID, newStepID int64

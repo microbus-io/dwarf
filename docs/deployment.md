@@ -106,12 +106,14 @@ for benchmarking sweeps or externally-constrained connection budgets - and is ot
 unset. The measurements behind these constants are in the [cloud benchmarks](benchmark-cloud.md).
 
 > **Running more than one replica?** The derived budget is a property of the shard's *database*, not
-> of one replica: R replicas each holding the full ~6 × `VirtualCPUs` pool overshoot the knee R times
-> over, into the over-connection zone the cap exists to prevent. The engine cannot observe its peers,
-> so declare them: call `SetReplicas(R)` on every replica and each takes its 1/R share of every derived
-> pool. The setter is live — when you scale the replica set in or out, call it again with the new count
-> and the resized pools are pushed to the open shards immediately. (`SetMaxOpenConns`, when used, is an
-> exact per-replica number and is never divided.)
+> of one replica: R replicas each holding the full ~6 × `VirtualCPUs` pool would overshoot the knee R
+> times over, into the over-connection zone the cap exists to prevent. The engine handles this
+> automatically: replicas discover each other over the peer-signal channel (a hello on startup, a
+> periodic ping, a goodbye on shutdown) and each takes its 1/R share of every derived pool, resizing
+> live as the fleet scales in or out — nothing to declare. This makes wiring `SignalPeers` (below)
+> load-bearing for pool sizing, not just for wake latency: a multi-replica deployment that leaves it
+> a no-op has each replica believing it is alone, over-connecting the shard.
+> (`SetMaxOpenConns`, when used, is an exact per-replica number and is never divided.)
 
 ## Running multiple replicas
 

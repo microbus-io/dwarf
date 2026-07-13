@@ -17,7 +17,10 @@ limitations under the License.
 package engine
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/testarossa"
 )
@@ -26,7 +29,7 @@ import (
 // exactly; VirtualCPUs derives the open ceiling at the measured knee (~6x CPUs) with a warm idle core;
 // unknown CPUs fall back to the measured-safe default (8) rather than a guessed CPU count - the
 // over-connection collapse measured on small tiers is why honest ignorance beats a wrong guess. The
-// derived budgets are per database, so declared replicas (SetReplicas) split them; the override is a
+// derived budgets are per database, so the observed replica count splits them; the override is a
 // per-replica exact number and is never divided.
 func TestPoolSizing_ShardPool(t *testing.T) {
 	assert := testarossa.For(t)
@@ -57,11 +60,13 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 	}
 }
 
-// TestPoolSizing_SetReplicasLive pins the hot path: SetReplicas on a running engine recomputes each
-// shard's derived pool and pushes it immediately; a subsequent scale-in restores the full budget; and
-// the SetMaxOpenConns override, once set, is not disturbed by replica changes.
-func TestPoolSizing_SetReplicasLive(t *testing.T) {
+// TestPoolSizing_ObservedReplicasLive pins the observed-R path end to end through the real signal
+// seam: a peer's hello shrinks the derived pool to the 1/R share immediately (and is answered with a
+// ping); a second peer shrinks it further; a goodbye regrows it; and the SetMaxOpenConns override,
+// once set, is never divided by fleet changes.
+func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	assert := testarossa.For(t)
+	ctx := context.Background()
 
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
@@ -70,19 +75,72 @@ func TestPoolSizing_SetReplicasLive(t *testing.T) {
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget at R=1")
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
+	assert.Equal(1, e.observedReplicas())
 
-	assert.NoError(e.SetReplicas(3))
-	assert.Equal(16, db.DB.Stats().MaxOpenConnections, "1/3 share pushed live")
+	hello := func(id string) {
+		b, _ := json.Marshal(peerPayload{Origin: id})
+		assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
+	}
+	goodbye := func(id string) {
+		b, _ := json.Marshal(peerPayload{Origin: id})
+		assert.NoError(e.DeliverSignal(ctx, string(signalOpGoodbye), b))
+	}
 
-	assert.NoError(e.SetReplicas(1))
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "scale-in restores the full budget")
+	hello("peer-a")
+	assert.Equal(2, e.observedReplicas())
+	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share on the peer's hello")
 
+	hello("peer-b")
+	assert.Equal(3, e.observedReplicas())
+	assert.Equal(16, db.DB.Stats().MaxOpenConnections, "1/3 share at three replicas")
+
+	hello("peer-b") // duplicate hello: no fleet change, no recompute
+	assert.Equal(16, db.DB.Stats().MaxOpenConnections)
+
+	goodbye("peer-a")
+	goodbye("peer-b")
+	assert.Equal(1, e.observedReplicas())
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "graceful goodbyes restore the full budget")
+
+	// The pinned override wins over any fleet change.
 	assert.NoError(e.SetMaxOpenConns(11))
-	assert.NoError(e.SetReplicas(4))
+	hello("peer-c")
 	assert.Equal(11, db.DB.Stats().MaxOpenConnections, "the pinned override is never divided")
 
-	assert.Error(e.SetReplicas(0)) // must be >= 1
+	// The engine's own echoed hello must not create a phantom peer.
+	before := e.observedReplicas()
+	b, _ := json.Marshal(peerPayload{Origin: e.instanceID})
+	assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
+	assert.Equal(before, e.observedReplicas())
+}
+
+// TestPoolSizing_PeerExpiry pins the crashed-peer path: a peer that stops pinging (its goodbye never
+// comes) is pruned by the heartbeat loop after ~3 ping intervals, and the derived pool regrows.
+func TestPoolSizing_PeerExpiry(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	e.pingInterval = 50 * time.Millisecond // 3x expiry = 150ms
+	e.RunInTest(t)
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+
+	b, _ := json.Marshal(peerPayload{Origin: "peer-crash"})
+	assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
+	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share while the peer lives")
+
+	// The peer never pings again (crashed). The loop must prune it and regrow the pool.
+	deadline := time.Now().Add(5 * time.Second)
+	for e.observedReplicas() != 1 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	assert.Equal(1, e.observedReplicas(), "crashed peer pruned after expiry")
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget restored")
 }
 
 // TestPoolSizing_CapacityWeight pins the placement-weight curve: flat up to 2 vCPUs (the measured

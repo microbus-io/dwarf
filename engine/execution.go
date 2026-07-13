@@ -118,11 +118,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	switch db.DriverName() {
 	case "pgx", "sqlite":
 		err = db.QueryRowContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, updated_at=NOW_UTC(),"+
+			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
 				" RETURNING step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq",
-			workflow.StatusRunning, leaseMarginMs, stepID, parkedNone,
+			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
 		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
@@ -131,11 +131,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 	case "mssql":
 		err = db.QueryRowContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, updated_at=NOW_UTC(),"+
+			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
-			workflow.StatusRunning, leaseMarginMs, stepID, parkedNone,
+			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
 		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
@@ -152,10 +152,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// reading only on a successful claim, guarantees the read's snapshot is after the claim commit (and
 		// thus after the pending-setter's commit). A lost claim skips the read entirely (n==0 returns below).
 		res, e := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, updated_at=NOW_UTC(),"+
+			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
-			workflow.StatusRunning, leaseMarginMs, stepID, parkedNone,
+			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
 		)
 		if e != nil {
 			err = e
@@ -712,9 +712,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			}
 			nextURL := dispatchURLOf(graph, next.taskName)
 			newStepID, err := tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
-					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-				flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, string(stepStateJSON), workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight,
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
+					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+				flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, string(stepStateJSON), workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID,
 			)
 			if err != nil {
 				return errors.Trace(err)
@@ -982,9 +982,9 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		sleepMs := sleepDur.Milliseconds()
 		var err error
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -1101,9 +1101,9 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	bytes.stateWritten = len(mergedJSON)
 	fanInURL := dispatchURLOf(graph, fanInTaskName)
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?)",
-		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
 	)
 	if err != nil {
 		return 0, stateByteCount{}, errors.Trace(err)

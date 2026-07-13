@@ -959,6 +959,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 			priority:       priority,
 			fairnessKey:    fairnessKey,
 			fairnessWeight: fairnessWeight,
+			engineID:       e.engineID,
 		}
 		newFlowID, newStepID, err = insertFlowTx(ctx, tx, seed)
 		return err

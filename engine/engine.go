@@ -21,7 +21,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
-	"maps"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -99,12 +98,24 @@ type Engine struct {
 	timeBudgetMs    atomic.Int64
 	defaultPriority atomic.Int32
 	maxOpenConns    atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
-	replicas        atomic.Int32 // engine replicas sharing the shards' databases; divides derived pools; >= 1
 
-	// instanceID is a random identifier minted per engine instance, stamped as the origin on every
-	// outbound peer signal so DeliverSignal can discard the engine's own signals when the host's
-	// SignalPeers echoes the broadcast back to the sender.
+	// engineID is a random positive identifier minted per engine instance (fresh on every restart).
+	// It is stamped on every flow/step INSERT (creator) and overwritten by the claim CAS (claimer) -
+	// forensic provenance, deliberately unindexed. instanceID is its base-36 string form, the origin
+	// on every outbound peer signal: DeliverSignal discards the engine's own signals when the host's
+	// SignalPeers echoes the broadcast back, and the peer-discovery map is keyed by it.
+	engineID   int64
 	instanceID string
+
+	// Peer discovery: last time each peer instanceID was heard from (hello/ping/goodbye signals).
+	// Initialized to {self: now} at construction. The count of fresh entries is the observed replica
+	// count R that divides the derived per-shard connection pools - a lookup, not a control loop.
+	peersLock sync.Mutex
+	peers     map[string]time.Time
+	peersStop chan struct{}
+	peersLoop sync.WaitGroup
+	// lastAppliedR is the replica count the pools were last derived with, to skip no-op recomputes.
+	lastAppliedR atomic.Int32
 
 	// Database
 	db database.ShardSet
@@ -163,6 +174,7 @@ type Engine struct {
 	// (reapInterval, wedgeSweepInterval), so an otherwise minutes-long path is observable.
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	awaitPollInterval   time.Duration // Await lost-wake re-snapshot cadence (5s)
+	pingInterval        time.Duration // peer-discovery heartbeat cadence; peers expire at 3x (20s)
 	refillPace          time.Duration // pause after a refill that filled the cache (deep backlog); see refillerLoop (20ms)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
@@ -184,10 +196,13 @@ func NewEngine() *Engine {
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
 	e.defaultPriority.Store(100)
-	e.replicas.Store(1)
-	e.instanceID = strconv.FormatUint(rand.Uint64(), 36)
+	e.engineID = int64(rand.Uint64() >> 1) // positive, 63 bits of entropy
+	e.instanceID = strconv.FormatInt(e.engineID, 36)
+	e.peers = map[string]time.Time{e.instanceID: time.Now()}
+	e.lastAppliedR.Store(1)
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
+	e.pingInterval = 20 * time.Second
 	e.refillPace = 20 * time.Millisecond
 	e.wedgeSweepInterval = 5 * time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute
@@ -313,37 +328,6 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	return nil
 }
 
-// SetReplicas declares how many engine replicas share the shards' databases. The derived connection
-// budget (~6x a shard's VirtualCPUs - see SetShard) is a property of the DATABASE, not of one replica:
-// n replicas each holding the full budget overshoot the measured knee by n times, which on small
-// servers collapses throughput rather than merely wasting connections. The engine cannot observe its
-// peers, so the host declares them, and each replica takes its 1/n share of every derived pool. Live:
-// on a running engine the recomputed pools are pushed to every open shard immediately, so a host that
-// scales in or out mid-flight calls this again with the new count. The SetMaxOpenConns override is
-// never divided - it pins pools exactly and takes precedence. The derived default worker count is
-// fixed at Startup from the replica count in effect then; a live replica change adjusts pools only.
-func (e *Engine) SetReplicas(n int) error {
-	if n < 1 {
-		return errors.New("replicas must be >= 1", http.StatusBadRequest)
-	}
-	e.replicas.Store(int32(n))
-	if e.started.Load() && e.maxOpenConns.Load() == 0 {
-		e.shardsLock.Lock()
-		specs := maps.Clone(e.shardSpecs)
-		e.shardsLock.Unlock()
-		for _, idx := range e.db.Indices() {
-			db, err := e.db.Shard(idx)
-			if err != nil {
-				continue
-			}
-			idle, open := shardPool(specs[idx], 0, n) // zero-value spec = the default shard's sizing
-			db.SetMaxOpenConns(open)
-			db.SetMaxIdleConns(idle)
-		}
-	}
-	return nil
-}
-
 // SetHost registers the host the engine reaches the outside world through: it loads graphs, executes
 // tasks, and (optionally) receives flow-stop notifications and carries cross-replica coordination signals.
 // A host must implement LoadGraph and ExecuteTask; the remaining Host methods may be no-ops.
@@ -425,9 +409,10 @@ func (e *Engine) Startup(ctx context.Context) error {
 	}
 	// Per-shard pool sizes: the SetMaxOpenConns override pins every pool; otherwise each shard's budget
 	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools), split across the
-	// declared replicas (SetReplicas).
+	// observed replicas. At Startup only this replica is known (R=1, full budget); the hello broadcast
+	// at the end of Startup discovers peers within ~a heartbeat and recomputePools shrinks the shares.
 	override := int(e.maxOpenConns.Load())
-	replicas := int(e.replicas.Load())
+	replicas := e.observedReplicas()
 	e.shardsLock.Lock()
 	shards := make(map[int]database.ShardConfig, len(e.shardSpecs))
 	for idx, spec := range e.shardSpecs {
@@ -571,12 +556,30 @@ func (e *Engine) initRuntime() {
 	e.reaperWorker.Go(func() {
 		e.reaperLoop(e.lifetimeCtx)
 	})
+	// Peer discovery: refresh self, start the heartbeat, and announce this replica. Receivers reply
+	// with an immediate ping, so the observed replica count converges within one round trip and
+	// recomputePools shrinks the derived shares from the R=1 the pools were just opened with.
+	e.peersLock.Lock()
+	e.peers[e.instanceID] = time.Now()
+	e.peersLock.Unlock()
+	e.peersStop = make(chan struct{})
+	e.peersLoop.Go(func() {
+		e.runPeersLoop()
+	})
+	e.emitSignal(e.lifetimeCtx, signalOpHello, peerPayload{Origin: e.instanceID})
 	e.requestRefill()
 }
 
 // drainRuntime stops all goroutines in order. The caller (Shutdown) has already flipped e.started to false
 // via CompareAndSwap, which also serves as the single-shutdown guard.
 func (e *Engine) drainRuntime() {
+	// Announce the graceful exit first (fire-and-forget) so peers drop this replica and regrow their
+	// pool shares immediately rather than waiting out the 3x-ping expiry, then stop the heartbeat.
+	e.emitSignal(context.Background(), signalOpGoodbye, peerPayload{Origin: e.instanceID})
+	if e.peersStop != nil {
+		close(e.peersStop)
+	}
+	e.peersLoop.Wait()
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()

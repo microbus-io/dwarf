@@ -108,13 +108,12 @@ engine:
 
 - **Live** (take effect immediately, callable any time): `SetMaxOpenConns` (an **expert override** that pins
   every shard's pool exactly - the benchmarking / external-pooler path; normal deployments never call it),
-  `SetReplicas` (the declared engine-replica count; divides every *derived* pool - never the override - and on a
-  running engine recomputes and pushes each shard's pool immediately, so a host scaling in/out calls it again with
-  the new count), `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at
-  each `Create` (an existing flow keeps the budget/priority frozen at its own `Create`); the pool pushes ride
-  sequel's hot/atomic pool setters (`ShardSet.SetMaxIdleConns`/`SetMaxOpenConns` for the uniform override,
-  per-shard `sequel.DB` setters for `SetReplicas`' heterogeneous recompute). The derived *worker* default is fixed
-  at Startup from the replica count in effect then - a live `SetReplicas` adjusts pools only (worker resize is a
+  `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
+  existing flow keeps the budget/priority frozen at its own `Create`). The replica count that divides the derived
+  pools is NOT a setter - it is **observed** live via the peer-discovery signals (see "Peer discovery" below), and
+  `recomputePools` pushes each shard's recomputed size through the per-shard `sequel.DB` pool setters (hot/atomic);
+  the uniform override rides `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. The derived *worker* default is fixed at
+  Startup (observed R is 1 then - only this replica is known); fleet changes adjust pools only (worker resize is a
   deferred design; see `_CONGESTION_DETECTION.md`).
 - **Construction-time only** (return an error if called after `Startup`): `SetShard(ShardSpec)`, `SetWorkers`,
   `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying
@@ -1075,13 +1074,33 @@ engine policy — below.
   connections only queue inside the database - and on small servers actively collapse throughput
   (745 -> 212 steps/s at 1 vCPU between M=16 and M=96), which is why the budget is a hard cap, not an
   optimization.
-- **The derived budget is per DATABASE, so `SetReplicas(R)` splits it**: each replica takes
-  `max(2, open/R)`. The knee belongs to the shard's server, not to one replica - R replicas each
-  holding the full budget overshoot it R times over. The engine cannot observe its peers, so the host
-  declares the count; the setter is live (scale-in/out pushes recomputed pools to open shards
-  immediately). The `SetMaxOpenConns` override is a per-replica exact number and is never divided.
-  Eliminating R (and `VirtualCPUs`) from configuration entirely is the adaptive-budgeting design in
-  `_CONGESTION_DETECTION.md`.
+- **The derived budget is per DATABASE, so the observed replica count R splits it**: each replica
+  takes `max(2, open/R)`. The knee belongs to the shard's server, not to one replica - R replicas
+  each holding the full budget overshoot it R times over. R is never declared: the engine observes
+  it live via peer-discovery signals (hello/ping/goodbye - see "Peer discovery"), and every fleet
+  change pushes recomputed pools to the open shards immediately. The `SetMaxOpenConns` override is a
+  per-replica exact number and is never divided. Eliminating `VirtualCPUs` too is the
+  adaptive-budgeting design in `_CONGESTION_DETECTION.md`.
+
+**Peer discovery (observed replica count, `peers.go`).** The engine discovers how many replicas share
+its shards from three peer-signal ops: `hello` on Startup (receivers reply with an immediate `ping`,
+so a joiner converges in one round trip), `ping` re-announced every `pingInterval` (20s) by
+`runPeersLoop`, `goodbye` on graceful Shutdown (first thing in `drainRuntime`, so peers regrow
+without waiting out the expiry). Each replica keeps `map[instanceID]lastSeen` (self included,
+initialized at construction, refreshed by its own loop); the loop prunes entries not heard from for
+3 x `pingInterval` - a CRASHED peer's goodbye never comes - and `observedReplicas()` is a plain `len`
+under `peersLock`. Design posture, decided 2026-07-13: this is a **lookup, not a control loop** (the
+count is exact/discrete and independent of the actuation - a shrunk pool still pings); R is a
+**tuning** number (a wrong count mis-sizes pools, corrupts nothing), which is why - unlike the
+doorbell and statusChange signals - it rides best-effort transport with **no database backstop**.
+Asymmetry by construction: a new peer shrinks pools at once (hello/ping handled inline); a vanished
+peer regrows them lazily (only at the loop's prune). A multi-replica host that leaves `SignalPeers`
+a no-op now silently over-connects (each replica sees R=1) - wiring it was already the documented
+multi-replica requirement. `engine_id`/`instanceID` (random per process, fresh on restart) is also
+**stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - pure
+forensic provenance ("which replica created/ran this row"), deliberately unindexed, and the fallback
+substrate for a ledger-based R count if the signal-only posture ever proves insufficient
+(`_CONGESTION_DETECTION.md` records that fallback design).
 - **`VirtualCPUs = 0` (unknown) falls back to `defaultPoolSize = 8`**, measured safe on every tier. Never
   guess a CPU count: the over-connection collapse makes a wrong guess actively harmful, while honest
   ignorance has a validated-safe behavior.

@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"maps"
 	"math/rand/v2"
 	"net/http"
 
@@ -47,8 +48,9 @@ const (
 // shardPool returns the idle/open pool sizes for one shard. The explicit SetMaxOpenConns override wins
 // (the pool is pinned to exactly that size - the benchmarking/expert path); otherwise VirtualCPUs derives
 // the open ceiling at the measured knee with a warm idle core; otherwise the measured-safe default.
-// The derived budgets are per DATABASE, so they are split across the declared engine replicas
-// (SetReplicas); the override is the operator's exact per-replica number and is never divided.
+// The derived budgets are per DATABASE, so they are split across the OBSERVED engine replicas (the
+// peer-discovery count; see peers.go); the override is the operator's exact per-replica number and is
+// never divided.
 func shardPool(spec ShardSpec, override int, replicas int) (idle, open int) {
 	replicas = max(1, replicas)
 	switch {
@@ -61,6 +63,34 @@ func shardPool(spec ShardSpec, override int, replicas int) (idle, open int) {
 		open = max(2, defaultPoolSize/replicas)
 		return open, open
 	}
+}
+
+// recomputePools re-derives every shard's connection pool from the observed replica count and pushes
+// the sizes to the open shards (sequel's pool setters are hot/atomic). Called whenever the peer map
+// changes (hello/ping of a new id, goodbye, heartbeat prune). No-ops when the engine is not running,
+// when the SetMaxOpenConns override pins the pools (an exact per-replica number, never divided), and
+// when R is unchanged since the last application.
+func (e *Engine) recomputePools() {
+	if !e.started.Load() || e.maxOpenConns.Load() != 0 {
+		return
+	}
+	replicas := e.observedReplicas()
+	if int32(replicas) == e.lastAppliedR.Swap(int32(replicas)) {
+		return
+	}
+	e.shardsLock.Lock()
+	specs := maps.Clone(e.shardSpecs)
+	e.shardsLock.Unlock()
+	for _, idx := range e.db.Indices() {
+		db, err := e.db.Shard(idx)
+		if err != nil {
+			continue
+		}
+		idle, open := shardPool(specs[idx], 0, replicas) // zero-value spec = the default shard's sizing
+		db.SetMaxOpenConns(open)
+		db.SetMaxIdleConns(idle)
+	}
+	e.logger.Info("Derived pools recomputed", "replicas", replicas)
 }
 
 // capacityWeight maps a shard's VirtualCPUs to its new-flow placement weight, proportional to the

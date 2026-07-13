@@ -181,7 +181,7 @@ Inputs: `V` = the shard database's vCPU count, `L` = RTT to the shard, `exec` = 
 monitoring and other clients.
 
 ```
-M  = min(Y − headroom, ~6·V) ÷ R    # connections per replica (R declared via SetReplicas)
+M  = min(Y − headroom, ~6·V) ÷ R    # connections per replica (R observed via peer signals)
 db = k·L + s ≈ 12·L + 4.4ms         # per-step DB time
 T  = db + exec                      # per-step worker time
 N  = M × T/db                       # workers
@@ -192,9 +192,10 @@ Worked example — an 8-vCPU shard, same-zone (L = 0.5 ms), 50 ms tasks: M = 6×
 db ≈ 12×0.5 + 4.4 ≈ 10.4 ms; T ≈ 60 ms; N = M × T/db ≈ 48 × 5.8 ≈ 280 workers. Predicted ceiling
 ≈ min(4600, 4600, C_db ≈ 4600) steps/s — the database binds, as designed.
 
-**The engine applies this automatically**: provide `ShardSpec.VirtualCPUs` (and `SetReplicas` when
-running more than one replica) and it derives each shard's connection pool, its capacity-proportional
-share of new-flow placement, and — in aggregate — the default worker count (a generous 8× the summed
+**The engine applies this automatically**: provide `ShardSpec.VirtualCPUs` and it derives each
+shard's connection pool (divided by the replica count it observes live over the peer-signal channel —
+nothing to declare), its capacity-proportional share of new-flow placement, and — in aggregate — the
+default worker count (a generous 8× the summed
 connection budget, since `T/db` is a runtime quantity and idle workers are cheap while an
 under-provisioned pool caps throughput). `SetWorkers` and `SetMaxOpenConns` survive as expert
 overrides for tests, benchmark sweeps, and externally-constrained hosts — and `SetWorkers` is the
@@ -204,7 +205,7 @@ derived default, and blocked workers are cheap (a goroutine and a socket each).
 
 ## Known gaps
 
-- **Replicas (R) untested**: the ÷R division (`SetReplicas`) and multi-replica coordination await the
+- **Replicas (R) untested**: the observed-R division and multi-replica coordination await the
   multi-replica campaign. An adaptive connection-budgeting design under consideration would eliminate
   R from configuration entirely.
 - **Volume was measured under accumulation, not steady-state retention**: the fills grew monotonically
