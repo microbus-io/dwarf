@@ -72,14 +72,17 @@ func main() {
 func run() error {
 	var (
 		dsns         shardFlags
-		workloadName = flag.String("workload", "linear", "workload: linear, fanout, state, mixed")
+		workloadName = flag.String("workload", "linear", "workload: linear, fanout, state, llm, mixed")
 		payload      = flag.Int("payload", 64*1024, "state-workload payload bytes written per step")
 		taskDelay    = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
-		workers      = flag.Int("workers", 64, "engine worker goroutines")
+		// 0 on either override means "let the engine derive it" - the self-tuned path a production host
+		// takes, and the only way to measure the derivation itself (workers from the lease margin, the
+		// pool from VirtualCPUs). A sweep pins them; a validation run must not.
+		workers = flag.Int("workers", 0, "engine worker goroutines (0 = derived from the lease-margin ceiling)")
+		vcpus   = flag.Int("vcpus", 0, "ShardSpec.VirtualCPUs for every shard (0 = undeclared; the engine assumes 2)")
 		// SetMaxOpenConns is the expert override: it pins every shard's pool to exactly this size, which
-		// is what a pool-size sweep needs. (The old workers-per-conn trap - a silently unreached ceiling -
-		// is gone with the formula it belonged to.)
-		maxOpenConns = flag.Int("max-open-conns", 30, "engine per-shard connection pool size (expert override, pinned exactly)")
+		// is what a pool-size sweep needs.
+		maxOpenConns = flag.Int("max-open-conns", 0, "engine per-shard pool size (0 = derived from -vcpus; else pinned exactly)")
 		concurrency  = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
 		window       = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
 		warmup       = flag.Duration("warmup", 15*time.Second, "warmup before each measurement window (discarded)")
@@ -120,17 +123,22 @@ func run() error {
 
 	eng := engine.NewEngine()
 	for _, sh := range dsns {
-		err = eng.SetShard(engine.ShardSpec{Index: sh.index, DSN: sh.dsn})
+		err = eng.SetShard(engine.ShardSpec{Index: sh.index, DSN: sh.dsn, VirtualCPUs: *vcpus})
 		if err != nil {
 			return err
 		}
 	}
-	for _, setter := range []error{
+	setters := []error{
 		eng.SetHost(host),
-		eng.SetWorkers(*workers),
-		eng.SetMaxOpenConns(*maxOpenConns),
 		eng.SetMeterProvider(mp),
-	} {
+	}
+	if *workers > 0 {
+		setters = append(setters, eng.SetWorkers(*workers))
+	}
+	if *maxOpenConns > 0 {
+		setters = append(setters, eng.SetMaxOpenConns(*maxOpenConns))
+	}
+	for _, setter := range setters {
 		if setter != nil {
 			return setter
 		}
@@ -156,6 +164,7 @@ func run() error {
 			"payloadBytes": *payload,
 			"taskDelayMs":  taskDelay.Milliseconds(),
 			"workers":      *workers,
+			"virtualCPUs":  *vcpus,
 			"maxOpenConns": *maxOpenConns,
 			"shards":       dsns.redacted(),
 			"windowSec":    window.Seconds(),
@@ -165,12 +174,12 @@ func run() error {
 		Valid:       true,
 	}
 
-	fmt.Printf("%-6s %10s %10s %10s %8s %8s %8s %8s\n", "conc", "flows/s", "steps/s", "MB/s", "p50ms", "p95ms", "p99ms", "errors")
+	fmt.Printf("%-6s %10s %10s %10s %8s %8s %8s %8s %8s\n", "conc", "flows/s", "steps/s", "MB/s", "p50ms", "p95ms", "p99ms", "gorout", "errors")
 	for _, k := range ks {
 		res := runStep(ctx, eng, host, reader, pick, k, *warmup, *window)
 		art.Results = append(art.Results, res)
-		fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %8d\n",
-			k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms, res.Errors)
+		fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %8d %8d\n",
+			k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms, res.Goroutines, res.Errors)
 		if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
 			art.Valid = false
 			art.Invalidity = fmt.Sprintf("at concurrency %d: errors=%d recovered=%d unwedged=%d",

@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +40,7 @@ type stepResult struct {
 	P50ms          float64          `json:"p50Ms"`       // end-to-end flow latency percentiles
 	P95ms          float64          `json:"p95Ms"`
 	P99ms          float64          `json:"p99Ms"`
+	Goroutines     int              `json:"goroutines"`     // at the end of the window: the engine's pool is most of this
 	EngineCounters map[string]int64 `json:"engineCounters"` // dwarf_* deltas over the window
 }
 
@@ -106,6 +108,7 @@ func runStep(ctx context.Context, eng *engine.Engine, host *benchHost, reader *s
 		P50ms:          percentileMs(latencies, 0.50),
 		P95ms:          percentileMs(latencies, 0.95),
 		P99ms:          percentileMs(latencies, 0.99),
+		Goroutines:     runtime.NumGoroutine(),
 		EngineCounters: deltas,
 	}
 }

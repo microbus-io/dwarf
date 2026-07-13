@@ -175,6 +175,37 @@ fresh-database ceiling by ~20% for a mature deployment: the worked example's 4,6
 ~3,700 sustained. Retention (`Purge` / `DeleteOnCompletion`) caps volume, but these fills show the
 penalty for carrying history is bounded and flat, not a slow death.
 
+## Self-tuning, measured against hand-tuning
+
+The engine derives its own connection pool and worker count. Two runs on one 8-vCPU instance ask
+whether that derivation is as good as tuning by hand — and whether it holds when tasks are long.
+
+**Short tasks: the derived configuration matches a hand-tuned one.** Three repeat runs of each
+configuration, alternating, on a fresh database each (`linear`, closed-loop concurrency 512):
+
+| Configuration | steps/s (3 runs) | mean | worker goroutines |
+|---|---|---|---|
+| Hand-tuned (`SetWorkers(512)`, `SetMaxOpenConns(48)`) | 3454, 3439, 3623 | **3,505** | 512 |
+| Derived (`ShardSpec.VirtualCPUs: 8`, nothing else) | 3408, 3379, 3536 | **3,441** | 384 |
+
+Within 2% — and with fewer goroutines, because the connection budget is what actually bounds
+dispatch. One declared integer replaces two tuned ones.
+
+**Long tasks: the pool grows to fit the work in flight.** A single-step workflow whose task sleeps 60
+seconds (an LLM call, a human-latency integration), same derived configuration — the resident worker
+set is 384, so anything beyond that requires the pool to grow:
+
+| Closed-loop concurrency | flows/s | `concurrency ÷ 60 s` | worker goroutines | errors / lease recoveries |
+|---|---|---|---|---|
+| 500 | 8.3 | 8.3 | 514 | 0 |
+| 2,000 | 33.3 | 33.3 | 2,011 | 0 |
+| 10,000 | 166.6 | 166.7 | 10,011 | 0 |
+
+Throughput tracks `concurrency ÷ task duration` exactly at every level: the engine holds 10,000
+minutes-long tasks in flight against a 48-connection pool, and median flow latency is 60.0 s — the
+task duration itself, with no queueing. Workers parked in a task hold no connection, which is why the
+worker maximum can be this large without touching the database's budget.
+
 ## The sizing formula
 
 Inputs: `V` = the shard database's vCPU count, `L` = RTT to the shard, `exec` = mean task time,

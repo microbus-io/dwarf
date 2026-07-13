@@ -193,6 +193,53 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	close(release)
 }
 
+// TestPoolSizing_SaturationDoesNotGrowThePool pins the direction that was missing, and whose absence let
+// a runaway ship: a DB-BOUND backlog must NOT grow the pool. The spawn trigger counts workers parked
+// inside ExecuteTask (holding no connection); a worker queued on the connection pool is contending, not
+// parked, and spawning a peer for it only adds contention. Counting time inside processStep instead -
+// which includes that queueing - made "every worker busy" mean "saturated", so any backlog grew the pool
+// toward the ceiling: measured at ~20% throughput loss and a ~1,300-worker pool where ~512 sufficed.
+func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Sat")
+	g.SetEndpoint("A", "sat/a")
+	g.AddTransition("A", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("sat/g", g)
+	proxy.HandleTask("sat/a", func(ctx context.Context, f *workflow.Flow) error {
+		return nil // instant: the task never parks, so the pool has no reason to grow
+	})
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(proxy))
+	// A deliberately tiny pool makes the connection the binding resource: workers WILL queue on it.
+	assert.NoError(e.SetMaxOpenConns(2))
+	e.RunInTest(t)
+	resident := e.workersResident.Load()
+
+	// A deep backlog of DB-bound steps: every worker is contending for 2 connections, continuously.
+	var done atomic.Int32
+	for range 400 {
+		go func() {
+			_, _, err := e.Run(ctx, "sat/g", nil, nil)
+			if err == nil {
+				done.Add(1)
+			}
+		}()
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for done.Load() < 400 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	assert.Equal(int32(400), done.Load(), "the backlog drained")
+	assert.Equal(resident, e.workersResident.Load(),
+		"saturation must not grow the pool (was %d, now %d)", resident, e.workersResident.Load())
+	assert.Equal(int32(0), e.workersInTask.Load(), "no worker is parked in a task once the backlog drains")
+}
+
 // TestPoolSizing_CapacityWeight pins the placement-weight curve: flat up to 2 vCPUs (the measured
 // 1- and 2-vCPU tiers ceiling at the same ~745 steps/s), then ~450 steps/s per vCPU. An undeclared
 // count weighs as the assumed default (2 vCPUs), so every shard carries a positive weight.
@@ -304,7 +351,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	e.RunInTest(t)
 	assert.Equal(96, e.workersDispatch, "resident/dispatch set stays connection-derived")
-	assert.Equal(192, e.cache.Capacity(), "cache is 2x the resident set, never 2x the ceiling")
+	assert.Equal(192, e.cache.Capacity(), "cache is 2x the dispatch count, never 2x the ceiling")
 	assert.True(int(e.workers.Load()) > 1000, "the worker max is the lease-margin ceiling (got %d)", e.workers.Load())
 	assert.Equal(int32(96), e.workersResident.Load(), "only the resident set is spawned eagerly")
 
@@ -317,6 +364,17 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	e2.RunInTest(t)
 	assert.Equal(480, e2.workersDispatch)
 	assert.True(int(e2.workers.Load()) < workerCeiling(48, 0.3), "the smallest pool sets the ceiling")
+
+	// An explicit SetWorkers is spawned IN FULL, even above the connection-derived dispatch count: the
+	// operator asked for that many workers, and no-op tasks never park, so growth would never take the
+	// pool there on its own. (The derived maximum - the lease-margin ceiling - is the opposite: never
+	// spawned up front, filled on demand.)
+	eBig := NewEngine()
+	assert.NoError(eBig.SetHost(noopHost{}))
+	assert.NoError(eBig.SetWorkers(300)) // > the zero-config dispatch count of 96
+	eBig.RunInTest(t)
+	assert.Equal(int32(300), eBig.workersResident.Load(), "an explicit SetWorkers is spawned in full")
+	assert.Equal(192, eBig.cache.Capacity(), "but the cache still follows the dispatch count")
 
 	// Explicit SetWorkers pins, regardless of shards.
 	e3 := NewEngine()

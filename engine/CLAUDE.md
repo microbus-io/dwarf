@@ -1138,13 +1138,20 @@ The worker count is split into two numbers, because they answer different questi
   first discarded - it pays connection setup); a failed probe falls back to the measured same-zone
   constant. Every input is engine-visible - **no task duration T anywhere**, which is exactly what makes
   this derivable where `N = M x T/db` is not.
-- **The pool grows on demand** (`spawnWorker`/`maybeSpawnWorker`): a worker that pops a step and finds
-  every spawned peer busy adds one, up to the maximum. Short tasks never trip it (a worker is back at
-  `Pop` long before its peers are all busy); long tasks grow the pool to fit the concurrent work, which
-  is the whole point of a ceiling in the tens of thousands. Growth is inherently bounded by the work in
-  flight, not by the ceiling, so an idle engine (and every test) stays at its resident set. `spawnClosed`
-  is set under `spawnLock` **before** `drainRuntime` waits on the pool - a `WaitGroup.Add` concurrent with
-  a `Wait` panics, so the flag, not a counter check, is what makes shutdown safe.
+- **The pool grows on demand** (`spawnWorker`/`maybeSpawnWorker`): a worker about to enter the host's
+  `ExecuteTask` adds one **only if every spawned peer is already parked inside `ExecuteTask`** - i.e. not
+  one worker is left to dispatch. **The counter (`workersInTask`) must wrap the host call and nothing
+  else.** This is the load-bearing detail, and getting it wrong shipped a runaway: an earlier version
+  counted time inside `processStep`, which *includes waiting for a database connection*, so "every worker
+  busy" meant "saturated" - any DB-bound backlog grew the pool toward the ceiling, each new worker
+  queueing on the same connections and making the signal truer. Measured cost before the fix: ~20%
+  throughput on a saturated 8-vCPU shard (2,902 vs 3,523 steps/s) with the pool bloated to ~1,300 workers
+  where ~512 sufficed. A worker inside `ExecuteTask` holds no connection, so its replacement is pure added
+  dispatch capacity; a worker anywhere else in `processStep` is using or awaiting one, and a peer for it
+  is pure added contention. Both directions are pinned (`TestPoolSizing_PoolGrowsForLongTasks`,
+  `TestPoolSizing_SaturationDoesNotGrowThePool`) - the second is the one whose absence let the bug ship.
+  `spawnClosed` is set under `spawnLock` **before** `drainRuntime` waits on the pool - a `WaitGroup.Add`
+  concurrent with a `Wait` panics, so the flag, not a counter check, is what makes shutdown safe.
 - **`SetWorkers` pins the maximum** (deterministic tests use `SetWorkers(1)`, which also disables growth;
   benchmark sweeps; hosts wanting a smaller global bound, e.g. for memory - the in-flight state maps are
   a cost the engine cannot see). Setting it ABOVE the ceiling is allowed and warned about at Startup: an

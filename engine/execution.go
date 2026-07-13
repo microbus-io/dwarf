@@ -290,6 +290,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		taskCtx, cancel = context.WithTimeout(taskCtx, time.Duration(timeBudgetMs)*time.Millisecond)
 		defer cancel()
 	}
+	// Account for this worker as parked in the task, and grow the pool if that leaves NO worker free to
+	// dispatch. The counter must wrap the host call and nothing else: a worker anywhere else in
+	// processStep is either using a database connection or waiting for one, and spawning a peer then only
+	// adds contention for the same pool - the runaway that measures saturation and calls it "long tasks".
+	// Inside ExecuteTask a worker holds no connection, so a peer is pure added dispatch capacity.
+	e.workersInTask.Add(1)
+	e.maybeSpawnWorker()
 	// A panic in the in-process host is caught here so it flows through the normal error disposition
 	// rather than wedging this leased step until lease expiry.
 	execErr := errors.CatchPanic(func() error {
@@ -300,6 +307,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	})
+	e.workersInTask.Add(-1)
 	if execErr == nil && e.seams.IsFault(faultExecuteTask, taskName) {
 		execErr = errors.New("injected fault: "+faultExecuteTask+" "+taskName, http.StatusInternalServerError)
 	}

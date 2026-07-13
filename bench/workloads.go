@@ -100,7 +100,22 @@ func registerWorkloads(h *benchHost, payloadBytes int) map[string]*workload {
 	state.AddTransitionChain(stateNames...)
 	h.graphs["bench/state"] = state
 
+	// llm: ONE step per flow, so a flow's wall time is exactly the -task-delay. The multi-step workloads
+	// above multiply the delay by their chain length, which makes a minutes-long task unmeasurable in any
+	// sane window. This is the shape that validates the derived worker ceiling: the pool must grow past
+	// its (connection-derived) resident set to keep thousands of minutes-long tasks in flight at once.
+	llm := workflow.NewGraph("LLM")
+	llm.SetEndpoint("Call", "bench/nop") // the delay lives in the host's ExecuteTask (-task-delay)
+	llm.AddTransition("Call", workflow.END)
+	h.graphs["bench/llm"] = llm
+
 	return map[string]*workload{
+		"llm": {
+			name:         "llm",
+			graphURL:     "bench/llm",
+			initialState: func() map[string]any { return nil },
+			stepsPerFlow: 1,
+		},
 		"linear": {
 			name:         "linear",
 			graphURL:     "bench/linear",

@@ -134,7 +134,7 @@ type Engine struct {
 	cache           candidatecache.Cache
 	workerPool      sync.WaitGroup
 	workersResident atomic.Int32 // goroutines spawned so far
-	workersBusy     atomic.Int32 // goroutines currently inside processStep
+	workersInTask   atomic.Int32 // goroutines currently parked inside the host's ExecuteTask (holding no connection)
 	spawnLock       sync.Mutex
 	spawnClosed     bool // set under spawnLock before the pool is drained: no goroutine may join
 	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
@@ -556,16 +556,26 @@ func (e *Engine) RunInTest(t *testing.T) {
 // initRuntime starts all goroutines and initializes runtime state.
 func (e *Engine) initRuntime() {
 	e.lifetimeCtx, e.lifetimeCancel = context.WithCancel(context.Background())
-	// The cache (and every refill scan, which reads up to its capacity) is sized from the RESIDENT
-	// dispatch set, never from the worker maximum: a worker parked in a long ExecuteTask holds no
-	// connection and dispatches nothing, so letting the ceiling size the cache would scan a backlog
-	// orders of magnitude larger than the engine can claim. In test mode the dispatch set is unresolved
-	// (RunInTest skips the Startup derivation for engines with no shards), so fall back to the max.
-	resident := min(e.workersDispatch, int(e.workers.Load()))
-	if e.workersDispatch == 0 {
-		resident = int(e.workers.Load())
+	// How many workers to spawn eagerly. An explicit SetWorkers is a request for exactly that many, so it
+	// is honored in full: the operator's number is the pool, not a ceiling the pool might never reach
+	// (no-op tasks never park, so growth would never take it there). The DERIVED maximum is the
+	// lease-margin ceiling - tens of thousands - and is emphatically not spawned up front; there the
+	// resident set is the connection-derived dispatch count and growth fills the rest on demand.
+	maxWorkers := int(e.workers.Load())
+	resident := maxWorkers
+	if !e.workersSet.Load() {
+		resident = min(e.workersDispatch, maxWorkers)
 	}
-	e.cache.Init(resident)
+	// The cache (and every refill scan, which reads up to its capacity) is sized from the DISPATCH count,
+	// never from the worker maximum: a worker parked in a long ExecuteTask holds no connection and
+	// dispatches nothing, so letting the ceiling size the cache would scan a backlog orders of magnitude
+	// larger than the engine can ever claim. In test mode the dispatch count is unresolved for an engine
+	// with no shards, so fall back to the resident set.
+	cacheWorkers := min(resident, e.workersDispatch)
+	if e.workersDispatch == 0 {
+		cacheWorkers = resident
+	}
+	e.cache.Init(cacheWorkers)
 	e.refillTrigger = make(chan struct{}, 1)
 	e.refillStop = make(chan struct{})
 	e.wakeTimer = make(chan struct{}, 1)
@@ -587,13 +597,13 @@ func (e *Engine) initRuntime() {
 	// Resolve the tracer (no-op unless a TracerProvider was injected or the global SDK is configured).
 	e.initTracer()
 
-	// Spawn the resident set eagerly; the rest of the ceiling is spawned on demand by workers that find
-	// every peer busy while work waits (see maybeSpawnWorker) - the long-task case, where workers park
-	// in ExecuteTask and the resident set alone would cap throughput.
+	// Spawn the resident set eagerly; the rest of the ceiling is spawned on demand by a worker that finds
+	// every peer parked inside ExecuteTask (see maybeSpawnWorker) - the long-task case, where the resident
+	// set alone would cap throughput because nobody is left to dispatch.
 	e.spawnLock.Lock()
 	e.spawnClosed = false
 	e.workersResident.Store(0)
-	e.workersBusy.Store(0)
+	e.workersInTask.Store(0)
 	e.spawnLock.Unlock()
 	for range resident {
 		e.spawnWorker()
@@ -641,12 +651,21 @@ func (e *Engine) spawnWorker() {
 	})
 }
 
-// maybeSpawnWorker grows the pool by one when every spawned worker is busy and the maximum allows it.
-// The condition is the long-task signature: workers parked in ExecuteTask hold no connection, so the
-// database is idle while the resident (dispatch-sized) set is exhausted. Short-task workloads never
-// trip it - a worker returns to Pop long before its peers are all busy.
+// maybeSpawnWorker grows the pool by one when EVERY spawned worker is parked inside the host's
+// ExecuteTask, so not one of them is left to dispatch. That is the long-task signature, and it is the
+// only condition under which another worker helps: a worker inside ExecuteTask holds no database
+// connection, so its replacement adds dispatch capacity rather than competing for the pool.
+//
+// The counter must therefore track time inside ExecuteTask and NOTHING ELSE. An earlier version counted
+// time inside processStep - which includes waiting for a database connection - and so fired on ordinary
+// saturation: workers queued on the pool, the engine read that as "all busy", spawned more workers, and
+// those queued on the same pool too. A positive feedback loop on a signal that measured contention
+// rather than parking; it cost ~20% throughput on a saturated 8-vCPU shard (2,902 vs 3,523 steps/s) and
+// bloated the pool to ~1,300 workers where ~512 sufficed. Any future change here must keep asking: does
+// the worker this condition counts hold a connection? If it might, the condition is measuring the wrong
+// thing.
 func (e *Engine) maybeSpawnWorker() {
-	if int(e.workersBusy.Load()) >= int(e.workersResident.Load()) {
+	if int(e.workersInTask.Load()) >= int(e.workersResident.Load()) {
 		e.spawnWorker()
 	}
 }
