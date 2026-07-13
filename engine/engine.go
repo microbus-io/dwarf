@@ -349,6 +349,15 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	e.maxOpenConns.Store(int32(n))
 	e.db.SetMaxIdleConns(n)
 	e.db.SetMaxOpenConns(n)
+	// The worker ceiling is a function of the pool - it bounds how fast a completion storm can drain
+	// through M connections - so a live pool change must re-derive it. Skipping this leaves the ceiling
+	// at the size computed for the OLD pool: an override that shrinks the pool (the external-pooler case)
+	// would keep a bound many times too permissive on exactly the storm the ceiling exists to contain.
+	// Note this is also the only path that re-derives it once an override is set, because recomputePools
+	// (the fleet-change path) early-returns while the override pins the pools.
+	if e.started.Load() {
+		e.recomputeWorkerCeiling(e.lifetimeCtx)
+	}
 	return nil
 }
 
@@ -470,9 +479,12 @@ func (e *Engine) Startup(ctx context.Context) error {
 	}
 
 	// Measure the RTT to each shard (a few SELECT 1s on connections just opened) and hold it: the worker
-	// ceiling is a function of the shard's POOL, which shrinks as peers are discovered, so the ceiling is
-	// re-derived on every fleet change (recomputeWorkerCeiling) rather than frozen here.
-	e.shardRTTMs = make(map[int]float64, len(shards))
+	// ceiling is a function of the shard's POOL, which changes when peers are discovered or an override
+	// lands, so the ceiling is re-derived on those events (recomputeWorkerCeiling) rather than frozen
+	// here. The map is published under shardsLock because its readers are the peer-signal goroutines and
+	// the live SetMaxOpenConns, and a Shutdown/Startup restart reassigns it - an unsynchronized map
+	// read/write is a fatal throw, not a recoverable panic.
+	rtts := make(map[int]float64, len(shards))
 	for idx := range shards {
 		db, dbErr := e.db.Shard(idx)
 		if dbErr != nil {
@@ -482,9 +494,12 @@ func (e *Engine) Startup(ctx context.Context) error {
 		if rttMs <= 0 {
 			rttMs = defaultRTTMs // probe failed: fall back to the measured same-zone constant
 		}
-		e.shardRTTMs[idx] = rttMs
+		rtts[idx] = rttMs
 		e.logger.DebugContext(ctx, "Shard RTT probed", "shard", idx, "rttMs", rttMs)
 	}
+	e.shardsLock.Lock()
+	e.shardRTTMs = rtts
+	e.shardsLock.Unlock()
 	e.recomputeWorkerCeiling(ctx)
 
 	e.initRuntime()

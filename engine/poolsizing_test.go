@@ -193,6 +193,34 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	close(release)
 }
 
+// TestPoolSizing_CeilingFollowsLivePoolChange pins that the worker ceiling tracks a LIVE pool change.
+// The ceiling bounds how fast a completion storm drains through M connections, so it is a function of
+// the pool: a SetMaxOpenConns that shrinks the pool must shrink it too. Leaving it stale would keep a
+// bound many times too permissive on exactly the storm it exists to contain - and the override path is
+// the only one that can re-derive it, because recomputePools (the fleet-change path) early-returns while
+// an override pins the pools.
+func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	e.RunInTest(t)
+
+	derived := int(e.workers.Load()) // the ceiling for the derived pool of 48
+	assert.True(derived > 1000, "the derived ceiling is large (got %d)", derived)
+
+	// Shrink the pool 12x (the external-pooler case): the ceiling must shrink with it.
+	assert.NoError(e.SetMaxOpenConns(4))
+	shrunk := int(e.workers.Load())
+	assert.True(shrunk < derived/8, "the ceiling followed the pool down (was %d, now %d)", derived, shrunk)
+
+	// And back up: a larger pool drains a storm faster, so it permits more workers.
+	assert.NoError(e.SetMaxOpenConns(96))
+	grown := int(e.workers.Load())
+	assert.True(grown > derived, "the ceiling followed the pool up (derived %d, now %d)", derived, grown)
+}
+
 // TestPoolSizing_SaturationDoesNotGrowThePool pins the direction that was missing, and whose absence let
 // a runaway ship: a DB-BOUND backlog must NOT grow the pool. The spawn trigger counts workers parked
 // inside ExecuteTask (holding no connection); a worker queued on the connection pool is contending, not

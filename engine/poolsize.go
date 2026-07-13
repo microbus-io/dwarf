@@ -203,10 +203,11 @@ func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
 	override := int(e.maxOpenConns.Load())
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)
+	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
 
 	ceiling := math.MaxInt
-	for idx, rttMs := range e.shardRTTMs {
+	for idx, rttMs := range rtts {
 		_, open := shardPool(specs[idx], override, replicas)
 		ceiling = min(ceiling, workerCeiling(open, rttMs))
 	}

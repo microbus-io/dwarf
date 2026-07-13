@@ -112,9 +112,16 @@ engine:
   existing flow keeps the budget/priority frozen at its own `Create`). The replica count that divides the derived
   pools is NOT a setter - it is **observed** live via the peer-discovery signals (see "Peer discovery" below), and
   `recomputePools` pushes each shard's recomputed size through the per-shard `sequel.DB` pool setters (hot/atomic);
-  the uniform override rides `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. The derived *worker* ceiling follows the
-  pools (`recomputeWorkerCeiling` runs after every pool recompute): the ceiling encodes how fast a completion storm
-  drains through `M` connections, so a pool that shrank when peers appeared must not leave a stale, too-high ceiling.
+  the uniform override rides `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. **The derived *worker* ceiling follows the
+  pools, and EVERY path that changes a pool must re-derive it** (`recomputeWorkerCeiling`): the ceiling encodes how
+  fast a completion storm drains through `M` connections, so a shrunken pool must never leave a stale, too-high bound
+  on exactly the storm the ceiling exists to contain. There are two such paths and both call it - `recomputePools`
+  (a fleet change) and `SetMaxOpenConns` (the live override). The override path is not optional: once an override is
+  set, `recomputePools` early-returns (the override pins the pools), so `SetMaxOpenConns` is the *only* path left that
+  can re-derive the ceiling. Pinned by `TestPoolSizing_CeilingFollowsLivePoolChange`.
+  `shardRTTMs` (the Startup RTT probes the ceiling is derived from) is published and read **under `shardsLock`** -
+  its readers are the peer-signal goroutines and this live setter, while `Startup` reassigns it on a restart, and an
+  unsynchronized map read/write is a *fatal throw*, not a recoverable panic.
 - **Construction-time only** (return an error if called after `Startup`): `SetShard(ShardSpec)`, `SetWorkers`,
   `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying
   these on a running engine would mean opening live connections and mutating a shard set that flow keys already
