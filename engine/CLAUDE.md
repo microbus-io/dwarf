@@ -112,9 +112,9 @@ engine:
   existing flow keeps the budget/priority frozen at its own `Create`). The replica count that divides the derived
   pools is NOT a setter - it is **observed** live via the peer-discovery signals (see "Peer discovery" below), and
   `recomputePools` pushes each shard's recomputed size through the per-shard `sequel.DB` pool setters (hot/atomic);
-  the uniform override rides `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. The derived *worker* default is fixed at
-  Startup (observed R is 1 then - only this replica is known); fleet changes adjust pools only (worker resize is a
-  deferred design; see `_CONGESTION_DETECTION.md`).
+  the uniform override rides `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. The derived *worker* ceiling follows the
+  pools (`recomputeWorkerCeiling` runs after every pool recompute): the ceiling encodes how fast a completion storm
+  drains through `M` connections, so a pool that shrank when peers appeared must not leave a stale, too-high ceiling.
 - **Construction-time only** (return an error if called after `Startup`): `SetShard(ShardSpec)`, `SetWorkers`,
   `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying
   these on a running engine would mean opening live connections and mutating a shard set that flow keys already
@@ -1079,8 +1079,7 @@ engine policy — below.
   each holding the full budget overshoot it R times over. R is never declared: the engine observes
   it live via peer-discovery signals (hello/ping/goodbye - see "Peer discovery"), and every fleet
   change pushes recomputed pools to the open shards immediately. The `SetMaxOpenConns` override is a
-  per-replica exact number and is never divided. Eliminating `VirtualCPUs` too is the
-  adaptive-budgeting design in `_CONGESTION_DETECTION.md`.
+  per-replica exact number and is never divided.
 
 **Peer discovery (observed replica count, `peers.go`).** The engine discovers how many replicas share
 its shards from three peer-signal ops: `hello` on Startup (receivers reply with an immediate `ping`,
@@ -1098,12 +1097,21 @@ peer regrows them lazily (only at the loop's prune). A multi-replica host that l
 a no-op now silently over-connects (each replica sees R=1) - wiring it was already the documented
 multi-replica requirement. `engine_id`/`instanceID` (random per process, fresh on restart) is also
 **stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - pure
-forensic provenance ("which replica created/ran this row"), deliberately unindexed, and the fallback
-substrate for a ledger-based R count if the signal-only posture ever proves insufficient
-(`_CONGESTION_DETECTION.md` records that fallback design).
-- **`VirtualCPUs = 0` (unknown) falls back to `defaultPoolSize = 8`**, measured safe on every tier. Never
-  guess a CPU count: the over-connection collapse makes a wrong guess actively harmful, while honest
-  ignorance has a validated-safe behavior.
+forensic provenance ("which replica created/ran this row"), deliberately unindexed. It also keeps a
+ledger-based R count available as a fallback should the signal-only posture ever prove insufficient:
+distinct `engine_id`s over an `ORDER BY step_id DESC LIMIT 1000` backward PK tail-scan (index-free, and
+the rows age out on their own). That fallback is not implemented - the signals own R.
+- **`VirtualCPUs = 0` (undeclared) assumes `defaultVirtualCPUs = 2`** (pool 12). The vCPU count is a fact
+  off the spec sheet - something an operator KNOWS - so this covers the zero-config case, not a guess
+  anyone should rely on. It is bounded, not reckless: 2 is the FLOOR of every current-gen AWS RDS class,
+  and on the smaller machines that do exist (Cloud SQL's 1-vCPU `db-custom-1-*`) a pool of 12 still sits
+  under the measured knee - that tier peaked at M=16 and only collapsed from M=32 up. **Do NOT raise the
+  assumption to 4**: that yields a pool of 24, which lands in the unmeasured gap between the 1-vCPU
+  tier's peak (M=16) and its collapse (M=32). The asymmetry is the whole argument - under-connecting
+  costs throughput but stays healthy (excess load queues client-side, measured benign), over-connecting
+  collapses the database. Consequence to state plainly: an 8-vCPU database left undeclared runs at a
+  fraction of its capacity, and **nothing detects an over-declared `VirtualCPUs`** - the declared facts
+  are trusted, exactly like the shard set.
 - **`SetMaxOpenConns` is the expert override**: pins every shard's pool to exactly n (idle = open = n),
   replacing derivation. Exists for pool-size benchmarking sweeps and externally-constrained budgets.
 - Heterogeneous fleets get heterogeneous pools: sizing is per shard (`database.ShardConfig`), resolved at
@@ -1159,8 +1167,13 @@ smallest known weight (conservative); all-unknown degrades to uniform. `Cordoned
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
-The self-tune endgame (adaptive budgets replacing even `VirtualCPUs`, AIMD-style) is designed but deferred -
-see `_CONGESTION_DETECTION.md`.
+**Adaptive/AIMD budgeting was considered and rejected** (2026-07-13): discovering each shard's knee online
+(TCP-style probe-up/back-off) would eliminate the last declared fact, `VirtualCPUs` - but that fact is
+trivial for an operator to supply, and the engine has already shipped-and-removed one control loop (the
+per-task rate valve + breaker, 25959d0). The remaining exposure is honest and documented: a *wrong* declared
+`VirtualCPUs`, or a multi-replica deployment whose host leaves `SignalPeers` a no-op (each replica then sees
+R=1 and over-connects). Both are declared-fact failures, the same contract the shard set already carries. Do
+not reintroduce a controller without a much stronger reason than tidiness.
 
 The idle-drain / lifetime-recycle connection timers (`ConnMaxIdleTime` / `ConnMaxLifetime`, server-drivers only)
 are a database-layer mechanism — see `internal/database/CLAUDE.md`.
@@ -1723,7 +1736,7 @@ concurrency concern - the sparse indices cannot index a slice directly, so per-s
 encodes its shard (`{shard}-{id}-{token}`), so a flow created on a shard unknown to a peer replica is unroutable
 (404) there - and there is no cross-replica agreement on the set nor any rebalancing of existing flows (they stay on
 their original shard). Doing dynamic growth *correctly* - cross-replica agreement plus rollout sequencing - was
-designed but deliberately deferred (see `_BENCH.md` history); until then the set is fixed per process.
+designed but deliberately deferred; until then the set is fixed per process.
 
 ## Test-only instrumentation seams (`engine/debug.go`)
 

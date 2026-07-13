@@ -109,6 +109,12 @@ is an expert override that pins every shard's pool exactly — for benchmarking 
 externally-constrained connection budgets — and is otherwise best left unset. The measurements behind
 these constants are in the [cloud benchmarks](benchmark-cloud.md).
 
+> **Declare it correctly.** `VirtualCPUs` is trusted, not verified — the engine has no way to check it
+> and does not try. Declaring *more* CPUs than the database has sizes the pool past that machine's knee,
+> and over-connection does not merely waste connections: it collapses throughput (a 1-vCPU instance fell
+> from 856 to 385 steps/s as its pool grew). Under-declaring is the safe direction — it costs throughput
+> while the system stays healthy.
+
 > **Running more than one replica?** The derived budget is a property of the shard's *database*, not
 > of one replica: R replicas each holding the full ~6 × `VirtualCPUs` pool would overshoot the knee R
 > times over, into the over-connection zone the cap exists to prevent. The engine handles this

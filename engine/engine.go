@@ -21,7 +21,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
-	"math"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -139,9 +138,11 @@ type Engine struct {
 	spawnLock       sync.Mutex
 	spawnClosed     bool // set under spawnLock before the pool is drained: no goroutine may join
 	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
-	// input; workerMax is the lease-margin ceiling the pool may grow to. Both resolved at Startup.
+	// input, resolved at Startup. shardRTTMs is each shard's round-trip time, probed once at Startup and
+	// held so the worker ceiling can be re-derived whenever the observed replica count (and with it each
+	// shard's pool) changes - the ceiling is a function of the pool, so it must follow it.
 	workersDispatch int
-	workerMax       int
+	shardRTTMs      map[int]float64
 
 	// Single-slot refiller
 	refillTrigger chan struct{}
@@ -468,13 +469,11 @@ func (e *Engine) Startup(ctx context.Context) error {
 		return errors.Trace(err)
 	}
 
-	// Measure the RTT to each shard (a few SELECT 1s on connections just opened) and derive the worker
-	// ceiling from it: the largest pool that keeps a synchronized completion storm inside the lease
-	// margin (see workerCeiling). The fleet takes the worst shard's number. An explicit SetWorkers is
-	// honored as-is - an operator may consciously trade storm-re-execution risk for long-task
-	// throughput - but is reported when it exceeds the ceiling.
-	ceiling := math.MaxInt
-	for idx, sc := range shards {
+	// Measure the RTT to each shard (a few SELECT 1s on connections just opened) and hold it: the worker
+	// ceiling is a function of the shard's POOL, which shrinks as peers are discovered, so the ceiling is
+	// re-derived on every fleet change (recomputeWorkerCeiling) rather than frozen here.
+	e.shardRTTMs = make(map[int]float64, len(shards))
+	for idx := range shards {
 		db, dbErr := e.db.Shard(idx)
 		if dbErr != nil {
 			continue
@@ -483,22 +482,10 @@ func (e *Engine) Startup(ctx context.Context) error {
 		if rttMs <= 0 {
 			rttMs = defaultRTTMs // probe failed: fall back to the measured same-zone constant
 		}
-		ceiling = min(ceiling, workerCeiling(sc.MaxOpenConns, rttMs))
-		e.logger.DebugContext(ctx, "Shard RTT probed", "shard", idx, "rttMs", rttMs, "conns", sc.MaxOpenConns)
+		e.shardRTTMs[idx] = rttMs
+		e.logger.DebugContext(ctx, "Shard RTT probed", "shard", idx, "rttMs", rttMs)
 	}
-	if ceiling == math.MaxInt {
-		ceiling = 64
-	}
-	e.workerMax = ceiling
-	if !e.workersSet.Load() {
-		// Derived default: the ceiling. It is independent of the task duration T (which the engine
-		// cannot know), so it is correct for any workload - and the pool only grows into it on demand,
-		// so a short-task deployment never pays for the headroom.
-		e.workers.Store(int32(ceiling))
-	} else if n := int(e.workers.Load()); n > ceiling {
-		e.logger.WarnContext(ctx, "Worker count exceeds the lease-margin ceiling: a synchronized completion storm may re-execute tasks",
-			"workers", n, "ceiling", ceiling)
-	}
+	e.recomputeWorkerCeiling(ctx)
 
 	e.initRuntime()
 	return nil

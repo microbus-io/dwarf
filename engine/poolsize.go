@@ -159,10 +159,11 @@ func effectiveVirtualCPUs(declared int) int {
 }
 
 // recomputePools re-derives every shard's connection pool from the observed replica count and pushes
-// the sizes to the open shards (sequel's pool setters are hot/atomic). Called whenever the peer map
-// changes (hello/ping of a new id, goodbye, heartbeat prune). No-ops when the engine is not running,
-// when the SetMaxOpenConns override pins the pools (an exact per-replica number, never divided), and
-// when R is unchanged since the last application.
+// the sizes to the open shards (sequel's pool setters are hot/atomic), then re-derives the worker
+// ceiling, which is a function of those pools. Called whenever the peer map changes (hello/ping of a
+// new id, goodbye, heartbeat prune). No-ops when the engine is not running, when the SetMaxOpenConns
+// override pins the pools (an exact per-replica number, never divided), and when R is unchanged since
+// the last application.
 func (e *Engine) recomputePools() {
 	if !e.started.Load() || e.maxOpenConns.Load() != 0 {
 		return
@@ -184,6 +185,45 @@ func (e *Engine) recomputePools() {
 		db.SetMaxIdleConns(idle)
 	}
 	e.logger.Info("Derived pools recomputed", "replicas", replicas)
+	e.recomputeWorkerCeiling(e.lifetimeCtx)
+}
+
+// recomputeWorkerCeiling re-derives the worker maximum from each shard's CURRENT pool and its probed
+// RTT, taking the worst shard's number. It must follow the pool: the ceiling encodes how fast a
+// synchronized completion storm can drain (M / txTime), so a pool that shrank when peers appeared
+// leaves a stale, too-high ceiling whose storm math no longer holds. An explicit SetWorkers is honored
+// as-is - an operator may consciously trade storm-re-execution risk for long-task throughput - but is
+// reported when it exceeds the ceiling.
+//
+// Shrinking only bounds FUTURE growth: workers already spawned keep running (they are cheap, and killing
+// a worker mid-step is not a thing the pool does). The ceiling is a bound on how far the pool may grow,
+// not a live target.
+func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
+	replicas := e.observedReplicas()
+	override := int(e.maxOpenConns.Load())
+	e.shardsLock.Lock()
+	specs := maps.Clone(e.shardSpecs)
+	e.shardsLock.Unlock()
+
+	ceiling := math.MaxInt
+	for idx, rttMs := range e.shardRTTMs {
+		_, open := shardPool(specs[idx], override, replicas)
+		ceiling = min(ceiling, workerCeiling(open, rttMs))
+	}
+	if ceiling == math.MaxInt {
+		ceiling = 64 // no shard was probed (an unopened or test-mode engine)
+	}
+	if !e.workersSet.Load() {
+		// Derived default: the ceiling. It is independent of the task duration T (which the engine
+		// cannot know), so it is correct for any workload - and the pool only grows into it on demand,
+		// so a short-task deployment never pays for the headroom.
+		e.workers.Store(int32(ceiling))
+		return
+	}
+	if n := int(e.workers.Load()); n > ceiling {
+		e.logger.WarnContext(ctx, "Worker count exceeds the lease-margin ceiling: a synchronized completion storm may re-execute tasks",
+			"workers", n, "ceiling", ceiling)
+	}
 }
 
 // capacityWeight maps a shard's VirtualCPUs to its new-flow placement weight, proportional to the

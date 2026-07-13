@@ -16,7 +16,7 @@ limitations under the License.
 
 // The bench command drives the dwarf engine through its public API against a real database and measures
 // step/flow/MB throughput and latency at a sweep of closed-loop concurrencies. It is the harness of the
-// cloud benchmark campaign (_BENCH.md): a minimal proxy host (no transport framework), an RTT sampler for
+// cloud benchmark campaign: a minimal proxy host (no transport framework), an RTT sampler for
 // the database round-trip term of the sizing model, and one self-contained JSON artifact per run.
 //
 // Example (local smoke, SQLite):
