@@ -21,8 +21,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"maps"
+	"math/rand/v2"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -96,6 +99,12 @@ type Engine struct {
 	timeBudgetMs    atomic.Int64
 	defaultPriority atomic.Int32
 	maxOpenConns    atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
+	replicas        atomic.Int32 // engine replicas sharing the shards' databases; divides derived pools; >= 1
+
+	// instanceID is a random identifier minted per engine instance, stamped as the origin on every
+	// outbound peer signal so DeliverSignal can discard the engine's own signals when the host's
+	// SignalPeers echoes the broadcast back to the sender.
+	instanceID string
 
 	// Database
 	db database.ShardSet
@@ -175,6 +184,8 @@ func NewEngine() *Engine {
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
 	e.defaultPriority.Store(100)
+	e.replicas.Store(1)
+	e.instanceID = strconv.FormatUint(rand.Uint64(), 36)
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
 	e.refillPace = 20 * time.Millisecond
@@ -302,6 +313,37 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	return nil
 }
 
+// SetReplicas declares how many engine replicas share the shards' databases. The derived connection
+// budget (~6x a shard's VirtualCPUs - see SetShard) is a property of the DATABASE, not of one replica:
+// n replicas each holding the full budget overshoot the measured knee by n times, which on small
+// servers collapses throughput rather than merely wasting connections. The engine cannot observe its
+// peers, so the host declares them, and each replica takes its 1/n share of every derived pool. Live:
+// on a running engine the recomputed pools are pushed to every open shard immediately, so a host that
+// scales in or out mid-flight calls this again with the new count. The SetMaxOpenConns override is
+// never divided - it pins pools exactly and takes precedence. The derived default worker count is
+// fixed at Startup from the replica count in effect then; a live replica change adjusts pools only.
+func (e *Engine) SetReplicas(n int) error {
+	if n < 1 {
+		return errors.New("replicas must be >= 1", http.StatusBadRequest)
+	}
+	e.replicas.Store(int32(n))
+	if e.started.Load() && e.maxOpenConns.Load() == 0 {
+		e.shardsLock.Lock()
+		specs := maps.Clone(e.shardSpecs)
+		e.shardsLock.Unlock()
+		for _, idx := range e.db.Indices() {
+			db, err := e.db.Shard(idx)
+			if err != nil {
+				continue
+			}
+			idle, open := shardPool(specs[idx], 0, n) // zero-value spec = the default shard's sizing
+			db.SetMaxOpenConns(open)
+			db.SetMaxIdleConns(idle)
+		}
+	}
+	return nil
+}
+
 // SetHost registers the host the engine reaches the outside world through: it loads graphs, executes
 // tasks, and (optionally) receives flow-stop notifications and carries cross-replica coordination signals.
 // A host must implement LoadGraph and ExecuteTask; the remaining Host methods may be no-ops.
@@ -382,18 +424,20 @@ func (e *Engine) Startup(ctx context.Context) error {
 		return errors.New("host is required")
 	}
 	// Per-shard pool sizes: the SetMaxOpenConns override pins every pool; otherwise each shard's budget
-	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools).
+	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools), split across the
+	// declared replicas (SetReplicas).
 	override := int(e.maxOpenConns.Load())
+	replicas := int(e.replicas.Load())
 	e.shardsLock.Lock()
 	shards := make(map[int]database.ShardConfig, len(e.shardSpecs))
 	for idx, spec := range e.shardSpecs {
-		idle, open := shardPool(spec, override)
+		idle, open := shardPool(spec, override, replicas)
 		shards[idx] = database.ShardConfig{DSN: spec.DSN, MaxIdleConns: idle, MaxOpenConns: open}
 	}
 	e.shardsLock.Unlock()
 	if len(shards) == 0 {
 		// No shard registered: the single default shard, sized by the same rule (no spec = defaults).
-		idle, open := shardPool(ShardSpec{}, override)
+		idle, open := shardPool(ShardSpec{}, override, replicas)
 		shards[1] = database.ShardConfig{MaxIdleConns: idle, MaxOpenConns: open}
 	}
 	if !e.workersSet.Load() {

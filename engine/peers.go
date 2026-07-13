@@ -33,10 +33,19 @@ const (
 )
 
 // Per-op payload bodies. The engine marshals these in emitSignal and unmarshals the received bytes in
-// DeliverSignal.
+// DeliverSignal. Origin carries the sending engine's random instanceID: SignalPeers' contract asks the
+// host to deliver only to OTHER replicas, but a broadcast transport may echo the signal back to the
+// sender - DeliverSignal discards a payload whose Origin matches its own instanceID rather than rely
+// on the host. (An empty Origin - e.g. a signal from an older build - is never discarded.)
 type (
-	enqueuePayload      struct{ Shard, StepID int }
-	statusChangePayload struct{ FlowKey, Status string }
+	enqueuePayload struct {
+		Origin        string
+		Shard, StepID int
+	}
+	statusChangePayload struct {
+		Origin          string
+		FlowKey, Status string
+	}
 )
 
 // emitSignal serializes a signal body and hands (op, bytes) to the host for delivery to OTHER replicas.
@@ -62,11 +71,11 @@ func (e *Engine) emitSignal(ctx context.Context, op signalOp, payload any) {
 }
 
 func (e *Engine) signalEnqueue(ctx context.Context, shard, stepID int) {
-	e.emitSignal(ctx, signalOpEnqueue, enqueuePayload{Shard: shard, StepID: stepID})
+	e.emitSignal(ctx, signalOpEnqueue, enqueuePayload{Origin: e.instanceID, Shard: shard, StepID: stepID})
 }
 
 func (e *Engine) signalStatusChange(ctx context.Context, flowKey, status string) {
-	e.emitSignal(ctx, signalOpStatusChange, statusChangePayload{FlowKey: flowKey, Status: status})
+	e.emitSignal(ctx, signalOpStatusChange, statusChangePayload{Origin: e.instanceID, FlowKey: flowKey, Status: status})
 }
 
 // DeliverSignal processes an inbound peer signal. The host calls it with the op routing key and the
@@ -83,12 +92,18 @@ func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) e
 		if err != nil {
 			return errors.Trace(err)
 		}
+		if p.Origin == e.instanceID {
+			return nil // the host echoed this engine's own broadcast back; nothing new to learn
+		}
 		e.handleEnqueue(ctx, p.Shard, p.StepID)
 	case signalOpStatusChange:
 		var p statusChangePayload
 		err := json.Unmarshal(payload, &p)
 		if err != nil {
 			return errors.Trace(err)
+		}
+		if p.Origin == e.instanceID {
+			return nil
 		}
 		e.notifyStatusChange(p.FlowKey, p.Status)
 	default:

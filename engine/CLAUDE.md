@@ -26,7 +26,11 @@ observability providers below are injected separately. A host must implement `Lo
   via `Engine.DeliverSignal(ctx, op, payload)`, which parses `op` and applies the effect: a work doorbell (`enqueue`)
   or a cross-replica `Await`/status-change wake (`statusChange`). All signal kinds funnel through this one method, so
   adding a new kind needs no host change; the host never branches on `op` or inspects `payload`. A single-replica host
-  does nothing here and none of this runs.
+  does nothing here and none of this runs. The contract asks the host to deliver to OTHER replicas only (the engine
+  applies each signal locally before publishing), but the engine does not rely on it: every payload carries the
+  sending engine's random `instanceID` as `Origin`, and `DeliverSignal` silently discards its own echo (a
+  broadcast transport that includes the publisher is then correct, just wasteful). An empty `Origin` (an older
+  build's signal) is never discarded - process it normally.
 - **`*slog.Logger`** - structured logging sink (`SetLogger`); defaults to a **discard** logger (the engine and
   its sequel DB layer stay silent until a logger is injected, rather than writing to the application-owned
   `slog.Default()` - the library convention). A nil logger resets to that silent default. The engine logs through
@@ -104,9 +108,14 @@ engine:
 
 - **Live** (take effect immediately, callable any time): `SetMaxOpenConns` (an **expert override** that pins
   every shard's pool exactly - the benchmarking / external-pooler path; normal deployments never call it),
-  `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
-  existing flow keeps the budget/priority frozen at its own `Create`); the override pushes to every live shard via
-  `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns` (sequel's pool setters are hot/atomic).
+  `SetReplicas` (the declared engine-replica count; divides every *derived* pool - never the override - and on a
+  running engine recomputes and pushes each shard's pool immediately, so a host scaling in/out calls it again with
+  the new count), `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at
+  each `Create` (an existing flow keeps the budget/priority frozen at its own `Create`); the pool pushes ride
+  sequel's hot/atomic pool setters (`ShardSet.SetMaxIdleConns`/`SetMaxOpenConns` for the uniform override,
+  per-shard `sequel.DB` setters for `SetReplicas`' heterogeneous recompute). The derived *worker* default is fixed
+  at Startup from the replica count in effect then - a live `SetReplicas` adjusts pools only (worker resize is a
+  deferred design; see `_CONGESTION_DETECTION.md`).
 - **Construction-time only** (return an error if called after `Startup`): `SetShard(ShardSpec)`, `SetWorkers`,
   `SetHost`, `SetLogger`, `SetMeterProvider`, `SetTracerProvider` (plus the `SetDebugLogger` convenience). Applying
   these on a running engine would mean opening live connections and mutating a shard set that flow keys already
@@ -1066,6 +1075,13 @@ engine policy — below.
   connections only queue inside the database - and on small servers actively collapse throughput
   (745 -> 212 steps/s at 1 vCPU between M=16 and M=96), which is why the budget is a hard cap, not an
   optimization.
+- **The derived budget is per DATABASE, so `SetReplicas(R)` splits it**: each replica takes
+  `max(2, open/R)`. The knee belongs to the shard's server, not to one replica - R replicas each
+  holding the full budget overshoot it R times over. The engine cannot observe its peers, so the host
+  declares the count; the setter is live (scale-in/out pushes recomputed pools to open shards
+  immediately). The `SetMaxOpenConns` override is a per-replica exact number and is never divided.
+  Eliminating R (and `VirtualCPUs`) from configuration entirely is the adaptive-budgeting design in
+  `_CONGESTION_DETECTION.md`.
 - **`VirtualCPUs = 0` (unknown) falls back to `defaultPoolSize = 8`**, measured safe on every tier. Never
   guess a CPU count: the over-connection collapse makes a wrong guess actively harmful, while honest
   ignorance has a validated-safe behavior.
@@ -1078,7 +1094,10 @@ engine policy — below.
   `T/db` allowance (measured ~3 for no-op tasks, larger with task time) - over-provisioned workers idle
   cheaply, an under-provisioned pool caps throughput below the DB ceiling. `SetWorkers` is the expert
   override (deterministic tests use `SetWorkers(1)`; benchmark sweeps; hosts preferring an explicit bound
-  over an `ExecuteTask` semaphore). The zero-config case stays at the historical 64.
+  over an `ExecuteTask` semaphore). The zero-config case stays at the historical 64. **The 8x allowance is
+  wrong for long tasks**: `N = M x T/db` grows with task time, so minutes-long tasks (LLM calls) want
+  thousands of workers per connection - such hosts `SetWorkers` high (blocked workers are cheap), until the
+  measured-T elastic pool ships (deferred; `_CONGESTION_DETECTION.md`).
 
 **New-flow placement is capacity-weighted (`pickShard`).** Placement is the engine's only load-balancing
 moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks) - so heterogeneous

@@ -88,8 +88,9 @@ func (p *TestProxy) ExecuteTask(ctx context.Context, taskURL string, flow *workf
 }
 
 // AddPeer registers a peer engine that SignalPeers relays to, standing in for the bus in a
-// single-process multi-replica test. Add every OTHER replica's engine (not this proxy's own), so the
-// engine's self-exclusion contract holds. Call before Startup/RunInTest.
+// single-process multi-replica test. Registering the proxy's own engine is allowed and mirrors a
+// broadcast bus that includes the publisher (the foreman's shape): the engine stamps every signal
+// with its instanceID and DeliverSignal discards its own echo. Call before Startup/RunInTest.
 func (p *TestProxy) AddPeer(peer *Engine) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

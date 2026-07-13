@@ -25,28 +25,64 @@ import (
 // TestPoolSizing_ShardPool pins the per-shard pool derivation: the explicit override pins the pool
 // exactly; VirtualCPUs derives the open ceiling at the measured knee (~6x CPUs) with a warm idle core;
 // unknown CPUs fall back to the measured-safe default (8) rather than a guessed CPU count - the
-// over-connection collapse measured on small tiers is why honest ignorance beats a wrong guess.
+// over-connection collapse measured on small tiers is why honest ignorance beats a wrong guess. The
+// derived budgets are per database, so declared replicas (SetReplicas) split them; the override is a
+// per-replica exact number and is never divided.
 func TestPoolSizing_ShardPool(t *testing.T) {
 	assert := testarossa.For(t)
 
 	cases := []struct {
 		vcpus    int
 		override int
+		replicas int
 		idle     int
 		open     int
 	}{
-		{0, 0, 8, 8},    // unknown CPUs, no override: safe default
-		{1, 0, 3, 6},    // 1 vCPU: knee at 6
-		{2, 0, 6, 12},   // 2 vCPU: knee at 12
-		{8, 0, 24, 48},  // 8 vCPU: knee at 48
-		{8, 30, 30, 30}, // override wins over derived, pinned exactly
-		{0, 5, 5, 5},    // override with unknown CPUs
+		{0, 0, 1, 8, 8},    // unknown CPUs, no override: safe default
+		{1, 0, 1, 3, 6},    // 1 vCPU: knee at 6
+		{2, 0, 1, 6, 12},   // 2 vCPU: knee at 12
+		{8, 0, 1, 24, 48},  // 8 vCPU: knee at 48
+		{8, 30, 1, 30, 30}, // override wins over derived, pinned exactly
+		{0, 5, 1, 5, 5},    // override with unknown CPUs
+		{8, 0, 2, 12, 24},  // replicas split the derived budget: each takes its 1/R share of the knee
+		{8, 0, 3, 8, 16},
+		{1, 0, 4, 2, 2},    // floor: even many replicas keep a usable minimum pool
+		{0, 0, 2, 4, 4},    // the unknown-CPU default splits too
+		{8, 30, 4, 30, 30}, // the override is per replica and is never divided
 	}
 	for _, c := range cases {
-		idle, open := shardPool(ShardSpec{VirtualCPUs: c.vcpus}, c.override)
+		idle, open := shardPool(ShardSpec{VirtualCPUs: c.vcpus}, c.override, c.replicas)
 		assert.Equal(c.idle, idle, "idle for %+v", c)
 		assert.Equal(c.open, open, "open for %+v", c)
 	}
+}
+
+// TestPoolSizing_SetReplicasLive pins the hot path: SetReplicas on a running engine recomputes each
+// shard's derived pool and pushes it immediately; a subsequent scale-in restores the full budget; and
+// the SetMaxOpenConns override, once set, is not disturbed by replica changes.
+func TestPoolSizing_SetReplicasLive(t *testing.T) {
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	e.RunInTest(t)
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget at R=1")
+
+	assert.NoError(e.SetReplicas(3))
+	assert.Equal(16, db.DB.Stats().MaxOpenConnections, "1/3 share pushed live")
+
+	assert.NoError(e.SetReplicas(1))
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "scale-in restores the full budget")
+
+	assert.NoError(e.SetMaxOpenConns(11))
+	assert.NoError(e.SetReplicas(4))
+	assert.Equal(11, db.DB.Stats().MaxOpenConnections, "the pinned override is never divided")
+
+	assert.Error(e.SetReplicas(0)) // must be >= 1
 }
 
 // TestPoolSizing_CapacityWeight pins the placement-weight curve: flat up to 2 vCPUs (the measured

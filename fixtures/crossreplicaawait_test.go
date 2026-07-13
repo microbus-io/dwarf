@@ -67,8 +67,13 @@ func TestCrossReplicaAwait(t *testing.T) {
 	eng2.SetHost(proxy2)
 	eng2.SetShard(engine.ShardSpec{Index: 1, DSN: dsn})
 	eng2.SetWorkers(2)
+	// Broadcast shape including the publisher (a bus that echoes to the sender): each engine also
+	// receives its own signals and must discard them by origin, exercising the echo suppression the
+	// production transport relies on.
+	proxy1.AddPeer(eng1)
 	proxy1.AddPeer(eng2)
 	proxy2.AddPeer(eng1)
+	proxy2.AddPeer(eng2)
 
 	err := eng1.Startup(ctx)
 	assert.NoError(err)

@@ -95,7 +95,10 @@ func TestDeliverSignal_IdempotentAndSpoofSafe(t *testing.T) {
 	for _, p := range rec.all() {
 		var ep enqueuePayload
 		if json.Unmarshal(p, &ep) == nil && ep.StepID != 0 {
-			legit = p // a genuine doorbell for a real step (now completed)
+			// Rewrite the Origin to a foreign instance: a replay of this engine's own payload would be
+			// discarded by the echo-suppression check before ever reaching the claim CAS this test pins.
+			ep.Origin = "some-peer"
+			legit, _ = json.Marshal(ep)
 			break
 		}
 	}
@@ -139,4 +142,46 @@ func TestDeliverSignal_IdempotentAndSpoofSafe(t *testing.T) {
 	callsMu.Lock()
 	assert.Equal(callsBefore+1, calls)
 	callsMu.Unlock()
+}
+
+// TestDeliverSignal_IgnoresOwnEcho pins the echo-suppression contract: SignalPeers asks the host to
+// deliver only to OTHER replicas, but a broadcast transport may echo the signal back to the sender, so
+// every outbound payload carries the engine's random instanceID as Origin and DeliverSignal silently
+// discards a payload whose Origin is its own. A payload with a foreign or absent Origin (an older
+// build's signal) is processed normally.
+func TestDeliverSignal_IgnoresOwnEcho(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	eng := NewEngine()
+	assert.NoError(eng.SetHost(noopHost{}))
+	eng.RunInTest(t)
+
+	// A statusChange echo observability hook: register a waiter and see whether a signal wakes it.
+	// The waiters map is created lazily by the first Await, so initialize it here.
+	woke := func(payload statusChangePayload) bool {
+		ch := make(chan string, 1)
+		eng.waitersLock.Lock()
+		if eng.waiters == nil {
+			eng.waiters = make(map[string][]chan string)
+		}
+		eng.waiters[payload.FlowKey] = append(eng.waiters[payload.FlowKey], ch)
+		eng.waitersLock.Unlock()
+		b, _ := json.Marshal(payload)
+		assert.NoError(eng.DeliverSignal(ctx, string(signalOpStatusChange), b))
+		select {
+		case <-ch:
+			return true
+		case <-time.After(200 * time.Millisecond):
+			return false
+		}
+	}
+
+	key := "1-424242-deadbeefdeadbeef"
+	assert.False(woke(statusChangePayload{Origin: eng.instanceID, FlowKey: key, Status: workflow.StatusCompleted}),
+		"the engine's own echoed signal must be discarded")
+	assert.True(woke(statusChangePayload{Origin: "some-peer", FlowKey: key, Status: workflow.StatusCompleted}),
+		"a peer's signal must be processed")
+	assert.True(woke(statusChangePayload{FlowKey: key, Status: workflow.StatusCompleted}),
+		"an origin-less signal (older build) must be processed")
 }

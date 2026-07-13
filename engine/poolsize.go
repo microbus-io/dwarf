@@ -47,15 +47,19 @@ const (
 // shardPool returns the idle/open pool sizes for one shard. The explicit SetMaxOpenConns override wins
 // (the pool is pinned to exactly that size - the benchmarking/expert path); otherwise VirtualCPUs derives
 // the open ceiling at the measured knee with a warm idle core; otherwise the measured-safe default.
-func shardPool(spec ShardSpec, override int) (idle, open int) {
+// The derived budgets are per DATABASE, so they are split across the declared engine replicas
+// (SetReplicas); the override is the operator's exact per-replica number and is never divided.
+func shardPool(spec ShardSpec, override int, replicas int) (idle, open int) {
+	replicas = max(1, replicas)
 	switch {
 	case override > 0:
 		return override, override
 	case spec.VirtualCPUs > 0:
-		open = connsPerVCPU * spec.VirtualCPUs
+		open = max(2, connsPerVCPU*spec.VirtualCPUs/replicas)
 		return max(2, open/2), open
 	default:
-		return defaultPoolSize, defaultPoolSize
+		open = max(2, defaultPoolSize/replicas)
+		return open, open
 	}
 }
 

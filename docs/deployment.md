@@ -105,12 +105,13 @@ measured-safe pool of 8. `SetMaxOpenConns` is an expert override that pins every
 for benchmarking sweeps or externally-constrained connection budgets - and is otherwise best left
 unset. The measurements behind these constants are in the [cloud benchmarks](benchmark-cloud.md).
 
-> **Running more than one replica?** The derived pool is per replica and the engine does not know the
-> replica count, so R replicas open up to R × 6 × `VirtualCPUs` connections against one shard —
-> potentially past the knee into the over-connection zone the cap exists to prevent. Until the engine
-> accounts for replicas, divide the budget yourself: on each replica either set
-> `SetMaxOpenConns(6 × VirtualCPUs / R)` as the override, or declare `VirtualCPUs` as the true CPU
-> count divided by R.
+> **Running more than one replica?** The derived budget is a property of the shard's *database*, not
+> of one replica: R replicas each holding the full ~6 × `VirtualCPUs` pool overshoot the knee R times
+> over, into the over-connection zone the cap exists to prevent. The engine cannot observe its peers,
+> so declare them: call `SetReplicas(R)` on every replica and each takes its 1/R share of every derived
+> pool. The setter is live — when you scale the replica set in or out, call it again with the new count
+> and the resized pools are pushed to the open shards immediately. (`SetMaxOpenConns`, when used, is an
+> exact per-replica number and is never divided.)
 
 ## Running multiple replicas
 
@@ -141,9 +142,11 @@ Inbound:   peer transport → host → eng.DeliverSignal(ctx, op, payload)
 
 Two delivery rules:
 
-- **Deliver to other replicas only.** The engine applies each signal locally *before* publishing it, so a
-  signal echoed back to the sender is processed twice. If your transport delivers to the publisher, filter
-  out self-delivery.
+- **Deliver to other replicas only.** The engine applies each signal locally *before* publishing it, so
+  the sender has nothing to learn from its own broadcast. If your transport delivers to the publisher,
+  filter out self-delivery. As a backstop the engine also stamps each signal with its own instance id
+  and silently discards an echo of its own broadcast — but that discard still costs your transport a
+  round-trip per signal, so filtering at the transport remains the right design.
 - **The flow-stop signal is what wakes a cross-replica `Await`.** A flow created on replica A but completed
   on replica B wakes A's `Await` only via this broadcast — without it, A blocks until its context deadline.
 
