@@ -50,7 +50,7 @@ less useful here.
 | Graph | linear `T0 → T1 → T2 → END` | 3 trivial (no-op) tasks, so **3 steps/flow** and each step is essentially its own DB transaction |
 | Client concurrency | 32 goroutines | offered load; matched to the worker pool so the pool stays saturated |
 | Worker pool | 32 | fixed across dialects/shard counts |
-| Per-shard connection ceiling | 30, `workersPerConn=1` | the test default (8) starves 32 workers and would measure the pool, not the engine; 30 keeps 3 co-located shards under PostgreSQL's default `max_connections=100` (≈90) |
+| Per-shard connection pool | 30, pinned via the `SetMaxOpenConns` override | the test default (8) starves 32 workers and would measure the pool, not the engine; 30 keeps 3 co-located shards under PostgreSQL's default `max_connections=100` (≈90) |
 | Flows per pass | 1000 (`-benchtime=1000x`) | one measured pass per shard count |
 
 Because the tasks are no-ops, essentially all of each step's time is its **durable DB transaction** (claim CAS
@@ -162,9 +162,11 @@ Reading it:
   storage — passing only a key through flow state. (`final_state` is `JSON`/`JSONB`/`NVARCHAR(MAX)`/`TEXT` per
   dialect, so it holds arbitrarily large output on all four — there is no 64 KB cap.)
 
-## What this does *not* measure (yet)
+## What this does *not* measure
 
-A single-host laptop run cannot close these gaps: sustained multi-hour soak for drift (goroutine/memory/
-connection growth), true horizontal scale on **shard-per-server** hardware, high-volume tests (1M+ flows /
-10M+ steps to stress the index story at size), and an empirical sweep of the pool-sizing formula. This
-benchmark is the per-dialect throughput/latency baseline those build on.
+A single-host laptop run cannot show what production hardware does — those dimensions are measured by the
+[cloud benchmarks](benchmark-cloud.md): true horizontal scale on shard-per-server hardware, connection-pool
+and worker sizing (the sizing formula), the effect of real network latency, byte-throughput ceilings, and
+throughput at high volume (100M+ accumulated rows). Still open anywhere: a sustained multi-hour soak for
+drift (goroutine/memory/connection growth). This benchmark remains the per-dialect throughput/latency
+baseline the cloud numbers build on — the cloud campaign runs PostgreSQL only, on the ranking measured here.

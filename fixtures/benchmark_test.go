@@ -65,11 +65,11 @@ const benchConcurrency = 32
 // benchWorkers is the engine worker-pool size, fixed for reproducibility across dialects/shard counts.
 const benchWorkers = 32
 
-// benchMaxOpenConns is the per-shard connection ceiling. The test default (8) is sized to keep many parallel
-// CI test engines under a server's connection cap; a single benchmark engine wants far more or the pool, not
-// the engine, is what's measured.
-// this) per shard, so total connections = shards * that stays under PostgreSQL's default max_connections=100
-// even at 4 co-located shards (≈72). MySQL (151) and SQL Server (~32k) have more headroom.
+// benchMaxOpenConns is the per-shard connection pool, pinned exactly via SetMaxOpenConns. The test default
+// (8) is sized to keep many parallel CI test engines under a server's connection cap; a single benchmark
+// engine wants far more or the pool, not the engine, is what's measured. 30 per shard keeps
+// shards * pool under PostgreSQL's default max_connections=100 at 3 co-located shards (≈90). MySQL (151)
+// and SQL Server (~32k) have more headroom.
 const benchMaxOpenConns = 30
 
 
