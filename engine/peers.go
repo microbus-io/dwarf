@@ -91,7 +91,19 @@ func (e *Engine) signalStatusChange(ctx context.Context, flowKey, status string)
 // host; only the engine interprets them.
 //
 // Trust boundary: the host MUST authenticate the peer channel; a signal admitted here is trusted.
+//
+// An engine that is not running (never started, or already shut down) discards every signal: there is
+// no cache to ring a doorbell into, no waiter to wake, and no pool to resize, and a hello answered by
+// a dead replica would advertise it to the fleet - inflating every peer's observed R and shrinking
+// their connection budgets for a replica that will never claim a step. A host that keeps feeding a
+// shut-down engine (a slow bus drain, a late redelivery) is therefore harmless. Returns nil, not an
+// error: peer signals are fire-and-forget hints, and a dropped one is always recoverable by the
+// receiver's own backstop (the poll for doorbells, the Await re-snapshot for status changes, the next
+// ping for peer discovery).
 func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) error {
+	if !e.started.Load() {
+		return nil
+	}
 	switch signalOp(op) {
 	case signalOpEnqueue:
 		var p enqueuePayload
@@ -161,7 +173,10 @@ func (e *Engine) handlePeerSignal(ctx context.Context, op signalOp, origin strin
 	}
 	changed := len(e.peers) != before
 	e.peersLock.Unlock()
-	if op == signalOpHello && e.started.Load() {
+	if op == signalOpHello {
+		// Answer the joiner so it learns this replica within one round trip rather than a full
+		// heartbeat. Only a RUNNING engine ever gets here (DeliverSignal discards signals otherwise),
+		// so a shut-down replica never advertises itself into a peer's replica count.
 		e.emitSignal(ctx, signalOpPing, peerPayload{Origin: e.instanceID})
 	}
 	if changed {

@@ -42,9 +42,15 @@ func (e *Engine) workerLoop(ctx context.Context) {
 			return
 		}
 		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.StepID, "shard", j.Shard, "needRefill", needRefill)
+		// Grow the pool if this step leaves every spawned worker busy: the long-task signature (peers
+		// parked in ExecuteTask, holding no connections, while candidates wait). Bounded by the
+		// lease-margin ceiling; a no-op for short tasks and once the pool has grown to fit the load.
+		e.workersBusy.Add(1)
+		e.maybeSpawnWorker()
 		err := errors.CatchPanic(func() error {
 			return e.processStep(ctx, j.StepID, j.Shard)
 		})
+		e.workersBusy.Add(-1)
 		if err != nil {
 			e.logger.ErrorContext(ctx, "Failed to process step", "stepID", j.StepID, "error", err)
 		}

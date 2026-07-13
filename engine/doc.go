@@ -38,13 +38,13 @@ limitations under the License.
 // SetTimeBudget, SetDefaultPriority) take effect immediately on a running engine; the
 // construction-time-only ones (SetShard, SetWorkers, SetHost, SetLogger, SetMeterProvider,
 // SetTracerProvider) return an error if called after Startup. Tuning derives from the facts the host
-// declares plus what the engine observes: ShardSpec.VirtualCPUs drives each shard's connection budget,
-// its placement weight, and - in aggregate - the default worker count; the budget is automatically
-// split across the engine replicas sharing the databases, discovered live via peer signals (hello/
-// ping/goodbye over SignalPeers - no replica count is ever declared). The SetWorkers/SetMaxOpenConns
-// overrides exist for tests, benchmarks, and externally-constrained hosts - and SetWorkers is the
-// right tool when tasks run long (the useful worker count grows with task duration, and blocked
-// workers are cheap).
+// declares plus what the engine observes: ShardSpec.VirtualCPUs drives each shard's connection budget
+// and its placement weight; the budget is automatically split across the engine replicas sharing the
+// databases, discovered live via peer signals (hello/ping/goodbye over SignalPeers - no replica count
+// is ever declared); and the worker maximum is derived from the crash-recovery lease margin and the
+// round-trip time measured at Startup, so it holds for any task duration (the pool grows into it only
+// on demand, so short-task deployments never pay for the headroom). The SetWorkers/SetMaxOpenConns
+// overrides exist for tests, benchmarks, and externally-constrained hosts.
 //
 // # Host
 //

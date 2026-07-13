@@ -27,29 +27,42 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// enqueueRecorder wraps a TestProxy and records every enqueue payload the engine hands to SignalPeers, so a
-// test can replay a genuine, engine-serialized doorbell rather than hand-rolling the wire format.
+// enqueueRecorder wraps a TestProxy and records every signal the engine hands to SignalPeers, so a
+// test can replay a genuine, engine-serialized doorbell rather than hand-rolling the wire format, and
+// can assert on what a given engine state does (or does not) broadcast.
 type enqueueRecorder struct {
 	*TestProxy
 	mu       sync.Mutex
 	payloads [][]byte
+	ops      []string
 }
 
 func (r *enqueueRecorder) SignalPeers(ctx context.Context, op string, payload []byte) {
-	if signalOp(op) == signalOpEnqueue {
-		r.mu.Lock()
-		r.payloads = append(r.payloads, append([]byte(nil), payload...))
-		r.mu.Unlock()
-	}
+	r.mu.Lock()
+	r.payloads = append(r.payloads, append([]byte(nil), payload...))
+	r.ops = append(r.ops, op)
+	r.mu.Unlock()
 	r.TestProxy.SignalPeers(ctx, op, payload)
 }
 
+// all returns the enqueue payloads only - the doorbells a replay test needs.
 func (r *enqueueRecorder) all() [][]byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([][]byte, len(r.payloads))
-	copy(out, r.payloads)
+	var out [][]byte
+	for i, p := range r.payloads {
+		if signalOp(r.ops[i]) == signalOpEnqueue {
+			out = append(out, p)
+		}
+	}
 	return out
+}
+
+// count returns how many signals of any kind have been emitted.
+func (r *enqueueRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.ops)
 }
 
 // TestDeliverSignal_IdempotentAndSpoofSafe pins the documented trust-boundary claim (see
@@ -142,6 +155,45 @@ func TestDeliverSignal_IdempotentAndSpoofSafe(t *testing.T) {
 	callsMu.Lock()
 	assert.Equal(callsBefore+1, calls)
 	callsMu.Unlock()
+}
+
+// TestDeliverSignal_OfflineEngineIgnoresSignals pins the offline contract: an engine that is not
+// running (never started, or already shut down) discards every inbound signal. It must not enqueue
+// work (there is no cache), must not touch its peer map, and above all must not answer a hello - a
+// dead replica advertising itself would inflate every peer's observed replica count and shrink their
+// connection budgets for a replica that will never claim a step.
+func TestDeliverSignal_OfflineEngineIgnoresSignals(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	// A host that records every outbound signal, so we can prove a shut-down engine answers nothing.
+	base := NewTestProxy()
+	rec := &enqueueRecorder{TestProxy: base}
+
+	eng := NewEngine()
+	assert.NoError(eng.SetHost(rec))
+	eng.RunInTest(t)
+	assert.NoError(eng.Shutdown(ctx)) // the post-shutdown engine is the target
+
+	emittedBySutdown := rec.count() // the goodbye broadcast is legitimate; anything after it is not
+
+	hi, _ := json.Marshal(peerPayload{Origin: "peer-x"})
+	enq, _ := json.Marshal(enqueuePayload{Origin: "peer-x", Shard: 1, StepID: 1})
+	sc, _ := json.Marshal(statusChangePayload{Origin: "peer-x", FlowKey: "1-1-aaaaaaaaaaaaaaaa", Status: workflow.StatusCompleted})
+
+	// Every op is accepted (fire-and-forget hints never error) and every one is a no-op.
+	assert.NoError(eng.DeliverSignal(ctx, string(signalOpHello), hi))
+	assert.NoError(eng.DeliverSignal(ctx, string(signalOpPing), hi))
+	assert.NoError(eng.DeliverSignal(ctx, string(signalOpGoodbye), hi))
+	assert.NoError(eng.DeliverSignal(ctx, string(signalOpEnqueue), enq))
+	assert.NoError(eng.DeliverSignal(ctx, string(signalOpStatusChange), sc))
+
+	// The peer never entered the map, and the hello was never answered.
+	eng.peersLock.Lock()
+	_, known := eng.peers["peer-x"]
+	eng.peersLock.Unlock()
+	assert.False(known, "a shut-down engine must not track peers")
+	assert.Equal(emittedBySutdown, rec.count(), "a shut-down engine must not broadcast (no ping answering the hello)")
 }
 
 // TestDeliverSignal_IgnoresOwnEcho pins the echo-suppression contract: SignalPeers asks the host to

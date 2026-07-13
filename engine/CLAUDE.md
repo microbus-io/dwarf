@@ -1108,15 +1108,47 @@ substrate for a ledger-based R count if the signal-only posture ever proves insu
   replacing derivation. Exists for pool-size benchmarking sweeps and externally-constrained budgets.
 - Heterogeneous fleets get heterogeneous pools: sizing is per shard (`database.ShardConfig`), resolved at
   `Startup` from each spec.
-- **The default worker count derives from the aggregate budget**: `max(64, 8 x sum(per-shard open))`
-  (`workersPerConnBudget`). Workers are shard-agnostic, so the sum is what they feed; the 8 is a generous
-  `T/db` allowance (measured ~3 for no-op tasks, larger with task time) - over-provisioned workers idle
-  cheaply, an under-provisioned pool caps throughput below the DB ceiling. `SetWorkers` is the expert
-  override (deterministic tests use `SetWorkers(1)`; benchmark sweeps; hosts preferring an explicit bound
-  over an `ExecuteTask` semaphore). The zero-config case stays at the historical 64. **The 8x allowance is
-  wrong for long tasks**: `N = M x T/db` grows with task time, so minutes-long tasks (LLM calls) want
-  thousands of workers per connection - such hosts `SetWorkers` high (blocked workers are cheap), until the
-  measured-T elastic pool ships (deferred; `_CONGESTION_DETECTION.md`).
+**Worker sizing: the lease-margin ceiling, with a grow-on-demand pool (`poolsize.go`, `engine.go`).**
+The worker count is split into two numbers, because they answer different questions:
+
+- **`workersDispatch` (resident, eagerly spawned; also the candidate cache's size)** =
+  `max(64, 8 x sum(per-shard open))` (`workersPerConnBudget`). Dispatch is DATABASE-bound, so the
+  connection budget is what sizes it; the 8 is a generous `T/db` allowance (measured ~3 for no-op tasks).
+  **The cache - and therefore every refill scan, which reads up to `2 x` this - must never be sized from
+  the maximum below**: a worker parked in a long `ExecuteTask` holds no connection and dispatches nothing,
+  so a ceiling-sized cache would scan a backlog orders of magnitude larger than the replica can claim.
+- **`workers` (the MAXIMUM the pool may grow to)** = `workerCeiling` = `M x margin / txTime x safety`,
+  the largest pool that keeps a **synchronized completion storm** inside the crash-recovery lease margin.
+  The storm: every in-flight task blocks on one downstream (an LLM provider outage) and is released at
+  once, so N completions contend for M connections, draining at `M/txTime`; a completion that out-waits
+  its remaining margin is fenced after a peer re-claims - correct, but the task **re-executes**,
+  duplicating the most expensive work at the worst moment. `txTime = 7 x RTT + ~3ms` (the post-task phase
+  is 7 round trips: the standalone completed-UPDATE plus the transition tx's lock-grab, successor INSERT,
+  successor_id UPDATE, step_id UPDATE, COMMIT), `safety = 1/4` (claims compete with the drain, tx time
+  varies, a mature DB is ~20% slower, shards are unevenly loaded). The fleet takes the **worst shard's**
+  number. **RTT is measured at Startup** (`probeRTT`: a few `SELECT 1`s per shard, MINIMUM of the samples,
+  first discarded - it pays connection setup); a failed probe falls back to the measured same-zone
+  constant. Every input is engine-visible - **no task duration T anywhere**, which is exactly what makes
+  this derivable where `N = M x T/db` is not.
+- **The pool grows on demand** (`spawnWorker`/`maybeSpawnWorker`): a worker that pops a step and finds
+  every spawned peer busy adds one, up to the maximum. Short tasks never trip it (a worker is back at
+  `Pop` long before its peers are all busy); long tasks grow the pool to fit the concurrent work, which
+  is the whole point of a ceiling in the tens of thousands. Growth is inherently bounded by the work in
+  flight, not by the ceiling, so an idle engine (and every test) stays at its resident set. `spawnClosed`
+  is set under `spawnLock` **before** `drainRuntime` waits on the pool - a `WaitGroup.Add` concurrent with
+  a `Wait` panics, so the flag, not a counter check, is what makes shutdown safe.
+- **`SetWorkers` pins the maximum** (deterministic tests use `SetWorkers(1)`, which also disables growth;
+  benchmark sweeps; hosts wanting a smaller global bound, e.g. for memory - the in-flight state maps are
+  a cost the engine cannot see). Setting it ABOVE the ceiling is allowed and warned about at Startup: an
+  operator may consciously trade storm-re-execution risk for long-task throughput. `SetWorkers(0)` is the
+  await-only replica.
+
+The worker count is deliberately **not** a backpressure knob: a global cap cannot express "64 concurrent
+LLM calls, 1000 concurrent DB lookups, 200 Jira writes", and a per-task-URL cap is the removed valve's
+wrong axis all over again (see "Backpressure is the task's or host's job"). Per-downstream concurrency
+belongs in the host's `ExecuteTask` (a semaphore keyed on the real provider/account) with `flow.Retry`
+when the downstream says no. The engine sizes workers for throughput, bounded only by what it can see:
+the lease margin.
 
 **New-flow placement is capacity-weighted (`pickShard`).** Placement is the engine's only load-balancing
 moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks) - so heterogeneous
@@ -1162,9 +1194,10 @@ fan-out). `Fork` resolves scheduling once for the whole cloned tree and binds it
 - **Priority is a property of the flow, not the task or workflow type.** Step order *within* a flow is dictated by the
   graph, not urgency; priority only arbitrates *between* flows competing for workers, so it is resolved once at
   `Create` and immutable (`workflow.FlowOptions` is flow-level for the same reason).
-- **Workers default to the aggregate-budget derivation** (see "Connection pool sizing"); an explicit
-  `SetWorkers` pins the cap. A worker blocked on a `ExecuteTask` call is just a goroutine stack plus a
-  socket, so the derivation errs generous.
+- **Workers default to the lease-margin ceiling with a grow-on-demand pool** (see "Worker sizing"); an
+  explicit `SetWorkers` pins the maximum. A worker blocked on an `ExecuteTask` call is just a goroutine
+  stack plus a socket, so the derivation errs generous - and the pool only grows into it when work is
+  actually parked.
 - **Fairness weight is denormalized at `Create`, never resolved on the selection path** (a resolver hook would put
   synchronous I/O on the hot critical section). When a key's steps carry inconsistent weights, the oldest candidate
   step's weight is used; keeping weights consistent for a key is the caller's responsibility.

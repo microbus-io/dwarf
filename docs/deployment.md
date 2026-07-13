@@ -14,7 +14,7 @@ after `Startup`. `SetMaxOpenConns`, `SetTimeBudget`, and `SetDefaultPriority` ar
 | Method | Default | Purpose |
 |---|---|---|
 | `SetShard(spec)` | one default shard | Registers one shard: `ShardSpec{Index, DSN, VirtualCPUs, Cordoned}`; call once per shard |
-| `SetWorkers(n)` | derived | Expert override: pins worker count (deterministic tests, benchmarks, explicit host bounds). Normally unset - derived as 8x the aggregate connection budget, floor 64 |
+| `SetWorkers(n)` | derived | Expert override: pins the worker *maximum* (deterministic tests, benchmarks, memory-bounded hosts). Normally unset — derived from the crash-recovery lease margin and the round-trip time measured at startup, so it holds for any task duration; the pool grows into it only on demand |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
 | `SetMaxOpenConns(n)` | derived | Expert override: pins every shard's pool exactly (benchmarks, external poolers). Normally unset - each shard's pool derives from its `VirtualCPUs` |
@@ -114,6 +114,36 @@ unset. The measurements behind these constants are in the [cloud benchmarks](ben
 > load-bearing for pool sizing, not just for wake latency: a multi-replica deployment that leaves it
 > a no-op has each replica believing it is alone, over-connecting the shard.
 > (`SetMaxOpenConns`, when used, is an exact per-replica number and is never divided.)
+
+## Workers
+
+Workers are goroutines that dispatch steps: claim, call `ExecuteTask`, write the result. The count needs
+no configuration, and — importantly — it is **not** derived from how long your tasks take, which the
+engine cannot know.
+
+What bounds it is the crash-recovery lease. If every in-flight task is blocked on the same downstream
+(an LLM provider having an outage, say) and that downstream recovers, every task finishes at once and
+their completion transactions all queue for the shard's connections. A completion that waits longer than
+its remaining lease margin has its step re-claimed by a peer — correct, but the task runs a second time,
+which for a two-minute LLM call is real money. So the engine derives the largest pool that keeps such a
+storm inside the margin: `N_max = M × margin ÷ txTime × safety`, where `txTime ≈ 7·L + 3 ms` is the
+post-task database phase and `L` is the round-trip time it measures with a few `SELECT 1`s at startup.
+The worst shard's number wins.
+
+The pool **grows into that ceiling on demand**: it starts at a resident set sized by the connection
+budget (which is what dispatch is actually bound by) and adds a worker whenever every existing one is
+parked in a task and more work is waiting. So a short-task deployment stays small, and a workload of
+long tasks grows to fit its own concurrency — no knob either way.
+
+Reasons to call `SetWorkers(n)` anyway: **memory** (each in-flight step holds its state map, a size the
+engine cannot see — the ceiling can be tens of thousands), a deliberately smaller global bound, or
+deterministic tests. Setting it *above* the ceiling is allowed and logged as a warning: you are trading
+the risk of duplicate task execution in a storm for long-task throughput.
+
+Worker count is deliberately **not** a backpressure mechanism — a single global cap cannot express
+"64 concurrent LLM calls, 1,000 concurrent database lookups, 200 Jira writes". Per-downstream limits
+belong in your `ExecuteTask` (a semaphore keyed on the actual provider or account), with `flow.Retry`
+when the downstream pushes back.
 
 ## Running multiple replicas
 

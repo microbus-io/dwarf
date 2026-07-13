@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -125,9 +126,22 @@ type Engine struct {
 	// started.Load()==true, so the atomic started flag is the happens-before barrier.
 	testHashedID string
 
-	// Candidate cache and worker pool
-	cache      candidatecache.Cache
-	workerPool sync.WaitGroup
+	// Candidate cache and worker pool. `workers` is the pool's MAXIMUM (the lease-margin ceiling, or an
+	// explicit SetWorkers); the pool is grow-on-demand: initRuntime spawns `workersResident` = the
+	// dispatch-sized set (8 x conns, floored at 64), and a worker that finds every spawned peer busy
+	// while work is waiting spawns one more, up to the max. A worker blocked in a long ExecuteTask holds
+	// no connection, so the ceiling can be large without the resident set - and therefore the candidate
+	// cache and its refill scan, both sized from the resident count - paying for it.
+	cache           candidatecache.Cache
+	workerPool      sync.WaitGroup
+	workersResident atomic.Int32 // goroutines spawned so far
+	workersBusy     atomic.Int32 // goroutines currently inside processStep
+	spawnLock       sync.Mutex
+	spawnClosed     bool // set under spawnLock before the pool is drained: no goroutine may join
+	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
+	// input; workerMax is the lease-margin ceiling the pool may grow to. Both resolved at Startup.
+	workersDispatch int
+	workerMax       int
 
 	// Single-slot refiller
 	refillTrigger chan struct{}
@@ -276,15 +290,22 @@ func (e *Engine) SetShard(spec ShardSpec) error {
 	return nil
 }
 
-// SetWorkers is an expert override that pins the number of worker goroutines, replacing the derived
-// default (a generous multiple of the aggregate connection budget across shards - workers are
-// shard-agnostic, so the sum is what they feed). Operators normally never call this: under-provisioned
-// workers cap throughput below the database's ceiling, while the derived default errs on the cheap side
-// (an idle worker is a goroutine stack and a socket). The override exists for deterministic tests
-// (SetWorkers(1) serializes dispatch), benchmark sweeps, and hosts that prefer an explicit concurrency
-// bound over a semaphore in their ExecuteTask. SetWorkers(0) is a valid shape: a replica that creates,
-// awaits, and serves reads but never executes tasks. Construction-time only: the pool size is fixed at
-// Startup, so a call on a running engine is rejected.
+// SetWorkers is an expert override that pins the maximum number of worker goroutines, replacing the
+// derived default. The default is the lease-margin ceiling: the largest pool that keeps a synchronized
+// completion storm (every in-flight task released at once by a recovering downstream) draining inside
+// the crash-recovery lease margin, derived at Startup from each shard's connection budget and its
+// measured round-trip time. It contains no assumption about task duration, so it is correct for any
+// workload; the pool grows into it only on demand, so a short-task deployment never pays for the
+// headroom.
+//
+// Operators normally never call this. Reasons to: memory (the ceiling can be tens of thousands of
+// workers, and each in-flight step also holds its state map - a bound the engine cannot see); a
+// deliberately smaller global concurrency cap; deterministic tests (SetWorkers(1) serializes dispatch);
+// and benchmark sweeps. Setting it ABOVE the ceiling is allowed - an operator may consciously trade the
+// risk of duplicate task execution in a storm for long-task throughput - and is logged as a warning at
+// Startup. SetWorkers(0) is a valid shape: a replica that creates, awaits, and serves reads but never
+// executes tasks. Construction-time only: the pool bound is fixed at Startup, so a call on a running
+// engine is rejected.
 func (e *Engine) SetWorkers(n int) error {
 	if e.started.Load() {
 		return errSetAfterStartup("workers")
@@ -425,18 +446,15 @@ func (e *Engine) Startup(ctx context.Context) error {
 		idle, open := shardPool(ShardSpec{}, override, replicas)
 		shards[1] = database.ShardConfig{MaxIdleConns: idle, MaxOpenConns: open}
 	}
-	if !e.workersSet.Load() {
-		// Derived default: workers feed the aggregate connection budget (they are shard-agnostic), and
-		// the useful count is aggregate-conns x T/db. T/db is a runtime quantity (it includes task time),
-		// so the default uses a deliberately generous 8: erring high costs idle goroutines, erring low
-		// caps throughput below the database ceiling. The floor keeps the zero-config case at the
-		// historical 64. Explicit SetWorkers replaces all of this.
-		total := 0
-		for _, sc := range shards {
-			total += sc.MaxOpenConns
-		}
-		e.workers.Store(int32(max(64, workersPerConnBudget*total)))
+	// The RESIDENT worker set (and, with it, the candidate cache and every refill scan) is sized from
+	// the aggregate connection budget: dispatch is database-bound, so 8 x conns keeps the pool saturated
+	// for short tasks, floored at the historical 64 for the zero-config case.
+	totalConns := 0
+	for _, sc := range shards {
+		totalConns += sc.MaxOpenConns
 	}
+	e.workersDispatch = max(64, workersPerConnBudget*totalConns)
+
 	err := e.db.Open(ctx, database.Config{
 		Shards:         shards,
 		TestID:         e.testHashedID,
@@ -447,6 +465,39 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
+
+	// Measure the RTT to each shard (a few SELECT 1s on connections just opened) and derive the worker
+	// ceiling from it: the largest pool that keeps a synchronized completion storm inside the lease
+	// margin (see workerCeiling). The fleet takes the worst shard's number. An explicit SetWorkers is
+	// honored as-is - an operator may consciously trade storm-re-execution risk for long-task
+	// throughput - but is reported when it exceeds the ceiling.
+	ceiling := math.MaxInt
+	for idx, sc := range shards {
+		db, dbErr := e.db.Shard(idx)
+		if dbErr != nil {
+			continue
+		}
+		rttMs := probeRTT(ctx, db)
+		if rttMs <= 0 {
+			rttMs = defaultRTTMs // probe failed: fall back to the measured same-zone constant
+		}
+		ceiling = min(ceiling, workerCeiling(sc.MaxOpenConns, rttMs))
+		e.logger.DebugContext(ctx, "Shard RTT probed", "shard", idx, "rttMs", rttMs, "conns", sc.MaxOpenConns)
+	}
+	if ceiling == math.MaxInt {
+		ceiling = 64
+	}
+	e.workerMax = ceiling
+	if !e.workersSet.Load() {
+		// Derived default: the ceiling. It is independent of the task duration T (which the engine
+		// cannot know), so it is correct for any workload - and the pool only grows into it on demand,
+		// so a short-task deployment never pays for the headroom.
+		e.workers.Store(int32(ceiling))
+	} else if n := int(e.workers.Load()); n > ceiling {
+		e.logger.WarnContext(ctx, "Worker count exceeds the lease-margin ceiling: a synchronized completion storm may re-execute tasks",
+			"workers", n, "ceiling", ceiling)
+	}
+
 	e.initRuntime()
 	return nil
 }
@@ -516,7 +567,16 @@ func (e *Engine) RunInTest(t *testing.T) {
 // initRuntime starts all goroutines and initializes runtime state.
 func (e *Engine) initRuntime() {
 	e.lifetimeCtx, e.lifetimeCancel = context.WithCancel(context.Background())
-	e.cache.Init(int(e.workers.Load()))
+	// The cache (and every refill scan, which reads up to its capacity) is sized from the RESIDENT
+	// dispatch set, never from the worker maximum: a worker parked in a long ExecuteTask holds no
+	// connection and dispatches nothing, so letting the ceiling size the cache would scan a backlog
+	// orders of magnitude larger than the engine can claim. In test mode the dispatch set is unresolved
+	// (RunInTest skips the Startup derivation for engines with no shards), so fall back to the max.
+	resident := min(e.workersDispatch, int(e.workers.Load()))
+	if e.workersDispatch == 0 {
+		resident = int(e.workers.Load())
+	}
+	e.cache.Init(resident)
 	e.refillTrigger = make(chan struct{}, 1)
 	e.refillStop = make(chan struct{})
 	e.wakeTimer = make(chan struct{}, 1)
@@ -538,11 +598,16 @@ func (e *Engine) initRuntime() {
 	// Resolve the tracer (no-op unless a TracerProvider was injected or the global SDK is configured).
 	e.initTracer()
 
-	numWorkers := int(e.workers.Load())
-	for range numWorkers {
-		e.workerPool.Go(func() {
-			e.workerLoop(e.lifetimeCtx)
-		})
+	// Spawn the resident set eagerly; the rest of the ceiling is spawned on demand by workers that find
+	// every peer busy while work waits (see maybeSpawnWorker) - the long-task case, where workers park
+	// in ExecuteTask and the resident set alone would cap throughput.
+	e.spawnLock.Lock()
+	e.spawnClosed = false
+	e.workersResident.Store(0)
+	e.workersBusy.Store(0)
+	e.spawnLock.Unlock()
+	for range resident {
+		e.spawnWorker()
 	}
 	e.timerWorker.Go(func() {
 		e.timerLoop(e.lifetimeCtx)
@@ -570,9 +635,41 @@ func (e *Engine) initRuntime() {
 	e.requestRefill()
 }
 
+// spawnWorker adds one worker goroutine to the pool, unless the pool is draining (spawnClosed) or the
+// maximum is already reached. Called for the resident set at startup and on demand thereafter. The
+// spawnLock makes the resident count and the WaitGroup.Add inside Go atomic with respect to the drain,
+// which sets spawnClosed before it Waits - a goroutine joining a WaitGroup concurrently with Wait is a
+// panic, so the flag, not a bare counter check, is what makes shutdown safe.
+func (e *Engine) spawnWorker() {
+	e.spawnLock.Lock()
+	defer e.spawnLock.Unlock()
+	if e.spawnClosed || int(e.workersResident.Load()) >= int(e.workers.Load()) {
+		return
+	}
+	e.workersResident.Add(1)
+	e.workerPool.Go(func() {
+		e.workerLoop(e.lifetimeCtx)
+	})
+}
+
+// maybeSpawnWorker grows the pool by one when every spawned worker is busy and the maximum allows it.
+// The condition is the long-task signature: workers parked in ExecuteTask hold no connection, so the
+// database is idle while the resident (dispatch-sized) set is exhausted. Short-task workloads never
+// trip it - a worker returns to Pop long before its peers are all busy.
+func (e *Engine) maybeSpawnWorker() {
+	if int(e.workersBusy.Load()) >= int(e.workersResident.Load()) {
+		e.spawnWorker()
+	}
+}
+
 // drainRuntime stops all goroutines in order. The caller (Shutdown) has already flipped e.started to false
 // via CompareAndSwap, which also serves as the single-shutdown guard.
 func (e *Engine) drainRuntime() {
+	// Close the pool to new workers BEFORE the WaitGroup is waited on below (an Add concurrent with a
+	// Wait panics). After this, a worker mid-loop can still finish its step; it just cannot spawn a peer.
+	e.spawnLock.Lock()
+	e.spawnClosed = true
+	e.spawnLock.Unlock()
 	// Announce the graceful exit first (fire-and-forget) so peers drop this replica and regrow their
 	// pool shares immediately rather than waiting out the 3x-ping expiry, then stop the heartbeat.
 	e.emitSignal(context.Background(), signalOpGoodbye, peerPayload{Origin: e.instanceID})

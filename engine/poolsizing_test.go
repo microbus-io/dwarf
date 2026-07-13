@@ -19,9 +19,11 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -143,6 +145,52 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget restored")
 }
 
+// TestPoolSizing_PoolGrowsForLongTasks pins the grow-on-demand pool: with every worker parked in a
+// slow ExecuteTask and more work waiting, the pool spawns beyond its resident set (up to the ceiling),
+// so long tasks are not capped by the connection-derived dispatch count. This is the whole point of
+// deriving the worker maximum from the lease margin rather than from the connection budget.
+func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := NewTestProxy()
+	release := make(chan struct{})
+	var running atomic.Int32
+	g := workflow.NewGraph("Grow")
+	g.SetEndpoint("Slow", "grow/slow")
+	g.AddTransition("Slow", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("grow/g", g)
+	proxy.HandleTask("grow/slow", func(ctx context.Context, f *workflow.Flow) error {
+		running.Add(1)
+		<-release // park: hold the worker exactly as a minutes-long LLM call would
+		return nil
+	})
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(proxy))
+	e.RunInTest(t)
+	resident := e.workersResident.Load()
+	assert.Equal(int32(64), resident, "resident set is the connection-derived dispatch count")
+
+	// Start more flows than the resident set can hold concurrently.
+	const flows = 80
+	for range flows {
+		_, err := e.Create(ctx, "grow/g", nil, nil)
+		assert.NoError(err)
+	}
+	// The pool must grow past its resident set to run them all at once.
+	deadline := time.Now().Add(10 * time.Second)
+	for running.Load() < flows && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.Equal(int32(flows), running.Load(), "every parked task got a worker")
+	assert.True(e.workersResident.Load() > resident, "the pool grew beyond its resident set (got %d, was %d)",
+		e.workersResident.Load(), resident)
+	assert.True(int(e.workersResident.Load()) <= int(e.workers.Load()), "growth stays under the ceiling")
+	close(release)
+}
+
 // TestPoolSizing_CapacityWeight pins the placement-weight curve: flat up to 2 vCPUs (the measured
 // 1- and 2-vCPU tiers ceiling at the same ~745 steps/s), then ~450 steps/s per vCPU.
 func TestPoolSizing_CapacityWeight(t *testing.T) {
@@ -220,25 +268,51 @@ func TestPoolSizing_LiveOverride(t *testing.T) {
 	assert.Error(e.SetMaxOpenConns(0)) // must be >= 1
 }
 
-// TestPoolSizing_DerivedWorkers pins the derived default worker count: 8x the aggregate connection
-// budget across shards (workers are shard-agnostic), floored at the historical 64 so the zero-config
-// case is unchanged, and replaced entirely by an explicit SetWorkers.
+// TestPoolSizing_WorkerCeiling pins the lease-margin ceiling: N_max = M x margin / txTime x safety,
+// with txTime = 7 x RTT + 3ms. Every input is engine-visible (the pool, the engine's own 30s margin,
+// and the RTT probed at Startup) - no task duration appears, which is the property that makes it a
+// derivable default rather than a guess.
+func TestPoolSizing_WorkerCeiling(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// Same-zone (RTT 0.3ms): txTime = 7*0.3 + 3 = 5.1ms. M=48 -> 48 * 30000/5.1 * 0.25 = 70,588.
+	assert.Equal(70588, workerCeiling(48, 0.3))
+	// The small-tier pool scales the ceiling down proportionally: M=6 -> 8,823.
+	assert.Equal(8823, workerCeiling(6, 0.3))
+	// Cross-zone (RTT 1.1ms): txTime = 10.7ms - roughly halves the ceiling at the same pool.
+	assert.Equal(33644, workerCeiling(48, 1.1))
+	// A high-latency link is dominated by the round trips: RTT 5ms -> txTime 38ms.
+	assert.Equal(9473, workerCeiling(48, 5))
+	// Degenerate inputs never yield a zero-worker pool.
+	assert.True(workerCeiling(1, 0) >= 1)
+}
+
+// TestPoolSizing_DerivedWorkers pins the derived worker default (the lease-margin ceiling, so it holds
+// for any task duration) and the resident/dispatch split: the eagerly-spawned set and the candidate
+// cache stay sized by the connection budget (8x conns, floor 64), because a worker parked in a long
+// ExecuteTask holds no connection and must not inflate the refill scan.
 func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert := testarossa.For(t)
 
-	// Zero-config: single default shard (pool 8) -> max(64, 8*8) = 64, the historical default.
+	// Zero-config: one default shard (pool 8). The max is the ceiling (large - it is set by the 30s
+	// margin, not by the task); the resident set and cache stay at the historical 64.
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
 	e.RunInTest(t)
-	assert.Equal(64, int(e.workers.Load()))
+	assert.Equal(64, e.workersDispatch, "resident/dispatch set stays connection-derived")
+	assert.Equal(128, e.cache.Capacity(), "cache is 2x the resident set, never 2x the ceiling")
+	assert.True(int(e.workers.Load()) > 1000, "the worker max is the lease-margin ceiling (got %d)", e.workers.Load())
+	assert.Equal(int32(64), e.workersResident.Load(), "only the resident set is spawned eagerly")
 
-	// An 8-vCPU shard (pool 48) + a 2-vCPU shard (pool 12): max(64, 8*60) = 480.
+	// An 8-vCPU shard (pool 48) + a 2-vCPU shard (pool 12): dispatch = max(64, 8*60) = 480, and the
+	// ceiling is keyed on the WORST shard (the 2-vCPU pool of 12), never the aggregate.
 	e2 := NewEngine()
 	assert.NoError(e2.SetHost(noopHost{}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 2, VirtualCPUs: 2}))
 	e2.RunInTest(t)
-	assert.Equal(480, int(e2.workers.Load()))
+	assert.Equal(480, e2.workersDispatch)
+	assert.True(int(e2.workers.Load()) < workerCeiling(48, 0.3), "the smallest pool sets the ceiling")
 
 	// Explicit SetWorkers pins, regardless of shards.
 	e3 := NewEngine()
