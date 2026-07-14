@@ -449,8 +449,9 @@ immediately.
 On re-entry after Resume it unmarshals the resume data into out with yield=false and does not re-arm; the task
 proceeds. The payload is any JSON-marshalable value (a struct or a map[string]any); out is a pointer (a *struct or
 *map[string]any) the resume data is unmarshaled into by JSON tag, or nil to ignore it. The returned err is non-nil
-only if the payload fails to marshal (or out fails to unmarshal); interrupt itself has no failure mode, so err is
-otherwise always nil. Symmetric with Subgraph: any in, pointer out.
+only if the payload cannot be marshalled or stored (or out fails to unmarshal); interrupt itself has no failure
+mode, so err is otherwise always nil. A rejected payload does not arm the interrupt. The payload is copied, so
+mutating it after the call does not change what is persisted. Symmetric with Subgraph: any in, pointer out.
 
 	var resume ResumeData
 	yield, err := flow.Interrupt(map[string]any{"request": "userInput"}, &resume)

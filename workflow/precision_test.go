@@ -17,6 +17,7 @@ limitations under the License.
 package workflow
 
 import (
+	"math"
 	"testing"
 
 	"github.com/microbus-io/testarossa"
@@ -120,4 +121,56 @@ func TestFlow_SetAcceptsWhatFloat64CarriesExactly(t *testing.T) {
 	assert.Equal("1234567890123456789", f.GetString("orderID"))
 
 	assert.NoError(f.Set("order", map[string]any{"total": 19.99, "lines": []int{1, 2, 3}}))
+}
+
+// toStateMap round-trips EVERY payload through JSON, including a map that could have been passed through
+// as-is. The short-circuit it replaced forfeited three things at once, and all three are pinned here.
+func TestFlow_PayloadIsValidatedCopiedAndUniform(t *testing.T) {
+	t.Run("a map payload is validated, exactly like a struct one", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		// A NaN cannot be marshalled. Before, this was rejected from a struct but ACCEPTED from a map, and
+		// only surfaced later as an opaque step failure from inside the orchestrator.
+		f := NewFlow()
+		yield, err := f.Interrupt(map[string]any{"score": math.NaN()}, nil)
+		assert.Error(err)
+		assert.False(yield)
+		_, armed := f.InterruptRequested()
+		assert.False(armed, "a rejected payload must not arm the interrupt")
+
+		// Same value, struct shape: same outcome.
+		f2 := NewFlow()
+		_, err = f2.Interrupt(struct {
+			Score float64 `json:"score"`
+		}{Score: math.Inf(1)}, nil)
+		assert.Error(err)
+
+		// And the storability rules apply to a map payload too (see CheckStorable).
+		f3 := NewFlow()
+		_, err = f3.Subgraph("some/graph", map[string]any{"id": int64(1) << 54}, nil)
+		assert.Error(err)
+		_, _, armed = f3.SubgraphRequested()
+		assert.False(armed)
+	})
+
+	t.Run("the payload is copied, not aliased", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		// The caller's map is live. Without the copy, mutating it after the call would edit the payload the
+		// orchestrator is about to persist, from under it.
+		payload := map[string]any{"question": "approve?"}
+		f := NewFlow()
+		yield, err := f.Interrupt(payload, nil)
+		assert.NoError(err)
+		assert.True(yield)
+
+		payload["question"] = "MUTATED"
+		payload["injected"] = true
+
+		got, armed := f.InterruptRequested()
+		assert.True(armed)
+		assert.Equal("approve?", got["question"])
+		_, injected := got["injected"]
+		assert.False(injected)
+	})
 }

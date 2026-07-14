@@ -112,16 +112,25 @@ func parseMapInto(m map[string]any, target any) error {
 	return nil
 }
 
-// toStateMap converts an arbitrary JSON-marshalable value into a state map. A nil value yields a
-// nil map ("no arguments"); a map[string]any passes through unchanged; anything else (typically a
-// struct) is round-tripped through JSON so its tagged fields become map entries.
+// toStateMap converts an arbitrary JSON-marshalable value (a struct, or a map) into a state map. A nil
+// value yields a nil map ("no arguments").
+//
+// EVERY input is round-tripped through JSON, including a map[string]any that could have been returned
+// as-is. Three things follow from the round trip, and the map short-circuit forfeited all three:
+//
+//   - The payload is VALIDATED. A value that cannot be marshalled (a NaN, an +Inf, a channel) or cannot
+//     be stored (jsonx) is reported to the caller here. Short-circuited, the same NaN was accepted from a
+//     map and rejected from a struct, and only surfaced later as an opaque step failure from deep inside
+//     the orchestrator.
+//   - The Flow gets its OWN COPY. The caller's map is live: a task that keeps a reference and mutates it
+//     after the call would otherwise be editing the payload the orchestrator is about to persist, from
+//     under it.
+//   - The shape is uniform - plain decoded values, as if they had come back from the database - rather
+//     than whatever Go types the caller happened to hold.
 func toStateMap(v any) (map[string]any, error) {
 	if v == nil {
 		return nil, nil
 	}
-	// Marshal even a map that would pass straight through: this is a persisted payload (an interrupt
-	// request, a subgraph's initial state), so it is held to the same storability rules as any other state
-	// write - and the check needs the JSON form.
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -129,9 +138,6 @@ func toStateMap(v any) (map[string]any, error) {
 	err = jsonx.CheckStorable(data)
 	if err != nil {
 		return nil, errors.Trace(err)
-	}
-	if m, ok := v.(map[string]any); ok {
-		return m, nil
 	}
 	var m map[string]any
 	err = json.Unmarshal(data, &m)
