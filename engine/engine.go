@@ -239,7 +239,12 @@ func NewEngine() *Engine {
 	e.engineID = int64(rand.Uint64() >> 1) // positive, 63 bits of entropy
 	e.instanceID = strconv.FormatInt(e.engineID, 36)
 	e.peers = map[string]time.Time{e.instanceID: time.Now()}
-	e.lastAppliedR.Store(1)
+	// 0, not 1: nothing has been APPLIED yet. Until the grace window closes the pools sit at
+	// startupPoolCap, derived with no R at all - so the first recompute (the grace timer, even on a
+	// solo replica whose observedReplicas() is 1) must see a change and push the derived sizes. Seeding
+	// 1 made a solo replica's 1==1 swap a no-op, pinning it at the cap forever. shardPool clamps
+	// replicas=max(1,...), so 0 never reaches the arithmetic; it is purely the dedupe's "unapplied" sentinel.
+	e.lastAppliedR.Store(0)
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
 	e.pingInterval = 20 * time.Second

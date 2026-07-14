@@ -696,6 +696,39 @@ func TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown(t *testing.T) {
 	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "the derived size is taken once the window closes")
 }
 
+// TestPoolSizing_StartupCapReleasesForASoloReplica pins the case the dedupe seed used to break: a SOLO replica
+// (no peer ever says hello) must take its full derived budget once the grace window closes. observedReplicas() is 1
+// throughout, so with lastAppliedR pre-seeded to 1 the grace-timer recompute's 1==1 swap no-op'd and the pool stayed
+// pinned at startupPoolCap forever - a silent ~4x under-connect on the single most common deployment shape. Seeding
+// lastAppliedR to 0 ("nothing applied yet") makes the first recompute a genuine change and pushes the derived size.
+func TestPoolSizing_StartupCapReleasesForASoloReplica(t *testing.T) {
+	assert := testarossa.For(t)
+
+	saved := startupPoolGrace
+	startupPoolGrace = 300 * time.Millisecond
+	t.Cleanup(func() { startupPoolGrace = saved })
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derives 48 at R=1
+	e.RunInTest(t)
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+
+	// Inside the window: capped, and no peer will ever arrive.
+	assert.Equal(startupPoolCap, db.DB.Stats().MaxOpenConnections, "the pool is capped until the window closes")
+	assert.Equal(1, e.observedReplicas(), "solo - observedReplicas stays 1 for the whole test")
+
+	// The window closes with R still 1. The full derived budget (48, undivided) must be taken - not held at the cap.
+	deadline := time.Now().Add(5 * time.Second)
+	for db.DB.Stats().MaxOpenConnections == startupPoolCap && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "a solo replica takes its full derived pool once the grace timer fires")
+	assert.Equal(1, e.observedReplicas(), "still solo - the release came from the grace timer, not a peer")
+}
+
 // TestPoolSizing_StartupCapNeverRaisesASmallPool pins that the cap only ever LOWERS. A shard whose derived pool is
 // already smaller than the cap keeps its own smaller pool - the cap is a ceiling for the unknown, not a floor.
 func TestPoolSizing_StartupCapNeverRaisesASmallPool(t *testing.T) {
