@@ -312,6 +312,20 @@ state; a workflow author wanting narrower carryover scrubs with an entry adapter
 thread's policy** (priority/fairness/budget/baggage) from the latest turn; a caller wanting different policy
 uses `Create` with `FlowOptions.ThreadKey` (explicit policy, same thread).
 
+*`additionalState` is canonicalized at the door, because reducers compare MARSHALLED bytes.* A reducer
+dedupes (`union`) and overwrites (`merge`) on the marshalled form of its operands, and those bytes are
+canonical only for a **decoded** value: Go sorts a map's keys but marshals a **struct's** fields in
+*declaration* order, and a `json.RawMessage` passes through verbatim (keeping the author's key order, and a
+literal `1.0` that a `float64` would have written as `1`). Every other reducer input arrives decoded from the
+database (the fan-in merge, `computeFinalState`) - which is what makes their byte comparison sound - but
+`Continue`'s `additionalState` is the caller's **raw Go value** and skips the database entirely. Unfixed, a
+caller re-contributing an element already in the thread's state *as a struct* produced a second, byte-different
+spelling of it and `union` kept **both** (pinned by `fixtures/continuecanonicalflow_test.go`). So
+`continueFlow` round-trips it through JSON first (`canonicalStateMap`, outside the transaction - a
+lock-contention retry re-runs the closure and this is invariant), keeping *reducers only ever see decoded
+values* an invariant rather than a coincidence. This is why the fix belongs here and not in `reduceUnion`: it
+covers **every** reducer, not just the one whose symptom was noticed.
+
 *Concurrent Continue is serialized by a thread-anchor lock, so exactly one wins.* The latest-turn read
 (`find latest non-fork flow`), the completed-check, and the new-turn insert run in **one transaction**
 (`continueFlow`), opened **write-first on the thread anchor row** (`UPDATE dwarf_flows SET touch=1-touch WHERE
@@ -796,6 +810,12 @@ has exactly one fenced write to the dispatched step, and everything after it is 
   (`WHERE step_id=? AND status!='cancelled' AND lease_seq=?`). Past it the step is `completed`, so no peer can
   re-claim (claim needs `pending`); the entire transition transaction — successor inserts, `cohort_arrivals`
   bumps, `successor_id` writes, `fireFanInDirect`, `completeFlowSequential`, `insertFanInStep` — needs no fence.
+  `completeFlowSequential` in particular makes **no step write at all**: the gate already completed the step, so the
+  trailing `UPDATE dwarf_steps SET status='completed'` it used to run was a re-write of the same value — a wasted
+  transaction on every flow completion, and the one post-execution step write with neither a status guard nor a
+  fence. It was removed; do not reintroduce it. (Its only other effect was to bump the step's `updated_at` a second
+  time, to *after* `completeFlow`'s transaction — inflating the step's recorded task duration, which `History` and
+  the `FlowRenderer` compute as `updated_at - started_at`, by the cost of completing the flow.)
 - **fail** (`failStep`) — gated by the step-fail UPDATE, the transaction's first write, so a zero-row match
   wrote nothing: it commits the empty tx and returns `fenced=true`, and `failAndReturn` surfaces `nil` so the
   flow the peer is re-running is never failed. This closes the "late error → healthy-flow kill" case.

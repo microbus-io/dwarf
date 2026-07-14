@@ -71,19 +71,19 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 }
 
 // completeFlowSequential marks a flow completed when no successor exists.
-func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, db *sequel.DB, flowID int, flowToken string, stepID int, workflowURL string) error {
+//
+// It does NOT touch the step. Both call sites are downstream of processStep's fenced completion UPDATE, which
+// already set status='completed' (and bailed on a zero-row fence match), so the step is terminal before this
+// runs. The trailing "UPDATE dwarf_steps SET status=completed" that used to live here re-wrote that same value:
+// one wasted BEGIN/UPDATE/COMMIT on the hot path of EVERY flow completion, whose only real effect was to bump
+// the step's updated_at a second time - to AFTER completeFlow's transaction, inflating the step's recorded task
+// duration (History, and the FlowRenderer's node label, read updated_at - started_at) by the cost of completing
+// the flow. It was also the one post-execution step write carrying neither a status guard nor a lease_seq fence,
+// harmless only because the fenced gate upstream had already made the step terminal. Do not reintroduce it.
+func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowID int, flowToken string, workflowURL string) error {
 	e.logger.DebugContext(ctx, "Flow completed", "workflow", workflowURL)
 	_, err := e.completeFlow(ctx, shardNum, flowID, flowToken)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE step_id=?",
-			workflow.StatusCompleted, stepID,
-		)
-		return nil
-	}))
+	return errors.Trace(err)
 }
 
 // mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail.

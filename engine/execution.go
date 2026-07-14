@@ -612,13 +612,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if isPushTransition && cohortSize == 0 {
 		fanInTarget := cg.fanIn.For(taskName)
 		if fanInTarget == "" {
-			return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, workflowURL)
+			return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
 		}
 		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 	}
 
 	if cohortSize == 0 {
-		return e.completeFlowSequential(ctx, shardNum, db, flowID, flowToken, stepID, workflowURL)
+		return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
 	}
 
 	cohortSpawnID := lineageID
