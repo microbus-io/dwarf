@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/candidatecache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -414,6 +415,30 @@ func TestFault_RefillScanErr(t *testing.T) {
 	if out := boundedRun(t, e, "frefill/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
+}
+
+// TestFault_RefillScanErrPreservesCache pins the other half of the scan-error policy. Refill is a wholesale
+// replace that HONORS an empty batch (an empty scan means nothing is due, so the cached hints are dead), so
+// runRefill must not route a FAILED scan into it: an error means "unknown", not "nothing is due", and
+// replacing a healthy cache with nothing on a transient DB blip would idle every worker in Pop until the 1s
+// re-poll. The hints cost nothing to keep - a worker popping a stale one just loses its claim CAS.
+func TestFault_RefillScanErrPreservesCache(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	e := NewEngine()
+	e.SetHost(NewTestProxy())
+	assert.NoError(e.SetWorkers(0)) // no workers, so nothing drains the cache underneath the assertion
+	e.RunInTest(t)
+
+	// Seed the cache as a healthy refill would have, then make every scan fail (sticky, so the background
+	// refiller cannot slip a legitimate empty refill in and wipe the cache on its own).
+	e.cache.Refill([]candidatecache.Job{{StepID: 101, Shard: 1}, {StepID: 102, Shard: 1}}, 5)
+	assert.Equal(2, e.cache.Len())
+	e.seams.InjectN(1<<20, faultRefillScanErr)
+
+	assert.False(e.runRefill(ctx)) // a failed scan is never a full batch
+	assert.Equal(2, e.cache.Len()) // ... and it did not discard the healthy candidates
 }
 
 func TestFault_PollSizingErr(t *testing.T) {

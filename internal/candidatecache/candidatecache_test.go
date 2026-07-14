@@ -192,16 +192,35 @@ func TestCandidateCache_OfferClosedIsNoop(t *testing.T) {
 	assert.False(c.Offer(Job{StepID: 1}, 0))
 }
 
-func TestCandidateCache_RefillEmptyOrClosedIsNoop(t *testing.T) {
+// TestCandidateCache_RefillEmptyIsWholesale pins that an EMPTY batch is a real refill, not a no-op: it
+// empties the cache and resets the floor. An empty batch is the scan's statement that nothing is due, so
+// every still-cached candidate is a step that is no longer pending - a dead hint a worker would pop and
+// burn a claim-CAS round-trip on. Skipping the empty case (what Refill used to do) kept the whole dead
+// batch and left the floor advertising a band the cache no longer held.
+func TestCandidateCache_RefillEmptyIsWholesale(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(4)
+	c.Refill([]Job{{StepID: 1}, {StepID: 2}}, 5)
+	assert.Expect(c.Len(), 2)
+	assert.Expect(c.floor, 5)
+
+	c.Refill(nil, math.MaxInt) // the scan came back empty: nothing is due
+	assert.Expect(c.Len(), 0)
+	assert.Expect(c.floor, math.MaxInt)
+
+	// An arrival on an empty cache asks for a refill rather than head-inserting (the refiller picks the
+	// strictly-best step); the point here is that it is not weighed against a floor the cache no longer has.
+	assert.True(c.Offer(Job{StepID: 9}, 7))
+	assert.Expect(c.Len(), 0)
+}
+
+func TestCandidateCache_RefillClosedIsNoop(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var c Cache
 	c.Init(2)
-
-	c.Refill(nil, 5)
-	assert.Expect(c.Len(), 0)
-	assert.Expect(c.floor, math.MaxInt)
-
 	c.Close()
 	c.Refill([]Job{{StepID: 1}}, 1)
 	assert.Expect(c.Len(), 0)

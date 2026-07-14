@@ -347,8 +347,14 @@ func (e *Engine) runRefill(ctx context.Context) (full bool) {
 		// so the doorbell fires again and the refiller retries once the blip clears.
 		e.logger.ErrorContext(ctx, "Scanning priority band for refill", "error", err)
 		e.shortenNextPoll(time.Now().Add(pollErrorRetryInterval))
+		// Return WITHOUT refilling. A failed scan means "unknown", not "nothing is due", and Refill is a
+		// wholesale replace that honors an empty batch (it must, or an empty scan leaves a stale floor) -
+		// so falling through would hand a healthy cache's candidates to the garbage collector because the
+		// database blipped, idling every worker in Pop until the 1s re-poll. Keeping the existing hints
+		// costs nothing: they are hints, and a worker popping a stale one just loses its claim CAS.
+		return false
 	}
-	if err == nil && band != math.MaxInt {
+	if band != math.MaxInt {
 		type keyBucket struct {
 			weight    float64
 			oldestAge float64

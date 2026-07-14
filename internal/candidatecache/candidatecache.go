@@ -78,12 +78,29 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 	return j, true, needRefill
 }
 
-// Refill replaces the cache contents with batch at the given priority floor and wakes all waiters.
+// Refill replaces the cache contents with batch at the given priority floor and wakes all waiters. The
+// replacement is wholesale: an EMPTY batch empties the cache and resets the floor, exactly as draining the
+// last item through Pop does.
+//
+// The empty case must not be skipped. An empty batch is the scan's statement that NOTHING IS DUE, so every
+// candidate still cached is a step that is no longer pending - a dead hint. An early return on
+// len(batch)==0 (what this did) keeps that whole dead batch, and each worker then pops one and burns a
+// claim-CAS round-trip discovering it is gone, up to a cacheful of them. The floor rides along stale,
+// advertising a band the cache no longer holds. Neither breaks liveness - a CAS loser re-requests a refill,
+// so the cache self-corrects within a cycle - which is exactly why the bug was invisible; it is wasted work
+// and a lying floor, not a wedge. The caller already computes the right floor for this case (MaxInt).
+//
+// The caller must NOT route a *failed* scan here: a scan error means "unknown", not "nothing is due", and
+// wholesale-replacing a healthy cache with nothing on a transient DB blip would idle every worker in Pop.
+// runRefill returns early instead (see the error path in engine/scheduling.go).
 func (c *Cache) Refill(batch []Job, floor int) {
 	c.mu.Lock()
-	if c.closed || len(batch) == 0 {
+	if c.closed {
 		c.mu.Unlock()
 		return
+	}
+	if len(batch) == 0 {
+		batch = nil // Pop's empty representation, so Len/append behave identically either way
 	}
 	c.items = batch
 	c.floor = floor
