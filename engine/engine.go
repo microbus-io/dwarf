@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -245,8 +246,11 @@ type ShardSpec struct {
 	// routing, so the index-to-DSN mapping must be identical across all replicas and stable across
 	// restarts.
 	Index int
-	// DSN is the connection string of the shard's database (dialect auto-detected). A "%d" is
-	// substituted with the shard index. An empty DSN is only valid in test mode.
+	// DSN is the connection string of the shard's database (dialect auto-detected), used EXACTLY as
+	// given - the engine never formats or rewrites it, so a percent-encoded credential (a password
+	// "p@ss" written "p%40ss") survives intact. Each shard is declared with its own DSN; there is no
+	// template. An empty DSN is only valid in test mode, where the DSN IS a template (a "%d" is replaced
+	// with the shard index, which is what gives each shard its own isolated test database).
 	DSN string
 	// VirtualCPUs is the CPU count of the shard's database server - a fact off the instance's spec
 	// sheet. It drives the shard's connection budget (the pool is capped near the measured knee of ~6x
@@ -329,9 +333,22 @@ func (e *Engine) SetTimeBudget(d time.Duration) error {
 	return nil
 }
 
-// SetDefaultPriority sets the default priority for new flows. Live: read fresh on each Create, so it takes
-// effect on a running engine immediately.
+// SetDefaultPriority sets the default priority for new flows: an integer >= 1, lower runs first. Live:
+// read fresh on each Create, so it takes effect on a running engine immediately.
+//
+// The lower bound is not cosmetic. The refiller selects the strict-minimum band with a `priority=(SELECT
+// MIN(priority) ...)` subquery, but a step is only a candidate at all through predicates the scan applies
+// to a positive band; a flow stamped with a non-positive priority would sit `pending` forever, invisible
+// to selection, while the doorbell re-rang it in a loop. The upper bound guards the column's int32 width -
+// an int that overflows it (3_000_000_000, say) would wrap NEGATIVE and produce exactly that hang.
+// `FlowOptions.Priority` is separately validated at Create, where 0 means "unset, take this default".
 func (e *Engine) SetDefaultPriority(p int) error {
+	if p < 1 {
+		return errors.New("default priority must be >= 1", http.StatusBadRequest)
+	}
+	if p > math.MaxInt32 {
+		return errors.New("default priority must fit in an int32", http.StatusBadRequest)
+	}
 	e.defaultPriority.Store(int32(p))
 	return nil
 }

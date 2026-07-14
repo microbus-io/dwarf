@@ -23,10 +23,10 @@ package database
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,9 +48,10 @@ const sequenceName = "github.com/microbus-io/dwarf"
 // ShardConfig is one shard's open-time configuration: its DSN and its resolved pool sizes. The
 // connection-sizing formula is the caller's concern; this package applies the two integers verbatim.
 type ShardConfig struct {
-	// DSN is the sequel data source name; a "%d" is substituted with the shard index. In test mode
-	// (Config.TestID set) an empty DSN falls back to SEQUEL_TESTING_DSN, then to the SQLite in-memory
-	// default.
+	// DSN is the sequel data source name, used EXACTLY as given: it is never formatted or substituted, so
+	// a percent-encoded credential survives it intact. In test mode (Config.TestID set) it is a template -
+	// an empty DSN falls back to SEQUEL_TESTING_DSN and then the SQLite in-memory default, and a "%d" is
+	// replaced with the shard index, which is what makes each shard's test database distinct.
 	DSN          string
 	MaxIdleConns int
 	MaxOpenConns int
@@ -127,19 +128,30 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-// resolveShardDSN resolves one shard's DSN: in test mode an unset DSN falls back to SEQUEL_TESTING_DSN, then
-// the SQLite in-memory default; a "%d" is substituted with the shard index.
+// resolveShardDSN resolves one shard's DSN.
+//
+// In PRODUCTION the operator's DSN is used exactly as given - no formatting, no substitution. A DSN is a
+// credential-bearing string and percent-encoding in it is routine (`p%40ss` for a password `p@ss`), so
+// running it through fmt.Sprintf - which interprets EVERY `%` as a verb, not just `%d` - silently
+// corrupted it: `%40s` parsed as "width 40, verb s", swallowed the shard index there, and left the real
+// `%d` with no argument (`%!d(MISSING)`). The driver then failed with an opaque parse error naming
+// neither the shard nor the cause. Shards are declared one by one with their own DSN, so a template was
+// never needed here.
+//
+// In TEST MODE the DSN is a template by design - one base is shared across shards and `%d` is what makes
+// each shard's database distinct (the per-shard isolation the fixtures rely on; see fixtures/CLAUDE.md).
+// The substitution is a literal ReplaceAll, so it still cannot interpret any other `%` sequence.
 func resolveShardDSN(cfg Config, shardIndex int, dsn string) string {
-	if cfg.TestID != "" && dsn == "" {
+	if cfg.TestID == "" {
+		return dsn
+	}
+	if dsn == "" {
 		dsn = os.Getenv("SEQUEL_TESTING_DSN")
 		if dsn == "" {
 			dsn = "file:dwarf_%d?mode=memory&cache=shared"
 		}
 	}
-	if strings.Contains(dsn, "%d") {
-		dsn = fmt.Sprintf(dsn, shardIndex)
-	}
-	return dsn
+	return strings.ReplaceAll(dsn, "%d", strconv.Itoa(shardIndex))
 }
 
 // openShard opens and migrates one shard from its resolved DSN, in test mode first wrapping it via

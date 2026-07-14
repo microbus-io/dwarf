@@ -420,6 +420,22 @@ Same-age ties break by `(shard, step_id)` for determinism. The pick is re-rolled
 is proportional to weight and independent of backlog depth or shard layout. Strict priority means no aging: a fed
 higher-priority band starves lower bands by design.
 
+**The scan is bounded PER FAIRNESS KEY, not globally, and this is load-bearing.** The band query carries a
+`ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id)` cut at the cache capacity, so it reads at
+most `capacity` rows per key. Two things this must not become:
+
+- **Not unbounded** (what it was): with no cut, every due row of every key at the band crossed the wire and was
+  allocated as a `candidateRow`, only to be discarded down to `capacity` by the pick. The cost grew with the
+  **backlog**, so under a deep one - the case the refiller exists for - it re-read hundreds of thousands of rows every
+  `refillPace` (20ms), i.e. it was most expensive exactly when the replica was already behind.
+- **Not a plain `LIMIT`**: a global `ORDER BY created_at LIMIT n` would let one tenant's old backlog fill the entire
+  window and starve every other key - it would trade the waste for a fairness bug.
+
+The per-key cut costs nothing in selection: the pick takes at most `capacity` steps in one refill, so it can never
+want more than `capacity` from any single key. The batch is *identical* to the unbounded scan's - it is simply no
+longer built by materializing the backlog first. Pinned by `TestRefillScan_BoundedPerFairnessKey` (both halves: the
+cut, and that every key still reaches the batch, oldest-first).
+
 **Queue-as-cache, doorbell, single-slot refiller.** The enqueue signal carries no step to a queue; it is a **doorbell**
 (`candidatecache.Cache.Offer`). The generic path (`handleEnqueue`) resolves the announced step's priority *and*
 `not_before` in one PK lookup (off the selection path) - but the **hot-path origination sites skip the lookup**
@@ -1148,9 +1164,10 @@ The worker count is split into two numbers, because they answer different questi
 - **`workersDispatch` (resident, eagerly spawned; also the candidate cache's size)** =
   `max(64, 8 x sum(per-shard open))` (`workersPerConnBudget`). Dispatch is DATABASE-bound, so the
   connection budget is what sizes it; the 8 is a generous `T/db` allowance (measured ~3 for no-op tasks).
-  **The cache - and therefore every refill scan, which reads up to `2 x` this - must never be sized from
-  the maximum below**: a worker parked in a long `ExecuteTask` holds no connection and dispatches nothing,
-  so a ceiling-sized cache would scan a backlog orders of magnitude larger than the replica can claim.
+  **The cache - and therefore the refiller's scan, which reads at most the cache capacity PER FAIRNESS KEY
+  (see "Selection") - must never be sized from the maximum below**: a worker parked in a long `ExecuteTask`
+  holds no connection and dispatches nothing, so a ceiling-sized cache would scan far more of the backlog
+  than the replica can ever claim.
 - **`workers` (the MAXIMUM the pool may grow to)** = `workerCeiling` = `M x margin / txTime x safety`,
   the largest pool that keeps a **synchronized completion storm** inside the crash-recovery lease margin.
   The storm: every in-flight task blocks on one downstream (an LLM provider outage) and is released at

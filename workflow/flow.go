@@ -27,6 +27,40 @@ import (
 
 // Flow is the carrier object passed to tasks. It holds the state and control
 // signals for a single step in a workflow execution.
+//
+// # A Flow is NOT safe for concurrent use
+//
+// A task owns its Flow exclusively for the duration of its execution, and the Flow carries no lock. A
+// task that fans out internally must therefore collect results in its own goroutines and write them to
+// the Flow from a single goroutine:
+//
+//	// WRONG - concurrent map writes
+//	var g errgroup.Group
+//	for _, id := range f.GetStrings("ids") {
+//	    g.Go(func() error { f.SetString("r_"+id, lookup(id)); return nil })
+//	}
+//	return g.Wait()
+//
+//	// RIGHT - fan out, then write from one goroutine
+//	results := make([]string, len(ids))
+//	var g errgroup.Group
+//	for i, id := range ids {
+//	    g.Go(func() error { results[i] = lookup(id); return nil })
+//	}
+//	if err := g.Wait(); err != nil {
+//	    return err
+//	}
+//	for i, id := range ids {
+//	    f.SetString("r_"+id, results[i])
+//	}
+//
+// This matters more than the usual "not thread-safe" caveat. Two goroutines writing a Flow trip the Go
+// runtime's concurrent-map-write detector, which is a *throw*, not a panic: it cannot be recovered, so
+// the engine's panic isolation around a task cannot contain it. One task that does this takes down the
+// whole replica, and every unrelated flow in flight on it.
+//
+// Fanning work out across STEPS (a forEach transition) is the first-class way to parallelize, and each
+// branch gets its own Flow.
 type Flow struct {
 	// State
 	state   map[string]any

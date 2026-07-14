@@ -64,9 +64,9 @@ shard).
 SetShard(1, "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable")
 SetShard(2, "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable")
 
-# test/dev (co-located): shards as databases on one server (%d substitutes the shard index)
-SetShard(1, "postgres://user:pass@127.0.0.1:5432/dwarf_%d?sslmode=disable")
-SetShard(2, "postgres://user:pass@127.0.0.1:5432/dwarf_%d?sslmode=disable")
+# test/dev (co-located): shards as databases on one server - each named exactly
+SetShard(1, "postgres://user:pass@127.0.0.1:5432/dwarf_1?sslmode=disable")
+SetShard(2, "postgres://user:pass@127.0.0.1:5432/dwarf_2?sslmode=disable")
 ```
 
 The connection budget is a **per-server** property. With distributed shards each server hosts one shard per replica,
@@ -113,11 +113,18 @@ index; any non-nil return fails the whole call. Each caller retries on its next 
 tick, `scanPriorityBand` next refill), so a transient hiccup heals within one cycle and a persistent outage degrades
 loudly.
 
-**DSN format & test-mode resolution.** Each shard carries its own DSN (`Config.Shards`, index -> DSN); a `%d` in a
-DSN is substituted with the shard index (a convenience for patterned database names and the test defaults, not a
-requirement). `Open` resolves per shard: an explicit DSN wins; else, in test mode (`Config.TestID` set),
-`SEQUEL_TESTING_DSN`, then the SQLite in-memory default `file:dwarf_%d?mode=memory&cache=shared`; after `%d`
-substitution, test mode wraps the result via `sequel.CreateTestingDatabase` into an isolated, auto-dropped database
-keyed on `(driver, baseDSN, TestID)`. Two shards resolving to the same DSN are rejected at `Open` (the collapse
-guard). The test-harness rationale (per-test isolation, why the `%d` default, the multi-replica shared-key case)
-lives in `fixtures/CLAUDE.md`.
+**DSN format & test-mode resolution.** Each shard carries its own DSN (`Config.Shards`, index -> DSN).
+
+**In production the DSN is used EXACTLY as given - never formatted, never rewritten.** It was once run through
+`fmt.Sprintf` to substitute a `%d`, which interprets *every* `%` as a verb: a percent-encoded credential (a password
+`p@ss` written `p%40ss` - entirely routine) was silently corrupted (`%40s` parsed as "width 40, verb s", swallowing
+the shard index, leaving a real `%d` as `%!d(MISSING)`), and the driver then failed with an opaque parse error naming
+neither the shard nor the cause. Shards are declared one at a time with their own DSN, so no template is needed.
+
+**In test mode the DSN IS a template**, and that is where `%d` lives: one base is shared across shards and the index
+substitution is what makes each shard's database distinct (`strings.ReplaceAll`, so no other `%` sequence is touched).
+`Open` resolves per shard: an explicit DSN wins; else `SEQUEL_TESTING_DSN`; else the SQLite in-memory default
+`file:dwarf_%d?mode=memory&cache=shared`. It then wraps the result via `sequel.CreateTestingDatabase` into an
+isolated, auto-dropped database keyed on `(driver, baseDSN, TestID)`. Two shards resolving to the same DSN are
+rejected at `Open` (the collapse guard). The test-harness rationale (per-test isolation, why the `%d` default, the
+multi-replica shared-key case) lives in `fixtures/CLAUDE.md`. Pinned by `internal/database/database_test.go`.

@@ -86,8 +86,8 @@ Rules:
   (`{shard}-{flowID}-{token}`) and drives routing, so the index→DSN mapping must be **identical across
   all replicas** and stable across restarts.
 - Every shard database must exist before startup — the engine migrates the schema but does not
-  `CREATE DATABASE`. A `%d` in a DSN is substituted with the shard index (a convenience for patterned
-  hostnames or database names); arbitrary per-shard DSNs need no `%d`.
+  `CREATE DATABASE`. Each shard's DSN is used exactly as given — the engine never rewrites it, so a
+  percent-encoded credential (a password `p@ss` written `p%40ss`) is safe.
 - The shard set is fixed for the engine's life: shards are opened and migrated at `Startup`, and
   `SetShard` is rejected after. Each flow key encodes its shard, so changing the set requires a
   coordinated restart of every replica (a maintenance window), not a live/piecemeal change.

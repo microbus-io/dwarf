@@ -53,6 +53,20 @@ it is the pending-delete marker *in transit* - it only enacts the delete when `c
 That site therefore uses a plain overlay (`maps.Copy`), not `MergeState` (with a don't-simplify-this note at the
 accumulation site in `execution.go`).
 
+### The `Flow` carrier is single-owner and carries no lock
+
+A task owns its `Flow` exclusively for its execution; `Flow` is a bare struct over two `map[string]any`
+with no mutex, and **deliberately so** - a mutex would paper over a misuse pattern (concurrent writes with
+no defined ordering) rather than prevent it, and the carrier is single-owner by design.
+
+The failure mode is why this is documented rather than merely implied: two goroutines writing a `Flow`
+trip the Go runtime's concurrent-map-write detector, which is a **`throw`, not a panic**. `errors.CatchPanic`
+around `ExecuteTask` (the host-call panic isolation) **cannot recover it**, so one task fanning out
+internally with an errgroup and writing results straight back to the `Flow` takes down the whole replica and
+every unrelated in-flight flow on it. The godoc on `Flow` (and the package doc) now says so, with the
+collect-then-write-from-one-goroutine pattern spelled out. Parallelizing across *steps* (a `forEach`
+transition, one `Flow` per branch) is the first-class answer.
+
 ### Task-Initiated Control Signals
 
 Tasks signal the engine via control methods on the `Flow` carrier (distinct from the operations above):

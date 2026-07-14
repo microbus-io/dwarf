@@ -17,9 +17,12 @@ limitations under the License.
 package engine
 
 import (
+	"context"
+	"math"
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -47,4 +50,43 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 	assert.NoError(e.SetDefaultPriority(5))
 	assert.NoError(e.SetMaxOpenConns(4))
+}
+
+// TestSetDefaultPriority_RejectsNonPositive pins the validation on the engine-level default. A flow stamped
+// with a non-positive priority is invisible to the refiller's band selection: it sits `pending` forever
+// while the doorbell re-rings it in a loop, and no error is ever raised. `create` already rejected a
+// negative FlowOptions.Priority as a caller bug, but the engine-level default reached the same column
+// unchecked. The int32 upper bound matters for the same reason - a value that overflows the column's width
+// (3_000_000_000, say) wraps NEGATIVE and produces exactly that hang.
+func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.Error(e.SetDefaultPriority(0), "0 is not a valid priority (1 is the lowest)")
+	assert.Error(e.SetDefaultPriority(-1), "a negative priority hides every flow from the refiller")
+	assert.Error(e.SetDefaultPriority(math.MaxInt32+1), "a value beyond int32 wraps negative in the column")
+	assert.NoError(e.SetDefaultPriority(1))
+	assert.NoError(e.SetDefaultPriority(100))
+
+	// The guard rejects rather than clamps: the accepted value is the one the engine dispatches with.
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Prio")
+	g.SetEndpoint("A", "prio/a")
+	g.AddTransition("A", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("prio/g", g)
+	proxy.HandleTask("prio/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e2 := NewEngine()
+	assert.NoError(e2.SetHost(proxy))
+	assert.NoError(e2.SetDefaultPriority(7))
+	e2.RunInTest(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, out, err := e2.Run(ctx, "prio/g", nil, nil)
+	if !assert.NoError(err, "a flow at the default priority must dispatch") {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, out.Status)
 }

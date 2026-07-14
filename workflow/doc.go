@@ -57,6 +57,13 @@ limitations under the License.
 // terminal for that attempt - routed via the graph's onError transition if one exists, else it fails the
 // step.
 //
+// A Flow is NOT safe for concurrent use. A task that fans out internally (an errgroup over a slice of
+// IDs, say) must collect results in its own goroutines and write them to the Flow from a single
+// goroutine - see the Flow godoc. Two goroutines writing a Flow trip the Go runtime's
+// concurrent-map-write detector, which is a throw rather than a panic, so it cannot be recovered and it
+// takes the whole replica down with it. To parallelize across steps instead, fan out with a forEach
+// transition: each branch gets its own Flow.
+//
 // FlowOutcome, FlowStep, FlowSummary, and Query are the read-side result types returned by the engine's
 // inspection operations.
 package workflow

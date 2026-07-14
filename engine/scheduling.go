@@ -231,12 +231,15 @@ type candidateRow struct {
 	ageMs  float64
 }
 
-// scanPriorityBand returns the rows of the next priority band above prevBand.
-func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []candidateRow, error) {
+// scanPriorityBand returns the due rows of the globally-minimum priority band, at most perKeyLimit per
+// fairness key (oldest first). perKeyLimit is the cache capacity: the picker takes at most that many
+// steps in one refill, so it can never want more than that from any single key - the bound is free of
+// selection consequences and keeps the scan's cost off the size of the backlog.
+func (e *Engine) scanPriorityBand(ctx context.Context, perKeyLimit int) (int, []candidateRow, error) {
 	// faultRefillScanErr simulates the priority-band scan failing so the test proves runRefill logs and
 	// shortens the next poll (re-scan soon) instead of refilling empty and idling every worker.
 	if e.seams.IsFault(faultRefillScanErr) {
-		return prevBand, nil, errors.New("injected fault: " + faultRefillScanErr)
+		return math.MaxInt, nil, errors.New("injected fault: " + faultRefillScanErr)
 	}
 	type shardResult struct {
 		band int
@@ -245,13 +248,29 @@ func (e *Engine) scanPriorityBand(ctx context.Context, prevBand int) (int, []can
 	_, pos := e.shardOrdinals()
 	results := make([]*shardResult, len(pos))
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// Bounded per fairness key: ROW_NUMBER() over each key's due steps, oldest first, cut at
+		// perKeyLimit (the cache capacity). Without the cut this streamed the ENTIRE due band - every row
+		// of every key - across the wire and allocated a candidateRow for each, only to discard all but
+		// `capacity` of them in the weighted pick below. Its cost grew with the BACKLOG, so under a deep
+		// one (the case the refiller exists for) it re-scanned hundreds of thousands of rows every
+		// refillPace (20ms).
+		//
+		// The cut is per KEY, not a plain LIMIT, because fairness is the whole point of this query: a
+		// global `ORDER BY created_at LIMIT n` would let one tenant's old backlog fill the window and
+		// starve every other key. Per key, the picker can never consume more than `capacity` steps in one
+		// refill (it takes at most `capacity` steps total), so this drops nothing it could have used - the
+		// batch is identical, it is just no longer built by materializing the backlog first.
 		rows, err := db.QueryContext(ctx,
-			"SELECT step_id, task_url, fairness_key, fairness_weight, priority, DATE_DIFF_MILLIS(NOW_UTC(), created_at) FROM dwarf_steps"+
-				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?"+
+			"SELECT step_id, task_url, fairness_key, fairness_weight, priority, age_ms FROM ("+
+				"SELECT step_id, task_url, fairness_key, fairness_weight, priority,"+
+				" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms,"+
+				" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
+				" FROM dwarf_steps"+
+				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
 				" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
-				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() AND priority>?)"+
-				" ORDER BY step_id",
-			prevBand, prevBand,
+				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC())"+
+				") t WHERE rn<=? ORDER BY step_id",
+			perKeyLimit,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -319,7 +338,7 @@ func (e *Engine) runRefill(ctx context.Context) (full bool) {
 	// filter a non-MaxInt band always yields rows (every row makes a fairness-key bucket), so the scan runs
 	// exactly once - lower bands stay materialized only after the current one drains, by design.
 	chosenBand := math.MaxInt
-	band, rows, err := e.scanPriorityBand(ctx, -1)
+	band, rows, err := e.scanPriorityBand(ctx, capacity)
 	if err != nil {
 		// The scan failed (typically a transient DB error), so this refill produces an empty batch and
 		// every worker blocks in Pop. Swallowing the error would leave that stall unretried until the
