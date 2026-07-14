@@ -784,6 +784,25 @@ is validation-only and discarded; the engine recomputes the same mapping for rou
 non-fan-in *immediate* targets that still converge on one fan-in are fine - each sibling spawns its own next step;
 only the shared fan-in target must be single-valued.)
 
+**A fan-in arrival must have a cohort to arrive at, and this is enforced at BOTH layers.** `cohortSpawnID` is the
+dispatched step's `lineage_id`, which is `0` for any step *outside* a cohort - so a trunk step routed into a fan-in
+node bumps `cohort_arrivals` on `step_id=0` (zero rows, no error) and then SELECTs that step: `sql.ErrNoRows`, which
+aborts the transition transaction. The `processStep` recovery defer then rewinds the just-`completed` step to
+`pending`, it re-dispatches, and **the task re-runs - side effects and all - in an unbounded hot loop** that hammers
+the database and never advances the flow (measured: 2,735 failed transitions in 2 seconds).
+
+- **`validateLineage` rejects the edges that produce it.** Its `switch` tests `g.fanInNodes[tr.To]` **before**
+  `tr.WithGoto, tr.OnError, tr.Switch` - **the order is load-bearing**. The engine treats *any* transition into a
+  fan-in node as a cohort arrival and does not care which kind of edge carried it, so testing the goto/onError/switch
+  arm first (as it once did) skipped the frame-pop check for precisely the edge kinds that can reach a fan-in from
+  outside a cohort. A goto into the fan-in from *inside* a cohort stays legal - that branch has a frame to pop.
+- **`processStep` guards it at runtime** (`fanInArrivals > 0 && cohortSpawnID == 0` -> `failAndReturn`). Not
+  redundant with the validator: a graph frozen onto a flow *before* the validator fix is replayed from the flow row
+  on every dispatch and **never re-validated**, so the guard is all that stands between such a flow and the hot loop.
+  Failing the step is the honest outcome - the flow terminates with a clear error instead of looping forever.
+
+Pinned by `TestGraph_ValidateFanInFromOutsideCohort` and `TestFanInNoCohort_FailsInsteadOfHotLooping`.
+
 ### State Across Subgraphs
 
 **Subgraph is a function call.** The signature is `flow.Subgraph(url string, in any, out any) (yield bool, err

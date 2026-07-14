@@ -19,6 +19,16 @@ Each step has three JSON columns: `state` (input snapshot), `changes` (output de
 `flow.Interrupt`). `state` is set at creation and normally immutable; `changes` is written after execution. The next
 step's `state` is `merge(currentState, changes)`. This immutability enables checkpointing, restart, and recovery.
 
+**A task's output is its `changes`, never the state map - the public API must not offer a raw-state write.**
+`Flow.SetState` (marshal a struct into `state`, tracking nothing) was **deleted**: the engine reads back only
+`changes`, so such a write could never be persisted. It read as the natural write-side twin of `ParseState` -
+`ParseState(&order)` / mutate / `SetState(order)` - and the result was **silent, inconsistent data loss**:
+`processStep` saw an empty `changes` and persisted the *prior* attempt's, so the write never reached the next step's
+`state` nor `final_state`, while `evaluateTransitions` routed off `RawState()`, which *did* contain it. The flow
+branched on a value it then threw away. `ParseState`'s godoc now shows the correct pairing (`Snapshot` ->
+`ParseState` -> mutate -> `SetChanges(source, snap)`). `RawFlow.SetRawState` remains - it is the engine's own
+seeding path, not task-facing.
+
 **State mutation on retry:** on `flow.Retry()`, the engine merges `state + changes` back into `state` so the task
 sees its own prior output next attempt; `changes` is preserved. `Resume` does **not** mutate `state`: it writes the
 caller's data to `resume_data`, which `flow.Interrupt` returns on re-dispatch.

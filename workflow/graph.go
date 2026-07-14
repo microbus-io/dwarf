@@ -53,12 +53,12 @@ type Transition struct {
 // Graph is the definition of a workflow. It describes the tasks, transitions between them,
 // and reducers for merging state during fan-in.
 type Graph struct {
-	name          string
-	entryPoint    string
-	nodes         []Node
-	transitions   []Transition
-	reducers      map[string]Reducer
-	fanInNodes    map[string]bool
+	name        string
+	entryPoint  string
+	nodes       []Node
+	transitions []Transition
+	reducers    map[string]Reducer
+	fanInNodes  map[string]bool
 }
 
 // NewGraph creates a new workflow graph with the given display name. The name is a human-friendly
@@ -476,8 +476,13 @@ func (g *Graph) validateLineage() error {
 			}
 			var nextStack []string
 			switch {
-			case tr.WithGoto, tr.OnError, tr.Switch:
-				nextStack = fromStack
+			// The fan-in arm MUST precede the goto/onError/switch arm. The engine treats any transition
+			// whose target is a fan-in node as a cohort arrival - it does not care which kind of edge
+			// carried it - so a withGoto/onError/switch edge into a fan-in from a node with no fan-out
+			// frame is exactly the "arrive at a cohort that does not exist" shape, and at runtime it bumps
+			// cohort_arrivals on step_id=0 and hot-loops the flow. Testing goto/onError/switch first (as
+			// this switch once did) skipped the frame-pop check for precisely the edges that can reach a
+			// fan-in from outside a cohort.
 			case g.fanInNodes[tr.To]:
 				var fanOutSource string
 				if fromIsFanOut {
@@ -567,11 +572,11 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		jsonTasks[i] = jsonTask{Name: t.Name, URL: t.URL, FanIn: g.fanInNodes[t.Name]}
 	}
 	type jsonGraph struct {
-		Name          string             `json:"name,omitzero"`
-		EntryPoint    string             `json:"entryPoint"`
-		Tasks         []jsonTask         `json:"tasks"`
-		Transitions   []Transition       `json:"transitions"`
-		Reducers      map[string]Reducer `json:"reducers,omitzero"`
+		Name        string             `json:"name,omitzero"`
+		EntryPoint  string             `json:"entryPoint"`
+		Tasks       []jsonTask         `json:"tasks"`
+		Transitions []Transition       `json:"transitions"`
+		Reducers    map[string]Reducer `json:"reducers,omitzero"`
 	}
 	jg := jsonGraph{
 		Name:        g.name,
@@ -597,11 +602,11 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 		FanIn bool   `json:"fanIn,omitzero"`
 	}
 	type jsonGraph struct {
-		Name          string             `json:"name,omitzero"`
-		EntryPoint    string             `json:"entryPoint"`
-		Tasks         []jsonTask         `json:"tasks"`
-		Transitions   []Transition       `json:"transitions"`
-		Reducers      map[string]Reducer `json:"reducers,omitzero"`
+		Name        string             `json:"name,omitzero"`
+		EntryPoint  string             `json:"entryPoint"`
+		Tasks       []jsonTask         `json:"tasks"`
+		Transitions []Transition       `json:"transitions"`
+		Reducers    map[string]Reducer `json:"reducers,omitzero"`
 	}
 	var jg jsonGraph
 	err := json.Unmarshal(data, &jg)

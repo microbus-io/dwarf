@@ -138,6 +138,18 @@ func (f *Flow) Has(key string) bool {
 
 // ParseState unmarshals state fields into the target struct.
 // Fields are matched by their JSON tag names. Fields in state that are not in the struct are ignored.
+//
+// To write the struct back after modifying it, take a Snapshot first and pass it to SetChanges - that is
+// what records the task's output:
+//
+//	snap := f.Snapshot()
+//	var order Order
+//	f.ParseState(&order)
+//	order.Status = "charged"
+//	f.SetChanges(order, snap)
+//
+// A task's output is its changes, never the state map: state is the immutable input snapshot the engine
+// wrote when it created the step, and only changes are read back and persisted.
 func (f *Flow) ParseState(target any) error {
 	return parseMapInto(f.state, target)
 }
@@ -325,15 +337,6 @@ func (f *Flow) Snapshot() map[string]any {
 	snap := make(map[string]any, len(f.state))
 	maps.Copy(snap, f.state)
 	return snap
-}
-
-// SetState marshals the source struct fields into state without tracking changes.
-// Fields are matched by their JSON tag names.
-func (f *Flow) SetState(source any) error {
-	if f.state == nil {
-		f.state = make(map[string]any)
-	}
-	return f.applyFields(source, f.state)
 }
 
 // SetChanges marshals the source struct back to state, comparing against the provided snapshot.
@@ -571,31 +574,6 @@ func (f *Flow) SubgraphRequested() (url string, input map[string]any, ok bool) {
 }
 
 // --- Internal helpers ---
-
-// applyFields marshals each field of source into the target map.
-func (f *Flow) applyFields(source any, target map[string]any) error {
-	v := reflect.ValueOf(source)
-	if v.Kind() == reflect.Ptr {
-		v = v.Elem()
-	}
-	if v.Kind() != reflect.Struct {
-		return errors.New("source must be a struct or pointer to struct, got %s", v.Kind())
-	}
-	t := v.Type()
-	for i := range t.NumField() {
-		field := t.Field(i)
-		tag := jsonTagName(field)
-		if tag == "" || tag == "-" {
-			continue
-		}
-		data, err := json.Marshal(v.Field(i).Interface())
-		if err != nil {
-			return err
-		}
-		target[tag] = json.RawMessage(data)
-	}
-	return nil
-}
 
 // diffAndApply marshals each field of source, compares against the snapshot,
 // and writes changed fields to both state and changes.

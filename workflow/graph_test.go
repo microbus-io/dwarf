@@ -227,6 +227,53 @@ func TestGraph_ValidateFanOutConvergence(t *testing.T) {
 	assert.NoError(good.Validate())
 }
 
+// TestGraph_ValidateFanInFromOutsideCohort pins the check that a withGoto/onError/switch edge into a
+// fan-in node is subject to the same frame-pop rule as a normal edge. The engine treats ANY transition
+// into a fan-in node as a cohort arrival, so such an edge from a node with no fan-out frame arrives at a
+// cohort that does not exist: at runtime it bumps cohort_arrivals on step_id=0, the transition tx aborts
+// on the follow-up SELECT, the recovery defer rewinds the step, and the task re-runs - side effects and
+// all - in an unbounded hot loop. validateLineage tested the goto/onError/switch arm FIRST, which skipped
+// the frame-pop check for exactly the edge kinds that can reach a fan-in from outside a cohort.
+func TestGraph_ValidateFanInFromOutsideCohort(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// A goto from a TRUNK node (K, downstream of the fan-in, lineage 0) back into the fan-in node.
+	viaGoto := NewGraph("GotoIntoFanIn")
+	viaGoto.AddTransition("svc/s", "svc/b")
+	viaGoto.AddTransition("svc/s", "svc/c")
+	viaGoto.AddTransition("svc/b", "svc/j")
+	viaGoto.AddTransition("svc/c", "svc/j")
+	viaGoto.SetFanIn("svc/j")
+	viaGoto.AddTransition("svc/j", "svc/k")
+	viaGoto.AddTransition("svc/k", END)
+	viaGoto.AddTransitionGoto("svc/k", "svc/j") // K is not in a cohort: no frame to pop
+	assert.Error(viaGoto.Validate(), "a goto into a fan-in from outside a cohort must be rejected")
+
+	// Same shape via onError.
+	viaOnError := NewGraph("OnErrorIntoFanIn")
+	viaOnError.AddTransition("svc/s", "svc/b")
+	viaOnError.AddTransition("svc/s", "svc/c")
+	viaOnError.AddTransition("svc/b", "svc/j")
+	viaOnError.AddTransition("svc/c", "svc/j")
+	viaOnError.SetFanIn("svc/j")
+	viaOnError.AddTransition("svc/j", "svc/k")
+	viaOnError.AddTransition("svc/k", END)
+	viaOnError.AddTransitionOnError("svc/k", "svc/j")
+	assert.Error(viaOnError.Validate(), "an onError into a fan-in from outside a cohort must be rejected")
+
+	// A goto into the fan-in from INSIDE the cohort is legitimate - the branch has a frame to pop, and
+	// the arrival lands on a real spawn step.
+	fromBranch := NewGraph("GotoFromBranch")
+	fromBranch.AddTransition("svc/s", "svc/b")
+	fromBranch.AddTransition("svc/s", "svc/c")
+	fromBranch.AddTransition("svc/b", "svc/j")
+	fromBranch.AddTransition("svc/c", "svc/j")
+	fromBranch.SetFanIn("svc/j")
+	fromBranch.AddTransition("svc/j", END)
+	fromBranch.AddTransitionGoto("svc/b", "svc/j")
+	assert.NoError(fromBranch.Validate(), "a goto into the fan-in from a cohort branch is legitimate")
+}
+
 func TestGraph_AddTransitionChain(t *testing.T) {
 	assert := testarossa.For(t)
 
@@ -594,7 +641,8 @@ func TestLineage_SimpleFanOutFanIn(t *testing.T) {
 	g.AddTransition("b", "join")
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
-	assert.NoError(g.Validate())}
+	assert.NoError(g.Validate())
+}
 
 func TestLineage_NestedFanOutFanIn(t *testing.T) {
 	assert := testarossa.For(t)
@@ -624,7 +672,8 @@ func TestLineage_ForEachThenFanIn(t *testing.T) {
 	g.AddTransition("a", "join")
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
-	assert.NoError(g.Validate())}
+	assert.NoError(g.Validate())
+}
 
 func TestLineage_ConditionalWhenFanIn(t *testing.T) {
 	assert := testarossa.For(t)
@@ -636,7 +685,8 @@ func TestLineage_ConditionalWhenFanIn(t *testing.T) {
 	g.AddTransition("b", "join")
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
-	assert.NoError(g.Validate())}
+	assert.NoError(g.Validate())
+}
 
 func TestLineage_AliasedNodesInDifferentScopes(t *testing.T) {
 	assert := testarossa.For(t)
@@ -781,7 +831,8 @@ func TestLineage_FanOutDirectlyToFanIn(t *testing.T) {
 	g.AddTransition("a", "join")
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
-	assert.NoError(g.Validate())}
+	assert.NoError(g.Validate())
+}
 
 func TestLineage_SetFanInOnUnknownNodeRejected(t *testing.T) {
 	assert := testarossa.For(t)

@@ -635,6 +635,24 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 	}
 
+	// A fan-in arrival must have a cohort to arrive at. cohortSpawnID is the dispatched step's lineage_id,
+	// which is 0 for any step OUTSIDE a fan-out cohort - so a trunk step routed into a fan-in node would
+	// bump cohort_arrivals on step_id=0 (zero rows, no error) and then SELECT that step: sql.ErrNoRows,
+	// which aborts the transition transaction. The recovery defer then rewinds the just-completed step to
+	// pending, it re-dispatches, the task RE-RUNS - side effects and all - and it fails identically. An
+	// unbounded hot loop that hammers the database and never advances the flow.
+	//
+	// Graph.Validate now rejects such an edge (validateLineage applies the frame-pop check to
+	// withGoto/onError/switch edges too), so this cannot arise from a graph validated today. It remains as
+	// the runtime guard for a graph frozen onto a flow BEFORE that fix: the graph JSON is replayed from
+	// the flow row on every dispatch and never re-validated. Failing the step is the honest outcome - the
+	// flow terminates with a clear error instead of hot-looping forever.
+	if fanInArrivals > 0 && cohortSpawnID == 0 {
+		return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+			errors.New("task '%s' is routed to fan-in node '%s' but is not part of a fan-out cohort", taskName, fanInTaskName),
+			taskName)
+	}
+
 	childInputState, _ := workflow.MergeState(state, accumulatedChanges, nil)
 	childInputJSON, _ := json.Marshal(childInputState)
 	nextStepDepth := stepDepth + 1
