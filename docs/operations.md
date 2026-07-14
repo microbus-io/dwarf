@@ -75,8 +75,11 @@ outcome, err := eng.Await(ctx, flowKey)
 ```
 
 Blocks until the flow stops — `completed`, `failed`, `cancelled`, or `interrupted` — and returns the
-outcome. It wakes on a status-change notification or context cancellation; there is no polling. Across
-replicas, `Await` relies on the host's `SignalPeers` broadcast (see [Deployment](deployment.md)).
+outcome. It wakes on a status-change notification or context cancellation, and also re-checks on an internal
+ticker: the notification is a fire-and-forget in-memory wake that can be lost, so the ticker is a load-bearing
+safety net that bounds the wait to one interval — not a redundant polling layer to build atop, nor one to
+optimize away. Across replicas, `Await` relies on the host's `SignalPeers` broadcast (see
+[Deployment](deployment.md)).
 
 If the ctx deadline fires first, `Await` returns the error and the flow **keeps running** — it is durable and
 not bound to your call. You still hold the key, so you can `Await` again.
@@ -102,7 +105,7 @@ its own deadline — an HTTP status endpoint long-polling a flow that may run fo
 ```go
 type FlowOutcome struct {
     Status           string
-    State            map[string]any  // final_state when terminal; current snapshot otherwise
+    State            map[string]any  // final_state when terminal; the interrupted step's merged snapshot when interrupted; empty while running/created
     Error            string          // set when Status == "failed"
     InterruptPayload map[string]any  // set when Status == "interrupted"
     CancelReason     string          // set when Status == "cancelled"
@@ -125,7 +128,8 @@ summaries, next, err := eng.List(ctx, query)           // paginated flow listing
 err := eng.HistoryMermaid(ctx, flowKey, w)             // write the execution DAG as a Mermaid diagram
 ```
 
-`History` returns each step's task, depth, state, changes, status, error, and timings; subgraph-executing
+`History` returns each step's task, depth, status, error, and timings — metadata only, **not** `state`/`changes`
+(those columns are deliberately not fetched); use `Step` to read a single step's `state`/`changes`. Subgraph-executing
 steps carry nested `SubHistory`. `List` takes a `workflow.Query` (status, workflow name, thread, task,
 fairness key, priority, time window, shard, free-text `Search`, `Limit`) and returns newest-first with an
 opaque pagination cursor as its second return; see [Retention](#retention) for the same query shape.

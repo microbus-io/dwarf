@@ -46,8 +46,8 @@ type Query struct {
 	// a subgraph child is an internal execution detail most callers never want in a list. Pair it with
 	// WorkflowURL (a graph that runs only as a subgraph has no root flows under that URL) to locate every run
 	// of a graph that executed as a subgraph; FlowSummary.Subgraph marks which kind each returned flow is.
-	// Purge ignores this flag and always targets roots only (deleting a subgraph child directly would strand
-	// its parent).
+	// Purge rejects this flag with a 400 (a subgraph child is purged only as part of its root's subtree,
+	// never directly - doing so would strand its parent); Purge always targets roots only.
 	IncludeSubgraphs bool `json:"includeSubgraphs,omitzero"`
 	// Shard restricts the query to a single 1-based shard. Zero queries all shards.
 	Shard int `json:"shard,omitzero"`

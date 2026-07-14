@@ -325,8 +325,10 @@ callers) are stamped fork-time (`NOW_UTC()`). So a cloned prefix's timings match
 re-run boundary reads as new.
 
 **History / Step** - `History` returns the step-by-step execution as `[]workflow.FlowStep`; each includes key, depth,
-task name, state, changes, status, error, timestamp. Subgraph-executing steps have `Subgraph=true` with nested
-`SubHistory`. `Step` returns one step by key.
+task name, status, error, timestamps, and DAG links - but **not** `state`/`changes` (its two-round-trip tree scan
+deliberately omits the payload columns, so `FlowStep.State`/`.Changes` are nil on a History result). Subgraph-executing
+steps have `Subgraph=true` with nested `SubHistory`. `Step` returns one step by key **with** its `state`/`changes`
+(refs resolved) - it is the payload-bearing reader; use it when you need a step's actual data.
 
 **List** - Queries flows by status, workflow URL, or thread key, with cursor pagination (newest first **per shard**
 - see "`List` uses per-shard pagination" under Database Sharding; single-shard, the default, is globally
@@ -795,8 +797,9 @@ deliberately size-*independent*. So the guard is explicit: **never mint a ref fo
 Resolution asserts the invariant (a ref into a step whose own `state_refs` names that field is an error) rather
 than walking a chain, which would be the rejected delta design wearing a hat. (3) **Flatten at every flow
 boundary** - `final_state` (which outlives its steps; `DeleteOnCompletion` may reap them), `Continue`, subgraph
-`in`/`out`, and Fork's leaf. (4) **`History`/`Snapshot`/`Step` resolve** - the encoding is internal storage, never
-API-visible. (5) A resolved field is **decoded**, exactly like one that was never ref'd: a `json.RawMessage` spliced
+`in`/`out`, and Fork's leaf. (4) **`Snapshot`/`Step` resolve** - the encoding is internal storage, never
+API-visible. (`History` is exempt: it is metadata-only and selects no payload columns at all, so no ref reaches it to
+resolve - use `Step` for a step's data.) (5) A resolved field is **decoded**, exactly like one that was never ref'd: a `json.RawMessage` spliced
 into a state map would leak the storage encoding into `FlowStep.State`/`FlowOutcome.State`, where a caller's
 `state["pdf"].(string)` would silently stop matching. The cache holds the immutable *bytes* and each resolve decodes
 its own copy, so two fan-out branches never share a decoded map or slice. (6) **Anchors never cross a shard** (a ref
@@ -1126,7 +1129,8 @@ Transitions are evaluated after a task completes successfully:
 other transition (`onError` is exclusive with `when`/`forEach`/`withGoto`, so it is unconditional). The error is
 serialized as a `TracedError` into state field `onErr` **with its stack frames stripped** (`Stack=nil` on a
 shallow copy, so the shared error object keeps its stack for logs) - `onErr` rides into `changes`->`final_state`
-and is readable by any flow reader (`History`/`Snapshot`/`List`), and internal stack traces are code-structure
+and is readable by a state-bearing flow reader (`Snapshot`'s `final_state`, `Step`'s `state`/`changes` - not
+`History` or `List`, which carry no state), and internal stack traces are code-structure
 disclosure; the handler still gets the message, status code, trace id and properties for routing. The handler task
 becomes the next step, and the failed step is marked `completed` - **with the task's own changes DROPPED**. (The
 `error` *column* already carries only `err.Error()` - the message, no frames.)

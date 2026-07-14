@@ -85,7 +85,9 @@ limitations under the License.
 // a token-free "{shard}-{id}" correlation id), and there is deliberately no operation that resolves a
 // correlation id back to a key, which would be a capability-minting oracle.
 //
-// List and Search return keys, tokens included. Exposing them to a principal is equivalent to granting the
+// List returns keys, tokens included — the only key-returning operation (Purge returns a count, not keys;
+// free-text search is a field on workflow.Query consumed by List, not a separate operation). Exposing them to a
+// principal is equivalent to granting the
 // write capability for every flow they return, so a host must gate them by ownership and never surface
 // them to less-than-fully-trusted callers. Key exposure is also transitive across an execution tree: Step
 // and History navigation resolve and return the keys of neighboring steps, crossing flow boundaries into
