@@ -233,7 +233,21 @@ func (g *Graph) AddTransitionForEach(from, to string, forEach string, as string)
 	g.transitions = append(g.transitions, Transition{From: from, To: to, ForEach: forEach, As: as})
 }
 
-// AddTransitionOnError adds a transition that is taken when the source task returns an error.
+// AddTransitionOnError adds a transition that is taken when the source task returns an error, instead of
+// failing the flow. It fires on ANY error - the engine never inspects the status code or the text - and it
+// preempts every other transition from that node, so it cannot combine with when/forEach/goto.
+//
+// The error is delivered to the handler in the state field "onErr" (a structured error: message, status
+// code, trace id, properties; the stack frames are stripped).
+//
+// AN ERROR VOIDS THE TASK'S CHANGES. Whatever the failing task wrote with Set before it returned the error
+// is discarded - the handler does not see it, and it never reaches the flow's final state. (The same is true
+// when no handler is declared and the flow fails.) This mirrors Go's own convention that an error voids the
+// other results, and it is forced by at-least-once execution: a task whose worker loses its lease mid-body
+// re-runs and RECOMPUTES its changes, so what a failing attempt wrote before it died is not a fact anything
+// can be built on. To hand the handler something deliberately, put it in the error (it rides through in
+// onErr), or give an external side effect its own task so its success is recorded durably before anything
+// downstream can fail.
 func (g *Graph) AddTransitionOnError(from, to string) {
 	g.autoRegister(from)
 	g.autoRegister(to)

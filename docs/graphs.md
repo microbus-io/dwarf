@@ -123,11 +123,23 @@ g.AddTransitionOnError("Charge", "Refund") // any error from Charge -> Refund
 ```
 
 The error from `Charge` routes to `Refund` rather than failing the flow. The error is serialized into the
-state field `onErr` (as a structured error the handler can read), the failed step is marked completed with
-its changes preserved, and the handler runs next. If no `onError` handler is declared, the flow fails. An
+state field `onErr` (as a structured error the handler can read), the failed step is marked completed, and
+the handler runs next. If no `onError` handler is declared, the flow fails. An
 `onError` transition can't combine with `forEach`, `goto`, or `switch`. If the failing task was part of a
 fan-out, its siblings keep running — the errored branch continues down its handler path and the cohort
 converges normally.
+
+**An error voids the task's changes.** Anything the failing task wrote with `f.Set` before returning its
+error is discarded — the handler does not see it, and it never reaches the flow's final state. (Same on the
+unhandled path: a failing task's writes are dropped there too.) This mirrors Go's own convention, and it is
+forced by at-least-once execution: if a worker loses its lease mid-task, the task re-runs and *recomputes*
+its changes, so a half-written attempt is not a fact you can build on.
+
+Two ways to say something to your handler, both explicit:
+
+- **Put it in the error.** `onErr` carries the message, status code, trace id, and any properties you attach.
+- **Give an external side effect its own task.** Then its success is recorded durably before anything
+  downstream can fail — which is what lets the handler know the charge went through and needs refunding.
 
 > The engine routes on *any* error — it never inspects the error's HTTP status or text. To handle a
 > specific failure kind (e.g. a timeout), branch inside the task: `flow.Retry` for transient failures,

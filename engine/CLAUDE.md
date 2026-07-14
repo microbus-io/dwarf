@@ -844,8 +844,25 @@ serialized as a `TracedError` into state field `onErr` **with its stack frames s
 shallow copy, so the shared error object keeps its stack for logs) - `onErr` rides into `changes`->`final_state`
 and is readable by any flow reader (`History`/`Snapshot`/`List`), and internal stack traces are code-structure
 disclosure; the handler still gets the message, status code, trace id and properties for routing. The handler task
-becomes the next step, and the failed step is marked `completed` with its changes preserved. (The `error` *column*
-already carries only `err.Error()` - the message, no frames.) Fan-out siblings are **not** cancelled - the errored branch
+becomes the next step, and the failed step is marked `completed` - **with the task's own changes DROPPED**. (The
+`error` *column* already carries only `err.Error()` - the message, no frames.)
+
+**An error voids the task's changes**, and this is the contract on **both** error paths: the `onError` route builds a
+**fresh** `RawFlow` seeded with the input snapshot plus `onErr` (`execution.go`), so anything the task wrote with
+`flow.Set` before returning its error never reaches the handler, the step's `changes` column, or `final_state`; and
+`failStep` writes only `status`/`parked`/`error`, never the changes. The two paths agree, so the contract does not
+depend on whether the author happened to declare a handler. (This doc previously claimed the opposite - "changes
+preserved" - which was never true of either path.)
+
+The rationale is the same one that governs everything else here: **execution is at-least-once**. If a worker loses
+its lease mid-task, a peer re-runs the task from the same input snapshot and *recomputes* its changes - so "what the
+failing attempt wrote before it died" is not a stable fact about the flow; it depends on which attempt you observed.
+Preserving it would hand authors a record that looks dependable and is not, and compensation logic built on it would
+pass its tests and be wrong under lease recovery. It matches Go's own convention (an error voids the other returns).
+The deliberate channels for a task that has something to say to its handler: put it **in the error** (`onErr` carries
+message, status code, trace id, and properties), or give an external side effect **its own task**, so its success is
+durably recorded before anything downstream can fail. Pinned by `fixtures/errorchangesflow_test.go` (both error
+paths, plus a success control proving the write is only lost *because* of the error). Fan-out siblings are **not** cancelled - the errored branch
 continues down its handler path and rejoins the cohort as a normal arrival (convergence is by cohort arrivals, not by
 cancellation). If there is no `onError` transition, the step fails via `failStep`.
 

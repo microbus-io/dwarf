@@ -332,6 +332,11 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			// shared error object keeps its stack (e.g. for the debug log above / a later failStep).
 			redactedErr := *tracedErr
 			redactedErr.Stack = nil
+			// A FRESH flow, deliberately: an error voids the task's changes. Whatever it wrote before
+			// returning the error is dropped rather than carried to the handler - execution is at-least-once,
+			// so a lease-lost re-run recomputes those changes and a half-written attempt is not a fact
+			// anything can be built on. failStep does the same (it writes status/error only), so the contract
+			// does not turn on whether the author declared a handler. Do not "restore" rawChanges here.
 			resultFlow = workflow.NewRawFlow()
 			resultFlow.SetRawState(state)
 			resultFlow.Set("onErr", &redactedErr)
