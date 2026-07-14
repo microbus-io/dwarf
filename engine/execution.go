@@ -565,7 +565,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "workflow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted)
 	}
-	gotoTarget := resultFlow.GotoRequested()
 	// faultLeaseStaleWrite makes this completion write carry a stale lease generation, exactly as a zombie
 	// worker (whose lease was re-granted to a peer) would. The fence must reject it (zero rows -> benign
 	// no-op below), so the step stays claimable and lease recovery re-runs it cleanly - the test proves a
@@ -575,8 +574,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		writeSeq = leaseSeq - 1
 	}
 	stepRes, err := db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, changes=?, goto_next=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"' AND lease_seq=?",
-		workflow.StatusCompleted, string(changesJSON), gotoTarget, stepID, writeSeq,
+		"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"' AND lease_seq=?",
+		workflow.StatusCompleted, string(changesJSON), stepID, writeSeq,
 	)
 	if err != nil {
 		return errors.Trace(err)

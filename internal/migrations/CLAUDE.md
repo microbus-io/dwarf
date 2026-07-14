@@ -60,7 +60,6 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `subgraph_result` | JSON child `final_state` returned by `flow.Subgraph`. `'{}'` until resolved |
 | `subgraph_error` | child error text for a failed `flow.Subgraph` park, returned as the `err`. `''` when none |
 | `status` | Step lifecycle: `created`/`pending`/`running`/`interrupted`/`completed`/`failed`/`cancelled` |
-| `goto_next` | Task-requested `flow.Goto` target; `''` = none |
 | `error` | Error text when `failed`; `''` otherwise |
 | `time_budget_ms` | Execution budget; the deadline on the `ExecuteTask` call context. Denormalized from the flow's `time_budget_ms` at step insert (frozen, not the live config), and also self-referenced in the claim CAS to size the crash-recovery lease (`time_budget_ms + leaseMargin`) |
 | `attempt` | `flow.Retry` attempt counter, drives the backoff |

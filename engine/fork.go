@@ -357,14 +357,14 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		var newID int64
 		if isLeafFlow && s.oldID == cc.leafStepID {
 			newID, err = tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, changes, interrupt_payload, status, goto_next, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, changes, interrupt_payload, ?, goto_next, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
+					" SELECT ?, step_depth, ?, task_name, task_url, state, changes, interrupt_payload, ?, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
 				newFlowID, keys.RandomIdentifier(16), workflow.StatusCreated, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, s.oldID,
 			)
 		} else {
 			newID, err = tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, changes, interrupt_payload, status, goto_next, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, changes, interrupt_payload, status, goto_next, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
+					" SELECT ?, step_depth, ?, task_name, task_url, state, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
 				newFlowID, keys.RandomIdentifier(16), flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, s.oldID,
 			)
 		}
@@ -478,14 +478,14 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if isLeafFlow && rewind == cc.leafStepID {
 			// Leaf fork step: merged input, cleared output/park/cohort, gated `created`.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, state=?, changes='{}', error='', goto_next='', attempt=0, interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				"UPDATE dwarf_steps SET status=?, parked=?, state=?, changes='{}', error='', attempt=0, interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
 				workflow.StatusCreated, parkedNone, cc.mergedLeafState, newRewindID,
 			)
 			cc.newLeafStepID = newRewindID
 		} else {
 			// Ancestor caller: re-park so completeSurgraphFlow revives it when the re-run child completes.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, error='', goto_next='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, error='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
 				workflow.StatusRunning, parkedSubgraph, newRewindID,
 			)
 		}
