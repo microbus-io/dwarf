@@ -226,7 +226,7 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 	emitStep := func(stepID int) {
 		s := stepByID[stepID]
 		nodeID := fmt.Sprintf("%ss%d", prefix, stepID)
-		label := flowStripProto(s.TaskName)
+		label := stripProto(s.TaskName)
 		blk, isSubgraphCaller := subBlocks[stepID]
 		if isSubgraphCaller {
 			if isTerminalStepStatus(s.Status) && s.HasStarted() && !s.UpdatedAt.IsZero() && !s.StartedAt.IsZero() {
@@ -452,14 +452,6 @@ func subgraphWallTime(history []FlowStep) (time.Duration, bool) {
 		return 0, false
 	}
 	return maxUpdated.Sub(minCreated), true
-}
-
-func flowStripProto(u string) string {
-	left, right, cut := strings.Cut(u, "://")
-	if !cut {
-		return left
-	}
-	return right
 }
 
 func flowFormatDuration(d time.Duration) string {

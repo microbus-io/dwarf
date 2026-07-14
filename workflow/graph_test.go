@@ -1121,3 +1121,39 @@ func TestFlow_MermaidEscapesInjection(t *testing.T) {
 	assert.Contains(m, `#quot;`)
 	assert.Contains(m, `_title{{"T#quot;itle#lt;x#gt;"}}`)
 }
+
+// stripProto is shared by the graph's error messages and the flow renderer's node labels (it replaced a
+// near-copy, flowStripProto, that differed on exactly this case). Both sinks are human-facing, so a URL
+// with nothing after the scheme is returned WHOLE rather than as the empty string it strips down to - a
+// blank diagram label, or an error naming no task at all, is worse than a slightly ugly one.
+func TestStripProto(t *testing.T) {
+	assert := testarossa.For(t)
+
+	assert.Equal("host:443/task", stripProto("https://host:443/task"))
+	assert.Equal("host:443/task", stripProto("host:443/task")) // no scheme: unchanged
+	assert.Equal("", stripProto(""))
+	assert.Equal("x://", stripProto("x://")) // nothing after the scheme: kept, not blanked
+	assert.Equal("b://c", stripProto("a://b://c"))
+}
+
+// validateLineage memoizes IsFanOutSource rather than re-implementing the fan-out predicate, because the
+// engine ROUTES on IsFanOutSource (internal/faninmap, processStep): a validator that disagreed with the
+// router about what fans out would bless a graph the engine then mis-executes. This pins the agreement
+// across every shape the predicate distinguishes.
+func TestGraph_ValidatorAgreesWithIsFanOutSource(t *testing.T) {
+	assert := testarossa.For(t)
+
+	g := NewGraph("Shapes")
+	g.AddTransition("linear", "two")               // 1 outgoing: not a fan-out
+	g.AddTransitionFanOut("two", "l", "r")         // 2 outgoing: fan-out
+	g.AddTransitionForEach("l", "each", "xs", "x") // forEach: fan-out even at 1 outgoing
+	g.AddTransitionSwitch("r", "s1", "a==1")       // switch: exclusive, NOT a fan-out
+	g.AddTransitionSwitch("r", "s2", "true")
+	g.AddTransitionOnError("linear", "handler") // onError: never counts
+	g.AddTransitionGoto("linear", "handler")    // goto: never counts
+
+	assert.False(g.IsFanOutSource("linear"), "one success edge plus onError/goto is not a fan-out")
+	assert.True(g.IsFanOutSource("two"))
+	assert.True(g.IsFanOutSource("l"), "a forEach edge fans out on its own")
+	assert.False(g.IsFanOutSource("r"), "switch branches are exclusive")
+}

@@ -480,20 +480,16 @@ func (g *Graph) Validate() error {
 func (g *Graph) validateLineage() error {
 	fanOutToFanIn := make(map[string]string)
 
+	// Memoized IsFanOutSource, not a second copy of it: the BFS below revisits a node once per incoming
+	// edge, and this predicate must stay in lockstep with the engine's routing (internal/faninmap and
+	// processStep both branch on IsFanOutSource) - a validator that disagreed with the router about what
+	// fans out would bless a graph the engine then mis-executes.
+	//
+	// It is a SET, not a node->bool table: the "every fan-out source needs a fan-in" check below iterates
+	// its KEYS, so storing an explicit false would enrol every node in the graph as a fan-out source.
 	isFanOutSource := make(map[string]bool, len(g.nodes))
 	for _, t := range g.nodes {
-		var normalCount int
-		var hasForEach bool
-		for _, tr := range g.transitions {
-			if tr.From != t.Name || tr.WithGoto || tr.OnError || tr.Switch {
-				continue
-			}
-			normalCount++
-			if tr.ForEach != "" {
-				hasForEach = true
-			}
-		}
-		if normalCount >= 2 || hasForEach {
+		if g.IsFanOutSource(t.Name) {
 			isFanOutSource[t.Name] = true
 		}
 	}
@@ -609,7 +605,10 @@ func (g *Graph) validateLineage() error {
 	return nil
 }
 
-// stripProto removes the scheme prefix from a URL-like string for cleaner error messages.
+// stripProto removes the scheme prefix from a URL-like string, for cleaner error messages and diagram
+// labels. A string with nothing after the scheme ("x://") is returned whole rather than as the empty
+// string it strips down to - both sinks are human-facing, and a blank label or a message naming no task
+// is worse than a slightly ugly one.
 func stripProto(s string) string {
 	var x string
 	if _, x, _ = strings.Cut(s, "://"); x == "" {
