@@ -45,15 +45,3 @@ type FlowSummary struct {
 	// top-level/root flow. A list returns roots only unless Query.Subgraph opts subgraph children in.
 	Subgraph bool `json:"subgraph,omitzero"`
 }
-
-// Duration is the wall-clock time from StartedAt to UpdatedAt.
-func (f FlowSummary) Duration() time.Duration {
-	if f.StartedAt.IsZero() || f.UpdatedAt.IsZero() {
-		return 0
-	}
-	d := f.UpdatedAt.Sub(f.StartedAt)
-	if d < 0 {
-		return 0
-	}
-	return d
-}

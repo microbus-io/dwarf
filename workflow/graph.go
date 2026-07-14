@@ -314,11 +314,6 @@ func (g *Graph) IsFanIn(name string) bool {
 	return g.fanInNodes[name]
 }
 
-// HasFanIn reports whether the graph declares any fan-in nexus.
-func (g *Graph) HasFanIn() bool {
-	return len(g.fanInNodes) > 0
-}
-
 // IsFanOutSource reports whether the named node has 2+ non-goto/non-error outgoing
 // transitions, or any forEach outgoing transition. Switch transitions are exclusive
 // (only one branch ever fires) and therefore do not count toward fan-out.

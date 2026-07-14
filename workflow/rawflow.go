@@ -62,24 +62,6 @@ func (f *RawFlow) SetRawChanges(changes map[string]any) {
 	maps.Copy(f.changes, changes)
 }
 
-// ClearChanges resets the changes map. Called by the orchestrator after persisting changes.
-func (f *RawFlow) ClearChanges() {
-	f.changes = make(map[string]any)
-}
-
-// ClearControl resets all control signals. Called by the orchestrator after processing them.
-func (f *RawFlow) ClearControl() {
-	f.gotoNext = ""
-	f.retry = false
-	f.sleepDuration = 0
-	f.interrupt = false
-	f.interruptPayload = nil
-	f.attempt = 0
-	f.backoffInitialDelay = 0
-	f.backoffDelayMultiplier = 0
-	f.backoffMaxDelay = 0
-}
-
 // SetAttempt sets the attempt counter on the flow. Called by the orchestrator before dispatching
 // a task so that Retry can check whether attempts are exhausted.
 func (f *RawFlow) SetAttempt(attempt int) {

@@ -61,16 +61,3 @@ func (s FlowStep) HasStarted() bool {
 	}
 	return false
 }
-
-// Duration is the wall-clock time from CreatedAt to UpdatedAt. Returns zero when either
-// timestamp is missing or the delta is negative.
-func (s FlowStep) Duration() time.Duration {
-	if s.CreatedAt.IsZero() || s.UpdatedAt.IsZero() {
-		return 0
-	}
-	d := s.UpdatedAt.Sub(s.CreatedAt)
-	if d < 0 {
-		return 0
-	}
-	return d
-}
