@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/errors"
 )
 
@@ -250,21 +251,28 @@ func (f *Flow) StepKey() string {
 
 // --- State mutation ---
 
+// State round-trips through JSON, where a number is carried as a float64 - which holds integers
+// exactly only up to 2^53. Writing a larger integer would not fail, it would silently ROUND (an id of
+// 1234567890123456789 comes back as ...768 in the next step), so the setters below reject one instead:
+// Set and SetChanges return the error, and the typed setters - which have no error to return - panic,
+// exactly as the typed getters do on a mistyped read. A panic is a clean step failure, not a crash:
+// the orchestrator catches panics at the task-call boundary, so it fails the step (routed to onError if
+// the graph has one) with the field named. An identifier too large to carry - a Snowflake id, a 64-bit
+// database key, time.Now().UnixNano() - belongs in state as a string.
+
 // Set sets a state field and tracks the change. Use this for complex types (structs, maps, etc.).
+// It returns an error if the value holds an integer beyond ±2^53, which workflow state cannot carry
+// exactly (see SetInt).
 func (f *Flow) Set(key string, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	if f.state == nil {
-		f.state = make(map[string]any)
+	err = jsonx.CheckPrecision(data)
+	if err != nil {
+		return errors.New("state field %q: %v", key, err)
 	}
-	if f.changes == nil {
-		f.changes = make(map[string]any)
-	}
-	raw := json.RawMessage(data)
-	f.state[key] = raw
-	f.changes[key] = raw
+	f.record(key, data)
 	return nil
 }
 
@@ -278,7 +286,9 @@ func (f *Flow) SetStrings(key string, value []string) {
 	f.set(key, value)
 }
 
-// SetInt sets a state int field and tracks the change.
+// SetInt sets a state int field and tracks the change. It PANICS on a value beyond ±2^53: state
+// round-trips through JSON as a float64, which cannot carry such an integer exactly, and rounding it
+// silently would corrupt the workflow (see the note above, and Set to handle the error instead).
 func (f *Flow) SetInt(key string, value int) {
 	f.set(key, value)
 }
@@ -293,17 +303,29 @@ func (f *Flow) SetBool(key string, value bool) {
 	f.set(key, value)
 }
 
-// SetDuration sets a state time.Duration field and tracks the change.
+// SetDuration sets a state time.Duration field and tracks the change. A duration is nanoseconds, so it
+// panics beyond ±2^53ns (~104 days) - see SetInt.
 func (f *Flow) SetDuration(key string, value time.Duration) {
 	f.set(key, value)
 }
 
-// set is an internal helper that marshals a value and records it in state and changes.
+// set is an internal helper that marshals a value and records it in state and changes. It panics on a
+// value state cannot carry exactly, since the typed setters have no error to return.
 func (f *Flow) set(key string, value any) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		panic(err) // should never happen for primitive types
 	}
+	err = jsonx.CheckPrecision(data)
+	if err != nil {
+		panic(errors.New("state field %q: %v", key, err))
+	}
+	f.record(key, data)
+}
+
+// record writes marshalled JSON into both state (so later reads in this task see it) and changes (the
+// task's output, which is what the orchestrator persists).
+func (f *Flow) record(key string, data []byte) {
 	if f.state == nil {
 		f.state = make(map[string]any)
 	}
@@ -394,6 +416,9 @@ func (f *Flow) Snapshot() map[string]any {
 // Only fields whose JSON value differs from the snapshot are recorded as changes.
 // Changed fields are written to both the state and changes maps, so that subsequent reads
 // (including transition condition evaluation) see the updated values.
+//
+// It returns an error if a field holds an integer beyond ±2^53 - the precision workflow state carries
+// (see SetInt) - and that field is not recorded.
 func (f *Flow) SetChanges(source any, snap map[string]any) error {
 	if f.changes == nil {
 		f.changes = make(map[string]any)
@@ -646,6 +671,10 @@ func (f *Flow) diffAndApply(source any, snapshot, state, changes map[string]any)
 		data, err := json.Marshal(v.Field(i).Interface())
 		if err != nil {
 			return err
+		}
+		err = jsonx.CheckPrecision(data)
+		if err != nil {
+			return errors.New("state field %q: %v", tag, err)
 		}
 		// Only record as change if different from snapshot
 		if snapshot != nil {

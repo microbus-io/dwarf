@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -260,6 +261,17 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	stateJSON, err := json.Marshal(initialState)
 	if err != nil {
 		return "", errors.Trace(err)
+	}
+	// Host-supplied payloads are held to the same integer precision as a task's own writes: state
+	// round-trips through JSON as float64, so an integer beyond ±2^53 would be silently rounded. Reject
+	// it at the door rather than store a value the flow can never read back.
+	err = jsonx.CheckPrecision(stateJSON)
+	if err != nil {
+		return "", errors.New("invalid initial state: %v", err, http.StatusBadRequest)
+	}
+	err = jsonx.CheckPrecision(baggageJSON)
+	if err != nil {
+		return "", errors.New("invalid baggage: %v", err, http.StatusBadRequest)
 	}
 
 	flowToken := keys.RandomIdentifier(16)

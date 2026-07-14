@@ -72,6 +72,28 @@ f.Clear()                     // remove everything
 names (absent or null source fields are skipped) — handy as a small adapter task just upstream of a
 [subgraph](fan-out-and-subgraphs.md#subgraphs) to reshape state into the child's expected input.
 
+### Large integers must be carried as strings
+
+State round-trips through JSON, where a number is a `float64` — which holds integers exactly only up to
+**2^53** (about 9.0e15). A bigger integer would come back **rounded** in the next step, so dwarf refuses to
+store one: `SetInt` (and the other typed setters) **panic**, and `Set`/`SetChanges`, an interrupt payload, a
+subgraph input, and a host-supplied initial state or baggage return an error naming the field. A panic here
+is a clean step failure — it routes to the graph's `onError` if it has one — not a crash.
+
+```go
+f.SetInt("orderID", 1234567890123456789)   // panics: 1.2e18 cannot round-trip
+f.SetString("orderID", "1234567890123456789") // correct: exact, digit for digit
+
+f.SetInt("qty", 3)                          // ordinary integers are unaffected
+f.SetInt("createdMs", time.Now().UnixMilli()) // ~1.7e12: fine
+f.SetInt("createdNs", time.Now().UnixNano())  // panics: ~1.7e18
+f.SetFloat("total", 1e300)                  // floats are unaffected at any magnitude
+```
+
+So a 64-bit database key, a Snowflake id, or a nanosecond timestamp belongs in state as a **string** (the
+same reason APIs that mint 64-bit ids publish an `id_str` alongside them). A `time.Duration` is nanoseconds,
+so `SetDuration` is bounded the same way — beyond ~104 days it panics.
+
 ### Deltas, not totals, for reducer fields
 
 If a field is managed by a reducer (append, add, union, merge, …) at a fan-in, write only your **delta** —

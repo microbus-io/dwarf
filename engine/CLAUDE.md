@@ -78,6 +78,18 @@ A consequence of having no breaker is no probe *election*: each parked step is i
 independently on its own backoff. The trade is the breaker's coordinated backlog release (instant unblock the moment
 one probe succeeds) for zero engine-side policy and no shared-state machinery to coordinate across replicas.
 
+### Host-supplied payloads are precision-checked at ingress (400)
+
+State is float64-domain: an integer-shaped number beyond ±2^53 does not survive the JSON round trip and is
+rejected on write rather than silently rounded (the full rationale, and why the decode side was deliberately
+NOT changed, is in `workflow/CLAUDE.md`). The `workflow` package guards what a *task* authors; the engine
+guards what a *host* hands it, with `jsonx.CheckPrecision` at the four ingress points - `createWithGraph`
+(`initialState` **and** `Baggage`, so `Create`/`Run`/`Continue`'s merged carry-forward/subgraph input all
+pass through it), `resume` (resume data), and `mergeWithOverrides` (`Fork`'s state overrides). Each is a
+**400**, not a panic: this is caller input, and the caller is a program that can fix its request. Derived
+values need no check - they are merges of already-checked inputs (a `ReducerAdd` sum that grows past 2^53 is
+a `float64`, and float-shaped numbers are unconstrained).
+
 ### Size and count limits are the host's job, not the engine's
 
 The engine enforces **no** size or count bound anywhere - not on initial state, `baggage`, the per-flow-frozen

@@ -53,6 +53,40 @@ it is the pending-delete marker *in transit* - it only enacts the delete when `c
 That site therefore uses a plain overlay (`maps.Copy`), not `MergeState` (with a don't-simplify-this note at the
 accumulation site in `execution.go`).
 
+### Numbers are float64-domain, and the unrepresentable integer is rejected on WRITE
+
+**Invariant: every number in dwarf state round-trips exactly through a `float64`.** State/baggage/payloads
+are carried as `map[string]any` across a JSON round trip through the database, and `encoding/json` decodes a
+JSON number into a **`float64`** whenever the target is an `any` - exact for integers only up to **2^53**.
+An integer written beyond that came back **rounded** (`1234567890123456789` -> `...768`), and the engine then
+re-marshalled the rounded value onward into the next step's `state`, the flow's `final_state`, a `Fork`, a
+`Continue`. Nothing errored; the workflow charged the wrong order.
+
+The fix is **`internal/jsonx.CheckPrecision`, applied at every authoring path**, not a change to what a
+decoded number *means*: `Flow.set` (the typed setters) **panics**, `Set`/`SetChanges`/`toStateMap` (interrupt
+payload, subgraph input) return the error, and the engine 400s a host-supplied `initialState`/`Baggage`/
+resume data/fork override (see `engine/CLAUDE.md`). Only **integer-shaped** literals are constrained - a
+fractional or exponent-notation number is float64-domain by construction and round-trips at any magnitude, so
+`1e300` is fine and `9007199254740993` is not. A `ReducerAdd` sum that grows past 2^53 therefore stays legal:
+it is a `float64` and marshals as `9.007199254740994e+15`, float-shaped. The panic is the same disposition as
+a mistyped read (below): the orchestrator catches it at the task-call boundary, so it is a clean step failure
+routed to `onError`, not a crash.
+
+**The rejected alternative was decoding exactly** - `UseNumber` at every decode site, normalizing to
+`int64`/`float64` (or leaving `json.Number`). It works, and it was built and thrown away. The reasons: it
+changes the Go type every reader of a state map sees (`outcome.State["x"].(float64)` stops matching for an
+integral value - and *`float64(1)` writes the literal `1`, so it would read back as an `int64`*: JSON has one
+number type, so no scheme preserves the writer's Go type through the database); it needs a reflect-walker to
+give a caller-supplied target (`Subgraph(…, &out)`) the same treatment as the engine's own decodes; and it
+buys exactness for a value the workflow author can carry losslessly as a string anyway. Rejecting on write
+keeps `float64` correct **by construction** everywhere downstream - including `boolexp`, which re-marshals its
+symbols through JSON and compares in `float64` - and cost zero changes to existing fixtures.
+
+The workaround is the one 64-bit-id APIs already publish (`id_str`): **carry it as a string**. Pinned by
+`internal/jsonx/jsonx_test.go`, `workflow/precision_test.go`, and `fixtures/precisionflow_test.go` (a task's
+oversized write fails the step and routes to `onError`; the string workaround crosses the step boundary
+intact; host ingress 400s).
+
 ### The typed getters panic on a type mismatch (and that is the safe option here)
 
 `GetString`/`GetInt`/`GetFloat`/`GetBool`/`GetDuration`/`GetStrings` **panic** when the key holds a value of the

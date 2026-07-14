@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -521,6 +522,12 @@ func mergeWithOverrides(originalJSON string, overrides any) (string, error) {
 	overridesJSON, err := json.Marshal(overrides)
 	if err != nil {
 		return "", errors.Trace(err)
+	}
+	// The overrides are seeded into the fork's leaf step as state, so they carry the same ±2^53 integer
+	// precision as any state write (jsonx).
+	err = jsonx.CheckPrecision(overridesJSON)
+	if err != nil {
+		return "", errors.New("invalid state overrides: %v", err, http.StatusBadRequest)
 	}
 	var ov map[string]any
 	err = json.Unmarshal(overridesJSON, &ov)

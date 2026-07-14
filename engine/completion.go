@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -869,6 +870,12 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	resumeDataJSON := "{}"
 	if data != nil {
 		b, _ := json.Marshal(data)
+		// Resume data is delivered to the task and can be written on into state, so it carries the same
+		// ±2^53 integer precision as any state write (jsonx).
+		err = jsonx.CheckPrecision(b)
+		if err != nil {
+			return errors.New("invalid resume data: %v", err, http.StatusBadRequest)
+		}
 		var resumeMap map[string]any
 		json.Unmarshal(b, &resumeMap)
 		if len(resumeMap) > 0 {

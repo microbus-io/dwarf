@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/errors"
 )
 
@@ -118,12 +119,19 @@ func toStateMap(v any) (map[string]any, error) {
 	if v == nil {
 		return nil, nil
 	}
-	if m, ok := v.(map[string]any); ok {
-		return m, nil
-	}
+	// Marshal even a map that would pass straight through: this is a persisted payload (an interrupt
+	// request, a subgraph's initial state), so it is held to the same ±2^53 integer precision as any
+	// other state write - and the check needs the JSON form.
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, errors.Trace(err)
+	}
+	err = jsonx.CheckPrecision(data)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if m, ok := v.(map[string]any); ok {
+		return m, nil
 	}
 	var m map[string]any
 	err = json.Unmarshal(data, &m)
