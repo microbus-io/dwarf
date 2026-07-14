@@ -450,20 +450,54 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// anyway), and it counts a failure if any of its steps failed. Excluding the whole rewound BRANCH - not
 	// merely the rewind step - is the other half of the fix: with `rewind = Enrich1`, its sibling `Cell1` sat
 	// in the same branch and was still counted as an arrival.
+	//
+	// MEMBERSHIP IS THE LINEAGE CHAIN, NOT THE LINEAGE ID. A NESTED fan-out re-lineages its own children
+	// (`childLineageID = stepID`), so in `Seed -forEach-> Cell -forEach-> Chunk -> JoinChunk -> JoinCell` the
+	// Chunk steps carry `lineage_id = Cell`, not `Seed`. Testing `c.lineageID == s.oldID` - as this once did -
+	// therefore DEAD-ENDS the outer walk at the inner spawn: the Chunks are filtered out, and JoinChunk (which
+	// does carry the outer lineage) is only reachable THROUGH them, since its predecessor is the inner cohort's
+	// last completer. Everything past the inner cohort in that branch became invisible, with two consequences:
+	// a rewind at or past the inner frame was never seen, so the branch was counted as ARRIVED and its re-run
+	// pushed `cohort_arrivals` past `cohort_size`; and a failure inside a kept branch's inner cohort was never
+	// seen, so the clone lost `cohort_failures` and a fork that had to re-fail COMPLETED instead - silently
+	// absorbing an unrecovered branch failure, which inverts the whole point of the partial-recovery fork.
+	//
+	// So a step belongs to spawn S's cohort - at ANY nesting depth - iff walking its lineage chain upward
+	// reaches S. That descends through nested cohorts and still stops cleanly at the outer fan-in, whose lineage
+	// is the spawn's OWN lineage and so never reaches S. Every spawn in a kept step's chain is itself kept (a
+	// lineage ancestor is a DAG ancestor, and pruning removes only descendants of the rewind step), so this is a
+	// pure in-memory walk over rows already loaded - no extra query, at any depth.
 	childrenByPred := map[int][]stepMeta{}
+	lineageOf := make(map[int]int, len(keep))
 	for _, s := range keep {
 		childrenByPred[s.predID] = append(childrenByPred[s.predID], s)
+		lineageOf[s.oldID] = s.lineageID
 	}
 	for _, s := range keep {
 		if s.cohortSize == 0 {
 			continue
+		}
+		// inCohort memoizes per spawn: the same chain is re-walked for every step of a branch.
+		memo := map[int]bool{}
+		var inCohort func(lineageID int) bool
+		inCohort = func(lineageID int) bool {
+			if lineageID == 0 {
+				return false
+			}
+			if v, ok := memo[lineageID]; ok {
+				return v
+			}
+			memo[lineageID] = false // breaks a malformed chain rather than spinning on it
+			v := lineageID == s.oldID || inCohort(lineageOf[lineageID])
+			memo[lineageID] = v
+			return v
 		}
 		arrivals, failures := 0, 0
 		for _, head := range childrenByPred[s.oldID] {
 			if head.lineageID != s.oldID {
 				continue // not a member of this spawn's cohort (e.g. a nested cohort's own frame)
 			}
-			// Walk this branch's sub-DAG, staying inside the cohort's lineage.
+			// Walk this branch's sub-DAG, descending THROUGH any nested cohort and stopping at the fan-in.
 			branchFailed, branchRewound := false, false
 			stack := []stepMeta{head}
 			for len(stack) > 0 {
@@ -476,7 +510,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 					branchFailed = true
 				}
 				for _, c := range childrenByPred[n.oldID] {
-					if c.lineageID == s.oldID {
+					if inCohort(c.lineageID) {
 						stack = append(stack, c)
 					}
 				}

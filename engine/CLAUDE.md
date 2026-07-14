@@ -245,10 +245,30 @@ cohort-**counting** device, not a DAG: every step of a per-element sub-pipeline 
 3-branch cohort of 2-step branches has 6 members, and counting members wrote `cohort_arrivals=5` against
 `cohort_size=3` (overshooting the pinned invariant, and pre-arriving a fan-in whose rewound branch has not re-run).
 The walk therefore starts at each direct child of the spawn that shares its lineage and descends the branch's
-sub-DAG within that lineage; one arrival per surviving branch, one failure if any step in it failed. Excluding the
-whole *branch* rather than the rewind *step* is the same fix's other half (a mid-branch rewind leaves its own
-already-completed earlier steps kept, and they are not arrivals). Pinned by `engine/forkcohort_test.go`; the older
-fork fixtures all use single-step branches - the degenerate case where members == branches and the bug is invisible.
+sub-DAG; one arrival per surviving branch, one failure if any step in it failed. Excluding the whole *branch*
+rather than the rewind *step* is the same fix's other half (a mid-branch rewind leaves its own already-completed
+earlier steps kept, and they are not arrivals).
+
+*Membership is the lineage CHAIN, not the lineage id* - and this is the trap one level deeper. A **nested**
+fan-out re-lineages its own children (`childLineageID = stepID`), so in
+`Seed -forEach-> Cell -forEach-> Chunk -> JoinChunk -> JoinCell` the `Chunk` steps carry `lineage_id = Cell`, not
+`Seed` - while `JoinChunk`, inserted with the inner spawn's *own* lineage, carries `Seed` and is reachable only
+**through** those `Chunk`s (its `predecessor_id` is the inner cohort's last completer). Filtering the descent on
+`lineage_id == spawn` therefore **dead-ends the outer walk at the inner spawn**, making everything past the inner
+cohort invisible, with two consequences: a rewind at or past the inner frame was never seen, so the branch counted
+as *arrived* and its re-run pushed `cohort_arrivals` past `cohort_size`; and a failure inside a **kept** branch's
+inner cohort was never seen, so the clone lost `cohort_failures` and **a fork that had to re-fail COMPLETED
+instead** - silently absorbing an unrecovered branch failure, inverting the whole point of the partial-recovery
+fork. So a step is in spawn `S`'s cohort - at *any* nesting depth - iff walking its lineage chain upward reaches
+`S`. That descends through nested cohorts and still stops cleanly at the outer fan-in (whose lineage is the
+spawn's own, and so never reaches `S`). It costs **no extra query at any depth**: Fork already holds every step of
+the flow in memory, and a kept step's lineage ancestors are always kept (a lineage ancestor is a DAG ancestor, and
+pruning removes only descendants of the rewind step). A materialized `lineage_path` column was considered and
+rejected - unbounded length, and a reindexing obligation on every insert, to replace a free in-memory walk.
+
+Pinned by `engine/forkcohort_test.go` (flat multi-step branches; nested rewind; nested failure in a kept branch).
+The older fork fixtures all use single-step, non-nested branches - the degenerate case where members == branches
+and neither bug is visible.
 `cloneTree` drives this per flow (`cloneOneFlow`) over an explicit
 LIFO worklist of kept subgraph-caller children, skipping the leaf fork step (which re-spawns a fresh child) -
 iterative rather than recursive so nesting depth costs O(1) goroutine stack (see "Size and count limits").
