@@ -28,6 +28,28 @@ The testID is hashed to a bounded 16 hex chars (SQL identifier limits: Postgres 
 `CreateTestingDatabase`, so an arbitrarily long Go subtest name still yields a valid database name. The hash is
 deterministic, so two engines in the **same** test (both keyed by `t.Name()`) resolve to the *same* isolated
 databases - which is how an in-test multi-replica fixture gives its peer engines shared state.
+
+### Running the suite against a real server
+
+`SEQUEL_TESTING_DSN` redirects the whole suite at a real database (the `%d` is required - it is what gives each
+shard its own isolated test database; see the DSN resolution above). All four dialects pass:
+
+```sh
+SEQUEL_TESTING_DSN='postgres://root:secret1234@127.0.0.1:5432/dwarftest_%d?sslmode=disable' go test ./engine/ ./fixtures/
+SEQUEL_TESTING_DSN='root:secret1234@tcp(127.0.0.1:3306)/dwarftest_%d'                        go test ./engine/ ./fixtures/
+SEQUEL_TESTING_DSN='sqlserver://sa:PASS@127.0.0.1:1433?database=dwarftest_%d&encrypt=disable' go test ./engine/ ./fixtures/
+```
+
+**SQL Server needs `&encrypt=disable` against a container's self-signed certificate.** The stock image's cert has a
+*negative serial number*, which Go's `crypto/x509` refuses to parse, so every connection dies with
+`TLS Handshake failed: x509: negative serial number` before a single query runs. It looks like a dwarf failure (the
+tests fail in `t.Cleanup`, dropping the test database) and is not one.
+
+Worth doing before shipping anything dialect-sensitive: SQLite serializes writes and has the weakest planner, so it
+hides exactly the bugs the others catch - MySQL's `RowsAffected` counting *changed* rather than *matched* rows, its
+gap locks under `REPEATABLE READ`, SQL Server's filtered-index/parameterization rules and its `OUTPUT INSERTED`
+claim path, and Postgres's real MVCC lock ordering. Expect the run to be slower there: SQL Server takes ~3x SQLite.
+
 #### Per-test engine + sequential execution (connection-load control)
 
 **Each `RunInTest` engine opens its own connection pool** - up to `maxOpenConns` (default 8) per

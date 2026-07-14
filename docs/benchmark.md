@@ -28,10 +28,17 @@ SEQUEL_TESTING_DSN='postgres://USER:PASS@127.0.0.1:5432/dwarfbench_%d?sslmode=di
 SEQUEL_TESTING_DSN='USER:PASS@tcp(127.0.0.1:3306)/dwarfbench_%d' \
   go test ./fixtures/ -run=X -bench=BenchmarkFlowThroughput -benchtime=1000x
 
-# SQL Server  (enable READ_COMMITTED_SNAPSHOT on the model database first to avoid deadlocks)
-SEQUEL_TESTING_DSN='sqlserver://sa:PASS@127.0.0.1:1433?database=dwarfbench_%d' \
+# SQL Server  (enable READ_COMMITTED_SNAPSHOT on the model database first to avoid deadlocks;
+#              add &encrypt=disable against a container using a self-signed certificate)
+SEQUEL_TESTING_DSN='sqlserver://sa:PASS@127.0.0.1:1433?database=dwarfbench_%d&encrypt=disable' \
   go test ./fixtures/ -run=X -bench=BenchmarkFlowThroughput -benchtime=1000x
 ```
+
+> **SQL Server TLS.** The stock SQL Server container ships a self-signed certificate whose serial number
+> is *negative*, which Go's `crypto/x509` refuses to parse — every connection then dies with
+> `TLS Handshake failed: x509: negative serial number`, long before any query runs. `&encrypt=disable`
+> (or a real certificate) is required against such a server. This is a driver/TLS constraint, not a dwarf
+> one.
 
 Swap `-bench=BenchmarkFlowThroughput` for `-bench=BenchmarkStatePayload` (use a smaller `-benchtime`, e.g.
 `100x`, since large payloads are slow) to measure byte throughput across payload sizes — see the section below.
