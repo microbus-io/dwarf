@@ -60,6 +60,7 @@ const (
 	faultReapMidTree         = "reapMidTree"         // the reaper errors after deleting steps, before flows
 	faultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
 	faultRefillScanErr       = "refillScanErr"       // the refiller's priority-band scan errors
+	faultSlowPoolPush        = "slowPoolPush"        // recomputePools stalls between reading R and pushing the derived sizes
 	faultPollSizingErr       = "pollSizingErr"       // the poll's pending-sizing query is treated as errored
 	faultDeliverFailureErr   = "deliverFailureErr"   // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery); unscoped, or scoped by the parked caller's task name for per-level control
 	faultCancelCommit        = "cancelCommit"        // the Cancel transaction errors

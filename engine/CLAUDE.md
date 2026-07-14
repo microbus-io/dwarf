@@ -1195,7 +1195,25 @@ count is exact/discrete and independent of the actuation - a shrunk pool still p
 **tuning** number (a wrong count mis-sizes pools, corrupts nothing), which is why - unlike the
 doorbell and statusChange signals - it rides best-effort transport with **no database backstop**.
 Asymmetry by construction: a new peer shrinks pools at once (hello/ping handled inline); a vanished
-peer regrows them lazily (only at the loop's prune). A multi-replica host that leaves `SignalPeers`
+peer regrows them lazily (only at the loop's prune).
+
+**Every APPLICATION of a pool size is serialized under `poolsLock`** - both writers: the derived
+recompute (`recomputePools`) and the live override (`SetMaxOpenConns`). The `lastAppliedR` dedupe
+skips a no-op recompute but does **not order two live ones**: two peers saying hello microseconds
+apart during a rolling deploy each read a different R, and with nothing serializing read-of-R
+through push, the **R=2 sizes can land AFTER the R=3 sizes** - every replica then holds a half-budget
+pool against a fleet of three, over-connecting the shard's server, and it is *sticky* (the next
+recompute sees R unchanged and skips). The override races the same way and worse: `recomputePools`
+reads `maxOpenConns` and only *then* pushes, so a `SetMaxOpenConns` landing in that window has its
+**pinned pools silently overwritten by derived ones** - the operator's explicit pin evaporates. With
+the lock spanning read through push, whichever writer goes second sees a settled world (the override
+applies last, or the recompute early-returns because the override is now set). Lock order:
+`poolsLock` -> `peersLock` (via `observedReplicas`) -> `shardsLock`; both peer-signal call sites
+release `peersLock` before calling, so it cannot cycle. Pinned by
+`TestPoolSizing_ConcurrentRecomputeAppliesLatestR` and
+`TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride` (both drive the interleaving with the
+`slowPoolPush` seam rather than racing for it; without the lock they measure 24 instead of 16, and a
+pinned 7 turning into 24). A multi-replica host that leaves `SignalPeers`
 a no-op now silently over-connects (each replica sees R=1) - wiring it was already the documented
 multi-replica requirement. `engine_id`/`instanceID` (random per process, fresh on restart) is also
 **stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - pure

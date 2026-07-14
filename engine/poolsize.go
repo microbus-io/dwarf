@@ -158,6 +158,10 @@ func effectiveVirtualCPUs(declared int) int {
 	return defaultVirtualCPUs
 }
 
+// slowPoolPushDelay is how long the faultSlowPoolPush seam stalls a recompute between reading R and pushing
+// the derived sizes. Test-only (the fault is inert in production); a var so it stays adjustable.
+var slowPoolPushDelay = 200 * time.Millisecond
+
 // recomputePools re-derives every shard's connection pool from the observed replica count and pushes
 // the sizes to the open shards (sequel's pool setters are hot/atomic), then re-derives the worker
 // ceiling, which is a function of those pools. Called whenever the peer map changes (hello/ping of a
@@ -165,12 +169,26 @@ func effectiveVirtualCPUs(declared int) int {
 // override pins the pools (an exact per-replica number, never divided), and when R is unchanged since
 // the last application.
 func (e *Engine) recomputePools() {
+	// poolsLock is held across the whole read-then-push, not just the dedupe: lastAppliedR keeps a no-op
+	// recompute from touching the pools, but it does not ORDER two live ones, so without this an R=2 push
+	// could land after an R=3 push (over-connecting a fleet of 3), and a concurrent SetMaxOpenConns could
+	// have its pinned pools overwritten by derived ones. Callers release peersLock before calling, so the
+	// poolsLock -> peersLock (observedReplicas) -> shardsLock order below cannot cycle.
+	e.poolsLock.Lock()
+	defer e.poolsLock.Unlock()
 	if !e.started.Load() || e.maxOpenConns.Load() != 0 {
 		return
 	}
 	replicas := e.observedReplicas()
 	if int32(replicas) == e.lastAppliedR.Swap(int32(replicas)) {
 		return
+	}
+	// The window poolsLock closes: R has been read, the sizes are not yet pushed. A test stalls one recompute
+	// here to hold a stale R while a peer's fresher one races past (see TestPoolSizing_ConcurrentRecompute-
+	// AppliesLatestR). Deliberately a FAULT, not a checkpoint: a breakpoint would freeze the racing recompute
+	// at this same site too, and the test needs it to run through.
+	if e.seams.IsFault(faultSlowPoolPush) {
+		time.Sleep(slowPoolPushDelay)
 	}
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)

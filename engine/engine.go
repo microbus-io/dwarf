@@ -117,6 +117,15 @@ type Engine struct {
 	peersLoop sync.WaitGroup
 	// lastAppliedR is the replica count the pools were last derived with, to skip no-op recomputes.
 	lastAppliedR atomic.Int32
+	// poolsLock serializes every APPLICATION of a pool size - the derived recompute (recomputePools) and
+	// the live override (SetMaxOpenConns). Deduping the recompute on lastAppliedR is not enough: two peer
+	// signals microseconds apart during a rolling deploy each read a different R, and nothing orders their
+	// pushes, so the R=2 sizes can land AFTER the R=3 sizes and leave every replica over-connecting a fleet
+	// of 3 - sticky until the next fleet change. The override races the same way, and worse: recomputePools
+	// reads maxOpenConns and then pushes, so a SetMaxOpenConns landing in that window has its PINNED pools
+	// silently overwritten by derived ones. Holding this across read-of-R/override + push makes the last
+	// writer win with the value it actually read. Lock order: poolsLock -> peersLock -> shardsLock.
+	poolsLock sync.Mutex
 
 	// Database
 	db database.ShardSet
@@ -363,6 +372,8 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	if n < 1 {
 		return errors.New("max open connections must be >= 1", http.StatusBadRequest)
 	}
+	e.poolsLock.Lock()
+	defer e.poolsLock.Unlock()
 	e.maxOpenConns.Store(int32(n))
 	e.db.SetMaxIdleConns(n)
 	e.db.SetMaxOpenConns(n)

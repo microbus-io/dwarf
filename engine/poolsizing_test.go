@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -317,6 +318,101 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 2, Cordoned: true}))
 	_, err := e.pickShard()
 	assert.Error(err)
+}
+
+// TestPoolSizing_ConcurrentRecomputeAppliesLatestR pins the ORDERING of pool application, which the
+// lastAppliedR dedupe does not give. Two peers saying hello microseconds apart during a rolling deploy each
+// run a recompute: one reads R=2, the other R=3. Nothing ordered their pushes, so the R=2 sizes could land
+// AFTER the R=3 sizes and leave the replica holding a half-of-the-budget pool against a fleet of three -
+// over-connecting the shard's server, and sticky until the next fleet change (the dedupe sees R unchanged
+// and skips). poolsLock now spans read-of-R through push, so the last writer wins with the value it read.
+//
+// The interleaving is forced, not raced: a breakpoint freezes the first recompute in exactly that window.
+// With the lock, the second recompute blocks on it and applies AFTER - which is the fix working.
+func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // budget 48
+	e.RunInTest(t)
+
+	db, err := e.db.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
+
+	hello := func(id string) {
+		b, _ := json.Marshal(peerPayload{Origin: id})
+		assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
+	}
+
+	// Stall peer-a's recompute (one-shot) after it has read R=2, before it pushes 48/2=24.
+	e.seams.InjectN(1, faultSlowPoolPush)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		hello("peer-a")
+	}()
+	time.Sleep(slowPoolPushDelay / 10) // peer-a is now inside the window, holding a stale R=2
+
+	// peer-b arrives while peer-a is stalled, and its recompute is NOT stalled: it sees R=3 and wants
+	// 48/3=16. Unserialized, it pushes 16 immediately and peer-a then overwrites it with the stale 24.
+	// Serialized, it cannot start until peer-a's push is done, so 16 lands last - the correct value.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		hello("peer-b")
+	}()
+	wg.Wait()
+
+	// The fleet is 3, so the pool must be the R=3 share - not the R=2 share applied last.
+	assert.Equal(3, e.observedReplicas())
+	assert.Equal(16, db.DB.Stats().MaxOpenConnections,
+		"the pool must reflect the LATEST replica count (48/3), not a stale recompute that pushed last")
+}
+
+// TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride is the same race against the OTHER writer of pool
+// sizes, and the damaging half: recomputePools reads maxOpenConns and only THEN pushes, so a SetMaxOpenConns
+// landing in that window had its pinned pools silently overwritten by derived ones. The operator's explicit
+// override - the external-pooler / benchmark path - just evaporated, and stayed gone until the next fleet
+// change. poolsLock spans the read through the push, so whichever of the two goes second sees a settled world:
+// the override applies last, or the recompute early-returns because the override is already set. Either way
+// the pin stands.
+func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derived budget 48
+	e.RunInTest(t)
+
+	db, err := e.db.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// A peer's recompute reads R=2 (derived 24) and stalls before pushing.
+	e.seams.InjectN(1, faultSlowPoolPush)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		b, _ := json.Marshal(peerPayload{Origin: "peer-a"})
+		assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
+	}()
+	time.Sleep(slowPoolPushDelay / 10)
+
+	// The operator pins the pool while that recompute is mid-flight.
+	assert.NoError(e.SetMaxOpenConns(7))
+	wg.Wait()
+
+	assert.Equal(7, db.DB.Stats().MaxOpenConnections,
+		"the explicit override must survive a concurrent derived recompute, not be overwritten by its 48/2")
 }
 
 // TestPoolSizing_NoOpenShardsIs503 pins that pickShard returns an error instead of panicking when no shard
