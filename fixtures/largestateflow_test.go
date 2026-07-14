@@ -58,7 +58,7 @@ func TestLargeFinalStateflow(t *testing.T) {
 	if assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		got, _ := out.State["payload"].(string)
-		assert.Equal(payloadLen, len(got))            // not truncated
+		assert.Equal(payloadLen, len(got))                              // not truncated
 		assert.True(got == payload, "payload corrupted in final_state") // and byte-identical (no huge diff dump)
 	}
 }

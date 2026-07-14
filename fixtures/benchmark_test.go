@@ -72,7 +72,6 @@ const benchWorkers = 32
 // and SQL Server (~32k) have more headroom.
 const benchMaxOpenConns = 30
 
-
 // benchChainLen is the number of task executions per flow (A -> B -> C -> ... -> END). steps/sec derives from
 // flows/sec times this, so a graph change stays reflected in the reported step rate.
 const benchChainLen = 3

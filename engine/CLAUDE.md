@@ -1737,6 +1737,29 @@ into an already-closed cache is a no-op. Never-closed nudge channels plus dedica
 remove the ordering hazard an earlier design carried (closing `wakeTimer` before draining the workers let a worker
 mid-`processStep` race the close and panic).
 
+### An unchecked `tx.ExecContext` inside `Transact` is SAFE - do not "fix" it
+
+Many statements inside `db.Transact` closures discard their error (`tx.ExecContext(ctx, "UPDATE ...", ...)` with no
+`if err != nil`). This looks like a bug, has been filed as one twice, and is not: **`sequel.Transact` latches it.**
+
+In `Transact` mode the `Tx` carries `autoErr: true`, so (1) every `Exec`/`Query` records the **first** statement error,
+(2) every statement after it **short-circuits** - returning that error without touching the database, so no later write
+in the closure can land, (3) when the closure returns `nil`, `transactOnce` sees `tx.err != nil`, returns it, and the
+deferred `Rollback` fires, and (4) `Transact` **retries** the whole closure if it was lock contention. SQL Server also
+gets `SET XACT_ABORT ON`. Sequel's `Tx` doc states the intent outright: a transaction *cannot* commit partial state
+when a caller forgets to check a statement error, and a deadlock is surfaced rather than masked so `Transact` can
+retry. Dwarf never calls `BeginTx` directly, so `autoErr` is always on.
+
+The trap for anyone re-deriving this: raw `database/sql` behaves differently, and **that** is what makes the code look
+broken. On MySQL and SQLite a failed statement does *not* poison a plain `sql.Tx` - the commit succeeds with that write
+silently missing (measured). It is `sequel.Tx`, not the driver, that closes the hole. Any analysis that reasons about
+driver semantics without accounting for the `autoErr` latch will "discover" a partial-commit bug that does not exist -
+in `Delete`/`Cancel`, in the `cohort_arrivals` bump, in the resume leaf reset, in the reaper's deletes.
+
+What is **not** delegated to the latch, and is still checked explicitly at each site: **`RowsAffected()==0`** - a
+zero-row match is a *semantic* outcome (a lost CAS, a terminal-status guard, the resume race gate), not an error, and
+the latch says nothing about it.
+
 ### Transactions
 
 The multi-statement write paths each run under one `db.Transact`. **There is no single engine-wide row-lock
