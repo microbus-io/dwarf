@@ -219,11 +219,25 @@ by the **root** flow key (a subgraph-child key is rejected with 400 - see "Subgr
 multiple fan-out siblings interrupt, each `Resume` handles one; the flow returns to `running` only when no
 interrupted steps remain.
 
-**Cancel** - Aborts a created, running, or interrupted flow. Walks up (`surgraphChain`) and down (`allSubgraphFlows`)
-the hierarchy, atomically cancels all steps across all flows, computes `final_state` per flow, and cancels all flows
-with per-flow `final_state` via CASE - all in one transaction. Must be addressed by the **root** flow key (a
+**Cancel** - Aborts a created, running, or interrupted flow. Walks **down** (`allSubgraphFlows`) the hierarchy,
+atomically cancels all steps across all flows, computes `final_state` per flow, and cancels all flows with per-flow
+`final_state` via CASE - all in one transaction (`cancelSubtree`). Must be addressed by the **root** flow key (a
 subgraph-child key is rejected with 400 - see "Subgraph keys are read-only"). Takes a reason string surfaced as
 `FlowOutcome.CancelReason`.
+
+*Down only - there is no up-walk, and there was never a live one.* Cancel used to call `surgraphChain` too, but
+being root-only it can have no ancestors: the chain returns no ancestor steps, so the block that cancelled them was
+unreachable, and the call itself was a full `root_flow_id` tree scan run to learn the flow's own id and token - both
+of which the caller already holds. Every cancellation the engine performs, present or planned, is down-only or
+one-level: a root-addressed Cancel has no ancestors; the orphan sweep starts at a child whose ancestor chain is
+already terminal; and a child terminalizing settles its *one* caller step by `surgraph_step_id` (a PK), not by
+walking to the root. The up-walk would only come alive if Cancel accepted a mid-tree key - which it deliberately
+does not. (`surgraphChain` itself stays: `Resume`, `handleInterrupt`, and `Fork` are its real users.)
+
+**`cancelSubtree` is shared with the orphan sweep** (`cancelOrphanedSubtree`), which had been a near-duplicate of
+this transaction. The two differ in exactly one behavior, and it is a real one: a zero-row flow UPDATE (a racing
+terminalization) is a **409** for an operator Cancel - the caller asked to stop something that had already stopped -
+and a **benign no-op** for the sweep, which asked for an outcome that already happened.
 
 **Fork** - The sole recovery/exploration operation, given terminal-flow immutability. `Fork(stepKey,
 stateOverrides)` clones a terminal flow's execution tree up to a chosen step into a brand-new,
@@ -2027,9 +2041,10 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
      sibling is live - see "Failure back to the parent".) The orphan has no path out on its
      own: the terminal root 409s `Resume`/`Cancel`, the child's own key is read-only (400), and
      `recoverWedgedSubgraphParks` is blind because the caller step is *terminal*, not `running`+`parkedSubgraph`.
-     The sweep cancels the orphan's whole subtree (`cancelOrphanedSubtree`: a subtree-scoped clone of `Cancel`'s
-     transaction with no surgraph up-walk, since the ancestor chain is already terminal), sharing the parent's
-     terminal fate. An **`interrupted`** parent is deliberately *excluded* (not terminal - a `Resume` of the root
+     The sweep cancels the orphan's whole subtree (`cancelOrphanedSubtree`, which now *shares* `Cancel`'s
+     transaction via `cancelSubtree` rather than cloning it - no surgraph up-walk is wanted or exists, since the
+     ancestor chain is already terminal; it differs only in taking a zero-row flow UPDATE as a benign no-op rather
+     than a 409), sharing the parent's terminal fate. An **`interrupted`** parent is deliberately *excluded* (not terminal - a `Resume` of the root
      revives that branch and a sibling child under it is healthy); the `parkWedgeThreshold` age guard excludes the
      sub-second window where a just-terminalized parent's sibling child is still being cleaned up by the normal
      completion/error path. It counts under `park_type="orphaned_child"`.

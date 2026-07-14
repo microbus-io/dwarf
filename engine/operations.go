@@ -662,7 +662,9 @@ func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 	}
 }
 
-// cancel aborts a flow and its entire surgraph chain + descendants.
+// cancel aborts a flow and its whole subgraph subtree. Root-only: a subgraph child is not an independently
+// cancellable unit (its parent is parked on it, and the unit of any lifecycle change is the tree), so a child key
+// is rejected rather than silently widened into a tree-wide cancel.
 func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -685,8 +687,6 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if err != nil {
 		return errors.Trace(err)
 	}
-	// Cancel tears down the whole tree (it walks up to the root and down to all descendants), so it must be
-	// addressed by the root flow key; a subgraph child key is read-only (introspection/Fork only).
 	if surgraphFlowID != 0 {
 		return errors.New("cannot cancel a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
@@ -695,84 +695,10 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		return errors.New("flow is already in terminal status", http.StatusConflict)
 	}
 
-	surgraphFlowIDs, surgraphStepIDs, surgraphCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowToken)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	descendantFlowIDs, descendantCompositeIDs, err := e.allSubgraphFlows(ctx, shardNum, flowID)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	allFlowIDs := append([]any{}, surgraphFlowIDs...)
-	allFlowIDs = append(allFlowIDs, descendantFlowIDs...)
-	allCompositeIDs := append([]string{}, surgraphCompositeIDs...)
-	allCompositeIDs = append(allCompositeIDs, descendantCompositeIDs...)
-
-	reason = strings.TrimSpace(reason)
-	finalStates := make([]string, len(allFlowIDs))
-	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		// faultCancelCommit fails this transaction once, before any write, so the test proves it rolls back
-		// atomically (the tree is untouched) and a retry then cancels cleanly.
-		if e.seams.IsFault(faultCancelCommit) {
-			return errors.New("injected fault: " + faultCancelCommit)
-		}
-		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
-		stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
-			stepArgs...,
-		)
-
-		if len(surgraphStepIDs) > 0 {
-			surgraphStepPlaceholders := strings.Repeat("?,", len(surgraphStepIDs)-1) + "?"
-			surgraphStepArgs := append([]any{workflow.StatusCancelled, parkedNone}, surgraphStepIDs...)
-			tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+surgraphStepPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
-				surgraphStepArgs...,
-			)
-		}
-
-		for i, fid := range allFlowIDs {
-			fs, _, err := e.computeFinalState(ctx, tx, shardNum, fid.(int))
-			if err != nil {
-				return errors.Trace(err)
-			}
-			finalStates[i] = fs
-		}
-
-		var caseClause strings.Builder
-		caseClause.WriteString("CASE")
-		var flowArgs []any
-		for i, fid := range allFlowIDs {
-			caseClause.WriteString(" WHEN flow_id=? THEN ?")
-			flowArgs = append(flowArgs, fid, finalStates[i])
-		}
-		caseClause.WriteString(" END")
-		flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
-		flowArgs = append(flowArgs, allFlowIDs...)
-		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
-			flowArgs...,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return errors.New("flow is already in terminal status", http.StatusConflict)
-		}
-		return nil
-	})
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	awaitedSet := e.awaitedFlows(ctx, shardNum, allFlowIDs)
-	for i, cid := range allCompositeIDs {
-		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, allFlowIDs[i].(int)), "to", workflow.StatusCancelled)
-		e.signalStop(ctx, cid, workflow.StatusCancelled, awaitedSet == nil || awaitedSet[allFlowIDs[i].(int)])
-	}
-	return nil
+	// The root has no ancestors by construction, so this walks DOWN only - see cancelSubtree, which the orphan
+	// sweep shares. A racing terminalization that empties the flow UPDATE is a 409 here: the caller asked to stop
+	// something that had already stopped.
+	return errors.Trace(e.cancelSubtree(ctx, shardNum, flowID, flowToken, reason, faultCancelCommit, true))
 }
 
 // deleteFlow schedules a flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete rows

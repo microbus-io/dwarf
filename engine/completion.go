@@ -321,6 +321,93 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	return merged, nil
 }
 
+// cancelSubtree cancels a flow and every non-terminal flow beneath it, in one transaction: the steps first
+// (write-first, per the flow-terminating-transaction rule), then each flow's `final_state`, then one CASE-per-flow
+// terminalization guarded on non-terminal status. It signals every flow it stopped.
+//
+// It walks DOWN only. Cancellation is always initiated at a flow that has no live ancestor to reconcile with -
+// the public Cancel is root-only (a subgraph-child key is rejected, not silently widened), and the internal
+// orphan sweep starts at a child whose whole ancestor chain is already terminal. The `surgraphChain` up-walk the
+// public path used to run was therefore dead: on a root it returns no ancestor steps at all, so the block that
+// cancelled them could never execute, and the call itself was an expensive way (a full root_flow_id tree scan) to
+// learn the flow's own id and token, which the caller already holds.
+//
+// conflictIfSettled is the only behavioral difference between the two callers, and it is a real one: an operator
+// Cancel of an already-terminal flow is a 409 (the caller asked to stop something that had stopped), while the
+// orphan sweep racing a concurrent terminalization is a benign no-op (it asked for an outcome that already
+// happened). commitFault is a test-only seam name, checked before any write so a fired fault proves the whole
+// transaction rolls back atomically; pass "" for none.
+func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowToken, reason, commitFault string, conflictIfSettled bool) error {
+	db, err := e.db.Shard(shardNum)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	descendantFlowIDs, descendantCompositeIDs, err := e.allSubgraphFlows(ctx, shardNum, flowID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
+	allCompositeIDs := append(
+		[]string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))},
+		descendantCompositeIDs...,
+	)
+
+	reason = strings.TrimSpace(reason)
+	finalStates := make([]string, len(allFlowIDs))
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		if commitFault != "" && e.seams.IsFault(commitFault) {
+			return errors.New("injected fault: " + commitFault)
+		}
+		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
+		// Write-first (the step-cancel UPDATE) per the flow-terminating-transaction rule.
+		stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
+		tx.ExecContext(ctx,
+			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
+			stepArgs...,
+		)
+
+		for i, fid := range allFlowIDs {
+			fs, _, err := e.computeFinalState(ctx, tx, shardNum, fid.(int))
+			if err != nil {
+				return errors.Trace(err)
+			}
+			finalStates[i] = fs
+		}
+
+		var caseClause strings.Builder
+		caseClause.WriteString("CASE")
+		var flowArgs []any
+		for i, fid := range allFlowIDs {
+			caseClause.WriteString(" WHEN flow_id=? THEN ?")
+			flowArgs = append(flowArgs, fid, finalStates[i])
+		}
+		caseClause.WriteString(" END")
+		flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
+		flowArgs = append(flowArgs, allFlowIDs...)
+		res, err := tx.ExecContext(ctx,
+			"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			flowArgs...,
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 && conflictIfSettled {
+			return errors.New("flow is already in terminal status", http.StatusConflict)
+		}
+		return nil
+	})
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	awaitedSet := e.awaitedFlows(ctx, shardNum, allFlowIDs)
+	for i, cid := range allCompositeIDs {
+		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, allFlowIDs[i].(int)), "to", workflow.StatusCancelled)
+		e.signalStop(ctx, cid, workflow.StatusCancelled, awaitedSet == nil || awaitedSet[allFlowIDs[i].(int)])
+	}
+	return nil
+}
+
 // cohortSpawnTasks walks a step's lineage chain upward and returns the task name of every fan-out spawn whose
 // cohort the step is inside - innermost first. `lineage_id` names the spawn step of the cohort a step belongs
 // to (0 outside any cohort), and a spawn is itself a step with its own lineage, so nested fan-outs form a

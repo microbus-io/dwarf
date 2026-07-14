@@ -19,7 +19,6 @@ package engine
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"strings"
 	"time"
 
@@ -203,67 +202,14 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 	}
 }
 
-// cancelOrphanedSubtree cancels an orphaned subgraph child and its own non-terminal descendants in one
-// transaction - a subtree-scoped cancel (no surgraph up-walk: the ancestor chain is already terminal, which is
-// why the child is orphaned). It mirrors Cancel's transaction shape (write-first step cancel, per-flow
-// computeFinalState, one CASE flow-cancel) but does not error on a zero-row flow update: the child may have
-// terminalized concurrently between the sweep's SELECT and this write, which is a benign no-op, not a 409.
-// This whole subtree is descendants of an already-terminal root.
+// cancelOrphanedSubtree cancels an orphaned subgraph child and its own non-terminal descendants, sharing the
+// public Cancel's transaction (cancelSubtree). No surgraph up-walk is needed - and none exists: the ancestor
+// chain is already terminal, which is precisely why the child is orphaned. A zero-row flow update is a benign
+// no-op rather than a 409: the child may have terminalized concurrently between the sweep's SELECT and this
+// write, which is the outcome the sweep wanted anyway.
 func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlowID int, childFlowToken string) error {
-	db, err := e.db.Shard(shard)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	descFlowIDs, descCompositeIDs, err := e.allSubgraphFlows(ctx, shard, childFlowID)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	allFlowIDs := append([]any{childFlowID}, descFlowIDs...)
-	allCompositeIDs := append([]string{fmt.Sprintf("%d-%d-%s", shard, childFlowID, strings.TrimSpace(childFlowToken))}, descCompositeIDs...)
-
 	const reason = "parent flow terminated (orphan recovery)"
-	finalStates := make([]string, len(allFlowIDs))
-	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
-		// Write-first (the step-cancel UPDATE) per the flow-terminating-transaction rule.
-		stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
-			stepArgs...,
-		)
-
-		for i, fid := range allFlowIDs {
-			fs, _, err := e.computeFinalState(ctx, tx, shard, fid.(int))
-			if err != nil {
-				return errors.Trace(err)
-			}
-			finalStates[i] = fs
-		}
-
-		var caseClause strings.Builder
-		caseClause.WriteString("CASE")
-		var flowArgs []any
-		for i, fid := range allFlowIDs {
-			caseClause.WriteString(" WHEN flow_id=? THEN ?")
-			flowArgs = append(flowArgs, fid, finalStates[i])
-		}
-		caseClause.WriteString(" END")
-		flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
-		flowArgs = append(flowArgs, allFlowIDs...)
-		_, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
-			flowArgs...,
-		)
-		return errors.Trace(err)
-	})
-	if err != nil {
-		return errors.Trace(err)
-	}
-	awaitedSet := e.awaitedFlows(ctx, shard, allFlowIDs)
-	for i, cid := range allCompositeIDs {
-		e.signalStop(ctx, cid, workflow.StatusCancelled, awaitedSet == nil || awaitedSet[allFlowIDs[i].(int)])
-	}
-	return nil
+	return errors.Trace(e.cancelSubtree(ctx, shard, childFlowID, childFlowToken, reason, "", false))
 }
 
 // detectOrphanedFlows reports `running` flows that have no non-terminal step and have not advanced for
