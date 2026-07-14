@@ -724,11 +724,17 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		for i, next := range normalNexts {
 			stepStateJSON := childInputJSON
 			if next.item != nil {
+				// A forEach branch's state is the flow state plus its element and ordinal context. The
+				// source array is NOT stripped: the engine once deleted it from each branch's local state
+				// to avoid N copies of it in every step row of every branch, but that was a byte
+				// optimization for the one field the engine happens to know the name of, while every other
+				// carried field paid the same cost unaddressed. It also made a branch's state a LIE - the
+				// branch could not see the array its own element came from - and it is what made a failed
+				// fan-out's final_state come back missing the array (a completed sibling's branch-local
+				// snapshot is the merge base there). De-duplicating large carried fields belongs to a
+				// general mechanism, not a special case; until then a branch sees the state its flow has.
 				perStepState := make(map[string]any, len(childInputState)+3)
 				maps.Copy(perStepState, childInputState)
-				if next.forEachKey != "" && next.forEachKey != next.itemKey {
-					delete(perStepState, next.forEachKey)
-				}
 				perStepState[next.itemKey] = next.item
 				if next.forEachKey != "" {
 					perStepState[next.itemKey+"Index"] = next.cohortIndex
@@ -1053,12 +1059,12 @@ type stateByteCount struct {
 // moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot), which
 // the caller emits after its transaction commits.
 func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, stateByteCount, error) {
-	var spawnStateJSON, spawnChangesJSON, spawnTaskName string
+	var spawnStateJSON, spawnChangesJSON string
 	var spawnLineageID int
 	tx.QueryRowContext(ctx,
-		"SELECT state, changes, lineage_id, task_name FROM dwarf_steps WHERE step_id=?",
+		"SELECT state, changes, lineage_id FROM dwarf_steps WHERE step_id=?",
 		cohortSpawnID,
-	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnLineageID, &spawnTaskName)
+	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnLineageID)
 	bytes := stateByteCount{stateRead: len(spawnStateJSON), changesRead: len(spawnChangesJSON)}
 	var spawnState, spawnChanges map[string]any
 	unmarshalJSONMap(spawnStateJSON, &spawnState)
@@ -1113,15 +1119,10 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	// deepest path the flow took. nextStepDepth (last-completer+1) is the floor for the defensive empty case.
 	fanInDepth := max(maxCohortDepth+1, nextStepDepth)
 
-	// Drop per-branch forEach bookkeeping
-	for _, tr := range graph.Transitions() {
-		if tr.From != spawnTaskName || tr.ForEach == "" || tr.As == "" {
-			continue
-		}
-		delete(merged, tr.As)
-		delete(merged, tr.As+"Index")
-		delete(merged, tr.As+"Count")
-	}
+	// Drop per-branch forEach bookkeeping. The same strip runs in computeFinalState for a fan-out that
+	// FAILED (and so never reached this convergence), so the two paths agree on what a fan-out's state
+	// means once the cohort is behind it - see stripForEachBookkeeping.
+	stripForEachBookkeeping(merged, graph)
 
 	mergedJSON, _ := json.Marshal(merged)
 	bytes.stateWritten = len(mergedJSON)

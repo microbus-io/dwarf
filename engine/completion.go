@@ -183,11 +183,42 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, flow
 		return "", "", errors.Trace(err)
 	}
 
+	// Drop per-branch forEach bookkeeping, exactly as insertFanInStep does when a cohort converges.
+	//
+	// A FAILED fan-out is the case that needs it: the merge base is the first tail row, and a completed
+	// sibling that transitioned toward a fan-in that never fired keeps successor_id=0 - so it IS a tail,
+	// and its `state` is a BRANCH-LOCAL snapshot carrying the element it was handed (`<as>`) and its
+	// ordinal context (`<as>Index`/`<as>Count`). Left in, whichever branch happens to have the lowest
+	// step_id donates its private bookkeeping to the flow's final_state, and with 3+ branches which one
+	// wins is arbitrary. The successful path already deletes these keys at the fan-in; the failed path
+	// must agree, or a fan-out's final state means two different things depending on how it ended.
+	stripForEachBookkeeping(merged, &graph)
+
 	data, err := json.Marshal(merged)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
 	return string(data), workflowURL, nil
+}
+
+// stripForEachBookkeeping deletes the per-branch fields the engine injects into a forEach branch's state -
+// the element (`<as>`) and its ordinal context (`<as>Index`, `<as>Count`) - from a materialized state map.
+// They are a branch's private context and have no meaning once the cohort is behind the flow: with the
+// Replace reducer one arbitrary branch's element would otherwise ride forward. Applied at both places a
+// cohort's state leaves the cohort: insertFanInStep (the convergence) and computeFinalState (a fan-out that
+// never converged). A workflow wanting the element past the fan-in forwards it under a different key.
+func stripForEachBookkeeping(state map[string]any, graph *workflow.Graph) {
+	if len(state) == 0 {
+		return
+	}
+	for _, tr := range graph.Transitions() {
+		if tr.ForEach == "" || tr.As == "" {
+			continue
+		}
+		delete(state, tr.As)
+		delete(state, tr.As+"Index")
+		delete(state, tr.As+"Count")
+	}
 }
 
 // completeFlow transitions a flow to completed and propagates to surgraph.

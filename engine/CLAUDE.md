@@ -212,8 +212,17 @@ cloned flow, only the steps that are **not** strict DAG-descendants of that flow
 (everything, for an off-path completed-prefix subgraph); a per-step `INSERT…SELECT` copies all columns DB-side
 (native timestamps) under a fresh `flow_id`/`step_token`, building an old→new id map; predecessor/successor/lineage
 references are remapped (a ref to a pruned step → 0); cohort `arrivals`/`failures` are recomputed on cloned spawns
-from the cloned members' terminal states, **excluding the rewound branch** (so the existing fan-in path converges/
-fails the fork with no special escalation). `cloneTree` drives this per flow (`cloneOneFlow`) over an explicit
+by **counting BRANCHES**, **excluding the whole rewound branch** (so the existing fan-in path converges/
+fails the fork with no special escalation). *Branches, not lineage members* - the trap is that `lineage_id` is a
+cohort-**counting** device, not a DAG: every step of a per-element sub-pipeline inherits the spawn's lineage, so a
+3-branch cohort of 2-step branches has 6 members, and counting members wrote `cohort_arrivals=5` against
+`cohort_size=3` (overshooting the pinned invariant, and pre-arriving a fan-in whose rewound branch has not re-run).
+The walk therefore starts at each direct child of the spawn that shares its lineage and descends the branch's
+sub-DAG within that lineage; one arrival per surviving branch, one failure if any step in it failed. Excluding the
+whole *branch* rather than the rewind *step* is the same fix's other half (a mid-branch rewind leaves its own
+already-completed earlier steps kept, and they are not arrivals). Pinned by `engine/forkcohort_test.go`; the older
+fork fixtures all use single-step branches - the degenerate case where members == branches and the bug is invisible.
+`cloneTree` drives this per flow (`cloneOneFlow`) over an explicit
 LIFO worklist of kept subgraph-caller children, skipping the leaf fork step (which re-spawns a fresh child) -
 iterative rather than recursive so nesting depth costs O(1) goroutine stack (see "Size and count limits").
 
@@ -566,25 +575,39 @@ each receiving the element under the `as` key. An empty array spawns nothing; wh
 transition, an empty array completes the flow there - downstream tasks (including the fan-in target) are never
 reached.
 
-**Branch state strip on dynamic fan-out.** When spawning `forEach` branches, the engine removes the source array
-field from each branch's local `state` (only the local state - the spawn step's immutable snapshot keeps it). Without
-this, an N-element forEach feeding `forEach -> A -> B -> C -> J` would write N copies of the array into every step row
-in every branch, blowing storage up by N times the chain length. The fan-in step rebuilds its state from the spawn
-step's `state + changes`, so the source array reappears at the fan-in and downstream - the absence is local to the
-cohort. The strip is skipped when `as == forEach` (the alias named the same as the source). The engine also injects
-two read-only fields per branch: `<as>Index` (position in the array) and `<as>Count` (cohort size), so the branch
-reads its ordinal context without the source array.
+**A branch sees its flow's state, plus its element.** Each `forEach` branch's local `state` is the flow state with
+three injected fields: `<as>` (the element), `<as>Index` (its position), `<as>Count` (the cohort size). Nothing is
+removed. **There was once a "branch state strip"** - the engine deleted the source array from each branch's local
+state (an N-element forEach feeding `forEach -> A -> B -> C -> J` otherwise writes N copies of the array into every
+step row of every branch). **It was removed, and must not come back as a special case.** It was a byte optimization
+for the one carried field the engine happens to know the name of, while every *other* large carried field paid the
+same N x chain-length cost unaddressed; it made a branch's state a lie (the branch could not see the array its own
+element came from); and it is what made a failed fan-out's `final_state` come back *missing* the array - a failed
+cohort never reaches its fan-in, so the terminal-state merge bases on a completed sibling's branch-local snapshot,
+which is precisely the stripped one. De-duplicating large carried state is a general mechanism (state references),
+not a per-field deletion.
+
+**Downstream suppression via explicit clear** (below) remains the author-space way to drop a large source array past
+the fan-in.
 
 **Downstream suppression via explicit clear.** A branch that wants to suppress the source array past the fan-in calls
 `flow.Set(<forEach>, nil)` in its body. That writes the new value into the branch's `changes`, the replace reducer
 at fan-in folds it over the spawn-step base, and the field is absent (or whatever the branch wrote) past the fan-in -
 useful for a forEach over a very large array where downstream tasks only care about the per-element transformation.
 
-**Fan-in strip on dynamic fan-out.** `insertFanInStep` deletes `<as>`, `<as>Index`, `<as>Count` from the merged state
-after the cohort converges. The injected per-branch bookkeeping has no meaning past the fan-in: with the Replace
-reducer, one branch's element value and index would otherwise win arbitrarily and ride forward. The names to delete
-are recovered by walking the spawn task's outgoing `forEach` transitions (`tr.As`); static fan-outs have no `as`. A
-workflow wanting the element value past the fan-in must forward it under a different key.
+**Fan-in strip on dynamic fan-out.** The injected per-branch bookkeeping (`<as>`, `<as>Index`, `<as>Count`) has no
+meaning once the cohort is behind the flow: with the Replace reducer, one branch's element value and index would
+otherwise win arbitrarily and ride forward - the flow's state would say which element it saw by *completion order*.
+So `stripForEachBookkeeping` (`completion.go`) deletes those three names, walking the graph's `forEach` transitions
+to recover them (`tr.As`; static fan-outs have no `as`). A workflow wanting the element value past the fan-in must
+forward it under a different key. **Two paths call it and both must**, or they disagree on what a fan-out's state
+means:
+
+- `insertFanInStep` - the cohort **converged**; the merged fan-in snapshot is stripped.
+- `computeFinalState` - the cohort **failed** and so never reached its fan-in. The terminal state is the merge of
+  the tail steps, and a completed sibling of a failed cohort *is* a tail (its `successor_id` was never pointed at a
+  fan-in that never fired), so the merge base is a branch-local snapshot carrying that branch's bookkeeping. Without
+  the strip, a failed fan-out's `final_state` reports an arbitrary branch's element as the flow's own.
 
 **Fan-in** is implicit. When the last sibling at a cohort completes, the engine merges all siblings' changes using
 reducers and creates the next step(s) in a transaction that prevents duplicate next steps when multiple workers

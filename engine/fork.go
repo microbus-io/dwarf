@@ -398,28 +398,59 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		}
 	}
 
-	// Recompute cohort counters on cloned spawns from cloned members' terminal states, excluding this flow's
-	// rewind step (the re-run / re-parked branch).
-	membersByLineage := map[int][]stepMeta{}
+	// Recompute cohort counters on cloned spawns, counting BRANCHES - not lineage members.
+	//
+	// `lineage_id` is a cohort-COUNTING device, not a DAG: every step of a per-element sub-pipeline inherits
+	// the spawn's childLineageID, so a branch of depth D contributes D members to the lineage. The live
+	// engine bumps `cohort_arrivals` once per BRANCH (when the branch's exit step transitions to the fan-in),
+	// so `arrivals <= size` always holds. Counting members instead - as this once did - breaks that on any
+	// multi-step branch: `Seed --forEach(3)--> Cell --> Enrich --> Join` has 6 members for size 3, so a fork
+	// wrote arrivals=5, size=3 and violated the pinned invariant `cohort_arrivals <= cohort_size`
+	// (`invariants_test.go`, asserted across the chaos-soak and race suites). The existing fork fixture hid
+	// it because its branch is exactly ONE step - the degenerate case where members == branches.
+	//
+	// A branch is the sub-DAG rooted at a direct child of the spawn (predecessor_id = spawn) that shares the
+	// spawn's cohort lineage. Fork requires a TERMINAL origin, so every kept step is settled: a branch has
+	// arrived unless it is the one being rewound (that branch re-runs, and its post-rewind steps were pruned
+	// anyway), and it counts a failure if any of its steps failed. Excluding the whole rewound BRANCH - not
+	// merely the rewind step - is the other half of the fix: with `rewind = Enrich1`, its sibling `Cell1` sat
+	// in the same branch and was still counted as an arrival.
+	childrenByPred := map[int][]stepMeta{}
 	for _, s := range keep {
-		if s.lineageID != 0 {
-			membersByLineage[s.lineageID] = append(membersByLineage[s.lineageID], s)
-		}
+		childrenByPred[s.predID] = append(childrenByPred[s.predID], s)
 	}
 	for _, s := range keep {
 		if s.cohortSize == 0 {
 			continue
 		}
 		arrivals, failures := 0, 0
-		for _, m := range membersByLineage[s.oldID] {
-			if m.oldID == rewind {
-				continue
+		for _, head := range childrenByPred[s.oldID] {
+			if head.lineageID != s.oldID {
+				continue // not a member of this spawn's cohort (e.g. a nested cohort's own frame)
 			}
-			switch m.status {
-			case workflow.StatusCompleted, workflow.StatusCancelled:
-				arrivals++
-			case workflow.StatusFailed:
-				arrivals++
+			// Walk this branch's sub-DAG, staying inside the cohort's lineage.
+			branchFailed, branchRewound := false, false
+			stack := []stepMeta{head}
+			for len(stack) > 0 {
+				n := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				if n.oldID == rewind {
+					branchRewound = true
+				}
+				if n.status == workflow.StatusFailed {
+					branchFailed = true
+				}
+				for _, c := range childrenByPred[n.oldID] {
+					if c.lineageID == s.oldID {
+						stack = append(stack, c)
+					}
+				}
+			}
+			if branchRewound {
+				continue // this branch re-runs in the fork; it has not arrived
+			}
+			arrivals++
+			if branchFailed {
 				failures++
 			}
 		}

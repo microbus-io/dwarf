@@ -41,12 +41,13 @@ Each branch receives:
 - `<as>Index` — the element's position in the array,
 - `<as>Count` — the cohort size.
 
-The source array (`lineItems`) is stripped from each branch's local state, so an N-element fan-out feeding
-a long chain doesn't copy the whole array into every branch's every step. The array reappears at the fan-in
-(rebuilt from the spawning step). An empty array spawns nothing; if `forEach` is the only outgoing
-transition, an empty array ends the flow.
+A branch otherwise sees the flow's state as it was at the fan-out, including the source array (`lineItems`)
+its own element came from. An empty array spawns nothing; if `forEach` is the only outgoing transition, an
+empty array ends the flow.
 
-To suppress the source array past the fan-in, a branch can call `f.Set("<source>", nil)`.
+Every branch carrying the source array means an N-element fan-out over a chain of depth D stores N×D copies
+of it. For a large array, drop it once it has been fanned out: a branch calling `f.Set("<source>", nil)`
+removes it from the flow's state past the fan-in.
 
 ## Fan-in
 
@@ -82,8 +83,10 @@ A few rules worth knowing:
 
 - **Fan-out siblings must share the same outgoing transition targets.** The engine evaluates transitions
   from the last sibling to finish; `Validate()` enforces this so the result can't depend on finish order.
-- **The per-branch bookkeeping (`item`, `itemIndex`, `itemCount`) is stripped at the fan-in.** Forward an
-  element value past the fan-in under a different key if you need it.
+- **The per-branch bookkeeping (`item`, `itemIndex`, `itemCount`) does not survive the fan-out.** It is gone
+  from the flow's state once the cohort is behind it — at the fan-in, and in the final state of a flow whose
+  fan-out failed. (Otherwise one arbitrary branch's element would ride forward as the flow's own, picked by
+  whichever branch happened to finish last.) Forward an element value under a different key if you need it.
 - **A failed or cancelled sibling doesn't poison the fan-in.** It contributes nothing to the merge; the
   flow is driven by the failure/error path instead.
 
