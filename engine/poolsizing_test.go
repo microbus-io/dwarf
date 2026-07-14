@@ -19,11 +19,13 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -315,6 +317,80 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 2, Cordoned: true}))
 	_, err := e.pickShard()
 	assert.Error(err)
+}
+
+// TestPoolSizing_NoOpenShardsIs503 pins that pickShard returns an error instead of panicking when no shard
+// is open. It cannot mean "a shardless engine" - Startup always opens at least the default shard - so it
+// means the engine is not live: never started, or already SHUT DOWN (ShardSet.Close nils the indices).
+// The second is the one that matters: a host still serving while it tears the engine down, or a Create in
+// flight when Shutdown lands, is an ordinary race, and indexing the empty index slice (rand.IntN(0)) took
+// the host's whole process down with it. Create must surface a 503, not a panic.
+func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	// (1) Never started. No SetShard either, so this is the default-shard path - the one that indexed the
+	// empty slice.
+	e := NewEngine()
+	e.SetHost(NewTestProxy())
+	_, err := e.pickShard()
+	if assert.Error(err) {
+		assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err))
+	}
+	_, err = e.Create(ctx, "unstarted/g", nil, nil) // and Create surfaces it rather than dying
+	assert.Error(err)
+
+	// (2) Started, then shut down - the shutdown race, reached through the public API.
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Solo")
+	g.SetEndpoint("A", "shutdownrace/a")
+	g.AddTransition("A", workflow.END)
+	proxy.HandleGraph("shutdownrace/g", g)
+	proxy.HandleTask("shutdownrace/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e2 := NewEngine()
+	e2.SetHost(proxy)
+	e2.RunInTest(t) // registers a t.Cleanup Shutdown; shutting down early here is idempotent
+	flowKey, err := e2.Create(ctx, "shutdownrace/g", nil, nil)
+	assert.NoError(err) // sanity: it works while live
+	assert.NoError(e2.Shutdown(ctx))
+
+	_, err = e2.pickShard()
+	if assert.Error(err) {
+		assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err))
+	}
+
+	// Every public operation must now say 503 - "the engine is not available" - and NOT the lies it used to
+	// tell. The key-addressed ops all route through ShardSet.Shard, which answers "flow not found" (404) when
+	// no shard is open: a stopped engine told the caller its flow did not exist. The cross-shard ops were
+	// worse - List/Purge/ShardInfo fanned out over an empty index set and returned SUCCESS with an empty
+	// result ("you have no flows"). Both are indistinguishable from the truth, and a caller can act on them.
+	is503 := func(label string, err error) {
+		if assert.Error(err, "%s must fail on a stopped engine", label) {
+			assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err), "%s", label)
+		}
+	}
+	_, err = e2.Create(ctx, "shutdownrace/g", nil, nil)
+	is503("Create", err)
+	_, err = e2.Snapshot(ctx, flowKey)
+	is503("Snapshot", err)
+	_, err = e2.Fork(ctx, flowKey, nil)
+	is503("Fork", err)
+	_, err = e2.Continue(ctx, flowKey, nil)
+	is503("Continue", err)
+	is503("Resume", e2.Resume(ctx, flowKey, nil))
+	is503("Cancel", e2.Cancel(ctx, flowKey, "x"))
+	is503("Delete", e2.Delete(ctx, flowKey))
+	_, err = e2.History(ctx, flowKey)
+	is503("History", err)
+	_, err = e2.Await(ctx, flowKey)
+	is503("Await", err)
+	_, _, err = e2.List(ctx, workflow.Query{}) // used to return an EMPTY LIST and no error
+	is503("List", err)
+	_, err = e2.Purge(ctx, workflow.Query{}) // used to return 0 marked and no error
+	is503("Purge", err)
+	_, err = e2.ShardInfo(ctx)
+	is503("ShardInfo", err)
 }
 
 // TestPoolSizing_LiveOverride pins that SetMaxOpenConns pushes the pinned pool to every live shard

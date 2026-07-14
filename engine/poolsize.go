@@ -252,7 +252,16 @@ func (e *Engine) pickShard() (int, error) {
 	e.shardsLock.Unlock()
 	if len(specs) == 0 {
 		// No shard was registered: Startup opened the single default shard.
+		//
+		// An EMPTY index set is not a shardless engine - Startup always opens at least the default shard, so
+		// this only happens off a live engine: before Startup, or AFTER Shutdown (ShardSet.Close nils the
+		// indices). The second is not API misuse but an ordinary shutdown race - a host still serving while
+		// it tears the engine down, or a Create in flight when Shutdown lands - and indexing the empty slice
+		// panicked the host's process for it. A library owes that caller an error.
 		indices := e.db.Indices()
+		if len(indices) == 0 {
+			return 0, errors.New("engine is not started", http.StatusServiceUnavailable)
+		}
 		return indices[rand.IntN(len(indices))], nil
 	}
 	total := 0

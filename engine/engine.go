@@ -835,31 +835,65 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 
 // --- Public API ---
 
+// ensureStarted rejects an operation on an engine that is not live - never started, or already shut down.
+// It is not merely a nicety: without it the failure is a LIE rather than an error. Every key-addressed
+// operation routes through ShardSet.Shard, which returns "flow not found" (404) when no shard is open, so a
+// stopped engine tells the caller its flow does not exist - and a caller may act on that (stop retrying,
+// recreate the work). The cross-shard operations are worse: List/Purge/ShardInfo fan out over an EMPTY index
+// set and return SUCCESS with an empty result - "you have no flows". Both are indistinguishable from the
+// truth. 503 says the one true thing: the engine is not available, come back later.
+//
+// The shutdown half is not API misuse: a host still serving while it tears the engine down, or a request in
+// flight when Shutdown lands, is an ordinary race. (pickShard keeps its own no-open-shards guard for exactly
+// that race - `started` can flip after this check - where indexing an empty index slice used to panic the
+// host's process.)
+func (e *Engine) ensureStarted() error {
+	if !e.started.Load() {
+		return errors.New("engine is not started", http.StatusServiceUnavailable)
+	}
+	return nil
+}
+
 // Create creates a new flow for a workflow and starts it, returning the running flow's key. opts carries
 // the flow's policy (scheduling, DeleteOnCompletion, Baggage, ThreadKey); nil uses defaults.
 // For a flow that must wait for an external trigger, have the entry task call flow.Interrupt and resume it
 // with Resume (which, unlike a separate start, also delivers a payload).
 func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
+	if err := e.ensureStarted(); err != nil {
+		return "", errors.Trace(err)
+	}
 	return e.create(ctx, workflowURL, initialState, opts)
 }
 
 // Snapshot returns the current state and status of a flow.
 func (e *Engine) Snapshot(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
+	if err := e.ensureStarted(); err != nil {
+		return nil, errors.Trace(err)
+	}
 	return e.snapshot(ctx, flowKey)
 }
 
 // Fingerprint returns a fingerprint and status for change detection.
 func (e *Engine) Fingerprint(ctx context.Context, flowKey string) (fingerprint string, status string, err error) {
+	if err := e.ensureStarted(); err != nil {
+		return "", "", errors.Trace(err)
+	}
 	return e.fingerprint(ctx, flowKey)
 }
 
 // Resume continues a flow paused by flow.Interrupt.
 func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) error {
+	if err := e.ensureStarted(); err != nil {
+		return errors.Trace(err)
+	}
 	return e.resume(ctx, flowKey, resumeData)
 }
 
 // Cancel aborts a flow.
 func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) error {
+	if err := e.ensureStarted(); err != nil {
+		return errors.Trace(err)
+	}
 	return e.cancel(ctx, flowKey, reason)
 }
 
@@ -868,26 +902,41 @@ func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) erro
 // modified. The fork inherits the original's scheduling and baggage (it does not take FlowOptions).
 // Returns the new flow's key.
 func (e *Engine) Fork(ctx context.Context, stepKey string, stateOverrides any) (string, error) {
+	if err := e.ensureStarted(); err != nil {
+		return "", errors.Trace(err)
+	}
 	return e.forkFlow(ctx, stepKey, stateOverrides)
 }
 
 // History returns the step-by-step execution history of a flow.
 func (e *Engine) History(ctx context.Context, flowKey string) ([]workflow.FlowStep, error) {
+	if err := e.ensureStarted(); err != nil {
+		return nil, errors.Trace(err)
+	}
 	return e.history(ctx, flowKey)
 }
 
 // Step returns details of a single step.
 func (e *Engine) Step(ctx context.Context, stepKey string) (*workflow.FlowStep, error) {
+	if err := e.ensureStarted(); err != nil {
+		return nil, errors.Trace(err)
+	}
 	return e.step(ctx, stepKey)
 }
 
 // List queries flows by status, workflow name, or thread key.
 func (e *Engine) List(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, string, error) {
+	if err := e.ensureStarted(); err != nil {
+		return nil, "", errors.Trace(err)
+	}
 	return e.list(ctx, query)
 }
 
 // Delete removes a flow and its steps.
 func (e *Engine) Delete(ctx context.Context, flowKey string) error {
+	if err := e.ensureStarted(); err != nil {
+		return errors.Trace(err)
+	}
 	return e.deleteFlow(ctx, flowKey)
 }
 
@@ -895,16 +944,25 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 // them shortly after. Marked flows are excluded from List/History immediately. Returns the count of roots
 // marked - no more than 4096 per call; iterate to mark more. Running flows are skipped.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (int, error) {
+	if err := e.ensureStarted(); err != nil {
+		return 0, errors.Trace(err)
+	}
 	return e.purge(ctx, query)
 }
 
 // ShardInfo returns health and size summaries for all shards.
 func (e *Engine) ShardInfo(ctx context.Context) ([]ShardSummary, error) {
+	if err := e.ensureStarted(); err != nil {
+		return nil, errors.Trace(err)
+	}
 	return e.shardInfo(ctx)
 }
 
 // Await blocks until a flow stops, or until the ctx expires (which returns an error).
 func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
+	if err := e.ensureStarted(); err != nil {
+		return nil, errors.Trace(err)
+	}
 	outcome, err := e.await(ctx, flowKey)
 	if err != nil {
 		return nil, err
@@ -921,6 +979,9 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 // caller bridging an open-ended flow to a bounded request (e.g. an HTTP poll) can answer within its budget and
 // re-poll. A real failure still returns an error.
 func (e *Engine) Poll(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
+	if err := e.ensureStarted(); err != nil {
+		return nil, errors.Trace(err)
+	}
 	return e.await(ctx, flowKey)
 }
 
@@ -934,6 +995,9 @@ func (e *Engine) Poll(ctx context.Context, flowKey string) (*workflow.FlowOutcom
 // the error, so the caller keeps a handle to Await/Snapshot/Cancel it later. Run never cancels the flow
 // on the caller's behalf; a caller that wants the flow torn down on timeout calls Cancel explicitly.
 func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
+	if err := e.ensureStarted(); err != nil {
+		return "", nil, errors.Trace(err)
+	}
 	return e.run(ctx, workflowURL, initialState, opts)
 }
 
@@ -941,11 +1005,17 @@ func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, 
 // (scheduling, baggage) - it does not take FlowOptions. For a turn with different policy,
 // use Create with FlowOptions.ThreadKey.
 func (e *Engine) Continue(ctx context.Context, threadKey string, additionalState any) (string, error) {
+	if err := e.ensureStarted(); err != nil {
+		return "", errors.Trace(err)
+	}
 	return e.continueFlow(ctx, threadKey, additionalState)
 }
 
 // HistoryMermaid writes the execution DAG of a flow as a Mermaid diagram.
 func (e *Engine) HistoryMermaid(ctx context.Context, flowKey string, w io.StringWriter) error {
+	if err := e.ensureStarted(); err != nil {
+		return errors.Trace(err)
+	}
 	steps, err := e.history(ctx, flowKey)
 	if err != nil {
 		return errors.Trace(err)

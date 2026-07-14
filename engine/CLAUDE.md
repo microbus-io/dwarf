@@ -141,6 +141,20 @@ is real complexity for a need that does not arise in practice.
 
 These are methods on `*engine.Engine`.
 
+**Every public operation is gated on a live engine (`ensureStarted` -> 503).** Not a nicety: without it a
+stopped engine *lies*. The key-addressed operations all route through `ShardSet.Shard`, which returns
+**"flow not found" (404)** when no shard is open - so a stopped engine tells the caller its flow does not
+exist, and the caller may act on that (stop retrying, recreate the work). The cross-shard operations are
+worse: `List`/`Purge`/`ShardInfo` fan out over an **empty index set** and return **success with an empty
+result** - "you have no flows." Both are indistinguishable from the truth; 503 says the one true thing. The
+state is reachable in production, not just by API misuse: `Shutdown` -> `ShardSet.Close` nils the index set,
+so a host still serving while it tears the engine down (or a request in flight when `Shutdown` lands) hits
+it. `pickShard` keeps its **own** no-open-shards guard, because `started` can flip between the gate and the
+pick - and there, indexing the empty index slice (`rand.IntN(0)`) **panicked the host's process**. Inbound
+`DeliverSignal` is the deliberate exception: a doorbell to a stopped engine is inert (`return nil`), not an
+error, since it is fire-and-forget and there is nothing to wake. Pinned by
+`TestPoolSizing_NoOpenShardsIs503`.
+
 **Policy is set once at genesis and inherited by derivation; the operation is the inherit-vs-default selector.**
 A flow's policy (priority, fairness, time budget, baggage, thread membership) is authored
 explicitly via `FlowOptions` only at **genesis** - `Create`/`Run`. **Derived** operations carry policy from
