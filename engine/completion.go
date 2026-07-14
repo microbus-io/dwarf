@@ -198,6 +198,25 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 		return "", "", errors.Trace(err)
 	}
 
+	// The tails are COHORT MEMBERS (lineage_id != 0), which means a fan-out resolved with failures and so never
+	// reached its fan-in. Rebuild the state the way the convergence would have, rather than from the tail rows.
+	//
+	// mergeTerminalSteps bases on the FIRST tail's `state` and folds in every tail's `changes` - and that loses
+	// the intermediate output of every branch but one. In a multi-step branch (`forEach -> Cell -> Enrich -> J`),
+	// Cell's output lives in Enrich's `state`, not in its `changes`: only the first tail's state is consulted, so
+	// branch 0's Cell output rides in via the base while branches 1..N-1's is simply dropped. The converged path
+	// (insertFanInStep) has no such hole - it merges EVERY cohort member's `changes` - so the two paths disagreed
+	// on what a fan-out's terminal state means, which is exactly the drift the shared strip below exists to stop.
+	//
+	// Every step of a per-element sub-pipeline inherits the spawn's lineage, so "every cohort member" is one
+	// indexed scan and it covers Cell AND Enrich, for every branch.
+	if baseLineageID != 0 {
+		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, baseLineageID, &graph, workflowURL)
+		if err != nil {
+			return "", "", errors.Trace(err)
+		}
+	}
+
 	// Drop per-branch forEach bookkeeping, exactly as insertFanInStep does when a cohort converges - and, like
 	// it, only for the cohorts the merge base is actually INSIDE.
 	//
@@ -226,6 +245,80 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 		return "", "", errors.Trace(err)
 	}
 	return string(data), workflowURL, nil
+}
+
+// mergeCohortState rebuilds the state of a cohort that resolved with failures, and so never reached its fan-in.
+// It runs the SAME merge insertFanInStep runs at a successful convergence - the spawn step's `state + changes` as
+// the base, then every COMPLETED member's `changes` folded through the graph's reducers in `fan_out_ordinal,
+// step_id` order - so a fan-out's terminal state means one thing whether it converged or failed.
+//
+// Why the base is the SPAWN and not a tail: a branch's intermediate output lives in the NEXT step's `state`, not in
+// any tail's `changes`, so merging tails alone silently drops everything but the last step of each branch (and, for
+// the state half, everything but the first tail's branch). The spawn's own row is the only base that is common to
+// the whole cohort, and every member's `changes` is exactly the set of per-branch outputs.
+//
+// Reducer ORDER matters (append/union/concat are not commutative), which is why the scan is ordered the same way
+// the convergence orders it: by the branch's position in the spawn loop, not by completion order.
+func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shardNum, flowID, cohortSpawnID int, graph *workflow.Graph, workflowURL string) (map[string]any, error) {
+	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON string
+	err := db.QueryRowContext(ctx,
+		"SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", cohortSpawnID,
+	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON)
+	if err == sql.ErrNoRows {
+		return map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	var spawnState, spawnChanges map[string]any
+	unmarshalJSONMap(spawnStateJSON, &spawnState)
+	unmarshalJSONMap(spawnChangesJSON, &spawnChanges)
+	if spawnState == nil {
+		spawnState = map[string]any{}
+	}
+	// FLATTEN: final_state is a flow-boundary value, so everything the spawn carried by reference is materialized
+	// here - unlike the fan-in, which may pass a carried ref through.
+	err = e.resolveStateRefs(ctx, db, shardNum, spawnState, parseStateRefs(spawnRefsJSON), nil, workflowURL)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	merged, err := workflow.MergeState(spawnState, spawnChanges, graph.Reducers())
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	rows, err := db.QueryContext(ctx,
+		"SELECT status, changes FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_id",
+		flowID, cohortSpawnID,
+	)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status, changesJSON string
+		if err := rows.Scan(&status, &changesJSON); err != nil {
+			return nil, errors.Trace(err)
+		}
+		// Only completed members contribute, matching insertFanInStep: a failed or cancelled branch's partial
+		// output is not a fact the flow can build on (an error voids the task's changes).
+		if strings.TrimSpace(status) != workflow.StatusCompleted {
+			continue
+		}
+		var changes map[string]any
+		unmarshalJSONMap(changesJSON, &changes)
+		merged, err = workflow.MergeState(merged, changes, graph.Reducers())
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.Trace(err)
+	}
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	return merged, nil
 }
 
 // cohortSpawnTasks walks a step's lineage chain upward and returns the task name of every fan-out spawn whose

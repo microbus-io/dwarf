@@ -196,3 +196,74 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	// The source array the branches were spawned from is still there (it is flow state, not bookkeeping).
 	assert.Contains(outcome.State, "pages")
 }
+
+// TestFailedFanOut_KeepsEveryBranchesIntermediateOutput pins that a fan-out which resolved with FAILURES reports
+// the same terminal state a successful convergence would have - specifically, that it keeps the intermediate
+// output of EVERY surviving branch, not just the first.
+//
+// The hole this closes: a branch's intermediate output lives in the NEXT step's `state`, not in any tail's
+// `changes`. The terminal merge used to base on the FIRST tail's `state` and fold in only the tails' `changes`, so
+// in `forEach -> Cell -> Enrich -> Join` branch 0's Cell output rode in via the base while branches 1..N-1's was
+// silently dropped. The converged path (insertFanInStep) merges EVERY cohort member's changes and has no such
+// hole, so the two paths disagreed on what a fan-out's terminal state means. The failed path now runs the same
+// merge: spawn base + every completed member's changes, in fan_out_ordinal order.
+func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	proxy := NewTestProxy()
+	e.SetHost(proxy)
+	e.RunInTest(t)
+
+	// Two-STEP branches: Cell writes, then Enrich writes. Cell's output survives only in Enrich's `state`.
+	g := workflow.NewGraph("MultiStepBranch")
+	for _, n := range []string{"Seed", "Cell", "Enrich", "Join"} {
+		g.SetEndpoint(n, "ms/"+n)
+	}
+	g.SetFanIn("Join")
+	g.SetReducer("cells", workflow.ReducerAppend)
+	g.SetReducer("enriched", workflow.ReducerAppend)
+	g.AddTransitionForEach("Seed", "Cell", "items", "item")
+	g.AddTransitionChain("Cell", "Enrich", "Join", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("ms/wf", g)
+
+	proxy.HandleTask("ms/Seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	// The FIRST step of each branch. Its output must reach final_state for every branch, not just branch 0.
+	proxy.HandleTask("ms/Cell", func(ctx context.Context, f *workflow.Flow) error {
+		f.Set("cells", []string{"cell:" + f.GetString("item")})
+		return nil
+	})
+	// The SECOND step. One branch fails here, so the cohort resolves with failures and never reaches the fan-in.
+	proxy.HandleTask("ms/Enrich", func(ctx context.Context, f *workflow.Flow) error {
+		if f.GetString("item") == "b" {
+			return errors.New("branch b failed at Enrich")
+		}
+		f.Set("enriched", []string{"enriched:" + f.GetString("item")})
+		return nil
+	})
+	proxy.HandleTask("ms/Join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	_, outcome, err := e.Run(ctx, "ms/wf", map[string]any{"items": []string{"a", "b", "c"}}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusFailed, outcome.Status)
+
+	// Cell ran and COMPLETED in all three branches, so all three contributions survive - including branch b's,
+	// whose branch later failed at Enrich (Cell's own step completed; only Enrich failed).
+	cells, _ := outcome.State["cells"].([]any)
+	assert.Equal(3, len(cells), "every branch's FIRST-step output must survive, not just the first branch's")
+	assert.Contains(cells, "cell:a")
+	assert.Contains(cells, "cell:b")
+	assert.Contains(cells, "cell:c")
+
+	// Enrich completed only in branches a and c; b's failed step contributes nothing (an error voids its changes).
+	enriched, _ := outcome.State["enriched"].([]any)
+	assert.Equal(2, len(enriched))
+	assert.Contains(enriched, "enriched:a")
+	assert.Contains(enriched, "enriched:c")
+
+	// The per-branch bookkeeping still does not ride forward, and the source array still does.
+	assert.NotContains(outcome.State, "item")
+	assert.Contains(outcome.State, "items")
+}

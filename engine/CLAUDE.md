@@ -831,8 +831,22 @@ The Mermaid renderer ignores `step_depth` and `lineage_id`: it draws the deduped
 and `{step -> successor_id}`, exact for arbitrary nesting. Heads are nodes with no incoming edge, tails with no
 outgoing.
 
+**A failed fan-out's terminal state is rebuilt the way the convergence would have built it, not from the tails.**
+When the merge base tail is a cohort member (`lineage_id != 0`), the cohort resolved with failures and never reached
+its fan-in, and `computeFinalState` switches to `mergeCohortState` - the *same* merge `insertFanInStep` runs: the
+**spawn** step's `state + changes` as the base, then every **completed member's** `changes` folded through the
+reducers in `fan_out_ordinal, step_id` order. Merging the tails instead loses data, because **a branch's
+intermediate output lives in the NEXT step's `state`, not in any tail's `changes`**: in
+`forEach -> Cell -> Enrich -> Join`, only the *first* tail's `state` is consulted, so branch 0's `Cell` output rides
+in via the base and branches 1..N-1's is silently dropped (measured: 1 of 3 branches surviving, and *which* one is
+arbitrary). The spawn's row is the only base common to the whole cohort, and every member's `changes` is exactly the
+set of per-branch outputs - every step of a per-element sub-pipeline inherits the spawn's lineage, so one indexed
+scan covers `Cell` *and* `Enrich`, for every branch. Reducer order matters (`append`/`union`/`concat` are not
+commutative), which is why the scan is ordered by the branch's position in the spawn loop rather than by completion
+order. Pinned by `TestFailedFanOut_KeepsEveryBranchesIntermediateOutput`.
+
 `computeFinalState` also reads the DAG, not `step_depth`. The terminal state is the merge of the tail steps -
-completed steps with `successor_id = 0` (`mergeTerminalSteps`). The earlier `MAX(step_depth)` heuristic was wrong for
+completed steps with `successor_id = 0` (`mergeTerminalSteps`) - for a flow that is *not* a failed fan-out. The earlier `MAX(step_depth)` heuristic was wrong for
 any graph where an intra-thread `flow.Goto` self-loop sits inside a fan-out: each loop iteration pushes
 `step_depth + 1`, so the looping branch can outrun the fan-in/terminal step in depth, and `MAX(step_depth)` selected
 the dangling loop step (empty state). The tail-step merge is depth-agnostic: loop iterations carry
