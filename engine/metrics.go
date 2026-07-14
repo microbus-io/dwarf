@@ -193,9 +193,23 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 	pendingPerShard := make([]map[int]int, len(indices))
 	agePerShard := make([]map[int]int, len(indices))
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// parked=0 is what this gauge MEANS: a parked step is excluded from selection by construction, so
+		// counting one would report a backlog no worker will ever pick up. Every other due-pending query in
+		// the engine carries the predicate; this one was the lone exception. (No row is miscounted today -
+		// `parkedSubgraph` is only ever written alongside status='running' - but that is an accident of the
+		// current park kinds, not an invariant, and the next park kind that can coexist with `pending`
+		// would silently inflate the gauge.)
+		//
+		// The reason is DEFINITIONAL, not performance - do not re-justify it as an index fix. Measured on
+		// Postgres (300k terminal rows, 2k pending, the real partial index): the planner uses
+		// idx_dwarf_steps_selection either way, seeking on the leading `status` column alone, and both plans
+		// read every pending row (73 vs 76 buffers). They must: this is a GROUP BY over the whole due band,
+		// so every due row is touched by definition and no index prefix can reduce that. Adding `parked`
+		// only moves it into the Index Cond.
 		rows, err := db.QueryContext(ctx,
 			"SELECT priority, COUNT(*), DATE_DIFF_MILLIS(NOW_UTC(), MIN(created_at)) FROM dwarf_steps"+
-				" WHERE status='"+workflow.StatusPending+"' AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() GROUP BY priority",
+				" WHERE status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() GROUP BY priority",
+			parkedNone,
 		)
 		if err != nil {
 			return errors.Trace(err)
