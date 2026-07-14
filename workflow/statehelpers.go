@@ -38,6 +38,22 @@ func getFromMap(m map[string]any, key string, target any) error {
 	return json.Unmarshal(raw, target)
 }
 
+// mustGetFromMap is getFromMap for the single-return typed getters, which have no channel to report a
+// type mismatch through. It PANICS when the key holds a value of the wrong type - a task reading
+// GetInt("retryAfter") off a 1.5 must not silently proceed with 0, which is how a zero-delay retry loop
+// against a downstream gets built. The panic is not a crash: the orchestrator wraps its task call in a
+// panic catcher, so this surfaces as a normal step failure (routed to onError if the graph has one, else
+// the step fails) carrying the stack trace. A task that wants to HANDLE a mistyped field instead of
+// failing on it uses Get, which returns the error.
+//
+// Absent and cleared keys are not a mismatch - they yield the zero value, so an optional field still
+// reads as one.
+func mustGetFromMap(m map[string]any, key string, target any) {
+	if err := getFromMap(m, key, target); err != nil {
+		panic(errors.New("state field %q is not a %s: %v", key, reflect.TypeOf(target).Elem(), err))
+	}
+}
+
 // isCleared reports whether v represents a cleared state slot. Either a Go nil
 // or a json.RawMessage equal to "null" (after trimming whitespace) qualifies.
 // Both forms appear after Clear or Set(name, nil).

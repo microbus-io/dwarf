@@ -53,6 +53,33 @@ it is the pending-delete marker *in transit* - it only enacts the delete when `c
 That site therefore uses a plain overlay (`maps.Copy`), not `MergeState` (with a don't-simplify-this note at the
 accumulation site in `execution.go`).
 
+### The typed getters panic on a type mismatch (and that is the safe option here)
+
+`GetString`/`GetInt`/`GetFloat`/`GetBool`/`GetDuration`/`GetStrings` **panic** when the key holds a value of the
+wrong type (`mustGetFromMap`, `statehelpers.go`). They previously discarded `getFromMap`'s error and returned the
+zero value, which made *absent*, *cleared*, and *wrong-typed* indistinguishable - and the zero value is an
+actively dangerous answer: `GetInt("retryAfter")` over a `1.5` (a fractional number from an upstream task, a
+host's `initialState`, or `ReducerAdd`) read as `0`, and the task built a zero-delay retry loop against its
+downstream. `Has` returned `true`, so the usual guard did not help.
+
+Panicking is the right disposition *because of the engine's panic isolation*, not despite it: `ExecuteTask` is
+wrapped in `errors.CatchPanic` at the call boundary, so the panic becomes the call's error and takes the normal
+disposition - routed to `onError` if the graph has one, else `failStep` - with a stack trace attached. It is a
+clean, immediate, correctly-attributed step failure, not a crash. (This is the *boundary* catch, which releases
+the lease; the coarse worker-loop catch would have wedged the step. See "Host-call panic isolation" in
+`engine/CLAUDE.md`.)
+
+The rejected alternative was two-valued getters (`(T, error)`). `f.GetString("x")` is used inline everywhere
+(conditions, arguments, struct literals), so it would force a temp var at every call site and the realistic
+outcome is `v, _ := f.GetInt(…)` - the same silent zero with more ceremony. **`Get(key, target) error` already is
+the two-valued form**, and is the documented escape hatch for a task that wants to *handle* a mistyped field.
+
+Absent and cleared keys are **not** a mismatch - they still yield the zero value, so the optional-field idiom is
+untouched. Only the typed getters panic; the engine's own `when`-expression evaluation does not go through them.
+Pinned by `TestFlow_TypedGetterPanicsOnTypeMismatch` (workflow) and
+`fixtures/panicflow_test.go` (end-to-end: a mistyped read fails the step and routes to `onError`, and the task is
+proven not to have proceeded past the read).
+
 ### The `Flow` carrier is single-owner and carries no lock
 
 A task owns its `Flow` exclusively for its execution; `Flow` is a bare struct over two `map[string]any`

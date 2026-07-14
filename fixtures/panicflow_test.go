@@ -55,8 +55,23 @@ func TestPanicflow(t *testing.T) {
 	handled.AddTransition("Rescue", workflow.END)
 	proxy.HandleGraph("panicflow.verify:0/handled", handled)
 
+	// Graph 3: a task reading a mistyped state field with a typed getter. The getters panic rather than
+	// hand back a zero value the task never wrote, and this is what makes that safe: the panic is caught at
+	// the task-call boundary, so the mistyped read is an ordinary step failure the graph's onError handles.
+	mistyped := workflow.NewGraph("Mistyped")
+	mistyped.SetEndpoint("Read", "panicflow.verify:0/read")
+	mistyped.SetEndpoint("Rescue", "panicflow.verify:0/rescue")
+	mistyped.AddTransition("Read", workflow.END)
+	mistyped.AddTransitionOnError("Read", "Rescue")
+	mistyped.AddTransition("Rescue", workflow.END)
+	proxy.HandleGraph("panicflow.verify:0/mistyped", mistyped)
+
 	proxy.HandleTask("panicflow.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {
 		panic("boom")
+	})
+	proxy.HandleTask("panicflow.verify:0/read", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetInt("delay", f.GetInt("retryAfter")) // retryAfter is 1.5 - a mistyped read, never a silent 0
+		return nil
 	})
 	proxy.HandleTask("panicflow.verify:0/rescue", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetString("recovered", "yes")
@@ -91,5 +106,23 @@ func TestPanicflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal("yes", outcome.State["recovered"])
+	})
+
+	t.Run("mistyped_getter_fails_the_step_and_routes_to_onError", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		_, outcome, err := eng.Run(awaitCtx, "panicflow.verify:0/mistyped",
+			map[string]any{"retryAfter": 1.5}, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		// Not a wedged step, and not a task that silently proceeded on a 0 it never wrote.
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("yes", outcome.State["recovered"])
+		_, wroteDelay := outcome.State["delay"]
+		assert.False(wroteDelay, "the task must not have proceeded past the mistyped read")
 	})
 }

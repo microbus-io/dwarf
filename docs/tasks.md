@@ -45,6 +45,13 @@ if err != nil { ... }   // decode a field into a struct
 `f.Snapshot()` returns a read-only copy of the entire current state. `f.ParseState(&v)` decodes the whole
 state into a struct.
 
+An **absent** field reads as the zero value, so an optional field needs no guard. A field that is **present
+but holds the wrong type** panics — reading a string as an int is a bug in the workflow, and handing back a
+`0` the task never wrote is how a `GetInt("retryAfter")` over a `1.5` becomes a zero-delay hot loop against
+a downstream. The panic is not a crash: the engine catches it at the task-call boundary and fails the step
+like any returned error, routing to `onError` if the graph has one. Use `f.Get(key, &v)`, which returns an
+error, to handle a mistyped field instead of failing on it.
+
 ## Writing state
 
 Mutations are recorded as the step's output delta:

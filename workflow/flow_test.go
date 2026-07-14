@@ -434,3 +434,38 @@ func TestFlow_MarshalUnmarshal(t *testing.T) {
 	assert.Equal(2.0, restored.backoffDelayMultiplier)
 	assert.Equal(30*time.Second, restored.backoffMaxDelay)
 }
+
+// TestFlow_TypedGetterPanicsOnTypeMismatch pins the disposition of a present-but-mistyped state field. The
+// single-return getters have no channel to report one through, and returning the zero value silently is how
+// a task ends up acting on a value it never had (a GetInt of a 1.5 retry delay reading as 0 is a hot loop
+// against the downstream, not a slow retry). Absent and cleared fields are NOT a mismatch - an optional
+// field must still read as its zero value.
+func TestFlow_TypedGetterPanicsOnTypeMismatch(t *testing.T) {
+	assert := testarossa.For(t)
+
+	f := NewFlow()
+	assert.NoError(f.Set("retryAfter", 1.5))
+	assert.NoError(f.Set("name", "Alice"))
+	assert.NoError(f.Set("cleared", nil))
+
+	mustPanic := func(label string, read func()) {
+		defer func() {
+			assert.NotNil(recover(), "%s: expected a panic on the type mismatch", label)
+		}()
+		read()
+	}
+	mustPanic("GetInt of a fractional number", func() { f.GetInt("retryAfter") })
+	mustPanic("GetInt of a string", func() { f.GetInt("name") })
+	mustPanic("GetBool of a string", func() { f.GetBool("name") })
+	mustPanic("GetStrings of a string", func() { f.GetStrings("name") })
+
+	// Absent, cleared, and well-typed fields are untouched.
+	assert.Equal(0, f.GetInt("missing"))
+	assert.Equal("", f.GetString("cleared"))
+	assert.Equal("Alice", f.GetString("name"))
+	assert.Equal(1.5, f.GetFloat("retryAfter"))
+
+	// Get reports the mismatch as an error instead - the escape hatch for a task that wants to handle it.
+	var n int
+	assert.Error(f.Get("retryAfter", &n))
+}

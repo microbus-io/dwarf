@@ -116,49 +116,66 @@ func NewFlow() *Flow {
 
 // --- State access ---
 
-// GetString returns a state field as a string.
+// The typed getters below return the zero value for a field that is absent or cleared, and PANIC on a
+// field that is present but holds a value of the wrong type - reading a string as an int is a bug in the
+// workflow, and returning 0 for it would let the task proceed on a value it never had (a GetInt of a 1.5
+// retry delay yielding 0 is a hot loop against the downstream, not a slow retry).
+//
+// A panic here is a clean failure, not a crash: the orchestrator catches panics at the task-call boundary,
+// so a mistyped read fails the step - routed to the graph's onError handler if it has one - with the stack
+// trace attached. Use Get to HANDLE a mistyped field instead of failing on it: it returns the error.
+
+// GetString returns a state field as a string. It returns "" if the field is absent, and panics if the
+// field holds a non-string.
 func (f *Flow) GetString(key string) string {
 	var v string
-	getFromMap(f.state, key, &v)
+	mustGetFromMap(f.state, key, &v)
 	return v
 }
 
-// GetStrings returns a state field as a string slice.
+// GetStrings returns a state field as a string slice. It returns nil if the field is absent, and panics
+// if the field holds anything but an array of strings.
 func (f *Flow) GetStrings(key string) []string {
 	var v []string
-	getFromMap(f.state, key, &v)
+	mustGetFromMap(f.state, key, &v)
 	return v
 }
 
-// GetInt returns a state field as an int.
+// GetInt returns a state field as an int. It returns 0 if the field is absent, and panics if the field
+// holds a non-integer (a fractional number included).
 func (f *Flow) GetInt(key string) int {
 	var v int
-	getFromMap(f.state, key, &v)
+	mustGetFromMap(f.state, key, &v)
 	return v
 }
 
-// GetFloat returns a state field as a float64.
+// GetFloat returns a state field as a float64. It returns 0 if the field is absent, and panics if the
+// field holds a non-number.
 func (f *Flow) GetFloat(key string) float64 {
 	var v float64
-	getFromMap(f.state, key, &v)
+	mustGetFromMap(f.state, key, &v)
 	return v
 }
 
-// GetBool returns a state field as a bool.
+// GetBool returns a state field as a bool. It returns false if the field is absent, and panics if the
+// field holds a non-boolean.
 func (f *Flow) GetBool(key string) bool {
 	var v bool
-	getFromMap(f.state, key, &v)
+	mustGetFromMap(f.state, key, &v)
 	return v
 }
 
-// GetDuration returns a state field as a time.Duration.
+// GetDuration returns a state field as a time.Duration. It returns 0 if the field is absent, and panics
+// if the field holds anything but a duration in nanoseconds.
 func (f *Flow) GetDuration(key string) time.Duration {
 	var v time.Duration
-	getFromMap(f.state, key, &v)
+	mustGetFromMap(f.state, key, &v)
 	return v
 }
 
-// Get unmarshals a state field into the target. Use this for complex types (structs, maps, etc.).
+// Get unmarshals a state field into the target. Use this for complex types (structs, maps, etc.), and to
+// handle a type mismatch rather than fail the step on it - unlike the typed getters, Get reports one as an
+// error instead of panicking. An absent or cleared field leaves the target untouched and returns nil.
 func (f *Flow) Get(key string, target any) error {
 	return getFromMap(f.state, key, target)
 }
