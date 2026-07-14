@@ -845,6 +845,14 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		return "", errors.Trace(err)
 	}
 
+	// The caller's raw Go value is the only reducer input that does not arrive decoded from the database,
+	// so canonicalize it here or a reducer compares two spellings of the same value (canonicalStateMap).
+	// Done before the transaction: a lock-contention retry re-runs the closure, and this is invariant.
+	additional, err := canonicalStateMap(additionalState)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+
 	var threadID int
 	var threadToken string
 	var surgraphFlowID int
@@ -916,7 +924,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		if entryPoint == "" {
 			return errors.New("workflow has no entry point", http.StatusBadRequest)
 		}
-		mergedState, err := workflow.MergeState(finalState, additionalState, graph.Reducers())
+		mergedState, err := workflow.MergeState(finalState, additional, graph.Reducers())
 		if err != nil {
 			return errors.Trace(err)
 		}

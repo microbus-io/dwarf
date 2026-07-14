@@ -18,9 +18,11 @@ package engine
 
 import (
 	"encoding/json"
+	"net/http"
 
 	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 )
 
 // graphCacheKey scopes the per-flow graph cache by shard, since flow_id is only unique within a shard.
@@ -43,4 +45,33 @@ func unmarshalJSONMap(jsonStr string, out *map[string]any) {
 		return
 	}
 	json.Unmarshal([]byte(jsonStr), out)
+}
+
+// canonicalStateMap round-trips a caller-supplied value into the shape every value read back from a state
+// column already has: nested objects as map[string]any, numbers as float64. Reducers compare and dedupe on
+// the MARSHALLED bytes of their operands, and those bytes are canonical only for a decoded value - Go sorts
+// a map's keys but marshals a STRUCT's fields in declaration order, and a json.RawMessage passes through
+// verbatim (keeping the author's key order, and a literal 1.0 that a float64 would have written as 1). So a
+// raw Go value folded against the flow's accumulated state compares unequal to its own decoded twin: a union
+// reducer keeps both spellings of one element, a merge reducer double-writes a key.
+//
+// Every other reducer input is decoded from the database on its way in (the fan-in merge, computeFinalState),
+// which is what makes their byte comparison sound. Continue's additionalState is the one input that skips the
+// database, so it is canonicalized here - keeping "reducers only ever see decoded values" an invariant rather
+// than a coincidence. A nil value yields a nil map ("no additional state"); a value that is not a JSON object
+// is a caller error.
+func canonicalStateMap(v any) (map[string]any, error) {
+	if v == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, errors.New("additional state is not JSON-marshalable: %v", err, http.StatusBadRequest)
+	}
+	var m map[string]any
+	err = json.Unmarshal(data, &m)
+	if err != nil {
+		return nil, errors.New("additional state must be a JSON object: %v", err, http.StatusBadRequest)
+	}
+	return m, nil
 }
