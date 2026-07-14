@@ -239,11 +239,11 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	}
 
 	var status, workflowURL, workflowName, graphJSON, baggageJSON, traceParent string
-	var deleteOnCompletion int
+	var deleteOnCompletion, originStepID int
 	err := tx.QueryRowContext(ctx,
-		"SELECT status, workflow_url, workflow_name, graph, baggage, trace_parent, delete_on_completion FROM dwarf_flows WHERE flow_id=?",
+		"SELECT status, workflow_url, workflow_name, graph, baggage, trace_parent, delete_on_completion, step_id FROM dwarf_flows WHERE flow_id=?",
 		originFlowID,
-	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &baggageJSON, &traceParent, &deleteOnCompletion)
+	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &baggageJSON, &traceParent, &deleteOnCompletion, &originStepID)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
@@ -264,10 +264,14 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		cc.rootWorkflowURL = workflowURL // for the flows_started metric, emitted after the tx commits
 	}
 
+	// Hoist the minted token: the root overwrites it with cc.rootFlowToken below, but a non-root subgraph
+	// flow keeps it AND must echo it into thread_token (it is its own thread), or List builds a malformed
+	// ThreadKey ("{shard}-{id}-") that the API's thread resolution then 404s on.
+	newFlowToken := keys.RandomIdentifier(16)
 	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id",
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id)"+
 			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		keys.RandomIdentifier(16), workflowURL, workflowName, graphJSON, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID,
+		newFlowToken, workflowURL, workflowName, graphJSON, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID,
 	)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
@@ -283,8 +287,9 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			return 0, nil, errors.Trace(err)
 		}
 	} else {
-		// Subgraph flows are their own thread but share the cloned root's tree-membership id.
-		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET thread_id=?, root_flow_id=? WHERE flow_id=?", newFlowID, cc.newRootFlowID, newFlowID)
+		// Subgraph flows are their own thread (thread_id/thread_token = own flow_id/flow_token) but share
+		// the cloned root's tree-membership id. step_id is set below, once idMap is built.
+		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET thread_id=?, thread_token=?, root_flow_id=? WHERE flow_id=?", newFlowID, newFlowToken, cc.newRootFlowID, newFlowID)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}
@@ -566,6 +571,21 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		_, err = tx.ExecContext(ctx,
 			"UPDATE dwarf_flows SET status=?, step_id=?, started_at=NOW_UTC(), updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
 			workflow.StatusRunning, idMap[rewind], newFlowID,
+		)
+		if err != nil {
+			return 0, nil, errors.Trace(err)
+		}
+	} else {
+		// Point the non-root flow at its current step, mirroring insertFlowTx (which leaves no creation path
+		// with step_id=0): the rewound caller on the rewind chain, else the origin's own current step for an
+		// off-path completed-prefix subgraph.
+		currentStep := idMap[originStepID]
+		if rewind != 0 {
+			currentStep = idMap[rewind]
+		}
+		_, err = tx.ExecContext(ctx,
+			"UPDATE dwarf_flows SET step_id=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=?",
+			currentStep, newFlowID,
 		)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
