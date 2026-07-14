@@ -262,14 +262,12 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	// Host-supplied payloads are held to the same integer precision as a task's own writes: state
-	// round-trips through JSON as float64, so an integer beyond ±2^53 would be silently rounded. Reject
-	// it at the door rather than store a value the flow can never read back.
-	err = jsonx.CheckPrecision(stateJSON)
+	// Host-supplied payloads are held to the same storability rules as a task's own writes.
+	err = jsonx.CheckStorable(stateJSON)
 	if err != nil {
 		return "", errors.New("invalid initial state: %v", err, http.StatusBadRequest)
 	}
-	err = jsonx.CheckPrecision(baggageJSON)
+	err = jsonx.CheckStorable(baggageJSON)
 	if err != nil {
 		return "", errors.New("invalid baggage: %v", err, http.StatusBadRequest)
 	}

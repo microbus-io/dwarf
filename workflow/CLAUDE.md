@@ -53,6 +53,33 @@ it is the pending-delete marker *in transit* - it only enacts the delete when `c
 That site therefore uses a plain overlay (`maps.Copy`), not `MergeState` (with a don't-simplify-this note at the
 accumulation site in `execution.go`).
 
+### An unstorable value is rejected on WRITE, never on read (`internal/jsonx.CheckStorable`)
+
+**The rule: a value that cannot be stored and read back unchanged never enters state.** Two values qualify, and
+both are *silent* if let through - which is why the guard sits at the point of writing, in one place
+(`jsonx.CheckStorable`), applied at every authoring path: `Flow.set` (typed setters) **panics**,
+`Set`/`SetChanges`/`toStateMap` (interrupt payload, subgraph input) return the error, and the engine 400s a
+host-supplied `initialState`/`Baggage`/resume data/fork override.
+
+The **integer beyond ±2^53** is the precision case, below. The other is the **NUL** (`U+0000`): valid UTF-8,
+legal JSON, and rejected outright by **PostgreSQL's `JSONB`** (`SQLSTATE 22P05`) while MySQL/SQLite/SQL Server
+accept it - so unguarded it is a value that passes the test suite (SQLite) and kills the flow on the
+recommended production database. And it kills it in the worst way: the write that carries it is the step's own
+**completion UPDATE** (`execution.go`), which fails *before* `stepMarkedComplete`, so the recovery defer
+selects neither arm and the step is left `running` with `error=""` and `attempt=0` - reading as perfectly
+healthy - while lease recovery re-executes the task, side effects and all, every `budget + leaseMargin`
+forever. Reproduced against real Postgres; binary data belongs in state base64-encoded. **Invalid UTF-8 needs
+no guard** - `encoding/json` coerces it to `U+FFFD` on marshal, so it can never reach the database, which is
+why the NUL is the *only* string value constrained.
+
+Rejecting on write closes the one instance reachable through the public API; it does **not** make the engine
+safe against a permanent write failure in general (any non-transient DB error still re-executes a task
+forever - a separate, open concern). Switching the pgx columns to `json` was the considered alternative and is
+**not** free: Postgres defines no equality operator for `json`, so the `interrupt_payload='{}'` first-writer
+guard (`execution.go`) would break and need a text cast, and it is a schema migration for every existing
+deployment - all to *permit* a value that still cannot round-trip anywhere else. Verified both facts against a
+live Postgres.
+
 ### Numbers are float64-domain, and the unrepresentable integer is rejected on WRITE
 
 **Invariant: every number in dwarf state round-trips exactly through a `float64`.** State/baggage/payloads

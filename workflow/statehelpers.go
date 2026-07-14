@@ -120,13 +120,13 @@ func toStateMap(v any) (map[string]any, error) {
 		return nil, nil
 	}
 	// Marshal even a map that would pass straight through: this is a persisted payload (an interrupt
-	// request, a subgraph's initial state), so it is held to the same ±2^53 integer precision as any
-	// other state write - and the check needs the JSON form.
+	// request, a subgraph's initial state), so it is held to the same storability rules as any other state
+	// write - and the check needs the JSON form.
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	err = jsonx.CheckPrecision(data)
+	err = jsonx.CheckStorable(data)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

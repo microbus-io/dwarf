@@ -24,7 +24,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-func TestCheckPrecision_AcceptsWhatFloat64CarriesExactly(t *testing.T) {
+func TestCheckStorable_AcceptsWhatFloat64CarriesExactly(t *testing.T) {
 	assert := testarossa.For(t)
 
 	for _, doc := range []string{
@@ -41,11 +41,11 @@ func TestCheckPrecision_AcceptsWhatFloat64CarriesExactly(t *testing.T) {
 		`{}`,
 		`null`,
 	} {
-		assert.NoError(CheckPrecision([]byte(doc)), "should accept %s", doc)
+		assert.NoError(CheckStorable([]byte(doc)), "should accept %s", doc)
 	}
 }
 
-func TestCheckPrecision_RejectsIntegersFloat64WouldRound(t *testing.T) {
+func TestCheckStorable_RejectsIntegersFloat64WouldRound(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// The failure this exists to prevent: the standard decode rounds the value and reports nothing.
@@ -53,7 +53,7 @@ func TestCheckPrecision_RejectsIntegersFloat64WouldRound(t *testing.T) {
 	assert.NoError(json.Unmarshal([]byte(`{"orderID":1234567890123456789}`), &round))
 	assert.Equal(int64(1234567890123456768), int64(round["orderID"].(float64)))
 
-	err := CheckPrecision([]byte(`{"orderID":1234567890123456789}`))
+	err := CheckStorable([]byte(`{"orderID":1234567890123456789}`))
 	if !assert.Error(err) {
 		return
 	}
@@ -62,23 +62,23 @@ func TestCheckPrecision_RejectsIntegersFloat64WouldRound(t *testing.T) {
 	assert.Contains(err.Error(), "carry it as a string") // and the fix
 
 	// 2^53+1 is the first integer float64 cannot hold: it shares a float64 with 2^53.
-	assert.Error(CheckPrecision([]byte(`{"n":9007199254740993}`)))
-	assert.Error(CheckPrecision([]byte(`{"n":-9007199254740993}`)))
+	assert.Error(CheckStorable([]byte(`{"n":9007199254740993}`)))
+	assert.Error(CheckStorable([]byte(`{"n":-9007199254740993}`)))
 	// time.Now().UnixNano() is ~1.7e18 - the most likely way a task trips this.
-	assert.Error(CheckPrecision([]byte(`{"ts":1752459999999000000}`)))
+	assert.Error(CheckStorable([]byte(`{"ts":1752459999999000000}`)))
 	// Beyond int64 entirely.
-	assert.Error(CheckPrecision([]byte(`{"n":123456789012345678901234567890}`)))
+	assert.Error(CheckStorable([]byte(`{"n":123456789012345678901234567890}`)))
 	// A bare top-level number, with no field to name.
-	err = CheckPrecision([]byte(`9007199254740993`))
+	err = CheckStorable([]byte(`9007199254740993`))
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "top level")
 	}
 }
 
-func TestCheckPrecision_NamesTheNestedPath(t *testing.T) {
+func TestCheckStorable_NamesTheNestedPath(t *testing.T) {
 	assert := testarossa.For(t)
 
-	err := CheckPrecision([]byte(`{"order":{"lines":[{"sku":"a"},{"id":9007199254740993}]}}`))
+	err := CheckStorable([]byte(`{"order":{"lines":[{"sku":"a"},{"id":9007199254740993}]}}`))
 	if !assert.Error(err) {
 		return
 	}
@@ -86,30 +86,95 @@ func TestCheckPrecision_NamesTheNestedPath(t *testing.T) {
 	assert.Contains(err.Error(), "order.lines[1].id")
 }
 
-func TestCheckPrecision_ArrayIndicesAdvanceCorrectly(t *testing.T) {
+func TestCheckStorable_ArrayIndicesAdvanceCorrectly(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// A number in the third element must report [2] - the index tracking is the fiddly part of the walk,
 	// and an off-by-one here would name the wrong element in every error.
-	err := CheckPrecision([]byte(`{"ids":[1,2,9007199254740993]}`))
+	err := CheckStorable([]byte(`{"ids":[1,2,9007199254740993]}`))
 	if !assert.Error(err) {
 		return
 	}
 	assert.Contains(err.Error(), "ids[2]")
 
 	// Nested containers must not corrupt the enclosing array's index.
-	err = CheckPrecision([]byte(`{"rows":[{"a":1},[7],{"b":9007199254740993}]}`))
+	err = CheckStorable([]byte(`{"rows":[{"a":1},[7],{"b":9007199254740993}]}`))
 	if !assert.Error(err) {
 		return
 	}
 	assert.Contains(err.Error(), "rows[2].b")
 }
 
-func TestCheckPrecision_MalformedJSON(t *testing.T) {
+func TestCheckStorable_MalformedJSON(t *testing.T) {
 	assert := testarossa.For(t)
-	err := CheckPrecision([]byte(`{"n":`))
+	err := CheckStorable([]byte(`{"n":`))
 	if !assert.Error(err) {
 		return
 	}
 	assert.False(strings.Contains(err.Error(), "2^53"), "a syntax error should not be reported as a precision error")
+}
+
+// A NUL is valid UTF-8 and marshals to legal JSON, but PostgreSQL's JSONB rejects it (SQLSTATE 22P05) -
+// so it is a value that passes on SQLite and kills the flow on the recommended production database.
+// Rejected on write, uniformly on every dialect.
+func TestCheckStorable_RejectsNUL(t *testing.T) {
+	assert := testarossa.For(t)
+
+	nul := string(rune(0))
+
+	// The shape a task produces: f.SetString("payload", string(rawBytes)) with a 0x00 among the bytes.
+	doc, err := json.Marshal(map[string]any{"payload": "a" + nul + "b"})
+	if !assert.NoError(err) {
+		return
+	}
+	// It marshals to a perfectly legal JSON escape - which is exactly why nothing catches it downstream.
+	assert.Equal(`{"payload":"a`+`\u0000`+`b"}`, string(doc))
+
+	err = CheckStorable(doc)
+	if !assert.Error(err) {
+		return
+	}
+	assert.Contains(err.Error(), "payload") // names the field
+	assert.Contains(err.Error(), "U+0000")  // and the offender
+	assert.Contains(err.Error(), "22P05")   // and the failure it prevents
+	assert.Contains(err.Error(), "base64")  // and the fix
+
+	// Nested inside an array element: the path must pinpoint it.
+	nested, _ := json.Marshal(map[string]any{"order": map[string]any{"lines": []any{"ok", nul}}})
+	err = CheckStorable(nested)
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "order.lines[1]")
+	}
+
+	// A NUL in a KEY is just as unstorable as one in a value.
+	inKey, _ := json.Marshal(map[string]any{"bad" + nul + "key": "v"})
+	assert.Error(CheckStorable(inKey))
+}
+
+// The guard is on the NUL specifically, not on control characters or exotic text as a class: everything
+// else round-trips through every dialect and must keep working.
+func TestCheckStorable_AcceptsEveryOtherString(t *testing.T) {
+	assert := testarossa.For(t)
+
+	ok, err := json.Marshal(map[string]any{
+		"tab":     "a\tb",
+		"newline": "a\nb",
+		"ctrl":    "\x01\x1f", // other C0 controls are storable
+		"emoji":   "🙂",
+		"empty":   "",
+		"escapes": `quote " backslash \ slash /`,
+	})
+	if !assert.NoError(err) {
+		return
+	}
+	assert.NoError(CheckStorable(ok))
+
+	// Invalid UTF-8 needs no guard at all: encoding/json coerces it to U+FFFD on marshal, so it can never
+	// reach the database. This is why the write-side guard needs to cover only the NUL.
+	coerced, err := json.Marshal(map[string]any{"s": string([]byte{0xff, 0xfe})})
+	if !assert.NoError(err) {
+		return
+	}
+	assert.NoError(CheckStorable(coerced))
+	assert.Equal(`{"s":"`+`\ufffd\ufffd`+`"}`, string(coerced)) // both bad bytes became U+FFFD, escaped
 }

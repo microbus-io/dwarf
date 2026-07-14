@@ -61,11 +61,12 @@ matching one before working there:**
 - **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
 - **State delete:** `flow.Delete`/`Set(k,nil)` writes a JSON `null` that `MergeState` *drops* on materialization but
   *preserves* during changes-accumulation. (`workflow/CLAUDE.md`; enforced at `execution.go`)
-- **Integer precision:** state numbers are **float64-domain**; an integer-shaped value beyond ±2^53 is rejected on
-  **write** (`internal/jsonx.CheckPrecision` - the typed setters panic, everything else errors/400s), never decoded
-  exactly. Do not "fix" a decode site with `UseNumber`: the invariant that every stored number round-trips exactly
-  through a `float64` is what lets every reader (including `boolexp`) treat numbers as `float64` without
-  qualification. Large ids are carried as strings. (`workflow/CLAUDE.md`)
+- **Unstorable values are rejected on WRITE, never handled on read** (`internal/jsonx.CheckStorable` - the typed
+  setters panic, everything else errors/400s). Two of them: an integer-shaped value beyond **±2^53** (state numbers
+  are float64-domain; large ids are carried as strings) and a **NUL** in a string (Postgres `JSONB` rejects it -
+  base64 binary data). Do not "fix" the integer by decoding with `UseNumber`: the invariant that every stored number
+  round-trips exactly through a `float64` is what lets every reader (including `boolexp`) treat numbers as `float64`
+  without qualification. (`workflow/CLAUDE.md`)
 - **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
 - **Lease fencing:** every post-execution write to the *dispatched* step must carry `AND lease_seq=?` (the

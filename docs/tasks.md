@@ -72,6 +72,23 @@ f.Clear()                     // remove everything
 names (absent or null source fields are skipped) — handy as a small adapter task just upstream of a
 [subgraph](fan-out-and-subgraphs.md#subgraphs) to reshape state into the child's expected input.
 
+### Binary data must be base64-encoded
+
+A **NUL character** (`U+0000`) in a string cannot be stored. It is valid UTF-8 and marshals to legal JSON,
+but PostgreSQL's `JSONB` rejects it outright — so, unguarded, it is a value that works on SQLite and kills
+the flow on the recommended production database. Dwarf therefore rejects it on **every** dialect, at the
+point of writing, with the same disposition as an oversized integer (typed setters panic into a clean step
+failure; `Set`/`SetChanges` and host-supplied payloads return an error).
+
+```go
+f.SetString("payload", string(rawBytes))                        // panics if rawBytes holds a 0x00
+f.SetString("payload", base64.StdEncoding.EncodeToString(raw))  // correct
+```
+
+So raw bytes belong in state **base64-encoded**. Nothing else about strings is constrained — tabs, newlines,
+other control characters, and emoji all round-trip fine. (Invalid UTF-8 needs no rule: `encoding/json`
+replaces it with `U+FFFD` on the way in.)
+
 ### Large integers must be carried as strings
 
 State round-trips through JSON, where a number is a `float64` — which holds integers exactly only up to

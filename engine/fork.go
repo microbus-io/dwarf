@@ -523,9 +523,9 @@ func mergeWithOverrides(originalJSON string, overrides any) (string, error) {
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	// The overrides are seeded into the fork's leaf step as state, so they carry the same ±2^53 integer
-	// precision as any state write (jsonx).
-	err = jsonx.CheckPrecision(overridesJSON)
+	// The overrides are seeded into the fork's leaf step as state, so they are held to the same storability
+	// rules as any state write.
+	err = jsonx.CheckStorable(overridesJSON)
 	if err != nil {
 		return "", errors.New("invalid state overrides: %v", err, http.StatusBadRequest)
 	}
