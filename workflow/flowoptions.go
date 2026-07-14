@@ -36,6 +36,10 @@ type FlowOptions struct {
 	// ExecuteTask call's context deadline. Subgraph descendants inherit it. Zero uses the engine's
 	// SetTimeBudget default. Frozen at Create and immutable for the flow's life; a per-task default, not a
 	// flow-wide deadline.
+	//
+	// Create rejects a negative value, or a positive one below 1ms - the budget is persisted in
+	// milliseconds, so a sub-millisecond value would truncate to zero and dispatch every task with a
+	// deadline that has already passed.
 	TimeBudget time.Duration `json:"timeBudget,omitzero"`
 	// DeleteOnCompletion marks the flow (and its subgraph subtree) for deletion once it completes
 	// successfully - for fire-and-forget jobs whose output is not retained. Failed and cancelled flows are

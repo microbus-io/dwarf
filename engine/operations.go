@@ -39,16 +39,22 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if workflowURL == "" {
 		return "", errors.New("workflow URL is required", http.StatusBadRequest)
 	}
-	// Reject a negative priority/weight rather than silently coercing it to the default (resolveFlowOptions
-	// treats <=0 as "unset"): a negative value is a caller bug, and swallowing it hides it. 0 stays "use the
-	// engine default" for both, so this only rejects genuinely-invalid input. Genesis-only (Create/Run);
-	// derived ops (Continue/Fork/subgraph) inherit already-validated values and take no FlowOptions.
+	// Reject a negative priority/weight/budget rather than silently coercing it to the default
+	// (resolveFlowOptions treats <=0 as "unset"): a negative value is a caller bug, and swallowing it hides
+	// it. 0 stays "use the engine default" for all three, so this only rejects genuinely-invalid input.
+	// Genesis-only (Create/Run); derived ops (Continue/Fork/subgraph) inherit already-validated values and
+	// take no FlowOptions.
 	if opts != nil {
 		if opts.Priority < 0 {
 			return "", errors.New("priority must be >= 0", http.StatusBadRequest)
 		}
 		if opts.FairnessWeight < 0 {
 			return "", errors.New("fairness weight must be >= 0", http.StatusBadRequest)
+		}
+		// 0 means "use the engine default"; anything else must survive the millisecond persistence, or the
+		// step is stamped with a 0 budget and its task's deadline has already passed when it is dispatched.
+		if opts.TimeBudget < 0 || (opts.TimeBudget > 0 && opts.TimeBudget < time.Millisecond) {
+			return "", errors.New("time budget must be 0 (engine default) or at least 1ms", http.StatusBadRequest)
 		}
 	}
 	opts = e.resolveFlowOptions(opts)

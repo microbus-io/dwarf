@@ -336,8 +336,18 @@ func (e *Engine) SetWorkers(n int) error {
 
 // SetTimeBudget sets the default duration for a single task execution, used by any flow that does not
 // override it via FlowOptions.TimeBudget. Live: read fresh on each Create (existing flows keep the budget
-// frozen at their own Create).
+// frozen at their own Create). It must be positive.
+//
+// The lower bound is not cosmetic. The budget is the ExecuteTask call's context deadline and, via the step
+// row, the size of the crash-recovery lease - so a non-positive default hands every new flow a deadline
+// that has already passed, failing every task instantly, engine-wide and silently. Unlike Priority and
+// FairnessWeight, 0 cannot mean "unset" here: this setter IS the default. The floor is a millisecond
+// rather than a nanosecond because the budget is persisted in MILLISECONDS: a positive duration below
+// 1ms truncates to zero and produces exactly the expired-deadline case.
 func (e *Engine) SetTimeBudget(d time.Duration) error {
+	if d < time.Millisecond {
+		return errors.New("time budget must be at least 1ms (it is stored in milliseconds)", http.StatusBadRequest)
+	}
 	e.timeBudgetMs.Store(int64(d / time.Millisecond))
 	return nil
 }
