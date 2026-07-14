@@ -21,6 +21,7 @@ import (
 	"net/http"
 
 	"github.com/microbus-io/dwarf/internal/faninmap"
+	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 )
@@ -69,6 +70,12 @@ func unmarshalJSONMap(jsonStr string, out *map[string]any) {
 // database, so it is canonicalized here - keeping "reducers only ever see decoded values" an invariant rather
 // than a coincidence. A nil value yields a nil map ("no additional state"); a value that is not a JSON object
 // is a caller error.
+//
+// This is also Continue's storability ingress: additionalState is host input that never passes through
+// createWithGraph's CheckStorable, so the check runs here on the MARSHALLED bytes - before the json.Unmarshal
+// below rounds a >2^53 integer to float64, where it would slip through undetected. Checking the caller's raw
+// input (not the merged carry-forward) is deliberate: a legitimate ReducerAdd sum past 2^53 is integer-shaped
+// too, so checking the merge result would 400 a valid continuation.
 func canonicalStateMap(v any) (map[string]any, error) {
 	if v == nil {
 		return nil, nil
@@ -76,6 +83,10 @@ func canonicalStateMap(v any) (map[string]any, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, errors.New("additional state is not JSON-marshalable: %v", err, http.StatusBadRequest)
+	}
+	err = jsonx.CheckStorable(data)
+	if err != nil {
+		return nil, errors.New("invalid additional state: %v", err, http.StatusBadRequest)
 	}
 	var m map[string]any
 	err = json.Unmarshal(data, &m)

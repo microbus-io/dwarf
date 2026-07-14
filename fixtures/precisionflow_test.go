@@ -180,4 +180,24 @@ func TestPrecisionflow(t *testing.T) {
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 		assert.Contains(err.Error(), "tenantID")
 	})
+
+	t.Run("Continue's additionalState is rejected with a 400", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		// A clean completed turn to continue from. Continue does not ride createWithGraph, so its
+		// additionalState carries its own storability check - without it the oversized integer would be
+		// rounded to ...768 by the canonicalizing Unmarshal and silently merged into the next turn.
+		flowKey, outcome, err := eng.Run(ctx, "precisionflow.verify:428/g", map[string]any{"safe": true}, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+
+		_, err = eng.Continue(ctx, flowKey, map[string]any{"orderID": int64(snowflakeID)})
+		if !assert.Error(err) {
+			return
+		}
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+		assert.Contains(err.Error(), "orderID")
+	})
 }

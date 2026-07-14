@@ -83,12 +83,16 @@ one probe succeeds) for zero engine-side policy and no shared-state machinery to
 State is float64-domain: an integer-shaped number beyond ±2^53 does not survive the JSON round trip and is
 rejected on write rather than silently rounded (the full rationale, and why the decode side was deliberately
 NOT changed, is in `workflow/CLAUDE.md`). The `workflow` package guards what a *task* authors; the engine
-guards what a *host* hands it, with `jsonx.CheckPrecision` at the four ingress points - `createWithGraph`
-(`initialState` **and** `Baggage`, so `Create`/`Run`/`Continue`'s merged carry-forward/subgraph input all
-pass through it), `resume` (resume data), and `mergeWithOverrides` (`Fork`'s state overrides). Each is a
-**400**, not a panic: this is caller input, and the caller is a program that can fix its request. Derived
-values need no check - they are merges of already-checked inputs (a `ReducerAdd` sum that grows past 2^53 is
-a `float64`, and float-shaped numbers are unconstrained).
+guards what a *host* hands it, with `jsonx.CheckStorable` at **five** ingress points - `createWithGraph`
+(`initialState` **and** `Baggage`, covering `Create`/`Run` and subgraph input), `resume` (resume data),
+`mergeWithOverrides` (`Fork`'s state overrides), and `canonicalStateMap` (`Continue`'s `additionalState`).
+`Continue` does **not** ride `createWithGraph` - it builds its own `flowSeed` and calls `insertFlowTx`
+directly, so it carries its own ingress check. That check runs on the caller's **raw** `additionalState`, not
+the merged carry-forward, and on the marshalled bytes *before* the `json.Unmarshal` that would round a >2^53
+integer to `float64` (checking the decoded/merged value is too late, and would also reject a legitimate
+`ReducerAdd` sum - see below). Each is a **400**, not a panic: this is caller input, and the caller is a
+program that can fix its request. Derived values are not checked - they are merges of already-checked inputs,
+and a `ReducerAdd` sum that grows past 2^53 stays legal (the engine produced it).
 
 ### Size and count limits are the host's job, not the engine's
 
@@ -330,8 +334,8 @@ newest-first - default 100).
 Returns `ThreadKey` and a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
 `Query.IncludeSubgraphs` adds subgraph children to the results. Combined with `WorkflowURL` (a graph that runs only
 as a subgraph has no root flows under that URL) this locates every run of a graph that executed as a subgraph.
-`Purge` ignores the flag and always targets roots only (deleting a subgraph child directly would strand its parent's
-surgraph step).
+`Purge` **rejects** the flag with a 400 (`purge cannot include subgraphs`) rather than silently ignoring it, and
+always targets roots only (deleting a subgraph child directly would strand its parent's surgraph step).
 
 **Continue** - `Continue(threadKey, additionalState)` creates and runs a new flow from the latest completed flow
 in a thread, merged with `additionalState` using the graph's reducers - sugar over `Create` for the multi-turn
@@ -626,24 +630,27 @@ intermittent sleep/retry **wedge** (every worker parked on the cache, the timer 
 it updates when `tm` is sooner **or** `nextPoll` is already past (the exact predicate is at `shortenNextPoll` in
 `engine.go`). Reproduced as ~1-in-40 timeouts of `fixtures/sleepretrycomposeflow_test.go` under stress before the fix.
 
-### Query Parallelism
+### Round-trip minimization in `processStep`
 
-`processStep` is the hot path. Independent queries within it run in parallel (errgroup-style) to minimize latency on a
-remote database:
+`processStep` is the hot path, and it is strictly **sequential** end to end - the engine spawns no goroutines outside
+its lifecycle loops and imports no errgroup. What optimization there is collapses round-trips to a remote database,
+not parallelism:
 
 - **Claim UPDATE + step SELECT** - on pgx/sqlite/mssql the claim and read are **one** round-trip via
   `RETURNING`/`OUTPUT` (reads the row *as updated* - a consistent snapshot). MySQL lacks RETURNING, so they are two
-  statements run **serially, not in parallel** (claim first, read only on success): parallelizing on separate
-  connections is unsafe - an independent read snapshot can observe the pre-transition row and deliver an empty resume
-  payload (the reason is spelled out at the claim site in `execution.go`). The lease size comes from the step row's
-  own `time_budget_ms` (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
+  statements run **serially** (claim first, read only on success): running them on separate connections is unsafe -
+  an independent read snapshot can observe the pre-transition row and deliver an empty resume payload (the reason is
+  spelled out at the claim site in `execution.go`). The lease size comes from the step row's own `time_budget_ms`
+  (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
 - **Flow data** - runs after the claim+read, since it needs the `flow_id`.
-- **Fan-in sibling counts** - the unfinished and failed sibling COUNT queries run concurrently.
-- **Subgraph status counts** - the active and completed subgraph COUNT queries run concurrently.
 
-**Transaction constraint:** functions receiving a `sequel.Executor` (which may be a transaction) cannot parallelize
-because SQL transactions are not safe for concurrent use. This applies to `computeFinalState` and code inside
-`failStep`/`Cancel` transactions.
+Fan-in accounting no longer issues sibling/subgraph COUNT queries at all - it reads the
+`cohort_arrivals`/`cohort_failures`/`cohort_size` counter columns.
+
+**Transaction constraint (do not reintroduce parallelism here):** a function receiving a `sequel.Executor` - which may
+be a `*sequel.Tx` - must not run concurrent statements on it, because a SQL transaction is not safe for concurrent
+use. This is exactly what forbids wrapping an errgroup around, say, the flow read and `resolveStateRefs` (which takes
+a `sequel.Executor`). It applies to `computeFinalState` and code inside `failStep`/`Cancel` transactions.
 
 ### Fan-Out and Fan-In
 
@@ -1359,8 +1366,9 @@ given," so a host authz bug alone is not sufficient to walk the table (you would
 token): two independent failures, not one. It also preserves the no-existence-oracle property (every
 operation on an unknown-or-mismatched key returns a uniform not-found - verified) and enables opaque
 capability-URL patterns (a "resume your approval" link). What it is **not** is access control: a leaked,
-logged, or shared key is a full write capability for that one flow. The amplifier is therefore `List`/
-`Search`, which return keys wholesale (a separate concern) - not the token itself.
+logged, or shared key is a full write capability for that one flow. The amplifier is therefore `List` - the only
+operation that returns keys wholesale (a separate concern) - not the token itself. (There is no `Search` operation;
+free-text search is a field on `workflow.Query` that `List` consumes.)
 
 **Token entropy (64-bit) and the every-gate-is-`flow_id`+`flow_token` invariant that makes it adequate** live in
 `internal/keys/CLAUDE.md`. Load-bearing for this section: the token is never a standalone lookup, so a leaked key
@@ -1664,8 +1672,14 @@ not reintroduce a controller without a much stronger reason than tidiness.
 The idle-drain / lifetime-recycle connection timers (`ConnMaxIdleTime` / `ConnMaxLifetime`, server-drivers only)
 are a database-layer mechanism — see `internal/database/CLAUDE.md`.
 
-**Live re-sizing.** Only the `SetMaxOpenConns` override is live (pushes the pinned size to every open shard).
-Derived sizing is fixed at `Startup` from each shard's spec and stays for the engine's life.
+**Live re-sizing.** Derived sizing **is** live. `recomputePools` re-derives each shard's pool from the observed
+replica count and pushes `SetMaxOpenConns`/`SetMaxIdleConns` to every open shard, `Resize`s the candidate cache, and
+re-derives the worker ceiling - on a peer-map change, on the grace timer, and on the heartbeat prune. The
+`SetMaxOpenConns` override is the opposite of "the live one": it *pins* every shard's pool and thereby **suppresses**
+the derived path (`recomputePools` early-returns once an override is set). See the live-vs-derived split at lines
+122-133 and 1506-1511, and the load-bearing rule there - "EVERY path that changes a pool must re-derive it," and "the
+cache follows the pool split": a new pool-derived quantity must be wired into `recomputePools`, not merely computed
+once at `Startup`.
 
 ### Flow Scheduling (priority / fairness)
 
