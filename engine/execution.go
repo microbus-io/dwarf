@@ -645,16 +645,26 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	isPushTransition := graph.IsFanOutSource(taskName) && !errorRouted && resultFlow.GotoRequested() == ""
 	cohortSize := len(realTasks)
 
+	// The remaining post-completion writes. Like the transition transaction, these run with the step already
+	// `completed`, so a database error here would drive the recovery defer to rewind and re-dispatch - RE-EXECUTING
+	// the task - and would do so forever if the error is permanent. Same class, same treatment: retry the write in
+	// place, and classify it if it will not land (see persistStep).
 	if isPushTransition && cohortSize == 0 {
 		fanInTarget := cg.fanIn.For(taskName)
 		if fanInTarget == "" {
-			return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
+			return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
+				return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
+			})
 		}
-		return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+		return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
+			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+		})
 	}
 
 	if cohortSize == 0 {
-		return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
+		return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
+			return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
+		})
 	}
 
 	cohortSpawnID := lineageID

@@ -193,3 +193,20 @@ func sanitizeErrorMessage(msg string) string {
 		return r
 	}, msg)
 }
+
+// persistStep is persist plus the disposition every caller in processStep shares: a lost lease or a drain is a
+// benign no-op, lock contention goes to the recovery defer (never the classifier - terminalizing a flow because the
+// database was busy is exactly backwards), and anything else that would not land is classified.
+func (e *Engine) persistStep(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, write func() error) error {
+	err := e.persist(ctx, db, shardNum, stepID, leaseSeq, write)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errPersistFenced), errors.Is(err, errPersistDrained):
+		return nil // a peer owns the step now; abandon it silently
+	case sequel.IsLockContentionError(err):
+		return errors.Trace(err) // the recovery defer rewinds and re-polls
+	default:
+		return errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
+	}
+}

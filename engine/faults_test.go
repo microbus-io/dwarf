@@ -226,14 +226,16 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 	e.SetHost(proxy)
 	e.RunInTest(t)
 
-	// The flow-completion transaction fails once after the terminal step was marked completed: the recovery
-	// defer resets it and re-dispatches, so the flow still completes (no `running` orphan with all steps
-	// terminal).
+	// The flow-completion transaction fails once after the terminal step was marked completed with a
+	// non-contention error: persist retries the transaction in place, so the flow still completes (no `running`
+	// orphan with all steps terminal) and the task runs ONCE. It used to run twice - the recovery defer rewound
+	// the step and re-dispatched it, RE-EXECUTING the task to recover from a database blip the task had nothing
+	// to do with.
 	e.seams.Inject(faultCompleteFlowCommit)
 	if out := boundedRun(t, e, "fcfc/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
-	assert.Equal(2, runs)
+	assert.Equal(1, runs) // the WRITE was retried, not the task
 }
 
 func TestFault_LeaseStaleWrite(t *testing.T) {

@@ -141,9 +141,10 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		// A's transition tx returns a retryable lock-contention error: Transact retries the closure inside the
 		// tx, transparently - A runs only once.
 		{"contention", func(e *Engine) { e.seams.Inject(faultContention, "A") }, 1, 1},
-		// B's flow-completion tx fails once after B was marked completed (B is the terminal node): the recovery
-		// defer resets B and re-dispatches, so B runs twice.
-		{"completeFlowCommit", func(e *Engine) { e.seams.Inject(faultCompleteFlowCommit) }, 1, 2},
+		// B's flow-completion tx fails once after B was marked completed (B is the terminal node) with a
+		// non-contention error: persist retries the transaction in place, so B runs only ONCE. (It used to run
+		// twice - the recovery defer rewound and re-dispatched it.)
+		{"completeFlowCommit", func(e *Engine) { e.seams.Inject(faultCompleteFlowCommit) }, 1, 1},
 	}
 	for _, tc := range cases {
 		tc := tc
