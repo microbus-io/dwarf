@@ -839,6 +839,45 @@ Pinned by `engine/staterefs_test.go` (the three tiers, both-column resolve, one-
 storage assertions) and `fixtures/staterefsflow_test.go` (end-to-end: a carried document across fan-out/fan-in,
 `Continue`, `Fork`, overwrite and tombstone).
 
+**Rejected alternatives, so they are not re-proposed:**
+
+- **A content-addressed side table** (`(hash, bytes)`, flow-scoped). It buys field-granular fetches (read exactly
+  the value, not the anchor's whole JSON row) and cross-flow dedup. It costs a new table, a new GC path, a new
+  orphan class, and a `Fork`/`Continue` story for blobs whose owning flow may be deleted. Step rows are *already*
+  immutable, flow-scoped, deleted with the flow, and remapped by `Fork`'s id map - a ref into one reuses a lifecycle
+  that is entirely paid for. It stays the escape hatch if **overfetch** ever binds (resolving pulls the anchor's
+  whole `state + changes`, so a fat anchor row makes the reader pay for bulk nobody wanted).
+- **Delta-encoded step state** (a step's `state` as a delta over its predecessor's, with a bounded lookback). It
+  **cuts writes, not reads** - the task still receives fully materialized state at dispatch, so the large field is
+  still read and decoded at every one of the N branch dispatches; refs plus the LRU improve the read side too. And
+  the cost lands on the multi-step-in-one-transaction paths (`computeFinalState`, `Cancel`'s cascade, `Fork`'s
+  DB-side clone, `History`), where a trivial row read becomes a chain resolution. If it is ever revived, do **not**
+  revive the bounded-lookback walk: store an anchor id plus the *cumulative* delta, so materialization is always two
+  rows. Note that this is the same skeleton as refs - refs are that idea applied per *field* rather than per *state
+  map*, which is what makes them one-hop and cache-friendly.
+- **An inline `"pdf$ref": 1234` key instead of the `state_refs` column.** Rejected for the `Fork` reason above (it
+  would force every large `state` blob through the engine to remap), plus: unresolved state would be the same Go
+  type as resolved state, so a missed resolve is silent (and its symptom - a missing field - reads as an absent
+  optional); and a user field literally named `pdf$ref` becomes a collision.
+- **`JSON_FIELD` extraction for resolution** (available in sequel). Deferred, not adopted: SQL Server's `JSON_VALUE`
+  is `NVARCHAR(4000)` and returns NULL past that, so a large *scalar* - our exact case - reads back NULL and would
+  need a whole-row fallback anyway; extraction saves wire bytes and Go-side decode but not the server-side read (a
+  TOASTed `jsonb` is de-TOASTed whole before slicing); and multi-anchor gets awkward (per-row paths force a
+  `UNION ALL` or a `CASE`). **It is also coupled to the free tier**: tier 1 is free *because* resolution fetches
+  whole columns, so adopting per-field extraction would require re-pricing it.
+
+**Open follow-ups (deliberately not blockers, but real):**
+
+- **A carry workload for `bench/`.** The existing `state` workload *rewrites* its payload every step - the worst
+  case for refs, where every copy is a legitimate change and nothing ever mints. Measuring the win needs a workload
+  that writes a large field once and *carries* it through D steps, plus a fan-out variant for the N·D case. The same
+  workload measures today's duplication cost, which is the design's baseline.
+- **A large-state warning.** `metricStateWriteBytes` is already emitted per step; a warning when a step's state
+  crosses a threshold would turn "you were supposed to clear the PDF" from folklore into something the engine says
+  out loud. Nearly free, and its firing rate is itself evidence for how much refs are needed.
+- **Whether `maxStateAnchors` ever binds** is an open empirical question (how many large fields are concurrently
+  live in a realistic workflow). The byte counters are the instrument.
+
 ### Execution-DAG edges (`predecessor_id` / `successor_id`)
 
 `lineage_id` is a cohort-counting device, not a DAG: a `forEach` source applies one `childLineageID` to every branch,
