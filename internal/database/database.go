@@ -245,15 +245,23 @@ func (s *ShardSet) Indices() []int {
 	return slices.Clone(s.indices)
 }
 
-// OnEach fans op out over every shard concurrently using an errgroup-style wait, returning the first error.
+// OnEach fans op out over every shard concurrently using an errgroup-style wait. Every shard is always
+// attempted; if several fail, the error of the LOWEST shard index is the one returned (deterministic, not
+// whichever failed first - the ops run concurrently, so "first" would be a race).
+//
+// The returned error carries a "shard" property naming the failing shard. Without it an operator sees the
+// reaper or the refiller fail with a bare driver error and no clue WHICH database is unhealthy - and this
+// package's whole contract is that a persistent outage degrades loudly. The property is a NAMED pair
+// deliberately: an unnamed int in this errors package is read as an HTTP status code, so passing the index
+// bare would silently set the error's status.
 func (s *ShardSet) OnEach(ctx context.Context, op func(ctx context.Context, db *sequel.DB, shard int) error) error {
 	indices := s.Indices()
 	if len(indices) == 1 {
 		db, err := s.Shard(indices[0])
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Trace(err, "shard", indices[0])
 		}
-		return errors.Trace(op(ctx, db, indices[0]))
+		return errors.Trace(op(ctx, db, indices[0]), "shard", indices[0])
 	}
 	errs := make([]error, len(indices))
 	var wg sync.WaitGroup
@@ -268,9 +276,9 @@ func (s *ShardSet) OnEach(ctx context.Context, op func(ctx context.Context, db *
 		})
 	}
 	wg.Wait()
-	for _, err := range errs {
+	for i, err := range errs {
 		if err != nil {
-			return errors.Trace(err)
+			return errors.Trace(err, "shard", indices[i])
 		}
 	}
 	return nil

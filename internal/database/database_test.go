@@ -17,8 +17,11 @@ limitations under the License.
 package database
 
 import (
+	"context"
 	"testing"
 
+	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -62,4 +65,64 @@ func TestResolveShardDSN_TestModeSubstitutesShardIndex(t *testing.T) {
 	// Even in test mode, only %d is substituted - a percent-encoded credential in a testing DSN survives.
 	assert.Equal("postgres://user:p%40ss@host/dwarfbench_4",
 		resolveShardDSN(test, 4, "postgres://user:p%40ss@host/dwarfbench_%d"))
+}
+
+// TestOnEach_ErrorNamesTheFailingShard pins that a shard's failure is attributable. Without the "shard"
+// property an operator sees the reaper or the refiller fail with a bare driver error and no clue WHICH
+// database is unhealthy - in a package whose contract is that a persistent outage degrades loudly.
+//
+// Also pins the deterministic choice among concurrent failures: every shard is attempted, and the LOWEST
+// failing index is the one reported (the ops run concurrently, so "whichever failed first" would be a race).
+func TestOnEach_ErrorNamesTheFailingShard(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	shardOf := func(err error) any {
+		var te *errors.TracedError
+		if !errors.As(err, &te) {
+			return nil
+		}
+		return te.Properties["shard"]
+	}
+
+	// A ShardSet whose op fails on chosen shards; the DBs are never touched by the op below.
+	var s ShardSet
+	s.indices = []int{2, 5, 9}
+	s.dbs = map[int]*sequel.DB{2: nil, 5: nil, 9: nil}
+
+	// One failing shard: it is named.
+	err := s.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		if shard == 5 {
+			return errors.New("boom on 5")
+		}
+		return nil
+	})
+	if assert.Error(err) {
+		assert.Equal(5, shardOf(err), "the error must name the failing shard")
+	}
+
+	// Two failing shards: the lowest index wins, deterministically.
+	err = s.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		if shard == 5 || shard == 9 {
+			return errors.New("boom on %d", shard)
+		}
+		return nil
+	})
+	if assert.Error(err) {
+		assert.Equal(5, shardOf(err), "among concurrent failures the lowest shard index is reported")
+	}
+
+	// No failure: no error (and Trace(nil) must not manufacture one on the single-shard path either).
+	assert.NoError(s.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error { return nil }))
+
+	var one ShardSet
+	one.indices = []int{7}
+	one.dbs = map[int]*sequel.DB{7: nil}
+	assert.NoError(one.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error { return nil }))
+	err = one.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		return errors.New("boom on the only shard")
+	})
+	if assert.Error(err) {
+		assert.Equal(7, shardOf(err), "the single-shard path must name its shard too")
+	}
 }

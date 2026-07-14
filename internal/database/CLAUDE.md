@@ -105,6 +105,14 @@ parallel. A sequential per-shard loop would grow total latency linearly with the
 query becomes 80ms wall-clock); the parallel shape stays at single-shard latency regardless of shard count. (The
 single-shard case skips the goroutines.)
 
+**The error names its shard.** `OnEach` annotates whatever it returns with a `"shard"` property
+(`errors.Trace(err, "shard", idx)`), because a bare driver error tells an operator that the reaper or the refiller
+failed but not WHICH database is unhealthy - and this package's contract is that a persistent outage degrades
+*loudly*. It must stay a **named** pair: an unnamed `int` in this `errors` package is interpreted as an HTTP status
+code, so passing the index bare would silently stamp the error's status instead. When several shards fail
+concurrently, the **lowest failing index** is the one reported - deterministic, unlike "whichever failed first,"
+which is a race between the parallel ops. Pinned by `TestOnEach_ErrorNamesTheFailingShard`.
+
 **Not shard-fault-tolerant by design.** `OnEach` fails the whole call on any shard's error. A partial-tolerance
 attempt was rejected: real outages mostly manifest as hangs, not errors; classifying "shard down" vs transient/data
 errors is driver-specific and brittle; and a helper that *claims* partial tolerance only in a narrow subset of failure
