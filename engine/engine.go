@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"math"
 	"math/rand/v2"
@@ -188,6 +189,11 @@ type Engine struct {
 	// Per-flow parsed-graph cache. The graph JSON is frozen at flow creation, so processStep reuses
 	// the parsed *workflow.Graph across the flow's steps instead of re-unmarshalling it each step.
 	graphCache *lru.Cache[graphCacheKey, *cachedGraph]
+	// stateRefCache serves a ref'd field's bytes without re-reading its anchor row. The key is immutable
+	// once the anchor settles, and in a fan-out every branch resolves the SAME anchor set - so after the
+	// first branch the hit rate is ~1, which is what makes refs a READ win as well as a write win (today
+	// each of the N branches re-reads the payload from the database).
+	stateRefCache *lru.Cache[string, json.RawMessage]
 
 	// Lifecycle
 	started        atomic.Bool
@@ -634,6 +640,7 @@ func (e *Engine) initRuntime() {
 	e.reaperStop = make(chan struct{})
 	e.nextPoll = time.Now()
 	e.graphCache = lru.New[graphCacheKey, *cachedGraph](4096, 15*time.Minute)
+	e.stateRefCache = lru.New[string, json.RawMessage](4096, 15*time.Minute)
 	e.waiters = nil
 	e.started.Store(true)
 

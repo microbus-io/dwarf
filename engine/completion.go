@@ -87,7 +87,7 @@ func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowI
 }
 
 // mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail.
-func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flowID int, reducers map[string]workflow.Reducer) (map[string]any, error) {
+func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, reducers map[string]workflow.Reducer, workflowURL string) (map[string]any, error) {
 	merge := func(query string, args ...any) (map[string]any, bool, error) {
 		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
@@ -96,12 +96,13 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 		defer rows.Close()
 
 		var baseState map[string]any
+		var baseRefs stateRefs
 		var allChanges []map[string]any
 		found := false
 		for rows.Next() {
 			found = true
-			var stateJSON, changesJSON string
-			err := rows.Scan(&stateJSON, &changesJSON)
+			var stateJSON, changesJSON, refsJSON string
+			err := rows.Scan(&stateJSON, &changesJSON, &refsJSON)
 			if err != nil {
 				return nil, false, errors.Trace(err)
 			}
@@ -110,6 +111,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 				if err != nil {
 					return nil, false, errors.Trace(err)
 				}
+				baseRefs = parseStateRefs(refsJSON)
 			}
 			var changes map[string]any
 			err = json.Unmarshal([]byte(changesJSON), &changes)
@@ -124,6 +126,13 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 		}
 		if !found {
 			return nil, false, nil
+		}
+		// FLATTEN: final_state is a flow-boundary value (a dwarf_flows column that Continue feeds into the next
+		// turn, and that outlives this flow's steps - DeleteOnCompletion may reap them). A ref that escaped the
+		// flow would dangle, so the terminal merge always materializes, whatever it costs on this one row.
+		// It is not a regression either: a large field surviving to the end is copied into final_state today.
+		if err := e.resolveStateRefs(ctx, db, shardNum, baseState, baseRefs, nil, workflowURL); err != nil {
+			return nil, false, errors.Trace(err)
 		}
 
 		merged := baseState
@@ -140,7 +149,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 	}
 
 	merged, found, err := merge(
-		"SELECT state, changes FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='"+workflow.StatusCompleted+"' ORDER BY step_id",
+		"SELECT state, changes, state_refs FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='"+workflow.StatusCompleted+"' ORDER BY step_id",
 		flowID,
 	)
 	if err != nil {
@@ -151,7 +160,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 	}
 
 	merged, found, err = merge(
-		"SELECT state, changes FROM dwarf_steps WHERE flow_id=? AND successor_id=0 ORDER BY step_id",
+		"SELECT state, changes, state_refs FROM dwarf_steps WHERE flow_id=? AND successor_id=0 ORDER BY step_id",
 		flowID,
 	)
 	if err != nil {
@@ -164,7 +173,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, flo
 }
 
 // computeFinalState computes the merged state for a flow.
-func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, flowID int) (string, string, error) {
+func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) (string, string, error) {
 	var graphJSON, workflowURL string
 	err := db.QueryRowContext(ctx,
 		"SELECT graph, workflow_url FROM dwarf_flows WHERE flow_id=?",
@@ -179,7 +188,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, flow
 		return "", "", errors.Trace(err)
 	}
 
-	merged, err := e.mergeTerminalSteps(ctx, db, flowID, graph.Reducers())
+	merged, err := e.mergeTerminalSteps(ctx, db, shardNum, flowID, graph.Reducers(), workflowURL)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
@@ -267,7 +276,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		if err != nil {
 			return errors.Trace(err)
 		}
-		fs, wf, err := e.computeFinalState(ctx, tx, flowID)
+		fs, wf, err := e.computeFinalState(ctx, tx, shardNum, flowID)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -457,7 +466,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		}
 		if failFlow {
 			var err error
-			finalStateJSON, _, err = e.computeFinalState(ctx, tx, flowID)
+			finalStateJSON, _, err = e.computeFinalState(ctx, tx, shardNum, flowID)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -597,7 +606,7 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFl
 				return errors.Trace(err)
 			}
 			if n, _ := res.RowsAffected(); n > 0 {
-				childFinalState, _, err := e.computeFinalState(ctx, tx, childFlowID)
+				childFinalState, _, err := e.computeFinalState(ctx, tx, shardNum, childFlowID)
 				if err != nil {
 					return errors.Trace(err)
 				}

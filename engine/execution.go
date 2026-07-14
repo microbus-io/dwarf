@@ -114,6 +114,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	var subgraphDone bool
 	var subgraphResultJSON, subgraphErrorStr string
 	var stepCreatedAt time.Time
+	var stateRefsJSON string
 
 	switch db.DriverName() {
 	case "pgx", "sqlite":
@@ -121,9 +122,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
-				" RETURNING step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq",
+				" RETURNING step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq",
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -133,10 +134,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		err = db.QueryRowContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
-				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq"+
+				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.state_refs, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -164,9 +165,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		n, _ = res.RowsAffected()
 		if n == 1 {
 			readErr := db.QueryRowContext(ctx,
-				"SELECT step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq FROM dwarf_steps WHERE step_id=?",
+				"SELECT step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq FROM dwarf_steps WHERE step_id=?",
 				stepID,
-			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
+			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
 			if readErr != nil && readErr != sql.ErrNoRows {
 				err = readErr
 			}
@@ -233,6 +234,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Build the Flow carrier
 	var state map[string]any
 	unmarshalJSONMap(stateJSON, &state)
+	// Materialize any field this step carries BY REFERENCE (see staterefs.go). Resolving here, once, is what
+	// keeps the ref encoding out of everything downstream: the carrier, `when` evaluation, forEach expansion,
+	// the transport to a remote task, and the transition machinery all work on literals and never learn refs
+	// exist. The refs the step inherited are kept, because minting the successors' state needs to know which
+	// fields arrived as refs (and so must be carried, never re-anchored against this step).
+	inheritedRefs := parseStateRefs(stateRefsJSON)
+	if err := e.resolveStateRefs(ctx, db, shardNum, state, inheritedRefs, nil, workflowURL); err != nil {
+		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		return errors.Trace(err)
+	}
 	var priorChanges map[string]any
 	unmarshalJSONMap(priorChangesJSON, &priorChanges)
 	mergedInputState, _ := workflow.MergeState(state, priorChanges, nil)
@@ -658,7 +669,18 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 
 	childInputState, _ := workflow.MergeState(state, accumulatedChanges, nil)
-	childInputJSON, _ := json.Marshal(childInputState)
+	// Mint state refs for the successors: a field big enough to be worth an anchor is omitted from their
+	// `state` and recorded in `state_refs` instead, pointing at THIS step (which holds the bytes in its
+	// `changes` if the task just wrote them, or in its `state` if it merely carried them). A field that
+	// arrived here as a ref keeps that ref. The bar scales with the fan-out width - see mintStateRefs.
+	//
+	// The linear/static-fan-out successors all share this one snapshot, so it is minted once; a forEach
+	// branch re-mints because its state carries the injected element (below).
+	linearStateJSON, linearRefsJSON, err := mintStateRefs(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), nil)
+	if err != nil {
+		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		return errors.Trace(err)
+	}
 	nextStepDepth := stepDepth + 1
 	sleepMs := sleepDur.Milliseconds()
 
@@ -726,7 +748,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 
 		for i, next := range normalNexts {
-			stepStateJSON := childInputJSON
+			stepStateJSON, stepRefsJSON := linearStateJSON, linearRefsJSON
 			if next.item != nil {
 				// A forEach branch's state is the flow state plus its element and ordinal context. The
 				// source array is NOT stripped: the engine once deleted it from each branch's local state
@@ -735,8 +757,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 				// carried field paid the same cost unaddressed. It also made a branch's state a LIE - the
 				// branch could not see the array its own element came from - and it is what made a failed
 				// fan-out's final_state come back missing the array (a completed sibling's branch-local
-				// snapshot is the merge base there). De-duplicating large carried fields belongs to a
-				// general mechanism, not a special case; until then a branch sees the state its flow has.
+				// snapshot is the merge base there). The general mechanism that owns the cost is state refs:
+				// the array is REF'd, so the branches share one copy of it and each still sees it whole.
 				perStepState := make(map[string]any, len(childInputState)+3)
 				maps.Copy(perStepState, childInputState)
 				perStepState[next.itemKey] = next.item
@@ -744,13 +766,25 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 					perStepState[next.itemKey+"Index"] = next.cohortIndex
 					perStepState[next.itemKey+"Count"] = next.cohortCount
 				}
-				stepStateJSON, _ = json.Marshal(perStepState)
+				// The injected element and its ordinal context are SYNTHESIZED per branch - their bytes are
+				// in no step row at all - so they can never be ref'd; a ref to them would dangle. Everything
+				// else in the branch's state comes from this step and re-mints exactly as the linear case.
+				noRef := map[string]bool{next.itemKey: true}
+				if next.forEachKey != "" {
+					noRef[next.itemKey+"Index"] = true
+					noRef[next.itemKey+"Count"] = true
+				}
+				var mintErr error
+				stepStateJSON, stepRefsJSON, mintErr = mintStateRefs(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef)
+				if mintErr != nil {
+					return errors.Trace(mintErr)
+				}
 			}
 			nextURL := dispatchURLOf(graph, next.taskName)
 			newStepID, err := tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
-					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
-				flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, string(stepStateJSON), workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID,
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
+					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+				flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, stepStateJSON, stepRefsJSON, workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID,
 			)
 			if err != nil {
 				return errors.Trace(err)
@@ -780,7 +814,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			}
 			fullyResolved := size > 0 && arrivals >= size
 			if fullyResolved && failures == 0 {
-				fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+				fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -807,7 +841,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 					if sampleErr == "" {
 						sampleErr = "cohort failed"
 					}
-					finalStateJSON, _, cfsErr := e.computeFinalState(ctx, tx, flowID)
+					finalStateJSON, _, cfsErr := e.computeFinalState(ctx, tx, shardNum, flowID)
 					if cfsErr != nil {
 						return errors.Trace(cfsErr)
 					}
@@ -1003,24 +1037,36 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		}
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=0 WHERE step_id=?", stepID)
 
-		var ourStateJSON, ourChangesJSON string
-		tx.QueryRowContext(ctx, "SELECT state, changes FROM dwarf_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON)
+		var ourStateJSON, ourChangesJSON, ourRefsJSON string
+		tx.QueryRowContext(ctx, "SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON, &ourRefsJSON)
 		txBytes.stateRead = len(ourStateJSON)
 		txBytes.changesRead = len(ourChangesJSON)
 		var ourState, ourChanges map[string]any
 		unmarshalJSONMap(ourStateJSON, &ourState)
 		unmarshalJSONMap(ourChangesJSON, &ourChanges)
+		// Resolve only what the reducers actually fold; a merely-carried ref rides through the (empty) cohort
+		// untouched, still pointing at its original anchor - see resolveReducedRefs.
+		ourRefs := parseStateRefs(ourRefsJSON)
+		_, rerr := e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, graph.Reducers(), workflowURL)
+		if rerr != nil {
+			return errors.Trace(rerr)
+		}
 		mergedState, _ := workflow.MergeState(ourState, ourChanges, graph.Reducers())
-		mergedJSON, _ := json.Marshal(mergedState)
+		// This step IS the cohort spawn (an empty forEach spawns no branches), so it anchors exactly as a
+		// populated cohort's spawn does in insertFanInStep - and with no members, nothing is excluded.
+		mergedJSON, refsJSON, merr := mintStateRefs(mergedState, ourChanges, ourRefs, stepID, 1, nil)
+		if merr != nil {
+			return errors.Trace(merr)
+		}
 		txBytes.stateWritten = len(mergedJSON)
 
 		nextStepDepth := stepDepth + 1
 		sleepMs := sleepDur.Milliseconds()
 		var err error
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
-			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -1062,18 +1108,33 @@ type stateByteCount struct {
 // insertFanInStep creates the fan-in step after the cohort completes. It also returns the state bytes it
 // moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot), which
 // the caller emits after its transaction commits.
-func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, stateByteCount, error) {
-	var spawnStateJSON, spawnChangesJSON string
+func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardNum, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, workflowURL string, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, stateByteCount, error) {
+	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON string
 	var spawnLineageID int
 	tx.QueryRowContext(ctx,
-		"SELECT state, changes, lineage_id FROM dwarf_steps WHERE step_id=?",
+		"SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE step_id=?",
 		cohortSpawnID,
-	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnLineageID)
+	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON, &spawnLineageID)
 	bytes := stateByteCount{stateRead: len(spawnStateJSON), changesRead: len(spawnChangesJSON)}
 	var spawnState, spawnChanges map[string]any
 	unmarshalJSONMap(spawnStateJSON, &spawnState)
 	unmarshalJSONMap(spawnChangesJSON, &spawnChanges)
+	// Materialize only the ref'd fields a reducer will FOLD - a combining reducer (append/add/union/...) needs
+	// its accumulated base, and folding a delta onto an absent base would silently lose everything so far. A
+	// merely-carried ref is left alone and re-emitted onto the fan-in step below, still pointing at its
+	// original anchor: resolving it here would materialize the payload and re-anchor it at EVERY fan-in,
+	// giving back the win in exactly the fan-out graphs this design exists for.
+	spawnRefs := parseStateRefs(spawnRefsJSON)
+	_, err := e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, graph.Reducers(), workflowURL)
+	if err != nil {
+		return 0, stateByteCount{}, errors.Trace(err)
+	}
 	merged, _ := workflow.MergeState(spawnState, spawnChanges, graph.Reducers())
+	// Fields a cohort MEMBER contributed. Their bytes are in that member's `changes` - not in the spawn's row -
+	// and a reducer's COMBINED output exists in no row at all, so neither can be anchored at the spawn. They are
+	// inlined into the fan-in step's own state, which becomes their anchor for everything downstream (the third
+	// of the three places an anchor's bytes can sit). A stale spawn ref for such a field is dropped with them.
+	memberWrites := map[string]bool{}
 
 	// The cohort-exit steps whose successor_id must point at the fan-in step. Collected from this same
 	// cohort scan so the successor_id write can target them by primary key (step_id IN ...) below,
@@ -1114,6 +1175,9 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 		}
 		var changes map[string]any
 		unmarshalJSONMap(changesJSON, &changes)
+		for k := range changes {
+			memberWrites[k] = true
+		}
 		merged, _ = workflow.MergeState(merged, changes, graph.Reducers())
 	}
 	rows.Close()
@@ -1128,13 +1192,21 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, flowID
 	// means once the cohort is behind it - see stripForEachBookkeeping.
 	stripForEachBookkeeping(merged, graph)
 
-	mergedJSON, _ := json.Marshal(merged)
+	// Mint against the SPAWN step, not this one: a field the cohort merely carried has its bytes in the spawn's
+	// row (its `state` if the spawn received it - e.g. the entry step holding the flow's initial input - or its
+	// `changes` if the spawn's task wrote it), so the spawn is a legitimate anchor and the fan-in must not
+	// re-copy the payload into its own row. A field that arrived at the spawn as a ref keeps that ref, so the
+	// chain stays one hop. Member-contributed and reduced fields are excluded and therefore inline (above).
+	mergedJSON, refsJSON, err := mintStateRefs(merged, spawnChanges, spawnRefs, cohortSpawnID, 1, memberWrites)
+	if err != nil {
+		return 0, stateByteCount{}, errors.Trace(err)
+	}
 	bytes.stateWritten = len(mergedJSON)
 	fanInURL := dispatchURLOf(graph, fanInTaskName)
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
-		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, string(mergedJSON), workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
 	)
 	if err != nil {
 		return 0, stateByteCount{}, errors.Trace(err)

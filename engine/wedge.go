@@ -233,7 +233,7 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 		)
 
 		for i, fid := range allFlowIDs {
-			fs, _, err := e.computeFinalState(ctx, tx, fid.(int))
+			fs, _, err := e.computeFinalState(ctx, tx, shard, fid.(int))
 			if err != nil {
 				return errors.Trace(err)
 			}

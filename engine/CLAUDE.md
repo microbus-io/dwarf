@@ -635,8 +635,9 @@ for the one carried field the engine happens to know the name of, while every *o
 same N x chain-length cost unaddressed; it made a branch's state a lie (the branch could not see the array its own
 element came from); and it is what made a failed fan-out's `final_state` come back *missing* the array - a failed
 cohort never reaches its fan-in, so the terminal-state merge bases on a completed sibling's branch-local snapshot,
-which is precisely the stripped one. De-duplicating large carried state is a general mechanism (state references),
-not a per-field deletion.
+which is precisely the stripped one. De-duplicating large carried state is a general mechanism - **state refs**,
+below - not a per-field deletion. The source array is now *ref'd* (one stored copy, every branch pointing at it),
+which is the same byte saving without deleting anything or lying to the branch.
 
 **Downstream suppression via explicit clear** (below) remains the author-space way to drop a large source array past
 the fan-in.
@@ -695,6 +696,96 @@ converges and the flow recovers via the handler -> fan-in path; likewise a `canc
 **Retry rejoins its cohort naturally.** `flow.Retry` rewinds the failed step in place - same `step_id`, `lineage_id`,
 `fan_out_ordinal`, just `status='pending'` and the prior error/park slot cleared. The merge query sees one row per
 branch regardless of attempts, so retry can't double-count.
+
+### State refs — a large carried field is stored once (`staterefs.go`)
+
+A step's `state` is a full input snapshot, so a field that is *carried* but not *changed* is re-serialized into
+every row it survives into: D copies down a chain of depth D, and **N·D across a fan-out of N branches**. Bytes
+are the binding resource for large-state workflows (a shard sustaining ~4,600 steps/s on small state caps near
+~700-900 steps/s rewriting 64KB per step, bound by the instance's disk/WAL path - `docs/benchmark-cloud.md`), so
+this is the dominant cost of a carry-heavy graph. The doc-extraction shape (a document fanned out over pages, then
+chunks) measures **~29x** fewer stored state bytes with refs than without.
+
+A field above a size bar is therefore **not written into the successor's `state` at all**: it is omitted, and the
+`dwarf_steps.state_refs` column records `{"<field>": <anchor step_id>}` - the step that physically holds the bytes.
+
+**An anchor's bytes can be in EITHER payload column, and resolution reads both** (`changes` shadowing `state`, being
+the newer value). Three places they sit, and only the first is the obvious one:
+
+- a task produced the value → the anchor's **`changes`**;
+- the flow's **initial input** → the **entry step's `state`** (no task produced it, so it appears in no `changes`
+  anywhere - and it is the headline case: a large `initialState`, or a `Continue` carry-forward);
+- a fan-in **reducer's output** → the **fan-in step's `state`** (the merged value exists nowhere else - not in the
+  spawn's row, not in any one member's `changes`).
+
+A changes-only resolver silently misses the last two. Do not "simplify" the resolve to one column.
+
+**The shape: resolve once at dispatch, mint once at the successor write.** Everything in between works on
+literals - `when` evaluation, `forEach` expansion, the task carrier, the transport to a remote task - so the ref
+encoding never leaks into transition evaluation or task-facing code. Minting needs **no database read** (state was
+already resolved, so "inlining" is just declining to omit a field), which is what makes the write-side win free of
+round-trips. Intra-step merge is replace-only (`MergeState(state, changes, nil)`), so a field is either replaced by
+a literal in `changes` or carried untouched - three cases per key: a literal drops the ref (and may re-anchor here),
+a tombstone drops field and ref, absence carries the ref forward.
+
+**Invariants.** (1) **Refs live only in `state`, never in `changes`** - `changes` is always a task's literal output
+or a reducer's literal result, which is what makes one refs column sufficient and the changes-shadows-state rule
+safe. (2) **Refs are one hop.** This mostly holds *by construction* - a ref is a few bytes, so it never trips the
+size bar and is never re-minted - but that is a side effect of a SIZE comparison, and the fan-out policy below is
+deliberately size-*independent*. So the guard is explicit: **never mint a ref for a field that is already a ref.**
+Resolution asserts the invariant (a ref into a step whose own `state_refs` names that field is an error) rather
+than walking a chain, which would be the rejected delta design wearing a hat. (3) **Flatten at every flow
+boundary** - `final_state` (which outlives its steps; `DeleteOnCompletion` may reap them), `Continue`, subgraph
+`in`/`out`, and Fork's leaf. (4) **`History`/`Snapshot`/`Step` resolve** - the encoding is internal storage, never
+API-visible. (5) A resolved field is **decoded**, exactly like one that was never ref'd: a `json.RawMessage` spliced
+into a state map would leak the storage encoding into `FlowStep.State`/`FlowOutcome.State`, where a caller's
+`state["pdf"].(string)` would silently stop matching. The cache holds the immutable *bytes* and each resolve decodes
+its own copy, so two fan-out branches never share a decoded map or slice. (6) **Anchors never cross a shard** (a ref
+targets a step in the same flow; a flow lives on one shard), which is what lets the fan-in and final-state paths
+resolve inside the transactions they already run in. (7) Refs are minted only from **settled** predecessors - a
+future "re-run a completed step in place" feature would invalidate every ref into it.
+
+**Policy prices the ANCHOR, not the field.** Resolution fetches whole payload columns, so the cost is one row per
+*distinct anchor* (and, on a cache miss, one round-trip for all of them together) while any number of fields in an
+already-fetched row are free. From the measured constants (`db = k·L + s`, k ≈ 11-12, s ≈ 4.4ms; byte ceiling
+46-60 MB/s), same-zone **one round-trip costs about what ~23KB of avoided writes buys** (`stateRefBudget`). Three
+tiers follow:
+
+- **Free** - a field whose anchor is already in the fetch set. Every field a step could newly anchor lives in that
+  *one* step's row, so all candidates share a single prospective anchor: once any one opens it, the rest ride along
+  at zero extra read cost, subject only to `stateRefFloor` (~1KB).
+- **Fan-out** - the bar scales as `stateRefBudget/N`, because the cache collapses N resolves into one miss while the
+  write saving is paid N times. Linear break-even sits near 23KB (the depth cancels: cost ~D resolves, saving S·D),
+  but at N=100 even a few hundred bytes pays. **Fan-out width is the primary axis, not a refinement** - a ~100x swing
+  in the correct threshold, on a quantity the engine knows exactly at mint time.
+- **Linear** - one field clears `stateRefThreshold`, **or the per-anchor sum does**. Summing is legitimate *only*
+  because candidates are co-located in one row; four 1KB fields at four *different* anchors would mean four whole-row
+  overfetches for the same bytes, and the sum is never taken across anchors.
+
+`maxStateAnchors` caps the resolve IN-list by inlining the cheapest anchors back as literals. It is the *same knob*
+as the threshold seen from the other end (the model prices rows), and the scheme is correct at any value.
+
+**Fan-in resolves only what it reduces.** A combining reducer (`append`/`add`/`union`/…) needs its accumulated base,
+so a ref'd field it folds must be materialized or the fold would apply the delta to an *absent* base and silently
+lose everything accumulated. The default `replace` reducer needs nothing. So a field is materialized iff the graph
+registers a reducer for it - a safe superset. A merely *carried* ref is passed through untouched, still pointing at
+its original anchor: materializing it at every fan-in would re-anchor the payload and hand back the win in exactly
+the fan-out graphs the design exists for. The fan-in mints against the **spawn** step (whose row holds what the
+cohort carried), while member-contributed and reduced fields are inlined into the fan-in's own `state`.
+
+**`Fork` remaps ref targets** through its clone id map, and this is *why refs live in their own column*: Fork clones
+step rows with a DB-side `INSERT...SELECT`, so the payload bytes never pass through the engine - remapping a ref
+buried inside the state JSON would have meant reading every large blob into Go to rewrite it, hauling precisely the
+payloads this feature exists to stop hauling. An anchor is always an ancestor of the step that refs it, and pruning
+removes only descendants of the rewind step, so a kept step's anchors are always kept; a zero mapping is caught, not
+written as a dangling ref. The fork *leaf* gets materialized state and cleared refs.
+
+**The forEach element is never ref'd** (`<as>`/`<as>Index`/`<as>Count`) - the engine synthesizes it per branch, so
+its bytes are in no step row and a ref to it would dangle.
+
+Pinned by `engine/staterefs_test.go` (the three tiers, both-column resolve, one-hop carry, the fan-out and fan-in
+storage assertions) and `fixtures/staterefsflow_test.go` (end-to-end: a carried document across fan-out/fan-in,
+`Continue`, `Fork`, overwrite and tombstone).
 
 ### Execution-DAG edges (`predecessor_id` / `successor_id`)
 

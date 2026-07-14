@@ -173,13 +173,13 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		return nil, errors.Trace(err)
 	}
 	var taskName, statusStr, errMsg string
-	var stateJSON, changesJSON, interruptJSON string
+	var stateJSON, changesJSON, stateRefsJSON, interruptJSON string
 	var stepDepth, attempt, predID, succID int
 	var createdAt, updatedAt time.Time
 	err = db.QueryRowContext(ctx,
-		"SELECT step_depth, task_name, attempt, state, changes, interrupt_payload, status, error, created_at, updated_at, predecessor_id, successor_id FROM dwarf_steps WHERE step_id=? AND step_token=?",
+		"SELECT step_depth, task_name, attempt, state, changes, state_refs, interrupt_payload, status, error, created_at, updated_at, predecessor_id, successor_id FROM dwarf_steps WHERE step_id=? AND step_token=?",
 		stepID, stepToken,
-	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID)
+	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("step not found", http.StatusNotFound)
 	}
@@ -200,6 +200,12 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		UpdatedAt:     updatedAt,
 	}
 	err = json.Unmarshal([]byte(stateJSON), &fs.State)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	// Materialize the step's carried-by-reference fields: the ref encoding is internal storage, never an
+	// API-visible one, so Step reports the input the task actually saw (invariant 6).
+	err = e.resolveStateRefs(ctx, db, shardNum, fs.State, parseStateRefs(stateRefsJSON), nil, "")
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

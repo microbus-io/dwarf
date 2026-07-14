@@ -51,11 +51,11 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 
 	// Resolve the fork step, its owning flow, and that flow's token (needed to walk the surgraph chain).
 	var leafFlowID int
-	var forkStepState, leafFlowToken string
+	var forkStepState, forkStepRefs, leafFlowToken string
 	err = db.QueryRowContext(ctx,
-		"SELECT s.flow_id, s.state, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
+		"SELECT s.flow_id, s.state, s.state_refs, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
 		forkStepID, forkStepToken,
-	).Scan(&leafFlowID, &forkStepState, &leafFlowToken)
+	).Scan(&leafFlowID, &forkStepState, &forkStepRefs, &leafFlowToken)
 	if err == sql.ErrNoRows {
 		return "", errors.New("step not found", http.StatusNotFound)
 	}
@@ -97,7 +97,14 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		return "", errors.New("cannot fork a flow scheduled for deletion", http.StatusConflict)
 	}
 
-	mergedLeafState, err := mergeWithOverrides(forkStepState, stateOverrides)
+	// The fork's leaf step is rewritten with fully MATERIALIZED state (and state_refs cleared below): the
+	// caller's overrides merge onto the real values, and the leaf is the one row the fork re-runs from, so it
+	// must not depend on anchors whose ids are about to be remapped. Its successors re-mint refs normally.
+	mergedLeafState, err := e.resolvedStepState(ctx, db, shardNum, forkStepState, forkStepRefs, rootWorkflowURL)
+	if err != nil {
+		return "", errors.Trace(err)
+	}
+	mergedLeafState, err = mergeWithOverrides(mergedLeafState, stateOverrides)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -299,9 +306,10 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	type stepMeta struct {
 		oldID, predID, succID, lineageID, cohortSize int
 		status                                       string
+		refs                                         stateRefs
 	}
 	mrows, err := tx.QueryContext(ctx,
-		"SELECT step_id, predecessor_id, successor_id, lineage_id, cohort_size, status FROM dwarf_steps WHERE flow_id=? ORDER BY step_id",
+		"SELECT step_id, predecessor_id, successor_id, lineage_id, cohort_size, status, state_refs FROM dwarf_steps WHERE flow_id=? ORDER BY step_id",
 		originFlowID,
 	)
 	if err != nil {
@@ -310,11 +318,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	var keep []stepMeta
 	for mrows.Next() {
 		var s stepMeta
-		mrows.Scan(&s.oldID, &s.predID, &s.succID, &s.lineageID, &s.cohortSize, &s.status)
+		var refsJSON string
+		mrows.Scan(&s.oldID, &s.predID, &s.succID, &s.lineageID, &s.cohortSize, &s.status, &refsJSON)
 		if pruned[s.oldID] {
 			continue
 		}
 		s.status = strings.TrimSpace(s.status)
+		s.refs = parseStateRefs(refsJSON)
 		keep = append(keep, s)
 	}
 	mrows.Close()
@@ -357,14 +367,14 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		var newID int64
 		if isLeafFlow && s.oldID == cc.leafStepID {
 			newID, err = tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, changes, interrupt_payload, ?, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
+					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, changes, interrupt_payload, ?, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
 				newFlowID, keys.RandomIdentifier(16), workflow.StatusCreated, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, s.oldID,
 			)
 		} else {
 			newID, err = tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
-					" SELECT ?, step_depth, ?, task_name, task_url, state, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
+				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key, fairness_weight, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, engine_id)"+
+					" SELECT ?, step_depth, ?, task_name, task_url, state, state_refs, changes, interrupt_payload, status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures, fan_out_ordinal, predecessor_id, successor_id, ?, ?, ?, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, parked, not_before, lease_expires, created_at, started_at, updated_at, ? FROM dwarf_steps WHERE step_id=?",
 				newFlowID, keys.RandomIdentifier(16), flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID, s.oldID,
 			)
 		}
@@ -376,10 +386,34 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 
 	// Remap intra-flow references (a ref to a pruned/absent step -> 0) and stamp the resolved time budget
 	// (kept uniform with priority/fairness; the INSERT...SELECT copied the source step's budget).
+	//
+	// state_refs is remapped the same way, and this is exactly why refs live in their own COLUMN rather than
+	// inline in the state JSON: the payload columns ride the DB-side INSERT...SELECT above and never pass
+	// through the engine, so remapping an anchor costs one tiny UPDATE - where an inline `$ref` would have
+	// forced reading every large state blob into Go to rewrite it, hauling precisely the payloads state refs
+	// exist to stop hauling. An anchor is always an ANCESTOR of the step that refs it, and pruning removes
+	// only DESCENDANTS of the rewind step, so a kept step's anchors are always kept too; a zero mapping would
+	// mean that invariant broke, and it is caught rather than silently written as a dangling ref.
 	for _, s := range keep {
+		refsJSON := "{}"
+		if len(s.refs) > 0 {
+			remapped := make(stateRefs, len(s.refs))
+			for field, anchor := range s.refs {
+				newAnchor, ok := idMap[anchor]
+				if !ok || newAnchor == 0 {
+					return 0, nil, errors.New("cannot fork: step %d refs field %q at step %d, which is not in the clone", s.oldID, field, anchor)
+				}
+				remapped[field] = newAnchor
+			}
+			data, merr := json.Marshal(remapped)
+			if merr != nil {
+				return 0, nil, errors.Trace(merr)
+			}
+			refsJSON = string(data)
+		}
 		_, err = tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET predecessor_id=?, successor_id=?, lineage_id=?, time_budget_ms=? WHERE step_id=?",
-			idMap[s.predID], idMap[s.succID], idMap[s.lineageID], flowBudget, idMap[s.oldID],
+			"UPDATE dwarf_steps SET predecessor_id=?, successor_id=?, lineage_id=?, time_budget_ms=?, state_refs=? WHERE step_id=?",
+			idMap[s.predID], idMap[s.succID], idMap[s.lineageID], flowBudget, refsJSON, idMap[s.oldID],
 		)
 		if err != nil {
 			return 0, nil, errors.Trace(err)
@@ -478,7 +512,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if isLeafFlow && rewind == cc.leafStepID {
 			// Leaf fork step: merged input, cleared output/park/cohort, gated `created`.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, state=?, changes='{}', error='', attempt=0, interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs='{}', changes='{}', error='', attempt=0, interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
 				workflow.StatusCreated, parkedNone, cc.mergedLeafState, newRewindID,
 			)
 			cc.newLeafStepID = newRewindID

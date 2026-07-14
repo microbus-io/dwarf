@@ -394,16 +394,16 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 		out.CancelReason = flowCancelReason
 	case workflow.StatusInterrupted:
 		// For interrupted, query the leaf step's state and interrupt payload
-		var stepStateJSON, stepChangesJSON string
+		var stepStateJSON, stepChangesJSON, stepRefsJSON string
 		var interruptPayloadJSON sql.NullString
 		// Pick the same interrupted leaf Resume's chain walk would act on (earliest-updated, step_id
 		// tiebreak) - not by step_depth, which is only an informational ordering and varies with branch
 		// length (loops/gotos) without indicating which interrupt resolves next.
 		err = db.QueryRowContext(ctx,
-			"SELECT state, changes, interrupt_payload FROM dwarf_steps"+
+			"SELECT state, changes, state_refs, interrupt_payload FROM dwarf_steps"+
 				" WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"' ORDER BY updated_at, step_id LIMIT_OFFSET(1, 0)",
 			flowID,
-		).Scan(&stepStateJSON, &stepChangesJSON, &interruptPayloadJSON)
+		).Scan(&stepStateJSON, &stepChangesJSON, &stepRefsJSON, &interruptPayloadJSON)
 		// A missing interrupted step (ErrNoRows) is a tolerated race - report empty state; a real DB
 		// error must not masquerade as that empty state.
 		if err != nil && err != sql.ErrNoRows {
@@ -413,6 +413,11 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			var stepState, stepChanges map[string]any
 			unmarshalJSONMap(stepStateJSON, &stepState)
 			unmarshalJSONMap(stepChangesJSON, &stepChanges)
+			// The ref encoding is a storage detail, never API-visible: a caller sees the state the step
+			// actually saw (invariant 6).
+			if rerr := e.resolveStateRefs(ctx, db, shardNum, stepState, parseStateRefs(stepRefsJSON), nil, ""); rerr != nil {
+				return nil, errors.Trace(rerr)
+			}
 			merged, _ := workflow.MergeState(stepState, stepChanges, nil)
 			out.State = merged
 			if interruptPayloadJSON.Valid {
@@ -729,7 +734,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		}
 
 		for i, fid := range allFlowIDs {
-			fs, _, err := e.computeFinalState(ctx, tx, fid.(int))
+			fs, _, err := e.computeFinalState(ctx, tx, shardNum, fid.(int))
 			if err != nil {
 				return errors.Trace(err)
 			}

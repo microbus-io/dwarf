@@ -51,8 +51,9 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `step_depth` | Sequential transition depth; fan-out siblings share it. **Purely informational** (History ordering + the surfaced `FlowStep.StepDepth`, useful to see how deep a flow goes) - it is *not* used for the execution DAG (that is `predecessor_id`/`successor_id`), fan-in firing (`lineage_id`/cohort counters), final state (tail steps), or selection. The entry step is `callerStepDepth+1` (1 for a top-level flow; a subgraph continues from its caller's depth); a fan-in step is `max(cohort step_depth)+1` |
 | `step_token` | Random token component of the stepKey |
 | `task_name` | Graph node name of the task this step executes |
-| `state` | JSON input snapshot. Immutable except on retry/resume |
-| `changes` | JSON output delta the task produced |
+| `state` | JSON input snapshot. Immutable except on retry/resume. A field carried by REFERENCE is **absent** here - see `state_refs` |
+| `changes` | JSON output delta the task produced. Always literal: a ref never appears in `changes`, which is what lets one refs column cover the whole scheme |
+| `state_refs` | `{"<field>": <anchor step_id>}` - fields whose bytes live in another step's row rather than in this step's `state`, so a large carried field is stored once instead of once per step (measured ~29x fewer state bytes on a fan-out doc-extraction shape). The anchor's bytes may be in **either** its `changes` (a task produced them) or its `state` (the flow's initial input at the entry step; a fan-in's reducer output), so resolution reads both, `changes` shadowing `state`. Own column, not an inline `$ref` key, so `Fork`'s DB-side `INSERT...SELECT` clone can remap anchors with one tiny UPDATE instead of pulling every large state blob through the engine. Empty (`'{}'`) for the overwhelming majority of rows. The full design is in `engine/CLAUDE.md` |
 | `interrupt_payload` | JSON outbound payload from `flow.Interrupt()` - what the awaiting caller sees |
 | `interrupt_done` | `1` once the interrupt park has been resumed; drives `flow.Interrupt`'s return-vs-arm decision |
 | `resume_data` | JSON inbound payload recorded by `Resume`; returned by `flow.Interrupt` on re-dispatch. `'{}'` until resumed |
