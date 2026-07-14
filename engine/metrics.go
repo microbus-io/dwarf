@@ -98,11 +98,18 @@ func (e *Engine) initMetrics() error {
 		}
 		return g
 	}
-	queueDepth := gauge("dwarf_steps_queue_depth", "Steps waiting in the local worker queue.", "")
-	stepsPending := gauge("dwarf_steps_pending", "Due pending steps in each priority band.", "")
-	oldestAge := gauge("dwarf_steps_oldest_pending_age_seconds", "Age of the oldest due pending step in each priority band.", "s")
-	fairnessKeys := gauge("dwarf_steps_fairness_keys", "Distinct fairness keys in the most recent refill selection at the given priority band.", "")
-	concurrency := gauge("dwarf_task_concurrency_running", "Cluster-wide running steps per task.", "")
+	// The five gauges split into two kinds, and the difference is NOT cosmetic - it decides how a dashboard
+	// must aggregate them across replicas:
+	//   - PER-REPLICA (read from this replica's memory): queueDepth, fairnessKeys. Sum across replicas.
+	//   - CLUSTER-WIDE (read by querying the SHARED shard databases): stepsPending, oldestAge, concurrency.
+	//     Every replica observes the SAME number, so summing them multiplies by the replica count - a
+	//     1,000-step backlog reads as 3,000 on three replicas. Aggregate with max (or avg), never sum.
+	// Each description says so, because that is where an operator building a panel actually reads it.
+	queueDepth := gauge("dwarf_steps_queue_depth", "Per-replica: steps waiting in this replica's local worker cache. Sum across replicas.", "")
+	stepsPending := gauge("dwarf_steps_pending", "Cluster-wide: due pending steps in each priority band, read from the shared database. Every replica reports the same value - aggregate with max, not sum.", "")
+	oldestAge := gauge("dwarf_steps_oldest_pending_age_seconds", "Cluster-wide: age of the oldest due pending step in each priority band, read from the shared database. Every replica reports the same value - aggregate with max, not sum.", "s")
+	fairnessKeys := gauge("dwarf_steps_fairness_keys", "Per-replica: distinct fairness keys in this replica's most recent refill selection at the given priority band.", "")
+	concurrency := gauge("dwarf_task_concurrency_running", "Cluster-wide: running steps per task, read from the shared database. Every replica reports the same value - aggregate with max, not sum.", "")
 
 	reg, err := meter.RegisterCallback(
 		func(ctx context.Context, o metric.Observer) error {

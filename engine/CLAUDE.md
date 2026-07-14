@@ -1342,11 +1342,25 @@ time and reads engine state: in-memory for
 `dwarf_steps_queue_depth` (cache length) and `dwarf_steps_fairness_keys` (the last refill's selected band +
 distinct-key count, stashed under `lastRefillLock` by the refiller); shard queries for `dwarf_steps_pending`
 and `dwarf_steps_oldest_pending_age_seconds` (per priority band) and `dwarf_task_concurrency_running` (running
-steps per task). Gauges emit **per replica**; cluster-wide aggregates are summed at the backend. The callback is
+steps per task).
+
+**The gauges are of two kinds and they aggregate differently - do not paper over this.** `queue_depth` and
+`fairness_keys` are genuinely **per-replica** (read from this replica's memory): sum them. The other three are
+**cluster-wide** by construction - they are computed by querying the SHARED shard databases, so every replica
+observes the *same* number. Summing them multiplies by the replica count (a 1,000-step backlog reads as 3,000
+on three replicas; a summed `oldest_pending_age` is meaningless outright), so they aggregate with `max`/`avg`.
+A per-replica reading of them is not obtainable from a shared database, and the engine does not pretend
+otherwise: each instrument's *description* states its kind, because that is what an operator building a panel
+actually reads. (`engine/CLAUDE.md` and `docs/observability.md` both claimed the blanket "per replica; sum at
+the backend" - a 3x overcount on the three that matter most for capacity.) The callback is
 `Unregister`ed first thing in `drainRuntime` so the OTEL reader can't query a closing database.
 
 **Fidelity choices:** `flows_terminated` fires only on `completed` (failed/cancelled are not counted here;
-`steps_executed{status=failed}` still covers the failed-step case). Subgraph flows are counted too - the start
+`steps_executed{status=failed}` still covers the failed-step case). **Every path that starts a flow must call
+`metricFlowStarted`** - `Create`, `Continue`, AND `Fork` (which builds its new root through its own
+`INSERT...SELECT` clone and so was silently missed): a fork's completion runs through the same `completeFlow`
+that increments `flows_terminated`, so a missing start makes the standard in-flight panel
+(`started - terminated`) drift negative by one per fork. Subgraph flows are counted too - the start
 path and `completeFlow` run for them - so no `surgraph_flow_id` filter; the `workflow` label lets dashboards
 slice root-vs-subgraph. `TestMetrics_EmittedOnRun` pins emission with an in-memory SDK `ManualReader`.
 

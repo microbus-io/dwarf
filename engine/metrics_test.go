@@ -178,3 +178,66 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	// The queue-depth observable gauge always emits a point at collection time.
 	assert.True(gaugePresent(rm, "dwarf_steps_queue_depth"), "dwarf_steps_queue_depth gauge should be present")
 }
+
+// TestMetrics_ForkCountsAsStarted pins that a Fork increments dwarf_flows_started. A fork builds its new
+// root flow through its own INSERT...SELECT clone path, which never called metricFlowStarted - but the
+// fork's completion runs through the same completeFlow that increments dwarf_flows_terminated. So a fork
+// was counted on the way out and never on the way in: the standard in-flight panel (started - terminated)
+// drifts NEGATIVE by one per fork, or permanently understates. Both counters must move together.
+func TestMetrics_ForkCountsAsStarted(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Forked")
+	g.SetEndpoint("A", "forkmetric.verify:428/a")
+	g.AddTransition("A", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("forkmetric.verify:428/g", g)
+	proxy.HandleTask("forkmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	eng := NewEngine()
+	eng.SetHost(proxy)
+	eng.SetMeterProvider(mp)
+	eng.RunInTest(t)
+
+	// One flow, run to completion: started=1, terminated=1.
+	flowKey, outcome, err := eng.Run(ctx, "forkmetric.verify:428/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+
+	// Fork it from its only step, and let the fork run to completion too.
+	hist, err := eng.History(ctx, flowKey)
+	if !assert.NoError(err) || !assert.True(len(hist) > 0, "the origin has a step to fork from") {
+		return
+	}
+	forkKey, err := eng.Fork(ctx, hist[0].StepKey, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	forkOut, err := eng.Await(ctx, forkKey)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, forkOut.Status)
+
+	var rm metricdata.ResourceMetrics
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+	started, ok := sumCounter(rm, "dwarf_flows_started", "", "")
+	assert.True(ok, "dwarf_flows_started should be present")
+	terminated, ok := sumCounter(rm, "dwarf_flows_terminated", "status", workflow.StatusCompleted)
+	assert.True(ok, "dwarf_flows_terminated{status=completed} should be present")
+
+	// Two flows started (the original and the fork), two terminated. The in-flight gauge a dashboard builds
+	// from these - started minus terminated - must be 0, not -1.
+	assert.Equal(int64(2), started, "the fork counts as a started flow")
+	assert.Equal(int64(2), terminated)
+	assert.Equal(int64(0), started-terminated, "in-flight (started - terminated) must not go negative")
+}

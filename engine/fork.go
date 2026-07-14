@@ -145,6 +145,11 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 
 	newFlowKey := fmt.Sprintf("%d-%d-%s", shardNum, newRootFlowID, cc.rootFlowToken)
 	e.logger.InfoContext(ctx, "Flow forked", "fromRoot", rootFlowID, "forkStep", forkStepID, "to", newRootFlowID)
+	// A fork starts a new, self-contained root flow, and its completion runs through the same completeFlow
+	// that increments dwarf_flows_terminated - so it MUST also be counted here, or the standard in-flight
+	// panel (started - terminated) drifts negative by one per fork. Create and Continue count their starts
+	// at the same point; Fork's own INSERT...SELECT clone path simply never did.
+	e.metricFlowStarted(ctx, cc.rootWorkflowURL)
 	e.notifyStatusChange(newFlowKey, workflow.StatusRunning)
 	e.enqueueStep(ctx, shardNum, cc.newLeafStepID)
 	return newFlowKey, nil
@@ -165,7 +170,8 @@ type forkClone struct {
 	fairnessWeight  float64
 	timeBudgetMs    int
 	newLeafStepID   int
-	newRootFlowID   int // the cloned root's flow_id; descendants inherit it as their root_flow_id
+	newRootFlowID   int    // the cloned root's flow_id; descendants inherit it as their root_flow_id
+	rootWorkflowURL string // the cloned root's workflow_url, for the flows_started metric after commit
 }
 
 // forkChild is a queued subgraph-caller child awaiting clone: its origin flow plus the new-surgraph context
@@ -247,6 +253,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		newStatus = workflow.StatusCreated // gate; flipped to running below once this flow is mapped
 		forkedFromStep, newTrace = cc.leafStepID, cc.rootTraceParent
 		deleteOnCompletion = 0
+		cc.rootWorkflowURL = workflowURL // for the flows_started metric, emitted after the tx commits
 	}
 
 	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id",

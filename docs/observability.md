@@ -50,9 +50,26 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_task_concurrency_running` | gauge | `task_url` | running steps per task | `dwarf_task_concurrency_running` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state
-at collection time. Gauges emit **per replica** — sum them at the backend for cluster-wide totals. Labels
-are deliberately bounded: there are no per-`fairness_key` labels (that would be unbounded cardinality), so
-fairness/priority metrics are aggregate-only.
+at collection time.
+
+**Aggregating the gauges across replicas — two kinds, and mixing them up inflates your dashboard by the
+replica count:**
+
+| Gauge | Kind | Aggregate with |
+|---|---|---|
+| `dwarf_steps_queue_depth` | **per-replica** (this replica's in-memory cache) | `sum` |
+| `dwarf_steps_fairness_keys` | **per-replica** (this replica's last refill) | `sum` |
+| `dwarf_steps_pending` | **cluster-wide** (queries the shared database) | `max` |
+| `dwarf_steps_oldest_pending_age_seconds` | **cluster-wide** (queries the shared database) | `max` |
+| `dwarf_task_concurrency_running` | **cluster-wide** (queries the shared database) | `max` |
+
+The cluster-wide three are computed by querying the shard databases, which every replica shares — so each
+replica reports the *same* number, and `sum by (task_url)` over three replicas shows 15 running steps where
+there are 5. A summed `oldest_pending_age` is meaningless outright. Use `max` (or `avg`); a per-replica
+reading of these is not obtainable from a shared database, and the engine does not pretend otherwise.
+
+Labels are deliberately bounded: there are no per-`fairness_key` labels (that would be unbounded
+cardinality), so fairness/priority metrics are aggregate-only.
 
 ## Tracing
 
