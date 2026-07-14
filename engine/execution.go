@@ -652,6 +652,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if isPushTransition && cohortSize == 0 {
 		fanInTarget := cg.fanIn.For(taskName)
 		if fanInTarget == "" {
+			// No fan-in to converge on. Only a TRUNK source (lineage_id == 0) may complete the flow; a
+			// fan-out source that is itself a cohort MEMBER (a nested fan-out) would terminalize the flow
+			// while its outer siblings are still running. (Unreachable for a validated graph - Validate
+			// requires a fan-out source to converge on a SetFanIn node - so this is defense in depth for a
+			// graph frozen before that check.)
+			if lineageID != 0 {
+				return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+					errors.New("fan-out source '%s' is inside a cohort but has no fan-in node to converge on", taskName),
+					taskName)
+			}
 			return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
 				return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
 			})
@@ -662,6 +672,20 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 
 	if cohortSize == 0 {
+		// No matching transition. Only a TRUNK step (lineage_id == 0) completes the flow. A cohort MEMBER
+		// (lineage_id != 0) that matched no onward transition has dead-ended before reaching its fan-in -
+		// whether the dead end came from a `when` guard that evaluated false or a `switch`/`goto` with no
+		// live target. Completing the flow here would terminalize it while sibling branches are still running
+		// and skip the fan-in entirely, silently dropping every downstream task and the siblings' work. Fail
+		// the branch loudly instead: every branch of a fan-out must reach a fan-in node. This mirrors the
+		// fan-in-from-outside-a-cohort guard below, and a fan-in step is always trunk (its lineage_id is its
+		// spawn source's OWN lineage, 0 for a top-level cohort), so a legitimate `<fan-in> -> END` still
+		// completes here.
+		if lineageID != 0 {
+			return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+				errors.New("task '%s' is inside a fan-out cohort but matched no onward transition; every branch must reach a fan-in node", taskName),
+				taskName)
+		}
 		return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
 			return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
 		})
@@ -1103,8 +1127,11 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		}
 		mergedState, _ := workflow.MergeState(ourState, ourChanges, graph.Reducers())
 		// This step IS the cohort spawn (an empty forEach spawns no branches), so it anchors exactly as a
-		// populated cohort's spawn does in insertFanInStep - and with no members, nothing is excluded.
-		mergedJSON, refsJSON, merr := mintStateRefs(mergedState, ourChanges, ourRefs, stepID, 1, nil)
+		// populated cohort's spawn does in insertFanInStep. There are no members, but a field this step wrote
+		// through a COMBINING reducer still has a merged value (reduce(ourState[k], ourChanges[k])) that exists
+		// in no row, so it must be inlined rather than anchored - the same exclusion insertFanInStep applies.
+		exclude := combinedReducerFields(ourState, ourChanges, graph.Reducers())
+		mergedJSON, refsJSON, merr := mintStateRefs(mergedState, ourChanges, ourRefs, stepID, 1, exclude)
 		if merr != nil {
 			return errors.Trace(merr)
 		}
@@ -1243,6 +1270,15 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// same scoped strip runs in computeFinalState for a fan-out that FAILED (and so never reached this
 	// convergence), so the two paths agree on what a fan-out's state means once its cohort is behind it.
 	stripForEachBookkeeping(merged, graph, strings.TrimSpace(spawnTaskName))
+
+	// A field the SPAWN itself wrote through a COMBINING reducer (reduce(spawnState[k], spawnChanges[k])) is the
+	// other value that exists in no row - the spawn's `changes` holds only its delta - so it too must be inlined,
+	// not anchored at the spawn. memberWrites already excludes member-contributed fields; add the spawn's own
+	// combined ones. (A spawn field with a combining reducer but no base has merged[k]==changes[k] and stays a
+	// sound anchor, so combinedReducerFields leaves it off.)
+	for k := range combinedReducerFields(spawnState, spawnChanges, graph.Reducers()) {
+		memberWrites[k] = true
+	}
 
 	// Mint against the SPAWN step, not this one: a field the cohort merely carried has its bytes in the spawn's
 	// row (its `state` if the spawn received it - e.g. the entry step holding the flow's initial input - or its
