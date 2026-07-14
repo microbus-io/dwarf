@@ -230,3 +230,43 @@ func TestCandidateCache_CloseZeroValueDoesNotPanic(t *testing.T) {
 	var c Cache
 	c.Close()
 }
+
+// TestCandidateCache_ResizeTrimsAndRebounds pins the live re-bound the engine performs when the observed replica
+// count changes and each shard's connection budget is re-divided. The cache must follow that split: it is sized
+// from what the replica can actually CLAIM, and one left at its startup (R=1) size is handed far more candidates
+// than it can claim.
+func TestCandidateCache_ResizeTrimsAndRebounds(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(8) // capacity 16, lowWater 8
+	assert.Equal(16, c.Capacity())
+
+	batch := make([]Job, 16)
+	for i := range batch {
+		batch[i] = Job{StepID: i + 1, Shard: 1}
+	}
+	c.Refill(batch, 5)
+	assert.Equal(16, c.Len())
+
+	// Shrink to a 2-worker replica: capacity 4, and the overflowing tail is trimmed. The trimmed candidates stay
+	// `pending` in the database and are simply re-selected - the same thing an Offer's head-insert already does
+	// when it pushes one past the bound.
+	c.Resize(2)
+	assert.Equal(4, c.Capacity())
+	assert.Equal(4, c.Len())
+	// The head is kept: it is the strictly-best work the refiller selected.
+	j, ok, _ := c.Pop()
+	assert.True(ok)
+	assert.Equal(1, j.StepID)
+
+	// Growing back re-bounds without discarding anything.
+	c.Resize(8)
+	assert.Equal(16, c.Capacity())
+	assert.Equal(3, c.Len())
+
+	// Resize after Close is inert, like Offer/Refill.
+	c.Close()
+	c.Resize(64)
+	assert.Equal(16, c.Capacity())
+}

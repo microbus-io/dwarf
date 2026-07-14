@@ -1501,19 +1501,29 @@ The worker count is split into two numbers, because they answer different questi
   (see "Selection") - must never be sized from the maximum below**: a worker parked in a long `ExecuteTask`
   holds no connection and dispatches nothing, so a ceiling-sized cache would scan far more of the backlog
   than the replica can ever claim.
-  **KNOWN GAP - it is anchored at R=1 and does not follow the pool split.** It is computed once in
-  `Startup`, when peer discovery has not run yet (`observedReplicas()` is still 1), so `sum(per-shard open)`
-  is the FULL per-database budget. Every later fleet change re-divides the pools by R (`recomputePools`) but
-  leaves `workersDispatch` and the cache at their R=1 size. On an 8-vCPU shard across 8 replicas each replica
-  therefore keeps a ~384-worker resident set and a 384-entry cache against a **6**-connection pool: the
-  surplus workers merely queue on the pool (bounded, not a runaway - this is not finding #3's feedback loop),
-  but the oversized cache is the real cost, since it is exactly the "deliver more candidates than the replica
-  can claim" shape that the deep-backlog pacing exists to contain - stale candidates, wasted claim CAS
-  round-trips. **This is an over-provision, not a design choice; do not "document it as deliberate".** It is
-  unfixed because the honest fix is live re-sizing on every fleet change: the cache would have to be re-Init'd
-  under load (it is sized once at `initRuntime`) and the resident worker pool would have to *shrink*, which
-  needs a per-worker quit signal it does not have (growth is on-demand and easy; shrinkage is not). Worth
-  doing if a large-R deployment ever shows it; the single-replica and small-fleet cases are unaffected.
+  **The CACHE follows the pool split; the RESIDENT WORKER COUNT does not, and that asymmetry is deliberate.**
+  `workersDispatch` is computed once in `Startup`, when peer discovery has not run yet (`observedReplicas()` is
+  still 1), so `sum(per-shard open)` is the FULL per-database budget. Every later fleet change re-divides the
+  pools by R (`recomputePools`), which now **also re-derives the dispatch count from the post-split budget and
+  `cache.Resize`s to it** - the same "every path that changes a pool must re-derive what depends on it" rule the
+  worker ceiling obeys.
+  - The **cache** had to follow, because it was the half that costs throughput. The refiller scans up to the
+    cache's capacity *per fairness key* and wholesale-replaces it, so a replica in a fleet of 8 holding a cache
+    sized for the whole budget is handed ~6x more candidates than it can ever claim: stale hints whose claim CAS
+    loses to a peer, and wasted round-trips, exactly when the fleet is busiest. It is the same "never size the
+    cache from more than the replica can claim" rule that keeps it away from the worker *ceiling*, reached
+    through a different door. Pinned by `TestPoolSizing_CacheFollowsTheReplicaSplit` (768 -> 128 on an 8-vCPU
+    shard at R=8). `Cache.Resize` trims the tail; a trimmed candidate stays `pending` and is re-selected, exactly
+    as one pushed past the bound by an `Offer` head-insert already is.
+  - The **resident worker set** is deliberately left over-provisioned. The surplus workers merely queue on the
+    pool - bounded, and *non-compounding* now that the growth trigger counts `workersInTask` rather than
+    saturation - so the entire prize for shrinking it is goroutine stacks (~3MB at 384 workers). Buying that
+    needs a worker-retirement protocol (a surplus counter, a retirement check on the hot loop, resize
+    serialization, and an interaction with the `WaitGroup`/`spawnClosed` drain ordering). That is a control
+    protocol added to the worker lifecycle for a memory saving, which is the trade the removed rate valve lost.
+    If a large-R deployment ever shows the goroutine count actually hurting, the design to build is a **surplus
+    counter** (retire the first N workers to reach a safe point), never per-worker indices - indices are what
+    make a shrink-then-grow race produce duplicate ids.
 - **`workers` (the MAXIMUM the pool may grow to)** = `workerCeiling` = `M x margin / txTime x safety`,
   the largest pool that keeps a **synchronized completion storm** inside the crash-recovery lease margin.
   The storm: every in-flight task blocks on one downstream (an LLM provider outage) and is released at

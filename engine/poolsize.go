@@ -193,6 +193,7 @@ func (e *Engine) recomputePools() {
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)
 	e.shardsLock.Unlock()
+	postSplitConns := 0
 	for _, idx := range e.db.Indices() {
 		db, err := e.db.Shard(idx)
 		if err != nil {
@@ -201,8 +202,24 @@ func (e *Engine) recomputePools() {
 		idle, open := shardPool(specs[idx], 0, replicas) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
+		postSplitConns += open
 	}
-	e.logger.Info("Derived pools recomputed", "replicas", replicas)
+	// The candidate cache follows the pool split, for the same reason the worker ceiling does: it is sized from
+	// what this replica can actually CLAIM, and the pool it claims through just shrank by R.
+	//
+	// Startup derives the dispatch count with R=1 (peer discovery has not run yet), so it is the FULL per-database
+	// budget. Left alone, a replica in a fleet of 8 keeps a cache sized for 8x the connections it now holds - and
+	// the refiller scans up to the cache's capacity per fairness key and wholesale-replaces it, so it is handed far
+	// more candidates than it can ever claim. Stale hints whose claim CAS loses to a peer, and wasted round-trips,
+	// exactly when the fleet is busiest. This is the same "never size the cache from more than the replica can
+	// claim" rule the worker ceiling is kept away from, arrived at through a different door.
+	//
+	// The RESIDENT worker count is deliberately NOT resized: it is a bounded, non-compounding over-provision
+	// (surplus workers queue on the pool and the growth trigger counts workersInTask, not saturation), and
+	// shrinking it needs a worker-retirement protocol whose only prize is goroutine stacks.
+	dispatch := max(64, workersPerConnBudget*postSplitConns)
+	e.cache.Resize(min(dispatch, int(e.workers.Load())))
+	e.logger.Info("Derived pools recomputed", "replicas", replicas, "dispatch", dispatch)
 	e.recomputeWorkerCeiling(e.lifetimeCtx)
 }
 

@@ -584,3 +584,48 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	e3.RunInTest(t)
 	assert.Equal(2, int(e3.workers.Load()))
 }
+
+// TestPoolSizing_CacheFollowsTheReplicaSplit pins that the candidate cache follows the connection budget down
+// when the fleet grows - the same "every path that changes a pool must re-derive what depends on it" rule the
+// worker ceiling obeys.
+//
+// Startup derives the dispatch count with R=1, because peer discovery has not run yet, so it is the FULL
+// per-database budget. When the replicas find each other, each shard's pool is correctly re-divided by R - but
+// the cache used to stay pinned at its R=1 size for the life of the process. A replica in a fleet of 8 then held
+// a cache sized for 8x the connections it could actually use, and the refiller (which scans up to the cache's
+// capacity per fairness key and wholesale-replaces it) handed it far more candidates than it could ever claim:
+// stale hints whose claim CAS loses to a peer, and wasted round-trips, exactly when the fleet is busiest.
+//
+// Severity is nil at R=1 - where the two numbers agree by construction - which is why this escaped every test and
+// every single-replica deployment.
+func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // open = 6 x 8 = 48 at R=1
+	e.RunInTest(t)
+
+	assert.Equal(1, e.observedReplicas())
+	solo := e.cache.Capacity()
+	assert.True(solo > 100, "a solo replica caches against the whole budget (got %d)", solo)
+
+	// Seven peers say hello: the pool is re-divided by 8, and the cache must come down with it.
+	for _, id := range []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7"} {
+		b, _ := json.Marshal(peerPayload{Origin: id})
+		assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
+	}
+	assert.Equal(8, e.observedReplicas())
+
+	split := e.cache.Capacity()
+	assert.True(split < solo, "the cache must follow the pool split down (was %d, still %d)", solo, split)
+
+	// And back up as peers leave, so a shrinking fleet is not left under-fed.
+	for _, id := range []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7"} {
+		b, _ := json.Marshal(peerPayload{Origin: id})
+		assert.NoError(e.DeliverSignal(ctx, string(signalOpGoodbye), b))
+	}
+	assert.Equal(1, e.observedReplicas())
+	assert.Equal(solo, e.cache.Capacity(), "the cache follows the pool back up when the fleet shrinks")
+}

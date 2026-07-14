@@ -53,7 +53,30 @@ func (c *Cache) Init(workers int) {
 
 // Capacity returns the cache's bound (twice the worker count).
 func (c *Cache) Capacity() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.size
+}
+
+// Resize re-bounds the cache to a new worker count, live, and trims the tail if it now overflows. A trimmed
+// candidate stays `pending` in the database and is simply re-selected - exactly what already happens when an
+// Offer's head-insert pushes one past the bound - so this adds no new state, only a smaller bound.
+//
+// The engine calls this when the observed replica count changes and each shard's connection budget is re-divided.
+// The cache MUST follow that split: it is sized from what the replica can actually CLAIM, and one still holding a
+// cache sized for the WHOLE fleet's budget is handed far more candidates than it can claim - stale hints whose
+// claim CAS loses to a peer, and wasted round-trips, precisely when the fleet is busiest.
+func (c *Cache) Resize(workers int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.size = max(1, 2*workers)
+	c.lowWater = max(1, c.size/2)
+	if len(c.items) > c.size {
+		c.items = c.items[:c.size]
+	}
 }
 
 // Pop removes and returns the front candidate, blocking until one is available or the cache closes.
@@ -102,6 +125,10 @@ func (c *Cache) Refill(batch []Job, floor int) {
 	if len(batch) == 0 {
 		batch = nil // Pop's empty representation, so Len/append behave identically either way
 	}
+	// Deliberately NOT trimmed to c.size. The bound is a sizing target, not an invariant: Offer enforces it on a
+	// head-insert and Resize enforces it when the bound moves, but a refill batch that was sized from a capacity
+	// a live Resize has since shrunk simply overshoots for one cycle and drains. Trimming here would make the
+	// bound strict for the first time, and nothing needs it to be.
 	c.items = batch
 	c.floor = floor
 	c.mu.Unlock()
