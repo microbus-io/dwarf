@@ -97,7 +97,8 @@ func (g *Graph) Transitions() []Transition {
 }
 
 // SetEndpoint binds a node (identified by its graph name) to the given dispatch URL, creating the node
-// if it does not exist and updating its URL if it does. The name is the node's identity in the graph
+// if it does not exist and updating its URL if it does. It is optional: a node first named inside an
+// AddTransition* call is auto-registered with its URL equal to its name (see AddTransition). The name is the node's identity in the graph
 // (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
 // hands to the host's ExecuteTask and groups the saturation/concurrency metric by. The first node bound
 // becomes the default entry point unless SetEntryPoint is called explicitly. The pseudo-node END is not
@@ -141,8 +142,25 @@ func (g *Graph) SetEntryPoint(name string) {
 	g.entryPoint = name
 }
 
-// AddTransition adds an unconditional transition between two nodes. Both endpoints are
-// auto-registered as tasks if not already present (see autoRegister).
+// AddTransition adds an unconditional transition between two nodes.
+//
+// # Naming a node that was never bound with SetEndpoint
+//
+// Every AddTransition* method auto-registers a node it has not seen before, binding it to a dispatch URL equal to
+// ITS OWN NAME. That is deliberate, and it is what makes the concise form work:
+//
+//	g.AddTransition("billing.charge", "billing.receipt")   // two nodes whose names ARE their dispatch URLs
+//
+// Use SetEndpoint when the node's graph identity should differ from where it dispatches - to give a task a
+// readable position in the graph, or to reuse one task's code at several positions:
+//
+//	g.SetEndpoint("Charge", "billing.charge")
+//	g.SetEndpoint("Retry", "billing.charge")   // same task, a second position with its own transitions
+//
+// The consequence worth knowing: because an unbound node is a VALID node (dispatching as its own name), a
+// forgotten SetEndpoint is not a build-time error and Validate cannot catch it. The graph is well-formed; it just
+// names a task the host does not serve, and the host rejects it on that node's first dispatch. If you use
+// SetEndpoint for a graph's nodes, use it for all of them.
 func (g *Graph) AddTransition(from, to string) {
 	g.autoRegister(from)
 	g.autoRegister(to)
