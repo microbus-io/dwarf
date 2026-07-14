@@ -571,9 +571,14 @@ because SQL transactions are not safe for concurrent use. This applies to `compu
 `step_depth`. The flow's `step_id` is `0` during fan-out.
 
 **Dynamic fan-out** uses `forEach` on a transition to iterate a state array and spawn one task instance per element,
-each receiving the element under the `as` key. An empty array spawns nothing; when `forEach` is the only outgoing
-transition, an empty array completes the flow there - downstream tasks (including the fan-in target) are never
-reached.
+each receiving the element under the `as` key. An **empty array** spawns no branches but does **not** stop the flow:
+the transition path routes straight to the fan-in node (`fireFanInDirect`), which runs on the source step's own
+`state + changes` with the graph's reducers applied - so an empty cohort and a non-empty one agree on what the fan-in
+sees for a reducer-managed field the branches never touched (`fixtures/emptyforeachreducerflow_test.go`). The
+fan-in target comes from the routing map the engine derives per flow at dispatch (`internal/faninmap`), not from
+`Validate`. The `fanInTarget == ""` arm - complete the flow at the source - is therefore effectively unreachable for
+any graph the engine accepted: `Validate` (run at `Create`) requires a fan-out source to converge on a `SetFanIn`
+node. It is a defensive fallback, not the documented behavior of an empty array.
 
 **A branch sees its flow's state, plus its element.** Each `forEach` branch's local `state` is the flow state with
 three injected fields: `<as>` (the element), `<as>Index` (its position), `<as>Count` (the cohort size). Nothing is

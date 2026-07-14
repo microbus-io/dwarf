@@ -42,8 +42,12 @@ Each branch receives:
 - `<as>Count` — the cohort size.
 
 A branch otherwise sees the flow's state as it was at the fan-out, including the source array (`lineItems`)
-its own element came from. An empty array spawns nothing; if `forEach` is the only outgoing transition, an
-empty array ends the flow.
+its own element came from.
+
+An **empty array spawns no branches, but the flow does not stop there** — it routes straight to the fan-in,
+which runs with the source task's own output and no branch contributions. So write the fan-in to tolerate a
+cohort of zero (a reducer-managed field just keeps its incoming value; any per-element output it expected is
+absent), and expect the branch task to sometimes never run at all.
 
 Every branch carrying the source array means an N-element fan-out over a chain of depth D stores N×D copies
 of it. For a large array, drop it once it has been fanned out: a branch calling `f.Set("<source>", nil)`

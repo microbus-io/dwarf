@@ -148,7 +148,28 @@ func (g *Graph) AddTransition(from, to string) {
 	g.transitions = append(g.transitions, Transition{From: from, To: to})
 }
 
-// AddTransitionWhen adds a conditional transition between two nodes.
+// AddTransitionWhen adds a conditional transition between two nodes: the edge is taken when the 'when'
+// expression evaluates true against the flow's state.
+//
+// Every When transition from a node is evaluated INDEPENDENTLY, so two of them are a conditional
+// PARALLEL FAN-OUT, not an if/else - if both conditions hold, both branches run. Even when they are
+// mutually exclusive by construction, the source is still a fan-out source, so it requires a downstream
+// convergence node marked with SetFanIn - Validate rejects the graph otherwise, complaining that a branch
+// reached END with an unpopped fan-out frame.
+//
+// For an if/else - exactly one branch runs, no fan-in needed - use AddTransitionSwitch, which is
+// first-match-wins:
+//
+//	// WRONG: a fan-out that happens to have exclusive conditions, and fails Validate without a fan-in.
+//	g.AddTransitionWhen("Check", "Approve", "score > 0.8")
+//	g.AddTransitionWhen("Check", "Reject", "score <= 0.8")
+//
+//	// RIGHT: exactly one of these fires.
+//	g.AddTransitionSwitch("Check", "Approve", "score > 0.8")
+//	g.AddTransitionSwitch("Check", "Reject", "true")   // catch-all
+//
+// Use When when a genuinely parallel fan-out should be conditional (each branch opts in on its own
+// condition, all surviving branches converging on one SetFanIn node).
 func (g *Graph) AddTransitionWhen(from, to string, when string) {
 	g.autoRegister(from)
 	g.autoRegister(to)
@@ -179,7 +200,30 @@ func (g *Graph) AddTransitionGoto(from, to string) {
 	g.transitions = append(g.transitions, Transition{From: from, To: to, WithGoto: true})
 }
 
-// AddTransitionForEach adds a dynamic fan-out transition.
+// AddTransitionForEach adds a dynamic fan-out transition: 'forEach' names a state field holding an ARRAY,
+// and the engine spawns one parallel instance of the 'to' task per element.
+//
+// Each branch's state is the flow's state at the fan-out, plus three injected fields:
+//
+//	<as>        the element itself ('as' defaults to "item" when empty)
+//	<as>Index   the element's 0-based position in the array
+//	<as>Count   the number of elements, i.e. the cohort size
+//
+// The branches must converge on a single node marked with SetFanIn (Validate rejects a fan-out that does
+// not), where their outputs are merged by the fields' reducers - see SetReducer, and note that a branch
+// writing to a reducer-managed field writes its DELTA, not the accumulated value. The three injected
+// fields do not survive the fan-out: they are branch-private, so the flow's state past the fan-in - and
+// the final state of a flow whose fan-out failed - carries none of them. Forward an element value under a
+// different key if a downstream task needs it.
+//
+// An EMPTY array spawns no branches, but the flow does NOT stop there: it routes straight to the fan-in
+// node, which runs with the source task's own state and output and no branch contributions. So a fan-in
+// task must tolerate a cohort of zero (a reducer-managed field simply keeps its incoming value, and any
+// per-element output it expected is absent), and the branch task must tolerate never running at all.
+//
+// Every branch carries the source array (it is ordinary flow state), so an N-element fan-out over a chain
+// of depth D stores N*D copies of it. For a large array, a branch can drop it with f.Set(<forEach>, nil),
+// which removes it from the flow's state past the fan-in.
 func (g *Graph) AddTransitionForEach(from, to string, forEach string, as string) {
 	g.autoRegister(from)
 	g.autoRegister(to)
