@@ -1252,8 +1252,8 @@ hot-path scan - no in-memory filter at refill time. The `parked` value labels *w
 
 **Terminal status implies `parked=parkedNone`.** The park value is meaningful only while a step is actively waiting.
 Once terminal (`completed`/`failed`/`cancelled`), the park slot is gone, and the column must read `parkedNone`. Every
-terminal-transition code path resets `parked` in the same UPDATE (the `failStep` write, the `deliverSubgraphError`
-child-leaf write, the `Cancel` cascade, the `processStep` terminal-flow guard). Without this, a step that was parked
+terminal-transition code path resets `parked` in the same UPDATE (the `failStep` write, the `Cancel` cascade, the
+`processStep` terminal-flow guard). Without this, a step that was parked
 when its flow was cancelled would sit terminal with non-zero `parked` - invisible to the selection index but never
 re-leased. A `Fork` clone writes each step's `parked` explicitly (the re-parked ancestor callers to `parkedSubgraph`,
 all other cloned steps to `parkedNone`), so cloned rows never inherit a stale non-zero `parked`.
@@ -1573,8 +1573,7 @@ ordering was wrong:
   terminating step is marked `completed` in a standalone UPDATE *before* the disposition tx, so the flow row must
   be locked first for the disposition to be recoverable). Do not reorder these to read-first.
 - **Steps-first.** The lifecycle mutations update `dwarf_steps` before `dwarf_flows`: `Resume`, `Cancel`,
-  `failStep`, `deliverSubgraphError`, `handleInterrupt`, and `Delete`/`Purge` (the deletes run steps-before-flows,
-  ascending id). `handleInterrupt` belongs here despite advancing the flow (running→interrupted): interrupt is
+  `failStep`, `handleInterrupt`, and `Delete`/`Purge` (the deletes run steps-before-flows, ascending id). `handleInterrupt` belongs here despite advancing the flow (running→interrupted): interrupt is
   **non-terminating** and marks no step `completed` in a prior standalone UPDATE, so it carries **no** orphan-strand
   obligation - its only write-first requirement is that the *first* statement be a write (the `UPDATE dwarf_steps`
   satisfies it, keeping the SQLite deadlock closed). It is deliberately steps-first to match `Resume`/`Cancel`,
@@ -1661,7 +1660,16 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
      non-terminal child** (`surgraph_step_id = step_id`, status created/running/interrupted) is wedged - the child
      reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
      latest child (`flow_id DESC`): `completeSurgraphFlow` for a completed child, `deliverSubgraphError` for a
-     failed/cancelled/absent one. (A fan-out has several caller steps, each its own `surgraph_step_id`, checked
+     failed/cancelled/absent one. **The absent-child case (`childFlowID == 0`) is the one the whole sweep exists
+     for** - a worker that committed the park and died before inserting the child leaves a step no lease can
+     recover (`parkedSubgraph` carries no lease) - and it must skip every child-directed write: aiming them at
+     id `0` made `computeFinalState` SELECT `WHERE flow_id=0`, hit `sql.ErrNoRows`, and roll the recovery back on
+     every sweep, so the flow hung forever. There is no child to terminalize; the recovery IS failing the caller,
+     which the parent re-arm does. Pinned by `TestWedgeSweep_SubgraphCallerWithNoChildFails`.
+     `deliverSubgraphError` is **flow-first (write-first)**, not steps-first: it lock-grabs the child flow row
+     (`touch=1-touch`, guarded non-terminal) before `computeFinalState` reads, so it can never be the read-first
+     half of a SQLite SHARED-lock upgrade deadlock. With no child flow, its first statement is the parent-step
+     re-arm - itself a write. (A fan-out has several caller steps, each its own `surgraph_step_id`, checked
      independently; `flow.Retry` leaves older terminal children whose latest sibling is still active - handled by
      the `NOT EXISTS` + latest-child logic.)
    - **orphaned subgraph child** (`recoverOrphanedSubgraphChildren`) - the **mirror image** of the above: a

@@ -113,7 +113,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 			// The child flow is gone (e.g. deleted/purged): fail the caller so the flow can terminate.
 			e.logger.ErrorContext(ctx, "Wedge sweep: parked subgraph caller has no child flow; failing it",
 				"shard", shard, "step", w.stepID, "flow", keys.CorrelationID(shard, w.flowID))
-			if rerr := e.deliverSubgraphError(ctx, shard, 0, 0, w.stepID, errors.New("subgraph flow not found (wedge recovery)")); rerr != nil {
+			if rerr := e.deliverSubgraphError(ctx, shard, 0, w.stepID, errors.New("subgraph flow not found (wedge recovery)")); rerr != nil {
 				e.logger.ErrorContext(ctx, "Wedge sweep: failing orphaned subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)
 				continue
 			}
@@ -133,7 +133,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 				if msg == "" {
 					msg = "subgraph " + childStatus
 				}
-				rerr = e.deliverSubgraphError(ctx, shard, 0, childFlowID, w.stepID, errors.New(msg))
+				rerr = e.deliverSubgraphError(ctx, shard, childFlowID, w.stepID, errors.New(msg))
 			}
 			if rerr != nil {
 				e.logger.ErrorContext(ctx, "Wedge sweep: reviving subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)

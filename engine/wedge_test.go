@@ -157,6 +157,98 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	assert.Equal(7, int(got))
 }
 
+// TestWedgeSweep_SubgraphCallerWithNoChildFails forges the wedge the sweep's designated last-resort branch
+// exists for and could never actually recover: a caller step parked on a subgraph whose child flow does not
+// exist (a worker committed the park and died before inserting the child; or the child was deleted). Such a
+// step is invisible to lease recovery BY DESIGN - parkedSubgraph carries no lease - so the sweep is the only
+// way out. It must fail the caller: the parent re-arm writes the error onto the parked step, the
+// re-dispatched flow.Subgraph returns it, and the task fails through its normal disposition.
+//
+// Before the fix the sweep detected this correctly and then rolled back every time (computeFinalState
+// SELECTed `WHERE flow_id=0` -> sql.ErrNoRows), so dwarf_steps_unwedged never moved and the flow hung
+// forever - only Delete got it out.
+func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	proxy := NewTestProxy()
+	release := make(chan struct{})
+
+	parent := workflow.NewGraph("Parent")
+	parent.SetEndpoint("P", "wedgenochild.verify:0/p")
+	parent.AddTransition("P", workflow.END)
+	proxy.HandleGraph("wedgenochild.verify:0/parent", parent)
+	child := workflow.NewGraph("Child")
+	child.SetEndpoint("K", "wedgenochild.verify:0/k")
+	child.AddTransition("K", workflow.END)
+	proxy.HandleGraph("wedgenochild.verify:0/child", child)
+
+	proxy.HandleTask("wedgenochild.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
+		var out map[string]any
+		yield, err := f.Subgraph("wedgenochild.verify:0/child", nil, &out)
+		if yield || err != nil {
+			return err // the wedge recovery delivers its error here, failing this step
+		}
+		return nil
+	})
+	proxy.HandleTask("wedgenochild.verify:0/k", func(ctx context.Context, f *workflow.Flow) error {
+		<-release // hold the child running so the caller stays parked while we forge the wedge
+		return nil
+	})
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	e.RunInTest(t)
+	defer close(release)
+
+	flowKey, err := e.Create(ctx, "wedgenochild.verify:0/parent", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	shard, parentFlowID, _, err := keys.ParseFlowKey(flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := e.db.Shard(shard)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// Wait for the caller to be parked on a running child (see the sibling test for why `running`, not
+	// merely parked, is the right signal).
+	var parentStepID, childFlowID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if db.QueryRowContext(ctx,
+			"SELECT surgraph_step_id, flow_id FROM dwarf_flows WHERE surgraph_flow_id=? AND status=?",
+			parentFlowID, workflow.StatusRunning,
+		).Scan(&parentStepID, &childFlowID) == nil && parentStepID != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !assert.NotEqual(0, parentStepID, "subgraph child never started") {
+		return
+	}
+
+	// Forge the wedge: the child flow (and its steps) vanish, leaving the caller parked on nothing.
+	_, err = db.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id=?", childFlowID)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE flow_id=?", childFlowID)
+	assert.NoError(err)
+
+	// The sweep must recover it (minAge=0 bypasses the age guard) by failing the caller.
+	e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
+
+	out, err := e.Await(ctx, flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusFailed, out.Status, "the caller step fails when its subgraph is gone")
+	assert.True(strings.Contains(out.Error, "subgraph flow not found"),
+		"the failure names the missing subgraph (got %q)", out.Error)
+}
+
 // TestWedgeSweep_OrphanedSubgraphChildCancelled forges the zombie a Cancel racing a subgraph spawn leaves - a
 // non-terminal subgraph child whose parent tree was cancelled in the window after the caller step parked but
 // before the child was inserted, so the teardown missed it. The child rests interrupted with no path out
