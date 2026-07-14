@@ -23,13 +23,6 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
-
 func TestGraph_BuilderAndMarshal(t *testing.T) {
 	assert := testarossa.For(t)
 
@@ -369,7 +362,7 @@ func TestGraph_Mermaid(t *testing.T) {
 	g.AddTransition("payment.service/charge", END)
 	g.AddTransition("order.service/reject", END)
 
-	mmd := must(NewGraphRenderer(g).Render())
+	mmd := NewGraphRenderer(g).Render()
 
 	assert.Contains(mmd, "graph LR")
 	assert.Contains(mmd, "_start(( ))")
@@ -397,7 +390,7 @@ func TestGraph_GotoTransition(t *testing.T) {
 	assert.False(transitions[3].WithGoto) // svc/c -> END
 
 	// Goto transitions should have a "goto" label in Mermaid
-	mmd := must(NewGraphRenderer(g).Render())
+	mmd := NewGraphRenderer(g).Render()
 	assert.Contains(mmd, `"goto"`)
 
 	// Should validate successfully
@@ -506,7 +499,7 @@ func TestGraph_MermaidForEachShape(t *testing.T) {
 	g.AddTransitionForEach("svc/start", "svc/worker", "items", "item")
 	g.AddTransition("svc/worker", END)
 
-	mmd := must(NewGraphRenderer(g).Render())
+	mmd := NewGraphRenderer(g).Render()
 	// forEach is marked with a "for each" edge label, the same convention as onError/goto.
 	assert.Contains(mmd, `t0 -->|"for each"| t1`)
 	// No enclosing box and no box style line; the branch is not wrapped.
@@ -528,7 +521,7 @@ func TestGraph_MermaidFanInShape(t *testing.T) {
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 
-	mmd := must(NewGraphRenderer(g).Render())
+	mmd := NewGraphRenderer(g).Render()
 	// Fan-in nodes are standard rectangles; no special shape.
 	assert.Contains(mmd, `t3["join"]:::task`)
 	assert.NotContains(mmd, `shape: trap-t`)
@@ -547,7 +540,7 @@ func TestGraph_MermaidForEachFanInLabel(t *testing.T) {
 	g.SetFanIn("svc/join")
 	assert.NoError(g.Validate())
 
-	mmd := must(NewGraphRenderer(g).Render())
+	mmd := NewGraphRenderer(g).Render()
 	// Only the forEach transition is labeled; the edge from the branch into the fan-in
 	// reduce circle is a plain edge.
 	assert.Contains(mmd, `t0 -->|"for each"| t1`)
@@ -569,7 +562,7 @@ func TestGraph_MermaidNestedForEachLabels(t *testing.T) {
 	g.SetFanIn("svc/outerJoin")
 	assert.NoError(g.Validate())
 
-	mmd := must(NewGraphRenderer(g).Render())
+	mmd := NewGraphRenderer(g).Render()
 	// Each forEach transition gets its own "for each" edge label; no nested boxes.
 	assert.Contains(mmd, `t0 -->|"for each"| t1`)
 	assert.Contains(mmd, `t1 -->|"for each"| t2`)
@@ -584,7 +577,7 @@ func TestGraph_MermaidLabelsOnError(t *testing.T) {
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
 	g.AddTransition("svc/errHandler", END)
 
-	mmd := must(NewGraphRenderer(g).Render())
+	mmd := NewGraphRenderer(g).Render()
 	assert.Contains(mmd, `"onError"`)
 }
 
@@ -987,7 +980,7 @@ func TestGraph_SwitchMermaidDiamond(t *testing.T) {
 	g.AddTransition("a", END)
 	g.AddTransition("b", END)
 	assert.NoError(g.Validate())
-	m := must(NewGraphRenderer(g).Render())
+	m := NewGraphRenderer(g).Render()
 	// Diamond is emitted as a rhombus labeled "switch" with a per-source suffix.
 	assert.Contains(m, `t0_switch{"switch"}`)
 	// Source routes through the diamond, not directly to the arms.
@@ -1011,7 +1004,7 @@ func TestGraph_MermaidReduceCircle(t *testing.T) {
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
-	m := must(NewGraphRenderer(g).Render())
+	m := NewGraphRenderer(g).Render()
 
 	// The reduce circle sits ahead of the fan-in node, same color as the
 	// switch/when diamonds (term class).
@@ -1037,7 +1030,7 @@ func TestGraph_WhenMermaidDiamond(t *testing.T) {
 	g.AddTransition("join", END)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
-	m := must(NewGraphRenderer(g).Render())
+	m := NewGraphRenderer(g).Render()
 	// Diamond labeled "when" appears for the When-source.
 	assert.Contains(m, `t0_when{"when"}`)
 	assert.Contains(m, "t0 --> t0_when")
@@ -1073,7 +1066,7 @@ func TestGraph_MermaidEscapesInjection(t *testing.T) {
 	g.AddTransitionWhen(evil, "svc/next", `a || b == "c"`)
 	g.AddTransition("svc/next", END)
 
-	m := must(NewGraphRenderer(g).Render())
+	m := NewGraphRenderer(g).Render()
 
 	// No raw metacharacter survives to end a label or inject markup/directives.
 	assert.NotContains(m, `<img`)
@@ -1110,7 +1103,7 @@ func TestFlow_MermaidEscapesInjection(t *testing.T) {
 		},
 	}
 
-	m := must(NewFlowRenderer(steps).WithTitle(`T"itle<x>`).Render())
+	m := NewFlowRenderer(steps).WithTitle(`T"itle<x>`).Render()
 
 	// No raw metacharacter survives in node labels, the subgraph block title, or the chart title.
 	assert.NotContains(m, `<img`)
@@ -1156,4 +1149,29 @@ func TestGraph_ValidatorAgreesWithIsFanOutSource(t *testing.T) {
 	assert.True(g.IsFanOutSource("two"))
 	assert.True(g.IsFanOutSource("l"), "a forEach edge fans out on its own")
 	assert.False(g.IsFanOutSource("r"), "switch branches are exclusive")
+}
+
+// TestRender_NilGraphAndEmptyHistory pins the two degenerate inputs, both of which used to be the only plausible
+// candidates for the error return the renderers no longer have. Rendering builds into a strings.Builder, whose
+// writes cannot fail, so Render returns no error at all - the honest error lives one level up, in the engine's
+// HistoryMermaid, which writes to a caller-supplied sink that genuinely can fail.
+func TestRender_NilGraphAndEmptyHistory(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// A nil graph renders empty rather than panicking on r.g.name.
+	assert.Equal("", NewGraphRenderer(nil).Render())
+	assert.Equal("", NewGraphRenderer(nil).WithTitleLabel(true).WithLeftRight().Render())
+
+	// An empty history renders a well-formed (if bare) flowchart.
+	assert.Contains(NewFlowRenderer(nil).Render(), "flowchart")
+
+	// A graph that would FAIL Validate still renders: a diagram is a diagnostic, and the moment an author most
+	// wants to see a graph is the moment it is malformed.
+	g := NewGraph("Broken")
+	g.SetEndpoint("A", "svc/a")
+	g.AddTransition("A", "Undeclared") // no END edge, target never declared -> Validate rejects it
+	assert.Error(g.Validate())
+	mmd := NewGraphRenderer(g).Render()
+	assert.Contains(mmd, "A")
+	assert.Contains(mmd, "Undeclared")
 }

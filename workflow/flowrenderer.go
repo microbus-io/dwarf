@@ -142,8 +142,8 @@ func (r *FlowRenderer) WithLinks(paramName string) *FlowRenderer {
 	return r
 }
 
-// Render returns the Mermaid flowchart representation.
-func (r *FlowRenderer) Render() (string, error) {
+// Render returns the Mermaid flowchart representation. An empty history renders as an empty flowchart.
+func (r *FlowRenderer) Render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "flowchart %s\n", r.direction)
 
@@ -182,7 +182,7 @@ func (r *FlowRenderer) Render() (string, error) {
 		}
 	}
 
-	return b.String(), nil
+	return b.String()
 }
 
 func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []FlowStep) (heads []string, tails []string) {

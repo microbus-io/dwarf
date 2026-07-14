@@ -95,7 +95,15 @@ func (r *GraphRenderer) WithLinks(paramName string) *GraphRenderer {
 }
 
 // Render returns a fully-styled Mermaid flowchart representation of the graph.
-func (r *GraphRenderer) Render() (string, error) {
+//
+// It renders whatever it is given, including a graph that would fail Validate: a diagram is a diagnostic, and
+// the moment an author most wants to SEE a graph is the moment it is malformed. (Graphs reaching the engine are
+// validated at Create, so an invalid one only exists in author space anyway.) A nil graph renders as an empty
+// string rather than panicking.
+func (r *GraphRenderer) Render() string {
+	if r.g == nil {
+		return ""
+	}
 	var b strings.Builder
 	if r.titleLabel {
 		// The author-controlled graph name is painted into .flowchartTitleText (the built-in themes
@@ -127,7 +135,7 @@ func (r *GraphRenderer) Render() (string, error) {
 		}
 	}
 
-	return b.String(), nil
+	return b.String()
 }
 
 type endEdge struct {

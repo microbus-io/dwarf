@@ -1055,10 +1055,8 @@ func (e *Engine) HistoryMermaid(ctx context.Context, flowKey string, w io.String
 	if err != nil {
 		return errors.Trace(err)
 	}
-	mmd, err := workflow.NewFlowRenderer(steps).WithLinks("step").Render()
-	if err != nil {
-		return errors.Trace(err)
-	}
+	// Render cannot fail (it builds into a strings.Builder); the write to the caller's sink can.
+	mmd := workflow.NewFlowRenderer(steps).WithLinks("step").Render()
 	_, err = w.WriteString(mmd)
 	return errors.Trace(err)
 }
