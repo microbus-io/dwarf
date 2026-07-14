@@ -390,7 +390,7 @@ func (e *Engine) skipSurgraphBackward(ctx context.Context, db *sequel.DB, id int
 		}
 		var exit int
 		err = db.QueryRowContext(ctx,
-			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='completed' ORDER BY step_id DESC LIMIT_OFFSET(1, 0)",
+			"SELECT step_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='"+workflow.StatusCompleted+"' ORDER BY step_id DESC LIMIT_OFFSET(1, 0)",
 			childFlow,
 		).Scan(&exit)
 		if err != nil {

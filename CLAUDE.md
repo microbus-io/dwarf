@@ -106,10 +106,11 @@ delta (`changes`), and metadata (status, error, timing). Steps are numbered by `
 siblings share a `step_depth`. Once terminal (`completed`/`failed`/`cancelled`), a step is immutable.
 
 **Reducer** - A merge strategy for state fields during fan-in. When parallel branches converge, each branch's changes
-are merged using the reducer for that field: `replace` (last write wins, default), `append` (concatenate arrays),
-`add` (sum numbers), `union` (deduplicate arrays), or `merge` (combine objects, new key wins). A field with no
-registered reducer uses `replace`; every non-default fan-in field is wired explicitly with
-`graph.SetReducer(name, reducer)` (the older `sum*`/`list*`/`set*` name-prefix inference was removed).
+are merged using the reducer for that field. Ten are defined (`workflow/reducer.go`): `replace` (last write wins,
+default), `append` (concatenate arrays), `union` (concatenate arrays, deduplicated), `add` (sum numbers), `min`/`max`
+(smaller/larger number), `and`/`or` (logical fold of booleans), `concat` (concatenate strings), and `merge` (combine
+objects, new key wins). A field with no registered reducer uses `replace`; every non-default fan-in field is wired
+explicitly with `graph.SetReducer(name, reducer)` (the older `sum*`/`list*`/`set*` name-prefix inference was removed).
 
 **Thread** - A chain of flows linked by `Continue`. Each flow has a `thread_id` grouping it with others in the same
 multi-turn conversation; defaults to `flow_id` (each flow its own thread). `Continue` inherits the thread's

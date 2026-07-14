@@ -52,8 +52,12 @@ claim path, and Postgres's real MVCC lock ordering. Expect the run to be slower 
 
 #### Per-test engine + sequential execution (connection-load control)
 
-**Each `RunInTest` engine opens its own connection pool** - up to `maxOpenConns` (default 8) per
-shard. **Each fixture stands up its own engine** (`engine.NewEngine()` + `SetHost(proxy)` + `RunInTest(t)`, with a
+**Each `RunInTest` engine opens its own connection pool - 12 connections per shard.** `RunInTest` sets no
+`SetMaxOpenConns` override and a fixture declares no `VirtualCPUs`, so the pool is *derived* like any other:
+`connsPerVCPU (6) x defaultVirtualCPUs (2) = 12` (`engine/poolsize.go`). It is **not** the `MaxOpenConns: 8`
+in `internal/database`, which is only a fallback for a shard map the engine always populates - a plausible
+misreading that understates the real per-engine pool by 50%, in the one paragraph whose whole purpose is the
+budget arithmetic below. **Each fixture stands up its own engine** (`engine.NewEngine()` + `SetHost(proxy)` + `RunInTest(t)`, with a
 fresh `proxy := engine.NewTestProxy()` per test), and `RunInTest` registers a `t.Cleanup` that shuts it down - so a
 fixture's pool is open only for the duration of that one test. There is **no** shared/`TestMain`-built engine; the
 suite was deliberately moved off one.
@@ -64,8 +68,8 @@ live at a time. With `t.Parallel()`, `go test` runs up to `-parallel` (defaults 
 each per-test engine would multiply into *N parallel engines × pool × shards* connections to the **same** server - a
 sum that overruns the cap (**PostgreSQL defaults to `max_connections = 100`**; MySQL 151, SQL Server ~32k, SQLite
 none, so Postgres trips first). A pool opening a connection past the cap is *rejected* with an error (not blocked); the
-engine then fails the operation or, on a `pollPendingSteps` sizing query, briefly re-polls (see the poll-error clamp
-below). Retrying does not fix *structural* oversubscription (3 replicas each wanting 60 against a 100-cap server) - the
+engine then fails the operation or, on a `pollPendingSteps` sizing query, briefly re-polls (the "Sizing-error clamp"
+in `engine/CLAUDE.md`). Retrying does not fix *structural* oversubscription (3 replicas each wanting 60 against a 100-cap server) - the
 only fix is to keep the **sum of live pools under the cap**, which serial execution does. So a fixture must **not** add
 `t.Parallel()`; if the suite is ever parallelized, connection load must be re-controlled (a shared engine, or a
 per-test `SetMaxOpenConns` low enough that `parallel × pool × shards` stays under the cap).

@@ -78,45 +78,65 @@ func hasInflightStep(steps []FlowStep) bool {
 	return false
 }
 
+// The four With*Colors setters each take a (fill, text) pair and together cover every step status. Values
+// may be hex literals for a static rendering, or CSS custom-property references like "var(--primary)" for a
+// page that tracks its own light/dark theme - the browser then resolves them through the SVG's cascade and
+// the diagram re-colors on a theme toggle with no re-render. To let host CSS own the text color entirely,
+// pass "currentColor" as the fill and "" as the text: the generated classDef omits `color:` and Mermaid
+// inherits it.
+
+// WithPrimaryColors overrides the pair used for completed and running steps (running additionally gets a
+// dashed border).
 func (r *FlowRenderer) WithPrimaryColors(fill, text string) *FlowRenderer {
 	r.primaryFill = fill
 	r.primaryText = text
 	return r
 }
 
+// WithSecondaryColors overrides the pair used for pending steps and for diagram chrome - the start/end
+// terminals, fan-out cohort wrappers, and subgraph block fills.
 func (r *FlowRenderer) WithSecondaryColors(fill, text string) *FlowRenderer {
 	r.secondaryFill = fill
 	r.secondaryText = text
 	return r
 }
 
+// WithErrorColors overrides the pair used for failed and cancelled steps.
 func (r *FlowRenderer) WithErrorColors(fill, text string) *FlowRenderer {
 	r.errorFill = fill
 	r.errorText = text
 	return r
 }
 
+// WithAttentionColors overrides the pair used for interrupted steps. It is deliberately distinct from the
+// error pair: an interrupt means "needs human input," not "went wrong."
 func (r *FlowRenderer) WithAttentionColors(fill, text string) *FlowRenderer {
 	r.attentionFill = fill
 	r.attentionText = text
 	return r
 }
 
+// WithTopDown renders the diagram top-to-bottom (the default).
 func (r *FlowRenderer) WithTopDown() *FlowRenderer {
 	r.direction = "TD"
 	return r
 }
 
+// WithLeftRight renders the diagram left-to-right.
 func (r *FlowRenderer) WithLeftRight() *FlowRenderer {
 	r.direction = "LR"
 	return r
 }
 
+// WithTitle renders text as a caption node above the chart. Empty (the default) renders no caption.
 func (r *FlowRenderer) WithTitle(text string) *FlowRenderer {
 	r.title = text
 	return r
 }
 
+// WithLinks makes every step node clickable, emitting a Mermaid click directive that navigates to
+// "?<paramName>=<stepKey>" - so a host page can turn the diagram into a step inspector by reading that query
+// parameter. Empty (the default) emits no click directives.
 func (r *FlowRenderer) WithLinks(paramName string) *FlowRenderer {
 	r.linkParam = paramName
 	return r

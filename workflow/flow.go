@@ -431,8 +431,12 @@ func (f *Flow) SetChanges(source any, snap map[string]any) error {
 
 // --- Control ---
 
-// Goto overrides transition routing. The orchestrator skips condition evaluation
-// and follows the specified task instead.
+// Goto overrides transition routing. The orchestrator skips condition evaluation and follows the specified
+// task instead.
+//
+// The target must be wired with graph.AddTransitionGoto(from, target) from this task. An unmatched target
+// FAILS the step - it does not fall through to normal routing - because a goto that silently did nothing
+// would send the flow down the very path the task was trying to override.
 func (f *Flow) Goto(taskName string) {
 	f.gotoNext = taskName
 }
@@ -607,11 +611,11 @@ func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxInt
 	return true
 }
 
-// Sleep tells the orchestrator to wait for the given duration before the next execution.
+// Sleep tells the orchestrator to wait for the given duration before the next execution. A non-positive
+// duration is a no-op (no sleep is requested), not an error - "wait for no time" and "do not wait" are the
+// same instruction, so a computed delay that lands at or below zero needs no guard at the call site.
 func (f *Flow) Sleep(duration time.Duration) {
-	if duration >= 0 {
-		f.sleepDuration = duration
-	}
+	f.sleepDuration = duration
 }
 
 // --- Control signal inspection ---
@@ -630,7 +634,9 @@ func (f *Flow) RetryRequested() (initialDelay time.Duration, multiplier float64,
 	return f.backoffInitialDelay, f.backoffDelayMultiplier, f.backoffMaxDelay, true
 }
 
-// SleepRequested returns the duration set by Sleep, or zero if not set.
+// SleepRequested returns the duration set by Sleep, or zero if not set. The clamp is the trust boundary,
+// not a duplicate of Sleep's: this Flow may have been decoded off the wire from a remote task, so the field
+// is not necessarily a value Sleep ever vetted, and a negative here would land in the step's not_before.
 func (f *Flow) SleepRequested() time.Duration {
 	return max(f.sleepDuration, 0)
 }

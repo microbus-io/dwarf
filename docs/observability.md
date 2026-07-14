@@ -20,6 +20,14 @@ active step span. To route logs to OpenTelemetry, pass a logger whose handler br
 `otelslog` bridge — optionally fanned out to a stdout handler for container logs. The bridge stamps each
 record with the active trace and span IDs, giving you trace↔log correlation for free.
 
+For development and test runs, `SetDebugLogger()` is a one-liner that wires a human-readable text logger to
+**stderr** at debug level — so the engine's (and sequel's) internal logging is visible without standing up an
+OTEL pipeline. It routes through `SetLogger`, so it counts as an explicitly-set logger:
+
+```go
+eng.SetDebugLogger()   // shorthand; stderr, text, debug level
+```
+
 ## Metrics
 
 Inject an OpenTelemetry `metric.MeterProvider`:

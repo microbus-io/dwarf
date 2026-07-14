@@ -48,10 +48,10 @@ invocable unit.
 
 ### Detecting completion
 
-The engine has **no** stop-notification callback. To learn a flow's outcome you either **`Await`** it
-(below) or **compose** the notification into the workflow itself (an orchestrating graph whose follow-up
-tasks report the outcome). The two approaches and when to use each are covered in
-[Detecting flow completion](detecting-completion.md).
+The engine has **no** stop-notification callback. To learn a flow's outcome you **`Await`** it (below),
+**`Poll`** it when your own deadline is shorter than the flow's (below), or **compose** the notification into
+the workflow itself (an orchestrating graph whose follow-up tasks report the outcome). The three approaches
+and when to use each are covered in [Detecting flow completion](detecting-completion.md).
 
 ### Deferring work
 
@@ -77,6 +77,23 @@ outcome, err := eng.Await(ctx, flowKey)
 Blocks until the flow stops — `completed`, `failed`, `cancelled`, or `interrupted` — and returns the
 outcome. It wakes on a status-change notification or context cancellation; there is no polling. Across
 replicas, `Await` relies on the host's `SignalPeers` broadcast (see [Deployment](deployment.md)).
+
+If the ctx deadline fires first, `Await` returns the error and the flow **keeps running** — it is durable and
+not bound to your call. You still hold the key, so you can `Await` again.
+
+### Poll
+
+```go
+outcome, err := eng.Poll(ctx, flowKey)   // ctx timeout is NOT an error
+if !outcome.Stopped() {
+    // still running - answer now, ask again later
+}
+```
+
+`Poll` waits exactly like `Await`, but a **ctx timeout is not an error**: it returns the flow's current,
+non-terminal outcome, whose `Stopped()` reports `false`. That makes it the right call for a caller bounded by
+its own deadline — an HTTP status endpoint long-polling a flow that may run for hours — without hand-rolling a
+`Snapshot` loop. A genuine failure (unknown flow, database down) still returns an error.
 
 ## The outcome
 

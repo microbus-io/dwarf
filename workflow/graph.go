@@ -18,6 +18,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"maps"
 	"strings"
 
 	"github.com/microbus-io/boolexp"
@@ -346,9 +347,11 @@ func (g *Graph) SetReducer(field string, reducer Reducer) {
 	g.reducers[field] = reducer
 }
 
-// Reducers returns the reducer map for state fields.
+// Reducers returns the reducer map for state fields. The returned map is a copy - like Nodes and
+// Transitions, a getter must not hand out a live handle to the graph's internals, or a caller mutating the
+// result would silently re-wire the fan-in merge of a graph already frozen onto running flows.
 func (g *Graph) Reducers() map[string]Reducer {
-	return g.reducers
+	return maps.Clone(g.reducers)
 }
 
 // Validate checks the graph for structural errors.

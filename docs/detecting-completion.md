@@ -1,14 +1,18 @@
 # Detecting flow completion
 
-The engine has **no stop-notification callback**. There are two ways to learn a flow's outcome, and they
+The engine has **no stop-notification callback**. There are three ways to learn a flow's outcome, and they
 suit different situations:
 
 1. **`Await`** — block a live caller until the flow stops, then read the outcome.
-2. **Orchestration** — model the follow-up work as tasks inside a workflow that calls the real work as a
+2. **`Poll`** — `Await` with a bounded wait: on a ctx timeout it returns the flow's *current* outcome instead
+   of an error, so a caller whose own deadline is shorter than the flow can answer now and ask again.
+3. **Orchestration** — model the follow-up work as tasks inside a workflow that calls the real work as a
    subgraph, so the reaction to success or failure is itself durable.
 
-Pick `Await` when a caller is standing by for the result. Pick orchestration when the reaction must happen
-reliably regardless of who is (or isn't) waiting — a push notification, a downstream call, a compensation.
+Pick `Await` when a caller is standing by and can wait for the result. Pick `Poll` when the caller is bounded
+by its own deadline — an HTTP handler backing a status endpoint — but the flow is not. Pick orchestration when
+the reaction must happen reliably regardless of who is (or isn't) waiting — a push notification, a downstream
+call, a compensation.
 
 ## Await
 
@@ -27,6 +31,34 @@ It wakes on a status-change signal, with a periodic re-check as a backstop in ca
   key). Long-running or human-in-the-loop flows routinely outlive a request context.
 - It does **not** survive the caller process restarting — there is no durable "call me back."
 - It is a poor fit for **fire-and-forget** submissions, where nobody waits.
+
+## Poll
+
+```go
+ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+defer cancel()
+
+outcome, err := eng.Poll(ctx, flowKey)
+if err != nil {
+    return err // a real failure: the flow is unknown, or the database is down
+}
+if !outcome.Stopped() {
+    // Still running. Answer the caller now; it will ask again.
+    return respond(http.StatusAccepted, outcome.Status)
+}
+return respond(http.StatusOK, outcome)
+```
+
+`Poll` waits exactly like `Await`, but **a ctx timeout is not an error**: it returns the flow's current,
+non-terminal outcome, whose `Stopped()` reports `false`. So it settles the "flow outlives the caller's
+deadline" problem in `Await`'s limits above without a hand-rolled `Snapshot` loop — and it still returns
+promptly the moment the flow stops, rather than sleeping out a fixed interval.
+
+**Good for:** an HTTP status endpoint, or any caller whose deadline is shorter than the flow. It gives you
+long-polling: wait up to your own budget, answer with whatever is true then, and re-poll.
+
+**Limits:** the same as `Await` otherwise — the caller must hold the `flowKey`, and nothing durable happens
+if it never comes back. For work that must happen regardless of who is waiting, use orchestration.
 
 ## Orchestration (recommended for reliable follow-up)
 

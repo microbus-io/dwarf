@@ -1283,6 +1283,19 @@ The worker count is split into two numbers, because they answer different questi
   (see "Selection") - must never be sized from the maximum below**: a worker parked in a long `ExecuteTask`
   holds no connection and dispatches nothing, so a ceiling-sized cache would scan far more of the backlog
   than the replica can ever claim.
+  **KNOWN GAP - it is anchored at R=1 and does not follow the pool split.** It is computed once in
+  `Startup`, when peer discovery has not run yet (`observedReplicas()` is still 1), so `sum(per-shard open)`
+  is the FULL per-database budget. Every later fleet change re-divides the pools by R (`recomputePools`) but
+  leaves `workersDispatch` and the cache at their R=1 size. On an 8-vCPU shard across 8 replicas each replica
+  therefore keeps a ~384-worker resident set and a 384-entry cache against a **6**-connection pool: the
+  surplus workers merely queue on the pool (bounded, not a runaway - this is not finding #3's feedback loop),
+  but the oversized cache is the real cost, since it is exactly the "deliver more candidates than the replica
+  can claim" shape that the deep-backlog pacing exists to contain - stale candidates, wasted claim CAS
+  round-trips. **This is an over-provision, not a design choice; do not "document it as deliberate".** It is
+  unfixed because the honest fix is live re-sizing on every fleet change: the cache would have to be re-Init'd
+  under load (it is sized once at `initRuntime`) and the resident worker pool would have to *shrink*, which
+  needs a per-worker quit signal it does not have (growth is on-demand and easy; shrinkage is not). Worth
+  doing if a large-R deployment ever shows it; the single-replica and small-fleet cases are unaffected.
 - **`workers` (the MAXIMUM the pool may grow to)** = `workerCeiling` = `M x margin / txTime x safety`,
   the largest pool that keeps a **synchronized completion storm** inside the crash-recovery lease margin.
   The storm: every in-flight task blocks on one downstream (an LLM provider outage) and is released at

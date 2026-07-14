@@ -156,7 +156,7 @@ func chooseWorkload(workloads map[string]*workload, name string) (func() *worklo
 	}
 	w := workloads[name]
 	if w == nil {
-		return nil, fmt.Errorf("unknown workload %q (linear, fanout, state, mixed)", name)
+		return nil, fmt.Errorf("unknown workload %q (linear, fanout, state, llm, mixed)", name)
 	}
 	return func() *workload { return w }, nil
 }
