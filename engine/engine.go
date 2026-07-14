@@ -612,13 +612,10 @@ func (e *Engine) initRuntime() {
 	// The cache (and every refill scan, which reads up to its capacity) is sized from the DISPATCH count,
 	// never from the worker maximum: a worker parked in a long ExecuteTask holds no connection and
 	// dispatches nothing, so letting the ceiling size the cache would scan a backlog orders of magnitude
-	// larger than the engine can ever claim. In test mode the dispatch count is unresolved for an engine
-	// with no shards, so fall back to the resident set.
-	cacheWorkers := min(resident, e.workersDispatch)
-	if e.workersDispatch == 0 {
-		cacheWorkers = resident
-	}
-	e.cache.Init(cacheWorkers)
+	// larger than the engine can ever claim. workersDispatch is always resolved here - Startup computes it
+	// (max(64, ...), so never zero) before it calls initRuntime, which is its only caller - so there is no
+	// unresolved-dispatch case to fall back from.
+	e.cache.Init(min(resident, e.workersDispatch))
 	e.refillTrigger = make(chan struct{}, 1)
 	e.refillStop = make(chan struct{})
 	e.wakeTimer = make(chan struct{}, 1)
