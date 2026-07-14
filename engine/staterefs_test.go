@@ -423,3 +423,63 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	assert.NotContains(joinRefs, "log", "a reduced field cannot be a ref - the merged value exists nowhere else")
 	assert.Contains(joinState, "log", "the fan-in step inlines it, anchoring it for everything downstream")
 }
+
+// TestStateRefs_SpawnCombinedFieldIsNotAnchored pins finding 3: a field the SPAWN task itself writes through a
+// COMBINING reducer, over a base it also holds, has a merged fan-in value (reduce(base, delta)) that exists in no
+// row - the spawn's `changes` holds only the delta. Anchoring it at the spawn (as the fan-in mint did) made
+// resolution splice back the bare delta, silently dropping the accumulated base. It must be inlined instead.
+// Distinct from the member-written case above: here no cohort member touches the field, so the only reason it
+// must not be anchored is that the SPAWN combined it. Without the fix, logLen reads 1 (just the spawn delta).
+func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	proxy := NewTestProxy()
+	e.SetHost(proxy)
+	e.RunInTest(t)
+
+	g := workflow.NewGraph("SpawnCombined")
+	g.SetEndpoint("Seed", "sc/seed")
+	g.SetEndpoint("Work", "sc/work")
+	g.SetEndpoint("Join", "sc/join")
+	g.SetFanIn("Join")
+	g.SetReducer("log", workflow.ReducerAppend)
+	g.AddTransitionForEach("Seed", "Work", "pages", "page")
+	g.AddTransitionChain("Work", "Join", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("sc/wf", g)
+
+	// The SPAWN (fan-out source) appends to log; its merged value (base + delta) clears the ref threshold. The
+	// branches deliberately never touch log, so it is NOT a member write - the spawn's combine is the only reason
+	// it must not be anchored.
+	proxy.HandleTask("sc/seed", func(ctx context.Context, f *workflow.Flow) error {
+		f.Set("log", []string{"spawn-delta"})
+		return nil
+	})
+	proxy.HandleTask("sc/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	proxy.HandleTask("sc/join", func(ctx context.Context, f *workflow.Flow) error {
+		var log []string
+		testarossa.For(t).NoError(f.Get("log", &log))
+		f.SetInt("logLen", len(log))
+		return nil
+	})
+
+	base := make([]string, 400)
+	for i := range base {
+		base[i] = blob(64)
+	}
+	pages := []string{"a", "b", "c"}
+	_, outcome, err := e.Run(ctx, "sc/wf", map[string]any{"log": base, "pages": pages}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+	// 400 accumulated base + the spawn's one appended entry. Anchoring the spawn's combined output would have
+	// dropped the base and read back 1.
+	assert.Equal(401.0, outcome.State["logLen"])
+
+	// The fan-in step inlines the combined value rather than ref'ing it at the spawn (whose row holds only the delta).
+	join := stepIDsByTask(t, e, "Join")[0]
+	joinState, joinRefs, _ := stepRefsOf(t, e, join)
+	assert.NotContains(joinRefs, "log", "the spawn's combined output cannot be anchored at the spawn - its row holds only the delta")
+	assert.Contains(joinState, "log", "the fan-in step inlines the combined value, anchoring it downstream")
+}

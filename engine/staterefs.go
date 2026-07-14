@@ -189,6 +189,26 @@ func mintStateRefs(merged map[string]any, changes map[string]any, inherited stat
 	return string(stateJSON), string(refsJSON), nil
 }
 
+// combinedReducerFields names the keys whose merged fan-in value came from a COMBINING (non-replace) reducer
+// folding a delta the anchor step wrote onto a base it also held - reduce(state[k], changes[k]). That value
+// exists in NO step row: the anchor's `changes` column holds only the delta, its `state` only the base. So it
+// must never be minted as a ref against that anchor (resolution reads `changes` first and would splice back the
+// bare delta, silently dropping the accumulated base). The fan-in mint therefore excludes these, inlining them
+// as literals into the fan-in step's own `state`. A key present only in `changes` (no base) is left off: there
+// merged[k] == changes[k], so the anchor's `changes` is a sound anchor and keeping the ref preserves the byte win.
+func combinedReducerFields(state, changes map[string]any, reducers map[string]workflow.Reducer) map[string]bool {
+	out := map[string]bool{}
+	for k := range changes {
+		if r := reducers[k]; r == "" || r == workflow.ReducerReplace {
+			continue
+		}
+		if _, hasBase := state[k]; hasBase {
+			out[k] = true
+		}
+	}
+	return out
+}
+
 // inlineExcessAnchors caps the pointer fan at maxStateAnchors by inlining the cheapest anchors' fields back
 // into state as literals - one copy, paid once, to shorten the resolve IN-list. It costs no database read:
 // the literals are all present in merged (state was resolved at dispatch). Anchors are dropped smallest-bytes

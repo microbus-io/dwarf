@@ -1494,6 +1494,14 @@ engine policy — below.
     (a host does not echo a hello back to its sender), and it is exactly the replica that must eventually take its
     full budget. Something has to fire on its own.
 
+  **`lastAppliedR` is seeded to 0, not 1, and that is load-bearing for the solo case above.** The seed means "the R
+  the pools were last *derived* with," and until the window closes nothing has been derived - the pools sit at the
+  cap. A solo replica's `observedReplicas()` is 1, so seeding 1 made the grace-timer recompute's `Swap(1)` return 1,
+  the dedupe eat it, and the pool stay pinned at `startupPoolCap` forever (a ~4x under-connect on the commonest
+  deployment shape). Seeding 0 makes that first recompute a genuine change (`0 != 1`) that pushes the derived size.
+  `shardPool` clamps `replicas = max(1, replicas)`, so 0 never reaches the arithmetic - it is purely the dedupe's
+  "nothing applied yet" sentinel. Pinned by `TestPoolSizing_StartupCapReleasesForASoloReplica`.
+
   The timer lives in `runPeersLoop`'s `select` - which already owns peer state, already calls `recomputePools`, and
   is already drained - so it needs no separate goroutine, field, or shutdown hook. Pinned by
   `TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown` (a peer says hello mid-window and the pool does **not**
