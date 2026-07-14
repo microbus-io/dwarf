@@ -244,3 +244,84 @@ func TestStaterefsflow(t *testing.T) {
 		assert.NotContains(outcome.State, "pdf")
 	})
 }
+
+// TestStaterefs_SingleFieldEntirelyByReference guards the case a fan-out shape can never produce: a linear chain
+// whose ENTIRE state is one large carried field. Each successor's state column is then exactly "{}" with a
+// non-empty state_refs, and a nil-map short-circuit in resolveStateRefs would drop the ref at dispatch - the
+// task runs with empty state, the field is not re-anchored, and it vanishes from every downstream step and from
+// final_state, silently and permanently. The fan-out fixtures above never trip it because a branch's state
+// always carries the injected forEach bookkeeping (page/pageIndex/pages), so it is never entirely "{}".
+//
+// Every task returns an error if it cannot see the whole document, so StatusCompleted alone proves the middle
+// steps - the ones dispatched from a "{}" state column - resolved the ref.
+func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
+	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngine()
+	eng.SetHost(proxy)
+	eng.RunInTest(t)
+
+	const docLen = 40000
+	pdf := strings.Repeat("P", docLen)
+
+	graph := workflow.NewGraph("SoleRef")
+	graph.SetEndpoint("A", "staterefsflow.verify:429/sole-a")
+	graph.SetEndpoint("B", "staterefsflow.verify:429/sole-b")
+	graph.SetEndpoint("C", "staterefsflow.verify:429/sole-c")
+	graph.AddTransitionChain("A", "B", "C", workflow.END)
+	if err := graph.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	proxy.HandleGraph("staterefsflow.verify:429/sole", graph)
+
+	// The entry task adds nothing: the document arrives as initial state and is the flow's ONLY field, so the
+	// successor's minted state is entirely by reference (state="{}", state_refs={"pdf": entryStep}).
+	proxy.HandleTask("staterefsflow.verify:429/sole-a", func(ctx context.Context, f *workflow.Flow) error {
+		if got := len(f.GetString("pdf")); got != docLen {
+			return errors.New("A sees a %d-byte document, want %d", got, docLen)
+		}
+		return nil
+	})
+	// B is dispatched from a "{}" state column - the exact site the bug drops the ref. It too writes nothing,
+	// so the ref must ride one-hop through to C, still anchored at the entry step.
+	proxy.HandleTask("staterefsflow.verify:429/sole-b", func(ctx context.Context, f *workflow.Flow) error {
+		if got := len(f.GetString("pdf")); got != docLen {
+			return errors.New("B sees a %d-byte document, want %d (ref dropped at dispatch)", got, docLen)
+		}
+		return nil
+	})
+	proxy.HandleTask("staterefsflow.verify:429/sole-c", func(ctx context.Context, f *workflow.Flow) error {
+		if got := len(f.GetString("pdf")); got != docLen {
+			return errors.New("C sees a %d-byte document, want %d", got, docLen)
+		}
+		f.SetInt("pdfLen", len(f.GetString("pdf")))
+		return nil
+	})
+
+	assert := testarossa.For(t)
+	flowKey, outcome, err := eng.Run(ctx, "staterefsflow.verify:429/sole", map[string]any{"pdf": pdf}, nil)
+	assert.NoError(err)
+	// Completed proves A, B and C each saw the whole document; a dropped ref would fail B with StatusFailed.
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+	assert.Equal(float64(docLen), outcome.State["pdfLen"])
+	// The ref survived to the flow boundary: final_state is materialized, and the field is still present.
+	assert.Equal(docLen, len(outcome.State["pdf"].(string)))
+
+	// Step is API surface, so B's recorded input is materialized - the whole document, never a ref or "".
+	steps, err := eng.History(ctx, flowKey)
+	assert.NoError(err)
+	sawB := false
+	for _, s := range steps {
+		if s.TaskName != "B" {
+			continue
+		}
+		sawB = true
+		step, err := eng.Step(ctx, s.StepKey)
+		assert.NoError(err)
+		doc, ok := step.State["pdf"].(string)
+		assert.True(ok, "Step must materialize B's carried document")
+		assert.Equal(docLen, len(doc))
+	}
+	assert.True(sawB)
+}

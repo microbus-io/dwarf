@@ -39,9 +39,18 @@ type cachedGraph struct {
 	fanIn *faninmap.Map
 }
 
-// unmarshalJSONMap parses a JSON string into a map. Empty or "{}" input yields a nil map.
+// unmarshalJSONMap parses a JSON string into a map. An empty string (an absent/NULL column) yields a nil map;
+// "{}" yields a non-nil EMPTY map. The distinction is load-bearing for state refs: a step whose entire state is
+// carried by reference persists state="{}" alongside a non-empty state_refs, and resolveStateRefs skips a nil
+// state map - so a nil map here would drop every ref and dispatch the task with empty state, losing the field
+// from every downstream step and from final_state (silent, permanent). rawEncode always marshals to "{}" (never
+// "null"), so this case is the exact write-side counterpart.
 func unmarshalJSONMap(jsonStr string, out *map[string]any) {
-	if jsonStr == "" || jsonStr == "{}" {
+	if jsonStr == "{}" {
+		*out = map[string]any{}
+		return
+	}
+	if jsonStr == "" {
 		return
 	}
 	json.Unmarshal([]byte(jsonStr), out)
