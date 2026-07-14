@@ -921,6 +921,67 @@ step's `budget + leaseMargin`, so a flow's budget directly bounds its worst-case
 practical reason a host caps the budget. (The earlier config-sized lease and its "decrease `TimeBudget` mid-flight"
 re-dispatch trade-off are retired: each step's lease now follows its own frozen budget.)
 
+### Persisting a step's outcome: retry the WRITE, never the task (`persist.go`)
+
+The task has **already run** when its outcome is persisted - its side effects have fired - so this write is the
+only record that it ran. Before `persist` existed, a database error here left the step `running` with `error=''`
+and `attempt=0` (reading as perfectly healthy) and lease recovery re-dispatched it every `budget + leaseMargin`,
+**re-executing the task**, forever. Silent and eternal: `detectOrphanedFlows` could not see it, because a
+non-terminal step *did* exist. Reproduced against a live Postgres with a `\u0000` in state (now rejected on write,
+but the structural hazard was the point).
+
+The rule is: **retry the WRITE, never the task.** Re-dispatching is the one recovery that re-fires side effects,
+and it was being used for failures the task had nothing to do with.
+
+- **In-place retry, holding the lease.** A short exponential (1s/2s/4s). The errors this exists for - a failover, a
+  dropped connection, a momentary connection-limit rejection - clear in **seconds**, so a blip is absorbed with
+  **zero re-execution**. A minutes-long backoff would be slow in both directions: slow to recover from something
+  that already cleared, and slow to report a permanent failure.
+- **The lease is extended first** (`persistLeaseExtensionMs`, 30s). Without it, a task that consumed most of its
+  budget has only `leaseMargin` left, so sleeping through the backoff would put the worker *past* its lease: a peer
+  re-claims, **re-executes the task**, and the late write is fenced away - exactly the re-execution this prevents.
+  The extension is itself a fenced, payload-free write, so a **zero-row** match means a peer already re-claimed us
+  and we abandon silently.
+- **Drain aborts it.** A worker asleep in the backoff selects on `drainStop` (closed at the top of `drainRuntime` -
+  the lifetime ctx is deliberately not cancelled until *after* the workers drain, so there is nothing else to
+  watch), releases its lease, and exits. That *does* re-execute the task on the peer that picks it up - it is the
+  at-least-once contract, and it is what lease expiry would have done anyway, only sooner.
+
+**The classifier: ask the database, do not read the error code.** When the retries are exhausted, `failOnPersistError`
+attempts the **clean** terminal write (`failStep` - a status and an error message, none of the payload):
+
+- it **lands** ⇒ the database is reachable, so the database is not the problem: the **payload** is. The failure is
+  permanent, re-running the task would only reproduce it, and the step **fails** naming the driver's actual error.
+  **The task ran exactly once.**
+- it **also fails** ⇒ the database is unreachable, so nothing was recorded and nothing *can* be. Leave the step for
+  lease recovery (`dwarf_steps_recovered` counts it). Re-execution here is unavoidable **and correct** - from the
+  database's point of view the step never ran.
+
+The two attempts are milliseconds apart and differ only in what they carry, which is what makes the classification
+sound. It needs **no per-driver error taxonomy** (the part that would rot). Guessing the other way - terminalizing
+on any unknown error - would kill live flows on every routine failover, and a terminal flow is **immutable**
+(recovery is a human running `Fork`).
+
+**Lock contention is excluded, and that exclusion is load-bearing.** `Transact` already retries it to exhaustion;
+past that it reaches the recovery **defer** (rewind + re-poll), never the classifier. Terminalizing a flow because
+the database was busy would be exactly backwards, and it is why `processStep` tests `IsLockContentionError` *before*
+calling `failOnPersistError`. Consequence: the defer's `completed→pending` arm is now reached only by contention (or
+by a classifier that could not write at all), which is what `TestLeaseFence_RecoveryResetFenced` drives it with.
+
+**A fuse that can itself be poisoned is not a fuse.** `failStep` is the only way out, and it reads other steps'
+payloads via `computeFinalState`. If an unreadable value had already landed in a row, that merge would die the same
+way, `failStep` would error, and the classifier would misread it as "the database is down" - restoring the very
+loop this closes. So `computeFinalState` failing on this path falls back to `final_state='{}'`, and the error
+message is stripped of control bytes before it goes into a text column (Postgres rejects a NUL in `text` exactly as
+in `jsonb`, so a driver error quoting the offending value back could kill the clean write).
+
+Two counters: `dwarf_steps_write_retried` (a blip absorbed - the database is flaky, the workflow is fine) and
+`dwarf_steps_write_failed` (an **alarm**, like `dwarf_steps_unwedged`: the database was reachable and the outcome
+still could not be stored, so the payload is at fault and a latent bug exists). Pinned by `engine/persist_test.go` -
+a transient error absorbed with the task running **once**, a permanent one terminalized with the task running
+**once**, and a drain during the backoff releasing the lease instead of sleeping it out. Before the fix, both of the
+first two tests **hang forever**.
+
 ### Lease fencing (`lease_seq`) — at-least-once, never state corruption
 
 **Execution is at-least-once and may be concurrent; the fence guarantees only that the flow's persisted

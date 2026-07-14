@@ -178,13 +178,17 @@ func TestFault_TransitionCommit(t *testing.T) {
 	e.SetHost(proxy)
 	e.RunInTest(t)
 
-	// A's transition transaction fails once, after A was marked completed: the recovery defer must reset A
-	// and re-dispatch, so the flow still completes and A ran twice.
+	// A's transition transaction fails once with a non-contention error, after A was marked completed. It is
+	// retried IN PLACE (see persist), so it lands on the next attempt and the flow completes - and A runs ONCE.
+	//
+	// It used to run twice: the recovery defer rewound A and re-dispatched it, which RE-EXECUTED THE TASK to
+	// recover from a database blip the task had nothing to do with. Retrying the write instead of the task is
+	// the whole point - a task's side effects must not re-fire because a transaction lost a connection.
 	e.seams.Inject(faultTransitionCommit, "A")
 	if out := boundedRun(t, e, "ftrans/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
-	assert.Equal(2, *calls["a"]) // re-dispatched after the failed transition
+	assert.Equal(1, *calls["a"]) // the WRITE was retried, not the task
 	assert.Equal(1, *calls["b"])
 }
 

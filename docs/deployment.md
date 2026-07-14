@@ -195,6 +195,24 @@ Two delivery rules:
 In a single-replica deployment, leave `SignalPeers` a no-op; none of this runs, and the
 background poll is the only (and sufficient) recovery path.
 
+## Shutting down
+
+`Shutdown` drains gracefully: it stops accepting new work, then waits for every worker to finish the step it is
+already running. A step is not abandoned mid-flight.
+
+**Allow a drain window longer than the largest `TimeBudget` any of your flows declares.** A worker finishing a
+task cannot be hurried — the engine will not abort a running task to shut down faster — so the drain takes as long
+as the longest task still in flight. If your platform kills the process before the drain completes (a container
+runtime's termination grace period, for example), those steps are abandoned mid-task: their leases lapse, another
+replica recovers them, and **the tasks run again**. That is safe (execution is at-least-once and tasks must be
+idempotent), but it is wasted work, and it re-fires side effects that had already happened.
+
+The engine imposes no ceiling on `TimeBudget`, so the number is yours: if you cap task budgets in your own layer,
+size the drain window above that cap. If you do not cap them, the drain is bounded only by your slowest task.
+
+A worker that is mid-way through *persisting* a step's outcome — retrying a write after a database blip — does not
+delay the drain: it notices the shutdown, hands the step back for another replica to pick up immediately, and exits.
+
 ## Crash recovery
 
 Recovery is built in and needs no operator action. Every in-flight step holds a time-based lease; if a

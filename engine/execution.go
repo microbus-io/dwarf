@@ -584,14 +584,40 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if e.seams.IsFault(faultLeaseStaleWrite, taskName) {
 		writeSeq = leaseSeq - 1
 	}
-	stepRes, err := db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"' AND lease_seq=?",
-		workflow.StatusCompleted, string(changesJSON), stepID, writeSeq,
-	)
-	if err != nil {
+	// THE task has already run - its side effects have fired - so this write is the only record that it did.
+	// A database error here must therefore retry the WRITE, never the task (see persist): an ephemeral blip is
+	// absorbed with zero re-execution, and a write that will never land is classified and terminalized rather
+	// than left to lease recovery, which would re-execute the task every `budget + leaseMargin`, forever.
+	var stepRowsAffected int64
+	err = e.persist(ctx, db, shardNum, stepID, leaseSeq, func() error {
+		// faultPersistErr makes this write fail with a synthetic NON-contention error, consumed per attempt -
+		// so InjectN(1) is a transient blip the retry must absorb with NO re-execution, and InjectN(large) is a
+		// permanent failure the classifier must terminalize rather than loop on.
+		if e.seams.IsFault(faultPersistErr, taskName) {
+			return errors.New("injected fault: " + faultPersistErr + " " + taskName)
+		}
+		res, werr := db.ExecContext(ctx,
+			"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"' AND lease_seq=?",
+			workflow.StatusCompleted, string(changesJSON), stepID, writeSeq,
+		)
+		if werr != nil {
+			return errors.Trace(werr)
+		}
+		stepRowsAffected, _ = res.RowsAffected()
+		return nil
+	})
+	switch {
+	case errors.Is(err, errPersistFenced), errors.Is(err, errPersistDrained):
+		return nil // a peer owns the step now; abandon it silently
+	case sequel.IsLockContentionError(err):
+		// Contention is NOT a persistence failure and must never be classified as one: terminalizing on it
+		// would kill live flows during a contention storm - exactly backwards. Transact already retried it to
+		// exhaustion; hand it to the recovery defer, which rewinds the step and re-polls.
 		return errors.Trace(err)
+	case err != nil:
+		return errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
 	}
-	if nn, _ := stepRes.RowsAffected(); nn == 0 {
+	if stepRowsAffected == 0 {
 		return nil
 	}
 	stepMarkedComplete = true
@@ -707,177 +733,191 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// the flow, since a completed step is not lease-recoverable. Transact rolls back and re-runs the
 	// closure (re-reading the fan-in counts so the decision stays correct), and its Tx records any
 	// statement error so a partial transition can never commit.
-	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		newStepIDs = newStepIDs[:0]
-		flowFailed = false
-		txBytes = stateByteCount{}
-		flowFailedParentStepID, flowFailedReDispatchParent = 0, false
-		flowFailedAwaited = false
+	// The step is already `completed` at this point, so a database error here is the OTHER half of the eternal
+	// loop: the recovery defer rewinds it to pending and the task RE-EXECUTES. Retry the transaction in place
+	// first (Transact re-runs its own closure, which re-derives every value it writes), and if it will not land,
+	// classify it rather than spin - see persist / failOnPersistError.
+	err = e.persist(ctx, db, shardNum, stepID, leaseSeq, func() error {
+		return db.Transact(ctx, func(tx *sequel.Tx) error {
+			newStepIDs = newStepIDs[:0]
+			flowFailed = false
+			txBytes = stateByteCount{}
+			flowFailedParentStepID, flowFailedReDispatchParent = 0, false
+			flowFailedAwaited = false
 
-		// faultContention returns a retryable lock-contention error (consumed on the first attempt), so the
-		// test proves Transact rolls back and re-runs the closure to a clean commit. faultTransitionCommit
-		// returns a non-retryable error, so the tx fails after the step was already marked completed and the
-		// processStep recovery defer must reset it (completed->pending) and re-dispatch. Both are scoped to
-		// the completing task and checked before the flow-row write, so a fired fault rolls back nothing.
-		if e.seams.IsFault(faultContention, taskName) {
-			return errors.New("database is locked (injected fault: " + faultContention + " " + taskName + ")")
-		}
-		if e.seams.IsFault(faultTransitionCommit, taskName) {
-			return errors.New("injected fault: " + faultTransitionCommit + " " + taskName)
-		}
-
-		// Write-first: take the flow row's lock before any step, guarded on non-terminal status. If a
-		// concurrent Cancel/failStep terminalized this flow after the step was marked completed but before
-		// this transition committed (the Cancel-vs-transition window, and the retry after a lock-contention
-		// rollback), the guard yields zero rows and the transition becomes a clean no-op. Without it, the tx
-		// would insert pending successors into an already-terminal flow — orphan work only reaped later by the
-		// claim-time terminal-flow guard. The completed step is left as a harmless tail on the final flow.
-		// The lock-grab flips the non-indexed `touch` column, not `updated_at`: a running flow's
-		// `updated_at` now moves only on a genuine status transition, so the running band of
-		// idx_dwarf_flows_status is not churned once per step. `touch` always changes value, so
-		// RowsAffected still reflects the WHERE match (the terminal guard below) on every driver.
-		flowRes, flowErr := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
-			flowID,
-		)
-		if flowErr != nil {
-			return errors.Trace(flowErr)
-		}
-		if n, _ := flowRes.RowsAffected(); n == 0 {
-			return nil
-		}
-
-		for i, next := range normalNexts {
-			stepStateJSON, stepRefsJSON := linearStateJSON, linearRefsJSON
-			if next.item != nil {
-				// A forEach branch's state is the flow state plus its element and ordinal context. The
-				// source array is NOT stripped: the engine once deleted it from each branch's local state
-				// to avoid N copies of it in every step row of every branch, but that was a byte
-				// optimization for the one field the engine happens to know the name of, while every other
-				// carried field paid the same cost unaddressed. It also made a branch's state a LIE - the
-				// branch could not see the array its own element came from - and it is what made a failed
-				// fan-out's final_state come back missing the array (a completed sibling's branch-local
-				// snapshot is the merge base there). The general mechanism that owns the cost is state refs:
-				// the array is REF'd, so the branches share one copy of it and each still sees it whole.
-				perStepState := make(map[string]any, len(childInputState)+3)
-				maps.Copy(perStepState, childInputState)
-				perStepState[next.itemKey] = next.item
-				if next.forEachKey != "" {
-					perStepState[next.itemKey+"Index"] = next.cohortIndex
-					perStepState[next.itemKey+"Count"] = next.cohortCount
-				}
-				// The injected element and its ordinal context are SYNTHESIZED per branch - their bytes are
-				// in no step row at all - so they can never be ref'd; a ref to them would dangle. Everything
-				// else in the branch's state comes from this step and re-mints exactly as the linear case.
-				noRef := map[string]bool{next.itemKey: true}
-				if next.forEachKey != "" {
-					noRef[next.itemKey+"Index"] = true
-					noRef[next.itemKey+"Count"] = true
-				}
-				var mintErr error
-				stepStateJSON, stepRefsJSON, mintErr = mintStateRefs(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef)
-				if mintErr != nil {
-					return errors.Trace(mintErr)
-				}
+			// faultContention returns a retryable lock-contention error (consumed on the first attempt), so the
+			// test proves Transact rolls back and re-runs the closure to a clean commit. faultTransitionCommit
+			// returns a non-retryable error, so the tx fails after the step was already marked completed and the
+			// processStep recovery defer must reset it (completed->pending) and re-dispatch. Both are scoped to
+			// the completing task and checked before the flow-row write, so a fired fault rolls back nothing.
+			if e.seams.IsFault(faultContention, taskName) {
+				return errors.New("database is locked (injected fault: " + faultContention + " " + taskName + ")")
 			}
-			nextURL := dispatchURLOf(graph, next.taskName)
-			newStepID, err := tx.InsertReturnID(ctx, "step_id",
-				"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
-					" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
-				flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, stepStateJSON, stepRefsJSON, workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID,
+			if e.seams.IsFault(faultTransitionCommit, taskName) {
+				return errors.New("injected fault: " + faultTransitionCommit + " " + taskName)
+			}
+
+			// Write-first: take the flow row's lock before any step, guarded on non-terminal status. If a
+			// concurrent Cancel/failStep terminalized this flow after the step was marked completed but before
+			// this transition committed (the Cancel-vs-transition window, and the retry after a lock-contention
+			// rollback), the guard yields zero rows and the transition becomes a clean no-op. Without it, the tx
+			// would insert pending successors into an already-terminal flow — orphan work only reaped later by the
+			// claim-time terminal-flow guard. The completed step is left as a harmless tail on the final flow.
+			// The lock-grab flips the non-indexed `touch` column, not `updated_at`: a running flow's
+			// `updated_at` now moves only on a genuine status transition, so the running band of
+			// idx_dwarf_flows_status is not churned once per step. `touch` always changes value, so
+			// RowsAffected still reflects the WHERE match (the terminal guard below) on every driver.
+			flowRes, flowErr := tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+				flowID,
 			)
-			if err != nil {
-				return errors.Trace(err)
+			if flowErr != nil {
+				return errors.Trace(flowErr)
 			}
-			txBytes.stateWritten += len(stepStateJSON)
-			newStepIDs = append(newStepIDs, int(newStepID))
-		}
-
-		if len(newStepIDs) > 0 {
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET successor_id=? WHERE step_id=?", newStepIDs[0], stepID)
-		}
-
-		if isPushTransition {
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=? WHERE step_id=?", cohortSize, stepID)
-			e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(shardNum, flowID), "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
-		}
-
-		if fanInArrivals > 0 {
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?", fanInArrivals, cohortSpawnID)
-			var arrivals, size, failures, spawnLineageID int
-			err := tx.QueryRowContext(ctx,
-				"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM dwarf_steps WHERE step_id=?",
-				cohortSpawnID,
-			).Scan(&arrivals, &size, &failures, &spawnLineageID)
-			if err != nil {
-				return errors.Trace(err)
+			if n, _ := flowRes.RowsAffected(); n == 0 {
+				return nil
 			}
-			fullyResolved := size > 0 && arrivals >= size
-			if fullyResolved && failures == 0 {
-				fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+
+			for i, next := range normalNexts {
+				stepStateJSON, stepRefsJSON := linearStateJSON, linearRefsJSON
+				if next.item != nil {
+					// A forEach branch's state is the flow state plus its element and ordinal context. The
+					// source array is NOT stripped: the engine once deleted it from each branch's local state
+					// to avoid N copies of it in every step row of every branch, but that was a byte
+					// optimization for the one field the engine happens to know the name of, while every other
+					// carried field paid the same cost unaddressed. It also made a branch's state a LIE - the
+					// branch could not see the array its own element came from - and it is what made a failed
+					// fan-out's final_state come back missing the array (a completed sibling's branch-local
+					// snapshot is the merge base there). The general mechanism that owns the cost is state refs:
+					// the array is REF'd, so the branches share one copy of it and each still sees it whole.
+					perStepState := make(map[string]any, len(childInputState)+3)
+					maps.Copy(perStepState, childInputState)
+					perStepState[next.itemKey] = next.item
+					if next.forEachKey != "" {
+						perStepState[next.itemKey+"Index"] = next.cohortIndex
+						perStepState[next.itemKey+"Count"] = next.cohortCount
+					}
+					// The injected element and its ordinal context are SYNTHESIZED per branch - their bytes are
+					// in no step row at all - so they can never be ref'd; a ref to them would dangle. Everything
+					// else in the branch's state comes from this step and re-mints exactly as the linear case.
+					noRef := map[string]bool{next.itemKey: true}
+					if next.forEachKey != "" {
+						noRef[next.itemKey+"Index"] = true
+						noRef[next.itemKey+"Count"] = true
+					}
+					var mintErr error
+					stepStateJSON, stepRefsJSON, mintErr = mintStateRefs(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef)
+					if mintErr != nil {
+						return errors.Trace(mintErr)
+					}
+				}
+				nextURL := dispatchURLOf(graph, next.taskName)
+				newStepID, err := tx.InsertReturnID(ctx, "step_id",
+					"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
+						" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+					flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, stepStateJSON, stepRefsJSON, workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID,
+				)
 				if err != nil {
 					return errors.Trace(err)
 				}
-				txBytes.stateWritten += fanInBytes.stateWritten
-				txBytes.stateRead += fanInBytes.stateRead
-				txBytes.changesRead += fanInBytes.changesRead
-				newStepIDs = append(newStepIDs, fanInStepID)
-			} else if fullyResolved && failures > 0 {
-				failFlow := spawnLineageID == 0
-				if !failFlow {
-					var pcfErr error
-					failFlow, pcfErr = e.propagateCohortFailure(ctx, tx, spawnLineageID)
-					if pcfErr != nil {
-						return errors.Trace(pcfErr)
-					}
+				txBytes.stateWritten += len(stepStateJSON)
+				newStepIDs = append(newStepIDs, int(newStepID))
+			}
+
+			if len(newStepIDs) > 0 {
+				tx.ExecContext(ctx, "UPDATE dwarf_steps SET successor_id=? WHERE step_id=?", newStepIDs[0], stepID)
+			}
+
+			if isPushTransition {
+				tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=? WHERE step_id=?", cohortSize, stepID)
+				e.logger.DebugContext(ctx, "Fan-out cohort spawned", "flow", keys.CorrelationID(shardNum, flowID), "spawnStep", stepID, "task", taskName, "cohortSize", cohortSize)
+			}
+
+			if fanInArrivals > 0 {
+				tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?", fanInArrivals, cohortSpawnID)
+				var arrivals, size, failures, spawnLineageID int
+				err := tx.QueryRowContext(ctx,
+					"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM dwarf_steps WHERE step_id=?",
+					cohortSpawnID,
+				).Scan(&arrivals, &size, &failures, &spawnLineageID)
+				if err != nil {
+					return errors.Trace(err)
 				}
-				if failFlow {
-					var sampleErr string
-					tx.QueryRowContext(ctx,
-						"SELECT error FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusFailed+"' AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
-						flowID,
-					).Scan(&sampleErr)
-					sampleErr = strings.TrimSpace(sampleErr)
-					if sampleErr == "" {
-						sampleErr = "cohort failed"
+				fullyResolved := size > 0 && arrivals >= size
+				if fullyResolved && failures == 0 {
+					fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+					if err != nil {
+						return errors.Trace(err)
 					}
-					finalStateJSON, _, cfsErr := e.computeFinalState(ctx, tx, shardNum, flowID)
-					if cfsErr != nil {
-						return errors.Trace(cfsErr)
-					}
-					tx.ExecContext(ctx,
-						"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
-						finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
-					)
-					flowFailed = true
-					// The cohort fully resolved here (this branch completed last), so every sibling has
-					// settled - nothing is stranded. If this flow is a subgraph child, deliver the failure
-					// to the parked parent caller step rather than notifying directly.
-					var parentStepID int
-					tx.QueryRowContext(ctx, "SELECT surgraph_step_id, awaited FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID, &flowFailedAwaited)
-					if parentStepID != 0 {
-						rd, derr := e.deliverFlowFailureToParent(ctx, tx, parentStepID, sampleErr)
-						if derr != nil {
-							return errors.Trace(derr)
+					txBytes.stateWritten += fanInBytes.stateWritten
+					txBytes.stateRead += fanInBytes.stateRead
+					txBytes.changesRead += fanInBytes.changesRead
+					newStepIDs = append(newStepIDs, fanInStepID)
+				} else if fullyResolved && failures > 0 {
+					failFlow := spawnLineageID == 0
+					if !failFlow {
+						var pcfErr error
+						failFlow, pcfErr = e.propagateCohortFailure(ctx, tx, spawnLineageID)
+						if pcfErr != nil {
+							return errors.Trace(pcfErr)
 						}
-						flowFailedParentStepID = parentStepID
-						flowFailedReDispatchParent = rd
+					}
+					if failFlow {
+						var sampleErr string
+						tx.QueryRowContext(ctx,
+							"SELECT error FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusFailed+"' AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
+							flowID,
+						).Scan(&sampleErr)
+						sampleErr = strings.TrimSpace(sampleErr)
+						if sampleErr == "" {
+							sampleErr = "cohort failed"
+						}
+						finalStateJSON, _, cfsErr := e.computeFinalState(ctx, tx, shardNum, flowID)
+						if cfsErr != nil {
+							return errors.Trace(cfsErr)
+						}
+						tx.ExecContext(ctx,
+							"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+							finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
+						)
+						flowFailed = true
+						// The cohort fully resolved here (this branch completed last), so every sibling has
+						// settled - nothing is stranded. If this flow is a subgraph child, deliver the failure
+						// to the parked parent caller step rather than notifying directly.
+						var parentStepID int
+						tx.QueryRowContext(ctx, "SELECT surgraph_step_id, awaited FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID, &flowFailedAwaited)
+						if parentStepID != 0 {
+							rd, derr := e.deliverFlowFailureToParent(ctx, tx, parentStepID, sampleErr)
+							if derr != nil {
+								return errors.Trace(derr)
+							}
+							flowFailedParentStepID = parentStepID
+							flowFailedReDispatchParent = rd
+						}
 					}
 				}
 			}
-		}
 
-		nextFlowStepID := 0
-		if len(newStepIDs) == 1 {
-			nextFlowStepID = newStepIDs[0]
-		}
-		if !flowFailed {
-			tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", nextFlowStepID, flowID)
-		}
-		return nil
+			nextFlowStepID := 0
+			if len(newStepIDs) == 1 {
+				nextFlowStepID = newStepIDs[0]
+			}
+			if !flowFailed {
+				tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", nextFlowStepID, flowID)
+			}
+			return nil
+		})
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, errPersistFenced), errors.Is(err, errPersistDrained):
+		return nil // a peer owns the step now; abandon it silently
+	case sequel.IsLockContentionError(err):
+		// Contention is NOT a persistence failure and must never be classified as one: terminalizing on it
+		// would kill live flows during a contention storm - exactly backwards. Transact already retried it to
+		// exhaustion; hand it to the recovery defer, which rewinds the step and re-polls.
 		return errors.Trace(err)
+	case err != nil:
+		return errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
 	}
 	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)
 	e.metricStateReadBytes(ctx, workflowURL, "state", txBytes.stateRead)

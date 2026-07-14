@@ -39,13 +39,15 @@ const metricScope = "github.com/microbus-io/dwarf"
 // engineMetrics holds the engine's OpenTelemetry instruments. The counters are incremented inline at
 // their event sites; the gauges are observable (async) and pulled by observeGauges at collection time.
 type engineMetrics struct {
-	flowsStarted    metric.Int64Counter
-	flowsTerminated metric.Int64Counter
-	stepsExecuted   metric.Int64Counter
-	stepsRecovered  metric.Int64Counter
-	stepsUnwedged   metric.Int64Counter
-	stateWriteBytes metric.Int64Counter
-	stateReadBytes  metric.Int64Counter
+	flowsStarted      metric.Int64Counter
+	flowsTerminated   metric.Int64Counter
+	stepsExecuted     metric.Int64Counter
+	stepsRecovered    metric.Int64Counter
+	stepsUnwedged     metric.Int64Counter
+	stepsWriteRetried metric.Int64Counter
+	stepsWriteFailed  metric.Int64Counter
+	stateWriteBytes   metric.Int64Counter
+	stateReadBytes    metric.Int64Counter
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
 }
@@ -78,6 +80,8 @@ func (e *Engine) initMetrics() error {
 	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps recovered by pollPendingSteps after lease expiry.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
+	m.stepsWriteRetried = ctr("dwarf_steps_write_retried", "Counts in-place retries of a step's persistence write after a non-contention database error. The task is NOT re-executed; only the write is retried. A rising count tracks database flakiness, not workflow failure.")
+	m.stepsWriteFailed = ctr("dwarf_steps_write_failed", "Counts steps terminalized because their outcome could not be persisted while the database was reachable - i.e. the payload, not the database, was the problem. A nonzero value signals a latent bug (an unstorable value, a column/packet limit, a constraint violation), like dwarf_steps_unwedged.")
 	bytesCtr := func(name, desc string) metric.Int64Counter {
 		c, err := meter.Int64Counter(name, metric.WithDescription(desc), metric.WithUnit("By"))
 		if err != nil {
@@ -351,6 +355,25 @@ func (e *Engine) metricStepsRecovered(ctx context.Context, n int) {
 		return
 	}
 	e.metrics.stepsRecovered.Add(ctx, int64(n))
+}
+
+// metricStepWriteRetried counts a retry of the WRITE, never of the task. It is the signal that the database is
+// flaky; it does not imply anything went wrong with the workflow, and a run in which it rises but
+// dwarf_steps_write_failed stays zero is one where every blip was absorbed with no re-execution.
+func (e *Engine) metricStepWriteRetried(ctx context.Context, shardNum int) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.stepsWriteRetried.Add(ctx, 1, metric.WithAttributes(attribute.Int("shard", shardNum)))
+}
+
+// metricStepWriteFailed is an alarm, not a statistic: the engine could reach the database and still could not
+// store the step's outcome, so the payload is at fault and the failure is permanent.
+func (e *Engine) metricStepWriteFailed(ctx context.Context, taskName string) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.stepsWriteFailed.Add(ctx, 1, metric.WithAttributes(attribute.String("task_name", taskName)))
 }
 
 func (e *Engine) metricStepUnwedged(ctx context.Context, parkType string) {

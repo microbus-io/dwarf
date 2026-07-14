@@ -146,8 +146,14 @@ type Engine struct {
 	workerPool      sync.WaitGroup
 	workersResident atomic.Int32 // goroutines spawned so far
 	workersInTask   atomic.Int32 // goroutines currently parked inside the host's ExecuteTask (holding no connection)
-	spawnLock       sync.Mutex
-	spawnClosed     bool // set under spawnLock before the pool is drained: no goroutine may join
+	// drainStop is closed at the top of drainRuntime, BEFORE the worker pool is waited on. It is the only
+	// signal a worker can select on to learn that a shutdown started: the lifetime ctx is deliberately not
+	// cancelled until after every worker has drained (so in-flight database work always commits), so there is
+	// nothing else to watch. Used by persist's retry loop to hand its step back immediately rather than sleep
+	// out a backoff nobody is waiting for.
+	drainStop   chan struct{}
+	spawnLock   sync.Mutex
+	spawnClosed bool // set under spawnLock before the pool is drained: no goroutine may join
 	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
 	// input, resolved at Startup. shardRTTMs is each shard's round-trip time, probed once at Startup and
 	// held so the worker ceiling can be re-derived whenever the observed replica count (and with it each
@@ -632,6 +638,7 @@ func (e *Engine) initRuntime() {
 	// (max(64, ...), so never zero) before it calls initRuntime, which is its only caller - so there is no
 	// unresolved-dispatch case to fall back from.
 	e.cache.Init(min(resident, e.workersDispatch))
+	e.drainStop = make(chan struct{})
 	e.refillTrigger = make(chan struct{}, 1)
 	e.refillStop = make(chan struct{})
 	e.wakeTimer = make(chan struct{}, 1)
@@ -730,6 +737,12 @@ func (e *Engine) maybeSpawnWorker() {
 // drainRuntime stops all goroutines in order. The caller (Shutdown) has already flipped e.started to false
 // via CompareAndSwap, which also serves as the single-shutdown guard.
 func (e *Engine) drainRuntime() {
+	// Tell the workers a shutdown started, before anything waits on them. A worker sleeping out a persistence
+	// backoff wakes here, hands its step back (fenced), and exits, rather than making the drain wait out a
+	// window nobody is watching.
+	if e.drainStop != nil {
+		close(e.drainStop)
+	}
 	// Close the pool to new workers BEFORE the WaitGroup is waited on below (an Add concurrent with a
 	// Wait panics). After this, a worker mid-loop can still finish its step; it just cannot spawn a peer.
 	e.spawnLock.Lock()

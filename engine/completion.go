@@ -661,7 +661,10 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		return false, errors.Trace(err)
 	}
 
-	errMsg := taskErr.Error()
+	// The message lands in a text column, so it is sanitized: a control byte echoed out of a driver error (a
+	// NUL, which Postgres rejects in `text` exactly as it does in `jsonb`) would kill the very write that is
+	// supposed to be the clean one, and failOnPersistError would misread that as an unreachable database.
+	errMsg := sanitizeErrorMessage(taskErr.Error())
 	failFlow := false
 	reDispatchParent := false
 	var finalStateJSON string
@@ -699,7 +702,17 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 			var err error
 			finalStateJSON, _, err = e.computeFinalState(ctx, tx, shardNum, flowID)
 			if err != nil {
-				return errors.Trace(err)
+				// A fuse that can itself be poisoned is not a fuse. failStep is the ONLY way out of a step whose
+				// outcome cannot be persisted (failOnPersistError uses it as the clean, payload-free write that
+				// tells a permanent failure from an unreachable database) - and computeFinalState is the one part
+				// of it that reads other steps' payloads. If a value that cannot be read back had already landed
+				// in a row, this merge would die the same way as the write we are failing, failStep would report
+				// an error, and the classifier would misread it as "the database is down" - leaving the step to
+				// re-execute forever, which is exactly the loop this closes. So the flow still terminalizes; it
+				// just terminalizes with an empty final_state and the error that explains why.
+				e.logger.ErrorContext(ctx, "Computing final_state while failing a step; terminalizing with empty state",
+					"flow", keys.CorrelationID(shardNum, flowID), "step", stepID, "error", err)
+				finalStateJSON = "{}"
 			}
 			tx.ExecContext(ctx,
 				"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",

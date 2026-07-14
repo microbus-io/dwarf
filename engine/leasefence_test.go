@@ -318,9 +318,16 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	eng.SetHost(proxy)
 	eng.RunInTest(t)
 
-	// The first (zombie) dispatch of A completes, its transition tx fails (one-shot fault), and the recovery
-	// defer freezes at the reset checkpoint with A `completed` under generation N.
-	eng.seams.Inject(faultTransitionCommit, "A")
+	// The first (zombie) dispatch of A completes, its transition tx fails, and the recovery defer freezes at the
+	// reset checkpoint with A `completed` under generation N.
+	//
+	// The vehicle is LOCK CONTENTION, not an arbitrary write error, and that is now the only thing it can be: a
+	// non-contention failure is retried in place and then CLASSIFIED (persist / failOnPersistError), so it never
+	// reaches this arm of the defer. Contention deliberately still does - terminalizing a flow because the
+	// database was busy would be exactly backwards - so it is what drives the completed->pending reset now.
+	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transaction gives up and
+	// hands a contention error to the defer; the fault is spent, and the peer's re-dispatch runs clean.
+	eng.seams.InjectN(8, faultContention, "A")
 	eng.seams.Break(checkpointBeforeRecoveryReset)
 
 	flowKey, err := eng.Create(ctx, "lfrr/g", nil, nil)
@@ -341,7 +348,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	// Manufacture the peer re-claim the reset fence guards against. Lease recovery resets a lost-lease step
 	// running->pending WITHOUT bumping lease_seq; here the step is `completed`, so we force the same pending
 	// state directly (the completed->pending reset a real peer can never trigger on its own). The peer's claim
-	// then bumps the generation to N+1 and, with the one-shot fault already consumed, drives A->B->END.
+	// then bumps the generation to N+1 and, with the fault already spent, drives A->B->END.
 	res, err := db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status='"+workflow.StatusPending+"', lease_expires=NOW_UTC() WHERE flow_id=? AND task_name='A' AND status='"+workflow.StatusCompleted+"'",
 		flowID)

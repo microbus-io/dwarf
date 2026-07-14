@@ -95,8 +95,10 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	reader := withManualReader(e)
 	e.RunInTest(t)
 
-	// X's transition transaction fails once after X was marked completed: the recovery defer resets X and
-	// re-dispatches it, so X runs twice, but the cohort arrival is bumped only by the successful commit.
+	// X's transition transaction fails once after X was marked completed with a non-contention error: persist
+	// retries the transaction in place, so X's task runs only ONCE and the cohort arrival is still bumped
+	// exactly once by the successful commit. (It used to run twice - the recovery defer rewound and
+	// re-dispatched the branch, re-executing the task to recover from a database blip.)
 	e.seams.Inject(faultTransitionCommit, "X")
 	fk, out := batteryRun(t, e, "fcfan/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
@@ -106,7 +108,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	assert.Equal("ran", out.State["y"])
 
 	assert.Equal(int64(1), aCalls.Load())
-	assert.Equal(int64(2), xCalls.Load()) // faulted branch re-dispatched
+	assert.Equal(int64(1), xCalls.Load()) // the WRITE was retried in place, not the branch's task
 	assert.Equal(int64(1), yCalls.Load())
 	assert.Equal(int64(1), jCalls.Load()) // fan-in fired exactly once - no double-count from the recovery re-run
 
@@ -151,13 +153,14 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 	reader := withManualReader(e)
 	e.RunInTest(t)
 
-	// X's transition (X->Y) inside the child fails once after X was marked completed: the recovery defer resets
-	// X and re-dispatches, so the child proceeds to Y->END and completes, then the parent revives.
+	// X's transition (X->Y) inside the child fails once after X was marked completed: persist retries the
+	// transaction in place, so the child proceeds to Y->END and completes without re-running X, and the parent
+	// revives. (X used to run twice, re-dispatched by the recovery defer.)
 	e.seams.Inject(faultTransitionCommit, "X")
 	_, out := batteryRun(t, e, "fcsub/parent")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
-	assert.Equal(int64(2), xCalls.Load()) // child branch re-dispatched by the recovery defer
+	assert.Equal(int64(1), xCalls.Load()) // the WRITE was retried in place, not the child's task
 	assert.Equal(int64(1), yCalls.Load())
 
 	assertFaultRecoveryClean(t, e, reader)
@@ -180,14 +183,16 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 	assert.Equal(1, *calls["b"])
 	assertFaultRecoveryClean(t, e, reader)
 
-	// A's transition fails 3 times in a row; each failure drives one recovery-defer reset + re-dispatch. A runs
-	// N+1 = 4 times; B once; the flow still completes with an identical final_state.
+	// A's transition fails 3 times in a row. persist's backoff has 3 retries, so all three failures are absorbed
+	// IN PLACE and the fourth attempt commits - A's task runs exactly ONCE and the flow still completes with an
+	// identical final_state. (It used to run 4 times: each failure drove a recovery-defer reset + re-dispatch,
+	// re-executing the task once per database blip.)
 	*calls["a"], *calls["b"] = 0, 0
 	e.seams.InjectN(3, faultTransitionCommit, "A")
 	fk, out := batteryRun(t, e, "fcrep/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal(baseFS, readFinalState(t, e, fk), "final_state diverged from the no-fault baseline")
-	assert.Equal(4, *calls["a"]) // 3 faulted attempts + 1 clean
+	assert.Equal(1, *calls["a"]) // 3 failed writes, all retried in place; the task ran once
 	assert.Equal(1, *calls["b"])
 	assertFaultRecoveryClean(t, e, reader)
 }

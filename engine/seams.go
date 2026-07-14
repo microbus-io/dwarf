@@ -44,6 +44,7 @@ const (
 	faultCompleteFlowCommit = "completeFlowCommit" // the flow-completion transaction errors
 	faultContention         = "contention"         // a dispatch transaction returns a lock-contention error
 	faultLeaseStaleWrite    = "leaseStaleWrite"    // the completion write carries a stale lease_seq (zombie)
+	faultPersistErr         = "persistErr"         // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
 	faultSubgraphSpawnErr   = "subgraphSpawnErr"   // createSubgraphFlow errors after the caller step parked
 
 	// Scoped by workflow URL of the subgraph child:
