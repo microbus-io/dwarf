@@ -104,7 +104,7 @@ without fragmentation or excessive write amplification.
 | Index | Columns | Purpose |
 |---|---|---|
 | PK | `(flow_id)` | Row lookups by flow ID |
-| `idx_dwarf_flows_status` | `(status, updated_at)` | `List` by status; the `OlderThan`/`NewerThan` age range; the orphan/wedge sweep age guards. Its running band no longer churns per step: intra-flow flow-row writes flip the non-indexed `touch` column, not `updated_at`, so a running flow's entry moves only on a genuine status transition (see the `updated_at`/`touch` catalog rows) |
+| `idx_dwarf_flows_status` | `(status, updated_at)` | **The orphan sweep** (`detectOrphanedFlows`: `status='running' AND updated_at < NOW-5m`) - a textbook range seek on this exact prefix, and the query the index is *for*. Also the `OlderThan`/`NewerThan` age range. It is **not** an index for `List` (see below), despite an earlier version of this row saying so. Its running band no longer churns per step: intra-flow flow-row writes flip the non-indexed `touch` column, not `updated_at`, so a running flow's entry moves only on a genuine status transition (see the `updated_at`/`touch` catalog rows) |
 | `idx_dwarf_flows_workflow_url` | `(workflow_url)` | `List` by workflow URL |
 | `idx_dwarf_flows_thread` | `(thread_id, flow_id)` | `Continue` (latest in thread) and `List` by thread |
 | `idx_dwarf_flows_surgraph` | `(surgraph_flow_id)`, partial `WHERE surgraph_flow_id > 0` on pgx/sqlite/mssql | Walking the subgraph chain |
@@ -121,6 +121,39 @@ without fragmentation or excessive write amplification.
 | `idx_dwarf_steps_status` | `(status, updated_at)` - partial `WHERE status IN ('pending','running')` on pgx | `pollPendingSteps` recovery and pending discovery |
 | `idx_dwarf_steps_selection` | `(status, parked, priority, fairness_key)` - partial on pgx/mssql/sqlite, full on mysql | Two-level priority+fairness candidate selection. The `parked` second column excludes parked rows without an in-memory filter |
 | `idx_dwarf_steps_saturation` | `(status, parked, task_url)` - partial as above | Per-task in-flight count for the `dwarf_task_concurrency_running` gauge. Parked rows excluded so a surgraph parent doesn't inflate the executing-slot count |
+
+### `List` gets no indexes of its own, and its `ORDER BY` is not a bug
+
+**Indexes here are earned by load-bearing hot-path queries** - candidate selection, the claim CAS, fan-in, the
+tree walks, the reaper - and each is paid for on every INSERT and every status transition of the busiest tables
+in the system. `List`/`Purge` are the opposite: an **arbitrary query surface** (status, workflow URL/name,
+thread, task name, fairness key, priority, age range, free-text search, in any combination). There is no index
+set that covers a cross-product, and adding one per filter would tax the write path to speed up an operator
+screen. So most `List` filters are deliberately unindexed (see the `fairness_key` catalog row), and that is a
+decision, not an omission.
+
+**In particular, `idx_dwarf_flows_status` cannot serve `List`'s `ORDER BY f.flow_id DESC` + `flow_id` cursor,
+and does not need to.** A review filed this as a bug and proposed adding `(status, flow_id)`. Measured on
+Postgres (500k flows: 499,600 `completed`, 400 `failed`), the two plans the planner actually picks are
+self-balancing:
+
+| `List` call | Plan | Cost |
+|---|---|---|
+| no status filter | backward PK scan | 6 buffers |
+| `Status: completed` (common) | backward PK scan, `Rows Removed by Filter: 1` | 6 buffers |
+| `Status: failed` (rare) | index seek -> 400-row band -> top-N heapsort | 404 buffers |
+
+A **rare** status has a small band, so sorting it is cheap. A **common** status makes the backward PK scan
+optimal - it finds the first 100 matches in ~101 rows, and is **~67x cheaper** than the index path would be. The
+planner *chooses* the PK scan there; it is not "falling back," and the cursor is not "the only thing saving it"
+(the review's claim). Cost is bounded by `min(band, ~limit/selectivity)`; the only genuinely expensive case is a
+status band that is large in absolute terms (e.g. 100k `interrupted`), on a cold operator path.
+
+**And do NOT "fix" it by dropping the `ORDER BY`.** It is what makes the cursor correct: pagination is keyset
+(`flow_id < cursor`, cursor = the smallest `flow_id` returned). Unordered, page 1 returns an arbitrary subset
+and page 2 asks for `flow_id < min(page 1)` - so every match above that id which page 1 did not happen to return
+is **silently never shown**. `flow_id` is the cursor precisely because it is immutable; `updated_at` moves on
+every status transition, so keyset-paginating in the index's own order would shuffle rows between pages.
 
 ### Status predicates are inlined literals, not bound parameters
 
