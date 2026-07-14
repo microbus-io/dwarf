@@ -151,24 +151,24 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// pending row and succeeds - delivering an empty resume payload to the task. Claiming first, then
 		// reading only on a successful claim, guarantees the read's snapshot is after the claim commit (and
 		// thus after the pending-setter's commit). A lost claim skips the read entirely (n==0 returns below).
-		res, e := db.ExecContext(ctx,
+		res, claimErr := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
 		)
-		if e != nil {
-			err = e
+		if claimErr != nil {
+			err = claimErr
 			break
 		}
 		n, _ = res.RowsAffected()
 		if n == 1 {
-			e = db.QueryRowContext(ctx,
+			readErr := db.QueryRowContext(ctx,
 				"SELECT step_depth, task_name, step_token, state, changes, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq FROM dwarf_steps WHERE step_id=?",
 				stepID,
 			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
-			if e != nil && e != sql.ErrNoRows {
-				err = e
+			if readErr != nil && readErr != sql.ErrNoRows {
+				err = readErr
 			}
 		}
 	}
