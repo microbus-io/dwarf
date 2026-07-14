@@ -158,6 +158,35 @@ func effectiveVirtualCPUs(declared int) int {
 	return defaultVirtualCPUs
 }
 
+// startupPoolCap bounds every shard's pool until the replica count is known.
+//
+// At Startup, peer discovery has not run: observedReplicas() is 1, so the derived pool is the FULL per-database
+// budget. A fleet cold-starting together - a restart, a scale-out, a post-outage recovery with a backlog waiting -
+// therefore has EVERY replica sized for the whole knee at once. Eight replicas on an 8-vCPU shard would each cap at
+// 48 (384 against a server whose knee is 48, and whose Postgres default max_connections is 100). Under-connecting
+// costs throughput but stays healthy; over-connecting COLLAPSES the database - so the unknown must be resolved in
+// the conservative direction, exactly as it is for an undeclared VirtualCPUs.
+//
+// And it IS the same unknown, which is why the number is the same: connsPerVCPU * defaultVirtualCPUs is the pool
+// the engine already trusts when it does not know a shard's vCPUs, and which measured under the knee even on the
+// 1-vCPU tier. Until R is known, size every shard as if it were the default, undeclared shard. (It is a CAP, and
+// pools fill lazily, so a replica in its first seconds - not yet at full throttle - opens far fewer than this.)
+//
+// A shard whose derived pool is already smaller than the cap keeps its smaller pool: the cap only ever lowers.
+const startupPoolCap = connsPerVCPU * defaultVirtualCPUs
+
+// startupPoolGrace is how long the cap holds before the derived sizes are taken.
+//
+// It must be a WINDOW, not an event. There is no signal that says "R is now known": a solo replica hears nothing at
+// all (a host does not echo a hello back to its sender), and in a fleet the replies trickle in at different
+// latencies - so the FIRST reply says R=2 when the truth may be 8, and sizing on it would over-connect fourfold.
+// Peers keep registering throughout the window; recomputePools simply does not act on a partial count until it
+// closes. Convergence is one round trip (hello draws an immediate ping), so this is orders of magnitude of margin.
+//
+// A `var` so a test can disable it (0 = take the derived sizes at once), the same reason awaitPollInterval and
+// persistBackoff are.
+var startupPoolGrace = 2 * time.Second
+
 // slowPoolPushDelay is how long the faultSlowPoolPush seam stalls a recompute between reading R and pushing
 // the derived sizes. Test-only (the fault is inert in production); a var so it stays adjustable.
 var slowPoolPushDelay = 200 * time.Millisecond
@@ -177,6 +206,15 @@ func (e *Engine) recomputePools() {
 	e.poolsLock.Lock()
 	defer e.poolsLock.Unlock()
 	if !e.started.Load() || e.maxOpenConns.Load() != 0 {
+		return
+	}
+	// Do not act on a PARTIAL replica count. Peer replies arrive at different latencies, so mid-window the count
+	// is climbing (1 -> 2 -> ... -> R) and pushing derived sizes on the first reply would size the pool for R=2
+	// when the truth is 8 - a fourfold over-connect, the very failure the startup cap exists to prevent. Peers
+	// still register; the pools simply stay capped until the window closes and one recompute runs on the count we
+	// actually converged on. Placed BEFORE the lastAppliedR swap, so a mid-window signal does not consume the
+	// dedupe and cause the real recompute to be skipped.
+	if !e.poolGraceDone.Load() {
 		return
 	}
 	replicas := e.observedReplicas()

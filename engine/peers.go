@@ -198,10 +198,33 @@ func (e *Engine) observedReplicas() int {
 func (e *Engine) runPeersLoop() {
 	ticker := time.NewTicker(e.pingInterval)
 	defer ticker.Stop()
+	// The peer-discovery window closes on a TIMER, not on a signal, and it lives here because this loop already
+	// owns peer state and is already drained by peersLoop.Wait().
+	//
+	// It cannot be a timestamp consulted lazily, because nothing would consult it: a SOLO replica receives no peer
+	// signals at all (a host does not echo a hello back to its sender), and it is exactly the replica that must
+	// eventually take its full budget. Something has to fire on its own.
+	//
+	// Nor can it be the first reply. Replies land at different latencies, so mid-window the count is still climbing
+	// (1 -> 2 -> ... -> R): sizing on the first one would pick R=2 when the truth may be 8, over-connecting
+	// fourfold - the very failure the startup cap prevents. Peers register throughout; the pools stay capped until
+	// the window closes, and then ONE recompute runs on the count we converged on.
+	// A nil channel blocks forever in a select, so when there is nothing to wait for (an explicit
+	// SetMaxOpenConns pins the pools, or a test disabled the window) no timer is armed at all.
+	var graceC <-chan time.Time
+	if !e.poolGraceDone.Load() {
+		grace := time.NewTimer(startupPoolGrace)
+		defer grace.Stop()
+		graceC = grace.C
+	}
 	for {
 		select {
 		case <-e.peersStop:
 			return
+		case <-graceC:
+			e.poolGraceDone.Store(true)
+			e.recomputePools()
+			continue
 		case <-ticker.C:
 		}
 		e.emitSignal(e.lifetimeCtx, signalOpPing, peerPayload{Origin: e.instanceID})

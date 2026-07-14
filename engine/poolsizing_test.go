@@ -37,6 +37,17 @@ import (
 // 1-vCPU tier) the resulting pool of 12 still sits under the measured knee (that tier peaked at M=16
 // and only collapsed from M=32). The derived budgets are per database, so the observed replica count
 // splits them; the override is a per-replica exact number and is never divided.
+// noPoolGrace takes the derived pool sizes immediately, skipping the peer-discovery window. Every test below that
+// reasons about DERIVED pools needs it: in production the pools are capped (startupPoolCap) until the window closes,
+// precisely so a cold-starting fleet cannot each open the whole per-database budget at once. The window itself is
+// pinned by TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown.
+func noPoolGrace(t *testing.T) {
+	t.Helper()
+	saved := startupPoolGrace
+	startupPoolGrace = 0
+	t.Cleanup(func() { startupPoolGrace = saved })
+}
+
 func TestPoolSizing_ShardPool(t *testing.T) {
 	assert := testarossa.For(t)
 
@@ -72,6 +83,7 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 // ping); a second peer shrinks it further; a goodbye regrows it; and the SetMaxOpenConns override,
 // once set, is never divided by fleet changes.
 func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
+	noPoolGrace(t)
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -125,6 +137,7 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 // TestPoolSizing_PeerExpiry pins the crashed-peer path: a peer that stops pinging (its goodbye never
 // comes) is pruned by the heartbeat loop after ~3 ping intervals, and the derived pool regrows.
 func TestPoolSizing_PeerExpiry(t *testing.T) {
+	noPoolGrace(t)
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -203,6 +216,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 // the only one that can re-derive it, because recomputePools (the fleet-change path) early-returns while
 // an override pins the pools.
 func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
+	noPoolGrace(t)
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -330,6 +344,7 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 // The interleaving is forced, not raced: a breakpoint freezes the first recompute in exactly that window.
 // With the lock, the second recompute blocks on it and applies AFTER - which is the fix working.
 func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
+	noPoolGrace(t)
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -383,6 +398,7 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 // the override applies last, or the recompute early-returns because the override is already set. Either way
 // the pin stands.
 func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
+	noPoolGrace(t)
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -542,6 +558,7 @@ func TestPoolSizing_WorkerCeiling(t *testing.T) {
 // cache stay sized by the connection budget (8x conns, floor 64), because a worker parked in a long
 // ExecuteTask holds no connection and must not inflate the refill scan.
 func TestPoolSizing_DerivedWorkers(t *testing.T) {
+	noPoolGrace(t)
 	assert := testarossa.For(t)
 
 	// Zero-config: one default shard (undeclared CPUs -> the assumed 2-vCPU pool of 12). The max is the
@@ -599,6 +616,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 // Severity is nil at R=1 - where the two numbers agree by construction - which is why this escaped every test and
 // every single-replica deployment.
 func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
+	noPoolGrace(t)
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -628,4 +646,92 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	}
 	assert.Equal(1, e.observedReplicas())
 	assert.Equal(solo, e.cache.Capacity(), "the cache follows the pool back up when the fleet shrinks")
+}
+
+// TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown pins the peer-discovery window.
+//
+// At Startup the replica count is NOT known: peer discovery has not run, so observedReplicas() is 1 and the
+// derivation would hand every replica of a cold-starting fleet the WHOLE per-database budget at once. Eight
+// replicas on an 8-vCPU shard would each open up to 48 - 384 against a server whose knee is 48, and whose
+// Postgres default max_connections is 100. Under-connecting costs throughput but stays healthy; over-connecting
+// COLLAPSES the database, so the unknown is resolved conservatively - the same asymmetry that governs an
+// undeclared VirtualCPUs, and the same number: startupPoolCap IS the default (undeclared) shard's pool.
+//
+// The window must close on a TIMER. There is no signal that says "R is known": a solo replica hears nothing back
+// (a host does not echo a hello to its sender), and in a fleet the replies land at different latencies, so the
+// FIRST one says R=2 when the truth may be 8. Peers register throughout; the pools stay capped until the window
+// closes and one recompute runs on the count actually converged on.
+func TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	saved := startupPoolGrace
+	startupPoolGrace = 300 * time.Millisecond
+	t.Cleanup(func() { startupPoolGrace = saved })
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derives 48 at R=1
+	e.RunInTest(t)
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+
+	// Inside the window: capped, NOT the derived 48. This is the whole point - a fleet starting together must not
+	// each open the full budget before they have found each other.
+	assert.Equal(startupPoolCap, db.DB.Stats().MaxOpenConnections, "the pool is capped until the replica count is known")
+
+	// A peer says hello mid-window. It registers - but it must NOT push the derived sizes: acting on a partial
+	// count would size for R=2 when the truth may be 8, over-connecting fourfold. The cap holds.
+	b, _ := json.Marshal(peerPayload{Origin: "peer-1"})
+	assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
+	assert.Equal(2, e.observedReplicas(), "the peer is registered even though the pools do not move")
+	assert.Equal(startupPoolCap, db.DB.Stats().MaxOpenConnections, "a partial replica count must not size the pool")
+
+	// The window closes: ONE recompute, on the count converged on (R=2, so 48/2 = 24).
+	deadline := time.Now().Add(5 * time.Second)
+	for db.DB.Stats().MaxOpenConnections == startupPoolCap && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "the derived size is taken once the window closes")
+}
+
+// TestPoolSizing_StartupCapNeverRaisesASmallPool pins that the cap only ever LOWERS. A shard whose derived pool is
+// already smaller than the cap keeps its own smaller pool - the cap is a ceiling for the unknown, not a floor.
+func TestPoolSizing_StartupCapNeverRaisesASmallPool(t *testing.T) {
+	assert := testarossa.For(t)
+
+	saved := startupPoolGrace
+	startupPoolGrace = time.Hour // hold the window open for the whole test
+	t.Cleanup(func() { startupPoolGrace = saved })
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 1})) // derives 6, which is below the cap
+	e.RunInTest(t)
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	assert.Equal(connsPerVCPU, db.DB.Stats().MaxOpenConnections, "a shard smaller than the cap keeps its own pool")
+	assert.True(connsPerVCPU < startupPoolCap)
+}
+
+// TestPoolSizing_StartupCapBypassedByOverride pins that SetMaxOpenConns - the expert / external-pooler path -
+// pins the pool exactly and is not second-guessed by the discovery window.
+func TestPoolSizing_StartupCapBypassedByOverride(t *testing.T) {
+	assert := testarossa.For(t)
+
+	saved := startupPoolGrace
+	startupPoolGrace = time.Hour
+	t.Cleanup(func() { startupPoolGrace = saved })
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.SetMaxOpenConns(40)) // above the cap, and deliberate
+	e.RunInTest(t)
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	assert.Equal(40, db.DB.Stats().MaxOpenConnections, "an explicit override is never capped")
 }

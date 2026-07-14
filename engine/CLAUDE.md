@@ -1431,6 +1431,39 @@ engine policy — below.
   connections only queue inside the database - and on small servers actively collapse throughput
   (745 -> 212 steps/s at 1 vCPU between M=16 and M=96), which is why the budget is a hard cap, not an
   optimization.
+- **Until R is known, every pool is CAPPED (`startupPoolCap`, and R is not known at Startup).** Peer discovery has
+  not run when `Startup` sizes the pools, so `observedReplicas()` is 1 and the derivation would hand every replica
+  of a **cold-starting fleet** the whole per-database budget at once - eight replicas on an 8-vCPU shard each
+  opening up to 48, i.e. 384 against a server whose knee is 48 and whose Postgres default `max_connections` is 100.
+  That is the *dangerous* direction of the asymmetry this whole section turns on (under-connecting costs throughput
+  but stays healthy; over-connecting collapses the database), so the unknown is resolved conservatively.
+
+  **The cap is the same number as the undeclared-vCPU default, and that is the point, not a coincidence**:
+  `connsPerVCPU x defaultVirtualCPUs` (12) is the pool the engine already trusts when it does not know a shard's
+  vCPUs and which measured under the knee even on the 1-vCPU tier. *Until R is known, size every shard as if it
+  were the default, undeclared shard.* It only ever **lowers** - a shard whose derived pool is already smaller keeps
+  it - and an explicit `SetMaxOpenConns` (the expert path) bypasses it entirely. It is a cap on a pool that fills
+  lazily, so a replica in its first seconds opens far fewer than this.
+
+  **The window closes on a TIMER (`startupPoolGrace`, 2s), never on a signal**, and both halves of that matter:
+  - *Not on the first reply.* Replies land at different latencies, so mid-window the count is still climbing
+    (1 -> 2 -> ... -> R). Sizing on the first one picks **R=2 when the truth may be 8** - a fourfold over-connect,
+    the very failure the cap prevents. Peers keep registering; `recomputePools` simply declines to act on a partial
+    count (the check sits **before** the `lastAppliedR` swap, so a mid-window signal cannot consume the dedupe and
+    make the real recompute a no-op).
+  - *Not a lazily-consulted timestamp.* Nothing would consult it: a **solo** replica receives no peer signals at all
+    (a host does not echo a hello back to its sender), and it is exactly the replica that must eventually take its
+    full budget. Something has to fire on its own.
+
+  The timer lives in `runPeersLoop`'s `select` - which already owns peer state, already calls `recomputePools`, and
+  is already drained - so it needs no separate goroutine, field, or shutdown hook. Pinned by
+  `TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown` (a peer says hello mid-window and the pool does **not**
+  move), plus the never-raises and override-bypass cases.
+
+  This does **not** rescue a host that leaves `SignalPeers` a no-op on a multi-replica deployment: R stays 1, the
+  window closes, and the full budget is taken. Implementing `SignalPeers` is a hard requirement for multi-replica
+  hosts, not something the engine defends against.
+
 - **The derived budget is per DATABASE, so the observed replica count R splits it**: each replica
   takes `max(2, open/R)`. The knee belongs to the shard's server, not to one replica - R replicas
   each holding the full budget overshoot it R times over. R is never declared: the engine observes

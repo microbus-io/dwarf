@@ -151,9 +151,12 @@ type Engine struct {
 	// cancelled until after every worker has drained (so in-flight database work always commits), so there is
 	// nothing else to watch. Used by persist's retry loop to hand its step back immediately rather than sleep
 	// out a backoff nobody is waiting for.
-	drainStop   chan struct{}
-	spawnLock   sync.Mutex
-	spawnClosed bool // set under spawnLock before the pool is drained: no goroutine may join
+	// poolGraceDone is false until the peer-discovery window closes (runPeersLoop owns the timer). While false,
+	// recomputePools declines to act on a partial replica count and every pool stays at startupPoolCap.
+	poolGraceDone atomic.Bool
+	drainStop     chan struct{}
+	spawnLock     sync.Mutex
+	spawnClosed   bool // set under spawnLock before the pool is drained: no goroutine may join
 	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
 	// input, resolved at Startup. shardRTTMs is each shard's round-trip time, probed once at Startup and
 	// held so the worker ceiling can be re-derived whenever the observed replica count (and with it each
@@ -494,18 +497,34 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools), split across the
 	// observed replicas. At Startup only this replica is known (R=1, full budget); the hello broadcast
 	// at the end of Startup discovers peers within ~a heartbeat and recomputePools shrinks the shares.
+	//
+	// But R IS NOT KNOWN YET - peer discovery has not run, so observedReplicas() is 1 and the derivation would hand
+	// every replica of a cold-starting fleet the WHOLE per-database budget at once. So each pool is CAPPED
+	// (startupPoolCap) until the discovery window closes, and only then are the derived sizes taken. The cap only
+	// ever lowers: a shard whose derived pool is already smaller keeps it. An explicit SetMaxOpenConns is the expert
+	// path and bypasses the cap entirely.
 	override := int(e.maxOpenConns.Load())
 	replicas := e.observedReplicas()
+	capped := override == 0 && startupPoolGrace > 0
+	e.poolGraceDone.Store(!capped)
+	sized := func(spec ShardSpec) (idle, open int) {
+		idle, open = shardPool(spec, override, replicas)
+		if capped && open > startupPoolCap {
+			open = startupPoolCap
+			idle = max(2, open/2)
+		}
+		return idle, open
+	}
 	e.shardsLock.Lock()
 	shards := make(map[int]database.ShardConfig, len(e.shardSpecs))
 	for idx, spec := range e.shardSpecs {
-		idle, open := shardPool(spec, override, replicas)
+		idle, open := sized(spec)
 		shards[idx] = database.ShardConfig{DSN: spec.DSN, MaxIdleConns: idle, MaxOpenConns: open}
 	}
 	e.shardsLock.Unlock()
 	if len(shards) == 0 {
 		// No shard registered: the single default shard, sized by the same rule (no spec = defaults).
-		idle, open := shardPool(ShardSpec{}, override, replicas)
+		idle, open := sized(ShardSpec{})
 		shards[1] = database.ShardConfig{MaxIdleConns: idle, MaxOpenConns: open}
 	}
 	// The RESIDENT worker set (and, with it, the candidate cache and every refill scan) is sized from
