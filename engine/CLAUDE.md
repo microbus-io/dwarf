@@ -650,16 +650,34 @@ useful for a forEach over a very large array where downstream tasks only care ab
 **Fan-in strip on dynamic fan-out.** The injected per-branch bookkeeping (`<as>`, `<as>Index`, `<as>Count`) has no
 meaning once the cohort is behind the flow: with the Replace reducer, one branch's element value and index would
 otherwise win arbitrarily and ride forward - the flow's state would say which element it saw by *completion order*.
-So `stripForEachBookkeeping` (`completion.go`) deletes those three names, walking the graph's `forEach` transitions
-to recover them (`tr.As`; static fan-outs have no `as`). A workflow wanting the element value past the fan-in must
-forward it under a different key. **Two paths call it and both must**, or they disagree on what a fan-out's state
-means:
+So `stripForEachBookkeeping` (`completion.go`) deletes those three names. A workflow wanting the element value past
+the fan-in must forward it under a different key. **Two paths call it and both must**, or they disagree on what a
+fan-out's state means:
 
-- `insertFanInStep` - the cohort **converged**; the merged fan-in snapshot is stripped.
+- `insertFanInStep` - the cohort **converged**; the merged fan-in snapshot is stripped, scoped to the **spawn's own
+  task** (`tr.From == spawnTaskName`).
 - `computeFinalState` - the cohort **failed** and so never reached its fan-in. The terminal state is the merge of
   the tail steps, and a completed sibling of a failed cohort *is* a tail (its `successor_id` was never pointed at a
   fan-in that never fired), so the merge base is a branch-local snapshot carrying that branch's bookkeeping. Without
-  the strip, a failed fan-out's `final_state` reports an arbitrary branch's element as the flow's own.
+  the strip, a failed fan-out's `final_state` reports an arbitrary branch's element as the flow's own. The cohorts
+  to strip are read from **the merge base tail's own lineage chain** (`cohortSpawnTasks` walks `lineage_id` upward,
+  one PK lookup per nesting level), never from the graph at large.
+
+**The strip is scoped to the cohort being closed, and BOTH halves of that scoping are load-bearing.** Stripping
+"every `forEach` in the graph" - which it briefly did - broke two things at once:
+
+- **Name collision (silent data loss).** It made the three injected names of *every* `as` globally reserved. A graph
+  with `forEach … as "page"` reserved `pageCount` for the whole workflow, so a task writing its own `pageCount` -
+  even one downstream of the fan-in, outside the cohort entirely - had it deleted from `final_state` while `History`
+  still showed the step had written it. The author was never told the name was reserved. Scoping by the merge base's
+  *lineage* fixes it: a tail outside any cohort (the ordinary completed flow, whose terminal step is downstream of
+  every fan-in) is inside no cohort and strips **nothing**.
+- **Nesting.** At an *inner* fan-in it also deleted the *outer* cohort's bookkeeping, so a step converging out of the
+  inner cohort - still inside the outer branch - could no longer see which outer element it was working on. Scoping
+  by `tr.From == spawnTaskName` fixes it: each cohort's names die at its **own** fan-in and no earlier.
+
+The names are reserved only *within* their own cohort. Pinned by `engine/foreachstrip_test.go` (collision, nesting,
+and the failed-fan-out case the strip exists for), each verified to fail against the unscoped version.
 
 **Fan-in** is implicit. When the last sibling at a cohort completes, the engine merges all siblings' changes using
 reducers and creates the next step(s) in a transaction that prevents duplicate next steps when multiple workers

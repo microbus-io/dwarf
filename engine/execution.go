@@ -1109,12 +1109,12 @@ type stateByteCount struct {
 // moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot), which
 // the caller emits after its transaction commits.
 func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardNum, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, workflowURL string, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, stateByteCount, error) {
-	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON string
+	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON, spawnTaskName string
 	var spawnLineageID int
 	tx.QueryRowContext(ctx,
-		"SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE step_id=?",
+		"SELECT state, changes, state_refs, lineage_id, task_name FROM dwarf_steps WHERE step_id=?",
 		cohortSpawnID,
-	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON, &spawnLineageID)
+	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON, &spawnLineageID, &spawnTaskName)
 	bytes := stateByteCount{stateRead: len(spawnStateJSON), changesRead: len(spawnChangesJSON)}
 	var spawnState, spawnChanges map[string]any
 	unmarshalJSONMap(spawnStateJSON, &spawnState)
@@ -1187,10 +1187,12 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// deepest path the flow took. nextStepDepth (last-completer+1) is the floor for the defensive empty case.
 	fanInDepth := max(maxCohortDepth+1, nextStepDepth)
 
-	// Drop per-branch forEach bookkeeping. The same strip runs in computeFinalState for a fan-out that
-	// FAILED (and so never reached this convergence), so the two paths agree on what a fan-out's state
-	// means once the cohort is behind it - see stripForEachBookkeeping.
-	stripForEachBookkeeping(merged, graph)
+	// Drop the per-branch forEach bookkeeping of THIS cohort - the one spawnTaskName fanned out - and of no
+	// other. An outer cohort's bookkeeping must survive an inner fan-in: a step converging out of the inner
+	// cohort is still inside the outer branch and must still see which element that branch is working on. The
+	// same scoped strip runs in computeFinalState for a fan-out that FAILED (and so never reached this
+	// convergence), so the two paths agree on what a fan-out's state means once its cohort is behind it.
+	stripForEachBookkeeping(merged, graph, strings.TrimSpace(spawnTaskName))
 
 	// Mint against the SPAWN step, not this one: a field the cohort merely carried has its bytes in the spawn's
 	// row (its `state` if the spawn received it - e.g. the entry step holding the flow's initial input - or its

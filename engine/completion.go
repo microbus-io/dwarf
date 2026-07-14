@@ -87,89 +87,94 @@ func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowI
 }
 
 // mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail.
-func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, reducers map[string]workflow.Reducer, workflowURL string) (map[string]any, error) {
-	merge := func(query string, args ...any) (map[string]any, bool, error) {
+// It also returns the merge base tail's lineage_id, so the caller can strip exactly the forEach bookkeeping of
+// the cohorts that tail is inside - and nothing else.
+func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, reducers map[string]workflow.Reducer, workflowURL string) (map[string]any, int, error) {
+	merge := func(query string, args ...any) (map[string]any, int, bool, error) {
 		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
-			return nil, false, errors.Trace(err)
+			return nil, 0, false, errors.Trace(err)
 		}
 		defer rows.Close()
 
 		var baseState map[string]any
 		var baseRefs stateRefs
+		baseLineage := 0
 		var allChanges []map[string]any
 		found := false
 		for rows.Next() {
 			found = true
 			var stateJSON, changesJSON, refsJSON string
-			err := rows.Scan(&stateJSON, &changesJSON, &refsJSON)
+			var lineageID int
+			err := rows.Scan(&stateJSON, &changesJSON, &refsJSON, &lineageID)
 			if err != nil {
-				return nil, false, errors.Trace(err)
+				return nil, 0, false, errors.Trace(err)
 			}
 			if baseState == nil {
 				err := json.Unmarshal([]byte(stateJSON), &baseState)
 				if err != nil {
-					return nil, false, errors.Trace(err)
+					return nil, 0, false, errors.Trace(err)
 				}
 				baseRefs = parseStateRefs(refsJSON)
+				baseLineage = lineageID
 			}
 			var changes map[string]any
 			err = json.Unmarshal([]byte(changesJSON), &changes)
 			if err != nil {
-				return nil, false, errors.Trace(err)
+				return nil, 0, false, errors.Trace(err)
 			}
 			allChanges = append(allChanges, changes)
 		}
 		err = rows.Err()
 		if err != nil {
-			return nil, false, errors.Trace(err)
+			return nil, 0, false, errors.Trace(err)
 		}
 		if !found {
-			return nil, false, nil
+			return nil, 0, false, nil
 		}
 		// FLATTEN: final_state is a flow-boundary value (a dwarf_flows column that Continue feeds into the next
 		// turn, and that outlives this flow's steps - DeleteOnCompletion may reap them). A ref that escaped the
 		// flow would dangle, so the terminal merge always materializes, whatever it costs on this one row.
 		// It is not a regression either: a large field surviving to the end is copied into final_state today.
 		if err := e.resolveStateRefs(ctx, db, shardNum, baseState, baseRefs, nil, workflowURL); err != nil {
-			return nil, false, errors.Trace(err)
+			return nil, 0, false, errors.Trace(err)
 		}
 
 		merged := baseState
 		for _, changes := range allChanges {
 			merged, err = workflow.MergeState(merged, changes, reducers)
 			if err != nil {
-				return nil, false, errors.Trace(err)
+				return nil, 0, false, errors.Trace(err)
 			}
 		}
 		if merged == nil {
 			merged = map[string]any{}
 		}
-		return merged, true, nil
+		return merged, baseLineage, true, nil
 	}
 
-	merged, found, err := merge(
-		"SELECT state, changes, state_refs FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='"+workflow.StatusCompleted+"' ORDER BY step_id",
+	merged, lineage, found, err := merge(
+		"SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 AND status='"+workflow.StatusCompleted+"' ORDER BY step_id",
 		flowID,
 	)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, 0, errors.Trace(err)
 	}
 	if found {
-		return merged, nil
+		return merged, lineage, nil
 	}
 
-	merged, found, err = merge(
-		"SELECT state, changes, state_refs FROM dwarf_steps WHERE flow_id=? AND successor_id=0 ORDER BY step_id",
+	merged, lineage, found, err = merge(
+		"SELECT state, changes, state_refs, lineage_id FROM dwarf_steps WHERE flow_id=? AND successor_id=0 ORDER BY step_id",
 		flowID,
 	)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, 0, errors.Trace(err)
 	}
 	if found {
-		return merged, nil
+		return merged, lineage, nil
 	}
-	return map[string]any{}, nil
+	return map[string]any{}, 0, nil
 }
 
 // computeFinalState computes the merged state for a flow.
@@ -188,21 +193,33 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 		return "", "", errors.Trace(err)
 	}
 
-	merged, err := e.mergeTerminalSteps(ctx, db, shardNum, flowID, graph.Reducers(), workflowURL)
+	merged, baseLineageID, err := e.mergeTerminalSteps(ctx, db, shardNum, flowID, graph.Reducers(), workflowURL)
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
 
-	// Drop per-branch forEach bookkeeping, exactly as insertFanInStep does when a cohort converges.
+	// Drop per-branch forEach bookkeeping, exactly as insertFanInStep does when a cohort converges - and, like
+	// it, only for the cohorts the merge base is actually INSIDE.
 	//
-	// A FAILED fan-out is the case that needs it: the merge base is the first tail row, and a completed
-	// sibling that transitioned toward a fan-in that never fired keeps successor_id=0 - so it IS a tail,
-	// and its `state` is a BRANCH-LOCAL snapshot carrying the element it was handed (`<as>`) and its
-	// ordinal context (`<as>Index`/`<as>Count`). Left in, whichever branch happens to have the lowest
-	// step_id donates its private bookkeeping to the flow's final_state, and with 3+ branches which one
-	// wins is arbitrary. The successful path already deletes these keys at the fan-in; the failed path
-	// must agree, or a fan-out's final state means two different things depending on how it ended.
-	stripForEachBookkeeping(merged, &graph)
+	// A FAILED fan-out is the case that needs it: the merge base is the first tail row, and a completed sibling
+	// that transitioned toward a fan-in that never fired keeps successor_id=0 - so it IS a tail, and its `state`
+	// is a BRANCH-LOCAL snapshot carrying the element it was handed (`<as>`) and its ordinal context
+	// (`<as>Index`/`<as>Count`). Left in, whichever branch happens to have the lowest step_id donates its
+	// private bookkeeping to the flow's final_state, and with 3+ branches which one wins is arbitrary.
+	//
+	// The cohorts to strip are read from the tail's OWN lineage chain, never from "every forEach in the graph":
+	// a tail that is not in a cohort (the ordinary completed flow, whose terminal step is downstream of every
+	// fan-in) is inside no cohort and must be stripped of NOTHING. Stripping by graph made the three injected
+	// names of every forEach globally reserved and silently deleted a same-named field a task legitimately
+	// wrote - a `forEach ... as "page"` reserved `pageCount` for the whole workflow, so a task writing its own
+	// `pageCount` saw it vanish from final_state while History still showed it.
+	spawns, err := e.cohortSpawnTasks(ctx, db, baseLineageID)
+	if err != nil {
+		return "", "", errors.Trace(err)
+	}
+	for _, spawnTask := range spawns {
+		stripForEachBookkeeping(merged, &graph, spawnTask)
+	}
 
 	data, err := json.Marshal(merged)
 	if err != nil {
@@ -211,18 +228,52 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 	return string(data), workflowURL, nil
 }
 
-// stripForEachBookkeeping deletes the per-branch fields the engine injects into a forEach branch's state -
-// the element (`<as>`) and its ordinal context (`<as>Index`, `<as>Count`) - from a materialized state map.
-// They are a branch's private context and have no meaning once the cohort is behind the flow: with the
-// Replace reducer one arbitrary branch's element would otherwise ride forward. Applied at both places a
-// cohort's state leaves the cohort: insertFanInStep (the convergence) and computeFinalState (a fan-out that
-// never converged). A workflow wanting the element past the fan-in forwards it under a different key.
-func stripForEachBookkeeping(state map[string]any, graph *workflow.Graph) {
-	if len(state) == 0 {
+// cohortSpawnTasks walks a step's lineage chain upward and returns the task name of every fan-out spawn whose
+// cohort the step is inside - innermost first. `lineage_id` names the spawn step of the cohort a step belongs
+// to (0 outside any cohort), and a spawn is itself a step with its own lineage, so nested fan-outs form a
+// chain. Each level costs one primary-key lookup and the chain is as deep as the graph's fan-out nesting
+// (typically zero or one), on a terminal path.
+func (e *Engine) cohortSpawnTasks(ctx context.Context, db sequel.Executor, lineageID int) ([]string, error) {
+	var tasks []string
+	seen := map[int]bool{}
+	for lineageID != 0 && !seen[lineageID] {
+		seen[lineageID] = true // a malformed chain must not spin
+		var taskName string
+		var next int
+		err := db.QueryRowContext(ctx,
+			"SELECT task_name, lineage_id FROM dwarf_steps WHERE step_id=?", lineageID,
+		).Scan(&taskName, &next)
+		if err == sql.ErrNoRows {
+			return tasks, nil
+		}
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		tasks = append(tasks, strings.TrimSpace(taskName))
+		lineageID = next
+	}
+	return tasks, nil
+}
+
+// stripForEachBookkeeping deletes the per-branch fields the engine injects into a forEach branch's state - the
+// element (`<as>`) and its ordinal context (`<as>Index`, `<as>Count`) - from a materialized state map, for the
+// ONE cohort spawned by spawnTask. They are a branch's private context and have no meaning once that cohort is
+// behind the flow: with the Replace reducer one arbitrary branch's element would otherwise ride forward.
+//
+// Scoping to the spawning task is load-bearing in both directions. Stripping every forEach in the graph (a) made
+// the three names of every `as` globally reserved, silently deleting a same-named field a task wrote, and (b)
+// broke nesting: at an INNER fan-in it also deleted the OUTER cohort's bookkeeping, so a step still inside the
+// outer branch could no longer see which element it was working on. The names are reserved only WITHIN their own
+// cohort; a workflow wanting the element past that cohort's fan-in forwards it under a different key.
+//
+// Applied at both places a cohort's state leaves the cohort: insertFanInStep (the convergence) and
+// computeFinalState (a fan-out that never converged), so the two cannot drift on what a fan-out's state means.
+func stripForEachBookkeeping(state map[string]any, graph *workflow.Graph, spawnTask string) {
+	if len(state) == 0 || spawnTask == "" {
 		return
 	}
 	for _, tr := range graph.Transitions() {
-		if tr.ForEach == "" || tr.As == "" {
+		if tr.From != spawnTask || tr.ForEach == "" || tr.As == "" {
 			continue
 		}
 		delete(state, tr.As)

@@ -93,7 +93,10 @@ func TestStaterefsflow(t *testing.T) {
 			return errors.New("the fan-in cannot see the carried document")
 		}
 		f.SetInt("pdfLen", len(f.GetString("pdf")))
-		f.SetInt("transcribed", len(f.GetStrings("transcript")))
+		// "pageCount" collides EXACTLY with the <as>Count the forEach injects (as="page"). It is this task's
+		// own output, written outside the cohort, and must survive: the bookkeeping strip is scoped to the
+		// cohort being closed, not to every forEach name in the graph.
+		f.SetInt("pageCount", len(f.GetStrings("transcript")))
 		return nil
 	})
 
@@ -109,7 +112,7 @@ func TestStaterefsflow(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		assert.Equal(float64(docLen), outcome.State["pdfLen"])
-		assert.Equal(6.0, outcome.State["transcribed"])
+		assert.Equal(6.0, outcome.State["pageCount"], "a task's own field must not be eaten by a same-named forEach bookkeeping key")
 		// FLATTEN at the flow boundary: final_state is a dwarf_flows column that outlives the steps backing it,
 		// so it is always materialized. A ref that escaped the flow would dangle.
 		assert.Equal(docLen, len(outcome.State["pdf"].(string)))
@@ -180,7 +183,7 @@ func TestStaterefsflow(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
 		assert.Equal(float64(docLen), forkOutcome.State["pdfLen"])
-		assert.Equal(6.0, forkOutcome.State["transcribed"])
+		assert.Equal(6.0, forkOutcome.State["pageCount"])
 
 		// The origin is never mutated by a fork.
 		origin, err := eng.Snapshot(ctx, flowKey)
