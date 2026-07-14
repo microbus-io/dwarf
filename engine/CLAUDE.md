@@ -278,7 +278,9 @@ re-run boundary reads as new.
 task name, state, changes, status, error, timestamp. Subgraph-executing steps have `Subgraph=true` with nested
 `SubHistory`. `Step` returns one step by key.
 
-**List** - Queries flows by status, workflow URL, or thread key, with cursor pagination (newest first, default 100).
+**List** - Queries flows by status, workflow URL, or thread key, with cursor pagination (newest first **per shard**
+- see "`List` uses per-shard pagination" under Database Sharding; single-shard, the default, is globally
+newest-first - default 100).
 Returns `ThreadKey` and a `Subgraph` bool in each `workflow.FlowSummary`. By default it returns **root flows only**;
 `Query.IncludeSubgraphs` adds subgraph children to the results. Combined with `WorkflowURL` (a graph that runs only
 as a subgraph has no root flows under that URL) this locates every run of a graph that executed as a subgraph.
@@ -1844,6 +1846,16 @@ rows by its own `flow_id DESC`; the aggregate is shard-grouped. Cross-shard orde
 different servers' clocks, and by `flow_id` alone is broken (a shard with fewer flows has lower ids). Pagination uses
 an opaque cursor encoding each shard's smallest-returned `flow_id`. `List` is strict by design: any shard error fails
 the whole call (the per-shard debug path is `ShardInfo` + `List(Shard=N)`).
+
+*Say this out loud in the public docs, do not quietly promise "newest first".* The Operations summary above, the
+`List` godoc, `Query.Limit`, and `docs/operations.md` all used to advertise a global newest-first order, which on a
+two-shard fleet visibly is not: `List(Limit:100)` returns shard 1's 50 newest, then shard 2's 50 newest, so shard 2's
+newest flow follows shard 1's oldest returned one - a reverse-chronological UI renders that as an interleaving
+artifact. The fix is the **doc**, not the code: merging by `created_at` (the tempting one) is exactly what the
+clock-comparison argument above rejects, and there is no other cross-shard key. A caller needing one ordered view
+sorts the page itself - deciding what to trust - or pages a single shard with `Query.Shard`. Pinned by
+`TestList_NewestFirstIsPerShardNotGlobal`, which also asserts the global-order violation is *present*, so the code is
+never "fixed" back to the old promise by accident.
 
 **The shard set is immutable at runtime.** `SetShard` is construction-time only: it records index->DSN pairs before
 `Startup` (which opens+migrates exactly those shards) and is **rejected** on a running engine, so the set never

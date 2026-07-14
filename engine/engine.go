@@ -924,7 +924,17 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	return e.step(ctx, stepKey)
 }
 
-// List queries flows by status, workflow name, or thread key.
+// List queries flows by status, workflow name, or thread key, newest first, with cursor pagination
+// (Query.Limit, default 100; the returned cursor fetches the next page).
+//
+// "Newest first" is per shard, not global. On a MULTI-SHARD fleet each shard contributes its own newest
+// flows and the results are grouped by shard, so the concatenation is not in one descending time order -
+// shard 2's newest flow follows shard 1's oldest returned one. There is no cross-shard order to give: the
+// flow ids are per-shard sequences (a shard with fewer flows has lower ids, so they do not compare), and
+// created_at would compare different database servers' clocks. A single-shard engine - the default - is
+// globally newest-first. A caller that needs one ordered view across shards sorts the page itself, choosing
+// what to trust; a UI that must not show interleaving artifacts can page one shard at a time with
+// Query.Shard.
 func (e *Engine) List(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, string, error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, "", errors.Trace(err)

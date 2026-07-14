@@ -113,6 +113,13 @@ steps carry nested `SubHistory`. `List` takes a `workflow.Query` (status, workfl
 fairness key, priority, time window, shard, free-text `Search`, `Limit`) and returns newest-first with an
 opaque pagination cursor as its second return; see [Retention](#retention) for the same query shape.
 
+**"Newest first" is per shard, not global.** On a single-shard engine — the default — a page is in one
+descending time order. On a multi-shard fleet each shard contributes its own newest flows and the page is
+grouped by shard, so shard 2's newest flow follows shard 1's oldest returned one. There is no cross-shard
+order to give: flow ids are per-shard sequences (a shard with fewer flows has lower ids, so they don't
+compare), and `created_at` would compare different database servers' clocks. If you need one ordered view,
+sort the page yourself — you decide what to trust — or page a single shard with `Query.Shard`.
+
 ## Pausing and resuming
 
 A flow pauses in two distinct ways, and each has its own continuation operation — they are never

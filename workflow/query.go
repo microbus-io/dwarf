@@ -58,5 +58,8 @@ type Query struct {
 	// literally, not as a wildcard, so "a_b" matches only "a_b" (not "axb") and "50%" matches only a
 	// literal "50%".
 	Search string `json:"search,omitzero"`
-	Limit  int    `json:"limit,omitzero"`
+	// Limit caps the number of flows returned (default 100). Results come back newest first - but per
+	// shard, not globally: on a multi-shard fleet each shard contributes its own newest flows and the
+	// results are shard-grouped. See Engine.List.
+	Limit int `json:"limit,omitzero"`
 }
