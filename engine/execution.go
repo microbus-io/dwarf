@@ -642,32 +642,46 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 	}
 
-	isPushTransition := graph.IsFanOutSource(taskName) && !errorRouted && resultFlow.GotoRequested() == ""
+	isFanOutSource := graph.IsFanOutSource(taskName)
+	isPushTransition := isFanOutSource && !errorRouted && resultFlow.GotoRequested() == ""
 	cohortSize := len(realTasks)
 
 	// The remaining post-completion writes. Like the transition transaction, these run with the step already
 	// `completed`, so a database error here would drive the recovery defer to rewind and re-dispatch - RE-EXECUTING
 	// the task - and would do so forever if the error is permanent. Same class, same treatment: retry the write in
 	// place, and classify it if it will not land (see persistStep).
-	if isPushTransition && cohortSize == 0 {
-		fanInTarget := cg.fanIn.For(taskName)
-		if fanInTarget == "" {
-			// No fan-in to converge on. Only a TRUNK source (lineage_id == 0) may complete the flow; a
-			// fan-out source that is itself a cohort MEMBER (a nested fan-out) would terminalize the flow
-			// while its outer siblings are still running. (Unreachable for a validated graph - Validate
-			// requires a fan-out source to converge on a SetFanIn node - so this is defense in depth for a
-			// graph frozen before that check.)
-			if lineageID != 0 {
-				return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
-					errors.New("fan-out source '%s' is inside a cohort but has no fan-in node to converge on", taskName),
-					taskName)
-			}
-			return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
-				return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
-			})
+
+	// A fan-out source can route STRAIGHT to its own fan-in with no branches - its forEach array was empty, or
+	// the task steered there directly (Goto/onError/a `when` or `switch` edge), e.g. "if the array to fan out on
+	// is empty, Goto the fan-in". In every such case the source IS the spawn, and the fan-in converges
+	// immediately on the source's own state, exactly as an empty cohort would (fireFanInDirect). The source's
+	// lineage_id carries through, so a NESTED source's direct fan-in stays a member of its outer cohort. This
+	// must be detected regardless of edge kind: a Goto/onError makes isPushTransition false and a `when`/`switch`
+	// leaves cohortSize at 1, so the plain cohort path below would otherwise mis-attribute the fan-in arrival -
+	// the trunk case fails the not-in-a-cohort guard, and a nested source bumps arrivals on its OUTER spawn and
+	// silently drops the branch. The shape is legal, not rejected.
+	fanInOfSource := ""
+	if isFanOutSource {
+		fanInOfSource = cg.fanIn.For(taskName)
+	}
+	if isFanOutSource && fanInOfSource != "" && (cohortSize == 0 || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
+		return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
+			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+		})
+	}
+	if isFanOutSource && cohortSize == 0 {
+		// An empty forEach with NO fan-in to converge on (fanInOfSource == ""). Only a TRUNK source
+		// (lineage_id == 0) may complete the flow; a fan-out source that is itself a cohort MEMBER (a nested
+		// fan-out) would terminalize the flow while its outer siblings are still running. (Unreachable for a
+		// validated graph - Validate requires a fan-out source to converge on a SetFanIn node - so this is
+		// defense in depth for a graph frozen before that check.)
+		if lineageID != 0 {
+			return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
+				errors.New("fan-out source '%s' is inside a cohort but has no fan-in node to converge on", taskName),
+				taskName)
 		}
 		return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
-			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInTarget, dispatchURLOf(graph, fanInTarget), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+			return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
 		})
 	}
 
@@ -717,11 +731,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// pending, it re-dispatches, the task RE-RUNS - side effects and all - and it fails identically. An
 	// unbounded hot loop that hammers the database and never advances the flow.
 	//
-	// Graph.Validate now rejects such an edge (validateLineage applies the frame-pop check to
-	// withGoto/onError/switch edges too), so this cannot arise from a graph validated today. It remains as
-	// the runtime guard for a graph frozen onto a flow BEFORE that fix: the graph JSON is replayed from
-	// the flow row on every dispatch and never re-validated. Failing the step is the honest outcome - the
-	// flow terminates with a clear error instead of hot-looping forever.
+	// A fan-out source routing to its OWN fan-in is legal and was already handled above (fireFanInDirect) -
+	// it never reaches here. What remains is a step with no cohort of its own reaching a fan-in: a trunk
+	// non-source step routed into a fan-in node (validateLineage rejects it, so a graph validated today
+	// cannot produce it; the guard covers a graph frozen onto a flow BEFORE that check, replayed unvalidated
+	// on every dispatch). Failing the step is the honest outcome - the flow terminates with a clear error
+	// instead of hot-looping forever.
 	if fanInArrivals > 0 && cohortSpawnID == 0 {
 		return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
 			errors.New("task '%s' is routed to fan-in node '%s' but is not part of a fan-out cohort", taskName, fanInTaskName),
