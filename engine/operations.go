@@ -108,15 +108,24 @@ func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum,
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
 	}
+	var surgraphFlowID int
 	err = db.QueryRowContext(ctx,
-		"SELECT thread_id, thread_token FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
-	).Scan(&threadID, &threadToken)
+	).Scan(&threadID, &threadToken, &surgraphFlowID)
 	if err == sql.ErrNoRows {
 		return 0, 0, "", errors.New("thread not found", http.StatusNotFound)
 	}
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
+	}
+	// A subgraph child key is read-only, like everywhere else (Resume/Cancel/Delete/Continue all 400 it).
+	// A child runs on its own private thread precisely so it cannot contaminate the parent's continuation
+	// chain, so joining that thread is never what a caller means: the new flow would be a top-level root
+	// grouped under a subgraph's thread, and a later Continue of it would build on the subgraph's turns.
+	// Reject rather than silently widen to the child's root - the caller must name the root it means.
+	if surgraphFlowID != 0 {
+		return 0, 0, "", errors.New("thread key is a subgraph flow; address the root flow", http.StatusBadRequest)
 	}
 	return shardNum, threadID, strings.TrimSpace(threadToken), nil
 }

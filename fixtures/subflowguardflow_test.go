@@ -110,6 +110,16 @@ func TestSubflowGuardflow(t *testing.T) {
 		_, err = eng.Continue(ctx, child, nil)
 		assert.Error(err)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+
+		// Create's ThreadKey is the fifth door into a child's thread, and the subtlest: it does not mutate
+		// the child at all, it JOINS its thread. A child runs on its own private thread precisely so it
+		// cannot contaminate the parent's continuation chain, so a top-level root grouped under a
+		// subgraph's thread is never what the caller meant - and a later Continue of it would build on the
+		// subgraph's turns.
+		_, err = eng.Create(ctx, "subflowguard.verify:428/inner", nil,
+			&workflow.FlowOptions{ThreadKey: child})
+		assert.Error(err)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 	})
 
 	t.Run("child_survives_rejected_mutations", func(t *testing.T) {

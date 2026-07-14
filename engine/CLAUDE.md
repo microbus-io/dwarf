@@ -167,7 +167,8 @@ itself is an engine-side optimization derived per flow at dispatch from the froz
 validates identically (a nil/invalid child graph fails the caller step like any `LoadGraph` error). One
 consequence for graph authors: a graph with no explicit transition to `END` (relying on "no matching
 transition completes the flow") is rejected at `Create` - `Validate` requires an explicit `END` edge. `FlowOptions.ThreadKey` (optional) joins the new flow into an existing thread
-(any flowKey in that thread; a bad/stale key 404s). The engine has **no creation-time delay** (no `StartAt`):
+(any **root** flowKey in that thread; a bad/stale key 404s, and a **subgraph-child key 400s** - see "Subgraph
+keys are read-only"). The engine has **no creation-time delay** (no `StartAt`):
 every flow runs as soon as it is created. A flow that should wait runs author-side - an entry **gate** task that
 calls `flow.Sleep(until)` for a one-shot durable delay, or an interrupt-first entry task + `Resume` (staged
 start) - and recurring schedules are an external concern (a host/cron service that calls `Create`/`Run` on a
@@ -339,13 +340,16 @@ A subgraph child flow has a real flowKey (a task inside it reads its own via `fl
 `IncludeSubgraphs` surfaces it), but that key is a **read** handle, not a write unit: a child cannot be mutated
 independently because its parent is parked waiting on it, and the unit for any lifecycle change is the whole tree.
 So the **lifecycle mutations reject a subgraph-child key with 400** (`surgraph_flow_id != 0`): `Resume`, `Cancel`,
-`Delete`, `Continue`. The rejection is folded into each operation's existing flow-row SELECT (no extra round-trip;
+`Delete`, `Continue`, and `Create` with `FlowOptions.ThreadKey` (in `resolveThread`). The rejection is folded into each operation's existing flow-row SELECT (no extra round-trip;
 the 404-not-found check still takes precedence). The caller addresses the tree by the **root** key instead - which
 it always holds (it came from `Create`/`Run`/`Continue`, or from `List` of roots). The rationale per op: `Resume`/
 `Cancel` are inherently tree-wide (they walk up to the root and down), so a child key is just a confusing alias for
 the root; `Delete` cascades *down* only, so deleting a child directly would strand the parent's surgraph step; and
 `Continue` on a child's own (private) thread would spin up a detached top-level flow from the subgraph's final state,
-not a thread turn. **Reject, not silently widen** - widening `Delete(childKey)` into a whole-tree delete is a
+not a thread turn. **`Create(ThreadKey: childKey)` is the subtlest of the five** - it does not mutate the child at
+all, it *joins its thread*, and a child gets its own thread precisely so it cannot contaminate the parent's
+continuation chain: the new flow would be a top-level root grouped under a subgraph's thread (polluting `List` by
+thread), and a later `Continue` of it would build on the subgraph's turns. **Reject, not silently widen** - widening `Delete(childKey)` into a whole-tree delete is a
 surprising blast radius, so the engine makes the caller name the root.
 
 What a subgraph-child key *is* good for: **introspection** - `Snapshot`, `Fingerprint`, `History`, `HistoryMermaid`,

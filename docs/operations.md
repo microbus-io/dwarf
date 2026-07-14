@@ -34,7 +34,9 @@ part of the outcome — you need it for later `History`/`Resume`/`Fork`).
 
 Setting `ThreadKey` joins the new flow into an existing thread (identified by any flow key in that thread)
 while specifying its scheduling/baggage explicitly — the explicit-policy counterpart to `Continue`, which
-inherits the thread's policy. A nonexistent `ThreadKey` is rejected with a 404.
+inherits the thread's policy. A nonexistent `ThreadKey` is rejected with a 404, and a *subgraph child's* key with a
+400 — a child runs on its own private thread so it cannot contaminate its parent's continuation chain, so address the
+root flow instead.
 
 To run a single unit of work with the engine's durability and scheduling, declare a one-node workflow and
 create a flow for it like any other. A bare task is only ever a node in a graph, not an independently
