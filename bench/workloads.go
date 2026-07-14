@@ -24,12 +24,11 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 )
 
-// A workload is one benchmark graph plus the knowledge needed to drive and account for it.
+// A workload is one benchmark graph plus the knowledge needed to drive it. The workload's name is the key it is
+// registered under, not a field on it.
 type workload struct {
-	name         string
 	graphURL     string
 	initialState func() map[string]any
-	stepsPerFlow int // expected steps per flow, to sanity-check the metric-based steps/s
 }
 
 const (
@@ -111,28 +110,20 @@ func registerWorkloads(h *benchHost, payloadBytes int) map[string]*workload {
 
 	return map[string]*workload{
 		"llm": {
-			name:         "llm",
 			graphURL:     "bench/llm",
 			initialState: func() map[string]any { return nil },
-			stepsPerFlow: 1,
 		},
 		"linear": {
-			name:         "linear",
 			graphURL:     "bench/linear",
 			initialState: func() map[string]any { return nil },
-			stepsPerFlow: linearSteps,
 		},
 		"fanout": {
-			name:         "fanout",
 			graphURL:     "bench/fanout",
 			initialState: func() map[string]any { return map[string]any{"items": fanoutItems} },
-			stepsPerFlow: 1 + fanOutWidth + 1,
 		},
 		"state": {
-			name:         "state",
 			graphURL:     "bench/state",
 			initialState: func() map[string]any { return nil },
-			stepsPerFlow: stateSteps,
 		},
 	}
 }

@@ -30,14 +30,23 @@ import (
 
 // stepResult is the measured outcome of one closed-loop concurrency step.
 type stepResult struct {
-	Concurrency    int              `json:"concurrency"`
-	WindowSec      float64          `json:"windowSec"`
-	Flows          int              `json:"flows"`
-	Errors         int              `json:"errors"`
-	FlowsPerSec    float64          `json:"flowsPerSec"`
-	StepsPerSec    float64          `json:"stepsPerSec"` // from the dwarf_steps_executed delta
-	MBPerSec       float64          `json:"mbPerSec"`    // state payload bytes written by tasks
-	P50ms          float64          `json:"p50Ms"`       // end-to-end flow latency percentiles
+	Concurrency int     `json:"concurrency"`
+	WindowSec   float64 `json:"windowSec"`
+	Flows       int     `json:"flows"`
+	Errors      int     `json:"errors"`
+	FlowsPerSec float64 `json:"flowsPerSec"`
+	// StepsPerSec comes from the dwarf_steps_executed delta, which counts step DISPOSITIONS, not step rows:
+	// completed / failed / interrupted / subgraph-park / retried / error_routed each increment it, and
+	// collectCounters collapses the status attribute, so they all sum together. No workload here retries,
+	// interrupts, or calls a subgraph, so one step row = one `completed` disposition and the two coincide - but a
+	// workload that DID retry would inflate steps/s, and a retrying step contributes once per attempt.
+	//
+	// It is also drawn from a wider population than FlowsPerSec: an errored flow is excluded from Flows (below)
+	// while its steps still count here. The two are therefore only comparable on a run with Errors == 0, which is
+	// exactly the run main.go marks valid.
+	StepsPerSec    float64          `json:"stepsPerSec"`
+	MBPerSec       float64          `json:"mbPerSec"` // state payload bytes written by tasks
+	P50ms          float64          `json:"p50Ms"`    // end-to-end flow latency percentiles
 	P95ms          float64          `json:"p95Ms"`
 	P99ms          float64          `json:"p99Ms"`
 	Goroutines     int              `json:"goroutines"`     // at the end of the window: the engine's pool is most of this
