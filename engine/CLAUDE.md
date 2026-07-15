@@ -1778,22 +1778,26 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 12 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 15 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so both `Startup` and `RunInTest` get them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
 scope distinguishes dwarf's metrics; **service identity lives in the provider's Resource, not in per-metric
 attributes** (no `service.name` on data points - cardinality explosion, off-spec). The only attributes attached are
 the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `task_url` (on
-`dwarf_task_concurrency_running`), `priority`, and `park_type`.
+`dwarf_task_concurrency_running`), `priority`, `park_type`, `shard` (on `dwarf_steps_write_retried`), and
+`column` (on the byte counters).
 
-**5 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
+**8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
 (start path), `dwarf_flows_terminated` (completeFlow), `dwarf_steps_executed` (every terminal step
 disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered`
-(pollPendingSteps lease recovery), and `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
-nonzero value flags a latent bug). The inline helpers no-op when `e.metrics == nil` (before Startup).
+(pollPendingSteps lease recovery), `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
+nonzero value flags a latent bug), `dwarf_flows_orphaned` (the orphan sweep's detection-only alarm - the
+flow-level sibling of `dwarf_steps_unwedged`, counted at the same site as its error log, never auto-recovered),
+and the two persist alarms `dwarf_steps_write_retried` / `dwarf_steps_write_failed` (detailed under "Persisting
+a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Startup).
 
-**7 counters** in total: the 5 event counters above plus two byte counters,
+**10 counters** in total: the 8 event counters above plus two byte counters,
 `dwarf_state_write_bytes` / `dwarf_state_read_bytes` (labels `workflow` + `column`, unit `By`) - payload
 bytes the engine writes to / reads from **step rows on the execution path**. The `column` label is the
 dwarf_steps column the bytes moved through (`state` snapshots, `changes` task-output deltas,
@@ -2206,8 +2210,10 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
    `interrupted` human wait), and the no-recent-step check excludes the completed->successor window (the
    just-`completed` step's `updated_at` is fresh, even under persist backoff). The frozen `f.updated_at` is kept
    only as a cheap index pre-filter (`idx_dwarf_flows_status`), narrowing the scan to flows old enough to qualify -
-   it can never exclude a real orphan (one has been running longer than the threshold). Logs at error level only
-   (silent under the default discard logger); no metric.
+   it can never exclude a real orphan (one has been running longer than the threshold). Logs at error level
+   (silent under the default discard logger) **and** increments `dwarf_flows_orphaned{workflow}` - the flow-level
+   sibling of `dwarf_steps_unwedged`, on the same "nonzero = latent bug" footing, so an operator can alert on it
+   without scraping logs. It is a detection-only alarm: unlike the wedge sweep it does **not** auto-recover.
 4. **Parked-step wedge sweep** (`sweepWedgedParks`, `wedge.go`) - defense in depth for the `parkedSubgraph` park,
    whose releasing condition could in principle never fire (a parked step is invisible to selection, and
    `parkedSubgraph` is invisible to lease recovery too). Runs on a **dedicated recovery goroutine** (`recoveryLoop`)

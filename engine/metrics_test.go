@@ -19,7 +19,9 @@ package engine
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 	"go.opentelemetry.io/otel/attribute"
@@ -240,4 +242,65 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 	assert.Equal(int64(2), started, "the fork counts as a started flow")
 	assert.Equal(int64(2), terminated)
 	assert.Equal(int64(0), started-terminated, "in-flight (started - terminated) must not go negative")
+}
+
+// TestOrphanDetection_EmitsMetric pins that the orphan sweep increments dwarf_flows_orphaned (labelled by
+// workflow) when it flags a stranded flow - the operability alarm that lets an operator alert on the residual
+// orphan the recovery defer could not cover without scraping the error log. It forges the same orphan shape the
+// log-only test uses (a completed flow flipped back to running, its step backdated stale) and asserts the count.
+func TestOrphanDetection_EmitsMetric(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Orphan")
+	g.SetEndpoint("A", "orphanmetric.verify:428/a")
+	g.AddTransition("A", workflow.END)
+	proxy.HandleGraph("orphanmetric.verify:428/g", g)
+	proxy.HandleTask("orphanmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	eng := NewEngine()
+	eng.SetHost(proxy)
+	eng.SetMeterProvider(mp)
+	eng.RunInTest(t)
+
+	key, err := eng.Create(ctx, "orphanmetric.verify:428/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	out, err := eng.Await(ctx, key)
+	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {
+		return
+	}
+	shard, flowID, _, err := keys.ParseFlowKey(key)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := eng.db.Shard(shard)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// Forge the orphan shape: running flow, every step terminal and stale past the threshold.
+	pastMs := -(eng.orphanFlowThreshold + time.Minute).Milliseconds()
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_flows SET status=?, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
+		workflow.StatusRunning, pastMs, flowID)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?", pastMs, flowID)
+	assert.NoError(err)
+
+	eng.detectOrphanedFlows(ctx, db, shard)
+
+	var rm metricdata.ResourceMetrics
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+	orphaned, ok := sumCounter(rm, "dwarf_flows_orphaned", "workflow", "orphanmetric.verify:428/g")
+	assert.True(ok, "dwarf_flows_orphaned{workflow} should be present")
+	assert.Equal(int64(1), orphaned, "the forged orphan is counted exactly once")
 }

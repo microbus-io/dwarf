@@ -40,7 +40,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 10 instruments — 5 counters and 5 gauges. Counter instrument names carry **no** `_total`
+The engine emits 15 instruments — 10 counters and 5 gauges. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -50,7 +50,12 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_flows_terminated` | counter | `workflow`, `status` | flows reaching a terminal status | `dwarf_flows_terminated_total` |
 | `dwarf_steps_executed` | counter | `task_name`, `status` | steps executed, by disposition | `dwarf_steps_executed_total` |
 | `dwarf_steps_recovered` | counter | — | steps recovered after a lease expiry | `dwarf_steps_recovered_total` |
-| `dwarf_steps_unwedged` | counter | `park_type` | wedged subgraph parks recovered by the sweep | `dwarf_steps_unwedged_total` |
+| `dwarf_steps_unwedged` | counter | `park_type` | wedged subgraph parks recovered by the sweep (nonzero = latent bug) | `dwarf_steps_unwedged_total` |
+| `dwarf_flows_orphaned` | counter | `workflow` | running flows detected stranded by the orphan sweep — all steps terminal, no successor (nonzero = latent bug; detection-only, not recovered) | `dwarf_flows_orphaned_total` |
+| `dwarf_steps_write_retried` | counter | `shard` | in-place retries of a step's persistence write after a database blip (the task is not re-executed) | `dwarf_steps_write_retried_total` |
+| `dwarf_steps_write_failed` | counter | `task_name` | steps terminalized because their outcome could not be stored while the database was reachable (nonzero = latent bug) | `dwarf_steps_write_failed_total` |
+| `dwarf_state_write_bytes` | counter | `workflow`, `column` | payload bytes written to step rows on the execution path | `dwarf_state_write_bytes_total` |
+| `dwarf_state_read_bytes` | counter | `workflow`, `column` | payload bytes read from step rows on the execution path | `dwarf_state_read_bytes_total` |
 | `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
 | `dwarf_steps_pending` | gauge | `priority` | due pending steps per priority band | `dwarf_steps_pending` |
 | `dwarf_steps_oldest_pending_age_seconds` | gauge | `priority` | age of the oldest due pending step | `dwarf_steps_oldest_pending_age_seconds` |

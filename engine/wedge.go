@@ -215,10 +215,10 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 // detectOrphanedFlows reports a `running` flow that is stranded: every step terminal AND no step touched for
 // orphanFlowThreshold. It is the shape a post-completion transition leaves when it fails to commit its
 // successor (see the processStep recovery defer, whose own reset UPDATE can lose to a contention storm).
-// It is a bug signal, logged at error level only: auto-recovery is deliberately not attempted here, since
-// re-driving the flow would duplicate the transition-evaluation logic and a false positive could
-// double-advance it. The processStep defer is the actual recovery; this is the last-resort alarm for the
-// residual case it cannot cover.
+// It is a bug signal, logged at error level and counted by dwarf_flows_orphaned: auto-recovery is deliberately
+// not attempted here, since re-driving the flow would duplicate the transition-evaluation logic and a false
+// positive could double-advance it. The processStep defer is the actual recovery; this is the last-resort alarm
+// for the residual case it cannot cover.
 //
 // Both correctness conditions live on dwarf_steps, and that is the point. The age guard was originally on the
 // flow row (`dwarf_flows.updated_at`), but the touch-column refactor froze that column at the flow's
@@ -241,7 +241,7 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 // - and is flagged, with the same detection latency the flow-level guard intended.
 func (e *Engine) detectOrphanedFlows(ctx context.Context, db *sequel.DB, shard int) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT f.flow_id FROM dwarf_flows f"+
+		"SELECT f.flow_id, f.workflow_url FROM dwarf_flows f"+
 			// Index pre-filter, NOT the correctness signal (the step clauses below are). f.updated_at is frozen
 			// at go-`running` time, so this narrows the idx_dwarf_flows_status scan to flows that went running
 			// long enough ago to possibly hold a threshold-stale step - and it can never exclude a real orphan,
@@ -259,13 +259,15 @@ func (e *Engine) detectOrphanedFlows(ctx context.Context, db *sequel.DB, shard i
 	defer rows.Close()
 	for rows.Next() {
 		var flowID int
-		if err := rows.Scan(&flowID); err != nil {
+		var workflowURL string
+		if err := rows.Scan(&flowID, &workflowURL); err != nil {
 			e.logger.ErrorContext(ctx, "Orphan detection: scanning running flow", "shard", shard, "error", err)
 			return
 		}
 		// Token-free correlation id: this is an operator alarm, not a capability. See "Tracing".
 		e.logger.ErrorContext(ctx, "Orphaned flow: running with all steps terminal and no successor",
 			"flow", keys.CorrelationID(shard, flowID))
+		e.metricOrphanedFlow(ctx, workflowURL)
 	}
 	if err := rows.Err(); err != nil {
 		e.logger.ErrorContext(ctx, "Orphan detection: iterating running flows", "shard", shard, "error", err)

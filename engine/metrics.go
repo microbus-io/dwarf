@@ -46,6 +46,7 @@ type engineMetrics struct {
 	stepsUnwedged     metric.Int64Counter
 	stepsWriteRetried metric.Int64Counter
 	stepsWriteFailed  metric.Int64Counter
+	flowsOrphaned     metric.Int64Counter
 	stateWriteBytes   metric.Int64Counter
 	stateReadBytes    metric.Int64Counter
 
@@ -82,6 +83,7 @@ func (e *Engine) initMetrics() error {
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
 	m.stepsWriteRetried = ctr("dwarf_steps_write_retried", "Counts in-place retries of a step's persistence write after a non-contention database error. The task is NOT re-executed; only the write is retried. A rising count tracks database flakiness, not workflow failure.")
 	m.stepsWriteFailed = ctr("dwarf_steps_write_failed", "Counts steps terminalized because their outcome could not be persisted while the database was reachable - i.e. the payload, not the database, was the problem. A nonzero value signals a latent bug (an unstorable value, a column/packet limit, a constraint violation), like dwarf_steps_unwedged.")
+	m.flowsOrphaned = ctr("dwarf_flows_orphaned", "Counts running flows detected as stranded by the orphan sweep - every step terminal, none touched within the threshold, no successor. A nonzero value signals a latent bug the processStep recovery defer could not cover, like dwarf_steps_unwedged; detection-only, the sweep does not re-drive the flow.")
 	bytesCtr := func(name, desc string) metric.Int64Counter {
 		c, err := meter.Int64Counter(name, metric.WithDescription(desc), metric.WithUnit("By"))
 		if err != nil {
@@ -381,4 +383,15 @@ func (e *Engine) metricStepUnwedged(ctx context.Context, parkType string) {
 		return
 	}
 	e.metrics.stepsUnwedged.Add(ctx, 1, metric.WithAttributes(attribute.String("park_type", parkType)))
+}
+
+// metricOrphanedFlow is a detection-only alarm, not a statistic: the orphan sweep deliberately never re-drives
+// the flow (re-driving would duplicate transition-evaluation logic and a false positive could double-advance
+// it), so a nonzero value is a residual bug the recovery defer's own reset could not cover, surfaced for an
+// operator alongside the error log. Labelled by workflow, like the other flow counters.
+func (e *Engine) metricOrphanedFlow(ctx context.Context, workflowURL string) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.flowsOrphaned.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow", workflowURL)))
 }
