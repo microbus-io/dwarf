@@ -250,7 +250,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 // mergeCohortState rebuilds the state of a cohort that resolved with failures, and so never reached its fan-in.
 // It runs the SAME merge insertFanInStep runs at a successful convergence - the spawn step's `state + changes` as
 // the base, then every COMPLETED member's `changes` folded through the graph's reducers in `fan_out_ordinal,
-// step_id` order - so a fan-out's terminal state means one thing whether it converged or failed.
+// step_depth, step_id` order - so a fan-out's terminal state means one thing whether it converged or failed.
 //
 // Why the base is the SPAWN and not a tail: a branch's intermediate output lives in the NEXT step's `state`, not in
 // any tail's `changes`, so merging tails alone silently drops everything but the last step of each branch (and, for
@@ -288,7 +288,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	}
 
 	rows, err := db.QueryContext(ctx,
-		"SELECT status, changes FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_id",
+		"SELECT status, changes FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id",
 		flowID, cohortSpawnID,
 	)
 	if err != nil {

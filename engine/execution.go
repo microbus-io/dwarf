@@ -108,7 +108,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	var n int64
 	var stepDepth int
 	var taskName, stepToken, stateJSON, priorChangesJSON string
-	var attempt, lineageID, flowID, timeBudgetMs int
+	var attempt, lineageID, fanOutOrdinal, flowID, timeBudgetMs int
 	var interruptDone bool
 	var resumeDataJSON string
 	var subgraphDone bool
@@ -122,9 +122,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
-				" RETURNING step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq",
+				" RETURNING step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq, fan_out_ordinal",
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -134,10 +134,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		err = db.QueryRowContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
-				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.state_refs, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq"+
+				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.state_refs, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq, INSERTED.fan_out_ordinal"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -165,9 +165,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		n, _ = res.RowsAffected()
 		if n == 1 {
 			readErr := db.QueryRowContext(ctx,
-				"SELECT step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq FROM dwarf_steps WHERE step_id=?",
+				"SELECT step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq, fan_out_ordinal FROM dwarf_steps WHERE step_id=?",
 				stepID,
-			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq)
+			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal)
 			if readErr != nil && readErr != sql.ErrNoRows {
 				err = readErr
 			}
@@ -666,7 +666,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 	if isFanOutSource && fanInOfSource != "" && (cohortSize == 0 || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
 		return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
-			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 		})
 	}
 	if isFanOutSource && cohortSize == 0 {
@@ -828,6 +828,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			}
 
 			for i, next := range normalNexts {
+				// fan_out_ordinal identifies the BRANCH within a cohort so the fan-in folds order-sensitive
+				// reducers (append/concat/union) in input-array order. A fan-out SOURCE stamps each new branch
+				// with its spawn-loop position i. A step CONTINUING an existing branch (a single linear/goto
+				// successor, i is always 0 here) must instead INHERIT its own ordinal, or every second-or-later
+				// step of the branch lands in the ordinal-0 bucket and folds by completion order. A trunk step's
+				// ordinal is 0 and irrelevant.
+				successorOrdinal := i
+				if !isPushTransition {
+					successorOrdinal = fanOutOrdinal
+				}
 				stepStateJSON, stepRefsJSON := linearStateJSON, linearRefsJSON
 				if next.item != nil {
 					// A forEach branch's state is the flow state plus its element and ordinal context. The
@@ -864,7 +874,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 				newStepID, err := tx.InsertReturnID(ctx, "step_id",
 					"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
 						" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
-					flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, stepStateJSON, stepRefsJSON, workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, i, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID,
+					flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, stepStateJSON, stepRefsJSON, workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, successorOrdinal, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID,
 				)
 				if err != nil {
 					return errors.Trace(err)
@@ -1103,7 +1113,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 }
 
 // fireFanInDirect creates the fan-in step immediately for an empty-cohort case.
-func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) error {
+func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanOutOrdinal int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) error {
 	var fanInStepID int64
 	var txBytes stateByteCount
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
@@ -1156,9 +1166,9 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		sleepMs := sleepDur.Milliseconds()
 		var err error
 		fanInStepID, err = tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
-			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, fanOutOrdinal, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -1202,11 +1212,11 @@ type stateByteCount struct {
 // the caller emits after its transaction commits.
 func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardNum, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, workflowURL string, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, stateByteCount, error) {
 	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON, spawnTaskName string
-	var spawnLineageID int
+	var spawnLineageID, spawnFanOutOrdinal int
 	tx.QueryRowContext(ctx,
-		"SELECT state, changes, state_refs, lineage_id, task_name FROM dwarf_steps WHERE step_id=?",
+		"SELECT state, changes, state_refs, lineage_id, task_name, fan_out_ordinal FROM dwarf_steps WHERE step_id=?",
 		cohortSpawnID,
-	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON, &spawnLineageID, &spawnTaskName)
+	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON, &spawnLineageID, &spawnTaskName, &spawnFanOutOrdinal)
 	bytes := stateByteCount{stateRead: len(spawnStateJSON), changesRead: len(spawnChangesJSON)}
 	var spawnState, spawnChanges map[string]any
 	unmarshalJSONMap(spawnStateJSON, &spawnState)
@@ -1239,7 +1249,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	var exitStepIDs []int
 
 	rows, err := tx.QueryContext(ctx,
-		"SELECT step_id, task_name, status, changes, step_depth FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_id",
+		"SELECT step_id, task_name, status, changes, step_depth FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id",
 		flowID, cohortSpawnID,
 	)
 	if err != nil {
@@ -1307,9 +1317,9 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	bytes.stateWritten = len(mergedJSON)
 	fanInURL := dispatchURLOf(graph, fanInTaskName)
 	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
-		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, spawnFanOutOrdinal, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
 	)
 	if err != nil {
 		return 0, stateByteCount{}, errors.Trace(err)
