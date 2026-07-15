@@ -697,12 +697,19 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		failFlow = stepLineageID == 0
 		finalStateJSON = ""
 		reDispatchParent = false
-		// Fence the fail on our lease generation: a zombie whose lease was re-granted to a peer must not
-		// fail the flow (an unguarded write here is the "late error → healthy-flow kill" hazard). This
-		// is the first write in the transaction, so a zero-row match means nothing was written - commit the
-		// empty tx and report fenced so the caller abandons without failing the flow the peer is re-running.
+		// Fence the fail on BOTH our lease generation AND the two states a worker legitimately fails a step
+		// from: `running` (a task error, or the step-completion write itself failing) and `completed` (a
+		// transition/eval failure that failOnPersistError fails the already-completed step for, to escape the
+		// re-execution loop). The lease fence alone guards the zombie "late error → healthy-flow kill" hazard;
+		// the status guard - which every sibling post-execution write carries and this one was missing - closes
+		// the rest. Without it a step a racing Cancel just cancelled (cancelSubtree does NOT bump lease_seq, so it
+		// still matches our generation) is rewritten cancelled→failed, violating step immutability and seeding a
+		// phantom branch failure a later Fork re-derives from step status; and a step recovery reset to `pending`
+		// (also lease_seq-preserving) would be terminalized out from under the peer re-claiming it. This is the
+		// first write in the transaction, so a zero-row match means nothing was written - commit the empty tx and
+		// report fenced so the caller abandons without failing a flow that is cancelled or that a peer is re-running.
 		res, uerr := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=? AND lease_seq=?",
+			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"') AND lease_seq=?",
 			workflow.StatusFailed, parkedNone, errMsg, stepID, leaseSeq,
 		)
 		if uerr != nil {
