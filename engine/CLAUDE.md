@@ -2167,17 +2167,19 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
    is the last-resort alarm for the residual case the defer cannot cover (its own reset UPDATE losing to a contention
    storm). It runs on the same **dedicated `recoveryLoop`** as the wedge sweep (#4) - off `pollPendingSteps` for the
    same heavy-scan reason (its `NOT EXISTS` over `dwarf_steps` is latency-tolerant, while the poll is nudged
-   sub-second). **Both conditions are on `dwarf_steps`, deliberately.** The age guard used to live on the flow row
-   (`dwarf_flows.updated_at older than the threshold`), but the `touch`-column refactor froze that column at
-   go-`running` time (it moves only on a status change), so it stopped tracking per-step progress: it was then
+   sub-second). **Both correctness conditions are on `dwarf_steps`, deliberately.** The age guard used to *be* the
+   flow row (`dwarf_flows.updated_at older than the threshold`), but the `touch`-column refactor froze that column
+   at go-`running` time (it moves only on a status change), so it stopped tracking per-step progress: it was then
    *permanently* satisfied for any flow running past 5m, leaving the all-terminal check to trip on the brief
    completed->successor window of every ordinary transition (a healthy long-running flow would be alarmed on any
    sweep that sampled it). A step row's `updated_at` still moves on every `pending->running->terminal` transition,
    so the guard now anchors there. The all-terminal check excludes every legitimate long-wait (a `running` task -
    even a 10-minute one with no DB activity - a `pending` sleep/retry, a `running`+parked subgraph caller, an
    `interrupted` human wait), and the no-recent-step check excludes the completed->successor window (the
-   just-`completed` step's `updated_at` is fresh, even under persist backoff). Logs at error level only (silent
-   under the default discard logger); no metric.
+   just-`completed` step's `updated_at` is fresh, even under persist backoff). The frozen `f.updated_at` is kept
+   only as a cheap index pre-filter (`idx_dwarf_flows_status`), narrowing the scan to flows old enough to qualify -
+   it can never exclude a real orphan (one has been running longer than the threshold). Logs at error level only
+   (silent under the default discard logger); no metric.
 4. **Parked-step wedge sweep** (`sweepWedgedParks`, `wedge.go`) - defense in depth for the `parkedSubgraph` park,
    whose releasing condition could in principle never fire (a parked step is invisible to selection, and
    `parkedSubgraph` is invisible to lease recovery too). Runs on a **dedicated recovery goroutine** (`recoveryLoop`)
