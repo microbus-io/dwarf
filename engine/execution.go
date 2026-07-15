@@ -1042,17 +1042,25 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 			stepArgs...,
 		)
 
-		// Lease fence. The combined UPDATE above locked and re-parked the whole chain (in PK order, before
-		// any flow row - the ordering the comment guards), but a zombie whose leaf lease was re-granted to a
-		// peer must not be allowed to interrupt the chain: flipping the ancestor callers out of
-		// parkedSubgraph would strand the parent's revive. The combined UPDATE leaves lease_seq untouched, so
-		// a peer's re-claim shows up here as a bumped generation on the leaf; on mismatch we roll the entire
-		// interrupt back (undoing the ancestor re-park) and abandon. The check reads the leaf inside the tx
-		// (not a same-table subquery, which MySQL rejects on an UPDATE target) after the lock is held. A leaf
-		// merely reset to pending by lease recovery keeps our generation (recovery does not bump lease_seq),
-		// so the benign before-a-peer-claims case still proceeds and the peer re-does it correctly on claim.
+		// Lease fence - on BOTH the generation AND the leaf's own transition. The combined UPDATE above locked
+		// and re-parked the whole chain (in PK order, before any flow row - the ordering the comment guards),
+		// but its leaf write is conditional on status IN ('running','interrupted'). There are two ways the leaf
+		// can fail to be ours, and committing the chain re-park WITHOUT the leaf strands the parent - the ancestor
+		// callers are flipped out of parkedSubgraph, so deliverFlowFailureToParent (which needs status='running'
+		// AND parked=parkedSubgraph) can no longer reach them:
+		//   - a PEER re-claimed the leaf: the combined UPDATE leaves lease_seq untouched, so the re-claim shows up
+		//     here as a bumped generation on the leaf;
+		//   - lease recovery reset the leaf to `pending`: recovery does NOT bump lease_seq, so the generation
+		//     still matches - but the combined UPDATE matched the leaf ZERO rows (pending is not in its status
+		//     list), leaving it pending/claimable with no interrupt_done/changes while the chain around it was
+		//     re-parked and the chain flows marked interrupted.
+		// So require that our UPDATE actually moved the leaf to `interrupted`, not merely that the generation
+		// matches. On either failure roll the entire interrupt back (undoing the ancestor re-park) and abandon;
+		// the peer that (re-)claims the pending leaf then performs the interrupt in full. The check reads the leaf
+		// inside the tx (not a same-table subquery, which MySQL rejects on an UPDATE target) after the lock.
 		var curLeaseSeq int
-		if serr := tx.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE step_id=?", stepID).Scan(&curLeaseSeq); serr != nil {
+		var curStatus string
+		if serr := tx.QueryRowContext(ctx, "SELECT lease_seq, status FROM dwarf_steps WHERE step_id=?", stepID).Scan(&curLeaseSeq, &curStatus); serr != nil {
 			return errors.Trace(serr)
 		}
 		// faultInterruptStaleWrite forces the generation to look re-granted (as a real zombie would, after a peer
@@ -1061,7 +1069,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		if e.seams.IsFault(faultInterruptStaleWrite) {
 			curLeaseSeq = leaseSeq + 1
 		}
-		if curLeaseSeq != leaseSeq {
+		if curLeaseSeq != leaseSeq || strings.TrimSpace(curStatus) != workflow.StatusInterrupted {
 			fenced = true
 			return errLeaseFenced
 		}
