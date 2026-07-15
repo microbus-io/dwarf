@@ -94,10 +94,22 @@ decoded number *means*: `Flow.set` (the typed setters) **panics**, `Set`/`SetCha
 payload, subgraph input) return the error, and the engine 400s a host-supplied `initialState`/`Baggage`/
 resume data/fork override (see `engine/CLAUDE.md`). Only **integer-shaped** literals are constrained - a
 fractional or exponent-notation number is float64-domain by construction and round-trips at any magnitude, so
-`1e300` is fine and `9007199254740993` is not. A `ReducerAdd` sum that grows past 2^53 therefore stays legal:
-it is a `float64` and marshals as `9.007199254740994e+15`, float-shaped. The panic is the same disposition as
+`1e300` is fine and `9007199254740993` is not. The panic is the same disposition as
 a mistyped read (below): the orchestrator catches it at the task-call boundary, so it is a clean step failure
 routed to `onError`, not a crash.
+
+**A `ReducerAdd`/`min`/`max` result past 2^53 is a deliberately-conservative corner, NOT a free pass.** The
+engine never re-checks its own derived merges, so such a sum stores and round-trips fine - it is a `float64`, and
+`encoding/json` emits the shortest decimal that round-trips (here the *exact* value). But that shortest decimal is
+an **integer literal**, not float-shaped: `json`'s float encoder switches to `e` notation only at `|v| >= 1e21`, so
+`9007199254740994` marshals as `9007199254740994`, **not** `9.007199254740994e+15`. And `checkNumber` rejects an
+integer literal past 2^53 on sight - it cannot tell an exactly-representable derived sum from a lossy external
+integer. So the moment a *task* re-authors that sum through a public authoring path
+(`Set`/`SetChanges`/`flow.Subgraph(flow.Snapshot(), …)`), or a host re-submits it as input, the write is
+**rejected even though the engine produced it**. Carry a counter that can grow past 2^53 as a string (the `id_str`
+pattern), or keep it out of re-authored payloads. Making the check exact instead (accept iff
+`int64(float64(i)) == i`) was weighed and declined: it trades the clean "±2^53, else carry a string" contract for a
+boundary that flickers as a value crosses in and out of float64-representability.
 
 **The rejected alternative was decoding exactly** - `UseNumber` at every decode site, normalizing to
 `int64`/`float64` (or leaving `json.Number`). It works, and it was built and thrown away. The reasons: it

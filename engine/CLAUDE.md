@@ -91,8 +91,13 @@ directly, so it carries its own ingress check. That check runs on the caller's *
 the merged carry-forward, and on the marshalled bytes *before* the `json.Unmarshal` that would round a >2^53
 integer to `float64` (checking the decoded/merged value is too late, and would also reject a legitimate
 `ReducerAdd` sum - see below). Each is a **400**, not a panic: this is caller input, and the caller is a
-program that can fix its request. Derived values are not checked - they are merges of already-checked inputs,
-and a `ReducerAdd` sum that grows past 2^53 stays legal (the engine produced it).
+program that can fix its request. Derived values are not checked at the point the engine produces them - they are
+merges of already-checked inputs, so a `ReducerAdd` sum stores and round-trips fine even past 2^53. But "the engine
+produced it" does **not** make it re-authorable: such a sum marshals **integer**-shaped, not float-shaped (Go's
+`json` float encoder only uses `e` notation at `|v| >= 1e21`), so once a *task* re-authors it
+(`Set`/`flow.Subgraph(flow.Snapshot())`) or a host re-submits it, `CheckStorable`'s ±2^53 integer-literal rule
+rejects it - it cannot distinguish an exact derived `float64` from a lossy external integer. Carry such a counter as
+a string; see `workflow/CLAUDE.md`.
 
 ### Size and count limits are the host's job, not the engine's
 

@@ -75,6 +75,27 @@ func TestCheckStorable_RejectsIntegersFloat64WouldRound(t *testing.T) {
 	}
 }
 
+// TestCheckStorable_RejectsExactlyRepresentableIntegersPast2to53 pins the deliberately-CONSERVATIVE half of the
+// guard, and finding 14's corner: an integer past 2^53 that float64 holds EXACTLY - the kind a ReducerAdd sum
+// produces - is still rejected on sight, because checkNumber sees only "integer literal > 2^53" and cannot tell an
+// exact derived float64 from a lossy external integer. The documented consequence (workflow/CLAUDE.md): such a sum
+// stores and round-trips fine but is rejected the moment a task RE-AUTHORS it (Set / flow.Subgraph(flow.Snapshot)).
+// If this ever relaxes to accept round-trippable integers, that doc and the "carry it as a string" workaround change.
+func TestCheckStorable_RejectsExactlyRepresentableIntegersPast2to53(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// 2^53+2 is even, so float64 holds it EXACTLY and json.Marshal of that float64 re-emits this very literal -
+	// it round-trips perfectly, yet is rejected by design (it is not float-shaped, so it looks like a lossy int).
+	const sum = `9007199254740994`
+	var v any
+	assert.NoError(json.Unmarshal([]byte(sum), &v))
+	assert.Equal(int64(9007199254740994), int64(v.(float64))) // round-trips exactly through float64
+	b, _ := json.Marshal(v.(float64))
+	assert.Equal(sum, string(b)) // and marshals back integer-shaped, NOT as 9.007199254740994e+15
+
+	assert.Error(CheckStorable([]byte(`{"total":`+sum+`}`)), "an exact-but->2^53 integer is rejected on re-authoring, by design")
+}
+
 func TestCheckStorable_NamesTheNestedPath(t *testing.T) {
 	assert := testarossa.For(t)
 
