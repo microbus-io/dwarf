@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -120,6 +122,87 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	// Give lease recovery a chance to prove it has nothing to recover.
 	time.Sleep(200 * time.Millisecond)
 	assert.Equal(int32(1), runs.Load(), "nothing re-dispatches a terminalized step")
+}
+
+// TestPersist_LeaseExtensionStatusGuard pins finding 13: persist's lease-extension UPDATE is guarded on
+// `status IN ('running','completed')` - the two states a worker legitimately holds a step in - so it extends
+// the lease of a step we still own but NEVER stamps a future lease_expires onto one that lease recovery has
+// already reset to `pending`. Recovery resets an expired step running->pending WITHOUT bumping lease_seq, so
+// the generation fence alone still matches it; a `pending` row with a future lease_expires is un-claimable
+// (every claim/sizing predicate needs lease_expires<=NOW) and cannot wake the timer (which schedules only on a
+// `running` future lease_expires), so a step claimable in 30s could sleep up to maxPollInterval (5m).
+//
+// Both directions are pinned, because the guard must be neither too wide (fence the pending reset) nor too
+// narrow (running-only would wrongly fence the transition retry, which runs while the step is `completed`).
+func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
+	ctx := context.Background()
+
+	// setup inserts one running flow (flow_id=1) and its single step (step_id=1) in the given status under
+	// generation 5, with not_before/lease_expires far in the future so the engine's own candidate scan (a
+	// pending step needs both <= NOW) leaves it alone for the test.
+	setup := func(t *testing.T, status string) (*Engine, *sequel.DB) {
+		assert := testarossa.For(t)
+		e := NewEngine()
+		e.SetHost(NewTestProxy())
+		e.RunInTest(t)
+		db, err := e.db.Shard(1)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			"ftok", "u", "W", "{}", workflow.StatusRunning, 1, 1, 1000,
+		)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_seq, not_before, lease_expires)"+
+				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+			1, 1, "stok", "T", "u", status, 1000, 5,
+		)
+		assert.NoError(err)
+		return e, db
+	}
+	leaseMsOut := func(t *testing.T, db *sequel.DB) float64 {
+		var ms float64
+		testarossa.For(t).NoError(db.QueryRowContext(ctx, "SELECT DATE_DIFF_MILLIS(lease_expires, NOW_UTC()) FROM dwarf_steps WHERE step_id=1").Scan(&ms))
+		return ms
+	}
+
+	// A step recovery reset to `pending` (same generation) is no longer ours: the extension must match zero rows,
+	// persist must return errPersistFenced without starting the retry loop, and lease_expires must be untouched.
+	t.Run("pending_is_fenced_and_lease_untouched", func(t *testing.T) {
+		assert := testarossa.For(t)
+		shortPersistBackoff(t)
+		e, db := setup(t, workflow.StatusPending)
+
+		before := leaseMsOut(t, db)
+		assert.True(before > 100000)
+
+		var writeCalls int
+		err := e.persist(ctx, db, 1, 1, 5, func() error {
+			writeCalls++
+			return errors.New("injected non-contention write error")
+		})
+		assert.True(errors.Is(err, errPersistFenced), "a recovery-reset pending step must fence the extension, got: %v", err)
+		assert.Equal(1, writeCalls, "the write runs once; the retry loop must not start after the fence")
+		assert.True(leaseMsOut(t, db) > 100000, "lease_expires must be untouched on the reclaimed pending step (was %.0fms out)", before)
+	})
+
+	// A `completed` step whose transition write is retrying IS still ours (that is the second persist site): the
+	// extension must land, the retry loop must run, and lease_expires must move out to ~persistLeaseExtensionMs.
+	t.Run("completed_is_extended_not_fenced", func(t *testing.T) {
+		assert := testarossa.For(t)
+		shortPersistBackoff(t)
+		e, db := setup(t, workflow.StatusCompleted)
+
+		var writeCalls int
+		err := e.persist(ctx, db, 1, 1, 5, func() error {
+			writeCalls++
+			return errors.New("injected non-contention write error")
+		})
+		assert.False(errors.Is(err, errPersistFenced), "a completed step we own (transition retry) must NOT be fenced")
+		assert.True(writeCalls > 1, "the retry loop must run for a step we still own, got %d write(s)", writeCalls)
+		after := leaseMsOut(t, db)
+		assert.True(after > 20000 && after < 60000, "lease_expires must be extended to ~persistLeaseExtensionMs (30s), got %.0fms", after)
+	})
 }
 
 // TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut pins the shutdown path. A worker sitting out a

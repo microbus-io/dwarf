@@ -86,13 +86,27 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	// Extend the lease BEFORE sleeping, so the backoff cannot outlive our ownership of the step. This write
 	// carries no payload, so it is not subject to whatever is killing the real one.
 	//
-	// A zero-row match (the query SUCCEEDED but matched nothing) means our generation is stale - a peer already
-	// re-claimed the step and is re-running it. Abandon silently: retrying would be a zombie's write, and the
-	// fence would reject it anyway. An ERROR here means the database is unreachable, which is exactly the case
-	// the retry loop is for - so fall through and try, with whatever lease we still hold (the margin is 30s and
-	// the window is ~7s, so there is room unless the task burned its entire budget).
+	// The status guard is load-bearing, not decoration. It matches the two states a worker legitimately HOLDS a
+	// step in - `running` (the completion write has not landed) and `completed` (it landed, but the follow-up
+	// transition has not) - exactly as releaseLease does, because BOTH persist sites reach here: the completion
+	// write retries while the step is `running`, the transition write while it is `completed`. Restricting to
+	// `running` alone would wrongly fence the transition retry.
+	//
+	// What the guard excludes is the case this closes: lease recovery resets an expired step to `pending` WITHOUT
+	// bumping `lease_seq` (see "Lease fencing"), so the generation fence alone still matches a step recovery has
+	// already taken back. Stamping a FUTURE `lease_expires` onto that pending row would strand it - every
+	// claim/sizing predicate requires `lease_expires<=NOW` on a pending step, while the only query that schedules a
+	// wake on a future `lease_expires` is scoped to `status='running'`, so the row could neither be claimed nor
+	// wake the timer: a step claimable in 30s would sleep up to `maxPollInterval` (5m).
+	//
+	// A zero-row match (the query SUCCEEDED but matched nothing) therefore means we no longer own the step - a peer
+	// re-claimed it (lease_seq bumped), recovery reset it to `pending`, or a racing Cancel terminalized it. Abandon
+	// silently: retrying would be a zombie's write, and the fence would reject it anyway. An ERROR here means the
+	// database is unreachable, which is exactly the case the retry loop is for - so fall through and try, with
+	// whatever lease we still hold (the margin is 30s and the window is ~7s, so there is room unless the task
+	// burned its entire budget).
 	res, xerr := db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE step_id=? AND lease_seq=?",
+		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE step_id=? AND lease_seq=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"')",
 		persistLeaseExtensionMs, stepID, leaseSeq,
 	)
 	if xerr == nil {
