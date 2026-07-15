@@ -212,20 +212,37 @@ func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlow
 	return errors.Trace(e.cancelSubtree(ctx, shard, childFlowID, childFlowToken, reason, "", false))
 }
 
-// detectOrphanedFlows reports `running` flows that have no non-terminal step and have not advanced for
-// orphanFlowThreshold - a flow stranded by a post-completion transition that failed to commit its
+// detectOrphanedFlows reports a `running` flow that is stranded: every step terminal AND no step touched for
+// orphanFlowThreshold. It is the shape a post-completion transition leaves when it fails to commit its
 // successor (see the processStep recovery defer, whose own reset UPDATE can lose to a contention storm).
 // It is a bug signal, logged at error level only: auto-recovery is deliberately not attempted here, since
 // re-driving the flow would duplicate the transition-evaluation logic and a false positive could
 // double-advance it. The processStep defer is the actual recovery; this is the last-resort alarm for the
-// residual case it cannot cover. A flow legitimately waiting - on a subgraph child (its caller step is
-// `running`+parked), a sleep/retry backoff (its next step is `pending`), or a human (`interrupted`) - has
-// a non-terminal step and is excluded, so steady-state operation never trips it.
+// residual case it cannot cover.
+//
+// Both conditions live on dwarf_steps, and that is the point. The age guard was originally on the flow row
+// (`dwarf_flows.updated_at`), but the touch-column refactor froze that column at the flow's go-`running` time
+// (it moves only on a status change now), so `f.updated_at` no longer tracks per-step progress and the guard
+// stopped discriminating anything. A step row's `updated_at`, by contrast, still moves on every
+// pending->running->terminal transition, so it is the honest "last activity" signal.
+//
+//   - all steps terminal (NOT EXISTS a non-terminal step) excludes every legitimate long-wait, because each
+//     holds a non-terminal step: a task mid-execution (`running`, even for 10 minutes with no DB activity),
+//     a sleep/retry backoff (`pending`), a parked subgraph caller (`running`+parked), a human (`interrupted`).
+//   - no step touched within the threshold (NOT EXISTS a step with a recent `updated_at`) excludes the only
+//     real false positive: the brief window in a NORMAL transition between the standalone step->`completed`
+//     UPDATE and the tx that inserts the successor, where the flow momentarily has all-terminal steps. The
+//     just-`completed` step's `updated_at` is fresh, so the flow is excluded (this window stretches to seconds
+//     under persist's retry backoff, still far inside the threshold).
+//
+// A genuine orphan satisfies both - every step terminal, the last one completed longer ago than the threshold
+// - and is flagged, with the same detection latency the flow-level guard intended.
 func (e *Engine) detectOrphanedFlows(ctx context.Context, db *sequel.DB, shard int) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT f.flow_id FROM dwarf_flows f"+
-			" WHERE f.status='"+workflow.StatusRunning+"' AND f.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
-			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))",
+			" WHERE f.status='"+workflow.StatusRunning+"'"+
+			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))"+
+			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s2 WHERE s2.flow_id=f.flow_id AND s2.updated_at >= DATE_ADD_MILLIS(NOW_UTC(), ?))",
 		-e.orphanFlowThreshold.Milliseconds(),
 	)
 	if err != nil {

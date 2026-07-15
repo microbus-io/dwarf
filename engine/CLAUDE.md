@@ -2158,18 +2158,26 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
 2. **Terminal flow check** in `processStep` - after loading flow data, if the flow is `cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
-3. **Orphan flow detection** (`detectOrphanedFlows`, `wedge.go`) - logs an error for any `running` flow with no
-   non-terminal step and `updated_at` older than `orphanFlowThreshold` (5m). Such a flow (every step terminal, no
-   successor) is stranded - the shape the post-completion transition wedge produces (see "processStep - Normal
+3. **Orphan flow detection** (`detectOrphanedFlows`, `wedge.go`) - logs an error for a `running` flow that is
+   stranded: **every step terminal AND no step touched for `orphanFlowThreshold` (5m)**. Such a flow (every step
+   terminal, no successor) is the shape the post-completion transition wedge produces (see "processStep - Normal
    Completion" below). A bug signal; **auto-recovery is intentionally not attempted** - re-driving the flow would
    duplicate transition-evaluation logic and a false positive could double-advance it. The real recovery is the
    `processStep` recovery defer (which rolls the just-`completed` step back to `pending` to re-dispatch); this detector
    is the last-resort alarm for the residual case the defer cannot cover (its own reset UPDATE losing to a contention
    storm). It runs on the same **dedicated `recoveryLoop`** as the wedge sweep (#4) - off `pollPendingSteps` for the
    same heavy-scan reason (its `NOT EXISTS` over `dwarf_steps` is latency-tolerant, while the poll is nudged
-   sub-second). Excludes a flow legitimately waiting (`running`+parked subgraph caller, a `pending` sleep/retry step,
-   an `interrupted` step - all non-terminal), so steady-state never trips it. Logs at error level only (silent under
-   the default discard logger); no metric.
+   sub-second). **Both conditions are on `dwarf_steps`, deliberately.** The age guard used to live on the flow row
+   (`dwarf_flows.updated_at older than the threshold`), but the `touch`-column refactor froze that column at
+   go-`running` time (it moves only on a status change), so it stopped tracking per-step progress: it was then
+   *permanently* satisfied for any flow running past 5m, leaving the all-terminal check to trip on the brief
+   completed->successor window of every ordinary transition (a healthy long-running flow would be alarmed on any
+   sweep that sampled it). A step row's `updated_at` still moves on every `pending->running->terminal` transition,
+   so the guard now anchors there. The all-terminal check excludes every legitimate long-wait (a `running` task -
+   even a 10-minute one with no DB activity - a `pending` sleep/retry, a `running`+parked subgraph caller, an
+   `interrupted` human wait), and the no-recent-step check excludes the completed->successor window (the
+   just-`completed` step's `updated_at` is fresh, even under persist backoff). Logs at error level only (silent
+   under the default discard logger); no metric.
 4. **Parked-step wedge sweep** (`sweepWedgedParks`, `wedge.go`) - defense in depth for the `parkedSubgraph` park,
    whose releasing condition could in principle never fire (a parked step is invisible to selection, and
    `parkedSubgraph` is invisible to lease recovery too). Runs on a **dedicated recovery goroutine** (`recoveryLoop`)
@@ -2286,6 +2294,16 @@ clock-comparison argument above rejects, and there is no other cross-shard key. 
 sorts the page itself - deciding what to trust - or pages a single shard with `Query.Shard`. Pinned by
 `TestList_NewestFirstIsPerShardNotGlobal`, which also asserts the global-order violation is *present*, so the code is
 never "fixed" back to the old promise by accident.
+
+**`Query.Limit` is a per-shard cap, not a hard total - same honesty, same reason.** `perShardLimit =
+ceil(Limit/shards)` (`history.go`) is applied to each shard's query and the results are concatenated with no final
+truncation, so a multi-shard page returns up to `shards * ceil(Limit/shards)` rows (`Limit:10` on 4 shards → up to 12;
+`Limit:1` → up to 4). `purgeFlows` divides identically, so `Purge` can mark more than `Limit` roots. This is
+documented rather than clamped **on purpose**: truncating the assembled slice would advance each shard's cursor
+(`nextPerShard[s]`, set from the last row scanned per shard) past rows never handed to the caller, silently dropping
+them from the next page - the per-shard cursor is exactly why there is no global OFFSET to truncate against. A caller
+needing a strict total truncates its own copy (leaving the returned cursor untouched) or pages one shard at a time.
+The public `Query.Limit`/`List`/`Purge` godocs and `docs/operations.md` state this.
 
 **The shard set is immutable at runtime.** `SetShard` is construction-time only: it records index->DSN pairs before
 `Startup` (which opens+migrates exactly those shards) and is **rejected** on a running engine, so the set never

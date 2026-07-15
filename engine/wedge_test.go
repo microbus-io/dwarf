@@ -460,6 +460,14 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		"UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
 		pastMs, healthyFlowID)
 	assert.NoError(err)
+	// The detector's staleness guard is now on the STEP row, so the orphan's completed step must ALSO be
+	// backdated - a genuine orphan is one whose last step completed longer ago than the threshold. Without
+	// this the flow reads as a fresh completed->successor window, not a strand (see TestOrphanDetection_
+	// IgnoresCompletedSuccessorWindow).
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
+		pastMs, orphanFlowID)
+	assert.NoError(err)
 
 	e.detectOrphanedFlows(ctx, db, shard)
 
@@ -470,4 +478,60 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		assert.Equal(keys.CorrelationID(shard, orphanFlowID), seen[0], "the flagged flow is the forged orphan, not the healthy blocked flow")
 		assert.NotEqual(orphanKey, seen[0], "the logged id carries no token")
 	}
+}
+
+// TestOrphanDetection_IgnoresCompletedSuccessorWindow pins finding 10: a healthy flow mid-transition
+// momentarily has all-terminal steps (processStep commits step->completed in a standalone UPDATE, then a
+// separate tx inserts the successor). Because the touch-column refactor froze dwarf_flows.updated_at at
+// go-running time, the old flow-level age guard was permanently satisfied for any flow older than the
+// threshold, so this transient window was logged as an orphan on every sweep that sampled it. The step-level
+// staleness guard fixes it: the just-completed step's updated_at is fresh, so the flow is NOT flagged. This
+// forges exactly that window - a `running` flow, backdated flow row, but a RECENTLY-updated completed step -
+// and asserts silence. (It is the forged orphan of the test above minus the step backdate.)
+func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	capture := &orphanLogCapture{}
+	proxy := NewTestProxy()
+
+	solo := workflow.NewGraph("Solo")
+	solo.SetEndpoint("A", "orphanwin.verify:0/a")
+	solo.AddTransition("A", workflow.END)
+	proxy.HandleGraph("orphanwin.verify:0/solo", solo)
+	proxy.HandleTask("orphanwin.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngine()
+	e.SetHost(proxy)
+	assert.NoError(e.SetLogger(slog.New(capture)))
+	e.RunInTest(t)
+
+	key, err := e.Create(ctx, "orphanwin.verify:0/solo", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	out, err := e.Await(ctx, key)
+	if !assert.NoError(err) || !assert.Equal(workflow.StatusCompleted, out.Status) {
+		return
+	}
+	shard, flowID, _, err := keys.ParseFlowKey(key)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := e.db.Shard(shard)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// Backdate ONLY the flow row and flip it to running - the step stays freshly completed, which is exactly
+	// the completed->successor window a healthy long-running flow passes through on every transition.
+	pastMs := -(e.orphanFlowThreshold + time.Minute).Milliseconds()
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_flows SET status=?, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
+		workflow.StatusRunning, pastMs, flowID)
+	assert.NoError(err)
+
+	e.detectOrphanedFlows(ctx, db, shard)
+
+	assert.Len(capture.seen(), 0, "a flow whose step was just completed is mid-transition, not orphaned - it must not be flagged")
 }
