@@ -1250,6 +1250,15 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// cohort scan so the successor_id write can target them by primary key (step_id IN ...) below,
 	// rather than re-scanning dwarf_steps by (flow_id, lineage_id, task_name) - that unindexed predicate
 	// took an Update lock across the whole table and deadlocked two concurrent fan-ins on SQL Server.
+	//
+	// A member qualifies as an exit only if it BOTH bears a fan-in-predecessor task name AND has not already
+	// recorded a forward edge (successor_id=0). The task-name test alone is not enough: a branch that LOOPS
+	// through the exit task via flow.Goto (e.g. `Work -Goto-> Work -> Join`) leaves several `Work` steps in the
+	// cohort, but only the last one transitioned to the fan-in - the earlier iterations already point at their
+	// next loop step. A step that transitions to a fan-in inserts no successor of its own (the fan-in step is
+	// created here, or its arrival is only a counter bump), so its successor_id is still 0; a loop iteration or a
+	// multi-step branch's interior step wrote its successor_id when it created that successor. Overwriting the
+	// latter corrupts the execution DAG (spurious `step -> fan-in` edges in History/HistoryMermaid).
 	exitTaskSet := make(map[string]bool)
 	for _, t := range fanInPredecessorTasks(graph, fanInTaskName) {
 		exitTaskSet[t] = true
@@ -1257,7 +1266,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	var exitStepIDs []int
 
 	rows, err := tx.QueryContext(ctx,
-		"SELECT step_id, task_name, status, changes, step_depth FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id",
+		"SELECT step_id, task_name, status, changes, step_depth, successor_id FROM dwarf_steps WHERE flow_id=? AND lineage_id=? ORDER BY fan_out_ordinal, step_depth, step_id",
 		flowID, cohortSpawnID,
 	)
 	if err != nil {
@@ -1266,17 +1275,18 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	defer rows.Close()
 	maxCohortDepth := 0
 	for rows.Next() {
-		var memberStepID int
+		var memberStepID, memberSuccessorID int
 		var memberTaskName, status, changesJSON string
 		var depth int
-		rows.Scan(&memberStepID, &memberTaskName, &status, &changesJSON, &depth)
+		rows.Scan(&memberStepID, &memberTaskName, &status, &changesJSON, &depth, &memberSuccessorID)
 		bytes.changesRead += len(changesJSON)
 		if depth > maxCohortDepth {
 			maxCohortDepth = depth
 		}
-		// Match the prior predicate's row set exactly: every cohort member with an exit task name,
-		// regardless of status (the scan it replaces had no status filter).
-		if exitTaskSet[strings.TrimSpace(memberTaskName)] {
+		// A cohort member with an exit task name that has not yet recorded a successor is one that transitioned
+		// into the fan-in (see above); a member with the same task name that already has a successor looped or
+		// continued elsewhere and must keep its own forward edge.
+		if exitTaskSet[strings.TrimSpace(memberTaskName)] && memberSuccessorID == 0 {
 			exitStepIDs = append(exitStepIDs, memberStepID)
 		}
 		status = strings.TrimSpace(status)

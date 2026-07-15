@@ -920,11 +920,20 @@ is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
 - **Fan-out** `X->{Yi}`: every `Yi.predecessor_id=X`; `X.successor_id` = the first child only (the full set recovered
   from the children's `predecessor_id`).
 - **Fan-in** `{Yi}->Z`: `Z.predecessor_id` = the last cohort member to finish; every cohort *exit* step gets
-  `successor_id=Z`. The exit set is *logically* `lineage_id == cohortSpawnID AND task_name IN` the graph-predecessor
-  tasks of the fan-in - **not** the whole lineage, so `A`/`B` in `forEach->{A->B->C}->J` are excluded and only the
-  `C`s point at `J`. The `successor_id` write targets those exit steps **by primary key** (ids collected during
-  `insertFanInStep`'s cohort-member merge scan), not by the `(flow_id, lineage_id, task_name)` predicate - which is
-  unindexed and deadlocked concurrent fan-ins on SQL Server (the deadlock story is at that write in `execution.go`).
+  `successor_id=Z`. The exit set is `lineage_id == cohortSpawnID AND task_name IN` the graph-predecessor tasks of
+  the fan-in **AND `successor_id == 0`** - **not** the whole lineage, so `A`/`B` in `forEach->{A->B->C}->J` are
+  excluded and only the `C`s point at `J`. The `successor_id == 0` conjunct is load-bearing, not incidental: a
+  branch that LOOPS through its exit task via `flow.Goto` (`forEach->{Work -Goto-> Work -> J}`) leaves several
+  `Work` steps in the cohort, but only the last transitioned to the fan-in - the earlier iterations already wrote
+  a forward edge to their next loop step. A step that transitions *into* a fan-in inserts no successor of its own
+  (the fan-in step is created here; an earlier arriver's transition was only a counter bump), so its `successor_id`
+  is still 0, while a loop iteration or a multi-step branch's interior step set `successor_id` when it created that
+  successor. Without the conjunct, the task-name match alone overwrote those interior edges with the fan-in id,
+  corrupting the recorded DAG (spurious `step -> fan-in` edges in `History`/`HistoryMermaid`). Pinned by
+  `TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges`. The `successor_id` write targets the exit steps **by primary
+  key** (ids collected during `insertFanInStep`'s cohort-member merge scan), not by the
+  `(flow_id, lineage_id, task_name)` predicate - which is unindexed and deadlocked concurrent fan-ins on SQL Server
+  (the deadlock story is at that write in `execution.go`).
 - **flow.Retry**: rewinds the step in place (same row), so `predecessor_id` is preserved. (A `Fork` copies the
   step into a new row and remaps `predecessor_id` to the cloned predecessor.)
 - **Entry / subgraph-entry steps**: `predecessor_id` defaults to 0.
