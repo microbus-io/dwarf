@@ -987,7 +987,10 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 }
 
 // List queries flows by status, workflow name, or thread key, newest first, with cursor pagination
-// (Query.Limit, default 100; the returned cursor fetches the next page).
+// (Query.Limit, default 100; the returned cursor fetches the next page). Query.Limit is a per-shard cap
+// divided across shards, not a hard ceiling on the total: a multi-shard page can hold up to
+// shards*ceil(Limit/shards) summaries (see Query.Limit). Pass Query.Shard, or truncate the page, for a
+// strict count.
 //
 // "Newest first" is per shard, not global. On a MULTI-SHARD fleet each shard contributes its own newest
 // flows and the results are grouped by shard, so the concatenation is not in one descending time order -
@@ -1014,7 +1017,9 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 
 // Purge marks flows matching a query (and their subgraph subtrees) for deletion; a background reaper removes
 // them shortly after. Marked flows are excluded from List/History immediately. Returns the count of roots
-// marked - no more than 4096 per call; iterate to mark more. Running flows are skipped.
+// marked - no more than 4096 per call; iterate to mark more. Query.Limit is divided per shard exactly as in
+// List (up to ceil(Limit/shards) roots per shard), so a multi-shard call can mark more than Limit roots.
+// Running flows are skipped.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (int, error) {
 	if err := e.ensureStarted(); err != nil {
 		return 0, errors.Trace(err)

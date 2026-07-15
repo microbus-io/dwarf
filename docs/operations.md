@@ -141,6 +141,13 @@ order to give: flow ids are per-shard sequences (a shard with fewer flows has lo
 compare), and `created_at` would compare different database servers' clocks. If you need one ordered view,
 sort the page yourself — you decide what to trust — or page a single shard with `Query.Shard`.
 
+**`Query.Limit` is a per-shard cap, not a hard total.** It is divided across shards, so on a multi-shard
+fleet each shard returns up to `ceil(Limit/shards)` of its own newest flows and a page can hold as many as
+`shards * ceil(Limit/shards)` results (`Limit: 10` on 4 shards returns up to 12; `Limit: 1` returns up to 4).
+A single-shard engine returns at most `Limit`. This per-shard division is why pagination is a cursor rather
+than a global offset — each shard advances its own position independently. `Purge` divides `Limit` the same
+way. For a strict total, truncate the returned page yourself or query one shard at a time with `Query.Shard`.
+
 ## Pausing and resuming
 
 A flow pauses in two distinct ways, and each has its own continuation operation — they are never

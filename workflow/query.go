@@ -58,8 +58,14 @@ type Query struct {
 	// literally, not as a wildcard, so "a_b" matches only "a_b" (not "axb") and "50%" matches only a
 	// literal "50%".
 	Search string `json:"search,omitzero"`
-	// Limit caps the number of flows returned (default 100). Results come back newest first - but per
-	// shard, not globally: on a multi-shard fleet each shard contributes its own newest flows and the
-	// results are shard-grouped. See Engine.List.
+	// Limit is a PER-SHARD cap divided across shards, NOT a hard ceiling on the total returned (default
+	// 100). On a multi-shard fleet each shard returns up to ceil(Limit/shards) of its own newest flows, so
+	// a single page can hold as many as shards*ceil(Limit/shards) summaries - e.g. Limit=10 on 4 shards
+	// returns up to 12, and Limit=1 returns up to 4. A single-shard engine (the default) returns at most
+	// Limit. This per-shard division is also why pagination is a cursor and not a global OFFSET: each shard
+	// advances its own newest-first position independently (the cursor encodes one flow_id per shard), so
+	// no single offset could page the shard-grouped result without skipping rows. If you need a strict
+	// total, truncate the page yourself or query one shard at a time with Query.Shard. Results come back
+	// newest first per shard, not globally (see Engine.List). Purge divides Limit the same way.
 	Limit int `json:"limit,omitzero"`
 }
