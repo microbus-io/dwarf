@@ -50,6 +50,9 @@ const (
 	// Scoped by workflow URL of the subgraph child:
 	faultSubgraphReviveLost = "subgraphReviveLost" // completeSurgraphFlow skips reviving the parked caller
 
+	// Process-wide, consumed per attempt (InjectN sets how many attempts fail):
+	faultCompleteSurgraphErr = "completeSurgraphErr" // completeSurgraphFlow returns a non-contention database error
+
 	// Scoped by signal op (enqueue / statusChange):
 	faultSignalPeersPanic = "signalPeersPanic" // the host SignalPeers call panics (host-call panic isolation)
 

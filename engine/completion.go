@@ -468,7 +468,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	var finalStateJSON, workflowURL string
+	var finalStateJSON, workflowURL, currentStatus string
 	var surgraphFlowID, surgraphStepID int
 	var deleteOnCompletion, awaited bool
 	completed := false
@@ -501,9 +501,9 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// Read the surgraph linkage, disposable flag, and awaited flag under the write lock - needed for
 		// the post-tx surgraph revival, the atomic disposable delete below, and the signalStop broadcast gate.
 		err = tx.QueryRowContext(ctx,
-			"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, awaited FROM dwarf_flows WHERE flow_id=?",
+			"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, awaited, status FROM dwarf_flows WHERE flow_id=?",
 			flowID,
-		).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &awaited)
+		).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &awaited, &currentStatus)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -538,6 +538,22 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		return false, errors.Trace(err)
 	}
 	if !completed {
+		// Our status UPDATE matched no row, so the flow was already terminal at the lock. If it is `completed`
+		// with a surgraph parent, the revive still owes a re-drive - and this is exactly finding 8's case: on
+		// the FIRST attempt this transaction committed the completion and the post-tx completeSurgraphFlow then
+		// hit a transient DB error, so persist re-ran this idempotent closure; on this retry the status UPDATE
+		// no-ops (already completed) and, without re-driving the revive here, persist would read the nil below as
+		// "the write landed" and the parent's caller step would strand running+parkedSubgraph until the ~10m
+		// parked-step wedge sweep (raising a false wedge alarm). completeSurgraphFlow is CAS-guarded on
+		// running+parkedSubgraph, so re-driving is idempotent (a peer that already revived, or that raced us to
+		// complete, makes this a harmless no-op). signalStop/metrics are deliberately NOT repeated - they fired
+		// on the attempt that transitioned the flow. A failed/cancelled flow (status != completed) gets no revive
+		// here; its parent is handled by failure delivery / the Cancel cascade.
+		if strings.TrimSpace(currentStatus) == workflow.StatusCompleted && surgraphFlowID != 0 {
+			if rerr := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepID, finalStateJSON); rerr != nil {
+				return false, errors.Trace(rerr)
+			}
+		}
 		return false, nil
 	}
 
@@ -566,6 +582,11 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	// believes it succeeded, exactly as a lost revive would look.
 	if e.seams.IsFault(faultSubgraphReviveLost) {
 		return nil
+	}
+	// faultCompleteSurgraphErr makes the revive fail with a synthetic non-contention error (consumed per attempt),
+	// so a test can prove persist re-drives it on retry rather than losing it - the whole point of finding 8's fix.
+	if e.seams.IsFault(faultCompleteSurgraphErr) {
+		return errors.New("injected fault: " + faultCompleteSurgraphErr)
 	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
