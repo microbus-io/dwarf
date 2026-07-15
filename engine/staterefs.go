@@ -176,6 +176,27 @@ func mintStateRefs(merged map[string]any, changes map[string]any, inherited stat
 		}
 	}
 
+	// Carry forward an inherited ref whose key never appeared in `merged`. The loop above only sees keys
+	// present in `merged` (via `raw`), which is every inherited key on the paths that resolve state in FULL at
+	// dispatch (linear, fan-out branch). But the fan-in paths resolve only the fields their reducers fold
+	// (resolveReducedRefs): a merely-CARRIED ref is deliberately not materialized, so its key is absent from
+	// `merged` and the loop never carried it. Without this, that ref is neither materialized nor re-emitted and
+	// the carried field is silently, permanently dropped from the fan-in step onward and from final_state. A
+	// key already handled above (rewritten -> re-anchored, or excluded) is skipped; a tombstoned or
+	// member-overwritten field appears in `changes`/`exclude` and is correctly left dropped.
+	for k, anchor := range inherited {
+		if _, inMerged := merged[k]; inMerged {
+			continue
+		}
+		if exclude[k] {
+			continue
+		}
+		if _, rewritten := changes[k]; rewritten {
+			continue
+		}
+		refs[k] = anchor
+	}
+
 	inlineExcessAnchors(raw, refs, merged)
 
 	stateJSON, err := json.Marshal(raw)
@@ -219,30 +240,44 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs stateRefs, merged 
 	}
 	byAnchor := map[int][]string{}
 	bytesOf := map[int]int{}
+	// An anchor is PINNED (un-droppable) if any of its fields' literals are absent from `merged` - a merely
+	// carried ref whose payload this step never materialized. Inlining it would require a literal we do not
+	// have, so dropping it would delete the field outright: the exact data loss the carry-forward above closes.
+	// Such a ref must survive the cap even if that means a wider IN-list (correctness over the perf bound).
+	pinned := map[int]bool{}
 	for k, anchor := range refs {
 		byAnchor[anchor] = append(byAnchor[anchor], k)
 		if v, ok := merged[k]; ok {
 			if data, err := json.Marshal(v); err == nil {
 				bytesOf[anchor] += len(data)
 			}
+		} else {
+			pinned[anchor] = true
 		}
 	}
 	if len(byAnchor) <= maxStateAnchors {
 		return
 	}
-	anchors := make([]int, 0, len(byAnchor))
+	// Only inlineable (non-pinned) anchors are droppable, largest-bytes first so the survivors are the ones the
+	// refs buy the most on. Ties break on the anchor id, so the choice is deterministic.
+	droppable := make([]int, 0, len(byAnchor))
+	pinnedCount := 0
 	for a := range byAnchor {
-		anchors = append(anchors, a)
-	}
-	// Largest first, so the ones that survive the cap are the ones the refs buy the most on. Ties break on
-	// the anchor id, so the choice is deterministic.
-	sort.Slice(anchors, func(i, j int) bool {
-		if bytesOf[anchors[i]] != bytesOf[anchors[j]] {
-			return bytesOf[anchors[i]] > bytesOf[anchors[j]]
+		if pinned[a] {
+			pinnedCount++
+			continue
 		}
-		return anchors[i] < anchors[j]
+		droppable = append(droppable, a)
+	}
+	sort.Slice(droppable, func(i, j int) bool {
+		if bytesOf[droppable[i]] != bytesOf[droppable[j]] {
+			return bytesOf[droppable[i]] > bytesOf[droppable[j]]
+		}
+		return droppable[i] < droppable[j]
 	})
-	for _, a := range anchors[maxStateAnchors:] {
+	// Keep the pinned anchors plus the largest droppable ones up to the cap; inline the rest.
+	keepDroppable := max(0, maxStateAnchors-pinnedCount)
+	for _, a := range droppable[min(keepDroppable, len(droppable)):] {
 		for _, k := range byAnchor[a] {
 			if v, ok := merged[k]; ok {
 				if data, err := json.Marshal(v); err == nil {
@@ -400,8 +435,7 @@ func spliceResolved(state map[string]any, field string, raw json.RawMessage) err
 	return nil
 }
 
-// resolveReducedRefs materializes only the ref'd fields a fan-in's reducers actually need, and returns the
-// refs it left alone for the caller to carry forward onto the fan-in step.
+// resolveReducedRefs materializes only the ref'd fields a fan-in's reducers actually need, into state in place.
 //
 // A reducer that COMBINES (append/add/union/merge/min/max/and/or/concat) needs its accumulated base value, so
 // a ref'd field it touches must be materialized or the fold would apply the delta to an absent base and lose
@@ -413,28 +447,27 @@ func spliceResolved(state map[string]any, field string, raw json.RawMessage) err
 // ReducerReplace merely costs a wasted fetch - and it is what keeps a large CARRIED field (the motivating
 // case: a document fanned out over its pages) from being materialized and re-anchored at every fan-in, which
 // would hand back the win in precisely the fan-out graphs the design exists for.
-func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, shardNum int, state map[string]any, refs stateRefs, reducers map[string]workflow.Reducer, workflowURL string) (stateRefs, error) {
+//
+// A merely-carried (non-reduced) ref is left un-materialized here and re-emitted onto the fan-in step by
+// mintStateRefs' inherited-carry-forward (which handles a ref whose key is absent from the merged state,
+// exactly the case a non-materialized carry produces). That is why this returns nothing: the carried set is
+// not the caller's to thread - mintStateRefs recovers it from the same `inherited` refs it is already passed.
+func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, shardNum int, state map[string]any, refs stateRefs, reducers map[string]workflow.Reducer, workflowURL string) error {
 	if len(refs) == 0 {
-		return nil, nil
+		return nil
 	}
 	want := map[string]bool{}
-	carried := stateRefs{}
-	for field, anchor := range refs {
+	for field := range refs {
 		if _, reduced := reducers[field]; reduced {
 			want[field] = true
-		} else {
-			carried[field] = anchor
 		}
 	}
 	if len(want) > 0 {
 		if err := e.resolveStateRefs(ctx, tx, shardNum, state, refs, want, workflowURL); err != nil {
-			return nil, errors.Trace(err)
+			return errors.Trace(err)
 		}
 	}
-	if len(carried) == 0 {
-		return nil, nil
-	}
-	return carried, nil
+	return nil
 }
 
 // resolvedStepState materializes a step's state column into JSON with every ref'd field spliced back in - the

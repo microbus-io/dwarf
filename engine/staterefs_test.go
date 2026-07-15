@@ -236,6 +236,45 @@ func TestStateRefs_MintTiers(t *testing.T) {
 		assert.NotContains(stored, "f5")
 		assert.Equal(105, refs["f5"])
 	})
+
+	t.Run("carried_ref_absent_from_merged_is_re_emitted", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// The fan-in mint case: a merely-CARRIED field is not materialized into `merged` (resolveReducedRefs
+		// resolves only what its reducers fold), so its key is absent from `merged`. The inherited ref must
+		// still be re-emitted, or the carried field is silently dropped from the fan-in step onward. This is the
+		// shape a spawn that only carries the ref (an anchoring step precedes the fan-out source) produces.
+		merged := map[string]any{"local": "s"} // `pdf` deliberately absent - carried, not materialized
+		stored, refs := mint(t, merged, map[string]any{}, stateRefs{"pdf": 7}, 1)
+		assert.Equal(7, refs["pdf"], "a carried ref whose payload is not in merged must still be re-emitted")
+		assert.NotContains(stored, "pdf")
+		assert.Contains(stored, "local")
+	})
+
+	t.Run("carried_ref_absent_from_merged_but_rewritten_is_dropped", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// A tombstone (member/spawn deleted the carried field) leaves the key in `changes` and out of `merged`.
+		// The stale carried ref must NOT be resurrected - the field is genuinely gone.
+		_, refs := mint(t, map[string]any{}, map[string]any{"pdf": nil}, stateRefs{"pdf": 7}, 1)
+		assert.NotContains(refs, "pdf", "a tombstoned carried field must not be re-emitted through its stale ref")
+	})
+
+	t.Run("un_inlineable_carried_anchor_survives_the_cap", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// More distinct anchors than maxStateAnchors, where one anchor is a CARRIED ref whose payload is absent
+		// from `merged` (un-inlineable). The cap must never drop it - there is no literal to inline it back to,
+		// so dropping would delete the field. It survives even if that means keeping more than maxStateAnchors.
+		merged := map[string]any{}
+		inherited := stateRefs{}
+		for i := range maxStateAnchors + 1 {
+			field := "f" + string(rune('0'+i))
+			merged[field] = blob(2000 + i*1000) // inlineable: present in merged
+			inherited[field] = 100 + i
+		}
+		inherited["carried"] = 999 // absent from merged: un-inlineable, must be pinned
+		stored, refs := mint(t, merged, map[string]any{}, inherited, 1)
+		assert.Equal(999, refs["carried"], "an un-inlineable carried anchor must survive the cap")
+		assert.NotContains(stored, "carried")
+	})
 }
 
 // TestStateRefs_ResolveReadsBothColumns pins the correction that motivated the whole redesign: an anchor's

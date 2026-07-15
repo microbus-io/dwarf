@@ -832,8 +832,22 @@ so a ref'd field it folds must be materialized or the fold would apply the delta
 lose everything accumulated. The default `replace` reducer needs nothing. So a field is materialized iff the graph
 registers a reducer for it - a safe superset. A merely *carried* ref is passed through untouched, still pointing at
 its original anchor: materializing it at every fan-in would re-anchor the payload and hand back the win in exactly
-the fan-out graphs the design exists for. The fan-in mints against the **spawn** step (whose row holds what the
-cohort carried), while member-contributed and reduced fields are inlined into the fan-in's own `state`.
+the fan-out graphs the design exists for. The fan-in mints against the **spawn** step, while member-contributed and
+reduced fields are inlined into the fan-in's own `state`.
+
+**A carried ref's anchor is NOT necessarily the spawn - and re-emitting it is a distinct step from the mint.** The
+spawn's row holds a carried field's bytes only when the spawn is itself that field's anchor (e.g. a fan-out source
+that is also the entry step holding the flow's initial input). When an anchoring step *precedes* the fan-out source,
+the spawn merely carries the field as a ref pointing at that earlier step - the spawn's row does **not** hold the
+bytes. Because such a ref is deliberately *not* materialized (only reduced fields are), the carried key is absent
+from the fan-in's `merged` state, so `mintStateRefs`' main candidate loop never sees it. `mintStateRefs` therefore
+carries an inherited ref forward **even when its key is absent from `merged`** (skipping only a rewritten or excluded
+key), which re-emits the carried ref onto the fan-in step pointing at its original (one-hop) anchor. Omitting that
+carry-forward silently dropped the field from the fan-in step onward and from `final_state` - a permanent loss on the
+common `preprocess → fan-out → fan-in` shape with a large carried field. `inlineExcessAnchors` must likewise never
+drop such a ref (its literal is not in `merged` to inline back), so an un-inlineable carried anchor is *pinned* past
+the `maxStateAnchors` cap. Pinned by `fixtures/staterefscarryreview_test.go` (populated / empty / nested cohorts,
+plus `Continue`/`Fork`) and the `mintStateRefs` carried-absent-from-merged unit cases in `engine/staterefs_test.go`.
 
 **`Fork` remaps ref targets** through its clone id map, and this is *why refs live in their own column*: Fork clones
 step rows with a DB-side `INSERT...SELECT`, so the payload bytes never pass through the engine - remapping a ref

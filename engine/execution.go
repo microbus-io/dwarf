@@ -1154,7 +1154,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// Resolve only what the reducers actually fold; a merely-carried ref rides through the (empty) cohort
 		// untouched, still pointing at its original anchor - see resolveReducedRefs.
 		ourRefs := parseStateRefs(ourRefsJSON)
-		_, rerr := e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, graph.Reducers(), workflowURL)
+		rerr := e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, graph.Reducers(), workflowURL)
 		if rerr != nil {
 			return errors.Trace(rerr)
 		}
@@ -1235,7 +1235,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// original anchor: resolving it here would materialize the payload and re-anchor it at EVERY fan-in,
 	// giving back the win in exactly the fan-out graphs this design exists for.
 	spawnRefs := parseStateRefs(spawnRefsJSON)
-	_, err := e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, graph.Reducers(), workflowURL)
+	err := e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, graph.Reducers(), workflowURL)
 	if err != nil {
 		return 0, stateByteCount{}, errors.Trace(err)
 	}
