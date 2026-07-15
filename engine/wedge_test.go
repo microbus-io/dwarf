@@ -480,7 +480,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	}
 }
 
-// TestOrphanDetection_IgnoresCompletedSuccessorWindow pins finding 10: a healthy flow mid-transition
+// TestOrphanDetection_IgnoresCompletedSuccessorWindow pins that a healthy flow mid-transition
 // momentarily has all-terminal steps (processStep commits step->completed in a standalone UPDATE, then a
 // separate tx inserts the successor). Because the touch-column refactor froze dwarf_flows.updated_at at
 // go-running time, the old flow-level age guard was permanently satisfied for any flow older than the

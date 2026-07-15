@@ -139,7 +139,7 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 // never needed here.
 //
 // In TEST MODE the DSN is a template by design - one base is shared across shards and `%d` is what makes
-// each shard's database distinct (the per-shard isolation the fixtures rely on; see fixtures/CLAUDE.md).
+// each shard's database distinct (the per-shard isolation the fixtures rely on).
 // The substitution is a literal ReplaceAll, so it still cannot interpret any other `%` sequence.
 func resolveShardDSN(cfg Config, shardIndex int, dsn string) string {
 	if cfg.TestID == "" {

@@ -125,7 +125,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 		return
 	}
 
-	// The core of finding 15: neither column may take its schema default on a cloned non-root flow.
+	// The core of the fix: neither column may take its schema default on a cloned non-root flow.
 	assert.NotEqual("", threadToken)    // was '' - the permanent, API-visible defect
 	assert.NotEqual(0, childStepID)     // was 0 - flow no longer points at its current step
 	assert.Equal(childFlowID, threadID) // a subgraph flow is its own thread

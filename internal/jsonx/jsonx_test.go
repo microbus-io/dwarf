@@ -76,9 +76,9 @@ func TestCheckStorable_RejectsIntegersFloat64WouldRound(t *testing.T) {
 }
 
 // TestCheckStorable_RejectsExactlyRepresentableIntegersPast2to53 pins the deliberately-CONSERVATIVE half of the
-// guard, and finding 14's corner: an integer past 2^53 that float64 holds EXACTLY - the kind a ReducerAdd sum
+// guard: an integer past 2^53 that float64 holds EXACTLY - the kind a ReducerAdd sum
 // produces - is still rejected on sight, because checkNumber sees only "integer literal > 2^53" and cannot tell an
-// exact derived float64 from a lossy external integer. The documented consequence (workflow/CLAUDE.md): such a sum
+// exact derived float64 from a lossy external integer. The documented consequence: such a sum
 // stores and round-trips fine but is rejected the moment a task RE-AUTHORS it (Set / flow.Subgraph(flow.Snapshot)).
 // If this ever relaxes to accept round-trippable integers, that doc and the "carry it as a string" workaround change.
 func TestCheckStorable_RejectsExactlyRepresentableIntegersPast2to53(t *testing.T) {

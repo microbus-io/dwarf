@@ -463,7 +463,7 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	assert.Contains(joinState, "log", "the fan-in step inlines it, anchoring it for everything downstream")
 }
 
-// TestStateRefs_SpawnCombinedFieldIsNotAnchored pins finding 3: a field the SPAWN task itself writes through a
+// TestStateRefs_SpawnCombinedFieldIsNotAnchored pins that a field the SPAWN task itself writes through a
 // COMBINING reducer, over a base it also holds, has a merged fan-in value (reduce(base, delta)) that exists in no
 // row - the spawn's `changes` holds only the delta. Anchoring it at the spawn (as the fan-in mint did) made
 // resolution splice back the bare delta, silently dropping the accumulated base. It must be inlined instead.

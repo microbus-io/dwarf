@@ -27,7 +27,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestFailStep_TerminalStatusGuard pins finding 9: failStep's fenced write now carries a status guard
+// TestFailStep_TerminalStatusGuard pins that failStep's fenced write now carries a status guard
 // (status IN ('running','completed')), so it fails only a step a worker legitimately holds, never a terminal
 // one. cancelSubtree terminalizes a step to `cancelled` WITHOUT bumping lease_seq, so the dispatching worker's
 // generation still matches; without the status guard, failStep rewrote that cancelled step to `failed` -

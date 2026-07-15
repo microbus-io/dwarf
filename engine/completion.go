@@ -539,7 +539,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	}
 	if !completed {
 		// Our status UPDATE matched no row, so the flow was already terminal at the lock. If it is `completed`
-		// with a surgraph parent, the revive still owes a re-drive - and this is exactly finding 8's case: on
+		// with a surgraph parent, the revive still owes a re-drive - the revive-lost-on-retry case: on
 		// the FIRST attempt this transaction committed the completion and the post-tx completeSurgraphFlow then
 		// hit a transient DB error, so persist re-ran this idempotent closure; on this retry the status UPDATE
 		// no-ops (already completed) and, without re-driving the revive here, persist would read the nil below as
@@ -584,7 +584,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		return nil
 	}
 	// faultCompleteSurgraphErr makes the revive fail with a synthetic non-contention error (consumed per attempt),
-	// so a test can prove persist re-drives it on retry rather than losing it - the whole point of finding 8's fix.
+	// so a test can prove persist re-drives it on retry rather than losing it - the whole point of the re-drive.
 	if e.seams.IsFault(faultCompleteSurgraphErr) {
 		return errors.New("injected fault: " + faultCompleteSurgraphErr)
 	}

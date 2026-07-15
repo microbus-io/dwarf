@@ -26,7 +26,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestCompleteFlow_TransientReviveErrorIsRetriedNotLost pins finding 8: completeFlow's write closure is
+// TestCompleteFlow_TransientReviveErrorIsRetriedNotLost pins the revive re-drive: completeFlow's write closure is
 // idempotent for persist's retry, INCLUDING its post-commit surgraph revive. completeFlow is two phases - a
 // transaction that terminalizes the flow row, then a post-commit completeSurgraphFlow that re-dispatches the
 // parked parent caller. If the transaction commits but completeSurgraphFlow then hits a transient DB error,

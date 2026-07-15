@@ -32,8 +32,8 @@ limitations under the License.
 // dev/CI topology), so higher shard counts do NOT boost throughput - they add connection/coordination overhead
 // against the same server and typically cost a little. The shard sub-benchmarks are a distributed-routing
 // *reliability* check (does a multi-DB engine still complete every flow correctly?) and a measure of the
-// co-located overhead shape, NOT a scaling demo. The engine's real horizontal-scale story is shard-per-server
-// (see internal/database/CLAUDE.md), which this single-host harness cannot exhibit.
+// co-located overhead shape, NOT a scaling demo. The engine's real horizontal-scale story is shard-per-server,
+// which this single-host harness cannot exhibit.
 package fixtures
 
 import (

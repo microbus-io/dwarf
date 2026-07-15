@@ -124,7 +124,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	assert.Equal(int32(1), runs.Load(), "nothing re-dispatches a terminalized step")
 }
 
-// TestPersist_LeaseExtensionStatusGuard pins finding 13: persist's lease-extension UPDATE is guarded on
+// TestPersist_LeaseExtensionStatusGuard pins that persist's lease-extension UPDATE is guarded on
 // `status IN ('running','completed')` - the two states a worker legitimately holds a step in - so it extends
 // the lease of a step we still own but NEVER stamps a future lease_expires onto one that lease recovery has
 // already reset to `pending`. Recovery resets an expired step running->pending WITHOUT bumping lease_seq, so

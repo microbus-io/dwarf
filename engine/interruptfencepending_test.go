@@ -26,7 +26,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt pins finding 7. handleInterrupt writes the
+// TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt pins the leaf-transition fence. handleInterrupt writes the
 // leaf's interrupt AND re-parks the whole surgraph chain (ancestor callers running+parkedSubgraph -> interrupted,
 // chain flows -> interrupted) in one combined UPDATE guarded on status IN ('running','interrupted'). The only
 // post-UPDATE gate USED to be a lease_seq compare. But lease recovery resets an expired leaf running->pending
