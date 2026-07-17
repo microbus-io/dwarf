@@ -17,7 +17,6 @@ limitations under the License.
 package workflow_test
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/microbus-io/dwarf/workflow"
@@ -37,23 +36,6 @@ func ExampleGraph() {
 	// name: Checkout
 	// entry: Reserve
 	// valid: true
-}
-
-// Reducers merge the changes of parallel branches at a fan-in. MergeState applies them to fold a delta
-// onto a base state.
-func ExampleMergeState() {
-	reducers := map[string]workflow.Reducer{
-		"items": workflow.ReducerAppend, // concatenate arrays
-		"total": workflow.ReducerAdd,    // sum numbers
-	}
-	base := map[string]any{"items": []any{"a"}, "total": 1}
-	delta := map[string]any{"items": []any{"b"}, "total": 2}
-
-	// Reducer outputs are raw JSON, ready to be re-serialized as the next step's state.
-	merged, _ := workflow.MergeState(base, delta, reducers)
-	out, _ := json.Marshal(merged)
-	fmt.Println(string(out))
-	// Output: {"items":["a","b"],"total":3}
 }
 
 // A Flow carries state to and from a task. Tasks read inputs and write outputs with typed accessors.

@@ -17,7 +17,6 @@ limitations under the License.
 package engine
 
 import (
-	"encoding/json"
 	"strings"
 
 	"github.com/microbus-io/boolexp"
@@ -50,16 +49,8 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 		return nil, errors.New("task '%s' requested goto to '%s' but no WithGoto transition exists from this task", stripProto(currentTask), stripProto(gotoTarget))
 	}
 
-	stateMap := make(map[string]any, len(flow.RawState()))
-	for k, v := range flow.RawState() {
-		if raw, ok := v.(json.RawMessage); ok {
-			var val any
-			json.Unmarshal(raw, &val)
-			stateMap[k] = val
-		} else {
-			stateMap[k] = v
-		}
-	}
+	// State values are decoded, so RawState is directly the map boolexp evaluates against.
+	stateMap := flow.RawState()
 
 	for _, tr := range graph.Transitions() {
 		if tr.From != currentTask || !tr.Switch {
@@ -110,14 +101,15 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 			if !ok {
 				continue
 			}
-			raw, err := json.Marshal(val)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			var items []json.RawMessage
-			err = json.Unmarshal(raw, &items)
-			if err != nil {
-				return nil, errors.New("forEach field '%s' is not an array", tr.ForEach, err)
+			// State is decoded, so the source array is already a []any of decoded elements - no re-marshal
+			// needed. A null/absent source yields no elements (like an empty array); any non-array is an error.
+			var items []any
+			switch v := val.(type) {
+			case nil:
+			case []any:
+				items = v
+			default:
+				return nil, errors.New("forEach field '%s' is not an array", tr.ForEach)
 			}
 			itemKey := tr.As
 			if itemKey == "" {

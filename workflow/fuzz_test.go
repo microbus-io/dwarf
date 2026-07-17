@@ -33,48 +33,50 @@ var fuzzReducers = []Reducer{
 	"", "bogus",
 }
 
-// FuzzMergeState asserts the state-merge core never panics and never leaks a null tombstone into
-// materialized state, for arbitrary (state, changes, reducer) combinations. This is the function
-// every step transition, fan-in, final-state computation, and Continue runs through.
-func FuzzMergeState(f *testing.F) {
+// FuzzStateMergeReduce asserts the state-merge core never panics and never leaks a null tombstone into
+// materialized state, for arbitrary (state, changes, reducer) combinations. State.MergeReduce (accumulate)
+// followed by DelNils (materialize) is what every step transition, fan-in, final-state computation, and
+// Continue runs through.
+func FuzzStateMergeReduce(f *testing.F) {
 	f.Add([]byte(`{"a":1}`), []byte(`{"a":null}`), uint8(0))
 	f.Add([]byte(`{"log":["x"]}`), []byte(`{"log":["y"]}`), uint8(1))
 	f.Add([]byte(`{"n":1}`), []byte(`{"n":"NaN"}`), uint8(2))
 	f.Add([]byte(`{}`), []byte(`{"k":{"x":1}}`), uint8(6))
 	f.Add([]byte(`null`), []byte(`null`), uint8(0))
 	f.Fuzz(func(t *testing.T, stateJSON, changesJSON []byte, pick uint8) {
-		var state, changes map[string]any
-		if json.Unmarshal(stateJSON, &state) != nil {
+		var base, incoming State
+		if base.UnmarshalJSON(stateJSON) != nil {
 			t.Skip()
 		}
-		if json.Unmarshal(changesJSON, &changes) != nil {
+		if incoming.UnmarshalJSON(changesJSON) != nil {
 			t.Skip()
 		}
 		// Wire every changed key to a reducer chosen by the selector.
 		reducers := map[string]Reducer{}
 		i := int(pick)
-		for k := range changes {
+		for k := range incoming {
 			reducers[k] = fuzzReducers[i%len(fuzzReducers)]
 			i++
 		}
-		merged, err := MergeState(state, changes, reducers)
-		if err != nil {
+		if err := base.MergeReduce(incoming, reducers); err != nil {
 			return // rejected inputs are fine; panics are not
 		}
-		for k, v := range merged {
+		base.DelNils()
+		for k, v := range base {
 			if isCleared(v) {
 				t.Fatalf("null tombstone leaked into merged state at key %q", k)
 			}
 		}
 		// Materialized state must always be JSON-serializable (it is persisted verbatim).
-		if _, err := json.Marshal(merged); err != nil {
+		if _, err := json.Marshal(base); err != nil {
 			t.Fatalf("merged state not marshalable: %v", err)
 		}
 	})
 }
 
 // FuzzReducerReduce asserts each reducer is total over valid-JSON operands: no panic, and on
-// success the result is itself valid JSON (it is re-persisted into the changes/state columns).
+// success the result is itself valid JSON (it is re-persisted into the changes/state columns). Reducers
+// operate on DECODED values, exactly as State holds them, so the operands are unmarshaled before folding.
 func FuzzReducerReduce(f *testing.F) {
 	f.Add(uint8(1), []byte(`[1,2]`), []byte(`[3]`))
 	f.Add(uint8(2), []byte(`1`), []byte(`2.5`))
@@ -85,12 +87,15 @@ func FuzzReducerReduce(f *testing.F) {
 		if !json.Valid(a) || !json.Valid(b) {
 			t.Skip() // engine reducers only ever see values that round-tripped through JSON
 		}
+		var av, bv any
+		_ = json.Unmarshal(a, &av)
+		_ = json.Unmarshal(b, &bv)
 		r := fuzzReducers[int(pick)%len(fuzzReducers)]
-		out, err := r.Reduce(json.RawMessage(a), json.RawMessage(b))
+		out, err := r.Reduce(av, bv)
 		if err != nil {
 			return
 		}
-		raw, merr := marshalAny(out)
+		raw, merr := json.Marshal(out)
 		if merr != nil || !json.Valid(raw) {
 			t.Fatalf("reducer %q produced non-JSON result %v from %s + %s", r, out, a, b)
 		}

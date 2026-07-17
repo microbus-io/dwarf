@@ -17,7 +17,6 @@ limitations under the License.
 package workflow
 
 import (
-	"maps"
 	"time"
 )
 
@@ -36,30 +35,24 @@ func NewRawFlow() *RawFlow {
 
 // --- Raw state access (for orchestrator use) ---
 
-// RawState returns a copy of the raw state map.
-func (f *RawFlow) RawState() map[string]any {
-	result := make(map[string]any, len(f.state))
-	maps.Copy(result, f.state)
-	return result
+// RawState returns a copy of the raw state.
+func (f *RawFlow) RawState() State {
+	return f.state.Clone()
 }
 
-// RawChanges returns a copy of the raw changes map.
-func (f *RawFlow) RawChanges() map[string]any {
-	result := make(map[string]any, len(f.changes))
-	maps.Copy(result, f.changes)
-	return result
+// RawChanges returns a copy of the raw changes.
+func (f *RawFlow) RawChanges() State {
+	return f.changes.Clone()
 }
 
-// SetRawState replaces the entire state with the given raw map, without tracking changes.
-func (f *RawFlow) SetRawState(state map[string]any) {
-	f.state = make(map[string]any, len(state))
-	maps.Copy(f.state, state)
+// SetRawState replaces the entire state with a copy of the given state, without tracking changes.
+func (f *RawFlow) SetRawState(state State) {
+	f.state = state.Clone()
 }
 
-// SetRawChanges replaces the entire changes map with the given raw map.
-func (f *RawFlow) SetRawChanges(changes map[string]any) {
-	f.changes = make(map[string]any, len(changes))
-	maps.Copy(f.changes, changes)
+// SetRawChanges replaces the entire changes with a copy of the given changes.
+func (f *RawFlow) SetRawChanges(changes State) {
+	f.changes = changes.Clone()
 }
 
 // SetAttempt sets the attempt counter on the flow. Called by the orchestrator before dispatching
@@ -103,7 +96,7 @@ func (f *RawFlow) SetStepKey(stepKey string) {
 // materialized from the step row's resume_data column, so flow.Interrupt returns it (with yield=false)
 // on re-entry instead of re-arming. The orchestrator calls this only when the step row's interrupt_done
 // is set; an un-resumed step leaves the flow's default (not resolved).
-func (f *RawFlow) SetInterruptResolution(resumeData map[string]any) {
+func (f *RawFlow) SetInterruptResolution(resumeData State) {
 	f.interruptDone = true
 	f.resumeData = resumeData
 }
@@ -112,7 +105,7 @@ func (f *RawFlow) SetInterruptResolution(resumeData map[string]any) {
 // (result) and error materialized from the step row's subgraph_result / subgraph_error columns, so
 // flow.Subgraph returns them (with yield=false) on re-entry instead of re-arming. The orchestrator
 // calls this only when the step row's subgraph_done is set.
-func (f *RawFlow) SetSubgraphResolution(result map[string]any, errStr string) {
+func (f *RawFlow) SetSubgraphResolution(result State, errStr string) {
 	f.subgraphDone = true
 	f.subgraphResult = result
 	f.subgraphError = errStr

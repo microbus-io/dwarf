@@ -31,16 +31,16 @@ type FlowStep struct {
 	SuccessorID   int `json:"successorID,omitzero"`
 	// PrevKey and NextKey are the external step keys of the resolved navigation neighbors,
 	// ready for use as ?step= links. Populated only by the Step endpoint.
-	PrevKey          string         `json:"prevKey,omitzero"`
-	NextKey          string         `json:"nextKey,omitzero"`
-	Subgraph         bool           `json:"subgraph,omitzero"`
-	SubWorkflowURL   string         `json:"subWorkflowURL,omitzero"`
-	SubWorkflowName  string         `json:"subWorkflowName,omitzero"`
-	SubHistory       []FlowStep     `json:"subHistory,omitzero"`
-	State            map[string]any `json:"state,omitzero"`
-	Changes          map[string]any `json:"changes,omitzero"`
-	InterruptPayload map[string]any `json:"interruptPayload,omitzero"`
-	Status           string         `json:"status,omitzero"`
+	PrevKey          string     `json:"prevKey,omitzero"`
+	NextKey          string     `json:"nextKey,omitzero"`
+	Subgraph         bool       `json:"subgraph,omitzero"`
+	SubWorkflowURL   string     `json:"subWorkflowURL,omitzero"`
+	SubWorkflowName  string     `json:"subWorkflowName,omitzero"`
+	SubHistory       []FlowStep `json:"subHistory,omitzero"`
+	State            State      `json:"state,omitzero"`
+	Changes          State      `json:"changes,omitzero"`
+	InterruptPayload State      `json:"interruptPayload,omitzero"`
+	Status           string     `json:"status,omitzero"`
 	// Parked reports whether the step is currently held out of the selection band (a subgraph caller
 	// waiting on its child). A terminal step is never parked.
 	Parked    bool      `json:"parked,omitzero"`

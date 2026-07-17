@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/candidatecache"
-	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -58,8 +57,10 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		}
 	}
 	opts = e.resolveFlowOptions(opts)
-	// The create-time GraphLoader sees the baggage on ctx in the same decoded shape every dispatch will.
-	loaderCtx := workflow.ContextWithBaggage(ctx, baggageMap(opts.Baggage))
+	// The create-time GraphLoader sees the baggage on ctx in the same JSON-decoded shape (numbers as
+	// float64) every dispatch will - NewState round-trips the raw Go value through JSON.
+	loaderBaggage, _ := workflow.NewState(opts.Baggage)
+	loaderCtx := workflow.ContextWithBaggage(ctx, loaderBaggage)
 	var graph *workflow.Graph
 	err = errors.CatchPanic(func() error {
 		var lerr error
@@ -99,7 +100,13 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 			return "", errors.Trace(err)
 		}
 	}
-	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, initialState, threadID, threadToken, "", opts, 0, 0, 0, 0)
+	// Normalize the caller's initialState (a struct, map, or nil) into a State at the door. A nil yields
+	// empty state (NewState's nil case), so a marshaled "null" never reaches the strict object parser.
+	state, err := workflow.NewState(initialState)
+	if err != nil {
+		return "", errors.Trace(err, http.StatusBadRequest)
+	}
+	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, state, threadID, threadToken, "", opts, 0, 0, 0, 0)
 	return flowKey, errors.Trace(err)
 }
 
@@ -137,33 +144,15 @@ func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum,
 	return shardNum, threadID, strings.TrimSpace(threadToken), nil
 }
 
-// baggageMap normalizes an opaque baggage value to the map delivered on the context. It round-trips
-// through JSON - the same path the value takes through the baggage column - so the create-time
-// GraphLoader sees exactly what every dispatch-time callback sees (e.g. JSON numbers as float64),
-// rather than the caller's original Go types. A nil value, or a value that does not decode to a JSON
-// object, yields nil.
-func baggageMap(v any) map[string]any {
-	if v == nil {
-		return nil
-	}
-	data, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	var m map[string]any
-	_ = json.Unmarshal(data, &m)
-	return m
-}
-
 // flowSeed carries the precomputed, retry-stable values for inserting one new flow plus its entry step.
 // It is built outside the transaction (tokens, spans, marshalled JSON) so a lock-contention retry of the
 // insert closure reuses the same values rather than rerolling tokens.
 type flowSeed struct {
 	workflowURL        string
 	workflowName       string
-	graphJSON          string
-	baggageJSON        string
-	stateJSON          string
+	graphJSON          []byte
+	baggageJSON        []byte
+	stateJSON          []byte
 	traceParent        string
 	flowToken          string
 	stepToken          string
@@ -248,7 +237,7 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 // parent. (The parent caller is parked by processStep before this is called, the complementary half of
 // that ordering.) callerStepDepth is the caller step's step_depth (0 for a top-level flow): the entry step
 // is created at callerStepDepth+1, so a subgraph's depths continue from the caller (informational only).
-func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState any, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID int) (flowKey string, err error) {
+func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState workflow.State, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID int) (flowKey string, err error) {
 	entryPoint := graph.EntryPoint()
 	if entryPoint == "" {
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
@@ -256,9 +245,11 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 
 	traceParent := e.mintWorkflowSpan(ctx, workflowURL, parentTraceParent)
 
+	// A non-marshalable host-supplied value (a NaN/Inf/channel in Baggage or a map initialState, which
+	// NewState copies through without marshaling) surfaces here as a 400 - it is caller input.
 	baggageJSON, err := json.Marshal(opts.Baggage)
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.New("baggage is not JSON-marshalable: %v", err, http.StatusBadRequest)
 	}
 	graphJSON, err := json.Marshal(graph)
 	if err != nil {
@@ -266,16 +257,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	}
 	stateJSON, err := json.Marshal(initialState)
 	if err != nil {
-		return "", errors.Trace(err)
-	}
-	// Host-supplied payloads are held to the same storability rules as a task's own writes.
-	err = jsonx.CheckStorable(stateJSON)
-	if err != nil {
-		return "", errors.New("invalid initial state: %v", err, http.StatusBadRequest)
-	}
-	err = jsonx.CheckStorable(baggageJSON)
-	if err != nil {
-		return "", errors.New("invalid baggage: %v", err, http.StatusBadRequest)
+		return "", errors.New("initial state is not JSON-marshalable: %v", err, http.StatusBadRequest)
 	}
 
 	flowToken := keys.RandomIdentifier(16)
@@ -300,9 +282,9 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	seed := flowSeed{
 		workflowURL:        workflowURL,
 		workflowName:       graph.Name(),
-		graphJSON:          string(graphJSON),
-		baggageJSON:        string(baggageJSON),
-		stateJSON:          string(stateJSON),
+		graphJSON:          graphJSON,
+		baggageJSON:        baggageJSON,
+		stateJSON:          stateJSON,
 		traceParent:        traceParent,
 		flowToken:          flowToken,
 		stepToken:          stepToken,
@@ -356,7 +338,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	}
 
 	var flowStatus string
-	var finalStateJSON string
+	var finalStateJSON []byte
 	var flowErrorMsg string
 	var flowCancelReason string
 	err = db.QueryRowContext(ctx,
@@ -379,23 +361,16 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 
 	switch flowStatus {
 	case workflow.StatusCompleted:
-		var state map[string]any
-		unmarshalJSONMap(finalStateJSON, &state)
-		out.State = state
+		out.State, _ = workflow.NewState(finalStateJSON)
 	case workflow.StatusFailed:
-		var state map[string]any
-		unmarshalJSONMap(finalStateJSON, &state)
-		out.State = state
+		out.State, _ = workflow.NewState(finalStateJSON)
 		out.Error = flowErrorMsg
 	case workflow.StatusCancelled:
-		var state map[string]any
-		unmarshalJSONMap(finalStateJSON, &state)
-		out.State = state
+		out.State, _ = workflow.NewState(finalStateJSON)
 		out.CancelReason = flowCancelReason
 	case workflow.StatusInterrupted:
 		// For interrupted, query the leaf step's state and interrupt payload
-		var stepStateJSON, stepChangesJSON, stepRefsJSON string
-		var interruptPayloadJSON sql.NullString
+		var stepStateJSON, stepChangesJSON, stepRefsJSON, interruptPayloadJSON []byte
 		// Pick the same interrupted leaf Resume's chain walk would act on (earliest-updated, step_id
 		// tiebreak) - not by step_depth, which is only an informational ordering and varies with branch
 		// length (loops/gotos) without indicating which interrupt resolves next.
@@ -410,24 +385,21 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			return nil, errors.Trace(err)
 		}
 		if err == nil {
-			var stepState, stepChanges map[string]any
-			unmarshalJSONMap(stepStateJSON, &stepState)
-			unmarshalJSONMap(stepChangesJSON, &stepChanges)
+			stepState, _ := workflow.NewState(stepStateJSON)
+			stepChanges, _ := workflow.NewState(stepChangesJSON)
 			// The ref encoding is a storage detail, never API-visible: a caller sees the state the step
-			// actually saw (invariant 6).
+			// actually saw (invariant 6). resolveStateRefs mutates the map in place, so it gets the live map.
 			if rerr := e.resolveStateRefs(ctx, db, shardNum, stepState, parseStateRefs(stepRefsJSON), nil, ""); rerr != nil {
 				return nil, errors.Trace(rerr)
 			}
-			merged, _ := workflow.MergeState(stepState, stepChanges, nil)
-			out.State = merged
-			if interruptPayloadJSON.Valid {
-				var payload map[string]any
-				unmarshalJSONMap(interruptPayloadJSON.String, &payload)
-				out.InterruptPayload = payload
-			}
+			// Materialize the interrupted step's view: state + changes with pending deletes enacted.
+			_ = stepState.Merge(stepChanges)
+			stepState.DelNils()
+			out.State = stepState
+			out.InterruptPayload, _ = workflow.NewState(interruptPayloadJSON)
 		}
 	case workflow.StatusRunning, workflow.StatusCreated:
-		out.State = map[string]any{}
+		out.State = workflow.State{}
 	}
 
 	return out, nil

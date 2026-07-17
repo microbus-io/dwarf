@@ -60,7 +60,7 @@ func TestGraph_EmptyReducers(t *testing.T) {
 	assert.NoError(err)
 
 	// Reducers should be omitted when empty
-	var raw map[string]json.RawMessage
+	var raw map[string]any
 	err = json.Unmarshal(data, &raw)
 	assert.NoError(err)
 	_, ok := raw["reducers"]
@@ -416,7 +416,7 @@ func TestGraph_TransitionNoWhen(t *testing.T) {
 
 	// When should be omitted in JSON
 	var raw struct {
-		Transitions []map[string]json.RawMessage `json:"transitions"`
+		Transitions []map[string]any `json:"transitions"`
 	}
 	err = json.Unmarshal(data, &raw)
 	assert.NoError(err)

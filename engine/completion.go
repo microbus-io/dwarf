@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -25,7 +26,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -35,7 +35,7 @@ import (
 // createSubgraphFlow creates a subgraph flow for a dynamic subgraph transition. callerStepDepth is the
 // caller step's step_depth, so the child's entry step (and thus its whole subtree) is numbered as a
 // continuation of the caller (callerStepDepth+1).
-func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState map[string]any, baggageJSON string, callerTraceParent string) (string, error) {
+func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState workflow.State, baggageJSON []byte, callerTraceParent string) (string, error) {
 	// faultSubgraphSpawnErr simulates the spawn failing after the caller step already parked (processStep's
 	// park-then-create ordering): no child is inserted, and the caller must be failed cleanly (failAndReturn)
 	// rather than left parked forever. Scoped by the child workflow URL.
@@ -59,8 +59,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 		return "", errors.Trace(err)
 	}
 	inherited.TimeBudget = time.Duration(inheritedBudgetMs) * time.Millisecond
-	var inheritedBaggage map[string]any
-	unmarshalJSONMap(baggageJSON, &inheritedBaggage)
+	inheritedBaggage, _ := workflow.NewState(baggageJSON)
 	inherited.Baggage = inheritedBaggage
 
 	// The child is inserted already surgraph-linked and running in one transaction, so it can never complete
@@ -89,44 +88,41 @@ func (e *Engine) completeFlowSequential(ctx context.Context, shardNum int, flowI
 // mergeTerminalSteps computes a flow's terminal state from the execution-DAG tail.
 // It also returns the merge base tail's lineage_id, so the caller can strip exactly the forEach bookkeeping of
 // the cohorts that tail is inside - and nothing else.
-func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, reducers map[string]workflow.Reducer, workflowURL string) (map[string]any, int, error) {
-	merge := func(query string, args ...any) (map[string]any, int, bool, error) {
+func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, shardNum, flowID int, reducers map[string]workflow.Reducer, workflowURL string) (workflow.State, int, error) {
+	merge := func(query string, args ...any) (workflow.State, int, bool, error) {
 		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, 0, false, errors.Trace(err)
 		}
 		defer rows.Close()
 
-		var baseState map[string]any
+		var baseState workflow.State
 		var baseRefs stateRefs
 		baseLineage := 0
-		var allChanges []map[string]any
+		var allChanges []workflow.State
 		found := false
 		for rows.Next() {
-			found = true
-			var stateJSON, changesJSON, refsJSON string
+			var stateJSON, changesJSON, refsJSON []byte
 			var lineageID int
-			err := rows.Scan(&stateJSON, &changesJSON, &refsJSON, &lineageID)
-			if err != nil {
+			if err := rows.Scan(&stateJSON, &changesJSON, &refsJSON, &lineageID); err != nil {
 				return nil, 0, false, errors.Trace(err)
 			}
-			if baseState == nil {
-				err := json.Unmarshal([]byte(stateJSON), &baseState)
+			if !found {
+				found = true
+				baseState, err = workflow.NewState(stateJSON)
 				if err != nil {
 					return nil, 0, false, errors.Trace(err)
 				}
 				baseRefs = parseStateRefs(refsJSON)
 				baseLineage = lineageID
 			}
-			var changes map[string]any
-			err = json.Unmarshal([]byte(changesJSON), &changes)
+			changes, err := workflow.NewState(changesJSON)
 			if err != nil {
 				return nil, 0, false, errors.Trace(err)
 			}
 			allChanges = append(allChanges, changes)
 		}
-		err = rows.Err()
-		if err != nil {
+		if err := rows.Err(); err != nil {
 			return nil, 0, false, errors.Trace(err)
 		}
 		if !found {
@@ -136,20 +132,18 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 		// turn, and that outlives this flow's steps - DeleteOnCompletion may reap them). A ref that escaped the
 		// flow would dangle, so the terminal merge always materializes, whatever it costs on this one row.
 		// It is not a regression either: a large field surviving to the end is copied into final_state today.
+		// resolveStateRefs mutates the state map in place, so it gets the live map.
 		if err := e.resolveStateRefs(ctx, db, shardNum, baseState, baseRefs, nil, workflowURL); err != nil {
 			return nil, 0, false, errors.Trace(err)
 		}
 
 		merged := baseState
 		for _, changes := range allChanges {
-			merged, err = workflow.MergeState(merged, changes, reducers)
-			if err != nil {
+			if err := merged.MergeReduce(changes, reducers); err != nil {
 				return nil, 0, false, errors.Trace(err)
 			}
 		}
-		if merged == nil {
-			merged = map[string]any{}
-		}
+		merged.DelNils()
 		return merged, baseLineage, true, nil
 	}
 
@@ -174,28 +168,29 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 	if found {
 		return merged, lineage, nil
 	}
-	return map[string]any{}, 0, nil
+	return workflow.State{}, 0, nil
 }
 
 // computeFinalState computes the merged state for a flow.
-func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) (string, string, error) {
-	var graphJSON, workflowURL string
+func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) ([]byte, string, error) {
+	var workflowURL string
+	var graphJSON []byte
 	err := db.QueryRowContext(ctx,
 		"SELECT graph, workflow_url FROM dwarf_flows WHERE flow_id=?",
 		flowID,
 	).Scan(&graphJSON, &workflowURL)
 	if err != nil {
-		return "", "", errors.Trace(err)
+		return nil, "", errors.Trace(err)
 	}
 	var graph workflow.Graph
-	err = json.Unmarshal([]byte(graphJSON), &graph)
+	err = json.Unmarshal(graphJSON, &graph)
 	if err != nil {
-		return "", "", errors.Trace(err)
+		return nil, "", errors.Trace(err)
 	}
 
 	merged, baseLineageID, err := e.mergeTerminalSteps(ctx, db, shardNum, flowID, graph.Reducers(), workflowURL)
 	if err != nil {
-		return "", "", errors.Trace(err)
+		return nil, "", errors.Trace(err)
 	}
 
 	// The tails are COHORT MEMBERS (lineage_id != 0), which means a fan-out resolved with failures and so never
@@ -213,7 +208,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 	if baseLineageID != 0 {
 		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, baseLineageID, &graph, workflowURL)
 		if err != nil {
-			return "", "", errors.Trace(err)
+			return nil, "", errors.Trace(err)
 		}
 	}
 
@@ -234,7 +229,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 	// `pageCount` saw it vanish from final_state while History still showed it.
 	spawns, err := e.cohortSpawnTasks(ctx, db, baseLineageID)
 	if err != nil {
-		return "", "", errors.Trace(err)
+		return nil, "", errors.Trace(err)
 	}
 	for _, spawnTask := range spawns {
 		stripForEachBookkeeping(merged, &graph, spawnTask)
@@ -242,9 +237,9 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 
 	data, err := json.Marshal(merged)
 	if err != nil {
-		return "", "", errors.Trace(err)
+		return nil, "", errors.Trace(err)
 	}
-	return string(data), workflowURL, nil
+	return data, workflowURL, nil
 }
 
 // mergeCohortState rebuilds the state of a cohort that resolved with failures, and so never reached its fan-in.
@@ -259,31 +254,29 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 //
 // Reducer ORDER matters (append/union/concat are not commutative), which is why the scan is ordered the same way
 // the convergence orders it: by the branch's position in the spawn loop, not by completion order.
-func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shardNum, flowID, cohortSpawnID int, graph *workflow.Graph, workflowURL string) (map[string]any, error) {
-	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON string
+func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shardNum, flowID, cohortSpawnID int, graph *workflow.Graph, workflowURL string) (workflow.State, error) {
+	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON []byte
 	err := db.QueryRowContext(ctx,
 		"SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", cohortSpawnID,
 	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON)
 	if err == sql.ErrNoRows {
-		return map[string]any{}, nil
+		return workflow.State{}, nil
 	}
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	var spawnState, spawnChanges map[string]any
-	unmarshalJSONMap(spawnStateJSON, &spawnState)
-	unmarshalJSONMap(spawnChangesJSON, &spawnChanges)
-	if spawnState == nil {
-		spawnState = map[string]any{}
-	}
+	spawnState, _ := workflow.NewState(spawnStateJSON)
+	spawnChanges, _ := workflow.NewState(spawnChangesJSON)
 	// FLATTEN: final_state is a flow-boundary value, so everything the spawn carried by reference is materialized
-	// here - unlike the fan-in, which may pass a carried ref through.
+	// here - unlike the fan-in, which may pass a carried ref through. resolveStateRefs mutates the map in place.
 	err = e.resolveStateRefs(ctx, db, shardNum, spawnState, parseStateRefs(spawnRefsJSON), nil, workflowURL)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	merged, err := workflow.MergeState(spawnState, spawnChanges, graph.Reducers())
-	if err != nil {
+	// The failed cohort's terminal state is built the SAME way convergence would (insertFanInStep): the spawn's
+	// state with its own delta folded via the reducers, as the base the completed members fold onto below.
+	merged := spawnState.Clone()
+	if err := merged.MergeReduce(spawnChanges, graph.Reducers()); err != nil {
 		return nil, errors.Trace(err)
 	}
 
@@ -296,7 +289,8 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var status, changesJSON string
+		var status string
+		var changesJSON []byte
 		if err := rows.Scan(&status, &changesJSON); err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -305,19 +299,15 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		if strings.TrimSpace(status) != workflow.StatusCompleted {
 			continue
 		}
-		var changes map[string]any
-		unmarshalJSONMap(changesJSON, &changes)
-		merged, err = workflow.MergeState(merged, changes, graph.Reducers())
-		if err != nil {
+		changes, _ := workflow.NewState(changesJSON)
+		if err := merged.MergeReduce(changes, graph.Reducers()); err != nil {
 			return nil, errors.Trace(err)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, errors.Trace(err)
 	}
-	if merged == nil {
-		merged = map[string]any{}
-	}
+	merged.DelNils()
 	return merged, nil
 }
 
@@ -353,7 +343,7 @@ func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowTo
 	)
 
 	reason = strings.TrimSpace(reason)
-	finalStates := make([]string, len(allFlowIDs))
+	finalStates := make([][]byte, len(allFlowIDs))
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		if commitFault != "" && e.seams.IsFault(commitFault) {
 			return errors.New("injected fault: " + commitFault)
@@ -448,17 +438,15 @@ func (e *Engine) cohortSpawnTasks(ctx context.Context, db sequel.Executor, linea
 //
 // Applied at both places a cohort's state leaves the cohort: insertFanInStep (the convergence) and
 // computeFinalState (a fan-out that never converged), so the two cannot drift on what a fan-out's state means.
-func stripForEachBookkeeping(state map[string]any, graph *workflow.Graph, spawnTask string) {
-	if len(state) == 0 || spawnTask == "" {
+func stripForEachBookkeeping(state workflow.State, graph *workflow.Graph, spawnTask string) {
+	if state.Len() == 0 || spawnTask == "" {
 		return
 	}
 	for _, tr := range graph.Transitions() {
 		if tr.From != spawnTask || tr.ForEach == "" || tr.As == "" {
 			continue
 		}
-		delete(state, tr.As)
-		delete(state, tr.As+"Index")
-		delete(state, tr.As+"Count")
+		state.Del(tr.As, tr.As+"Index", tr.As+"Count")
 	}
 }
 
@@ -468,7 +456,8 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	var finalStateJSON, workflowURL, currentStatus string
+	var workflowURL, currentStatus string
+	var finalStateJSON []byte
 	var surgraphFlowID, surgraphStepID int
 	var deleteOnCompletion, awaited bool
 	completed := false
@@ -575,7 +564,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 }
 
 // completeSurgraphFlow re-dispatches a parked surgraph step after its child completes.
-func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, subgraphFinalStateJSON string) error {
+func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, subgraphFinalStateJSON []byte) error {
 	// faultSubgraphReviveLost simulates the revive being lost after the child went terminal (the wedge the
 	// parked-step sweep exists to catch): the caller step stays running+parkedSubgraph with no live child,
 	// so the test proves recoverWedgedSubgraphParks re-drives the release. Returns nil so the caller path
@@ -593,8 +582,8 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		return errors.Trace(err)
 	}
 	resultJSON := subgraphFinalStateJSON
-	if strings.TrimSpace(resultJSON) == "" {
-		resultJSON = "{}"
+	if len(bytes.TrimSpace(resultJSON)) == 0 {
+		resultJSON = []byte("{}")
 	}
 	// Test checkpoint: a breakpoint here freezes the worker after the child completed but before the caller
 	// revive, so a test can Cancel the caller in exactly the window the revive's running+parkedSubgraph guard
@@ -688,14 +677,14 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	errMsg := sanitizeErrorMessage(taskErr.Error())
 	failFlow := false
 	reDispatchParent := false
-	var finalStateJSON string
+	var finalStateJSON []byte
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		fenced = false
 		// A trunk step (lineage_id==0) has no concurrent sibling, so its failure fails the flow at once.
 		// A fan-out branch (lineage_id!=0) instead defers to cohort accounting below: siblings run to
 		// completion and the flow fails only once the whole cohort arrives with cohort_failures>0.
 		failFlow = stepLineageID == 0
-		finalStateJSON = ""
+		finalStateJSON = nil
 		reDispatchParent = false
 		// Fence the fail on BOTH our lease generation AND the two states a worker legitimately fails a step
 		// from: `running` (a task error, or the step-completion write itself failing) and `completed` (a
@@ -740,7 +729,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 				// just terminalizes with an empty final_state and the error that explains why.
 				e.logger.ErrorContext(ctx, "Computing final_state while failing a step; terminalizing with empty state",
 					"flow", keys.CorrelationID(shardNum, flowID), "step", stepID, "error", err)
-				finalStateJSON = "{}"
+				finalStateJSON = []byte("{}")
 			}
 			tx.ExecContext(ctx,
 				"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
@@ -1148,20 +1137,11 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		return errors.New("flow is not paused at an interrupt", http.StatusConflict)
 	}
 
+	// Normalize the caller's resume data (a struct, map, or nil) into a State; an empty one stays "{}".
 	resumeDataJSON := "{}"
-	if data != nil {
-		b, _ := json.Marshal(data)
-		// Resume data is delivered to the task and can be written on into state, so it is held to the same
-		// storability rules as any state write.
-		err = jsonx.CheckStorable(b)
-		if err != nil {
-			return errors.New("invalid resume data: %v", err, http.StatusBadRequest)
-		}
-		var resumeMap map[string]any
-		json.Unmarshal(b, &resumeMap)
-		if len(resumeMap) > 0 {
-			resumeDataJSON = string(b)
-		}
+	if resumeState, _ := workflow.NewState(data); len(resumeState) > 0 {
+		b, _ := json.Marshal(resumeState)
+		resumeDataJSON = string(b)
 	}
 
 	// Test-only checkpoint: a breakpoint here lets a test freeze resume before its transaction so a racing

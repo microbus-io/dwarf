@@ -104,7 +104,7 @@ func TestFlow_SetTracksChanges(t *testing.T) {
 	f.Set("a", "1")
 	f.Set("b", "2")
 	assert.Equal(2, len(f.changes))
-	assert.Equal(`"1"`, string(f.changes["a"].(json.RawMessage)))
+	assert.Equal("1", f.changes["a"]) // stored decoded, not as raw JSON bytes
 }
 
 func TestFlow_ParseStateAndSetChanges(t *testing.T) {
@@ -129,11 +129,11 @@ func TestFlow_ParseStateAndSetChanges(t *testing.T) {
 	err = f.SetChanges(view, snap)
 	assert.NoError(err)
 
-	// Only score should be in changes
+	// Only score should be in changes (decoded to float64, the canonical JSON number form)
 	assert.Equal(1, len(f.changes))
-	assert.Equal("25", string(f.changes["score"].(json.RawMessage)))
+	assert.Equal(float64(25), f.changes["score"])
 	// Extra field should be untouched
-	assert.Equal(`"untouched"`, string(f.state["extra"].(json.RawMessage)))
+	assert.Equal("untouched", f.state["extra"])
 }
 
 func TestFlow_SetChangesNoChanges(t *testing.T) {
@@ -176,11 +176,11 @@ func TestFlow_Delete(t *testing.T) {
 	assert.False(f.Has("score"))
 	assert.Equal("", f.GetString("name"))
 	assert.Equal(0, f.GetInt("score"))
-	// Changes records JSON null for each deleted key.
+	// Changes records a cleared tombstone for each deleted key.
 	for _, k := range []string{"name", "score"} {
-		raw, ok := f.changes[k].(json.RawMessage)
+		v, ok := f.changes[k]
 		assert.True(ok)
-		assert.Equal("null", string(raw))
+		assert.True(isCleared(v))
 	}
 	// Unlisted field is unaffected.
 	assert.True(f.Has("active"))
@@ -199,74 +199,20 @@ func TestFlow_Clear(t *testing.T) {
 	// Every field reads as absent.
 	assert.False(f.Has("name"))
 	assert.False(f.Has("score"))
-	// Every prior field has a null contribution in changes.
+	// Every prior field has a cleared tombstone in changes.
 	assert.Equal(2, len(f.changes))
 	for _, k := range []string{"name", "score"} {
-		raw, ok := f.changes[k].(json.RawMessage)
+		v, ok := f.changes[k]
 		assert.True(ok)
-		assert.Equal("null", string(raw))
+		assert.True(isCleared(v))
 	}
-}
-
-func TestFlow_Transform(t *testing.T) {
-	assert := testarossa.For(t)
-
-	f := NewFlow()
-	f.SetString("parentVarA", "alpha")
-	f.SetInt("parentVarB", 7)
-	f.SetString("scratch", "drop me")
-	f.changes = make(map[string]any)
-
-	f.Transform("subInput1", "parentVarA", "subInput2", "parentVarB")
-
-	// New names hold the captured values.
-	assert.Equal("alpha", f.GetString("subInput1"))
-	assert.Equal(7, f.GetInt("subInput2"))
-	// Old names and uninvolved fields are gone.
-	assert.False(f.Has("parentVarA"))
-	assert.False(f.Has("parentVarB"))
-	assert.False(f.Has("scratch"))
-	// Changes: new keys carry their values, dropped old keys carry null.
-	assert.Equal(`"alpha"`, string(f.changes["subInput1"].(json.RawMessage)))
-	assert.Equal("7", string(f.changes["subInput2"].(json.RawMessage)))
-	for _, k := range []string{"parentVarA", "parentVarB", "scratch"} {
-		raw, ok := f.changes[k].(json.RawMessage)
-		assert.True(ok)
-		assert.Equal("null", string(raw))
-	}
-}
-
-func TestFlow_TransformSkipsMissingAndNull(t *testing.T) {
-	assert := testarossa.For(t)
-
-	f := NewFlow()
-	f.SetString("present", "value")
-	f.state["alreadyNull"] = json.RawMessage("null")
-	f.changes = make(map[string]any)
-
-	f.Transform("kept", "present", "skipped1", "absent", "skipped2", "alreadyNull")
-
-	assert.True(f.Has("kept"))
-	assert.False(f.Has("skipped1"))
-	assert.False(f.Has("skipped2"))
-}
-
-func TestFlow_TransformPanicsOnOddArgs(t *testing.T) {
-	assert := testarossa.For(t)
-
-	f := NewFlow()
-	defer func() {
-		r := recover()
-		assert.True(r != nil)
-	}()
-	f.Transform("only-one")
 }
 
 func TestFlow_GetTreatsJSONNullAsAbsent(t *testing.T) {
 	assert := testarossa.For(t)
 
 	f := NewFlow()
-	f.state["x"] = json.RawMessage("null")
+	f.state["x"] = nil // a cleared (null) slot: state stores a decoded JSON null as Go nil
 	f.state["y"] = nil
 	assert.False(f.Has("x"))
 	assert.False(f.Has("y"))

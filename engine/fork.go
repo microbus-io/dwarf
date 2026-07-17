@@ -25,7 +25,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -51,7 +50,8 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 
 	// Resolve the fork step, its owning flow, and that flow's token (needed to walk the surgraph chain).
 	var leafFlowID int
-	var forkStepState, forkStepRefs, leafFlowToken string
+	var forkStepState, forkStepRefs []byte
+	var leafFlowToken string
 	err = db.QueryRowContext(ctx,
 		"SELECT s.flow_id, s.state, s.state_refs, f.flow_token FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.step_token=?",
 		forkStepID, forkStepToken,
@@ -167,7 +167,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 type forkClone struct {
 	leafFlowID      int
 	leafStepID      int
-	mergedLeafState string
+	mergedLeafState []byte
 	rewindByFlow    map[int]int
 	rootFlowToken   string
 	rootTraceParent string
@@ -238,7 +238,8 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		}
 	}
 
-	var status, workflowURL, workflowName, graphJSON, baggageJSON, traceParent string
+	var status, workflowURL, workflowName, traceParent string
+	var graphJSON, baggageJSON []byte
 	var deleteOnCompletion, originStepID int
 	err := tx.QueryRowContext(ctx,
 		"SELECT status, workflow_url, workflow_name, graph, baggage, trace_parent, delete_on_completion, step_id FROM dwarf_flows WHERE flow_id=?",
@@ -323,7 +324,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	var keep []stepMeta
 	for mrows.Next() {
 		var s stepMeta
-		var refsJSON string
+		var refsJSON []byte
 		mrows.Scan(&s.oldID, &s.predID, &s.succID, &s.lineageID, &s.cohortSize, &s.status, &refsJSON)
 		if pruned[s.oldID] {
 			continue
@@ -595,42 +596,22 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	return newFlowID, children, nil
 }
 
-func mergeWithOverrides(originalJSON string, overrides any) (string, error) {
-	var state map[string]any
-	if originalJSON != "" && originalJSON != "{}" {
-		json.Unmarshal([]byte(originalJSON), &state)
-	}
-	if state == nil {
-		state = map[string]any{}
-	}
-	if overrides == nil {
-		out, _ := json.Marshal(state)
-		return string(out), nil
-	}
-	overridesJSON, err := json.Marshal(overrides)
+func mergeWithOverrides(originalJSON []byte, overrides any) ([]byte, error) {
+	state, err := workflow.NewState(originalJSON)
 	if err != nil {
-		return "", errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
-	// The overrides are seeded into the fork's leaf step as state, so they are held to the same storability
-	// rules as any state write.
-	err = jsonx.CheckStorable(overridesJSON)
+	ov, err := workflow.NewState(overrides)
 	if err != nil {
-		return "", errors.New("invalid state overrides: %v", err, http.StatusBadRequest)
+		return nil, errors.Trace(err)
 	}
-	var ov map[string]any
-	err = json.Unmarshal(overridesJSON, &ov)
-	if err != nil {
-		return "", errors.Trace(err)
+	// Replace-merge the overrides onto the leaf state; a nil override is a delete (Merge keeps the tombstone,
+	// DelNils enacts it).
+	if err := state.Merge(ov); err != nil {
+		return nil, errors.Trace(err)
 	}
-	for k, v := range ov {
-		if v == nil {
-			delete(state, k)
-		} else {
-			state[k] = v
-		}
-	}
-	out, _ := json.Marshal(state)
-	return string(out), nil
+	state.DelNils()
+	return json.Marshal(state)
 }
 
 type sweptMember struct {

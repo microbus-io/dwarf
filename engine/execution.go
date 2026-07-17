@@ -107,14 +107,16 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// Claim the step and read its data in one round-trip where the driver supports RETURNING.
 	var n int64
 	var stepDepth int
-	var taskName, stepToken, stateJSON, priorChangesJSON string
+	var taskName, stepToken string
+	var stateJSON, priorChangesJSON []byte
 	var attempt, lineageID, fanOutOrdinal, flowID, timeBudgetMs int
 	var interruptDone bool
-	var resumeDataJSON string
+	var resumeDataJSON []byte
 	var subgraphDone bool
-	var subgraphResultJSON, subgraphErrorStr string
+	var subgraphResultJSON []byte
+	var subgraphErrorStr string
 	var stepCreatedAt time.Time
-	var stateRefsJSON string
+	var stateRefsJSON []byte
 
 	switch db.DriverName() {
 	case "pgx", "sqlite":
@@ -181,7 +183,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 
 	// Read flow data
-	var flowToken, flowStatus, workflowURL, graphJSON, baggageJSON, traceParent string
+	var flowToken, flowStatus, workflowURL, traceParent string
+	var graphJSON, baggageJSON []byte
 	var flowCreatedAt, flowUpdatedAt time.Time
 	var flowPriority int
 	var flowFairnessKey string
@@ -220,7 +223,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	cg, cached := e.graphCache.Load(graphKey)
 	if !cached {
 		parsed := &workflow.Graph{}
-		err = json.Unmarshal([]byte(graphJSON), parsed)
+		err = json.Unmarshal(graphJSON, parsed)
 		if err != nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
@@ -232,21 +235,25 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	graph := cg.graph
 
 	// Build the Flow carrier
-	var state map[string]any
-	unmarshalJSONMap(stateJSON, &state)
+	state, _ := workflow.NewState(stateJSON)
 	// Materialize any field this step carries BY REFERENCE (see staterefs.go). Resolving here, once, is what
 	// keeps the ref encoding out of everything downstream: the carrier, `when` evaluation, forEach expansion,
 	// the transport to a remote task, and the transition machinery all work on literals and never learn refs
 	// exist. The refs the step inherited are kept, because minting the successors' state needs to know which
-	// fields arrived as refs (and so must be carried, never re-anchored against this step).
+	// fields arrived as refs (and so must be carried, never re-anchored against this step). resolveStateRefs
+	// mutates the state map in place, so it gets the live backing map.
 	inheritedRefs := parseStateRefs(stateRefsJSON)
 	if err := e.resolveStateRefs(ctx, db, shardNum, state, inheritedRefs, nil, workflowURL); err != nil {
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
 	}
-	var priorChanges map[string]any
-	unmarshalJSONMap(priorChangesJSON, &priorChanges)
-	mergedInputState, _ := workflow.MergeState(state, priorChanges, nil)
+	priorChanges, _ := workflow.NewState(priorChangesJSON)
+	// The carrier's input is state + priorChanges, materialized: Merge accumulates (keeping a prior
+	// delete's tombstone), then DelNils enacts it so the carrier sees the key absent. Clone so `state`
+	// stays the pristine resolved snapshot the successor mint re-uses below.
+	mergedInputState := state.Clone()
+	_ = mergedInputState.Merge(priorChanges)
+	mergedInputState.DelNils()
 	flow := workflow.NewRawFlow()
 	flow.SetRawState(mergedInputState)
 	flow.SetRawChanges(priorChanges)
@@ -261,19 +268,17 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	flow.SetStepKey(fmt.Sprintf("%d-%d-%s", shardNum, stepID, stepToken))
 
 	if interruptDone {
-		var resumeData map[string]any
-		unmarshalJSONMap(resumeDataJSON, &resumeData)
+		resumeData, _ := workflow.NewState(resumeDataJSON)
 		flow.SetInterruptResolution(resumeData)
 	}
 	if subgraphDone {
-		var subgraphResult map[string]any
-		unmarshalJSONMap(subgraphResultJSON, &subgraphResult)
+		subgraphResult, _ := workflow.NewState(subgraphResultJSON)
 		flow.SetSubgraphResolution(subgraphResult, subgraphErrorStr)
 	}
 
-	// Parse baggage for the task executor
-	var baggage map[string]any
-	unmarshalJSONMap(baggageJSON, &baggage)
+	// Parse baggage for the task executor. A "null" column (from a nil FlowOptions.Baggage) and an empty
+	// column both yield an empty State, delivered as "no baggage".
+	baggage, _ := workflow.NewState(baggageJSON)
 
 	// Execute the task. The step's time_budget_ms bounds the executor call's context deadline; the
 	// surrounding DB work keeps using the undeadlined ctx so persistence is never cut short.
@@ -364,19 +369,17 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	}
 
 	// Accumulate changes
-	var accumulatedChanges map[string]any
+	var accumulatedChanges workflow.State
 	var changesJSON []byte
 	rawChanges := resultFlow.RawChanges()
 	if len(rawChanges) == 0 {
 		accumulatedChanges = priorChanges
-		changesJSON = []byte(priorChangesJSON)
+		changesJSON = priorChangesJSON
 	} else {
-		// Overlay, not MergeState: this builds the persisted changes delta, where a cleared (null) entry is
-		// a pending-delete marker that must survive. It only takes effect (drops the key) when changes later
-		// fold onto state via MergeState.
-		accumulatedChanges = make(map[string]any, len(priorChanges)+len(rawChanges))
-		maps.Copy(accumulatedChanges, priorChanges)
-		maps.Copy(accumulatedChanges, rawChanges)
+		// Accumulation, not materialization: Merge preserves a cleared (null) entry as a pending-delete
+		// marker. It is enacted (via DelNils) only when the changes later fold onto state below.
+		accumulatedChanges = priorChanges.Clone()
+		_ = accumulatedChanges.Merge(rawChanges)
 		changesJSON, _ = json.Marshal(accumulatedChanges)
 	}
 
@@ -743,7 +746,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			taskName)
 	}
 
-	childInputState, _ := workflow.MergeState(state, accumulatedChanges, nil)
+	// The successors' base state is state + accumulated changes, materialized: Merge accumulates, then
+	// DelNils enacts the changes' delete tombstones so they are absent downstream. Clone leaves `state`
+	// pristine; a forEach branch re-mints per element below.
+	childInputState := state.Clone()
+	_ = childInputState.Merge(accumulatedChanges)
+	childInputState.DelNils()
 	// Mint state refs for the successors: a field big enough to be worth an anchor is omitted from their
 	// `state` and recorded in `state_refs` instead, pointing at THIS step (which holds the bytes in its
 	// `changes` if the task just wrote them, or in its `state` if it merely carried them). A field that
@@ -839,7 +847,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 					successorOrdinal = fanOutOrdinal
 				}
 				stepStateJSON, stepRefsJSON := linearStateJSON, linearRefsJSON
-				if next.item != nil {
+				if next.itemKey != "" {
 					// A forEach branch's state is the flow state plus its element and ordinal context. The
 					// source array is NOT stripped: the engine once deleted it from each branch's local state
 					// to avoid N copies of it in every step row of every branch, but that was a byte
@@ -1144,21 +1152,26 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		}
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=0 WHERE step_id=?", stepID)
 
-		var ourStateJSON, ourChangesJSON, ourRefsJSON string
+		var ourStateJSON, ourChangesJSON, ourRefsJSON []byte
 		tx.QueryRowContext(ctx, "SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON, &ourRefsJSON)
 		txBytes.stateRead = len(ourStateJSON)
 		txBytes.changesRead = len(ourChangesJSON)
-		var ourState, ourChanges map[string]any
-		unmarshalJSONMap(ourStateJSON, &ourState)
-		unmarshalJSONMap(ourChangesJSON, &ourChanges)
+		ourState, _ := workflow.NewState(ourStateJSON)
+		ourChanges, _ := workflow.NewState(ourChangesJSON)
 		// Resolve only what the reducers actually fold; a merely-carried ref rides through the (empty) cohort
-		// untouched, still pointing at its original anchor - see resolveReducedRefs.
+		// untouched, still pointing at its original anchor - see resolveReducedRefs. resolveReducedRefs mutates
+		// the state map in place, so it gets the live map.
 		ourRefs := parseStateRefs(ourRefsJSON)
 		rerr := e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, graph.Reducers(), workflowURL)
 		if rerr != nil {
 			return errors.Trace(rerr)
 		}
-		mergedState, _ := workflow.MergeState(ourState, ourChanges, graph.Reducers())
+		// Fold our own delta via the reducers, then materialize: DelNils enacts replace-field deletes, and a
+		// cleared reduced field was ignored during the fold. An empty forEach spawns no members, so this is the
+		// whole merge - agreeing with insertFanInStep's populated path on the same primitive.
+		mergedState := ourState.Clone()
+		_ = mergedState.MergeReduce(ourChanges, graph.Reducers())
+		mergedState.DelNils()
 		// This step IS the cohort spawn (an empty forEach spawns no branches), so it anchors exactly as a
 		// populated cohort's spawn does in insertFanInStep. There are no members, but a field this step wrote
 		// through a COMBINING reducer still has a merged value (reduce(ourState[k], ourChanges[k])) that exists
@@ -1219,27 +1232,32 @@ type stateByteCount struct {
 // moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot), which
 // the caller emits after its transaction commits.
 func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardNum, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, workflowURL string, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, stateByteCount, error) {
-	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON, spawnTaskName string
+	var spawnTaskName string
+	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON []byte
 	var spawnLineageID, spawnFanOutOrdinal int
 	tx.QueryRowContext(ctx,
 		"SELECT state, changes, state_refs, lineage_id, task_name, fan_out_ordinal FROM dwarf_steps WHERE step_id=?",
 		cohortSpawnID,
 	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON, &spawnLineageID, &spawnTaskName, &spawnFanOutOrdinal)
 	bytes := stateByteCount{stateRead: len(spawnStateJSON), changesRead: len(spawnChangesJSON)}
-	var spawnState, spawnChanges map[string]any
-	unmarshalJSONMap(spawnStateJSON, &spawnState)
-	unmarshalJSONMap(spawnChangesJSON, &spawnChanges)
+	spawnState, _ := workflow.NewState(spawnStateJSON)
+	spawnChanges, _ := workflow.NewState(spawnChangesJSON)
 	// Materialize only the ref'd fields a reducer will FOLD - a combining reducer (append/add/union/...) needs
 	// its accumulated base, and folding a delta onto an absent base would silently lose everything so far. A
 	// merely-carried ref is left alone and re-emitted onto the fan-in step below, still pointing at its
 	// original anchor: resolving it here would materialize the payload and re-anchor it at EVERY fan-in,
-	// giving back the win in exactly the fan-out graphs this design exists for.
+	// giving back the win in exactly the fan-out graphs this design exists for. resolveReducedRefs mutates
+	// the state map in place, so it gets the live map.
 	spawnRefs := parseStateRefs(spawnRefsJSON)
 	err := e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, graph.Reducers(), workflowURL)
 	if err != nil {
 		return 0, stateByteCount{}, errors.Trace(err)
 	}
-	merged, _ := workflow.MergeState(spawnState, spawnChanges, graph.Reducers())
+	// The fan-in accumulator's base: the spawn's state with its own delta folded in via the reducers. A
+	// cleared reduced field is ignored (reducer identity); a cleared replace field rides as a tombstone that
+	// DelNils enacts once all members are folded.
+	merged := spawnState.Clone()
+	_ = merged.MergeReduce(spawnChanges, graph.Reducers())
 	// Fields a cohort MEMBER contributed. Their bytes are in that member's `changes` - not in the spawn's row -
 	// and a reducer's COMBINED output exists in no row at all, so neither can be anchored at the spawn. They are
 	// inlined into the fan-in step's own state, which becomes their anchor for everything downstream (the third
@@ -1276,7 +1294,8 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	maxCohortDepth := 0
 	for rows.Next() {
 		var memberStepID, memberSuccessorID int
-		var memberTaskName, status, changesJSON string
+		var memberTaskName, status string
+		var changesJSON []byte
 		var depth int
 		rows.Scan(&memberStepID, &memberTaskName, &status, &changesJSON, &depth, &memberSuccessorID)
 		bytes.changesRead += len(changesJSON)
@@ -1293,14 +1312,18 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 		if status != workflow.StatusCompleted {
 			continue
 		}
-		var changes map[string]any
-		unmarshalJSONMap(changesJSON, &changes)
+		changes, _ := workflow.NewState(changesJSON)
 		for k := range changes {
 			memberWrites[k] = true
 		}
-		merged, _ = workflow.MergeState(merged, changes, graph.Reducers())
+		_ = merged.MergeReduce(changes, graph.Reducers())
 	}
 	rows.Close()
+
+	// Materialize the fan-in snapshot: the folds preserved replace-field delete tombstones (accumulation);
+	// DelNils enacts them now, before the state is minted onto the fan-in step. Reduced fields are
+	// unaffected - a cleared reduced field was ignored during the fold, never stored as a tombstone.
+	merged.DelNils()
 
 	// The fan-in sits one level below the DEEPEST cohort branch, not merely below the last sibling to
 	// complete - branch lengths can differ (loops, gotos, varying chains), so step_depth must reflect the

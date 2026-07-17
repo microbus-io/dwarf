@@ -129,8 +129,8 @@ To invoke a single unit of work in isolation, declare a one-node workflow and `S
 only ever a node in a graph, never an independently invocable child on its own.
 
 - Pass `nil` input for "no arguments"; pass `f.Snapshot()` to forward the parent's entire state.
-- A small upstream adapter task using `f.Transform(newKey, oldKey, …)` is a clean way to reshape parent
-  state into the child's expected input shape.
+- Pass a struct or `map[string]any` as `in` to hand the child exactly the fields it expects — no need to
+  reshape the parent's state first.
 - Subgraphs inherit the parent's baggage and run on the parent's shard. They start their own thread, so
   they don't contaminate the parent's `Continue` chain.
 - Subgraphs can interrupt: an interrupt inside a child propagates up so the caller awaiting the top-level

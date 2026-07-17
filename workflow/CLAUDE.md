@@ -41,90 +41,63 @@ whole history. Violating this duplicates during fan-in merge.
 **forEach element injection:** the current element is injected into `state` only (under `as`), not `changes`, so it is
 available to the task but does not participate in fan-in merge.
 
-**Delete is a cleared (JSON null) entry in `changes`, and `MergeState` has two modes for it.** `flow.Delete`
-(and `Set(k, nil)`) writes JSON `null` into `changes` - `dwarf` conflates null and absent everywhere
-(`isCleared`), so there is no way to store a literal null value. `MergeState` **drops** a cleared key from its
-result (both the replace path and any reducer-managed field), so a delete never survives as a `"k": null`
-tombstone in materialized state - which is what `final_state`/`FlowOutcome.State`/`Snapshot` expose to the host,
-and what the next step's `state` column becomes. This is the *materialization* mode and covers every `MergeState`
-call except one. The exception is **changes accumulation** (`processStep` folding a task's fresh output onto a
-prior attempt's `changes` before persisting the `changes` column): there the null must be **preserved**, because
-it is the pending-delete marker *in transit* - it only enacts the delete when `changes` later folds onto `state`.
-That site therefore uses a plain overlay (`maps.Copy`), not `MergeState` (with a don't-simplify-this note at the
-accumulation site in `execution.go`).
+**Delete is a cleared (JSON null) entry in `changes`, and the merge has two modes for it, split across two
+`State` methods.** `flow.Delete` (and `Set(k, nil)`) writes JSON `null` into `changes` - `dwarf` conflates null
+and absent everywhere (`isCleared`), so there is no way to store a literal null value. `State.Merge`/`MergeReduce`
+are the **accumulation** primitive: a cleared key is **preserved** (the replace path stores the tombstone; a
+reducer-managed field *ignores* the clear - see below), so a changes delta can be built up across attempts/members
+with the pending-delete marker intact. `State.DeleteNils` is the **materialization** step: it drops every cleared
+key, so a delete never survives as a `"k": null` tombstone in materialized state - which is what
+`final_state`/`FlowOutcome.State`/`Snapshot` expose to the host, and what the next step's `state` column becomes.
+So *materialize* = `Merge`/`MergeReduce` then `DeleteNils`; *accumulate* = `Merge` alone. `processStep`'s changes
+accumulation (folding a task's fresh output onto a prior attempt's `changes` before persisting the `changes`
+column) uses `Merge` **without** `DeleteNils`, because there the null must be **preserved** - it only enacts the
+delete when `changes` later folds onto `state` (a don't-materialize-here note is at that site in `execution.go`).
 
-### An unstorable value is rejected on WRITE, never on read (`internal/jsonx.CheckStorable`)
+**A cleared incoming for a reducer-managed field is the reducer's IDENTITY - ignored, not dropped.** `MergeReduce`
+skips a cleared value on a reduced field (`isCleared` check before the fold), leaving the accumulator untouched, so
+a branch that `flow.Delete`s a reduced field never wipes the cohort's contributions to it. Deleting a reduced field
+is not a supported way to clear it - a delete is a *replace*-field concern. Pinned by
+`fixtures/reducerdeleteflow_test.go`.
 
-**The rule: a value that cannot be stored and read back unchanged never enters state.** Two values qualify, and
-both are *silent* if let through - which is why the guard sits at the point of writing, in one place
-(`jsonx.CheckStorable`), applied at every authoring path: `Flow.set` (typed setters) **panics**,
-`Set`/`SetChanges`/`toStateMap` (interrupt payload, subgraph input) return the error, and the engine 400s a
-host-supplied `initialState`/`Baggage`/resume data/fork override.
+### Numbers are float64-domain; two unstorable values are a KNOWN, UNGUARDED punt
 
-The **integer beyond ±2^53** is the precision case, below. The other is the **NUL** (`U+0000`): valid UTF-8,
-legal JSON, and rejected outright by **PostgreSQL's `JSONB`** (`SQLSTATE 22P05`) while MySQL/SQLite/SQL Server
-accept it - so unguarded it is a value that passes the test suite (SQLite) and kills the flow on the
-recommended production database. And it kills it in the worst way: the write that carries it is the step's own
-**completion UPDATE** (`execution.go`), which fails *before* `stepMarkedComplete`, so the recovery defer
-selects neither arm and the step is left `running` with `error=""` and `attempt=0` - reading as perfectly
-healthy - while lease recovery re-executes the task, side effects and all, every `budget + leaseMargin`
-forever. Reproduced against real Postgres; binary data belongs in state base64-encoded. **Invalid UTF-8 needs
-no guard** - `encoding/json` coerces it to `U+FFFD` on marshal, so it can never reach the database, which is
-why the NUL is the *only* string value constrained.
+**Invariant (still holds): every number the engine itself produces round-trips exactly through a `float64`.**
+State/baggage/payloads are carried as `map[string]any` across a JSON round trip through the database, and
+`encoding/json` decodes a JSON number into a **`float64`** whenever the target is an `any` - exact for integers
+only up to **2^53**. This is what lets every reader of a state map - including `boolexp`, which re-marshals its
+symbols through JSON and compares in `float64` - treat numbers as `float64` without qualification, and it holds
+by construction for every value dwarf derives (a `ReducerAdd`/`min`/`max` sum stores and round-trips fine even
+past 2^53). Do **not** "fix" the read side with `UseNumber`: it changes the Go type every state-map reader sees
+(`outcome.State["x"].(float64)` stops matching for an integral value; JSON has one number type, so no scheme
+preserves the writer's Go type through the database), needs a reflect-walker for caller-supplied targets, and
+buys exactness for a value an author can carry losslessly as a string anyway.
 
-Rejecting on write closes the one instance reachable through the public API; it does **not** make the engine
-safe against a permanent write failure in general (any non-transient DB error still re-executes a task
-forever - a separate, open concern). Switching the pgx columns to `json` was the considered alternative and is
-**not** free: Postgres defines no equality operator for `json`, so the `interrupt_payload='{}'` first-writer
-guard (`execution.go`) would break and need a text cast, and it is a schema migration for every existing
-deployment - all to *permit* a value that still cannot round-trip anywhere else. Verified both facts against a
-live Postgres.
+**Two *external/authored* values are unstorable and are currently NOT guarded - a deliberate, backlogged punt**
+(the former write-side storability guard, and its whole `internal/jsonx` package, were removed;
+`Flow.Set`/`set`/`SetChanges`/`Interrupt`/`Subgraph` and the engine's `Create`/`Continue`/`Fork`/`resume`
+ingress no longer check). Both fail *silently*, which is why they were guarded and why the punt is a real
+exposure to revisit, not a non-issue:
 
-### Numbers are float64-domain, and the unrepresentable integer is rejected on WRITE
+- **Integer beyond ±2^53.** Comes back **rounded** (`1234567890123456789` -> `...768`) and the engine
+  re-marshals the rounded value onward into the next step's `state`, `final_state`, a `Fork`, a `Continue`.
+  Nothing errors; the workflow charges the wrong order. Only **integer-shaped** literals are affected - a
+  fractional/exponent number is float64-domain at any magnitude (`1e300` is fine). **Workaround: carry a large
+  id as a string** (the `id_str` pattern 64-bit-id APIs already publish).
+- **NUL (`U+0000`) in a string.** Valid UTF-8, legal JSON, but **PostgreSQL's `JSONB` rejects it**
+  (`SQLSTATE 22P05`) while MySQL/SQLite/SQL Server accept it - so it passes the SQLite test suite and kills the
+  flow on the recommended production database, in the worst way: the write that carries it is the step's own
+  **completion UPDATE** (`execution.go`), so unguarded the step is left `running` with `error=""` and lease
+  recovery re-executes the task forever (reproduced against real Postgres). **Workaround: base64-encode binary
+  data.** (Invalid UTF-8 needs no guard - `encoding/json` coerces it to `U+FFFD` on marshal.) Note that
+  `persist.go`'s `sanitizeErrorMessage` still strips control bytes from the *error-text* write independently, and
+  its "ask the database" classifier turns a rejected payload write into a clean step failure rather than the old
+  eternal loop - so the NUL is degraded from "silent eternal loop" to "clean failure at write time on Postgres,
+  silently stored on the others," not fully benign.
 
-**Invariant: every number in dwarf state round-trips exactly through a `float64`.** State/baggage/payloads
-are carried as `map[string]any` across a JSON round trip through the database, and `encoding/json` decodes a
-JSON number into a **`float64`** whenever the target is an `any` - exact for integers only up to **2^53**.
-An integer written beyond that came back **rounded** (`1234567890123456789` -> `...768`), and the engine then
-re-marshalled the rounded value onward into the next step's `state`, the flow's `final_state`, a `Fork`, a
-`Continue`. Nothing errored; the workflow charged the wrong order.
-
-The fix is **`internal/jsonx.CheckPrecision`, applied at every authoring path**, not a change to what a
-decoded number *means*: `Flow.set` (the typed setters) **panics**, `Set`/`SetChanges`/`toStateMap` (interrupt
-payload, subgraph input) return the error, and the engine 400s a host-supplied `initialState`/`Baggage`/
-resume data/fork override (see `engine/CLAUDE.md`). Only **integer-shaped** literals are constrained - a
-fractional or exponent-notation number is float64-domain by construction and round-trips at any magnitude, so
-`1e300` is fine and `9007199254740993` is not. The panic is the same disposition as
-a mistyped read (below): the orchestrator catches it at the task-call boundary, so it is a clean step failure
-routed to `onError`, not a crash.
-
-**A `ReducerAdd`/`min`/`max` result past 2^53 is a deliberately-conservative corner, NOT a free pass.** The
-engine never re-checks its own derived merges, so such a sum stores and round-trips fine - it is a `float64`, and
-`encoding/json` emits the shortest decimal that round-trips (here the *exact* value). But that shortest decimal is
-an **integer literal**, not float-shaped: `json`'s float encoder switches to `e` notation only at `|v| >= 1e21`, so
-`9007199254740994` marshals as `9007199254740994`, **not** `9.007199254740994e+15`. And `checkNumber` rejects an
-integer literal past 2^53 on sight - it cannot tell an exactly-representable derived sum from a lossy external
-integer. So the moment a *task* re-authors that sum through a public authoring path
-(`Set`/`SetChanges`/`flow.Subgraph(flow.Snapshot(), …)`), or a host re-submits it as input, the write is
-**rejected even though the engine produced it**. Carry a counter that can grow past 2^53 as a string (the `id_str`
-pattern), or keep it out of re-authored payloads. Making the check exact instead (accept iff
-`int64(float64(i)) == i`) was weighed and declined: it trades the clean "±2^53, else carry a string" contract for a
-boundary that flickers as a value crosses in and out of float64-representability.
-
-**The rejected alternative was decoding exactly** - `UseNumber` at every decode site, normalizing to
-`int64`/`float64` (or leaving `json.Number`). It works, and it was built and thrown away. The reasons: it
-changes the Go type every reader of a state map sees (`outcome.State["x"].(float64)` stops matching for an
-integral value - and *`float64(1)` writes the literal `1`, so it would read back as an `int64`*: JSON has one
-number type, so no scheme preserves the writer's Go type through the database); it needs a reflect-walker to
-give a caller-supplied target (`Subgraph(…, &out)`) the same treatment as the engine's own decodes; and it
-buys exactness for a value the workflow author can carry losslessly as a string anyway. Rejecting on write
-keeps `float64` correct **by construction** everywhere downstream - including `boolexp`, which re-marshals its
-symbols through JSON and compares in `float64` - and cost zero changes to existing fixtures.
-
-The workaround is the one 64-bit-id APIs already publish (`id_str`): **carry it as a string**. Pinned by
-`internal/jsonx/jsonx_test.go`, `workflow/precision_test.go`, and `fixtures/precisionflow_test.go` (a task's
-oversized write fails the step and routes to `onError`; the string workaround crosses the step boundary
-intact; host ingress 400s).
+If a guard is ever reintroduced, it must run on the RAW marshaled bytes *before* the decode (the decode rounds
+a >2^53 integer to `float64`, so checking the decoded value is too late) and must NOT re-check the engine's own
+derived sums (a legitimate `ReducerAdd` result past 2^53 marshals integer-shaped and would be falsely rejected).
 
 ### The typed getters panic on a type mismatch (and that is the safe option here)
 

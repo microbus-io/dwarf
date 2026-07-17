@@ -102,7 +102,8 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		// The latest child for this caller step decides the disposition; older children are completed
 		// retry attempts. flow_id DESC mirrors how the live completion path keys the surgraph.
 		var childFlowID int
-		var childStatus, childFinalState, childError string
+		var childStatus, childError string
+		var childFinalState []byte
 		err := db.QueryRowContext(ctx,
 			"SELECT flow_id, status, final_state, error FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 			w.stepID,

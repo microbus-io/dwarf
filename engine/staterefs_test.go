@@ -34,16 +34,16 @@ func blob(n int) string {
 // stepRefsOf reads a step's persisted state column and refs map, so a test can assert what was actually
 // STORED - which is the whole point of the feature and is invisible from the task's view (a task always sees
 // materialized state).
-func stepRefsOf(t *testing.T, e *Engine, stepID int) (state map[string]any, refs stateRefs, stateBytes int) {
+func stepRefsOf(t *testing.T, e *Engine, stepID int) (state workflow.State, refs stateRefs, stateBytes int) {
 	t.Helper()
 	db, err := e.db.Shard(1)
 	testarossa.For(t).NoError(err)
-	var stateJSON, refsJSON string
+	var stateJSON, refsJSON []byte
 	err = db.QueryRowContext(context.Background(),
 		"SELECT state, state_refs FROM dwarf_steps WHERE step_id=?", stepID,
 	).Scan(&stateJSON, &refsJSON)
 	testarossa.For(t).NoError(err)
-	unmarshalJSONMap(stateJSON, &state)
+	state, _ = workflow.NewState(stateJSON)
 	return state, parseStateRefs(refsJSON), len(stateJSON)
 }
 
@@ -96,12 +96,12 @@ func TestStateRefs_OpenThreshold(t *testing.T) {
 func TestStateRefs_MintTiers(t *testing.T) {
 	const anchor = 42
 
-	mint := func(t *testing.T, state map[string]any, changes map[string]any, inherited stateRefs, successors int) (map[string]any, stateRefs) {
+	mint := func(t *testing.T, state map[string]any, changes map[string]any, inherited stateRefs, successors int) (workflow.State, stateRefs) {
 		t.Helper()
 		stateJSON, refsJSON, err := mintStateRefs(state, changes, inherited, anchor, successors, nil)
 		testarossa.For(t).NoError(err)
-		var stored map[string]any
-		unmarshalJSONMap(stateJSON, &stored)
+		var stored workflow.State
+		_ = stored.UnmarshalJSON(stateJSON)
 		return stored, parseStateRefs(refsJSON)
 	}
 
@@ -207,8 +207,8 @@ func TestStateRefs_MintTiers(t *testing.T) {
 		state := map[string]any{"item": blob(50000), "doc": blob(50000)}
 		stateJSON, refsJSON, err := mintStateRefs(state, map[string]any{}, nil, anchor, 32, map[string]bool{"item": true})
 		assert.NoError(err)
-		var stored map[string]any
-		unmarshalJSONMap(stateJSON, &stored)
+		var stored workflow.State
+		_ = stored.UnmarshalJSON(stateJSON)
 		refs := parseStateRefs(refsJSON)
 		assert.NotContains(refs, "item", "an excluded field is never ref'd, however large")
 		assert.Contains(stored, "item")
@@ -306,21 +306,25 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	)
 	assert.NoError(err)
 
-	state := map[string]any{}
+	state := workflow.State{}
 	refs := stateRefs{"fromState": 1, "fromChanges": 1, "shadowed": 1}
 	err = e.resolveStateRefs(ctx, db, 1, state, refs, nil, "u")
 	assert.NoError(err)
 
 	// A resolved field is DECODED, exactly like one that was never ref'd: the storage encoding must never leak
 	// into a state map, or an API caller's state["pdf"].(string) would silently stop matching.
-	assert.Equal("S", state["fromState"], "the entry step's state column is a legitimate anchor")
-	assert.Equal("C", state["fromChanges"])
-	assert.Equal("new", state["shadowed"], "changes shadows state - it is the newer value")
+	var fromState, fromChanges, shadowed string
+	_, _ = state.Get("fromState", &fromState)
+	_, _ = state.Get("fromChanges", &fromChanges)
+	_, _ = state.Get("shadowed", &shadowed)
+	assert.Equal("S", fromState, "the entry step's state column is a legitimate anchor")
+	assert.Equal("C", fromChanges)
+	assert.Equal("new", shadowed, "changes shadows state - it is the newer value")
 
 	// A dangling ref is an invariant violation and must be loud, never a silently-absent field.
-	err = e.resolveStateRefs(ctx, db, 1, map[string]any{}, stateRefs{"nope": 1}, nil, "u")
+	err = e.resolveStateRefs(ctx, db, 1, workflow.State{}, stateRefs{"nope": 1}, nil, "u")
 	assert.Error(err)
-	err = e.resolveStateRefs(ctx, db, 1, map[string]any{}, stateRefs{"x": 999}, nil, "u")
+	err = e.resolveStateRefs(ctx, db, 1, workflow.State{}, stateRefs{"x": 999}, nil, "u")
 	assert.Error(err)
 }
 

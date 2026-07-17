@@ -59,14 +59,21 @@ matching one before working there:**
 
 - **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`internal/migrations/CLAUDE.md`)
 - **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
-- **State delete:** `flow.Delete`/`Set(k,nil)` writes a JSON `null` that `MergeState` *drops* on materialization but
-  *preserves* during changes-accumulation. (`workflow/CLAUDE.md`; enforced at `execution.go`)
-- **Unstorable values are rejected on WRITE, never handled on read** (`internal/jsonx.CheckStorable` - the typed
-  setters panic, everything else errors/400s). Two of them: an integer-shaped value beyond **±2^53** (state numbers
-  are float64-domain; large ids are carried as strings) and a **NUL** in a string (Postgres `JSONB` rejects it -
-  base64 binary data). Do not "fix" the integer by decoding with `UseNumber`: the invariant that every stored number
-  round-trips exactly through a `float64` is what lets every reader (including `boolexp`) treat numbers as `float64`
-  without qualification. (`workflow/CLAUDE.md`)
+- **State delete:** `flow.Delete`/`Set(k,nil)` writes a JSON `null` tombstone. `State.Merge`/`MergeReduce`
+  *preserve* it (accumulation); `State.DeleteNils` *enacts* it (materialization) - the engine accumulates the
+  changes delta with the tombstone intact, then `DeleteNils` when the delta folds onto state. A cleared value on
+  a *reducer*-managed field is *ignored* (the reducer's identity), never dropped. (`workflow/CLAUDE.md`; enforced
+  at `execution.go`)
+- **Two unstorable values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt** (the former
+  write-side storability guard, and its whole `internal/jsonx` package, were removed). Both are *silent* if let through: (1) an
+  integer-shaped value beyond **±2^53** - state numbers are float64-domain, so it comes back **rounded** (a wrong
+  id, no error anywhere); carry a large id as a string. (2) A **NUL** (`U+0000`) in a string - Postgres `JSONB`
+  rejects it (`SQLSTATE 22P05`) while the other dialects accept it, so it passes SQLite tests and fails on the
+  recommended production DB; base64-encode binary data. The float64 invariant still holds for every value the
+  engine itself produces (every stored number round-trips exactly through `float64`), which is what lets every
+  reader - including `boolexp` - treat numbers as `float64`; it is only *external/authored* oversized integers
+  that are no longer caught. Do not reintroduce a guard (nor "fix" the integer with `UseNumber`) without
+  revisiting the punt. (`workflow/CLAUDE.md`)
 - **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
 - **Lease fencing:** every post-execution write to the *dispatched* step must carry `AND lease_seq=?` (the

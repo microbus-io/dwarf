@@ -24,16 +24,18 @@ type baggageKeyType struct{}
 
 var baggageKey = baggageKeyType{}
 
-// ContextWithBaggage returns a copy of ctx carrying the flow's opaque baggage. The engine calls this
-// when dispatching to the host's LoadGraph/ExecuteTask (and at the create-time LoadGraph call); hosts read
-// the value back with BaggageFrom. Set the baggage itself via FlowOptions.Baggage at Create, not here.
-func ContextWithBaggage(ctx context.Context, baggage any) context.Context {
+// ContextWithBaggage returns a copy of ctx carrying the flow's opaque baggage as a State. The engine calls
+// this when dispatching to the host's LoadGraph/ExecuteTask (and at the create-time LoadGraph call); hosts
+// read the value back with BaggageFrom. Set the baggage itself via FlowOptions.Baggage at Create, not here.
+func ContextWithBaggage(ctx context.Context, baggage State) context.Context {
 	return context.WithValue(ctx, baggageKey, baggage)
 }
 
-// BaggageFrom returns the flow's opaque baggage carried on ctx, or nil if none. The value is the
-// JSON-decoded form the host set in FlowOptions.Baggage at Create (typically map[string]any). It lives
-// in the workflow package so task code can read it without importing the engine.
-func BaggageFrom(ctx context.Context) any {
-	return ctx.Value(baggageKey)
+// BaggageFrom returns the flow's opaque baggage carried on ctx as a State, or a nil State if none was set.
+// It is the JSON-decoded form of what the host set in FlowOptions.Baggage at Create (numbers as float64,
+// etc.); a nil State indexes safely (state["k"] yields the zero value). It lives in the workflow package so
+// task code can read it without importing the engine.
+func BaggageFrom(ctx context.Context) State {
+	baggage, _ := ctx.Value(baggageKey).(State)
+	return baggage
 }

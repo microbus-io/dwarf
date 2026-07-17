@@ -51,8 +51,10 @@ The **baggage** is opaque to the engine: set once at `Create` via `FlowOptions.B
 `LoadGraph`/`ExecuteTask` call for the flow's lifetime - the host reads it with `workflow.BaggageFrom(ctx)` (which
 lives in the `workflow` package so task code needn't import `engine`). Authored in one typed place, observed
 ambiently; most callbacks ignore it. The engine never interprets it; a host carries actor claims / tenant identity
-there, receiving the JSON-decoded form (typically `map[string]any`), like flow state. (Unlike W3C/OTEL request
-baggage this is *flow*-scoped and frozen at `Create`, not per-request mutable.) See "Identity / baggage propagation".
+there, receiving it back as a `workflow.State` (the JSON-decoded form, numbers as float64), like flow state.
+`BaggageFrom` returns a `State` directly (a nil State when none was set); the set value (`FlowOptions.Baggage`)
+stays an `any` a host fills with a struct or map. (Unlike W3C/OTEL request baggage this is *flow*-scoped and frozen
+at `Create`, not per-request mutable.) See "Identity / baggage propagation".
 
 ### Backpressure is the task's or host's job, never the engine's
 
@@ -78,26 +80,20 @@ A consequence of having no breaker is no probe *election*: each parked step is i
 independently on its own backoff. The trade is the breaker's coordinated backlog release (instant unblock the moment
 one probe succeeds) for zero engine-side policy and no shared-state machinery to coordinate across replicas.
 
-### Host-supplied payloads are precision-checked at ingress (400)
+### Host-supplied payloads are NOT precision-checked (a KNOWN, backlogged punt)
 
-State is float64-domain: an integer-shaped number beyond ±2^53 does not survive the JSON round trip and is
-rejected on write rather than silently rounded (the full rationale, and why the decode side was deliberately
-NOT changed, is in `workflow/CLAUDE.md`). The `workflow` package guards what a *task* authors; the engine
-guards what a *host* hands it, with `jsonx.CheckStorable` at **five** ingress points - `createWithGraph`
-(`initialState` **and** `Baggage`, covering `Create`/`Run` and subgraph input), `resume` (resume data),
-`mergeWithOverrides` (`Fork`'s state overrides), and `canonicalStateMap` (`Continue`'s `additionalState`).
-`Continue` does **not** ride `createWithGraph` - it builds its own `flowSeed` and calls `insertFlowTx`
-directly, so it carries its own ingress check. That check runs on the caller's **raw** `additionalState`, not
-the merged carry-forward, and on the marshalled bytes *before* the `json.Unmarshal` that would round a >2^53
-integer to `float64` (checking the decoded/merged value is too late, and would also reject a legitimate
-`ReducerAdd` sum - see below). Each is a **400**, not a panic: this is caller input, and the caller is a
-program that can fix its request. Derived values are not checked at the point the engine produces them - they are
-merges of already-checked inputs, so a `ReducerAdd` sum stores and round-trips fine even past 2^53. But "the engine
-produced it" does **not** make it re-authorable: such a sum marshals **integer**-shaped, not float-shaped (Go's
-`json` float encoder only uses `e` notation at `|v| >= 1e21`), so once a *task* re-authors it
-(`Set`/`flow.Subgraph(flow.Snapshot())`) or a host re-submits it, `CheckStorable`'s ±2^53 integer-literal rule
-rejects it - it cannot distinguish an exact derived `float64` from a lossy external integer. Carry such a counter as
-a string; see `workflow/CLAUDE.md`.
+State is float64-domain, so an integer-shaped number beyond ±2^53 does not survive the JSON round trip and comes
+back silently rounded; and a NUL (`U+0000`) in a string is rejected by Postgres `JSONB`. Neither is guarded at
+ingress anymore - the former write-side storability guard (and its whole `internal/jsonx` package) was removed by
+deliberate decision (the two edge cases are rare, and the full rationale + workarounds are in `workflow/CLAUDE.md`).
+There is **no** 400 for either at any ingress point (`Create`/`Run`, `resume`, `Fork`'s overrides, `Continue`'s
+`additionalState`); a host handing an oversized integer or a NUL now gets a rounded value / a Postgres write
+failure rather than a clean 400. The host inputs are still normalized to a `workflow.State` at each door (via
+`workflow.NewState`, which JSON-round-trips a map/struct - so `Continue`'s `additionalState` is canonicalized for
+reducer comparison, see "Continue" below), but that normalization only decodes; it does not range-check. If a guard is reintroduced, it must run on the **raw**
+caller bytes *before* the decode (the decode rounds >2^53 to `float64`) and must **not** re-check the engine's own
+derived merges - a legitimate `ReducerAdd` sum past 2^53 stores and round-trips fine but marshals integer-shaped,
+so a naive re-check would falsely reject it.
 
 ### Size and count limits are the host's job, not the engine's
 
@@ -353,23 +349,25 @@ creates the new flow in the same thread with the same graph, returned **`running
 exclusion keeps a debug `Fork` (which shares the thread's `thread_id` for `List` grouping) from ever becoming a
 production continuation base. The prior turn's `final_state` passes through unfiltered as the new flow's initial
 state; a workflow author wanting narrower carryover scrubs with an entry adapter task using
-`flow.Delete`/`Transform`. As a **derived** operation `Continue` takes no `FlowOptions`: it **inherits the
+`flow.Delete`. As a **derived** operation `Continue` takes no `FlowOptions`: it **inherits the
 thread's policy** (priority/fairness/budget/baggage) from the latest turn; a caller wanting different policy
 uses `Create` with `FlowOptions.ThreadKey` (explicit policy, same thread).
 
 *`additionalState` is canonicalized at the door, because reducers compare MARSHALLED bytes.* A reducer
 dedupes (`union`) and overwrites (`merge`) on the marshalled form of its operands, and those bytes are
 canonical only for a **decoded** value: Go sorts a map's keys but marshals a **struct's** fields in
-*declaration* order, and a `json.RawMessage` passes through verbatim (keeping the author's key order, and a
-literal `1.0` that a `float64` would have written as `1`). Every other reducer input arrives decoded from the
+*declaration* order, so a struct a caller re-contributes compares byte-unequal to its own decoded twin (the
+sorted-key map a prior turn stored). Every other reducer input arrives decoded from the
 database (the fan-in merge, `computeFinalState`) - which is what makes their byte comparison sound - but
 `Continue`'s `additionalState` is the caller's **raw Go value** and skips the database entirely. Unfixed, a
 caller re-contributing an element already in the thread's state *as a struct* produced a second, byte-different
 spelling of it and `union` kept **both** (pinned by `fixtures/continuecanonicalflow_test.go`). So
-`continueFlow` round-trips it through JSON first (`canonicalStateMap`, outside the transaction - a
-lock-contention retry re-runs the closure and this is invariant), keeping *reducers only ever see decoded
-values* an invariant rather than a coincidence. This is why the fix belongs here and not in `reduceUnion`: it
-covers **every** reducer, not just the one whose symptom was noticed.
+`continueFlow` passes it through `workflow.NewState`, which JSON-round-trips a map or struct (it has **no**
+short-circuit for a raw `map[string]any` - that fast path was removed precisely so this canonicalizes), decoding
+it exactly like a value read from a column. Done outside the transaction so a lock-contention retry re-runs the
+closure and this stays invariant - keeping *reducers only ever see decoded values* an invariant rather than a
+coincidence. This is why the fix belongs here and not in `reduceUnion`: it covers **every** reducer, not just the
+one whose symptom was noticed.
 
 *Concurrent Continue is serialized by a thread-anchor lock, so exactly one wins.* The latest-turn read
 (`find latest non-fork flow`), the completed-check, and the new-turn insert run in **one transaction**
@@ -468,8 +466,9 @@ callers don't disambiguate "the workflow rejected my input" from "the engine is 
 
 The interrupt path is split from `State`: `Snapshot` of an `interrupted` flow returns `State` as the merged step
 snapshot *at the time of the interrupt* and `InterruptPayload` as the raw `flow.Interrupt(payload)` argument. Folding
-the payload into `State` was lossy (the caller could not tell workflow state from the resume request). Callers wanting
-the merged view call `workflow.MergeState(out.State, out.InterruptPayload, graph.Reducers())` themselves.
+the payload into `State` was lossy (the caller could not tell workflow state from the resume request). A caller that
+wants the two combined applies the payload onto the state itself, field by field - a resume request is not fan-in
+data, so it does not go through the graph's reducers.
 
 ### Flow-stop notification is not an engine concern
 
@@ -790,7 +789,8 @@ A changes-only resolver silently misses the last two. Do not "simplify" the reso
 literals - `when` evaluation, `forEach` expansion, the task carrier, the transport to a remote task - so the ref
 encoding never leaks into transition evaluation or task-facing code. Minting needs **no database read** (state was
 already resolved, so "inlining" is just declining to omit a field), which is what makes the write-side win free of
-round-trips. Intra-step merge is replace-only (`MergeState(state, changes, nil)`), so a field is either replaced by
+round-trips. Intra-step merge is replace-only (`State.Merge`, i.e. `MergeReduce` with no reducers, then
+`DeleteNils`), so a field is either replaced by
 a literal in `changes` or carried untouched - three cases per key: a literal drops the ref (and may re-anchor here),
 a tombstone drops field and ref, absence carries the ref forward.
 
@@ -1004,8 +1004,10 @@ The task has **already run** when its outcome is persisted - its side effects ha
 only record that it ran. Before `persist` existed, a database error here left the step `running` with `error=''`
 and `attempt=0` (reading as perfectly healthy) and lease recovery re-dispatched it every `budget + leaseMargin`,
 **re-executing the task**, forever. Silent and eternal: `detectOrphanedFlows` could not see it, because a
-non-terminal step *did* exist. Reproduced against a live Postgres with a `\u0000` in state (now rejected on write,
-but the structural hazard was the point).
+non-terminal step *did* exist. Reproduced against a live Postgres with a `\u0000` in state (no longer guarded on
+write - see the storability punt in `workflow/CLAUDE.md` - but `persist`'s classifier now turns such a
+rejected payload write into a clean step failure rather than the old eternal loop; the structural hazard was the
+point).
 
 The rule is: **retry the WRITE, never the task.** Re-dispatching is the one recovery that re-fires side effects,
 and it was being used for failures the task had nothing to do with.
@@ -1217,10 +1219,10 @@ Pinned by `TestGraph_ValidateFanInFromOutsideCohort` and `TestFanInNoCohort_Fail
 **Subgraph is a function call.** The signature is `flow.Subgraph(url string, in any, out any) (yield bool, err
 error)`. Only the explicit `in` passed in crosses into the child as its initial state; only the explicit `out`
 target (the child's `final_state`) crosses back. The parent's state and accumulated changes do NOT auto-cross either
-direction. `in` is any JSON-marshalable value (a struct or a `map[string]any`), normalized to a state map via
-`toStateMap` (nil → "no arguments"); `out` is a pointer (a `*struct` or `*map[string]any`) the child's `final_state`
-is unmarshaled into by JSON tag (`parseMapInto`), or nil to ignore the result. A typed struct on either side gives
-field-level type safety without manual `map[string]any` casts.
+direction. `in` is any JSON-marshalable value (a struct or a `map[string]any`), normalized to a `State` via
+`workflow.NewState` (nil → empty state); `out` is a pointer (a `*struct` or `*map[string]any`) the child's
+`final_state` is unmarshaled into by JSON tag (`State.Parse`), or nil to ignore the result. A typed struct on either
+side gives field-level type safety without manual `map[string]any` casts.
 
 The engine has no single-task front door: a bare task is only ever a node in a graph, never an independently
 invocable child. To run one unit of work in isolation, declare a one-node workflow and `Subgraph` it. ("Subflow" is
@@ -1377,8 +1379,11 @@ narrower context scrubs it in an entry adapter task, or starts a fresh flow with
 interprets is not a parameter on every callback and task handler. The engine injects it into the ctx it hands the
 callbacks (in `processStep` for the per-step executor, and at the create-time `LoadGraph` call); the
 `ContextWithBaggage`/`BaggageFrom` helpers live in the `workflow` package so task-defining code reads baggage
-without importing `engine`. The create-time injection round-trips the value through JSON (`baggageMap`) so the
-loader sees the same decoded shape every dispatch will.
+without importing `engine`; both are typed on `workflow.State` (delivery and read), while the *set* value
+(`FlowOptions.Baggage`) stays an `any` the host fills with a struct or map. The create-time injection round-trips
+the value through JSON (`json.Marshal` then `workflow.NewState`) so the loader sees the same decoded shape every
+dispatch will (a `map[string]any`/struct decodes to a `State` with numbers as float64); the dispatch and inherit
+paths read the `baggage` column the same way, via `workflow.NewState`.
 
 ### Keys are capabilities, not authorization
 

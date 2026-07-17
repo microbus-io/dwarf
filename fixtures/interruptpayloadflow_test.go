@@ -17,9 +17,11 @@ limitations under the License.
 /*
 For an interrupted flow, the engine deliberately keeps the raw flow.Interrupt
 payload OUT of State: Snapshot/Await return State as the merged step snapshot at
-the interrupt point and InterruptPayload as the separate, raw payload. A caller
-wanting the combined view merges them itself with workflow.MergeState. This
-asserts the split (the earlier folding-into-State behavior was lossy).
+the interrupt point and InterruptPayload as the separate, raw payload. This
+asserts the split (the earlier folding-into-State behavior was lossy). A caller
+that wants the two combined applies the payload onto the state itself, field by
+field - a resume request is not fan-in data, so it does not go through the graph's
+reducers.
 */
 package fixtures
 
@@ -82,17 +84,5 @@ func TestInterruptpayloadflow(t *testing.T) {
 		assert.Equal("choose", outcome.State["prompt"])
 		_, hasQuestion := outcome.State["question"]
 		assert.False(hasQuestion, "payload field leaked into State")
-
-		// A caller wanting the combined view merges them explicitly.
-		graph, err := proxy.LoadGraph(ctx, "interruptpayloadflow.verify:428/interrupt")
-		if !assert.NoError(err) {
-			return
-		}
-		merged, err := workflow.MergeState(outcome.State, outcome.InterruptPayload, graph.Reducers())
-		if !assert.NoError(err) {
-			return
-		}
-		assert.Equal("choose", merged["prompt"])
-		assert.Equal("pick one", merged["question"])
 	})
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"sort"
@@ -93,29 +94,6 @@ func stateRefOpenThreshold(successors int) int {
 	return max(stateRefFloor, min(stateRefThreshold, stateRefBudget/successors))
 }
 
-// rawEncode re-encodes a materialized state map as one raw message per field, which is both how field sizes
-// are measured (exactly, on the ENCODED form) and how the state column is then marshalled - so nothing is
-// marshalled twice. Values already carrying json.RawMessage (a task's own writes, via Flow.record) pass
-// through untouched.
-func rawEncode(state map[string]any) (map[string]json.RawMessage, error) {
-	if len(state) == 0 {
-		return map[string]json.RawMessage{}, nil
-	}
-	out := make(map[string]json.RawMessage, len(state))
-	for k, v := range state {
-		if raw, ok := v.(json.RawMessage); ok {
-			out[k] = raw
-			continue
-		}
-		data, err := json.Marshal(v)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		out[k] = data
-	}
-	return out, nil
-}
-
 // mintStateRefs decides which of a successor step's state fields are stored by reference rather than by
 // value. It returns the JSON to write into `state` (the ref'd fields omitted) and into `state_refs`.
 //
@@ -131,33 +109,37 @@ func rawEncode(state map[string]any) (map[string]json.RawMessage, error) {
 //
 // Minting needs no database read: state was resolved at dispatch, so every literal is already in hand and
 // "inlining" is simply declining to omit a field.
-func mintStateRefs(merged map[string]any, changes map[string]any, inherited stateRefs, anchorID int, successors int, exclude map[string]bool) (string, string, error) {
-	raw, err := rawEncode(merged)
-	if err != nil {
-		return "", "", errors.Trace(err)
-	}
+func mintStateRefs(merged workflow.State, changes workflow.State, inherited stateRefs, anchorID int, successors int, exclude map[string]bool) ([]byte, []byte, error) {
 	refs := stateRefs{}
 	type candidate struct {
 		key  string
 		size int
 	}
 	var candidates []candidate
-	for k, v := range raw {
-		if exclude[k] {
-			continue
-		}
-		// A field the task did not rewrite, and which arrived as a ref, KEEPS that ref - it is never
-		// re-minted against this step, whose row does not hold the bytes. This is the one-hop guard, and it
-		// is unconditional precisely because the fan-out policy below is not size-based (invariant 2).
-		if anchor, isRef := inherited[k]; isRef {
-			if _, rewritten := changes[k]; !rewritten {
-				refs[k] = anchor
-				delete(raw, k)
-				continue
+	// Encode fields for the state column as we go, but NEVER a carried inherited ref: it keeps its ref and
+	// its (possibly large) bytes stay at the anchor, so re-serializing it here only to discard it is exactly
+	// the cost state refs exists to avoid. Only fields headed for INLINE storage (or new-ref candidacy) are
+	// marshalled here.
+	raw := make(map[string]json.RawMessage, len(merged))
+	for k, v := range merged {
+		if !exclude[k] {
+			// A field the task did not rewrite, and which arrived as a ref, KEEPS that ref - it is never
+			// re-minted against this step, whose row does not hold the bytes. This is the one-hop guard, and it
+			// is unconditional precisely because the fan-out policy below is not size-based (invariant 2).
+			if anchor, isRef := inherited[k]; isRef {
+				if _, rewritten := changes[k]; !rewritten {
+					refs[k] = anchor
+					continue
+				}
 			}
 		}
-		if len(v) >= stateRefFloor {
-			candidates = append(candidates, candidate{k, len(v)})
+		data, err := json.Marshal(v)
+		if err != nil {
+			return nil, nil, errors.Trace(err)
+		}
+		raw[k] = data
+		if !exclude[k] && len(data) >= stateRefFloor {
+			candidates = append(candidates, candidate{k, len(data)})
 		}
 	}
 
@@ -201,13 +183,13 @@ func mintStateRefs(merged map[string]any, changes map[string]any, inherited stat
 
 	stateJSON, err := json.Marshal(raw)
 	if err != nil {
-		return "", "", errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
 	refsJSON, err := json.Marshal(refs)
 	if err != nil {
-		return "", "", errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
-	return string(stateJSON), string(refsJSON), nil
+	return stateJSON, refsJSON, nil
 }
 
 // combinedReducerFields names the keys whose merged fan-in value came from a COMBINING (non-replace) reducer
@@ -217,7 +199,7 @@ func mintStateRefs(merged map[string]any, changes map[string]any, inherited stat
 // bare delta, silently dropping the accumulated base). The fan-in mint therefore excludes these, inlining them
 // as literals into the fan-in step's own `state`. A key present only in `changes` (no base) is left off: there
 // merged[k] == changes[k], so the anchor's `changes` is a sound anchor and keeping the ref preserves the byte win.
-func combinedReducerFields(state, changes map[string]any, reducers map[string]workflow.Reducer) map[string]bool {
+func combinedReducerFields(state, changes workflow.State, reducers map[string]workflow.Reducer) map[string]bool {
 	out := map[string]bool{}
 	for k := range changes {
 		if r := reducers[k]; r == "" || r == workflow.ReducerReplace {
@@ -239,33 +221,38 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs stateRefs, merged 
 		return
 	}
 	byAnchor := map[int][]string{}
-	bytesOf := map[int]int{}
 	// An anchor is PINNED (un-droppable) if any of its fields' literals are absent from `merged` - a merely
 	// carried ref whose payload this step never materialized. Inlining it would require a literal we do not
 	// have, so dropping it would delete the field outright: the exact data loss the carry-forward above closes.
 	// Such a ref must survive the cap even if that means a wider IN-list (correctness over the perf bound).
+	// Detecting it needs only a presence check, no marshal.
 	pinned := map[int]bool{}
 	for k, anchor := range refs {
 		byAnchor[anchor] = append(byAnchor[anchor], k)
-		if v, ok := merged[k]; ok {
-			if data, err := json.Marshal(v); err == nil {
-				bytesOf[anchor] += len(data)
-			}
-		} else {
+		if _, ok := merged[k]; !ok {
 			pinned[anchor] = true
 		}
 	}
 	if len(byAnchor) <= maxStateAnchors {
 		return
 	}
-	// Only inlineable (non-pinned) anchors are droppable, largest-bytes first so the survivors are the ones the
-	// refs buy the most on. Ties break on the anchor id, so the choice is deterministic.
+	// Over the cap: only NOW size the droppable anchors (largest-bytes first so the survivors are the ones the
+	// refs buy the most on). This is the only path that marshals ref'd fields - a possibly-large carried
+	// payload is never re-serialized in the common under-cap case above. Ties break on anchor id for determinism.
+	bytesOf := map[int]int{}
 	droppable := make([]int, 0, len(byAnchor))
 	pinnedCount := 0
-	for a := range byAnchor {
+	for a, keys := range byAnchor {
 		if pinned[a] {
 			pinnedCount++
 			continue
+		}
+		for _, k := range keys {
+			if v, ok := merged[k]; ok {
+				if data, err := json.Marshal(v); err == nil {
+					bytesOf[a] += len(data)
+				}
+			}
 		}
 		droppable = append(droppable, a)
 	}
@@ -291,13 +278,13 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs stateRefs, merged 
 
 // parseStateRefs decodes the state_refs column. An empty/absent map is the overwhelmingly common case and
 // allocates nothing.
-func parseStateRefs(refsJSON string) stateRefs {
-	refsJSON = strings.TrimSpace(refsJSON)
-	if refsJSON == "" || refsJSON == "{}" {
+func parseStateRefs(refsJSON []byte) stateRefs {
+	refsJSON = bytes.TrimSpace(refsJSON)
+	if len(refsJSON) == 0 || bytes.Equal(refsJSON, []byte("{}")) {
 		return nil
 	}
 	var refs stateRefs
-	if err := json.Unmarshal([]byte(refsJSON), &refs); err != nil {
+	if err := json.Unmarshal(refsJSON, &refs); err != nil {
 		return nil
 	}
 	if len(refs) == 0 {
@@ -325,8 +312,8 @@ func stateRefCacheKey(shardNum, anchorID int, field string) string {
 // db may be a transaction - anchors never cross a flow, and a flow never crosses a shard (invariant 7), so
 // resolution is always a same-connection read and the fan-in and final-state paths can resolve inside the
 // transactions they already run in.
-func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shardNum int, state map[string]any, refs stateRefs, want map[string]bool, workflowURL string) error {
-	if len(refs) == 0 || state == nil {
+func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shardNum int, state workflow.State, refs stateRefs, want map[string]bool, workflowURL string) error {
+	if state == nil || len(refs) == 0 {
 		return nil
 	}
 	// Serve what the cache can, and collect the anchors still needed.
@@ -337,7 +324,10 @@ func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shard
 			continue
 		}
 		if cached, ok := e.stateRefCache.Load(stateRefCacheKey(shardNum, anchor, field)); ok {
-			if err := spliceResolved(state, field, cached); err != nil {
+			// The cache holds the immutable BYTES; State.Set decodes them into a fresh copy, so a resolved
+			// field is indistinguishable from one never ref'd (no RawMessage leaks into FlowStep/FlowOutcome
+			// state), and two fan-out branches resolving the same anchor never share a decoded map or slice.
+			if err := state.Set(field, cached); err != nil {
 				return errors.Trace(err)
 			}
 			continue
@@ -373,15 +363,15 @@ func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shard
 	readBytes := 0
 	for rows.Next() {
 		var anchorID int
-		var stateJSON, changesJSON, refsJSON string
+		var stateJSON, changesJSON, refsJSON []byte
 		if err := rows.Scan(&anchorID, &stateJSON, &changesJSON, &refsJSON); err != nil {
 			rows.Close()
 			return errors.Trace(err)
 		}
 		readBytes += len(stateJSON) + len(changesJSON)
 		row := anchorRow{refs: parseStateRefs(refsJSON)}
-		json.Unmarshal([]byte(stateJSON), &row.state)
-		json.Unmarshal([]byte(changesJSON), &row.changes)
+		json.Unmarshal(stateJSON, &row.state)
+		json.Unmarshal(changesJSON, &row.changes)
 		fetched[anchorID] = row
 	}
 	rows.Close()
@@ -408,30 +398,15 @@ func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shard
 			}
 			return errors.New("state ref %q not found in step %d", field, anchor)
 		}
+		// Cache the immutable BYTES (not a decoded value), then decode into state via State.Set. Caching the
+		// decoded value would alias the same map/slice across the fan-out branch goroutines about to hand it
+		// to concurrent tasks; each State.Set decodes its own copy. State.Set stores the decoded form, so the
+		// ref encoding never leaks into FlowStep/FlowOutcome state.
 		e.stateRefCache.Store(stateRefCacheKey(shardNum, anchor, field), value)
-		if err := spliceResolved(state, field, value); err != nil {
+		if err := state.Set(field, value); err != nil {
 			return errors.Trace(err)
 		}
 	}
-	return nil
-}
-
-// spliceResolved decodes an anchor's raw bytes into the state map, so a resolved field is INDISTINGUISHABLE
-// from one that was never ref'd. Two reasons this must decode rather than drop the json.RawMessage in:
-//
-//   - Type. Every other path builds state via unmarshalJSONMap, so a value is a decoded string/float64/map.
-//     A RawMessage would leak the storage encoding into API surface (FlowStep.State, FlowOutcome.State), where
-//     a caller's `state["pdf"].(string)` would simply stop matching - the ref encoding is internal, and this is
-//     what keeps it that way.
-//   - Isolation. The cache holds the immutable BYTES and every resolve decodes its own copy, so two fan-out
-//     branches resolving the same anchor never share a decoded map or slice. Caching the decoded value would
-//     alias it across the branch goroutines that are about to hand it to concurrent tasks.
-func spliceResolved(state map[string]any, field string, raw json.RawMessage) error {
-	var decoded any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return errors.Trace(err)
-	}
-	state[field] = decoded
 	return nil
 }
 
@@ -452,7 +427,7 @@ func spliceResolved(state map[string]any, field string, raw json.RawMessage) err
 // mintStateRefs' inherited-carry-forward (which handles a ref whose key is absent from the merged state,
 // exactly the case a non-materialized carry produces). That is why this returns nothing: the carried set is
 // not the caller's to thread - mintStateRefs recovers it from the same `inherited` refs it is already passed.
-func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, shardNum int, state map[string]any, refs stateRefs, reducers map[string]workflow.Reducer, workflowURL string) error {
+func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, shardNum int, state workflow.State, refs stateRefs, reducers map[string]workflow.Reducer, workflowURL string) error {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -473,22 +448,18 @@ func (e *Engine) resolveReducedRefs(ctx context.Context, tx sequel.Executor, sha
 // resolvedStepState materializes a step's state column into JSON with every ref'd field spliced back in - the
 // flatten used where a state snapshot must stand on its own, detached from the anchors that backed it (Fork's
 // leaf step, whose anchor ids are about to be remapped into a different flow).
-func (e *Engine) resolvedStepState(ctx context.Context, db sequel.Executor, shardNum int, stateJSON, refsJSON, workflowURL string) (string, error) {
+func (e *Engine) resolvedStepState(ctx context.Context, db sequel.Executor, shardNum int, stateJSON, refsJSON []byte, workflowURL string) ([]byte, error) {
 	refs := parseStateRefs(refsJSON)
 	if len(refs) == 0 {
 		return stateJSON, nil
 	}
-	var state map[string]any
-	unmarshalJSONMap(stateJSON, &state)
-	if state == nil {
-		state = map[string]any{}
-	}
+	state, _ := workflow.NewState(stateJSON)
 	if err := e.resolveStateRefs(ctx, db, shardNum, state, refs, nil, workflowURL); err != nil {
-		return "", errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
-		return "", errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
-	return string(data), nil
+	return data, nil
 }

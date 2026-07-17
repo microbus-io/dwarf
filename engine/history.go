@@ -173,7 +173,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		return nil, errors.Trace(err)
 	}
 	var taskName, statusStr, errMsg string
-	var stateJSON, changesJSON, stateRefsJSON, interruptJSON string
+	var stateJSON, changesJSON, stateRefsJSON, interruptJSON []byte
 	var stepDepth, attempt, predID, succID int
 	var createdAt, updatedAt time.Time
 	err = db.QueryRowContext(ctx,
@@ -199,22 +199,22 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		CreatedAt:     createdAt,
 		UpdatedAt:     updatedAt,
 	}
-	err = json.Unmarshal([]byte(stateJSON), &fs.State)
+	fs.State, err = workflow.NewState(stateJSON)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	// Materialize the step's carried-by-reference fields: the ref encoding is internal storage, never an
-	// API-visible one, so Step reports the input the task actually saw (invariant 6).
-	err = e.resolveStateRefs(ctx, db, shardNum, fs.State, parseStateRefs(stateRefsJSON), nil, "")
+	// API-visible one, so Step reports the input the task actually saw (invariant 6). resolveStateRefs
+	// mutates the state map in place.
+	if err = e.resolveStateRefs(ctx, db, shardNum, fs.State, parseStateRefs(stateRefsJSON), nil, ""); err != nil {
+		return nil, errors.Trace(err)
+	}
+	fs.Changes, err = workflow.NewState(changesJSON)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	err = json.Unmarshal([]byte(changesJSON), &fs.Changes)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if interruptJSON != "" {
-		err = json.Unmarshal([]byte(interruptJSON), &fs.InterruptPayload)
+	if len(interruptJSON) > 0 {
+		fs.InterruptPayload, err = workflow.NewState(interruptJSON)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -851,12 +851,13 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		return "", errors.Trace(err)
 	}
 
-	// The caller's raw Go value is the only reducer input that does not arrive decoded from the database,
-	// so canonicalize it here or a reducer compares two spellings of the same value (canonicalStateMap).
-	// Done before the transaction: a lock-contention retry re-runs the closure, and this is invariant.
-	additional, err := canonicalStateMap(additionalState)
+	// The caller's raw Go value is the only reducer input that does not arrive decoded from the database, so
+	// canonicalize it: NewState JSON-round-trips a map/struct, so a struct's declaration-order fields become
+	// sorted-key map form and a fold never compares two spellings of the same value (reducers compare
+	// marshalled bytes). Done before the transaction: a lock-contention retry re-runs the closure, invariant.
+	additional, err := workflow.NewState(additionalState)
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.Trace(err, http.StatusBadRequest)
 	}
 
 	var threadID int
@@ -899,7 +900,8 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		// The new turn inherits the latest completed turn's full policy (scheduling, baggage).
 		// Exclude debug forks: a Fork shares the thread_id for List grouping but must never become a
 		// production Continue's base (forked_from_step<>0 marks a fork).
-		var flowStatus, finalStateJSON, graphJSON, workflowURL, baggageJSON, fairnessKey string
+		var flowStatus, workflowURL, fairnessKey string
+		var finalStateJSON, graphJSON, baggageJSON []byte
 		var priority, timeBudgetMs int
 		var fairnessWeight float64
 		err := tx.QueryRowContext(ctx,
@@ -918,23 +920,25 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 			return errors.New("latest flow in thread is not completed (status: %s)", strings.TrimSpace(flowStatus), http.StatusConflict)
 		}
 
-		var finalState map[string]any
-		if err := json.Unmarshal([]byte(finalStateJSON), &finalState); err != nil {
+		finalState, err := workflow.NewState(finalStateJSON)
+		if err != nil {
 			return errors.Trace(err)
 		}
 		var graph workflow.Graph
-		if err := json.Unmarshal([]byte(graphJSON), &graph); err != nil {
+		if err := json.Unmarshal(graphJSON, &graph); err != nil {
 			return errors.Trace(err)
 		}
 		entryPoint := graph.EntryPoint()
 		if entryPoint == "" {
 			return errors.New("workflow has no entry point", http.StatusBadRequest)
 		}
-		mergedState, err := workflow.MergeState(finalState, additional, graph.Reducers())
-		if err != nil {
+		// Merge the caller's additionalState onto the prior turn's final_state via the graph's reducers, then
+		// materialize (DelNils enacts a delete the caller passed on a replace-managed field).
+		if err := finalState.MergeReduce(additional, graph.Reducers()); err != nil {
 			return errors.Trace(err)
 		}
-		mergedStateJSON, err := json.Marshal(mergedState)
+		finalState.DelNils()
+		mergedStateJSON, err := json.Marshal(finalState)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -942,8 +946,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		// Inherit the thread's baggage; DeleteOnCompletion is forced off (a disposable flow deletes itself,
 		// so it could never have been a Continue source). A turn wanting different policy uses Create with
 		// FlowOptions.ThreadKey instead.
-		var inheritedBaggage map[string]any
-		unmarshalJSONMap(baggageJSON, &inheritedBaggage)
+		inheritedBaggage, _ := workflow.NewState(baggageJSON)
 		baggageOut, err := json.Marshal(inheritedBaggage)
 		if err != nil {
 			return errors.Trace(err)
@@ -960,8 +963,8 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 			workflowURL:    workflowURL,
 			workflowName:   graph.Name(),
 			graphJSON:      graphJSON,
-			baggageJSON:    string(baggageOut),
-			stateJSON:      string(mergedStateJSON),
+			baggageJSON:    baggageOut,
+			stateJSON:      mergedStateJSON,
 			traceParent:    e.mintWorkflowSpan(ctx, workflowURL, ""),
 			flowToken:      newFlowToken,
 			stepToken:      newStepToken,

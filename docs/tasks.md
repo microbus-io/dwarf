@@ -68,48 +68,41 @@ f.Delete("coupon", "scratch") // remove fields
 f.Clear()                     // remove everything
 ```
 
-`f.Transform(newKey, oldKey, ...)` clears all state and re-introduces only the listed fields under new
-names (absent or null source fields are skipped) — handy as a small adapter task just upstream of a
-[subgraph](fan-out-and-subgraphs.md#subgraphs) to reshape state into the child's expected input.
-
 ### Binary data must be base64-encoded
 
-A **NUL character** (`U+0000`) in a string cannot be stored. It is valid UTF-8 and marshals to legal JSON,
-but PostgreSQL's `JSONB` rejects it outright — so, unguarded, it is a value that works on SQLite and kills
-the flow on the recommended production database. Dwarf therefore rejects it on **every** dialect, at the
-point of writing, with the same disposition as an oversized integer (typed setters panic into a clean step
-failure; `Set`/`SetChanges` and host-supplied payloads return an error).
+**Known limitation:** a **NUL character** (`U+0000`) in a string cannot be stored. It is valid UTF-8 and
+marshals to legal JSON, but PostgreSQL's `JSONB` rejects it outright — so it works on SQLite and kills the flow
+on the recommended production database. Dwarf does **not** currently detect or reject this, so it is your
+responsibility: raw bytes belong in state **base64-encoded**.
 
 ```go
-f.SetString("payload", string(rawBytes))                        // panics if rawBytes holds a 0x00
+f.SetString("payload", string(rawBytes))                        // FAILS on Postgres if rawBytes holds a 0x00
 f.SetString("payload", base64.StdEncoding.EncodeToString(raw))  // correct
 ```
 
-So raw bytes belong in state **base64-encoded**. Nothing else about strings is constrained — tabs, newlines,
-other control characters, and emoji all round-trip fine. (Invalid UTF-8 needs no rule: `encoding/json`
-replaces it with `U+FFFD` on the way in.)
+Nothing else about strings is constrained — tabs, newlines, other control characters, and emoji all
+round-trip fine. (Invalid UTF-8 needs no rule: `encoding/json` replaces it with `U+FFFD` on the way in.)
 
 ### Large integers must be carried as strings
 
-State round-trips through JSON, where a number is a `float64` — which holds integers exactly only up to
-**2^53** (about 9.0e15). A bigger integer would come back **rounded** in the next step, so dwarf refuses to
-store one: `SetInt` (and the other typed setters) **panic**, and `Set`/`SetChanges`, an interrupt payload, a
-subgraph input, and a host-supplied initial state or baggage return an error naming the field. A panic here
-is a clean step failure — it routes to the graph's `onError` if it has one — not a crash.
+**Known limitation:** an integer stored in state must not exceed **2^53** (about 9.0e15). State round-trips
+through JSON, where a number is a `float64`, which holds integers exactly only up to that bound. A bigger
+integer comes back **rounded** in the next step, silently corrupting the value (a wrong id, with no error
+anywhere). Dwarf does **not** currently detect or reject this, so it is your responsibility: if a larger number
+is required, carry it as a **string**. A 64-bit database key, a Snowflake id, or a nanosecond timestamp all
+belong in state as strings (the same reason APIs that mint 64-bit ids publish an `id_str` alongside them).
 
 ```go
-f.SetInt("orderID", 1234567890123456789)   // panics: 1.2e18 cannot round-trip
+f.SetInt("orderID", 1234567890123456789)   // WRONG: 1.2e18 comes back rounded to ...768
 f.SetString("orderID", "1234567890123456789") // correct: exact, digit for digit
 
 f.SetInt("qty", 3)                          // ordinary integers are unaffected
 f.SetInt("createdMs", time.Now().UnixMilli()) // ~1.7e12: fine
-f.SetInt("createdNs", time.Now().UnixNano())  // panics: ~1.7e18
+f.SetInt("createdNs", time.Now().UnixNano())  // WRONG: ~1.7e18 rounds
 f.SetFloat("total", 1e300)                  // floats are unaffected at any magnitude
 ```
 
-So a 64-bit database key, a Snowflake id, or a nanosecond timestamp belongs in state as a **string** (the
-same reason APIs that mint 64-bit ids publish an `id_str` alongside them). A `time.Duration` is nanoseconds,
-so `SetDuration` is bounded the same way — beyond ~104 days it panics.
+A `time.Duration` is nanoseconds, so `SetDuration` past ~104 days rounds the same way.
 
 ### Deltas, not totals, for reducer fields
 
@@ -248,17 +241,18 @@ or locale to task code without the engine interpreting it:
 
 ```go
 func charge(ctx context.Context, f *workflow.Flow) error {
-    if claims, ok := workflow.BaggageFrom(ctx).(map[string]any); ok {
-        token := mintToken(claims) // e.g. act as the original caller
+    claims := workflow.BaggageFrom(ctx) // a workflow.State; nil (safe to index) when none was set
+    if actor, ok := claims["actor"].(string); ok {
+        token := mintToken(actor) // e.g. act as the original caller
         ...
     }
     ...
 }
 ```
 
-Baggage is set once at `Create`, frozen on the flow, inherited by subgraphs and `Continue`, and delivered
-as the JSON-decoded form (typically `map[string]any`). See
-[Engine operations → Create](operations.md#create-and-run).
+Baggage is set once at `Create` (as any JSON object — a struct or map), frozen on the flow, inherited by
+subgraphs and `Continue`, and delivered back as a `workflow.State` (the JSON-decoded form, numbers as
+float64). See [Engine operations → Create](operations.md#create-and-run).
 
 ## Handling transient failures
 

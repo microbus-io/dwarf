@@ -22,7 +22,6 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/jsonx"
 	"github.com/microbus-io/errors"
 )
 
@@ -64,29 +63,29 @@ import (
 // branch gets its own Flow.
 type Flow struct {
 	// State
-	state   map[string]any
-	changes map[string]any
+	state   State
+	changes State
 
 	// Control
 	gotoNext         string
 	retry            bool
 	sleepDuration    time.Duration
 	interrupt        bool
-	interruptPayload map[string]any
+	interruptPayload State
 
 	// Dynamic subgraph request. subgraphURL holds the graph URL the engine LoadGraph's; subgraphInput is
 	// the child's initial state.
 	subgraphURL   string
-	subgraphInput map[string]any
+	subgraphInput State
 
 	// Park resolution (inbound), set by the orchestrator on dispatch from the step row.
 	// interruptDone/resumeData resolve an Interrupt park; subgraphDone/subgraphResult/
 	// subgraphError resolve a Subgraph park. A parker returns its resolved value once the
 	// matching *Done flag is set, instead of re-arming.
 	interruptDone  bool
-	resumeData     map[string]any
+	resumeData     State
 	subgraphDone   bool
-	subgraphResult map[string]any
+	subgraphResult State
 	subgraphError  string
 
 	// Backoff retry
@@ -107,11 +106,13 @@ type Flow struct {
 	stepKey string
 }
 
-// NewFlow creates a new Flow with initialized maps.
+// NewFlow creates a new Flow with initialized state.
 func NewFlow() *Flow {
+	state, _ := NewState()
+	changes, _ := NewState()
 	return &Flow{
-		state:   make(map[string]any),
-		changes: make(map[string]any),
+		state:   state,
+		changes: changes,
 	}
 }
 
@@ -128,64 +129,40 @@ func NewFlow() *Flow {
 
 // GetString returns a state field as a string. It returns "" if the field is absent, and panics if the
 // field holds a non-string.
-func (f *Flow) GetString(key string) string {
-	var v string
-	mustGetFromMap(f.state, key, &v)
-	return v
-}
+func (f *Flow) GetString(key string) string { return f.state.GetString(key) }
 
 // GetStrings returns a state field as a string slice. It returns nil if the field is absent, and panics
 // if the field holds anything but an array of strings.
-func (f *Flow) GetStrings(key string) []string {
-	var v []string
-	mustGetFromMap(f.state, key, &v)
-	return v
-}
+func (f *Flow) GetStrings(key string) []string { return f.state.GetStrings(key) }
 
 // GetInt returns a state field as an int. It returns 0 if the field is absent, and panics if the field
 // holds a non-integer (a fractional number included).
-func (f *Flow) GetInt(key string) int {
-	var v int
-	mustGetFromMap(f.state, key, &v)
-	return v
-}
+func (f *Flow) GetInt(key string) int { return f.state.GetInt(key) }
 
 // GetFloat returns a state field as a float64. It returns 0 if the field is absent, and panics if the
 // field holds a non-number.
-func (f *Flow) GetFloat(key string) float64 {
-	var v float64
-	mustGetFromMap(f.state, key, &v)
-	return v
-}
+func (f *Flow) GetFloat(key string) float64 { return f.state.GetFloat(key) }
 
 // GetBool returns a state field as a bool. It returns false if the field is absent, and panics if the
 // field holds a non-boolean.
-func (f *Flow) GetBool(key string) bool {
-	var v bool
-	mustGetFromMap(f.state, key, &v)
-	return v
-}
+func (f *Flow) GetBool(key string) bool { return f.state.GetBool(key) }
 
 // GetDuration returns a state field as a time.Duration. It returns 0 if the field is absent, and panics
 // if the field holds anything but a duration in nanoseconds.
-func (f *Flow) GetDuration(key string) time.Duration {
-	var v time.Duration
-	mustGetFromMap(f.state, key, &v)
-	return v
-}
+func (f *Flow) GetDuration(key string) time.Duration { return f.state.GetDuration(key) }
 
 // Get unmarshals a state field into the target. Use this for complex types (structs, maps, etc.), and to
 // handle a type mismatch rather than fail the step on it - unlike the typed getters, Get reports one as an
 // error instead of panicking. An absent or cleared field leaves the target untouched and returns nil.
 func (f *Flow) Get(key string, target any) error {
-	return getFromMap(f.state, key, target)
+	_, err := f.state.Get(key, target)
+	return err
 }
 
 // Has reports whether a state field exists. A cleared slot (JSON null) reads
 // as absent.
 func (f *Flow) Has(key string) bool {
-	v, ok := f.state[key]
-	return ok && !isCleared(v)
+	return f.state.Has(key)
 }
 
 // ParseState unmarshals state fields into the target struct.
@@ -203,7 +180,7 @@ func (f *Flow) Has(key string) bool {
 // A task's output is its changes, never the state map: state is the immutable input snapshot the engine
 // wrote when it created the step, and only changes are read back and persisted.
 func (f *Flow) ParseState(target any) error {
-	return parseMapInto(f.state, target)
+	return f.state.Parse(target)
 }
 
 // CreatedAt returns the wall-clock time at which the flow was created. Useful for tasks that
@@ -251,88 +228,53 @@ func (f *Flow) StepKey() string {
 
 // --- State mutation ---
 
-// Two values cannot be stored in workflow state and are rejected on write: an integer beyond ±2^53
-// (carry a large id as a string) and a NUL character in a string (base64-encode binary data). Set and
-// SetChanges return the error; the typed setters, having no error to return, panic - which the
-// orchestrator catches at the task-call boundary and turns into a clean step failure, routed to onError
-// if the graph has one, with the field named.
+// A task's output is its changes; state is the in-task working copy. So every setter writes to BOTH: state
+// (so a later read in the same task sees it) and changes (which is what the orchestrator persists). Each
+// delegates to the matching State method on the two fields; State normalizes the value through JSON.
 
 // Set sets a state field and tracks the change. Use this for complex types (structs, maps, etc.).
-// It returns an error if the value holds an integer beyond ±2^53 or a NUL character in a string, which
-// workflow state cannot store (see the note above).
+// It returns an error only if the value cannot be marshalled to JSON (a NaN, an +Inf, a channel).
 func (f *Flow) Set(key string, value any) error {
-	data, err := json.Marshal(value)
-	if err != nil {
+	if err := f.state.Set(key, value); err != nil {
 		return err
 	}
-	err = jsonx.CheckStorable(data)
-	if err != nil {
-		return errors.New("state field %q: %v", key, err)
-	}
-	f.record(key, data)
-	return nil
+	return f.changes.Set(key, value)
 }
 
-// SetString sets a state string field and tracks the change. It panics on a string containing a NUL
-// character (U+0000) - see the note above.
+// SetString sets a state string field and tracks the change.
 func (f *Flow) SetString(key string, value string) {
-	f.set(key, value)
+	f.state.SetString(key, value)
+	f.changes.SetString(key, value)
 }
 
-// SetStrings sets a state string slice field and tracks the change. It panics if any element contains a
-// NUL character (U+0000) - see the note above.
+// SetStrings sets a state string slice field and tracks the change.
 func (f *Flow) SetStrings(key string, value []string) {
-	f.set(key, value)
+	f.state.SetStrings(key, value)
+	f.changes.SetStrings(key, value)
 }
 
-// SetInt sets a state int field and tracks the change. It panics on a value beyond ±2^53, which state
-// cannot carry exactly - see the note above (and Set, to handle the error instead of failing on it).
+// SetInt sets a state int field and tracks the change.
 func (f *Flow) SetInt(key string, value int) {
-	f.set(key, value)
+	f.state.SetInt(key, value)
+	f.changes.SetInt(key, value)
 }
 
 // SetFloat sets a state float64 field and tracks the change.
 func (f *Flow) SetFloat(key string, value float64) {
-	f.set(key, value)
+	f.state.SetFloat(key, value)
+	f.changes.SetFloat(key, value)
 }
 
 // SetBool sets a state bool field and tracks the change.
 func (f *Flow) SetBool(key string, value bool) {
-	f.set(key, value)
+	f.state.SetBool(key, value)
+	f.changes.SetBool(key, value)
 }
 
-// SetDuration sets a state time.Duration field and tracks the change. A duration is nanoseconds, so it
-// panics beyond ±2^53ns (~104 days) - see SetInt.
+// SetDuration sets a state time.Duration field and tracks the change (nanoseconds).
 func (f *Flow) SetDuration(key string, value time.Duration) {
-	f.set(key, value)
-}
-
-// set is an internal helper that marshals a value and records it in state and changes. It panics on an
-// unstorable value, since the typed setters have no error to return.
-func (f *Flow) set(key string, value any) {
-	data, err := json.Marshal(value)
-	if err != nil {
-		panic(err) // should never happen for primitive types
-	}
-	err = jsonx.CheckStorable(data)
-	if err != nil {
-		panic(errors.New("state field %q: %v", key, err))
-	}
-	f.record(key, data)
-}
-
-// record writes marshalled JSON into both state (so later reads in this task see it) and changes (the
-// task's output, which is what the orchestrator persists).
-func (f *Flow) record(key string, data []byte) {
-	if f.state == nil {
-		f.state = make(map[string]any)
-	}
-	if f.changes == nil {
-		f.changes = make(map[string]any)
-	}
-	raw := json.RawMessage(data)
-	f.state[key] = raw
-	f.changes[key] = raw
+	f.state.SetDuration(key, value)
+	f.changes.SetDuration(key, value)
 }
 
 // Delete removes the listed state fields. Each is recorded as a cleared value
@@ -344,61 +286,27 @@ func (f *Flow) Delete(keys ...string) {
 	}
 }
 
-// Clear removes every state field. Equivalent to Delete on every current key.
-// Useful at workflow boundaries (e.g. a task that builds a fresh subgraph input
-// from a curated subset of parent state) or anywhere a task wants a blank slate
-// before populating it.
+// Clear removes every state field. Equivalent to Delete on every current key: each is recorded as a cleared
+// value (JSON null) in changes so the following merge drops it, and state is emptied. Useful at workflow
+// boundaries or anywhere a task wants a blank slate before populating it.
 func (f *Flow) Clear() {
+	if f.changes == nil {
+		f.changes, _ = NewState()
+	}
 	for k := range f.state {
-		f.deleteOne(k)
+		f.changes[k] = nil // tombstone so the delete propagates into the task's persisted changes
 	}
+	f.state.Clear()
 }
 
-// Transform clears all state, then re-introduces the listed fields under new
-// names. Arguments are (newKey, oldKey) pairs; the value previously stored
-// under oldKey is captured before the clear and re-set under newKey. Old keys
-// that were absent or already null are skipped (the new key is not introduced
-// as null). Panics on an odd number of arguments.
-//
-// Typical use: a small task immediately upstream of a subgraph node that
-// reshapes parent state into the subgraph's expected input.
-//
-//	flow.Transform("subInput1", "parentVarA", "subInput2", "parentVarB")
-func (f *Flow) Transform(pairs ...string) {
-	if len(pairs)%2 != 0 {
-		panic("workflow: Transform requires an even number of arguments (newKey, oldKey, ...)")
-	}
-	n := len(pairs) / 2
-	captured := make([]any, n)
-	for i := range n {
-		captured[i] = f.state[pairs[i*2+1]]
-	}
-	f.Clear()
-	for i := range n {
-		v := captured[i]
-		if isCleared(v) {
-			continue
-		}
-		if f.state == nil {
-			f.state = make(map[string]any)
-		}
-		newKey := pairs[i*2]
-		if raw, ok := v.(json.RawMessage); ok {
-			f.state[newKey] = raw
-			f.changes[newKey] = raw
-		} else {
-			_ = f.Set(newKey, v)
-		}
-	}
-}
-
-// deleteOne is the shared worker: writes JSON null to changes, drops from state.
+// deleteOne is the shared worker: writes a cleared (Go nil) tombstone to changes so the following merge
+// drops the field, and removes it from state so later reads in this task see it as absent.
 func (f *Flow) deleteOne(key string) {
 	if f.changes == nil {
-		f.changes = make(map[string]any)
+		f.changes, _ = NewState()
 	}
-	f.changes[key] = json.RawMessage("null")
-	delete(f.state, key)
+	f.changes[key] = nil // tombstone; isCleared treats a Go nil (or JSON null) as cleared
+	f.state.Del(key)
 }
 
 // Snapshot captures a read-only copy of the flow's current state
@@ -449,7 +357,7 @@ immediately.
 On re-entry after Resume it unmarshals the resume data into out with yield=false and does not re-arm; the task
 proceeds. The payload is any JSON-marshalable value (a struct or a map[string]any); out is a pointer (a *struct or
 *map[string]any) the resume data is unmarshaled into by JSON tag, or nil to ignore it. The returned err is non-nil
-only if the payload cannot be marshalled or stored (or out fails to unmarshal); interrupt itself has no failure
+only if the payload cannot be marshalled (or out fails to unmarshal); interrupt itself has no failure
 mode, so err is otherwise always nil. A rejected payload does not arm the interrupt. The payload is copied, so
 mutating it after the call does not change what is persisted. Symmetric with Subgraph: any in, pointer out.
 
@@ -463,7 +371,7 @@ mutating it after the call does not change what is persisted. Symmetric with Sub
 func (f *Flow) Interrupt(payload any, out any) (yield bool, err error) {
 	if f.interruptDone {
 		if out != nil {
-			err := parseMapInto(f.resumeData, out)
+			err := f.resumeData.Parse(out)
 			if err != nil {
 				return false, errors.Trace(err)
 			}
@@ -481,12 +389,12 @@ func (f *Flow) Interrupt(payload any, out any) (yield bool, err error) {
 	if f.interrupt {
 		return false, errors.New("cannot interrupt: step already armed an interrupt this dispatch")
 	}
-	payloadMap, err := toStateMap(payload)
+	payloadState, err := NewState(payload)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
 	f.interrupt = true
-	f.interruptPayload = payloadMap
+	f.interruptPayload = payloadState
 	return true, nil
 }
 
@@ -522,7 +430,7 @@ err if the child failed. Does not re-arm on re-entry.
 func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err error) {
 	if f.subgraphDone {
 		if out != nil {
-			err := parseMapInto(f.subgraphResult, out)
+			err := f.subgraphResult.Parse(out)
 			if err != nil {
 				return false, errors.Trace(err)
 			}
@@ -543,12 +451,12 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 	if f.subgraphURL != "" {
 		return false, errors.New("cannot start subgraph: step already armed a subgraph this dispatch")
 	}
-	inputMap, err := toStateMap(in)
+	inputState, err := NewState(in)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
 	f.subgraphURL = workflowURL
-	f.subgraphInput = inputMap
+	f.subgraphInput = inputState
 	return true, nil
 }
 
@@ -677,22 +585,21 @@ func (f *Flow) diffAndApply(source any, snapshot, state, changes map[string]any)
 		if err != nil {
 			return err
 		}
-		err = jsonx.CheckStorable(data)
-		if err != nil {
-			return errors.New("state field %q: %v", tag, err)
-		}
 		// Only record as change if different from snapshot
 		if snapshot != nil {
 			if prev, ok := snapshot[tag]; ok {
-				prevData, _ := marshalAny(prev)
+				prevData, _ := json.Marshal(prev)
 				if string(prevData) == string(data) {
 					continue
 				}
 			}
 		}
-		raw := json.RawMessage(data)
-		state[tag] = raw
-		changes[tag] = raw
+		var dv any
+		if err := json.Unmarshal(data, &dv); err != nil {
+			return errors.Trace(err)
+		}
+		state[tag] = dv
+		changes[tag] = dv
 	}
 	return nil
 }
@@ -701,29 +608,29 @@ func (f *Flow) diffAndApply(source any, snapshot, state, changes map[string]any)
 
 // flowJSON is the wire format for Flow.
 type flowJSON struct {
-	FlowKey                string         `json:"flowKey,omitzero"`
-	StepKey                string         `json:"stepKey,omitzero"`
-	State                  map[string]any `json:"state,omitzero"`
-	Changes                map[string]any `json:"changes,omitzero"`
-	Goto                   string         `json:"goto,omitzero"`
-	Retry                  bool           `json:"retry,omitzero"`
-	SleepDuration          time.Duration  `json:"sleepDuration,omitzero"`
-	Interrupt              bool           `json:"interrupt,omitzero"`
-	InterruptPayload       map[string]any `json:"interruptPayload,omitzero"`
-	SubgraphURL            string         `json:"subgraphURL,omitzero"`
-	SubgraphInput          map[string]any `json:"subgraphInput,omitzero"`
-	InterruptDone          bool           `json:"interruptDone,omitzero"`
-	ResumeData             map[string]any `json:"resumeData,omitzero"`
-	SubgraphDone           bool           `json:"subgraphDone,omitzero"`
-	SubgraphResult         map[string]any `json:"subgraphResult,omitzero"`
-	SubgraphError          string         `json:"subgraphError,omitzero"`
-	Attempt                int            `json:"attempt,omitzero"`
-	BackoffInitialDelay    time.Duration  `json:"backoffInitialDelay,omitzero"`
-	BackoffDelayMultiplier float64        `json:"backoffDelayMultiplier,omitzero"`
-	BackoffMaxDelay        time.Duration  `json:"backoffMaxDelay,omitzero"`
-	CreatedAt              time.Time      `json:"createdAt,omitzero"`
-	UpdatedAt              time.Time      `json:"updatedAt,omitzero"`
-	StepCreatedAt          time.Time      `json:"stepCreatedAt,omitzero"`
+	FlowKey                string        `json:"flowKey,omitzero"`
+	StepKey                string        `json:"stepKey,omitzero"`
+	State                  State         `json:"state,omitzero"`
+	Changes                State         `json:"changes,omitzero"`
+	Goto                   string        `json:"goto,omitzero"`
+	Retry                  bool          `json:"retry,omitzero"`
+	SleepDuration          time.Duration `json:"sleepDuration,omitzero"`
+	Interrupt              bool          `json:"interrupt,omitzero"`
+	InterruptPayload       State         `json:"interruptPayload,omitzero"`
+	SubgraphURL            string        `json:"subgraphURL,omitzero"`
+	SubgraphInput          State         `json:"subgraphInput,omitzero"`
+	InterruptDone          bool          `json:"interruptDone,omitzero"`
+	ResumeData             State         `json:"resumeData,omitzero"`
+	SubgraphDone           bool          `json:"subgraphDone,omitzero"`
+	SubgraphResult         State         `json:"subgraphResult,omitzero"`
+	SubgraphError          string        `json:"subgraphError,omitzero"`
+	Attempt                int           `json:"attempt,omitzero"`
+	BackoffInitialDelay    time.Duration `json:"backoffInitialDelay,omitzero"`
+	BackoffDelayMultiplier float64       `json:"backoffDelayMultiplier,omitzero"`
+	BackoffMaxDelay        time.Duration `json:"backoffMaxDelay,omitzero"`
+	CreatedAt              time.Time     `json:"createdAt,omitzero"`
+	UpdatedAt              time.Time     `json:"updatedAt,omitzero"`
+	StepCreatedAt          time.Time     `json:"stepCreatedAt,omitzero"`
 }
 
 // MarshalJSON serializes the Flow including private fields.

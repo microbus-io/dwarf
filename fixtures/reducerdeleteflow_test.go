@@ -15,19 +15,22 @@ limitations under the License.
 */
 
 /*
-Reducer-managed delete at fan-in. A branch's flow.Delete writes a cleared
-(JSON null) change; at fan-in the cohort members fold in fan_out_ordinal order via MergeState with
-the field's reducer, and MergeState DROPS a cleared key regardless of reducer. So the outcome is
-order-dependent:
+Reducer-managed delete at fan-in. A branch's flow.Delete writes a cleared (JSON null) change; at fan-in
+the cohort members fold in fan_out_ordinal order via the field's reducer. A cleared incoming for a
+reducer-managed field is the reducer's IDENTITY - it is IGNORED, leaving the accumulator untouched - so a
+branch that deletes a reduced field never wipes the cohort's contributions to it. The outcome is therefore
+order-INDEPENDENT:
 
-  - delete first (ordinal 0), then append: the delete drops the field (including its seed), then the
-    append folds onto the now-absent key -> ["b2"].
-  - append first (ordinal 0), then delete: the append accumulates, then the delete drops the whole
-    field -> the key is absent.
+  - delete first (ordinal 0), then append: the delete is ignored (the seed survives), then the append
+    folds onto it -> ["seed", "b2"].
+  - append first (ordinal 0), then delete: the append accumulates, then the delete is ignored -> the same
+    ["seed", "b2"].
 
-Both subtests also assert the materialized final_state carries no "log": null tombstone (delete never
-survives as a null in materialized state). fan_out_ordinal is set by static-transition declaration
-order, so the two subtests use graphs that differ only in the order the two branches are declared.
+(Deleting a reducer-managed field is not a supported way to clear it - a delete is a REPLACE-field concern.
+This pins that a stray delete on a reduced field cannot silently discard other branches' work.) Both
+subtests also assert the materialized final_state carries no "log": null tombstone (a delete never survives
+as a null in materialized state). fan_out_ordinal is set by static-transition declaration order, so the two
+subtests use graphs that differ only in the order the two branches are declared.
 */
 package fixtures
 
@@ -101,7 +104,7 @@ func TestReducerDeleteflow(t *testing.T) {
 		return out, true
 	}
 
-	t.Run("delete_first_then_append_drops_seed_keeps_b2", func(t *testing.T) {
+	t.Run("delete_first_is_ignored_seed_survives", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		_, outcome, err := eng.Run(ctx, "reducerdelete.verify:428/delete-first",
@@ -111,17 +114,18 @@ func TestReducerDeleteflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-		// The ordinal-0 delete drops the seeded key; the ordinal-1 append folds onto the absent key.
+		// The ordinal-0 delete of a reduced field is ignored (reducer identity); the seed survives and the
+		// ordinal-1 append folds onto it.
 		got, present := stringsOf(outcome.State["log"])
 		if assert.True(present, "log should be present, got %#v", outcome.State["log"]) {
-			assert.Equal([]string{"b2"}, got)
+			assert.Equal([]string{"seed", "b2"}, got)
 		}
 		// A cleared key never materializes as a null tombstone.
 		v, exists := outcome.State["log"]
 		assert.True(!exists || v != nil, "final_state must not carry a log:null tombstone")
 	})
 
-	t.Run("append_first_then_delete_drops_whole_field", func(t *testing.T) {
+	t.Run("delete_after_append_is_ignored_accumulator_survives", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		_, outcome, err := eng.Run(ctx, "reducerdelete.verify:428/append-first",
@@ -131,8 +135,13 @@ func TestReducerDeleteflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-		// The ordinal-0 append accumulates ["seed","b2"], then the ordinal-1 delete drops the whole field.
+		// The ordinal-0 append accumulates ["seed","b2"], then the ordinal-1 delete is ignored (identity) -
+		// the accumulator survives intact.
+		got, present := stringsOf(outcome.State["log"])
+		if assert.True(present, "log should be present, got %#v", outcome.State["log"]) {
+			assert.Equal([]string{"seed", "b2"}, got)
+		}
 		v, exists := outcome.State["log"]
-		assert.True(!exists || v == nil, "log should be absent (dropped by the last-folded delete), got %#v", v)
+		assert.True(!exists || v != nil, "final_state must not carry a log:null tombstone")
 	})
 }
