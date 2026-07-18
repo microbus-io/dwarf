@@ -466,7 +466,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// checked so a lost park fails the step rather than stranding it.
 		parkRes, err := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
-			string(changesJSON), parkedSubgraph, stepID, leaseSeq,
+			changesJSON, parkedSubgraph, stepID, leaseSeq,
 		)
 		if err != nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
@@ -541,8 +541,8 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		var rewound bool
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
 			res, execErr := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='' WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
-				workflow.StatusPending, string(changesJSON), attempt+1, retrySleepMs, stepID, leaseSeq,
+				"UPDATE dwarf_steps SET status=?, changes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='' WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
+				workflow.StatusPending, changesJSON, attempt+1, retrySleepMs, emptyJSON, emptyJSON, stepID, leaseSeq,
 			)
 			if execErr != nil {
 				return errors.Trace(execErr)
@@ -601,7 +601,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 		res, werr := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"' AND lease_seq=?",
-			workflow.StatusCompleted, string(changesJSON), stepID, writeSeq,
+			workflow.StatusCompleted, changesJSON, stepID, writeSeq,
 		)
 		if werr != nil {
 			return errors.Trace(werr)
@@ -828,7 +828,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			// Reports whether the flow is still non-terminal; a false return means the caller must bail (nil).
 			flowRowLocked := false
 			lockFlowRow := func() (bool, error) {
-				e.countFlowRowWrite(flowID)
+				e.countFlowRowWrite(ctx, flowID)
 				flowRes, flowErr := tx.ExecContext(ctx,
 					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 					flowID,
@@ -1024,7 +1024,7 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			// flow's hottest row (two extra tuple versions per sibling; 126 per 64-wide cohort) plus the lock
 			// hold that serializes the cohort. Every path that DOES advance the flow holds the row by here.
 			if !flowFailed && flowRowLocked {
-				e.countFlowRowWrite(flowID)
+				e.countFlowRowWrite(ctx, flowID)
 				tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", nextFlowStepID, flowID)
 			}
 			return nil
@@ -1098,7 +1098,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		// never locks a sibling's step row), and one shared resource cannot cycle.
 		allStepIDs := append([]any{stepID}, chainStepIDs...)
 		stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
-		stepArgs := []any{stepID, string(changesJSON), stepID, workflow.StatusInterrupted, parkedNone}
+		stepArgs := []any{stepID, changesJSON, stepID, workflow.StatusInterrupted, parkedNone}
 		stepArgs = append(stepArgs, allStepIDs...)
 		tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
@@ -1140,16 +1140,25 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		if len(interruptPayload) > 0 {
 			payloadJSON, _ := json.Marshal(interruptPayload)
 			payloadLen = len(payloadJSON)
-			payloadArgs := []any{string(payloadJSON)}
+			payloadArgs := []any{payloadJSON}
 			payloadArgs = append(payloadArgs, allStepIDs...)
 			// Guard: write the payload only to chain steps still at the default empty object, so a
 			// concurrent fan-out interrupt does not clobber a payload already set on a shared ancestor
-			// (first-writer-wins). MySQL's JSON column does not match a bare string literal with '=',
-			// so interrupt_payload='{}' silently matches nothing there; compare its textual form. The
-			// TEXT/JSONB/NVARCHAR columns on the other dialects match the literal directly.
+			// (first-writer-wins). Three dialect forms, and each is load-bearing:
+			//   - MySQL's JSON column does not match a bare string literal with '=', so
+			//     interrupt_payload='{}' silently matches nothing there; compare its textual form.
+			//   - SQL Server's column is VARBINARY (the payload columns are binary there so a Go []byte
+			//     binds as the matching type - see the migrations), so the literal must be the BYTE form:
+			//     0x7B7D is "{}". A varchar '{}' literal is accepted only in a comparison like this one;
+			//     SQL Server rejects the same implicit conversion outright in a DEFAULT or a SET
+			//     assignment, which is why every payload RESET binds emptyJSON instead of inlining '{}'.
+			//   - TEXT/JSONB match the literal directly.
 			emptyGuard := "interrupt_payload='{}'"
-			if db.DriverName() == "mysql" {
+			switch db.DriverName() {
+			case "mysql":
 				emptyGuard = "CAST(interrupt_payload AS CHAR)='{}'"
+			case "mssql":
+				emptyGuard = "interrupt_payload=0x7B7D"
 			}
 			tx.ExecContext(ctx,
 				"UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+stepPlaceholders+") AND "+emptyGuard,

@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/microbus-io/sequel"
@@ -95,7 +96,10 @@ func (e *Engine) deliverFailureLost(ctx context.Context, tx sequel.Executor, par
 
 // --- Test-only statement counters ---
 
-// countFlowRowWrite records one dwarf_flows UPDATE issued by the transition transaction for a flow.
+// The flow-row-write counter is a COUNTING checkpoint (seamster's Visits), not a rendezvous: countFlowRowWrite
+// fires checkpointFlowRowWrite scoped to the flow at each dwarf_flows UPDATE the transition transaction issues,
+// and flowRowWriteCount reads the accrued Visits count. No test arms Wait/Break on these flow-scoped names, so
+// Checkpoint just increments and returns.
 //
 // It exists for a single pin, and that pin guards a performance property no correctness test can see: a
 // NON-FINAL cohort arrival must issue ZERO flow-row statements. Grabbing the flow row for every arrival
@@ -105,28 +109,29 @@ func (e *Engine) deliverFailureLost(ctx context.Context, tx sequel.Executor, par
 // every existing fixture still passes - it just costs ~20% throughput silently. Hence a counter rather than a
 // state assertion.
 //
-// Counts are per flow and cumulative across the flow's whole life, so a test reads the delta it cares about.
-// A Transact contention retry re-runs the closure and legitimately re-counts, so a test asserting an exact
-// count must be single-worker and contention-free.
-//
-// Inert in production: the enabled gate short-circuits before the map is ever allocated or the lock taken.
-func (e *Engine) countFlowRowWrite(flowID int) {
+// Counts are per flow and cumulative across the flow's whole life (Visits never resets), so a test reads the
+// delta it cares about. A Transact contention retry re-runs the closure and legitimately re-counts, so a test
+// asserting an exact count must be single-worker and contention-free.
+
+// flowRowWriteCheckpoint is the flow-scoped name of the flow-row-write counting checkpoint. Scoped by flow id
+// so concurrent flows count independently, mirroring the old per-flow map key.
+func flowRowWriteCheckpoint(flowID int) string {
+	return "flowRowWrite:" + strconv.Itoa(flowID)
+}
+
+// countFlowRowWrite records one dwarf_flows UPDATE issued by the transition transaction for a flow. Inert in
+// production: the Enabled gate short-circuits before the scoped checkpoint name is built, so a live binary
+// allocates no throwaway string and consults nothing.
+func (e *Engine) countFlowRowWrite(ctx context.Context, flowID int) {
 	if !e.seams.Enabled() {
 		return
 	}
-	e.flowRowWritesLock.Lock()
-	defer e.flowRowWritesLock.Unlock()
-	if e.flowRowWrites == nil {
-		e.flowRowWrites = make(map[int]int)
-	}
-	e.flowRowWrites[flowID]++
+	e.seams.Checkpoint(ctx, flowRowWriteCheckpoint(flowID))
 }
 
 // flowRowWriteCount reports how many dwarf_flows UPDATEs the transition transaction has issued for a flow.
 func (e *Engine) flowRowWriteCount(flowID int) int {
-	e.flowRowWritesLock.Lock()
-	defer e.flowRowWritesLock.Unlock()
-	return e.flowRowWrites[flowID]
+	return e.seams.Visits(flowRowWriteCheckpoint(flowID))
 }
 
 // --- Execution checkpoints ---

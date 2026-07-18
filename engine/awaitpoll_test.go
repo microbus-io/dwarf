@@ -103,7 +103,7 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 	// Forge the terminal commit WITHOUT signalStop - the exact state the crash window leaves.
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_flows SET status=?, final_state=?, updated_at=NOW_UTC() WHERE flow_id=?",
-		workflow.StatusCompleted, `{"ok":true}`, flowID)
+		workflow.StatusCompleted, []byte(`{"ok":true}`), flowID)
 	assert.NoError(err)
 
 	select {

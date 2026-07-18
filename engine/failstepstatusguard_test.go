@@ -48,7 +48,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		at.NoError(err)
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			"ftok", "u", "W", "{}", flowStatus, 1, 1, 1000,
+			"ftok", "u", "W", []byte("{}"), flowStatus, 1, 1, 1000,
 		)
 		at.NoError(err)
 		_, err = db.ExecContext(ctx,

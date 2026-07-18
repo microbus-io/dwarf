@@ -44,7 +44,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		// flow_id is auto-increment; the first insert on a fresh per-test DB is flow_id=1 on every driver.
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			"ftok", "u", "W", "{}", workflow.StatusRunning, 1, 1, 1000,
+			"ftok", "u", "W", []byte("{}"), workflow.StatusRunning, 1, 1, 1000,
 		)
 		testarossa.For(t).NoError(err)
 		// lease_expires is set well into the future so the engine's own lease-recovery poll (running under

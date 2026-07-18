@@ -294,7 +294,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		"ftok", "u", "W", "{}", workflow.StatusRunning, 1, 1, 60000,
+		"ftok", "u", "W", []byte("{}"), workflow.StatusRunning, 1, 1, 60000,
 	)
 	assert.NoError(err)
 	// An anchor holding one field in `state` (an initial input nobody produced) and another in `changes` (a
@@ -302,7 +302,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	_, err = db.ExecContext(ctx,
 		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, state, changes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		1, 1, "s1", "Anchor", "u", workflow.StatusCompleted, 60000,
-		`{"fromState":"S","shadowed":"old"}`, `{"fromChanges":"C","shadowed":"new"}`,
+		[]byte(`{"fromState":"S","shadowed":"old"}`), []byte(`{"fromChanges":"C","shadowed":"new"}`),
 	)
 	assert.NoError(err)
 

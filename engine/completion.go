@@ -1138,10 +1138,10 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	}
 
 	// Normalize the caller's resume data (a struct, map, or nil) into a State; an empty one stays "{}".
-	resumeDataJSON := "{}"
+	resumeDataJSON := []byte("{}")
 	if resumeState, _ := workflow.NewState(data); len(resumeState) > 0 {
 		b, _ := json.Marshal(resumeState)
-		resumeDataJSON = string(b)
+		resumeDataJSON = b
 	}
 
 	// Test-only checkpoint: a breakpoint here lets a test freeze resume before its transaction so a racing
@@ -1161,7 +1161,8 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		}
 		allStepIDs := append([]any{leafStepID}, parkStepIDs...)
 		clearPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
-		tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload='{}' WHERE step_id IN ("+clearPlaceholders+")", allStepIDs...)
+		tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload=? WHERE step_id IN ("+clearPlaceholders+")",
+			append([]any{emptyJSON}, allStepIDs...)...)
 
 		if len(parkStepIDs) > 0 {
 			parkPlaceholders := strings.Repeat("?,", len(parkStepIDs)-1) + "?"

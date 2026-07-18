@@ -141,7 +141,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 	// Forge the wedge: the child reached terminal (completed, final_state {"v":7}) but the caller was never
 	// revived.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=?, final_state=? WHERE surgraph_step_id=?",
-		workflow.StatusCompleted, `{"v":7}`, parentStepID)
+		workflow.StatusCompleted, []byte(`{"v":7}`), parentStepID)
 	assert.NoError(err)
 
 	// Recover (minAge=0 bypasses the age guard for the test) and confirm the flow resumes and adopts the

@@ -27,7 +27,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `trace_parent` | W3C `traceparent` of the flow's root "workflow" span, minted at `Create` (or, for a subgraph, parented to the caller step's span). Reconstructed as the parent of every per-step span. Inherited by `Continue` only as a fresh trace (a new root span is minted per turn); a subgraph inherits the caller step's context, not this column. See "Tracing" |
 | `delete_on_completion` | Set from `FlowOptions.DeleteOnCompletion` at `Create`; `1` makes the flow *schedule* its own deletion (stamp `delete_after_ms`) when it reaches `completed`. Root-only (not inherited by children); `failed`/`cancelled`/`interrupted` flows are never auto-deleted. See "Data Retention" |
 | `delete_after_ms` | Milliseconds added to `updated_at` to compute the reap time; `0` = keep (default), `>0` = the background reaper deletes the flow's whole subtree (keyed on `root_flow_id`) once `updated_at + delete_after_ms <= NOW`. Stamped on the **root** only - by DeleteOnCompletion (= the 1-min grace, outcome observable meanwhile) and by `Delete`/`Purge` (= 1ms, due immediately). `delete_after_ms > 0` always implies a terminal status; such a flow is excluded from `List`/`History` but still serves its outcome to `Snapshot`/`Await`. Indexed `WHERE delete_after_ms > 0` (partial on pgx/mssql/sqlite, full on mysql). See "Data Retention" |
-| `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Del`. **Typed `JSON` on MySQL, not `TEXT`** - it carries arbitrary workflow output (same as `state`/`changes`, both `JSON` on MySQL), so a `TEXT` column would silently cap terminal state at 64 KB **on MySQL only** (pgx `TEXT` = 1 GB, mssql `NVARCHAR(MAX)`, sqlite `TEXT` have no such limit), failing/truncating a large-output flow on one dialect. Never regress it to `TEXT`; it is never compared in a `WHERE`/`CASE`, so it dodges the JSON-`=` landmine below |
+| `final_state` | JSON state computed at termination - the full merged state of the terminal step(s), unfiltered. Narrowing happens in the workflow's terminal task via `flow.Del`. **Typed `JSON` on MySQL, not `TEXT`** - it carries arbitrary workflow output (same as `state`/`changes`, both `JSON` on MySQL), so a `TEXT` column would silently cap terminal state at 64 KB **on MySQL only** (pgx `TEXT` = 1 GB, mssql `VARBINARY(MAX)`, sqlite `TEXT` have no such limit), failing/truncating a large-output flow on one dialect. Never regress it to `TEXT`; it is never compared in a `WHERE`/`CASE`, so it dodges the JSON-`=` landmine below |
 | `forked_from_step` | `Fork` provenance: the *original* fork-point `step_id` this flow was cloned from; `0` for a non-fork flow. Subsumes the origin flow id (derivable via the step's `flow_id`) and pins the exact divergence node. `Continue` excludes forks via `forked_from_step=0`. See "Fork" |
 | `created_at` | UTC creation time. Append-only and PK-correlated. Surfaced to tasks via `Flow.CreatedAt()`. A `Fork` clone is a new flow with its own `created_at` = fork time. **Deliberately unindexed on `dwarf_flows`**: no query on the flows table filters or orders on it (`List`/`Purge` age filters anchor on `updated_at` - which for a terminal flow is its finish time, the correct "time since finished" retention signal, and only terminal flows are purged). The fairness scheduler's `created_at` ordering runs on the **steps** copy, which *is* indexed (see `dwarf_steps.created_at`); the flows copy is never a hot-path order/filter key. A `dwarf_flows.created_at` index would be pure write amplification; if a "created in window X" analytics filter is ever added, add the index with the `Query` field then |
 | `started_at` | UTC time this attempt began dispatching. Stamped when the flow goes `running` at `Create` (and by `Fork` when the clone goes live); there is no separate `Start`. Distinct from `created_at`, which is the row's INSERT moment. Drives `FlowSummary.Duration()` (`updated_at - started_at`) |
@@ -223,16 +223,54 @@ keep bare literal defaults. Postgres, SQL Server, and SQLite permit bare literal
 is MySQL-only. Mirror the parenthesized form on every MySQL `TEXT`/`JSON` column or fresh MySQL deployments fail to
 migrate.
 
-**Comparing a MySQL `JSON` column to a string literal does not match.** `WHERE json_col = '{}'` returns zero rows on
-MySQL - the JSON-typed column is not implicitly compared against the bare SQL string `'{}'` (you'd need
-`CAST(json_col AS CHAR) = '{}'` or `json_col = CAST('{}' AS JSON)`). The same `= '{}'` predicate *does* match on
-SQLite (`TEXT`), Postgres (`JSONB` casts the unknown literal), and SQL Server (`NVARCHAR`), so a single shared query
-string silently no-ops only on MySQL. The `interrupt_payload='{}'` first-writer-wins guard in `handleInterrupt`
-(`execution.go`) hit exactly this: on MySQL the payload write matched nothing and `flow.Interrupt` payloads came back
-empty. It now branches on `db.DriverName()` to use `CAST(interrupt_payload AS CHAR)='{}'` for MySQL. **Assignments**
-(`SET col='{}'`) and the parenthesized column `DEFAULT ('{}')` are unaffected - only `=`/`<>` *comparisons* against a
-JSON column in a `WHERE`/`CASE` need the cast. Any new query comparing a JSON/JSONB column to a literal must apply the
-same per-driver treatment.
+**Comparing a payload column to a string literal is a THREE-WAY dialect split.** `WHERE json_col = '{}'` returns zero
+rows on MySQL - the JSON-typed column is not implicitly compared against the bare SQL string `'{}'` (you'd need
+`CAST(json_col AS CHAR) = '{}'` or `json_col = CAST('{}' AS JSON)`). On **SQL Server the payload columns are
+`VARBINARY(MAX)`** (see "Payload columns are binary on SQL Server" below), so the literal must be the **byte** form
+`0x7B7D`; a varchar literal happens to be accepted there through an implicit conversion, but the same conversion is
+*rejected outright* in a `DEFAULT`, so do not lean on that asymmetry. Only SQLite (`TEXT`) and Postgres (`JSONB`,
+which casts the unknown literal) match `'{}'` directly. A single shared query string is therefore wrong on two of
+four dialects. The `interrupt_payload='{}'` first-writer-wins guard in `handleInterrupt` (`execution.go`) hit exactly
+this: on MySQL the payload write matched nothing and `flow.Interrupt` payloads came back empty. It now branches on
+`db.DriverName()` - `CAST(interrupt_payload AS CHAR)='{}'` for MySQL, `interrupt_payload=0x7B7D` for SQL Server.
+**Assignments** (`SET col=?`) and the column `DEFAULT` are unaffected by the *comparison* rule - only `=`/`<>`
+comparisons in a `WHERE`/`CASE` need the per-driver treatment. Any new query comparing a payload column to a literal
+must apply the same treatment.
+
+### Payload columns are binary on SQL Server, and every payload bind is a Go `[]byte`
+
+On the `-- DRIVER: mssql` blocks the nine JSON payload columns - `dwarf_flows.graph`/`baggage`/`final_state` and
+`dwarf_steps.state`/`changes`/`interrupt_payload`/`state_refs`/`resume_data`/`subgraph_result` - are
+**`VARBINARY(MAX) NOT NULL DEFAULT 0x7B7D`** (`0x7B7D` is `{}`), not `NVARCHAR(MAX)`. The genuinely-textual columns
+(`error`, `subgraph_error`, `cancel_reason`, `workflow_url`, `workflow_name`, `task_name`, `task_url`,
+`fairness_key`, `status`, the tokens, `trace_parent`) stay `NVARCHAR`/`NCHAR` - they are compared, searched, and read
+by humans.
+
+**Why.** go-mssqldb sends a Go `[]byte` bind as **VARBINARY**. Aimed at an `NVARCHAR` column, SQL Server performs an
+implicit VARBINARY→NVARCHAR conversion that reinterprets successive **byte pairs as UTF-16 code units** - silent
+mojibake, with **no error at write time**, surfacing much later as a JSON decode failure on the read. Measured:
+
+```
+[]byte -> NVARCHAR : "≻慮敭㨢䜢慲桰Ⱒ砢㨢紱"        (corrupt, silent)
+[]byte -> VARBINARY: "{\"name\":\"Graph\",\"x\":1}"  (correct)
+```
+
+SQLite/Postgres/MySQL accept a `[]byte` **or** a `string` for their text/JSON columns, so nothing outside SQL Server
+can catch the difference. This shipped once already: the "State object cleanup" commit changed the payload fields
+from `string` to `[]byte` and deleted the `string(...)` conversions at the bind sites, which looked like redundant
+ceremony and were in fact load-bearing encoding conversions - it corrupted every flow on SQL Server.
+
+**The invariant, and why the column type enforces it better than a convention could.** Every bind to a payload
+column is a Go `[]byte`; every bind to a text column is a Go `string`. Get it backwards and SQL Server now raises
+`Implicit conversion from data type nvarchar to varbinary(max) is not allowed` - a **hard error at the first write**,
+not silent corruption. That is the whole point of the binary column: the failure mode moves from undetectable to
+unmissable, and the database enforces what Go's type system cannot (both `string` and `[]byte` satisfy `any`).
+Bonus: `NVARCHAR` stores UTF-16, so ASCII JSON cost 2 bytes/char on the wire and on disk; `VARBINARY` **halves**
+SQL Server payload storage and transfer, which matters on a byte-throughput-bound engine.
+
+**Cost, accepted knowingly:** `SELECT state FROM dwarf_steps` in SSMS returns hex rather than readable JSON, and
+server-side `JSON_VALUE` on these columns is foreclosed (already deferred - see the `JSON_FIELD` note in
+`engine/CLAUDE.md`).
 
 ### Timestamps come from the database clock, never from Go
 

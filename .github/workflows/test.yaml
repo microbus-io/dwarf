@@ -11,21 +11,41 @@ concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 
+# `go test -timeout` bounds EACH TEST BINARY (i.e. each package), not the whole `./...` run, so the value must
+# cover the slowest single package - `engine` or `fixtures` - not their sum. The suite is dominated by waiting,
+# not computing (~40% CPU): it exercises poll intervals, lease expiry, and backoffs, so wall-clock is set by
+# timers that a faster machine does not shorten. Each test also creates and migrates its own isolated database,
+# which is the bulk of the per-test cost on the server dialects.
+#
+# Measured per package on a dev machine, then given ~3x headroom for a CI runner's smaller vCPU count:
+#
+#   dialect      engine   fixtures   timeout
+#   SQLite         48s       44s       5m
+#   MariaDB        55s       44s      10m
+#   PostgreSQL     68s       71s      10m
+#   SQL Server    224s      282s      20m
+#
+# SQL Server is the outlier (~4x SQLite) and is why the former uniform `-timeout 2m` was not survivable: the
+# engine package alone already exceeded it on a dev machine, so that job could only ever have passed on a
+# smaller suite. Raise these when a package's real runtime grows; do not lower them to catch hangs - the
+# job-level `timeout-minutes` is the hang backstop, and it fails fast without killing a healthy slow run.
 jobs:
   sqlite:
     name: SQLite
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - name: Test (SQLite in-memory)
-        run: go test ./... -count=1 -timeout 2m
+        run: go test ./... -count=1 -timeout 5m
 
   postgres:
     name: PostgreSQL
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16
@@ -46,11 +66,12 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test (PostgreSQL)
-        run: go test ./... -count=1 -timeout 2m
+        run: go test ./... -count=1 -timeout 10m
 
   mysql:
     name: MySQL
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     services:
       mysql:
         image: mysql:8
@@ -71,11 +92,12 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test (MySQL)
-        run: go test ./... -count=1 -timeout 2m
+        run: go test ./... -count=1 -timeout 10m
 
   sqlserver:
     name: SQL Server
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     services:
       mssql:
         image: mcr.microsoft.com/mssql/server:2022-latest
@@ -104,4 +126,4 @@ jobs:
             /opt/mssql-tools18/bin/sqlcmd -C -b -S 127.0.0.1,1433 -U sa -P 'Dwarf_CI_Pass_2026' \
             -Q "ALTER DATABASE model SET READ_COMMITTED_SNAPSHOT ON;"
       - name: Test (SQL Server)
-        run: go test ./... -count=1 -timeout 2m
+        run: go test ./... -count=1 -timeout 20m

@@ -401,7 +401,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// only DESCENDANTS of the rewind step, so a kept step's anchors are always kept too; a zero mapping would
 	// mean that invariant broke, and it is caught rather than silently written as a dangling ref.
 	for _, s := range keep {
-		refsJSON := "{}"
+		refsJSON := []byte("{}")
 		if len(s.refs) > 0 {
 			remapped := make(stateRefs, len(s.refs))
 			for field, anchor := range s.refs {
@@ -415,7 +415,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			if merr != nil {
 				return 0, nil, errors.Trace(merr)
 			}
-			refsJSON = string(data)
+			refsJSON = data
 		}
 		_, err = tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET predecessor_id=?, successor_id=?, lineage_id=?, time_budget_ms=?, state_refs=? WHERE step_id=?",
@@ -552,15 +552,15 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if isLeafFlow && rewind == cc.leafStepID {
 			// Leaf fork step: merged input, cleared output/park/cohort, gated `created`.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs='{}', changes='{}', error='', attempt=0, interrupt_done=0, resume_data='{}', subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-				workflow.StatusCreated, parkedNone, cc.mergedLeafState, newRewindID,
+				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				workflow.StatusCreated, parkedNone, cc.mergedLeafState, emptyJSON, emptyJSON, emptyJSON, emptyJSON, newRewindID,
 			)
 			cc.newLeafStepID = newRewindID
 		} else {
 			// Ancestor caller: re-park so completeSurgraphFlow revives it when the re-run child completes.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=0, subgraph_result='{}', subgraph_error='', successor_id=0, error='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
-				workflow.StatusRunning, parkedSubgraph, newRewindID,
+				"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, error='', not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				workflow.StatusRunning, parkedSubgraph, emptyJSON, newRewindID,
 			)
 		}
 		if err != nil {

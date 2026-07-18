@@ -21,6 +21,17 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 )
 
+// emptyJSON is the empty JSON object, as a BIND value rather than an inline SQL literal.
+//
+// Every reset of a payload column (`state`/`changes`/`state_refs`/`interrupt_payload`/`resume_data`/
+// `subgraph_result`) must bind this instead of writing `SET col='{}'`. Those columns are `VARBINARY(MAX)` on
+// SQL Server (see the migrations), and a T-SQL `'{}'` literal is a *varchar*, so an inline assignment fails
+// outright: `Implicit conversion from data type varchar to varbinary(max) is not allowed`. Binding a []byte
+// sends the matching type and needs no per-driver branch at all - MySQL `JSON`, Postgres `JSONB`, SQLite
+// `TEXT`, and SQL Server `VARBINARY` all accept it. (A *comparison* against a payload column is the one place
+// that still needs a per-driver form - see the `interrupt_payload` empty-guard in execution.go.)
+var emptyJSON = []byte("{}")
+
 // graphCacheKey scopes the per-flow graph cache by shard, since flow_id is only unique within a shard.
 type graphCacheKey struct {
 	shard  int
