@@ -53,11 +53,13 @@ type stepResult struct {
 	EngineCounters map[string]int64 `json:"engineCounters"` // dwarf_* deltas over the window
 }
 
-// runStep drives the engine closed-loop at concurrency K: K submitters each Run one flow and immediately
-// submit the next. The warmup segment is discarded; only flows completing inside the measurement window
-// count. Returns the measured result.
-func runStep(ctx context.Context, eng *engine.Engine, host *benchHost, reader *sdkmetric.ManualReader,
-	pick func() *workload, k int, warmup, window time.Duration) stepResult {
+// runStep drives the fleet closed-loop at concurrency K: K submitters each Run one flow and immediately
+// submit the next, round-robining across the replicas (a client behind a load balancer). Steps are then
+// claimed cluster-wide by whichever replica wins the CAS, so execution distributes regardless of which
+// replica a flow was submitted to. The warmup segment is discarded; only flows completing inside the
+// measurement window count. Returns the measured result.
+func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader,
+	bytesWritten *atomic.Int64, pick func() *workload, k int, warmup, window time.Duration) stepResult {
 
 	var (
 		measuring  atomic.Bool
@@ -69,7 +71,8 @@ func runStep(ctx context.Context, eng *engine.Engine, host *benchHost, reader *s
 		submitters sync.WaitGroup
 	)
 
-	for range k {
+	for i := range k {
+		eng := engines[i%len(engines)]
 		submitters.Go(func() {
 			for !stop.Load() {
 				w := pick()
@@ -92,15 +95,15 @@ func runStep(ctx context.Context, eng *engine.Engine, host *benchHost, reader *s
 	}
 
 	time.Sleep(warmup)
-	before := collectCounters(reader)
-	bytesBefore := host.bytesWritten.Load()
+	before := collectAllCounters(readers)
+	bytesBefore := bytesWritten.Load()
 	windowStart := time.Now()
 	measuring.Store(true)
 	time.Sleep(window)
 	measuring.Store(false)
 	elapsed := time.Since(windowStart)
-	after := collectCounters(reader)
-	bytesAfter := host.bytesWritten.Load()
+	after := collectAllCounters(readers)
+	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
 	submitters.Wait()
 

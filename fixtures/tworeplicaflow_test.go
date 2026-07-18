@@ -64,17 +64,18 @@ func TestTwoReplicaflow(t *testing.T) {
 		return p
 	}
 
-	dsn := "file:tworeplica%d?mode=memory&cache=shared"
 	proxy1 := buildProxy()
 	proxy2 := buildProxy()
 
+	// Both replicas share one isolated database via a common SetInTest key (t.Name()), so the suite runs
+	// this contention on whatever dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default).
 	eng1 := engine.NewEngine()
 	eng1.SetHost(proxy1)
-	eng1.SetShard(engine.ShardSpec{Index: 1, DSN: dsn})
+	testarossa.NoError(t, eng1.SetInTest(t.Name()))
 	testarossa.NoError(t, eng1.SetWorkers(4))
 	eng2 := engine.NewEngine()
 	eng2.SetHost(proxy2)
-	eng2.SetShard(engine.ShardSpec{Index: 1, DSN: dsn})
+	testarossa.NoError(t, eng2.SetInTest(t.Name()))
 	testarossa.NoError(t, eng2.SetWorkers(4))
 	proxy1.AddPeer(eng2)
 	proxy2.AddPeer(eng1)
@@ -127,7 +128,6 @@ func TestTwoReplicaflow(t *testing.T) {
 		// step - forcing the cross-replica path), `worker` executes it. Awaiting on `awaiter` can only
 		// return via `worker`'s peer statusChange signal; the backstop poll is 5s, so a sub-2s return proves
 		// the signal (not the poll) woke the waiter. (Mirrors subgrapherrorwaitflow_test.go's timing pin.)
-		wdsn := "file:tworeplicawake%d?mode=memory&cache=shared"
 		pa := engine.NewTestProxy() // pure awaiter
 		pb := engine.NewTestProxy() // executor
 		wg := workflow.NewGraph("Wake")
@@ -146,13 +146,15 @@ func TestTwoReplicaflow(t *testing.T) {
 			return nil
 		})
 
+		// This pair shares its own isolated database, distinct from the outer pair's, via the subtest's
+		// t.Name() key - so it too runs on the SEQUEL_TESTING_DSN dialect, not SQLite only.
 		awaiter := engine.NewEngine()
 		awaiter.SetHost(pa)
-		awaiter.SetShard(engine.ShardSpec{Index: 1, DSN: wdsn})
+		assert.NoError(awaiter.SetInTest(t.Name()))
 		assert.NoError(awaiter.SetWorkers(0))
 		worker := engine.NewEngine()
 		worker.SetHost(pb)
-		worker.SetShard(engine.ShardSpec{Index: 1, DSN: wdsn})
+		assert.NoError(worker.SetInTest(t.Name()))
 		assert.NoError(worker.SetWorkers(2))
 		pa.AddPeer(worker)
 		pb.AddPeer(awaiter)

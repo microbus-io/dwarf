@@ -108,6 +108,19 @@ func registerWorkloads(h *benchHost, payloadBytes int) map[string]*workload {
 	llm.AddTransition("Call", workflow.END)
 	h.graphs["bench/llm"] = llm
 
+	// interrupt: an entry gate that interrupts once (the soak's load generator resumes it), then
+	// proceeds to a no-op. Registered here (not lazily) so the shared registry is never mutated after
+	// the engines start. Not a sweep workload - the soak references "bench/interrupt" directly.
+	h.tasks["bench/gate"] = func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(nil, nil)
+		return err
+	}
+	interrupt := workflow.NewGraph("Interrupt")
+	interrupt.SetEndpoint("Gate", "bench/gate")
+	interrupt.SetEndpoint("Work", "bench/nop")
+	interrupt.AddTransitionChain("Gate", "Work", workflow.END)
+	h.graphs["bench/interrupt"] = interrupt
+
 	return map[string]*workload{
 		"llm": {
 			graphURL:     "bench/llm",

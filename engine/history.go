@@ -115,7 +115,7 @@ func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, flowID
 // root_flow_id membership index), grouped by owning flow_id and ordered within each flow.
 func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int, flowID int) (map[int][]workflow.FlowStep, error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked FROM dwarf_steps"+
+		"SELECT flow_id, step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked, engine_id FROM dwarf_steps"+
 			" WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)) ORDER BY flow_id, step_depth, step_id",
 		flowID,
 	)
@@ -128,7 +128,7 @@ func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int,
 		var step workflow.FlowStep
 		var stepFlowID, stepID, parked int
 		var stepToken, errMsg string
-		err := rows.Scan(&stepFlowID, &stepID, &stepToken, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &step.PredecessorID, &step.SuccessorID, &parked)
+		err := rows.Scan(&stepFlowID, &stepID, &stepToken, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &step.PredecessorID, &step.SuccessorID, &parked, &step.EngineID)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}

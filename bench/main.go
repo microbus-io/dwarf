@@ -40,6 +40,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
@@ -57,7 +58,8 @@ type artifact struct {
 	Environment map[string]any `json:"environment"`
 	RTT         rttStats       `json:"rtt"`
 	Results     []stepResult   `json:"results"`
-	Valid       bool           `json:"valid"` // false when recovery/unwedge counters fired
+	Soak        *soakReport    `json:"soak,omitzero"` // set in -soak mode instead of Results
+	Valid       bool           `json:"valid"`         // false when recovery/unwedge counters fired
 	Invalidity  string         `json:"invalidity,omitzero"`
 }
 
@@ -88,6 +90,18 @@ func run() error {
 		warmup       = flag.Duration("warmup", 15*time.Second, "warmup before each measurement window (discarded)")
 		label        = flag.String("label", "", "free-form run label recorded in the artifact")
 		out          = flag.String("out", "", "artifact path (default bench/results/run-<timestamp>.json)")
+		soak         = flag.Duration("soak", 0, "soak mode: run a mixed create/interrupt/continue workload under create-purge churn for this long, sampling drift, instead of the concurrency sweep (uses the first -concurrency value as the submitter count)")
+		soakSample   = flag.Duration("soak-sample", 30*time.Second, "soak drift sampling interval")
+		replicas     = flag.Int("replicas", 1, "number of in-process engine replicas sharing the database(s), peered for signal relay (1 = single engine)")
+		// Signal-fault injection on the peer transport (see benchHost). Jitter/drop simulate an imperfect
+		// network; -drop-ops kills specific signal kinds outright (e.g. 'enqueue' for the poll-fallback
+		// A/B); the mute pair simulates one replica crashing (its outbound signals stop) and recovering.
+		signalJitter   = flag.Duration("signal-jitter", 0, "delay each peer signal by a uniform random [0,d) - simulated network latency")
+		signalDrop     = flag.Float64("signal-drop", 0, "probability [0,1) of dropping each per-peer signal delivery - simulated loss")
+		dropOps        = flag.String("drop-ops", "", "comma-separated signal ops to drop entirely (e.g. 'enqueue')")
+		muteAfter      = flag.Duration("mute-replica-after", 0, "mute the LAST replica's outbound signals this long after startup (simulated peer crash; 0 = never)")
+		muteDuration   = flag.Duration("mute-duration", 0, "unmute again after this long muted (0 = stay muted)")
+		replicaWorkers = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
 	flag.Parse()
@@ -107,48 +121,129 @@ func run() error {
 		return err
 	}
 
-	// Wire the engine through the public API only - the same path a production host takes.
-	host := &benchHost{
-		graphs:    map[string]*workflow.Graph{},
-		tasks:     map[string]func(context.Context, *workflow.Flow) error{},
-		taskDelay: *taskDelay,
+	if *replicas < 1 {
+		return fmt.Errorf("-replicas must be >= 1")
 	}
-	workloads := registerWorkloads(host, *payload)
+	// Per-replica worker overrides: "-replica-workers 0,4" pins replica 1 to 0 workers (await-only) and
+	// replica 2 to 4. Entries beyond the list fall back to -workers. -1 marks "use -workers".
+	perReplicaWorkers := make([]int, *replicas)
+	for i := range perReplicaWorkers {
+		perReplicaWorkers[i] = -1
+	}
+	if *replicaWorkers != "" {
+		parts := strings.Split(*replicaWorkers, ",")
+		if len(parts) > *replicas {
+			return fmt.Errorf("-replica-workers names %d replicas but -replicas is %d", len(parts), *replicas)
+		}
+		for i, part := range parts {
+			n, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil || n < 0 {
+				return fmt.Errorf("invalid -replica-workers entry %q", part)
+			}
+			perReplicaWorkers[i] = n
+		}
+	}
+	dropOpsSet := map[string]bool{}
+	for op := range strings.SplitSeq(*dropOps, ",") {
+		if op = strings.TrimSpace(op); op != "" {
+			dropOpsSet[op] = true
+		}
+	}
+
+	// One graph/task registry and one byte counter, shared by every replica's host (registered through the
+	// public API only - the path a production host takes).
+	sharedBytes := &atomic.Int64{}
+	regHost := &benchHost{
+		graphs:       map[string]*workflow.Graph{},
+		tasks:        map[string]func(context.Context, *workflow.Flow) error{},
+		taskDelay:    *taskDelay,
+		bytesWritten: sharedBytes,
+	}
+	workloads := registerWorkloads(regHost, *payload)
 	pick, err := chooseWorkload(workloads, *workloadName)
 	if err != nil {
 		return err
 	}
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
-	eng := engine.NewEngine()
-	for _, sh := range dsns {
-		err = eng.SetShard(engine.ShardSpec{Index: sh.index, DSN: sh.dsn, VirtualCPUs: *vcpus})
+	// Build the fleet of in-process engine replicas. Each shares the registry above and the same
+	// database(s), so they contend for every pending step at the claim CAS - exercising peer discovery,
+	// the connection pool-split (open/R per replica), and the cross-replica doorbell/wake. Each has its own
+	// metrics reader (summed across the fleet) and its own view of the fleet for signal relay. NOTE: one
+	// process, so goroutine/heap readings are a fleet total and there is no per-replica RSS attribution or
+	// kill-9 isolation - those need separate processes (a follow-up).
+	ctx := context.Background()
+	engines := make([]*engine.Engine, *replicas)
+	hosts := make([]*benchHost, *replicas)
+	readers := make([]*sdkmetric.ManualReader, *replicas)
+	for i := range *replicas {
+		reader := sdkmetric.NewManualReader()
+		readers[i] = reader
+		host := &benchHost{
+			graphs:       regHost.graphs,
+			tasks:        regHost.tasks,
+			taskDelay:    *taskDelay,
+			bytesWritten: sharedBytes,
+			signalJitter: *signalJitter,
+			signalDrop:   *signalDrop,
+			dropOps:      dropOpsSet,
+		}
+		hosts[i] = host
+		eng := engine.NewEngine()
+		for _, sh := range dsns {
+			err = eng.SetShard(engine.ShardSpec{Index: sh.index, DSN: sh.dsn, VirtualCPUs: *vcpus})
+			if err != nil {
+				return err
+			}
+		}
+		setters := []error{
+			eng.SetHost(host),
+			eng.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))),
+		}
+		replicaWorkerCount := perReplicaWorkers[i]
+		if replicaWorkerCount < 0 {
+			replicaWorkerCount = *workers
+		}
+		if replicaWorkerCount > 0 || perReplicaWorkers[i] == 0 {
+			setters = append(setters, eng.SetWorkers(replicaWorkerCount))
+		}
+		if *maxOpenConns > 0 {
+			setters = append(setters, eng.SetMaxOpenConns(*maxOpenConns))
+		}
+		for _, setter := range setters {
+			if setter != nil {
+				return setter
+			}
+		}
+		engines[i] = eng
+	}
+	// Wire every host to the whole fleet (self-echo discarded by Origin), then start all replicas.
+	for _, host := range hosts {
+		host.peers = engines
+	}
+	for _, eng := range engines {
+		err = eng.Startup(ctx)
 		if err != nil {
 			return err
 		}
+		defer eng.Shutdown(ctx)
 	}
-	setters := []error{
-		eng.SetHost(host),
-		eng.SetMeterProvider(mp),
+
+	// Simulated peer crash: mute the last replica's outbound signals at T (its pings stop; the rest of
+	// the fleet evicts it after ~3x pingInterval and regrows pools), optionally unmuting later (it
+	// "rejoins" on its next ping and pools re-split). The engine keeps running - only its voice goes.
+	if *muteAfter > 0 && *replicas > 1 {
+		mutee := hosts[len(hosts)-1]
+		time.AfterFunc(*muteAfter, func() {
+			fmt.Printf("--- muting replica %d (simulated crash)\n", len(hosts))
+			mutee.muted.Store(true)
+			if *muteDuration > 0 {
+				time.AfterFunc(*muteDuration, func() {
+					fmt.Printf("--- unmuting replica %d (rejoin)\n", len(hosts))
+					mutee.muted.Store(false)
+				})
+			}
+		})
 	}
-	if *workers > 0 {
-		setters = append(setters, eng.SetWorkers(*workers))
-	}
-	if *maxOpenConns > 0 {
-		setters = append(setters, eng.SetMaxOpenConns(*maxOpenConns))
-	}
-	for _, setter := range setters {
-		if setter != nil {
-			return setter
-		}
-	}
-	ctx := context.Background()
-	err = eng.Startup(ctx)
-	if err != nil {
-		return err
-	}
-	defer eng.Shutdown(ctx)
 
 	rtt, err := startRTTSampler(dsns[0].dsn)
 	if err != nil {
@@ -156,34 +251,68 @@ func run() error {
 	}
 	defer rtt.close()
 
+	// Database-side drift sampler (Postgres only; nil elsewhere): server connection count + on-disk
+	// table/index sizes, the two signals the process cannot observe from inside.
+	dbs, err := startDBStatsSampler(dsns[0].dsn)
+	if err != nil {
+		return err
+	}
+	defer dbs.close()
+
 	art := artifact{
 		Label:     *label,
 		StartedAt: time.Now().UTC(),
 		Config: map[string]any{
-			"workload":     *workloadName,
-			"payloadBytes": *payload,
-			"taskDelayMs":  taskDelay.Milliseconds(),
-			"workers":      *workers,
-			"virtualCPUs":  *vcpus,
-			"maxOpenConns": *maxOpenConns,
-			"shards":       dsns.redacted(),
-			"windowSec":    window.Seconds(),
-			"warmupSec":    warmup.Seconds(),
+			"workload":        *workloadName,
+			"payloadBytes":    *payload,
+			"taskDelayMs":     taskDelay.Milliseconds(),
+			"workers":         *workers,
+			"virtualCPUs":     *vcpus,
+			"maxOpenConns":    *maxOpenConns,
+			"replicas":        *replicas,
+			"replicaWorkers":  *replicaWorkers,
+			"signalJitterMs":  signalJitter.Milliseconds(),
+			"signalDrop":      *signalDrop,
+			"dropOps":         *dropOps,
+			"muteAfterSec":    muteAfter.Seconds(),
+			"muteDurationSec": muteDuration.Seconds(),
+			"shards":          dsns.redacted(),
+			"windowSec":       window.Seconds(),
+			"warmupSec":       warmup.Seconds(),
 		},
 		Environment: environment(),
 		Valid:       true,
 	}
 
-	fmt.Printf("%-6s %10s %10s %10s %8s %8s %8s %8s %8s\n", "conc", "flows/s", "steps/s", "MB/s", "p50ms", "p95ms", "p99ms", "gorout", "errors")
-	for _, k := range ks {
-		res := runStep(ctx, eng, host, reader, pick, k, *warmup, *window)
-		art.Results = append(art.Results, res)
-		fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %8d %8d\n",
-			k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms, res.Goroutines, res.Errors)
-		if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
+	if *soak > 0 {
+		art.Config["soakSec"] = soak.Seconds()
+		art.Config["soakSampleSec"] = soakSample.Seconds()
+		fmt.Printf("soak: %s at concurrency %d across %d replica(s), sampling every %s\n", *soak, ks[0], *replicas, *soakSample)
+		report := runSoak(ctx, engines, readers, dbs, pick, ks[0], *soak, *soakSample)
+		art.Soak = report
+		final := report.Samples[len(report.Samples)-1]
+		totalErrs := int64(0)
+		for _, n := range report.OpErrors {
+			totalErrs += n
+		}
+		fmt.Printf("soak ops: %v  errors: %v  purged: %d\n", report.Ops, report.OpErrors, report.Purged)
+		if final.Unwedged != 0 || final.Orphaned != 0 || final.WriteFailed != 0 || totalErrs != 0 {
 			art.Valid = false
-			art.Invalidity = fmt.Sprintf("at concurrency %d: errors=%d recovered=%d unwedged=%d",
-				k, res.Errors, res.EngineCounters["dwarf_steps_recovered"], res.EngineCounters["dwarf_steps_unwedged"])
+			art.Invalidity = fmt.Sprintf("soak: opErrors=%d unwedged=%d orphaned=%d writeFailed=%d",
+				totalErrs, final.Unwedged, final.Orphaned, final.WriteFailed)
+		}
+	} else {
+		fmt.Printf("%-6s %10s %10s %10s %8s %8s %8s %8s %8s\n", "conc", "flows/s", "steps/s", "MB/s", "p50ms", "p95ms", "p99ms", "gorout", "errors")
+		for _, k := range ks {
+			res := runStep(ctx, engines, readers, sharedBytes, pick, k, *warmup, *window)
+			art.Results = append(art.Results, res)
+			fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %8d %8d\n",
+				k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms, res.Goroutines, res.Errors)
+			if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
+				art.Valid = false
+				art.Invalidity = fmt.Sprintf("at concurrency %d: errors=%d recovered=%d unwedged=%d",
+					k, res.Errors, res.EngineCounters["dwarf_steps_recovered"], res.EngineCounters["dwarf_steps_unwedged"])
+			}
 		}
 	}
 	art.EndedAt = time.Now().UTC()
@@ -277,12 +406,13 @@ func redactDSN(dsn string) string {
 	return dsn
 }
 
-// parseConcurrency parses the comma-separated -concurrency list.
+// parseConcurrency parses the comma-separated -concurrency list. 0 is legal and meaningful only in soak
+// mode (drain/observe: engines run, no submitters - the post-crash verification shape).
 func parseConcurrency(s string) ([]int, error) {
 	var ks []int
 	for part := range strings.SplitSeq(s, ",") {
 		k, err := strconv.Atoi(strings.TrimSpace(part))
-		if err != nil || k < 1 {
+		if err != nil || k < 0 {
 			return nil, fmt.Errorf("invalid -concurrency %q", part)
 		}
 		ks = append(ks, k)

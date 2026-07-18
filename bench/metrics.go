@@ -30,8 +30,13 @@ import (
 // counts: dwarf_steps_executed is the primary steps/s source, and dwarf_steps_recovered /
 // dwarf_steps_unwedged must stay zero for a run to be valid.
 func collectCounters(reader *sdkmetric.ManualReader) map[string]int64 {
+	// Collect invokes the engine's async gauge callback, which queries the shard databases with THIS
+	// ctx - unbounded, a hung database (e.g. a paused container in a fault run) wedges the sampler
+	// forever. A production OTEL PeriodicReader passes a timeout ctx; do the same.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	var rm metricdata.ResourceMetrics
-	err := reader.Collect(context.Background(), &rm)
+	err := reader.Collect(ctx, &rm)
 	if err != nil {
 		return nil
 	}
@@ -47,6 +52,18 @@ func collectCounters(reader *sdkmetric.ManualReader) map[string]int64 {
 				total += dp.Value
 			}
 			out[m.Name] = total
+		}
+	}
+	return out
+}
+
+// collectAllCounters sums collectCounters across every replica's reader, so a fleet total (e.g. total
+// dwarf_steps_executed, or total unwedged) reads as one map regardless of replica count.
+func collectAllCounters(readers []*sdkmetric.ManualReader) map[string]int64 {
+	out := map[string]int64{}
+	for _, r := range readers {
+		for name, v := range collectCounters(r) {
+			out[name] += v
 		}
 	}
 	return out

@@ -25,6 +25,11 @@ type FlowStep struct {
 	StepDepth int    `json:"stepDepth,omitzero"`
 	TaskName  string `json:"taskName,omitzero"`
 	Attempt   int    `json:"attempt,omitzero"`
+	// EngineID identifies the engine replica that handled this step: the replica that executed
+	// its most recent attempt once dispatched, or created it before it ran. It is a random
+	// per-process value that changes when a replica restarts, so it is a correlation and
+	// work-distribution signal (which replica ran this step), not a stable address. Zero when unset.
+	EngineID int64 `json:"engineID,omitzero"`
 	// PredecessorID and SuccessorID are this step's neighbors in the execution DAG.
 	// 0 means no such edge (entry / exit step).
 	PredecessorID int `json:"predecessorID,omitzero"`
