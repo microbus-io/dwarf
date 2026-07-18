@@ -118,12 +118,12 @@ these constants are in the [cloud benchmarks](benchmark-cloud.md).
 > **Running more than one replica?** The derived budget is a property of the shard's *database*, not
 > of one replica: R replicas each holding the full ~6 × `VirtualCPUs` pool would overshoot the knee R
 > times over, into the over-connection zone the cap exists to prevent. The engine handles this
-> automatically: replicas discover each other over the peer-signal channel (a hello on startup, a
-> periodic ping, a goodbye on shutdown) and each takes its 1/R share of every derived pool, resizing
-> live as the fleet scales in or out — nothing to declare. This makes wiring `SignalPeers` (below)
-> load-bearing for pool sizing, not just for wake latency: a multi-replica deployment that leaves it
-> a no-op has each replica believing it is alone, over-connecting the shard.
-> (`SetMaxOpenConns`, when used, is an exact per-replica number and is never divided.)
+> automatically: each replica records a periodic heartbeat in the shard databases it already shares
+> with the others, reads the live replica count R back from them, and takes its 1/R share of every
+> derived pool — resizing live as the fleet scales in or out, with nothing to declare. Because the
+> count lives in the shared databases, this works **even if you leave `SignalPeers` (below) a no-op**;
+> wiring `SignalPeers` only makes the count converge faster (sub-second, rather than within one
+> heartbeat). (`SetMaxOpenConns`, when used, is an exact per-replica number and is never divided.)
 
 ## Workers
 

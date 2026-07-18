@@ -213,7 +213,7 @@ Inputs: `V` = the shard database's vCPU count, `L` = RTT to the shard, `exec` = 
 monitoring and other clients.
 
 ```
-M  = min(Y − headroom, ~6·V) ÷ R    # connections per replica (R observed via peer signals)
+M  = min(Y − headroom, ~6·V) ÷ R    # connections per replica (R = live replica count, read from the shared databases)
 db = k·L + s ≈ 12·L + 4.4ms         # per-step DB time
 T  = db + exec                      # per-step worker time
 N  = M × T/db                       # workers
@@ -225,7 +225,7 @@ db ≈ 12×0.5 + 4.4 ≈ 10.4 ms; T ≈ 60 ms; N = M × T/db ≈ 48 × 5.8 ≈ 2
 ≈ min(4600, 4600, C_db ≈ 4600) steps/s — the database binds, as designed.
 
 **The engine applies this automatically**: provide `ShardSpec.VirtualCPUs` and it derives each
-shard's connection pool (divided by the replica count it observes live over the peer-signal channel —
+shard's connection pool (divided by the replica count it reads live from the shared databases —
 nothing to declare), its capacity-proportional share of new-flow placement, and — in aggregate — the
 default worker count (a generous 8× the summed
 connection budget, since `T/db` is a runtime quantity and idle workers are cheap while an
