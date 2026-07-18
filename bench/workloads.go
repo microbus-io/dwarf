@@ -32,7 +32,6 @@ type workload struct {
 }
 
 const (
-	fanOutWidth = 16
 	stateSteps  = 5
 	linearSteps = 10
 )
@@ -43,7 +42,13 @@ const (
 //   - fanout: forEach over 16 elements converging on a fan-in - cohort accounting + flow-row contention.
 //   - state:  a 5-step chain where every task rewrites a payload of -payload bytes - MB/s throughput.
 //   - mixed:  chosen per flow by the load generator (70% linear / 20% fanout / 10% state).
-func registerWorkloads(h *benchHost, payloadBytes int) map[string]*workload {
+//
+// fanOutWidth is the forEach branch count, and it is the ONLY knob that decouples the pending-step
+// backlog from the submitter concurrency: a linear flow holds exactly one pending-or-running step at a
+// time, so a closed-loop generator's backlog can never exceed its concurrency, whereas a fan-out puts
+// `width` steps pending the instant its spawn completes. That is what lets a closed-loop harness reach
+// the deep-backlog regime the refiller's cache bound and pacing were designed for.
+func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth int) map[string]*workload {
 	nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
 	h.tasks["bench/nop"] = nop
 

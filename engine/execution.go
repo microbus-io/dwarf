@@ -824,15 +824,52 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			// `updated_at` now moves only on a genuine status transition, so the running band of
 			// idx_dwarf_flows_status is not churned once per step. `touch` always changes value, so
 			// RowsAffected still reflects the WHERE match (the terminal guard below) on every driver.
-			flowRes, flowErr := tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
-				flowID,
-			)
-			if flowErr != nil {
-				return errors.Trace(flowErr)
+			//
+			// Reports whether the flow is still non-terminal; a false return means the caller must bail (nil).
+			flowRowLocked := false
+			lockFlowRow := func() (bool, error) {
+				e.countFlowRowWrite(flowID)
+				flowRes, flowErr := tx.ExecContext(ctx,
+					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+					flowID,
+				)
+				if flowErr != nil {
+					return false, errors.Trace(flowErr)
+				}
+				n, _ := flowRes.RowsAffected()
+				flowRowLocked = n > 0
+				return flowRowLocked, nil
 			}
-			if n, _ := flowRes.RowsAffected(); n == 0 {
-				return nil
+
+			// A NON-FINAL cohort arrival is the one disposition that neither extends nor terminalizes the flow:
+			// it inserts no successor, advances no step_id, and its entire durable effect is the cohort_arrivals
+			// bump on the SPAWN step below. Grabbing the flow row for it serializes EVERY sibling of a cohort on
+			// one row - measured at fan-out width 64: 20 of 43 active backends queued on this exact statement,
+			// each holding a pool connection - to perform two writes that carry no information: the grab itself,
+			// and a step_id rewrite of 0 over 0 (step_id is already 0 throughout a fan-out). So the grab is
+			// DEFERRED to the arrival that actually resolves the cohort, which is the only one that inserts a
+			// fan-in step or fails the flow. This mirrors failStep/propagateCohortFailure - the failure-side twin
+			// of this path - which already bumps the same counters steps-first with no flow-row lock at all.
+			//
+			// Three properties are preserved, not traded:
+			//   - Write-first still holds: the bump IS a write, so it is the transaction's first statement and
+			//     the SQLite SHARED->EXCLUSIVE upgrade deadlock stays closed (the same argument that makes
+			//     handleInterrupt legitimately steps-first).
+			//   - The terminal-status guard is MOVED, never weakened: it still runs, unchanged, in front of
+			//     every write that can extend or terminalize the flow.
+			//   - Exactly-one-resolver is unaffected: it comes from the spawn row's write lock, held across the
+			//     bump and the re-read below within one transaction - never from the flow row.
+			// isPushTransition is excluded because a fan-out SOURCE writes cohort_size to its own step row and
+			// may carry successors, so it is not a pure arrival.
+			pureArrival := fanInArrivals > 0 && len(normalNexts) == 0 && !isPushTransition
+			if !pureArrival {
+				ok, err := lockFlowRow()
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return nil
+				}
 			}
 
 			for i, next := range normalNexts {
@@ -911,6 +948,19 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 					return errors.Trace(err)
 				}
 				fullyResolved := size > 0 && arrivals >= size
+				// The cohort resolves here, so this arrival is about to extend (fan-in step) or terminalize
+				// (cohort failure) the flow - exactly the writes the terminal guard protects. A deferred grab is
+				// taken now, before either, so the guard sits in front of them just as it did when every arrival
+				// grabbed the row. A zero-row match means Cancel/failStep won the race: bail as a clean no-op.
+				if fullyResolved && !flowRowLocked {
+					ok, lerr := lockFlowRow()
+					if lerr != nil {
+						return lerr
+					}
+					if !ok {
+						return nil
+					}
+				}
 				if fullyResolved && failures == 0 {
 					fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 					if err != nil {
@@ -969,7 +1019,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			if len(newStepIDs) == 1 {
 				nextFlowStepID = newStepIDs[0]
 			}
-			if !flowFailed {
+			// Gated on holding the flow row: an unresolved pure arrival never took the grab, and its write here
+			// would have been step_id=0 over the 0 a fan-out already carries - pure WAL amplification on the
+			// flow's hottest row (two extra tuple versions per sibling; 126 per 64-wide cohort) plus the lock
+			// hold that serializes the cohort. Every path that DOES advance the flow holds the row by here.
+			if !flowFailed && flowRowLocked {
+				e.countFlowRowWrite(flowID)
 				tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", nextFlowStepID, flowID)
 			}
 			return nil

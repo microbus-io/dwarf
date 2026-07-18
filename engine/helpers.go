@@ -34,4 +34,3 @@ type cachedGraph struct {
 	graph *workflow.Graph
 	fanIn *faninmap.Map
 }
-

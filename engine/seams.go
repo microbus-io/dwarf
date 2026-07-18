@@ -93,6 +93,42 @@ func (e *Engine) deliverFailureLost(ctx context.Context, tx sequel.Executor, par
 	return e.seams.IsFault(faultDeliverFailureErr, strings.TrimSpace(taskName))
 }
 
+// --- Test-only statement counters ---
+
+// countFlowRowWrite records one dwarf_flows UPDATE issued by the transition transaction for a flow.
+//
+// It exists for a single pin, and that pin guards a performance property no correctness test can see: a
+// NON-FINAL cohort arrival must issue ZERO flow-row statements. Grabbing the flow row for every arrival
+// serializes an entire cohort on one row (measured at fan-out width 64: 20 of 43 active backends queued on
+// that one statement), so the grab is deferred to the arrival that actually resolves the cohort. Nothing about
+// the flow's OUTCOME changes if someone reintroduces a per-arrival flow-row write - the fan-in still fires and
+// every existing fixture still passes - it just costs ~20% throughput silently. Hence a counter rather than a
+// state assertion.
+//
+// Counts are per flow and cumulative across the flow's whole life, so a test reads the delta it cares about.
+// A Transact contention retry re-runs the closure and legitimately re-counts, so a test asserting an exact
+// count must be single-worker and contention-free.
+//
+// Inert in production: the enabled gate short-circuits before the map is ever allocated or the lock taken.
+func (e *Engine) countFlowRowWrite(flowID int) {
+	if !e.seams.Enabled() {
+		return
+	}
+	e.flowRowWritesLock.Lock()
+	defer e.flowRowWritesLock.Unlock()
+	if e.flowRowWrites == nil {
+		e.flowRowWrites = make(map[int]int)
+	}
+	e.flowRowWrites[flowID]++
+}
+
+// flowRowWriteCount reports how many dwarf_flows UPDATEs the transition transaction has issued for a flow.
+func (e *Engine) flowRowWriteCount(flowID int) int {
+	e.flowRowWritesLock.Lock()
+	defer e.flowRowWritesLock.Unlock()
+	return e.flowRowWrites[flowID]
+}
+
 // --- Execution checkpoints ---
 const (
 	checkpointResumeBeforeFlowWrite   = "resumeBeforeFlowWrite"   // resume(), just before its transaction's flow-status gate write

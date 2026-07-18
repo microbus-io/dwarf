@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -116,7 +117,9 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	var status string
 	var errMsg string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, error FROM dwarf_steps WHERE task_name='A'").Scan(&status, &errMsg))
-	assert.Equal(workflow.StatusFailed, status)
+	// `status` is CHAR(16), which Postgres and SQL Server blank-pad on retrieval while SQLite/MySQL do not,
+	// so a raw column read is trimmed at the boundary - the same convention the engine itself follows.
+	assert.Equal(workflow.StatusFailed, strings.TrimSpace(status))
 	assert.NotEqual("", errMsg, "the step records why it could not be persisted")
 
 	// Give lease recovery a chance to prove it has nothing to recover.

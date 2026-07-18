@@ -219,9 +219,14 @@ type Engine struct {
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
 
-	// Test-only instrumentation seams (see debug.go), delegated to a seamster.Seamster constructed enabled
+	// Test-only instrumentation seams (see seams.go), delegated to a seamster.Seamster constructed enabled
 	// under testing.Testing() in NewEngine. Every consult is a lock-free bool read in production.
 	seams *seamster.Seamster
+	// Test-only per-flow count of dwarf_flows UPDATEs issued by the transition transaction (see
+	// countFlowRowWrite in seams.go). Written only under the seams' enabled gate, so it stays nil in
+	// production and its lock is never taken there.
+	flowRowWritesLock sync.Mutex
+	flowRowWrites     map[int]int
 }
 
 // NewEngine creates a new workflow engine.

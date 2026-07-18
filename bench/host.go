@@ -36,8 +36,13 @@ type benchHost struct {
 	tasks  map[string]func(ctx context.Context, f *workflow.Flow) error
 
 	// taskDelay simulates remote-executor latency plus task run time (the "exec" term of the sizing
-	// model): every task sleeps this long before running its body.
-	taskDelay time.Duration
+	// model): every task sleeps this long before running its body. taskJitter adds a uniform random
+	// [0, jitter) on top, which DE-SYNCHRONIZES fan-out siblings: without it a cohort's branches are
+	// dispatched together, run for identical durations, and therefore all complete at the same instant,
+	// piling onto the shared cohort-arrival row at once. Spreading arrivals is how a contention
+	// hypothesis about that row is tested causally.
+	taskDelay  time.Duration
+	taskJitter time.Duration
 
 	// bytesWritten counts the state payload bytes tasks wrote, for MB-throughput accounting. A shared
 	// pointer so every replica's host accumulates into one fleet total.
@@ -72,9 +77,13 @@ func (h *benchHost) ExecuteTask(ctx context.Context, taskURL string, f *workflow
 	if task == nil {
 		return errors.New("unknown task %q", taskURL)
 	}
-	if h.taskDelay > 0 {
+	delay := h.taskDelay
+	if h.taskJitter > 0 {
+		delay += time.Duration(rand.Int64N(int64(h.taskJitter)))
+	}
+	if delay > 0 {
 		select {
-		case <-time.After(h.taskDelay):
+		case <-time.After(delay):
 		case <-ctx.Done():
 			return errors.Trace(ctx.Err())
 		}

@@ -58,8 +58,9 @@ type artifact struct {
 	Environment map[string]any `json:"environment"`
 	RTT         rttStats       `json:"rtt"`
 	Results     []stepResult   `json:"results"`
-	Soak        *soakReport    `json:"soak,omitzero"` // set in -soak mode instead of Results
-	Valid       bool           `json:"valid"`         // false when recovery/unwedge counters fired
+	Soak        *soakReport    `json:"soak,omitzero"`   // set in -soak mode instead of Results
+	Volume      *volumeReport  `json:"volume,omitzero"` // set in -volume mode instead of Results
+	Valid       bool           `json:"valid"`           // false when recovery/unwedge counters fired
 	Invalidity  string         `json:"invalidity,omitzero"`
 }
 
@@ -77,6 +78,7 @@ func run() error {
 		workloadName = flag.String("workload", "linear", "workload: linear, fanout, state, llm, mixed")
 		payload      = flag.Int("payload", 64*1024, "state-workload payload bytes written per step")
 		taskDelay    = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
+		taskJitter   = flag.Duration("task-jitter", 0, "additional uniform random [0,d) per-task sleep - de-synchronizes fan-out siblings so a cohort's branches do not all complete at once")
 		// 0 on either override means "let the engine derive it" - the self-tuned path a production host
 		// takes, and the only way to measure the derivation itself (workers from the lease margin, the
 		// pool from VirtualCPUs). A sweep pins them; a validation run must not.
@@ -102,6 +104,10 @@ func run() error {
 		muteAfter      = flag.Duration("mute-replica-after", 0, "mute the LAST replica's outbound signals this long after startup (simulated peer crash; 0 = never)")
 		muteDuration   = flag.Duration("mute-duration", 0, "unmute again after this long muted (0 = stay muted)")
 		replicaWorkers = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
+		volume         = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
+		volumeCheckpt  = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
+		fairnessKeys   = flag.Int("fairness-keys", 1, "spread flows across this many distinct fairness keys (1 = all on the single default key, the degenerate case for the refiller's per-key scan bound)")
+		fanOutWidth    = flag.Int("fanout-width", 16, "forEach branch count for the fanout workload - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
 	flag.Parse()
@@ -157,9 +163,10 @@ func run() error {
 		graphs:       map[string]*workflow.Graph{},
 		tasks:        map[string]func(context.Context, *workflow.Flow) error{},
 		taskDelay:    *taskDelay,
+		taskJitter:   *taskJitter,
 		bytesWritten: sharedBytes,
 	}
-	workloads := registerWorkloads(regHost, *payload)
+	workloads := registerWorkloads(regHost, *payload, *fanOutWidth)
 	pick, err := chooseWorkload(workloads, *workloadName)
 	if err != nil {
 		return err
@@ -182,6 +189,7 @@ func run() error {
 			graphs:       regHost.graphs,
 			tasks:        regHost.tasks,
 			taskDelay:    *taskDelay,
+			taskJitter:   *taskJitter,
 			bytesWritten: sharedBytes,
 			signalJitter: *signalJitter,
 			signalDrop:   *signalDrop,
@@ -284,7 +292,22 @@ func run() error {
 		Valid:       true,
 	}
 
-	if *soak > 0 {
+	if *volume > 0 {
+		every := *volumeCheckpt
+		if every <= 0 {
+			every = max(1, *volume/5)
+		}
+		art.Config["volumeTargetSteps"] = *volume
+		art.Config["volumeCheckpointRows"] = every
+		fmt.Printf("volume: filling to %d step rows at concurrency %d across %d replica(s), probing every %d rows\n",
+			*volume, ks[0], *replicas, every)
+		report := runVolume(ctx, engines, dbs, pick, ks[0], *volume, every)
+		art.Volume = report
+		if report.Errors != 0 {
+			art.Valid = false
+			art.Invalidity = fmt.Sprintf("volume: %d submit errors", report.Errors)
+		}
+	} else if *soak > 0 {
 		art.Config["soakSec"] = soak.Seconds()
 		art.Config["soakSampleSec"] = soakSample.Seconds()
 		fmt.Printf("soak: %s at concurrency %d across %d replica(s), sampling every %s\n", *soak, ks[0], *replicas, *soakSample)
@@ -302,12 +325,15 @@ func run() error {
 				totalErrs, final.Unwedged, final.Orphaned, final.WriteFailed)
 		}
 	} else {
-		fmt.Printf("%-6s %10s %10s %10s %8s %8s %8s %8s %8s\n", "conc", "flows/s", "steps/s", "MB/s", "p50ms", "p95ms", "p99ms", "gorout", "errors")
+		fmt.Printf("%-6s %10s %10s %10s %8s %8s %8s %7s %7s %9s %8s %8s %7s\n",
+			"conc", "flows/s", "steps/s", "MB/s", "p50ms", "p95ms", "p99ms", "cpuCore", "cpu%", "steps/core", "netRxMB", "netTxMB", "errors")
 		for _, k := range ks {
-			res := runStep(ctx, engines, readers, sharedBytes, pick, k, *warmup, *window)
+			res := runStep(ctx, engines, readers, sharedBytes, pick, k, *fairnessKeys, *warmup, *window)
 			art.Results = append(art.Results, res)
-			fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %8d %8d\n",
-				k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms, res.Goroutines, res.Errors)
+			fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %7.2f %7.1f %9.0f %8.1f %8.1f %7d\n",
+				k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms,
+				res.Host.CPUCores, res.Host.CPUPct, res.Host.StepsPerCore,
+				res.Host.NetRxMBps, res.Host.NetTxMBps, res.Errors)
 			if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
 				art.Valid = false
 				art.Invalidity = fmt.Sprintf("at concurrency %d: errors=%d recovered=%d unwedged=%d",
