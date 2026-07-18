@@ -1790,9 +1790,10 @@ fan-out). `Fork` resolves scheduling once for the whole cloned tree and binds it
 ### Step Parking (`parked` column)
 
 `dwarf_steps.parked SMALLINT NOT NULL DEFAULT 0` takes a step out of the selection band without changing its
-`status`. The selection index `(status, parked, priority, fairness_key)` and saturation index
+`status`. The selection index `(status, parked, priority, fairness_key, created_at, step_id)` and saturation index
 `(status, parked, task_url)` lead with the partitioning columns, so parked rows are physically excluded from every
-hot-path scan - no in-memory filter at refill time. The `parked` value labels *why* the step is held:
+hot-path scan - no in-memory filter at refill time. (The selection index's trailing `(created_at, step_id)` serves
+the refiller's per-key oldest-first ordering; see `internal/migrations/CLAUDE.md`.) The `parked` value labels *why* the step is held:
 
 - `parked=0` (`parkedNone`, default) - active. Selection sees it; `pollPendingSteps` recovers it if its lease
   expires; saturation counts it as one in-flight slot. (Also the precondition the claim CAS requires.)
