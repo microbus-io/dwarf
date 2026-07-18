@@ -22,6 +22,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -221,56 +222,62 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 	e.requestRefill()
 }
 
-// candidateRow is a candidate step considered for admission.
-type candidateRow struct {
-	stepID int
-	shard  int
-	task   string
+// bandKeyAgg is one fairness key's aggregate at the scanned band: its count of due steps, and the age
+// and fairness weight of its OLDEST due step. The picker keys a tenant's weight off its oldest step (so
+// a tenant cannot self-promote by queueing newer high-weight tasks), and the age both fixes that weight
+// during cross-shard merge (the globally-oldest step wins) and is discarded thereafter - the actual
+// oldest-first ordering happens on the fetched steps in fetchBandSteps.
+type bandKeyAgg struct {
 	key    string
 	weight float64
 	ageMs  float64
+	count  int
 }
 
-// scanPriorityBand returns the due rows of the globally-minimum priority band, at most perKeyLimit per
-// fairness key (oldest first). perKeyLimit is the cache capacity: the picker takes at most that many
-// steps in one refill, so it can never want more than that from any single key - the bound is free of
-// selection consequences and keeps the scan's cost off the size of the backlog.
-func (e *Engine) scanPriorityBand(ctx context.Context, perKeyLimit int) (int, []candidateRow, error) {
-	// faultRefillScanErr simulates the priority-band scan failing so the test proves runRefill logs and
-	// shortens the next poll (re-scan soon) instead of refilling empty and idling every worker.
+// scanBandKeys returns the globally-minimum due priority band and, for every fairness key at that band,
+// a single aggregate row (count + oldest step's age/weight). This is phase 1 of a three-phase refill,
+// and its point is that it returns O(distinct keys) rows, NOT O(backlog): the earlier one-query scan
+// cut each key at the cache capacity and streamed up to capacity*keys rows across the wire - with high
+// fairness-key cardinality (thousands of tenants) that materialized hundreds of thousands of rows every
+// refillPace to pick only `capacity` of them. Here the per-key COUNT/ROW_NUMBER window collapses each
+// key to one row server-side, so the wire and heap cost scales with key cardinality alone. planBatch
+// (phase 2) then decides per-key demand from these aggregates and fetchBandSteps (phase 3) fetches only
+// the selected steps.
+func (e *Engine) scanBandKeys(ctx context.Context) (band int, keys []bandKeyAgg, err error) {
+	// faultRefillScanErr simulates the band scan failing so the test proves runRefill logs and shortens
+	// the next poll (re-scan soon) instead of refilling empty and idling every worker.
 	if e.seams.IsFault(faultRefillScanErr) {
 		return math.MaxInt, nil, errors.New("injected fault: " + faultRefillScanErr)
 	}
+	type shardKey struct {
+		key    string
+		weight float64
+		ageMs  float64
+		count  int
+	}
 	type shardResult struct {
 		band int
-		rows []candidateRow
+		rows []shardKey
 	}
 	_, pos := e.shardOrdinals()
 	results := make([]*shardResult, len(pos))
-	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		// Bounded per fairness key: ROW_NUMBER() over each key's due steps, oldest first, cut at
-		// perKeyLimit (the cache capacity). Without the cut this streamed the ENTIRE due band - every row
-		// of every key - across the wire and allocated a candidateRow for each, only to discard all but
-		// `capacity` of them in the weighted pick below. Its cost grew with the BACKLOG, so under a deep
-		// one (the case the refiller exists for) it re-scanned hundreds of thousands of rows every
-		// refillPace (20ms).
-		//
-		// The cut is per KEY, not a plain LIMIT, because fairness is the whole point of this query: a
-		// global `ORDER BY created_at LIMIT n` would let one tenant's old backlog fill the window and
-		// starve every other key. Per key, the picker can never consume more than `capacity` steps in one
-		// refill (it takes at most `capacity` steps total), so this drops nothing it could have used - the
-		// batch is identical, it is just no longer built by materializing the backlog first.
+	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// One row per fairness key at this shard's minimum due band: COUNT(*) OVER the key's due steps,
+		// and the age/weight of its oldest (rn=1). All rows are already filtered to the min band, so the
+		// returned priority is that band. rn=1 selects the oldest step whose fairness_weight is the one
+		// the picker must use.
 		rows, err := db.QueryContext(ctx,
-			"SELECT step_id, task_url, fairness_key, fairness_weight, priority, age_ms FROM ("+
-				"SELECT step_id, task_url, fairness_key, fairness_weight, priority,"+
+			"SELECT fairness_key, cnt, age_ms, weight, priority FROM ("+
+				"SELECT fairness_key, priority,"+
+				" COUNT(*) OVER (PARTITION BY fairness_key) AS cnt,"+
 				" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms,"+
+				" fairness_weight AS weight,"+
 				" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
 				" FROM dwarf_steps"+
 				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
 				" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
 				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC())"+
-				") t WHERE rn<=? ORDER BY step_id",
-			perKeyLimit,
+				") t WHERE rn=1",
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -278,23 +285,20 @@ func (e *Engine) scanPriorityBand(ctx context.Context, perKeyLimit int) (int, []
 		defer rows.Close()
 		var sr *shardResult
 		for rows.Next() {
-			var c candidateRow
+			var sk shardKey
 			var prio int
-			err := rows.Scan(&c.stepID, &c.task, &c.key, &c.weight, &prio, &c.ageMs)
-			if err != nil {
+			if err := rows.Scan(&sk.key, &sk.count, &sk.ageMs, &sk.weight, &prio); err != nil {
 				return errors.Trace(err)
 			}
-			if c.weight <= 0 {
-				c.weight = 1
+			if sk.weight <= 0 {
+				sk.weight = 1
 			}
-			c.shard = shard
 			if sr == nil {
 				sr = &shardResult{band: prio}
 			}
-			sr.rows = append(sr.rows, c)
+			sr.rows = append(sr.rows, sk)
 		}
-		err = rows.Err()
-		if err != nil {
+		if err := rows.Err(); err != nil {
 			return errors.Trace(err)
 		}
 		if sr != nil {
@@ -305,122 +309,267 @@ func (e *Engine) scanPriorityBand(ctx context.Context, perKeyLimit int) (int, []
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
-	globalBand := math.MaxInt
+	band = math.MaxInt
 	for _, sr := range results {
-		if sr != nil && len(sr.rows) > 0 && sr.band < globalBand {
-			globalBand = sr.band
+		if sr != nil && len(sr.rows) > 0 && sr.band < band {
+			band = sr.band
 		}
 	}
-	if globalBand == math.MaxInt {
-		return globalBand, nil, nil
+	if band == math.MaxInt {
+		return band, nil, nil
 	}
-	var atBand []candidateRow
+	// Merge keys across shards at the global band. A tenant's steps can span shards; sum the counts, and
+	// keep the globally-oldest step's weight (max age wins) - the same oldest-weins rule the old inline
+	// pick applied. Shards at a worse band contribute nothing (lower bands materialize only once the
+	// higher drains). Insertion order preserves a stable key order for planBatch's deterministic iteration.
+	byKey := map[string]*bandKeyAgg{}
+	var order []string
 	for _, sr := range results {
-		if sr == nil || sr.band != globalBand {
+		if sr == nil || sr.band != band {
 			continue
 		}
-		atBand = append(atBand, sr.rows...)
+		for _, sk := range sr.rows {
+			agg := byKey[sk.key]
+			if agg == nil {
+				byKey[sk.key] = &bandKeyAgg{key: sk.key, weight: sk.weight, ageMs: sk.ageMs, count: sk.count}
+				order = append(order, sk.key)
+				continue
+			}
+			agg.count += sk.count
+			if sk.ageMs > agg.ageMs {
+				agg.ageMs = sk.ageMs
+				agg.weight = sk.weight
+			}
+		}
 	}
-	return globalBand, atBand, nil
+	keys = make([]bandKeyAgg, 0, len(order))
+	for _, k := range order {
+		keys = append(keys, *byKey[k])
+	}
+	return band, keys, nil
+}
+
+// planBatch runs the weighted fairness pick over the band's per-key aggregates and returns the ordered
+// sequence of keys to dispatch - one entry per selected step, at most capacity. Each round weighted-
+// randomly picks a key (Efraimidis-Spirakis over the *keys*, re-rolled per step so a key's expected
+// share is proportional to its weight and independent of backlog depth) and consumes one of its due
+// steps, capped at the key's count. This is the identical selection the old inline pick made, just run
+// over counts instead of materialized rows - the actual steps are fetched afterward and replayed against
+// this plan oldest-first.
+func planBatch(keys []bandKeyAgg, capacity int) []string {
+	remaining := make([]int, len(keys))
+	for i := range keys {
+		remaining[i] = keys[i].count
+	}
+	plan := make([]string, 0, capacity)
+	for len(plan) < capacity {
+		best, bestScore := -1, -1.0
+		for i := range keys {
+			if remaining[i] <= 0 {
+				continue
+			}
+			score := math.Pow(rand.Float64(), 1/keys[i].weight)
+			if score > bestScore {
+				bestScore = score
+				best = i
+			}
+		}
+		if best < 0 {
+			break
+		}
+		plan = append(plan, keys[best].key)
+		remaining[best]--
+	}
+	return plan
+}
+
+// fetchStep is a fetched candidate carrying the age used to order a key's steps oldest-first across shards.
+type fetchStep struct {
+	stepID int
+	shard  int
+	ageMs  float64
+}
+
+// fetchBandSteps loads, per chosen fairness key, up to perKey of its oldest due steps at the given band
+// across all shards, keyed and sorted oldest-first (the order planBatch's plan replays). This is phase 3.
+//
+// perKey is a UNIFORM cap - the max per-key demand across the plan, not each key's exact demand. That
+// keeps the fetch a single IN-list query per shard (an exact per-key cap would need a per-key VALUES/
+// LATERAL join, non-trivial across the four SQL dialects). The cost is at most len(chosen)*perKey rows
+// per shard, and crucially BOTH factors are bounded by the cache capacity (at most capacity distinct
+// keys can be chosen, since each contributes >=1 step; perKey <= capacity) - so the fetch is bounded by
+// capacity^2 regardless of how many fairness keys exist. That independence from key cardinality is the
+// whole point: at high cardinality perKey is ~1, so the fetch is ~capacity. Over-fetch only appears
+// under extreme weight skew among many keys, the low-cardinality regime that never had a scaling problem.
+//
+// The uniform cap is still COMPLETE for every key: a key's globally-oldest needed steps live at most
+// `needed` (<=perKey) on any single shard - they are that shard's oldest for the key, so the per-shard
+// rn<=perKey cut captures all of them. The cross-shard merge then sorts by age and the replay takes each
+// key's true oldest.
+func (e *Engine) fetchBandSteps(ctx context.Context, band int, chosen []string, perKey int) (map[string][]fetchStep, error) {
+	if len(chosen) == 0 || perKey <= 0 {
+		return nil, nil
+	}
+	placeholders := strings.Repeat("?,", len(chosen)-1) + "?"
+	var mu sync.Mutex
+	byKey := map[string][]fetchStep{}
+	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		args := make([]any, 0, len(chosen)+2)
+		args = append(args, band)
+		for _, k := range chosen {
+			args = append(args, k)
+		}
+		args = append(args, perKey)
+		// Band is bound (priority=?), not the min-subquery: the plan committed to this band, and re-mining
+		// here could pick a lower band that arrived between phases and mismatch the chosen keys. A binding
+		// priority does not defeat the selection index (only a bound status would - status stays inlined).
+		rows, err := db.QueryContext(ctx,
+			"SELECT step_id, fairness_key, age_ms FROM ("+
+				"SELECT step_id, fairness_key,"+
+				" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms,"+
+				" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
+				" FROM dwarf_steps"+
+				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
+				" AND priority=? AND fairness_key IN ("+placeholders+")"+
+				") t WHERE rn<=? ORDER BY step_id",
+			args...,
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		defer rows.Close()
+		var local []fetchStep
+		var localKeys []string
+		for rows.Next() {
+			var fs fetchStep
+			var key string
+			if err := rows.Scan(&fs.stepID, &key, &fs.ageMs); err != nil {
+				return errors.Trace(err)
+			}
+			fs.shard = shard
+			local = append(local, fs)
+			localKeys = append(localKeys, key)
+		}
+		if err := rows.Err(); err != nil {
+			return errors.Trace(err)
+		}
+		mu.Lock()
+		for i := range local {
+			byKey[localKeys[i]] = append(byKey[localKeys[i]], local[i])
+		}
+		mu.Unlock()
+		return nil
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	// Sort each key oldest-first across shards: age desc, then (shard, step_id) for determinism - the
+	// same comparator the old inline pick used. age is the only cross-shard-comparable ordering signal
+	// (step_id is a per-shard auto-increment).
+	for k := range byKey {
+		list := byKey[k]
+		sort.Slice(list, func(a, b int) bool {
+			x, y := list[a], list[b]
+			if x.ageMs != y.ageMs {
+				return x.ageMs > y.ageMs
+			}
+			if x.shard != y.shard {
+				return x.shard < y.shard
+			}
+			return x.stepID < y.stepID
+		})
+	}
+	return byKey, nil
 }
 
 // runRefill replaces the candidate cache with a fresh priority+fairness batch drawn from the single
-// globally-minimum due band.
+// globally-minimum due band, in three phases: scanBandKeys (per-key aggregates), planBatch (weighted
+// pick over those aggregates), fetchBandSteps (fetch only the selected steps). Splitting the old single
+// scan this way keeps the wire/heap cost off the fairness-key cardinality - see scanBandKeys.
 // runRefill reports whether it filled the cache to capacity - the deep-backlog signal the refiller's
 // pacing gates on.
 func (e *Engine) runRefill(ctx context.Context) (full bool) {
 	capacity := e.cache.Capacity()
-	batch := make([]candidatecache.Job, 0, capacity)
 
-	// One band per refill: scanPriorityBand returns the strict global-minimum due band's rows (or MaxInt
-	// when nothing is due). The earlier per-band advance loop was vestige of the removed saturation gating,
-	// which could post-filter a band's rows to empty and force a scan of the next band up; without that
-	// filter a non-MaxInt band always yields rows (every row makes a fairness-key bucket), so the scan runs
-	// exactly once - lower bands stay materialized only after the current one drains, by design.
-	chosenBand := math.MaxInt
-	band, rows, err := e.scanPriorityBand(ctx, capacity)
+	// Phase 1: one aggregate row per fairness key at the global-minimum due band (or MaxInt band when
+	// nothing is due).
+	band, keys, err := e.scanBandKeys(ctx)
 	if err != nil {
-		// The scan failed (typically a transient DB error), so this refill produces an empty batch and
-		// every worker blocks in Pop. Swallowing the error would leave that stall unretried until the
-		// next doorbell or the backlog backstop (up to a minute). Log it and re-poll soon - the same
+		// The scan failed (typically a transient DB error). Log it and re-poll soon - the same
 		// pollErrorRetryInterval (1s) policy pollPendingSteps applies to its own sizing-query failures -
-		// so the doorbell fires again and the refiller retries once the blip clears.
+		// so the doorbell fires again and the refiller retries once the blip clears. Return WITHOUT
+		// refilling: a failed scan means "unknown", not "nothing is due", and Refill is a wholesale
+		// replace that honors an empty batch, so falling through would hand a healthy cache's candidates
+		// to the garbage collector because the database blipped, idling every worker in Pop until the 1s
+		// re-poll. Keeping the existing hints costs nothing - a worker popping a stale one just loses its
+		// claim CAS.
 		e.logger.ErrorContext(ctx, "Scanning priority band for refill", "error", err)
 		e.shortenNextPoll(time.Now().Add(pollErrorRetryInterval))
-		// Return WITHOUT refilling. A failed scan means "unknown", not "nothing is due", and Refill is a
-		// wholesale replace that honors an empty batch (it must, or an empty scan leaves a stale floor) -
-		// so falling through would hand a healthy cache's candidates to the garbage collector because the
-		// database blipped, idling every worker in Pop until the 1s re-poll. Keeping the existing hints
-		// costs nothing: they are hints, and a worker popping a stale one just loses its claim CAS.
 		return false
 	}
-	if band != math.MaxInt {
-		type keyBucket struct {
-			weight    float64
-			oldestAge float64
-			steps     []candidateRow
-		}
-		byKey := map[string]*keyBucket{}
-		order := []string{}
-		for _, c := range rows {
-			kb := byKey[c.key]
-			if kb == nil {
-				kb = &keyBucket{weight: c.weight, oldestAge: c.ageMs}
-				byKey[c.key] = kb
-				order = append(order, c.key)
-			} else if c.ageMs > kb.oldestAge {
-				kb.oldestAge = c.ageMs
-				kb.weight = c.weight
-			}
-			kb.steps = append(kb.steps, c)
-		}
-		e.logger.DebugContext(ctx, "Refill selecting", "band", band, "distinctKeys", len(order))
-		// Record this refill's selected band and its distinct-fairness-key count for the
-		// dwarf_steps_fairness_keys observable gauge (read at metric-collection time).
-		e.lastRefillLock.Lock()
-		e.lastRefillBand = band
-		e.lastRefillKeys = len(order)
-		e.lastRefillLock.Unlock()
-		for _, kb := range byKey {
-			sort.Slice(kb.steps, func(a, b int) bool {
-				x, y := kb.steps[a], kb.steps[b]
-				if x.ageMs != y.ageMs {
-					return x.ageMs > y.ageMs
-				}
-				if x.shard != y.shard {
-					return x.shard < y.shard
-				}
-				return x.stepID < y.stepID
-			})
-		}
-		for len(batch) < capacity {
-			bestKey, bestScore := "", -1.0
-			for _, k := range order {
-				kb := byKey[k]
-				if len(kb.steps) == 0 {
-					continue
-				}
-				score := math.Pow(rand.Float64(), 1/kb.weight)
-				if score > bestScore {
-					bestScore = score
-					bestKey = k
-				}
-			}
-			if bestScore < 0 {
-				break
-			}
-			kb := byKey[bestKey]
-			c := kb.steps[0]
-			kb.steps = kb.steps[1:]
-			batch = append(batch, candidatecache.Job{StepID: c.stepID, Shard: c.shard})
-		}
-		chosenBand = band
+
+	// Record this refill's selected band and its distinct-fairness-key count for the
+	// dwarf_steps_fairness_keys observable gauge (read at metric-collection time). len(keys) is every key
+	// in contention at the band, matching the old metric (which counted every key the scan returned).
+	e.lastRefillLock.Lock()
+	e.lastRefillBand = band
+	e.lastRefillKeys = len(keys)
+	e.lastRefillLock.Unlock()
+
+	if band == math.MaxInt || len(keys) == 0 {
+		// Nothing due: wholesale-replace with an empty batch (MaxInt floor), exactly as draining the cache
+		// dry does - a still-cached candidate would be a dead hint under a floor advertising a band the
+		// cache no longer holds.
+		e.cache.Refill(nil, math.MaxInt)
+		return false
 	}
 
-	e.logger.DebugContext(ctx, "Refill batch", "size", len(batch))
+	// Phase 2: weighted pick over the aggregates -> ordered plan of keys, and the per-key demand it implies.
+	plan := planBatch(keys, capacity)
+	if len(plan) == 0 {
+		e.cache.Refill(nil, math.MaxInt)
+		return false
+	}
+	needed := map[string]int{}
+	maxNeeded := 0
+	for _, k := range plan {
+		needed[k]++
+		if needed[k] > maxNeeded {
+			maxNeeded = needed[k]
+		}
+	}
+	chosen := make([]string, 0, len(needed))
+	for k := range needed {
+		chosen = append(chosen, k)
+	}
+
+	// Phase 3: fetch only the selected steps (up to maxNeeded oldest per chosen key).
+	stepsByKey, err := e.fetchBandSteps(ctx, band, chosen, maxNeeded)
+	if err != nil {
+		e.logger.ErrorContext(ctx, "Fetching band steps for refill", "error", err)
+		e.shortenNextPoll(time.Now().Add(pollErrorRetryInterval))
+		return false
+	}
+
+	// Assemble the batch by replaying the plan: each entry pops its key's oldest remaining fetched step.
+	// A key that came up short (a step got claimed/completed between phases) just skips - the batch runs a
+	// touch short, self-corrected on the next refill. The result is the same batch the old inline pick
+	// produced from a materialized band.
+	batch := make([]candidatecache.Job, 0, capacity)
+	idx := map[string]int{}
+	for _, k := range plan {
+		list := stepsByKey[k]
+		i := idx[k]
+		if i >= len(list) {
+			continue
+		}
+		batch = append(batch, candidatecache.Job{StepID: list[i].stepID, Shard: list[i].shard})
+		idx[k]++
+	}
+
+	e.logger.DebugContext(ctx, "Refill batch", "band", band, "distinctKeys", len(keys), "size", len(batch))
 	// The floor is the cached batch's actual band so the doorbell's priority-preemption decision
 	// (head-insert when a strictly more important step arrives) is made against the right threshold.
-	// chosenBand stays MaxInt when no band was selected (empty batch), matching the empty-cache case.
-	e.cache.Refill(batch, chosenBand)
+	e.cache.Refill(batch, band)
 	return len(batch) == capacity
 }

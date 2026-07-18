@@ -36,7 +36,7 @@ type Cache struct {
 	cond     *sync.Cond
 	items    []Job
 	floor    int // best (lowest) priority represented; math.MaxInt when empty
-	size     int // capacity, twice the worker count (see Init/Resize); the per-fairness-key row cut in the refiller band scan
+	size     int // capacity, twice the worker count (see Init/Resize); the refiller's per-fairness-key fetch cap and batch size
 	lowWater int // pop below this requests a refill so draining overlaps refill
 	closed   bool
 }

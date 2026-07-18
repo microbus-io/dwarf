@@ -24,15 +24,17 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestRefillScan_BoundedPerFairnessKey pins that the refiller's band scan reads at most perKeyLimit rows
-// per fairness key, instead of streaming the entire due band. The old scan had no LIMIT: every due row of
-// every key crossed the wire and was allocated in Go, only to be discarded down to the cache capacity by
-// the weighted pick - so its cost grew with the BACKLOG, and under a deep one (exactly what the refiller
-// exists for) it re-read the whole backlog every refillPace (20ms).
+// TestRefillScan_BoundedPerFairnessKey pins that the refiller's band scan cost scales with fairness-key
+// CARDINALITY, not with the backlog. Phase 1 (scanBandKeys) collapses each key to a single aggregate row
+// server-side, so a deep backlog on N tenants returns N rows, not N*capacity. Phase 3 (fetchBandSteps)
+// then reads only the selected steps - at most perKey OLDEST per chosen key. The old single-query scan
+// cut each key at the cache capacity and streamed up to capacity rows PER KEY across the wire, only to
+// discard all but `capacity` of them total - so under a deep backlog with high key cardinality it
+// materialized hundreds of thousands of rows every refillPace (20ms).
 //
-// The bound is per KEY rather than a plain LIMIT because fairness is the point of the query: a global
-// `ORDER BY created_at LIMIT n` would let one key's old backlog fill the window and starve the others.
-// This test therefore checks both halves - the cut, and that every key still reaches the batch.
+// The fetch keeps every key oldest-first because the picker dispatches oldest-first within a key; a bound
+// that kept the newest would starve the head of every queue. This test checks all of it: one aggregate
+// row per key (not per step), the per-key fetch cut, and that the fetched steps are the oldest.
 func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -54,47 +56,58 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 
 	// A deep backlog on two tenants: 40 steps each, far past any per-key limit used below.
 	const perTenant = 40
-	for _, tenant := range []string{"tenant-a", "tenant-b"} {
+	tenants := []string{"tenant-a", "tenant-b"}
+	for _, tenant := range tenants {
 		for range perTenant {
 			_, err := e.Create(ctx, "scan/g", nil, &workflow.FlowOptions{FairnessKey: tenant})
 			assert.NoError(err)
 		}
 	}
 
-	// The scan must cut each key at the limit - not stream the backlog.
-	for _, limit := range []int{1, 3, 10} {
-		_, rows, err := e.scanPriorityBand(ctx, limit)
+	// Phase 1: one aggregate row per key regardless of backlog depth, carrying that key's due count.
+	band, keys, err := e.scanBandKeys(ctx)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(2, len(keys), "one aggregate row per tenant, not per step in the %d-step backlog", 2*perTenant)
+	counts := map[string]int{}
+	for _, k := range keys {
+		counts[k.key] = k.count
+	}
+	assert.Equal(perTenant, counts["tenant-a"])
+	assert.Equal(perTenant, counts["tenant-b"])
+
+	// Phase 3: the fetch cuts each key at perKey - not the backlog - and every key still reaches the batch.
+	for _, perKey := range []int{1, 3, 10} {
+		byKey, err := e.fetchBandSteps(ctx, band, tenants, perKey)
 		if !assert.NoError(err) {
 			return
 		}
-		perKey := map[string]int{}
-		for _, r := range rows {
-			perKey[r.key]++
+		assert.Equal(2, len(byKey), "both tenants are represented (fairness is not sacrificed to the bound)")
+		for key, list := range byKey {
+			assert.Equal(perKey, len(list), "key %q is cut at perKey", key)
 		}
-		assert.Equal(2, len(perKey), "both tenants are represented (fairness is not sacrificed to the bound)")
-		for key, n := range perKey {
-			assert.Equal(limit, n, "key %q is cut at the per-key limit", key)
-		}
-		assert.Equal(2*limit, len(rows), "the scan reads limit-per-key, not the %d-step backlog", 2*perTenant)
 	}
 
-	// And the cut takes the OLDEST steps of each key: the picker dispatches oldest-first within a key, so
-	// a bound that kept the newest would starve the head of every queue.
-	_, rows, err := e.scanPriorityBand(ctx, 1)
+	// And the fetch keeps the OLDEST step of each key: the single row for a key at perKey=1 is its oldest
+	// (smallest step_id here, since steps are created in age order).
+	one, err := e.fetchBandSteps(ctx, band, tenants, 1)
 	if !assert.NoError(err) {
 		return
 	}
-	_, all, err := e.scanPriorityBand(ctx, perTenant)
+	all, err := e.fetchBandSteps(ctx, band, tenants, perTenant)
 	if !assert.NoError(err) {
 		return
 	}
-	oldest := map[string]int{}
-	for _, r := range all {
-		if cur, ok := oldest[r.key]; !ok || r.stepID < cur {
-			oldest[r.key] = r.stepID
+	for key, list := range all {
+		oldest := list[0].stepID
+		for _, fs := range list {
+			if fs.stepID < oldest {
+				oldest = fs.stepID
+			}
 		}
-	}
-	for _, r := range rows {
-		assert.Equal(oldest[r.key], r.stepID, "the single row kept for %q is its oldest step", r.key)
+		if assert.Equal(1, len(one[key])) {
+			assert.Equal(oldest, one[key][0].stepID, "the single fetched row for %q is its oldest step", key)
+		}
 	}
 }

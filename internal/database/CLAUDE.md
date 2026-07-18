@@ -118,7 +118,7 @@ attempt was rejected: real outages mostly manifest as hangs, not errors; classif
 errors is driver-specific and brittle; and a helper that *claims* partial tolerance only in a narrow subset of failure
 modes lies to operators about resilience. `OnEach` is invoked once per shard with the resolved DB and the shard
 index; any non-nil return fails the whole call. Each caller retries on its next natural cycle (`pollPendingSteps` next
-tick, `scanPriorityBand` next refill), so a transient hiccup heals within one cycle and a persistent outage degrades
+tick, `scanBandKeys` next refill), so a transient hiccup heals within one cycle and a persistent outage degrades
 loudly.
 
 **DSN format & test-mode resolution.** Each shard carries its own DSN (`Config.Shards`, index -> DSN).

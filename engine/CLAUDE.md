@@ -497,15 +497,22 @@ the next. The cache holds hints, never ownership; only the CAS grants a step. **
 `parked=parkedNone`**: a step that was offered to the cache and then parked (waiting on a subgraph) is rejected at
 claim time rather than dispatched, so a parked step in a stale cache entry never runs.
 
-**Selection (two-level priority + fairness).** The refiller, not the worker, decides *what* runs. (1) Each shard is
-scanned for its strict-minimum `priority` band's due pending rows in one statement (the band is a
-`priority=(SELECT MIN(priority) ... due)` subquery, so band and candidates are self-consistent within the statement;
-not transactional vs concurrent worker CAS claims, which self-corrects via the post-completion refill and backlog
-poll). (2) Rows are aggregated: the *global* minimum band across shards is taken (strict priority is cluster-wide)
-and only rows at that band form one `fairness_key` population - shards with a worse band contribute nothing this
-batch (lower bands are never materialized until the higher drains, by design). (3) Repeatedly weighted-random pick a
-key (Efraimidis-Spirakis over the *keys*, not the rows) and take that key's *oldest* remaining step until the batch
-is full - FIFO within a `fairness_key`. `created_at` (read as an age, comparable across shards) does two things per
+**Selection (two-level priority + fairness), in three phases.** The refiller, not the worker, decides *what* runs, in
+three phases (`scanBandKeys` -> `planBatch` -> `fetchBandSteps`, driven by `runRefill`). (1) **Aggregate scan**
+(`scanBandKeys`): each shard returns *one row per fairness key* at its strict-minimum `priority` band - a `COUNT(*)
+OVER (PARTITION BY fairness_key)` of the key's due steps plus the age and `fairness_weight` of its *oldest* due step
+(`ROW_NUMBER()=1`). The band is a `priority=(SELECT MIN(priority) ... due)` subquery, so band and aggregates are
+self-consistent within the statement (not transactional vs concurrent worker CAS claims, which self-corrects via the
+post-completion refill and backlog poll). (2) **Merge + weighted pick** (`planBatch`): the *global* minimum band
+across shards is taken (strict priority is cluster-wide) and only that band's keys form one `fairness_key` population
+- shards with a worse band contribute nothing this batch (lower bands are never materialized until the higher drains,
+by design); a key spanning shards sums its counts and keeps its globally-oldest step's weight. Then repeatedly
+weighted-random pick a key (Efraimidis-Spirakis over the *keys*, not the rows), consuming one of its due steps
+(capped at the key's count), until the plan reaches `capacity` - FIFO within a `fairness_key`. (3) **Targeted fetch**
+(`fetchBandSteps`): the selected steps - and only those - are fetched (at most the plan's max per-key demand, oldest
+first per key) and the plan is replayed against them, popping each key's oldest remaining step. The batch is the same
+one the earlier single-scan pick produced from a fully-materialized band; it is just no longer built by streaming the
+backlog. `created_at` (read as an age, comparable across shards) does two things per
 key: fixes the key's `fairness_weight` from the key's oldest step (so a tenant cannot self-promote with newer
 high-weight tasks) and orders dispatch oldest-first within the key. It is the only ordering signal comparable across
 shards: `step_id` is a per-shard auto-increment, so a `(shard, step_id)` order would let a brand-new task on a low
@@ -519,21 +526,30 @@ Same-age ties break by `(shard, step_id)` for determinism. The pick is re-rolled
 is proportional to weight and independent of backlog depth or shard layout. Strict priority means no aging: a fed
 higher-priority band starves lower bands by design.
 
-**The scan is bounded PER FAIRNESS KEY, not globally, and this is load-bearing.** The band query carries a
-`ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id)` cut at the cache capacity, so it reads at
-most `capacity` rows per key. Two things this must not become:
+**The wire/heap cost scales with fairness-key CARDINALITY, not with the backlog, and this is load-bearing.** The
+three-phase split exists to keep that promise. Its history is three stages:
 
-- **Not unbounded** (what it was): with no cut, every due row of every key at the band crossed the wire and was
-  allocated as a `candidateRow`, only to be discarded down to `capacity` by the pick. The cost grew with the
-  **backlog**, so under a deep one - the case the refiller exists for - it re-read hundreds of thousands of rows every
-  `refillPace` (20ms), i.e. it was most expensive exactly when the replica was already behind.
-- **Not a plain `LIMIT`**: a global `ORDER BY created_at LIMIT n` would let one tenant's old backlog fill the entire
-  window and starve every other key - it would trade the waste for a fairness bug.
+- **Unbounded scan** (the original): the band query returned every due row of every key, each allocated as a
+  a Go struct, only to be discarded down to `capacity` by the pick. Cost grew with the **backlog**, so under a
+  deep one - the case the refiller exists for - it re-read hundreds of thousands of rows every `refillPace` (20ms).
+- **Per-key cut** (the intermediate fix): a `ROW_NUMBER() OVER (PARTITION BY fairness_key ...)` cut at `capacity`
+  bounded it to `capacity` rows *per key*. That killed the backlog-depth dependence but not the **cardinality** one:
+  with thousands of tenants at the band it still returned up to `capacity * keys` rows (e.g. 768 x thousands) to pick
+  only `capacity`. A plain global `LIMIT n` was never an option - it would let one tenant's old backlog fill the
+  window and starve every other key (a fairness bug traded for the waste).
+- **Three-phase** (current): phase 1 collapses each key to *one* aggregate row (count + oldest age/weight) server-
+  side, so the scan returns O(distinct keys) rows; phase 2 picks the per-key demand from those aggregates; phase 3
+  fetches only the selected steps. Total rows crossing the wire are bounded by `capacity^2` (at most `capacity`
+  distinct keys chosen, each fetched at the uniform per-key cap `<= capacity`) - **independent of key cardinality**.
+  At high cardinality the per-key cap is ~1, so the fetch is ~`capacity`.
 
-The per-key cut costs nothing in selection: the pick takes at most `capacity` steps in one refill, so it can never
-want more than `capacity` from any single key. The batch is *identical* to the unbounded scan's - it is simply no
-longer built by materializing the backlog first. Pinned by `TestRefillScan_BoundedPerFairnessKey` (both halves: the
-cut, and that every key still reaches the batch, oldest-first).
+The uniform per-key fetch cap (phase 3's `maxNeeded`, not each key's exact demand) is a deliberate simplicity choice:
+an exact per-key cap would need a per-key `VALUES`/`LATERAL` join, non-trivial across the four SQL dialects, to shave
+an over-fetch that only appears under extreme weight skew among many keys - the low-cardinality regime that never had
+a scaling problem. The uniform cap stays complete for every key (a key's globally-oldest N steps sit at most N on any
+one shard, so the per-shard `rn<=maxNeeded` cut captures them all; the cross-shard merge then sorts by age). The
+resulting batch is *identical* to what the earlier fully-materialized pick produced. Pinned by
+`TestRefillScan_BoundedPerFairnessKey` (one aggregate row per key, the per-key fetch cut, oldest-first).
 
 **Queue-as-cache, doorbell, single-slot refiller.** The enqueue signal carries no step to a queue; it is a **doorbell**
 (`candidatecache.Cache.Offer`). The generic path (`handleEnqueue`) resolves the announced step's priority *and*
@@ -618,7 +634,7 @@ again, and let the step dispatch once the blip clears. The clamp is the engine's
 errors; it never *retries the connection* (that is left to the layer holding the resource - the task or host), it
 just refuses to convert an unknown backlog into a long sleep.
 
-**The refiller applies the same clamp.** `runRefill`'s `scanPriorityBand` can fail on the same transient DB error,
+**The refiller applies the same clamp.** `runRefill`'s `scanBandKeys` (or the phase-3 `fetchBandSteps`) can fail on the same transient DB error,
 and swallowing it is the mirror wedge: the cache refills **empty**, every worker blocks in `Pop`, and nothing retries
 until the next doorbell or the backlog backstop (up to 1m). So `runRefill` logs the scan error and
 `shortenNextPoll(now + pollErrorRetryInterval)` (1s) - the doorbell fires again promptly and the refiller re-scans
@@ -1635,18 +1651,18 @@ The worker count is split into two numbers, because they answer different questi
 - **`workersDispatch` (resident, eagerly spawned; also the candidate cache's size)** =
   `max(64, 8 x sum(per-shard open))` (`workersPerConnBudget`). Dispatch is DATABASE-bound, so the
   connection budget is what sizes it; the 8 is a generous `T/db` allowance (measured ~3 for no-op tasks).
-  **The cache - and therefore the refiller's scan, which reads at most the cache capacity PER FAIRNESS KEY
-  (see "Selection") - must never be sized from the maximum below**: a worker parked in a long `ExecuteTask`
-  holds no connection and dispatches nothing, so a ceiling-sized cache would scan far more of the backlog
-  than the replica can ever claim.
+  **The cache - and therefore the refiller's selection, which fills at most the cache capacity of candidates
+  and fetches per fairness key capped by it (see "Selection") - must never be sized from the maximum below**:
+  a worker parked in a long `ExecuteTask` holds no connection and dispatches nothing, so a ceiling-sized cache
+  would select far more of the backlog than the replica can ever claim.
   **The CACHE follows the pool split; the RESIDENT WORKER COUNT does not, and that asymmetry is deliberate.**
   `workersDispatch` is computed once in `Startup`, from the pools already sized for the R **discovered there** (for
   a solo start that is R=1, so `sum(per-shard open)` is the full per-database budget). Every later fleet change
   re-divides the pools by R (`recomputePools`), which **also re-derives the dispatch count from the post-split
   budget and `cache.Resize`s to it** - the same "every path that changes a pool must re-derive what depends on it"
   rule the worker ceiling obeys - but does **not** re-spawn the resident worker set.
-  - The **cache** had to follow, because it was the half that costs throughput. The refiller scans up to the
-    cache's capacity *per fairness key* and wholesale-replaces it, so a replica in a fleet of 8 holding a cache
+  - The **cache** had to follow, because it was the half that costs throughput. The refiller selects up to the
+    cache's capacity of candidates and wholesale-replaces it, so a replica in a fleet of 8 holding a cache
     sized for the whole budget is handed ~6x more candidates than it can ever claim: stale hints whose claim CAS
     loses to a peer, and wasted round-trips, exactly when the fleet is busiest. It is the same "never size the
     cache from more than the replica can claim" rule that keeps it away from the worker *ceiling*, reached
