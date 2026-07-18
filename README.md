@@ -50,7 +50,7 @@ fmt.Println(out.State["greeting"]) // hello ada
   fairness within a band so one tenant can't starve another.
 - **Scales horizontally.** Run many replicas against sharded databases; replicas coordinate through
   fire-and-forget peer signals you publish however you like.
-- **OTEL-native observability.** Structured logs (`slog`), 10 `dwarf_*` metrics, and distributed tracing,
+- **OTEL-native observability.** Structured logs (`slog`), 15 `dwarf_*` metrics, and distributed tracing,
   all through standard providers you inject.
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
 
@@ -107,8 +107,8 @@ Each `Set*` returns an `error`, so misconfiguration fails loudly at wiring time:
 
 ```go
 eng := dwarf.NewEngine()
-eng.SetShard(1, "postgres://user:pass@db-a.internal:5432/dwarf")
-eng.SetShard(2, "postgres://user:pass@db-b.internal:5432/dwarf")
+eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf", VirtualCPUs: 8})
+eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal:5432/dwarf", VirtualCPUs: 8})
 eng.SetWorkers(64)
 eng.SetHost(host)
 eng.SetLogger(slog.Default())

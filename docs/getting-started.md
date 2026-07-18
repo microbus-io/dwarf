@@ -107,7 +107,7 @@ func (h *myHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.F
 func (h *myHost) SignalPeers(context.Context, string, []byte) {}
 
 eng := dwarf.NewEngine()
-eng.SetShard(1, "postgres://user:pass@db:5432/dwarf")
+eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db:5432/dwarf"})
 eng.SetHost(&myHost{graphs: loadGraphRegistry()})
 
 err := eng.Startup(ctx)

@@ -42,21 +42,21 @@ whole history. Violating this duplicates during fan-in merge.
 available to the task but does not participate in fan-in merge.
 
 **Delete is a cleared (JSON null) entry in `changes`, and the merge has two modes for it, split across two
-`State` methods.** `flow.Delete` (and `Set(k, nil)`) writes JSON `null` into `changes` - `dwarf` conflates null
+`State` methods.** `flow.Del` (and `Set(k, nil)`) writes JSON `null` into `changes` - `dwarf` conflates null
 and absent everywhere (`isCleared`), so there is no way to store a literal null value. `State.Merge`/`MergeReduce`
 are the **accumulation** primitive: a cleared key is **preserved** (the replace path stores the tombstone; a
 reducer-managed field *ignores* the clear - see below), so a changes delta can be built up across attempts/members
-with the pending-delete marker intact. `State.DeleteNils` is the **materialization** step: it drops every cleared
+with the pending-delete marker intact. `State.DelNils` is the **materialization** step: it drops every cleared
 key, so a delete never survives as a `"k": null` tombstone in materialized state - which is what
 `final_state`/`FlowOutcome.State`/`Snapshot` expose to the host, and what the next step's `state` column becomes.
-So *materialize* = `Merge`/`MergeReduce` then `DeleteNils`; *accumulate* = `Merge` alone. `processStep`'s changes
+So *materialize* = `Merge`/`MergeReduce` then `DelNils`; *accumulate* = `Merge` alone. `processStep`'s changes
 accumulation (folding a task's fresh output onto a prior attempt's `changes` before persisting the `changes`
-column) uses `Merge` **without** `DeleteNils`, because there the null must be **preserved** - it only enacts the
+column) uses `Merge` **without** `DelNils`, because there the null must be **preserved** - it only enacts the
 delete when `changes` later folds onto `state` (a don't-materialize-here note is at that site in `execution.go`).
 
 **A cleared incoming for a reducer-managed field is the reducer's IDENTITY - ignored, not dropped.** `MergeReduce`
 skips a cleared value on a reduced field (`isCleared` check before the fold), leaving the accumulator untouched, so
-a branch that `flow.Delete`s a reduced field never wipes the cohort's contributions to it. Deleting a reduced field
+a branch that `flow.Del`s a reduced field never wipes the cohort's contributions to it. Deleting a reduced field
 is not a supported way to clear it - a delete is a *replace*-field concern. Pinned by
 `fixtures/reducerdeleteflow_test.go`.
 
@@ -102,7 +102,8 @@ derived sums (a legitimate `ReducerAdd` result past 2^53 marshals integer-shaped
 ### The typed getters panic on a type mismatch (and that is the safe option here)
 
 `GetString`/`GetInt`/`GetFloat`/`GetBool`/`GetDuration`/`GetStrings` **panic** when the key holds a value of the
-wrong type (`mustGetFromMap`, `statehelpers.go`). They previously discarded `getFromMap`'s error and returned the
+wrong type (the typed getters on `State` in `state.go` delegate to `Get` and `panic(errors.Trace(err))` on its
+error; `Flow`'s getters forward to them). They previously discarded that error and returned the
 zero value, which made *absent*, *cleared*, and *wrong-typed* indistinguishable - and the zero value is an
 actively dangerous answer: `GetInt("retryAfter")` over a `1.5` (a fractional number from an upstream task, a
 host's `initialState`, or `ReducerAdd`) read as `0`, and the task built a zero-delay retry loop against its

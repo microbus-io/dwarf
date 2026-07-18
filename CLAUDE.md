@@ -20,17 +20,27 @@ downstream of a specific framework in this repo, it must never name or assume th
 or their types like `sub.TimeBudget` or a "plane"). Use **"host"** for the upstream layer and describe what it *does*
 (mints a token, enforces a per-call deadline, shares a per-test isolation key), not which product does it.
 
-**Audience (who each kind of prose is for, and where it lives).**
-- **CLAUDE.md files** in this project are for the agent working on the Dwarf codebase.
-- **`docs/` and `README.md`** are for users and agents of the upstream project.
-- **Godoc comments** on public structs, functions, and packages are for upstream users and agents. They should
-  therefore not go into implementation details, and instead focus on how to use the API.
-- **Private comments** in the code should remain concise. They should not repeat what the code is already doing
-  unless it is not obvious on its own. They should include design rationale or a pitfall warning when it is specific
-  to that location.
-- **Cross-cutting design rationale** should generally be placed in the appropriate CLAUDE.md.
-- **No prose should refer to ephemeral working documents** - e.g. "finding A2" or "_PLAN.md".
-- **Comments in the code should not refer to CLAUDE.md.** The agent reads CLAUDE.md implicitly.
+**Audience — every piece of prose is written for exactly one of two readers; know which before you write.**
+
+- **Module users** (people and agents *using* dwarf as a dependency) read the **public-facing** docs:
+  **`docs/`, `README.md`, and godoc comments** on exported types, functions, and packages. Write these about the
+  **public API only**: how to use it, what to pass, what comes back. They must **not** name or describe internal
+  implementation - unexported functions, internal packages, private struct fields, source-file names (`state.go`),
+  or internal mechanics - because that reader cannot see any of it. Godoc especially stays at the how-to-use-it
+  altitude, not the how-it-works one.
+- **The dwarf coding agent** (you, working *on* the engine) reads the **internal** prose: **`CLAUDE.md` files and
+  private/unexported code comments**. These *may* freely reference internals - private identifiers, file names,
+  internal packages, the schema - and are where design rationale and pitfall warnings belong.
+
+Both audiences share one rule from above: **stay host-agnostic** (say "host", never name the upstream framework),
+in public and internal prose alike.
+
+Further guidance within each:
+- **Private comments** should stay concise: don't restate what the code plainly does; do capture design rationale
+  or a pitfall specific to that location.
+- **Cross-cutting design rationale** belongs in the appropriate `CLAUDE.md`, not scattered across code comments.
+- **No prose refers to ephemeral working documents** - e.g. "finding A2" or "_PLAN.md".
+- **Code comments do not refer to `CLAUDE.md`.** The agent reads `CLAUDE.md` implicitly.
 
 ## Where the design docs live
 
@@ -59,9 +69,9 @@ matching one before working there:**
 
 - **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`internal/migrations/CLAUDE.md`)
 - **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
-- **State delete:** `flow.Delete`/`Set(k,nil)` writes a JSON `null` tombstone. `State.Merge`/`MergeReduce`
-  *preserve* it (accumulation); `State.DeleteNils` *enacts* it (materialization) - the engine accumulates the
-  changes delta with the tombstone intact, then `DeleteNils` when the delta folds onto state. A cleared value on
+- **State delete:** `flow.Del`/`Set(k,nil)` writes a JSON `null` tombstone. `State.Merge`/`MergeReduce`
+  *preserve* it (accumulation); `State.DelNils` *enacts* it (materialization) - the engine accumulates the
+  changes delta with the tombstone intact, then `DelNils` when the delta folds onto state. A cleared value on
   a *reducer*-managed field is *ignored* (the reducer's identity), never dropped. (`workflow/CLAUDE.md`; enforced
   at `execution.go`)
 - **Two unstorable values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt** (the former
@@ -114,7 +124,7 @@ delta (`changes`), and metadata (status, error, timing). Steps are numbered by `
 siblings share a `step_depth`. Once terminal (`completed`/`failed`/`cancelled`), a step is immutable.
 
 **Reducer** - A merge strategy for state fields during fan-in. When parallel branches converge, each branch's changes
-are merged using the reducer for that field. Ten are defined (`workflow/reducer.go`): `replace` (last write wins,
+are merged using the reducer for that field. Ten are defined (`workflow/reducers.go`): `replace` (last write wins,
 default), `append` (concatenate arrays), `union` (concatenate arrays, deduplicated), `add` (sum numbers), `min`/`max`
 (smaller/larger number), `and`/`or` (logical fold of booleans), `concat` (concatenate strings), and `merge` (combine
 objects, new key wins). A field with no registered reducer uses `replace`; every non-default fan-in field is wired

@@ -165,7 +165,7 @@ Reading it:
   rate.
 - **Large state is expensive.** A flow carrying 1 MB of state takes seconds, not milliseconds. Because every
   step stores its own copy of the state, a large payload is written many times over per flow. Workflows that
-  move large documents should trim state early with `flow.Delete`, and keep big blobs in object
+  move large documents should trim state early with `flow.Del`, and keep big blobs in object
   storage — passing only a key through flow state. (`final_state` is `JSON`/`JSONB`/`NVARCHAR(MAX)`/`TEXT` per
   dialect, so it holds arbitrarily large output on all four — there is no 64 KB cap.)
 

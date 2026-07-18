@@ -64,7 +64,7 @@ f.SetBool("approved", true)
 f.SetStrings("errors", msgs)
 f.Set("order", order)         // any JSON-marshalable value
 
-f.Delete("coupon", "scratch") // remove fields
+f.Del("coupon", "scratch") // remove fields
 f.Clear()                     // remove everything
 ```
 

@@ -349,7 +349,7 @@ creates the new flow in the same thread with the same graph, returned **`running
 exclusion keeps a debug `Fork` (which shares the thread's `thread_id` for `List` grouping) from ever becoming a
 production continuation base. The prior turn's `final_state` passes through unfiltered as the new flow's initial
 state; a workflow author wanting narrower carryover scrubs with an entry adapter task using
-`flow.Delete`. As a **derived** operation `Continue` takes no `FlowOptions`: it **inherits the
+`flow.Del`. As a **derived** operation `Continue` takes no `FlowOptions`: it **inherits the
 thread's policy** (priority/fairness/budget/baggage) from the latest turn; a caller wanting different policy
 uses `Create` with `FlowOptions.ThreadKey` (explicit policy, same thread).
 
@@ -790,7 +790,7 @@ literals - `when` evaluation, `forEach` expansion, the task carrier, the transpo
 encoding never leaks into transition evaluation or task-facing code. Minting needs **no database read** (state was
 already resolved, so "inlining" is just declining to omit a field), which is what makes the write-side win free of
 round-trips. Intra-step merge is replace-only (`State.Merge`, i.e. `MergeReduce` with no reducers, then
-`DeleteNils`), so a field is either replaced by
+`DelNils`), so a field is either replaced by
 a literal in `changes` or carried untouched - three cases per key: a literal drops the ref (and may re-anchor here),
 a tombstone drops field and ref, absence carries the ref forward.
 

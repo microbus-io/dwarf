@@ -22,7 +22,7 @@ import (
 )
 
 // isCleared reports whether v represents a cleared state slot. State stores decoded values, so a delete
-// tombstone - written by flow.Delete/Set(name, nil), or decoded from a JSON null in the DB or off the wire -
+// tombstone - written by flow.Del/Set(name, nil), or decoded from a JSON null in the DB or off the wire -
 // is a Go nil.
 func isCleared(v any) bool {
 	return v == nil

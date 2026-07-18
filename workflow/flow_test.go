@@ -170,7 +170,7 @@ func TestFlow_Delete(t *testing.T) {
 	f.SetBool("active", true)
 	f.changes = make(map[string]any) // reset changes from typed setters
 
-	f.Delete("name", "score")
+	f.Del("name", "score")
 	// State reads see the deleted fields as absent.
 	assert.False(f.Has("name"))
 	assert.False(f.Has("score"))

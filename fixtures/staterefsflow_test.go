@@ -227,7 +227,7 @@ func TestStaterefsflow(t *testing.T) {
 			if f.GetString("pdf") != replacement {
 				return errors.New("the fan-in sees the stale document")
 			}
-			f.Delete("pdf") // a tombstone must invalidate the ref, not just the inline copy
+			f.Del("pdf") // a tombstone must invalidate the ref, not just the inline copy
 			return nil
 		})
 		proxy.HandleTask("staterefsflow.verify:429/m-after", func(ctx context.Context, f *workflow.Flow) error {

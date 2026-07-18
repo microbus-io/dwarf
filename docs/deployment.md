@@ -81,8 +81,8 @@ throughput and reduce index contention. Rough sizing by tolerated concurrent INS
 
 Rules:
 
-- Shard indices start at 1 and must be unique, but need **not** be contiguous — `SetShard(1, …)` and
-  `SetShard(99, …)` is valid. The shard appears as the leading number of a flow key
+- Shard indices start at 1 and must be unique, but need **not** be contiguous — `Index: 1` and
+  `Index: 99` is valid. The shard appears as the leading number of a flow key
   (`{shard}-{flowID}-{token}`) and drives routing, so the index→DSN mapping must be **identical across
   all replicas** and stable across restarts.
 - Every shard database must exist before startup — the engine migrates the schema but does not
@@ -94,8 +94,8 @@ Rules:
 - New top-level flows pick a random shard; subgraph flows stay on the parent's shard.
 
 ```go
-eng.SetShard(1, "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable")
-eng.SetShard(2, "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable")
+eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable", VirtualCPUs: 8})
+eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal:5432/dwarf?sslmode=disable", VirtualCPUs: 8})
 ```
 
 ## Connection pool

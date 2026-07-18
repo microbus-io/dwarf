@@ -277,16 +277,16 @@ func (f *Flow) SetDuration(key string, value time.Duration) {
 	f.changes.SetDuration(key, value)
 }
 
-// Delete removes the listed state fields. Each is recorded as a cleared value
+// Del removes the listed state fields. Each is recorded as a cleared value
 // (JSON null) in changes so the following merge drops it, and is removed from the
 // local state map so later reads in this task see it as absent.
-func (f *Flow) Delete(keys ...string) {
+func (f *Flow) Del(keys ...string) {
 	for _, k := range keys {
 		f.deleteOne(k)
 	}
 }
 
-// Clear removes every state field. Equivalent to Delete on every current key: each is recorded as a cleared
+// Clear removes every state field. Equivalent to Del on every current key: each is recorded as a cleared
 // value (JSON null) in changes so the following merge drops it, and state is emptied. Useful at workflow
 // boundaries or anywhere a task wants a blank slate before populating it.
 func (f *Flow) Clear() {

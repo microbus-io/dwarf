@@ -25,9 +25,9 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestDeletetombstoneflow pins that a field cleared with flow.Delete is absent from the flow's final_state /
+// TestDeletetombstoneflow pins that a field cleared with flow.Del is absent from the flow's final_state /
 // FlowOutcome.State - not carried forever as a JSON null tombstone. The host sees the key gone, matching
-// Flow.Delete's contract ("the following merge drops it") rather than a leaked "drop": null.
+// Flow.Del's contract ("the following merge drops it") rather than a leaked "drop": null.
 func TestDeletetombstoneflow(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -45,7 +45,7 @@ func TestDeletetombstoneflow(t *testing.T) {
 
 	// TaskA deletes "drop" (present in initial state) and keeps "keep".
 	proxy.HandleTask("deletetombstoneflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
-		f.Delete("drop")
+		f.Del("drop")
 		return nil
 	})
 	// TaskB does nothing - it just carries state to the terminal step so the delete must have survived

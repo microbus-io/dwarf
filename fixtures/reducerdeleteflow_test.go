@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 /*
-Reducer-managed delete at fan-in. A branch's flow.Delete writes a cleared (JSON null) change; at fan-in
+Reducer-managed delete at fan-in. A branch's flow.Del writes a cleared (JSON null) change; at fan-in
 the cohort members fold in fan_out_ordinal order via the field's reducer. A cleared incoming for a
 reducer-managed field is the reducer's IDENTITY - it is IGNORED, leaving the accumulator untouched - so a
 branch that deletes a reduced field never wipes the cohort's contributions to it. The outcome is therefore
@@ -51,7 +51,7 @@ func TestReducerDeleteflow(t *testing.T) {
 	// Two branch tasks: one clears the field, one appends its delta.
 	proxy.HandleTask("reducerdelete.verify:428/spawn", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("reducerdelete.verify:428/deleter", func(ctx context.Context, f *workflow.Flow) error {
-		f.Delete("log")
+		f.Del("log")
 		return nil
 	})
 	proxy.HandleTask("reducerdelete.verify:428/appender", func(ctx context.Context, f *workflow.Flow) error {
