@@ -159,14 +159,13 @@ func TestDeliverSignal_IdempotentAndSpoofSafe(t *testing.T) {
 
 // TestDeliverSignal_OfflineEngineIgnoresSignals pins the offline contract: an engine that is not
 // running (never started, or already shut down) discards every inbound signal. It must not enqueue
-// work (there is no cache), must not touch its peer map, and above all must not answer a hello - a
-// dead replica advertising itself would inflate every peer's observed replica count and shrink their
-// connection budgets for a replica that will never claim a step.
+// work (there is no cache), must not wake a waiter, and must not re-read the peer registry (its shards
+// are closed) - a peersChanged nudge to a dead replica is inert.
 func TestDeliverSignal_OfflineEngineIgnoresSignals(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	// A host that records every outbound signal, so we can prove a shut-down engine answers nothing.
+	// A host that records every outbound signal, so we can prove a shut-down engine emits nothing more.
 	base := NewTestProxy()
 	rec := &enqueueRecorder{TestProxy: base}
 
@@ -175,25 +174,20 @@ func TestDeliverSignal_OfflineEngineIgnoresSignals(t *testing.T) {
 	eng.RunInTest(t)
 	assert.NoError(eng.Shutdown(ctx)) // the post-shutdown engine is the target
 
-	emittedBySutdown := rec.count() // the goodbye broadcast is legitimate; anything after it is not
+	emittedByShutdown := rec.count() // the shutdown deregister nudge is legitimate; anything after it is not
 
-	hi, _ := json.Marshal(peerPayload{Origin: "peer-x"})
+	pc, _ := json.Marshal(peerPayload{Origin: "peer-x"})
 	enq, _ := json.Marshal(enqueuePayload{Origin: "peer-x", Shard: 1, StepID: 1})
 	sc, _ := json.Marshal(statusChangePayload{Origin: "peer-x", FlowKey: "1-1-aaaaaaaaaaaaaaaa", Status: workflow.StatusCompleted})
 
 	// Every op is accepted (fire-and-forget hints never error) and every one is a no-op.
-	assert.NoError(eng.DeliverSignal(ctx, string(signalOpHello), hi))
-	assert.NoError(eng.DeliverSignal(ctx, string(signalOpPing), hi))
-	assert.NoError(eng.DeliverSignal(ctx, string(signalOpGoodbye), hi))
+	assert.NoError(eng.DeliverSignal(ctx, string(signalOpPeersChanged), pc))
 	assert.NoError(eng.DeliverSignal(ctx, string(signalOpEnqueue), enq))
 	assert.NoError(eng.DeliverSignal(ctx, string(signalOpStatusChange), sc))
 
-	// The peer never entered the map, and the hello was never answered.
-	eng.peersLock.Lock()
-	_, known := eng.peers["peer-x"]
-	eng.peersLock.Unlock()
-	assert.False(known, "a shut-down engine must not track peers")
-	assert.Equal(emittedBySutdown, rec.count(), "a shut-down engine must not broadcast (no ping answering the hello)")
+	// The peersChanged nudge triggered no registry re-read (which would fail on closed shards) and no
+	// broadcast, and the offline engine emitted nothing beyond its own shutdown deregister nudge.
+	assert.Equal(emittedByShutdown, rec.count(), "a shut-down engine must not broadcast or recount")
 }
 
 // TestDeliverSignal_IgnoresOwnEcho pins the echo-suppression contract: SignalPeers asks the host to

@@ -18,7 +18,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -27,6 +26,7 @@ import (
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -37,15 +37,50 @@ import (
 // 1-vCPU tier) the resulting pool of 12 still sits under the measured knee (that tier peaked at M=16
 // and only collapsed from M=32). The derived budgets are per database, so the observed replica count
 // splits them; the override is a per-replica exact number and is never divided.
-// noPoolGrace takes the derived pool sizes immediately, skipping the peer-discovery window. Every test below that
-// reasons about DERIVED pools needs it: in production the pools are capped (startupPoolCap) until the window closes,
-// precisely so a cold-starting fleet cannot each open the whole per-database budget at once. The window itself is
-// pinned by TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown.
-func noPoolGrace(t *testing.T) {
+// startSolo starts e as an ISOLATED single-replica engine, keyed by a unique per-engine test-DB name.
+// Several independent engines in one test function otherwise share one registry (RunInTest keys the test
+// DB by t.Name() alone) and would count each other, dividing the pools they are asserting on. Use this
+// when a test spins up multiple engines that are meant to be separate deployments, not one fleet.
+func startSolo(t *testing.T, e *Engine, key string) {
 	t.Helper()
-	saved := startupPoolGrace
-	startupPoolGrace = 0
-	t.Cleanup(func() { startupPoolGrace = saved })
+	if err := e.SetInTest(t.Name() + "#" + key); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { e.Shutdown(context.Background()) })
+}
+
+// addPeerRow inserts a fake peer with the given engine_id (fresh seen_at) into every shard's registry,
+// then forces a recount - the DB-backed stand-in for a peer that came online. In test mode Startup
+// sizes the pools to their derived R immediately (no settle window), so a solo engine already holds its
+// full derived pool before the first addPeerRow.
+func addPeerRow(t *testing.T, e *Engine, id int64) {
+	t.Helper()
+	ctx := context.Background()
+	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		_, err := db.ExecContext(ctx, "INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (?, NOW_UTC())", id)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("insert peer %d: %v", id, err)
+	}
+	e.refreshReplicaCount(ctx)
+}
+
+// delPeerRow removes a fake peer from every shard's registry and forces a recount - a peer going away.
+func delPeerRow(t *testing.T, e *Engine, id int64) {
+	t.Helper()
+	ctx := context.Background()
+	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		_, err := db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", id)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("delete peer %d: %v", id, err)
+	}
+	e.refreshReplicaCount(ctx)
 }
 
 func TestPoolSizing_ShardPool(t *testing.T) {
@@ -78,12 +113,11 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 	}
 }
 
-// TestPoolSizing_ObservedReplicasLive pins the observed-R path end to end through the real signal
-// seam: a peer's hello shrinks the derived pool to the 1/R share immediately (and is answered with a
-// ping); a second peer shrinks it further; a goodbye regrows it; and the SetMaxOpenConns override,
+// TestPoolSizing_ObservedReplicasLive pins the observed-R path end to end through the registry: a peer
+// row joining shrinks the derived pool to the 1/R share on the recount; a second peer shrinks it
+// further; a departure regrows it; a duplicate recount is a no-op; and the SetMaxOpenConns override,
 // once set, is never divided by fleet changes.
 func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
-	noPoolGrace(t)
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -97,70 +131,56 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 	assert.Equal(1, e.observedReplicas())
 
-	hello := func(id string) {
-		b, _ := json.Marshal(peerPayload{Origin: id})
-		assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
-	}
-	goodbye := func(id string) {
-		b, _ := json.Marshal(peerPayload{Origin: id})
-		assert.NoError(e.DeliverSignal(ctx, string(signalOpGoodbye), b))
-	}
-
-	hello("peer-a")
+	addPeerRow(t, e, 1001)
 	assert.Equal(2, e.observedReplicas())
-	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share on the peer's hello")
+	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share once the peer registered")
 
-	hello("peer-b")
+	addPeerRow(t, e, 1002)
 	assert.Equal(3, e.observedReplicas())
 	assert.Equal(16, db.DB.Stats().MaxOpenConnections, "1/3 share at three replicas")
 
-	hello("peer-b") // duplicate hello: no fleet change, no recompute
+	e.refreshReplicaCount(ctx) // recount with no fleet change: no recompute
 	assert.Equal(16, db.DB.Stats().MaxOpenConnections)
 
-	goodbye("peer-a")
-	goodbye("peer-b")
+	delPeerRow(t, e, 1001)
+	delPeerRow(t, e, 1002)
 	assert.Equal(1, e.observedReplicas())
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "graceful goodbyes restore the full budget")
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
 
 	// The pinned override wins over any fleet change.
 	assert.NoError(e.SetMaxOpenConns(11))
-	hello("peer-c")
+	addPeerRow(t, e, 1003)
 	assert.Equal(11, db.DB.Stats().MaxOpenConnections, "the pinned override is never divided")
-
-	// The engine's own echoed hello must not create a phantom peer.
-	before := e.observedReplicas()
-	b, _ := json.Marshal(peerPayload{Origin: e.instanceID})
-	assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
-	assert.Equal(before, e.observedReplicas())
 }
 
-// TestPoolSizing_PeerExpiry pins the crashed-peer path: a peer that stops pinging (its goodbye never
-// comes) is pruned by the heartbeat loop after ~3 ping intervals, and the derived pool regrows.
+// TestPoolSizing_PeerExpiry pins the crashed-peer path: a peer that stops heartbeating (its row goes
+// stale, and no goodbye ever comes) drops out of the count once its row ages past the freshness window
+// (4x the heartbeat cadence). The heartbeat loop re-reads R on its own and regrows the pool - no signal
+// is involved, which is exactly what makes a vanished peer recoverable without cooperation.
 func TestPoolSizing_PeerExpiry(t *testing.T) {
-	noPoolGrace(t)
 	assert := testarossa.For(t)
-	ctx := context.Background()
 
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	e.pingInterval = 50 * time.Millisecond // 3x expiry = 150ms
+	e.pingInterval = 50 * time.Millisecond // freshness window = 4x = 200ms
 	e.RunInTest(t)
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 
-	b, _ := json.Marshal(peerPayload{Origin: "peer-crash"})
-	assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
-	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share while the peer lives")
+	// A peer registers a fresh row but then never heartbeats again (crashed).
+	addPeerRow(t, e, 2001)
+	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share while the peer's row is fresh")
 
-	// The peer never pings again (crashed). The loop must prune it and regrow the pool.
+	// The heartbeat loop re-reads R every 50ms; once the crashed peer's row ages past 200ms it is no
+	// longer counted, and the pool regrows to the full budget - with no forced recount from the test.
 	deadline := time.Now().Add(5 * time.Second)
-	for e.observedReplicas() != 1 && time.Now().Before(deadline) {
+	for db.DB.Stats().MaxOpenConnections != 48 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	assert.Equal(1, e.observedReplicas(), "crashed peer pruned after expiry")
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget restored")
+	assert.Equal(1, e.observedReplicas(), "crashed peer aged out of the count")
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget restored by the heartbeat recount")
 }
 
 // TestPoolSizing_PoolGrowsForLongTasks pins the grow-on-demand pool: with every worker parked in a
@@ -216,7 +236,6 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 // the only one that can re-derive it, because recomputePools (the fleet-change path) early-returns while
 // an override pins the pools.
 func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
-	noPoolGrace(t)
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -341,12 +360,12 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 // over-connecting the shard's server, and sticky until the next fleet change (the dedupe sees R unchanged
 // and skips). poolsLock now spans read-of-R through push, so the last writer wins with the value it read.
 //
-// The interleaving is forced, not raced: a breakpoint freezes the first recompute in exactly that window.
-// With the lock, the second recompute blocks on it and applies AFTER - which is the fix working.
+// The interleaving is forced, not raced: a fault freezes the first recompute in exactly that window.
+// With the lock, the second recompute blocks on it and applies AFTER - which is the fix working. R is
+// driven directly (observedR + recomputePools) rather than through the registry, so the two recomputes
+// read the two different counts the race needs.
 func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
-	noPoolGrace(t)
 	assert := testarossa.For(t)
-	ctx := context.Background()
 
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
@@ -359,29 +378,22 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	}
 	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 
-	hello := func(id string) {
-		b, _ := json.Marshal(peerPayload{Origin: id})
-		assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
-	}
-
-	// Stall peer-a's recompute (one-shot) after it has read R=2, before it pushes 48/2=24.
+	// Stall the first recompute (one-shot) after it has read R=2, before it pushes 48/2=24.
 	e.seams.InjectN(1, faultSlowPoolPush)
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		hello("peer-a")
-	}()
-	time.Sleep(slowPoolPushDelay / 10) // peer-a is now inside the window, holding a stale R=2
+	e.observedR.Store(2)
+	wg.Go(func() {
+		e.recomputePools()
+	})
+	time.Sleep(slowPoolPushDelay / 10) // the first recompute is now inside the window, holding a stale R=2
 
-	// peer-b arrives while peer-a is stalled, and its recompute is NOT stalled: it sees R=3 and wants
-	// 48/3=16. Unserialized, it pushes 16 immediately and peer-a then overwrites it with the stale 24.
-	// Serialized, it cannot start until peer-a's push is done, so 16 lands last - the correct value.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		hello("peer-b")
-	}()
+	// A second recompute runs while the first is stalled, and is NOT stalled: it sees R=3 and wants
+	// 48/3=16. Unserialized, it pushes 16 immediately and the first then overwrites it with the stale 24.
+	// Serialized, it cannot start until the first's push is done, so 16 lands last - the correct value.
+	e.observedR.Store(3)
+	wg.Go(func() {
+		e.recomputePools()
+	})
 	wg.Wait()
 
 	// The fleet is 3, so the pool must be the R=3 share - not the R=2 share applied last.
@@ -398,9 +410,7 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 // the override applies last, or the recompute early-returns because the override is already set. Either way
 // the pin stands.
 func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
-	noPoolGrace(t)
 	assert := testarossa.For(t)
-	ctx := context.Background()
 
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
@@ -412,15 +422,13 @@ func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
 		return
 	}
 
-	// A peer's recompute reads R=2 (derived 24) and stalls before pushing.
+	// A recompute reads R=2 (derived 24) and stalls before pushing.
 	e.seams.InjectN(1, faultSlowPoolPush)
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		b, _ := json.Marshal(peerPayload{Origin: "peer-a"})
-		assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
-	}()
+	e.observedR.Store(2)
+	wg.Go(func() {
+		e.recomputePools()
+	})
 	time.Sleep(slowPoolPushDelay / 10)
 
 	// The operator pins the pool while that recompute is mid-flight.
@@ -558,7 +566,6 @@ func TestPoolSizing_WorkerCeiling(t *testing.T) {
 // cache stay sized by the connection budget (8x conns, floor 64), because a worker parked in a long
 // ExecuteTask holds no connection and must not inflate the refill scan.
 func TestPoolSizing_DerivedWorkers(t *testing.T) {
-	noPoolGrace(t)
 	assert := testarossa.For(t)
 
 	// Zero-config: one default shard (undeclared CPUs -> the assumed 2-vCPU pool of 12). The max is the
@@ -566,7 +573,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	// connection budget: max(64, 8 x 12) = 96.
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
-	e.RunInTest(t)
+	startSolo(t, e, "e")
 	assert.Equal(96, e.workersDispatch, "resident/dispatch set stays connection-derived")
 	assert.Equal(192, e.cache.Capacity(), "cache is 2x the dispatch count, never 2x the ceiling")
 	assert.True(int(e.workers.Load()) > 1000, "the worker max is the lease-margin ceiling (got %d)", e.workers.Load())
@@ -578,7 +585,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(e2.SetHost(noopHost{}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 2, VirtualCPUs: 2}))
-	e2.RunInTest(t)
+	startSolo(t, e2, "e2")
 	assert.Equal(480, e2.workersDispatch)
 	assert.True(int(e2.workers.Load()) < workerCeiling(48, 0.3), "the smallest pool sets the ceiling")
 
@@ -589,7 +596,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	eBig := NewEngine()
 	assert.NoError(eBig.SetHost(noopHost{}))
 	assert.NoError(eBig.SetWorkers(300)) // > the zero-config dispatch count of 96
-	eBig.RunInTest(t)
+	startSolo(t, eBig, "eBig")
 	assert.Equal(int32(300), eBig.workersResident.Load(), "an explicit SetWorkers is spawned in full")
 	assert.Equal(192, eBig.cache.Capacity(), "but the cache still follows the dispatch count")
 
@@ -598,7 +605,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(e3.SetHost(noopHost{}))
 	assert.NoError(e3.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e3.SetWorkers(2))
-	e3.RunInTest(t)
+	startSolo(t, e3, "e3")
 	assert.Equal(2, int(e3.workers.Load()))
 }
 
@@ -616,8 +623,6 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 // Severity is nil at R=1 - where the two numbers agree by construction - which is why this escaped every test and
 // every single-replica deployment.
 func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
-	noPoolGrace(t)
-	ctx := context.Background()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -629,10 +634,9 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	solo := e.cache.Capacity()
 	assert.True(solo > 100, "a solo replica caches against the whole budget (got %d)", solo)
 
-	// Seven peers say hello: the pool is re-divided by 8, and the cache must come down with it.
-	for _, id := range []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7"} {
-		b, _ := json.Marshal(peerPayload{Origin: id})
-		assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
+	// Seven peers register: the pool is re-divided by 8, and the cache must come down with it.
+	for id := int64(3001); id <= 3007; id++ {
+		addPeerRow(t, e, id)
 	}
 	assert.Equal(8, e.observedReplicas())
 
@@ -640,131 +644,90 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	assert.True(split < solo, "the cache must follow the pool split down (was %d, still %d)", solo, split)
 
 	// And back up as peers leave, so a shrinking fleet is not left under-fed.
-	for _, id := range []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7"} {
-		b, _ := json.Marshal(peerPayload{Origin: id})
-		assert.NoError(e.DeliverSignal(ctx, string(signalOpGoodbye), b))
+	for id := int64(3001); id <= 3007; id++ {
+		delPeerRow(t, e, id)
 	}
 	assert.Equal(1, e.observedReplicas())
 	assert.Equal(solo, e.cache.Capacity(), "the cache follows the pool back up when the fleet shrinks")
 }
 
-// TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown pins the peer-discovery window.
-//
-// At Startup the replica count is NOT known: peer discovery has not run, so observedReplicas() is 1 and the
-// derivation would hand every replica of a cold-starting fleet the WHOLE per-database budget at once. Eight
-// replicas on an 8-vCPU shard would each open up to 48 - 384 against a server whose knee is 48, and whose
-// Postgres default max_connections is 100. Under-connecting costs throughput but stays healthy; over-connecting
-// COLLAPSES the database, so the unknown is resolved conservatively - the same asymmetry that governs an
-// undeclared VirtualCPUs, and the same number: startupPoolCap IS the default (undeclared) shard's pool.
-//
-// The window must close on a TIMER. There is no signal that says "R is known": a solo replica hears nothing back
-// (a host does not echo a hello to its sender), and in a fleet the replies land at different latencies, so the
-// FIRST one says R=2 when the truth may be 8. Peers register throughout; the pools stay capped until the window
-// closes and one recompute runs on the count actually converged on.
-func TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown(t *testing.T) {
+// TestPoolSizing_StartupSizesSoloFull pins that a solo replica takes its full derived budget as soon as
+// Startup returns - R is read from the registry synchronously during Startup (this replica's own row is
+// the only one), so there is no async grace window and no cap-then-release: the derived 48 is in place
+// before any worker dispatches.
+func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derives 48 at R=1
+	e.RunInTest(t)
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	assert.Equal(1, e.observedReplicas(), "solo replica reads R=1 from the registry at startup")
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "the full derived pool is in place the moment Startup returns")
+}
+
+// TestPoolSizing_StartupSizesFromRegisteredFleet is the real replacement for the old grace window: a
+// replica joining an already-registered fleet sizes for the full R at Startup, so it NEVER over-connects
+// on a partial count. eng2 reads eng1's row from the shared registry during its own Startup and opens at
+// the R=2 share immediately - the property the async grace window used to approximate, now exact because
+// the count comes from the database, not from waiting on signals. It also pins that the count propagates
+// with no signal wiring at all (noopHost): eng1 converges to R=2 purely via its heartbeat recount.
+func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	saved := startupPoolGrace
-	startupPoolGrace = 300 * time.Millisecond
-	t.Cleanup(func() { startupPoolGrace = saved })
+	// eng1 starts solo and registers itself. Small heartbeat so its recount converges within the test.
+	eng1 := NewEngine()
+	assert.NoError(eng1.SetHost(noopHost{}))
+	assert.NoError(eng1.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	eng1.pingInterval = 100 * time.Millisecond
+	assert.NoError(eng1.SetInTest(t.Name()))
+	assert.NoError(eng1.Startup(ctx))
+	t.Cleanup(func() { eng1.Shutdown(ctx) })
 
-	e := NewEngine()
-	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derives 48 at R=1
-	e.RunInTest(t)
-
-	db, err := e.db.Shard(1)
+	db1, err := eng1.db.Shard(1)
 	assert.NoError(err)
+	assert.Equal(48, db1.DB.Stats().MaxOpenConnections, "solo eng1 holds the full budget")
 
-	// Inside the window: capped, NOT the derived 48. This is the whole point - a fleet starting together must not
-	// each open the full budget before they have found each other.
-	assert.Equal(startupPoolCap, db.DB.Stats().MaxOpenConnections, "the pool is capped until the replica count is known")
+	// eng2 starts against the SAME databases (shared SetInTest key). At its Startup it reads eng1's row,
+	// so R=2 is known BEFORE it dispatches - it opens at 24, never over-connecting on a partial count.
+	eng2 := NewEngine()
+	assert.NoError(eng2.SetHost(noopHost{}))
+	assert.NoError(eng2.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	eng2.pingInterval = 100 * time.Millisecond
+	assert.NoError(eng2.SetInTest(t.Name()))
+	assert.NoError(eng2.Startup(ctx))
+	t.Cleanup(func() { eng2.Shutdown(ctx) })
 
-	// A peer says hello mid-window. It registers - but it must NOT push the derived sizes: acting on a partial
-	// count would size for R=2 when the truth may be 8, over-connecting fourfold. The cap holds.
-	b, _ := json.Marshal(peerPayload{Origin: "peer-1"})
-	assert.NoError(e.DeliverSignal(ctx, string(signalOpHello), b))
-	assert.Equal(2, e.observedReplicas(), "the peer is registered even though the pools do not move")
-	assert.Equal(startupPoolCap, db.DB.Stats().MaxOpenConnections, "a partial replica count must not size the pool")
+	db2, err := eng2.db.Shard(1)
+	assert.NoError(err)
+	assert.Equal(2, eng2.observedReplicas(), "eng2 sees the registered fleet at startup")
+	assert.Equal(24, db2.DB.Stats().MaxOpenConnections, "eng2 sizes for R=2 immediately - no partial over-connect")
 
-	// The window closes: ONE recompute, on the count converged on (R=2, so 48/2 = 24).
+	// eng1 converges to the R=2 share on its own heartbeat recount, with no signal wiring.
 	deadline := time.Now().Add(5 * time.Second)
-	for db.DB.Stats().MaxOpenConnections == startupPoolCap && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	for db1.DB.Stats().MaxOpenConnections != 24 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
 	}
-	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "the derived size is taken once the window closes")
+	assert.Equal(24, db1.DB.Stats().MaxOpenConnections, "eng1 converges to R=2 via its heartbeat recount")
 }
 
-// TestPoolSizing_StartupCapReleasesForASoloReplica pins the case the dedupe seed used to break: a SOLO replica
-// (no peer ever says hello) must take its full derived budget once the grace window closes. observedReplicas() is 1
-// throughout, so with lastAppliedR pre-seeded to 1 the grace-timer recompute's 1==1 swap no-op'd and the pool stayed
-// pinned at startupPoolCap forever - a silent ~4x under-connect on the single most common deployment shape. Seeding
-// lastAppliedR to 0 ("nothing applied yet") makes the first recompute a genuine change and pushes the derived size.
-func TestPoolSizing_StartupCapReleasesForASoloReplica(t *testing.T) {
+// TestPoolSizing_StartupOverridePins pins that SetMaxOpenConns - the expert / external-pooler path -
+// pins the pool exactly at Startup and is not divided by R (the discovery still runs so peers count this
+// replica, but the override is never second-guessed).
+func TestPoolSizing_StartupOverridePins(t *testing.T) {
 	assert := testarossa.For(t)
-
-	saved := startupPoolGrace
-	startupPoolGrace = 300 * time.Millisecond
-	t.Cleanup(func() { startupPoolGrace = saved })
-
-	e := NewEngine()
-	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derives 48 at R=1
-	e.RunInTest(t)
-
-	db, err := e.db.Shard(1)
-	assert.NoError(err)
-
-	// Inside the window: capped, and no peer will ever arrive.
-	assert.Equal(startupPoolCap, db.DB.Stats().MaxOpenConnections, "the pool is capped until the window closes")
-	assert.Equal(1, e.observedReplicas(), "solo - observedReplicas stays 1 for the whole test")
-
-	// The window closes with R still 1. The full derived budget (48, undivided) must be taken - not held at the cap.
-	deadline := time.Now().Add(5 * time.Second)
-	for db.DB.Stats().MaxOpenConnections == startupPoolCap && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "a solo replica takes its full derived pool once the grace timer fires")
-	assert.Equal(1, e.observedReplicas(), "still solo - the release came from the grace timer, not a peer")
-}
-
-// TestPoolSizing_StartupCapNeverRaisesASmallPool pins that the cap only ever LOWERS. A shard whose derived pool is
-// already smaller than the cap keeps its own smaller pool - the cap is a ceiling for the unknown, not a floor.
-func TestPoolSizing_StartupCapNeverRaisesASmallPool(t *testing.T) {
-	assert := testarossa.For(t)
-
-	saved := startupPoolGrace
-	startupPoolGrace = time.Hour // hold the window open for the whole test
-	t.Cleanup(func() { startupPoolGrace = saved })
-
-	e := NewEngine()
-	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 1})) // derives 6, which is below the cap
-	e.RunInTest(t)
-
-	db, err := e.db.Shard(1)
-	assert.NoError(err)
-	assert.Equal(connsPerVCPU, db.DB.Stats().MaxOpenConnections, "a shard smaller than the cap keeps its own pool")
-	assert.True(connsPerVCPU < startupPoolCap)
-}
-
-// TestPoolSizing_StartupCapBypassedByOverride pins that SetMaxOpenConns - the expert / external-pooler path -
-// pins the pool exactly and is not second-guessed by the discovery window.
-func TestPoolSizing_StartupCapBypassedByOverride(t *testing.T) {
-	assert := testarossa.For(t)
-
-	saved := startupPoolGrace
-	startupPoolGrace = time.Hour
-	t.Cleanup(func() { startupPoolGrace = saved })
 
 	e := NewEngine()
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	assert.NoError(e.SetMaxOpenConns(40)) // above the cap, and deliberate
+	assert.NoError(e.SetMaxOpenConns(40))
 	e.RunInTest(t)
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	assert.Equal(40, db.DB.Stats().MaxOpenConnections, "an explicit override is never capped")
+	assert.Equal(40, db.DB.Stats().MaxOpenConnections, "an explicit override pins the pool, ignoring R")
 }

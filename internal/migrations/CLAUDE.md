@@ -40,7 +40,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `cancel_reason` | Reason passed to `Cancel(flowKey, reason)`. Written to every flow in the cancellation chain in the same UPDATE that sets `status='cancelled'`, first-cancel-wins. Surfaced as `FlowOutcome.CancelReason` |
 | `time_budget_ms` | Per-flow task time budget, resolved from `FlowOptions.TimeBudget` (else the `SetTimeBudget` default) and frozen at `Create`; the engine imposes no ceiling (a host bounds it before `Create`). Seeds every step's `time_budget_ms`. Inherited by subgraph children **and** by `Continue`/`Fork` (which carry the source's policy). Always stored concrete at `Create`; a `0` is unexpected and falls back to the live engine default at step insert (pure defense) |
 | `awaited` | Peer-broadcast gate for flow stops. `0` default; stamped `1` (write-once, `WHERE awaited=0`) at the top of every `Await`/`Poll` (`Run` awaits, so it stamps too). A flow-stop site broadcasts the `statusChange` peer signal only when set - that broadcast's sole purpose is to wake remote awaiters, so a never-awaited (fire-and-forget) flow stops without a `SignalPeers` fan-out; local waiters are woken in-memory regardless. Advisory, never load-bearing: an `Await` whose stamp races the stop's read is caught by its own `awaitPollInterval` re-snapshot, the same backstop that covers any lost wake, and an unreadable flag is treated as `1` (broadcasting is always safe). Never reset; not inherited (`Fork`/`Continue`/subgraph children start at `0` - their awaiters are their own). Unindexed: read by PK (the stop sites' existing flow-row reads, or one batched `IN` scan on the multi-flow Cancel/interrupt/orphan paths) |
-| `engine_id` | Forensic provenance stamp: the random per-process id (fresh on every restart) of the engine replica that INSERTed the row - `Create`/`Continue`'s `insertFlowTx` and `Fork`'s clone stamp the creator. Never read by the engine; **deliberately unindexed** (an index on hot-insert tables would be pure write amplification for a rare one-off forensic query). `0` = pre-column row. Also the fallback substrate for a ledger-based replica count (distinct ids over an `ORDER BY <pk> DESC LIMIT 1000` backward PK tail-scan) should the signal-only peer discovery ever need a backstop; not implemented - the peer signals own the replica count |
+| `engine_id` | Forensic provenance stamp: the random per-process id (fresh on every restart) of the engine replica that INSERTed the row - `Create`/`Continue`'s `insertFlowTx` and `Fork`'s clone stamp the creator. Never read by the engine; **deliberately unindexed** (an index on hot-insert tables would be pure write amplification for a rare one-off forensic query). `0` = pre-column row. The same random per-process id is what a replica writes into `dwarf_peers` to be counted for the connection-pool split (see that table below); on the flows/steps rows it is provenance only |
 
 #### `dwarf_steps`
 
@@ -81,7 +81,23 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `fairness_key` | Denormalized copy of the flow's `fairness_key` |
 | `fairness_weight` | Denormalized copy of the flow's `fairness_weight` |
 | `parked` | Selection discriminator. `0` = active; `1` = surgraph park. The selection and saturation indexes lead with `(status, parked)` and the claim CAS requires `parked=parkedNone`, so non-zero rows are excluded from the hot path. See "Step Parking" |
-| `engine_id` | Forensic provenance stamp, dual-role: the INSERT stamps the **creator** (entry step, transition successors, fan-in step, Fork clone - the replica whose worker created the row) and the claim CAS **overwrites** it with the **claimer** (the replica that leased and ran this attempt; rides the existing UPDATE, zero extra round trips). So a pending row shows who created it, a running/terminal row who executed it. Never read by the engine; deliberately unindexed; `0` = pre-column row. Same fallback role as the flows column |
+| `engine_id` | Forensic provenance stamp, dual-role: the INSERT stamps the **creator** (entry step, transition successors, fan-in step, Fork clone - the replica whose worker created the row) and the claim CAS **overwrites** it with the **claimer** (the replica that leased and ran this attempt; rides the existing UPDATE, zero extra round trips). So a pending row shows who created it, a running/terminal row who executed it. Never read by the engine; deliberately unindexed; `0` = pre-column row |
+
+#### `dwarf_peers`
+
+The replica registry that backs the observed replica count R (which divides each shard's connection pool - see
+`engine/CLAUDE.md` §"Peer discovery"). One row per **live** engine replica, written to **every** shard.
+
+| Column | Meaning |
+|---|---|
+| `engine_id` | **Primary key** - the replica's random per-process id (the same value stamped as provenance on `dwarf_flows`/`dwarf_steps`). PK, not a mere index: it is *identity*, so a heartbeat is a clean update-by-id and the astronomically-unlikely id collision surfaces as a loud constraint violation rather than a silent double-count. Fresh on every restart, so a restarted replica inserts a new row and its old one ages out (never updated again) |
+| `seen_at` | UTC heartbeat timestamp, `NOW_UTC()` at every write (never a bound Go time - one clock per shard). A replica is **counted** while `seen_at > NOW - 4x pingInterval` (so a crashed peer, whose owner sends no goodbye, drops out of the count on its own) and its dead row is **DELETED** once `seen_at < NOW - 8x pingInterval` (hygiene only; the read filter already stopped counting it). Shutdown deletes the row outright |
+
+**No secondary index, by design.** The table holds one row per live replica - a handful, effectively always in the
+buffer pool - so the `COUNT`/`DELETE`/`UPDATE` all run as trivial full scans. A `seen_at` index would be pure write
+amplification on a hot-ish row for zero read benefit. The PK on `engine_id` is *identity* (the upsert target), not a
+scan-speed index. Written and read on **all** shards via `OnEach` (parallel), taking `MAX(count)` across them, so a
+future shard-fault-tolerant `OnEach` reads the count from the survivors with no schema change.
 
 ## Database Indexing Strategy
 

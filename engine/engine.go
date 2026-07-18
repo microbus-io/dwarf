@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"math"
 	"math/rand/v2"
 	"net/http"
@@ -109,11 +110,10 @@ type Engine struct {
 	engineID   int64
 	instanceID string
 
-	// Peer discovery: last time each peer instanceID was heard from (hello/ping/goodbye signals).
-	// Initialized to {self: now} at construction. The count of fresh entries is the observed replica
-	// count R that divides the derived per-shard connection pools - a lookup, not a control loop.
-	peersLock sync.Mutex
-	peers     map[string]time.Time
+	// Peer discovery: the observed replica count R, read from the shared dwarf_peers registry by the
+	// Startup discovery and the heartbeat loop (see peers.go). R divides the derived per-shard
+	// connection pools - a lookup, not a control loop. peersStop/peersLoop drive the heartbeat.
+	observedR atomic.Int32
 	peersStop chan struct{}
 	peersLoop sync.WaitGroup
 	// lastAppliedR is the replica count the pools were last derived with, to skip no-op recomputes.
@@ -151,12 +151,9 @@ type Engine struct {
 	// cancelled until after every worker has drained (so in-flight database work always commits), so there is
 	// nothing else to watch. Used by persist's retry loop to hand its step back immediately rather than sleep
 	// out a backoff nobody is waiting for.
-	// poolGraceDone is false until the peer-discovery window closes (runPeersLoop owns the timer). While false,
-	// recomputePools declines to act on a partial replica count and every pool stays at startupPoolCap.
-	poolGraceDone atomic.Bool
-	drainStop     chan struct{}
-	spawnLock     sync.Mutex
-	spawnClosed   bool // set under spawnLock before the pool is drained: no goroutine may join
+	drainStop   chan struct{}
+	spawnLock   sync.Mutex
+	spawnClosed bool // set under spawnLock before the pool is drained: no goroutine may join
 	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
 	// input, resolved at Startup. shardRTTMs is each shard's round-trip time, probed once at Startup and
 	// held so the worker ceiling can be re-derived whenever the observed replica count (and with it each
@@ -214,7 +211,7 @@ type Engine struct {
 	// (reapInterval, wedgeSweepInterval), so an otherwise minutes-long path is observable.
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	awaitPollInterval   time.Duration // Await lost-wake re-snapshot cadence (5s)
-	pingInterval        time.Duration // peer-discovery heartbeat cadence; peers expire at 3x (20s)
+	pingInterval        time.Duration // peer-registry heartbeat cadence; a peer is counted <4x, pruned >8x (30s)
 	refillPace          time.Duration // pause after a refill that filled the cache (deep backlog); see refillerLoop (20ms)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
@@ -238,16 +235,13 @@ func NewEngine() *Engine {
 	e.defaultPriority.Store(100)
 	e.engineID = int64(rand.Uint64() >> 1) // positive, 63 bits of entropy
 	e.instanceID = strconv.FormatInt(e.engineID, 36)
-	e.peers = map[string]time.Time{e.instanceID: time.Now()}
-	// 0, not 1: nothing has been APPLIED yet. Until the grace window closes the pools sit at
-	// startupPoolCap, derived with no R at all - so the first recompute (the grace timer, even on a
-	// solo replica whose observedReplicas() is 1) must see a change and push the derived sizes. Seeding
-	// 1 made a solo replica's 1==1 swap a no-op, pinning it at the cap forever. shardPool clamps
-	// replicas=max(1,...), so 0 never reaches the arithmetic; it is purely the dedupe's "unapplied" sentinel.
+	// 0, not 1: "nothing derived yet." Startup reads R from the registry, sizes the pools directly, and
+	// sets lastAppliedR=R; the heartbeat's recompute then dedupes against that. shardPool clamps
+	// replicas=max(1,...), so the 0 sentinel never reaches the arithmetic.
 	e.lastAppliedR.Store(0)
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
-	e.pingInterval = 20 * time.Second
+	e.pingInterval = 30 * time.Second
 	e.refillPace = 20 * time.Millisecond
 	e.wedgeSweepInterval = 5 * time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute
@@ -500,46 +494,25 @@ func (e *Engine) Startup(ctx context.Context) error {
 	}
 	// Per-shard pool sizes: the SetMaxOpenConns override pins every pool; otherwise each shard's budget
 	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools), split across the
-	// observed replicas. At Startup only this replica is known (R=1, full budget); the hello broadcast
-	// at the end of Startup discovers peers within ~a heartbeat and recomputePools shrinks the shares.
-	//
-	// But R IS NOT KNOWN YET - peer discovery has not run, so observedReplicas() is 1 and the derivation would hand
-	// every replica of a cold-starting fleet the WHOLE per-database budget at once. So each pool is CAPPED
-	// (startupPoolCap) until the discovery window closes, and only then are the derived sizes taken. The cap only
-	// ever lowers: a shard whose derived pool is already smaller keeps it. An explicit SetMaxOpenConns is the expert
-	// path and bypasses the cap entirely.
+	// observed replicas R. R comes from the shared dwarf_peers registry, which needs open connections to
+	// read - so the shards first open at a small BOOTSTRAP pool (enough to register + probe + read R,
+	// which is all any pre-dispatch work needs), then, once R is known, every pool is resized to its
+	// derived R-divided share BEFORE a single worker dispatches. There is no async grace window: R is
+	// known before the replica takes on work, so a cold-starting fleet's rows settle in the registry and
+	// one read yields the converged count - no partial-count over-connect. Lazy fill means the bootstrap
+	// ceiling barely materializes (a handful of connections), so the whole fleet's startup stays well
+	// under any server's connection limit.
 	override := int(e.maxOpenConns.Load())
-	replicas := e.observedReplicas()
-	capped := override == 0 && startupPoolGrace > 0
-	e.poolGraceDone.Store(!capped)
-	sized := func(spec ShardSpec) (idle, open int) {
-		idle, open = shardPool(spec, override, replicas)
-		if capped && open > startupPoolCap {
-			open = startupPoolCap
-			idle = max(2, open/2)
-		}
-		return idle, open
-	}
 	e.shardsLock.Lock()
 	shards := make(map[int]database.ShardConfig, len(e.shardSpecs))
 	for idx, spec := range e.shardSpecs {
-		idle, open := sized(spec)
-		shards[idx] = database.ShardConfig{DSN: spec.DSN, MaxIdleConns: idle, MaxOpenConns: open}
+		shards[idx] = database.ShardConfig{DSN: spec.DSN, MaxIdleConns: startupBootstrapConns, MaxOpenConns: startupBootstrapConns}
 	}
 	e.shardsLock.Unlock()
 	if len(shards) == 0 {
-		// No shard registered: the single default shard, sized by the same rule (no spec = defaults).
-		idle, open := sized(ShardSpec{})
-		shards[1] = database.ShardConfig{MaxIdleConns: idle, MaxOpenConns: open}
+		// No shard registered: the single default shard, opened at the same bootstrap size.
+		shards[1] = database.ShardConfig{MaxIdleConns: startupBootstrapConns, MaxOpenConns: startupBootstrapConns}
 	}
-	// The RESIDENT worker set (and, with it, the candidate cache and every refill scan) is sized from
-	// the aggregate connection budget: dispatch is database-bound, so 8 x conns keeps the pool saturated
-	// for short tasks, floored at the historical 64 for the zero-config case.
-	totalConns := 0
-	for _, sc := range shards {
-		totalConns += sc.MaxOpenConns
-	}
-	e.workersDispatch = max(64, workersPerConnBudget*totalConns)
 
 	err := e.db.Open(ctx, database.Config{
 		Shards:         shards,
@@ -553,9 +526,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 	}
 
 	// Measure the RTT to each shard (a few SELECT 1s on connections just opened) and hold it: the worker
-	// ceiling is a function of the shard's POOL, which changes when peers are discovered or an override
+	// ceiling is a function of the shard's POOL, which changes when the fleet changes or an override
 	// lands, so the ceiling is re-derived on those events (recomputeWorkerCeiling) rather than frozen
-	// here. The map is published under shardsLock because its readers are the peer-signal goroutines and
+	// here. The map is published under shardsLock because its readers are the heartbeat goroutine and
 	// the live SetMaxOpenConns, and a Shutdown/Startup restart reassigns it - an unsynchronized map
 	// read/write is a fatal throw, not a recoverable panic.
 	rtts := make(map[int]float64, len(shards))
@@ -574,6 +547,31 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.shardsLock.Lock()
 	e.shardRTTMs = rtts
 	e.shardsLock.Unlock()
+
+	// Discover R from the registry (register self, nudge peers, settle, read), then size every pool from
+	// the derived R-divided budget - the real sizes, taken before any worker dispatches. lastAppliedR is
+	// seeded to R so the first heartbeat recompute dedupes; observedR is set inside discovery.
+	replicas := e.discoverReplicasAtStartup(ctx, override)
+	e.observedR.Store(int32(replicas))
+	e.lastAppliedR.Store(int32(replicas))
+	e.shardsLock.Lock()
+	specs := maps.Clone(e.shardSpecs)
+	e.shardsLock.Unlock()
+	totalConns := 0
+	for _, idx := range e.db.Indices() {
+		db, dbErr := e.db.Shard(idx)
+		if dbErr != nil {
+			continue
+		}
+		idle, open := shardPool(specs[idx], override, replicas) // zero-value spec = the default shard's sizing
+		db.SetMaxOpenConns(open)
+		db.SetMaxIdleConns(idle)
+		totalConns += open
+	}
+	// The RESIDENT worker set (and, with it, the candidate cache and every refill scan) is sized from
+	// the aggregate connection budget: dispatch is database-bound, so 8 x conns keeps the pool saturated
+	// for short tasks, floored at the historical 64 for the zero-config case.
+	e.workersDispatch = max(64, workersPerConnBudget*totalConns)
 	e.recomputeWorkerCeiling(ctx)
 
 	e.initRuntime()
@@ -708,17 +706,13 @@ func (e *Engine) initRuntime() {
 	e.reaperWorker.Go(func() {
 		e.reaperLoop(e.lifetimeCtx)
 	})
-	// Peer discovery: refresh self, start the heartbeat, and announce this replica. Receivers reply
-	// with an immediate ping, so the observed replica count converges within one round trip and
-	// recomputePools shrinks the derived shares from the R=1 the pools were just opened with.
-	e.peersLock.Lock()
-	e.peers[e.instanceID] = time.Now()
-	e.peersLock.Unlock()
+	// Peer discovery: start the heartbeat. This replica already registered itself and read R during
+	// Startup (discoverReplicasAtStartup), and the pools are already sized for that R; the loop keeps the
+	// registry row fresh and re-reads R every pingInterval so a fleet change resizes the pools.
 	e.peersStop = make(chan struct{})
 	e.peersLoop.Go(func() {
 		e.runPeersLoop()
 	})
-	e.emitSignal(e.lifetimeCtx, signalOpHello, peerPayload{Origin: e.instanceID})
 	e.requestRefill()
 }
 
@@ -772,13 +766,18 @@ func (e *Engine) drainRuntime() {
 	e.spawnLock.Lock()
 	e.spawnClosed = true
 	e.spawnLock.Unlock()
-	// Announce the graceful exit first (fire-and-forget) so peers drop this replica and regrow their
-	// pool shares immediately rather than waiting out the 3x-ping expiry, then stop the heartbeat.
-	e.emitSignal(context.Background(), signalOpGoodbye, peerPayload{Origin: e.instanceID})
+	// Stop the heartbeat, then deregister: delete this replica's registry row and nudge peers to recount,
+	// so they regrow their pool shares immediately rather than waiting out the peerStragglerAge. Order
+	// matters - stop the loop first so it cannot re-insert the row after the delete. Both are best-effort
+	// (a still-open shard set): a missed delete just ages out of peers' counts on its own.
 	if e.peersStop != nil {
 		close(e.peersStop)
 	}
 	e.peersLoop.Wait()
+	if err := e.deregisterPeer(context.Background()); err != nil {
+		e.logger.Error("Deregistering peer at shutdown", "error", err)
+	}
+	e.signalPeersChanged(context.Background())
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()

@@ -127,7 +127,7 @@ engine:
   every shard's pool exactly - the benchmarking / external-pooler path; normal deployments never call it),
   `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
   existing flow keeps the budget/priority frozen at its own `Create`). The replica count that divides the derived
-  pools is NOT a setter - it is **observed** live via the peer-discovery signals (see "Peer discovery" below), and
+  pools is NOT a setter - it is **read** live from the shared `dwarf_peers` registry (see "Peer discovery" below), and
   `recomputePools` pushes each shard's recomputed size through the per-shard `sequel.DB` pool setters (hot/atomic);
   the uniform override rides `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. **The derived *worker* ceiling follows the
   pools, and EVERY path that changes a pool must re-derive it** (`recomputeWorkerCeiling`): the ceiling encodes how
@@ -1515,92 +1515,94 @@ engine policy — below.
   connections only queue inside the database - and on small servers actively collapse throughput
   (745 -> 212 steps/s at 1 vCPU between M=16 and M=96), which is why the budget is a hard cap, not an
   optimization.
-- **Until R is known, every pool is CAPPED (`startupPoolCap`, and R is not known at Startup).** Peer discovery has
-  not run when `Startup` sizes the pools, so `observedReplicas()` is 1 and the derivation would hand every replica
-  of a **cold-starting fleet** the whole per-database budget at once - eight replicas on an 8-vCPU shard each
-  opening up to 48, i.e. 384 against a server whose knee is 48 and whose Postgres default `max_connections` is 100.
-  That is the *dangerous* direction of the asymmetry this whole section turns on (under-connecting costs throughput
-  but stays healthy; over-connecting collapses the database), so the unknown is resolved conservatively.
+- **R is discovered at Startup BEFORE any worker dispatches, so pools are sized right the first time - there is no
+  async grace window.** Reading R from the registry needs open connections, so `Startup` opens the shards at a
+  small **bootstrap** pool (`startupBootstrapConns`, 4 - enough to register the peer row, probe the RTT, and read
+  the count, which is all any pre-dispatch work needs), then `discoverReplicasAtStartup` registers self, nudges
+  peers, waits `startupPeerSettle`, reads R, and only then resizes every pool to its derived R-divided share and
+  computes `workersDispatch` - all before `initRuntime` spawns a worker. So the replica takes on work with pools
+  already correct for the fleet it is in; a **cold-starting fleet's** rows settle in the registry and one read
+  yields the converged count, with no partial-count over-connect to defend against.
 
-  **The cap is the same number as the undeclared-vCPU default, and that is the point, not a coincidence**:
-  `connsPerVCPU x defaultVirtualCPUs` (12) is the pool the engine already trusts when it does not know a shard's
-  vCPUs and which measured under the knee even on the 1-vCPU tier. *Until R is known, size every shard as if it
-  were the default, undeclared shard.* It only ever **lowers** - a shard whose derived pool is already smaller keeps
-  it - and an explicit `SetMaxOpenConns` (the expert path) bypasses it entirely. It is a cap on a pool that fills
-  lazily, so a replica in its first seconds opens far fewer than this.
+  **The bootstrap pool is deliberately tiny** because a cold-starting fleet's only connections during that window
+  are these (no worker dispatches yet, and lazy fill means the ceiling barely materializes - a handful of
+  connections), so even N replicas starting together stay far under any server's `max_connections`. It is not the
+  over-connect guard the old cap was - the guard is now "R known before dispatch" - just enough to bootstrap the
+  registry read.
 
-  **The window closes on a TIMER (`startupPoolGrace`, 2s), never on a signal**, and both halves of that matter:
-  - *Not on the first reply.* Replies land at different latencies, so mid-window the count is still climbing
-    (1 -> 2 -> ... -> R). Sizing on the first one picks **R=2 when the truth may be 8** - a fourfold over-connect,
-    the very failure the cap prevents. Peers keep registering; `recomputePools` simply declines to act on a partial
-    count (the check sits **before** the `lastAppliedR` swap, so a mid-window signal cannot consume the dedupe and
-    make the real recompute a no-op).
-  - *Not a lazily-consulted timestamp.* Nothing would consult it: a **solo** replica receives no peer signals at all
-    (a host does not echo a hello back to its sender), and it is exactly the replica that must eventually take its
-    full budget. Something has to fire on its own.
+  **`startupPeerSettle` (250ms) exists for the SIMULTANEOUS cold start, and only that.** Without it an early reader
+  races the other starters' inserts and sees a partial fleet (R=2 when the truth is 8), over-sizing. The wait lets
+  those rows land so one read yields the converged count. It is orders of magnitude shorter than the old
+  signal-convergence window because it is backed by a real registry read, not a guess about when replies arrived;
+  it is skipped under a `SetMaxOpenConns` override (R does not size the pools then) and under test
+  (`!testing.Testing()`, so the suite does not pay it on every `RunInTest` - the peer tests drive R by writing the
+  registry directly). A single replica joining an established fleet needs no settle: the established rows are
+  already there, so its first read is exact.
 
-  **`lastAppliedR` is seeded to 0, not 1, and that is load-bearing for the solo case above.** The seed means "the R
-  the pools were last *derived* with," and until the window closes nothing has been derived - the pools sit at the
-  cap. A solo replica's `observedReplicas()` is 1, so seeding 1 made the grace-timer recompute's `Swap(1)` return 1,
-  the dedupe eat it, and the pool stay pinned at `startupPoolCap` forever (a ~4x under-connect on the commonest
-  deployment shape). Seeding 0 makes that first recompute a genuine change (`0 != 1`) that pushes the derived size.
-  `shardPool` clamps `replicas = max(1, replicas)`, so 0 never reaches the arithmetic - it is purely the dedupe's
-  "nothing applied yet" sentinel. Pinned by `TestPoolSizing_StartupCapReleasesForASoloReplica`.
+  **`lastAppliedR` is seeded to 0 (`"nothing derived yet"`), and Startup sets it to the discovered R** after sizing
+  the pools directly, so the first heartbeat `recomputePools` dedupes against the value the pools actually hold.
+  `shardPool` clamps `replicas = max(1, replicas)`, so the 0 sentinel never reaches the arithmetic.
 
-  The timer lives in `runPeersLoop`'s `select` - which already owns peer state, already calls `recomputePools`, and
-  is already drained - so it needs no separate goroutine, field, or shutdown hook. Pinned by
-  `TestPoolSizing_StartupCapHoldsUntilReplicasAreKnown` (a peer says hello mid-window and the pool does **not**
-  move), plus the never-raises and override-bypass cases.
-
-  This does **not** rescue a host that leaves `SignalPeers` a no-op on a multi-replica deployment: R stays 1, the
-  window closes, and the full budget is taken. Implementing `SignalPeers` is a hard requirement for multi-replica
-  hosts, not something the engine defends against.
+  This does **not** rescue a host that leaves `SignalPeers` a no-op *and* also isolates each replica's databases -
+  but that is a misconfiguration, not the SignalPeers gap: with a shared database the registry alone converges R
+  within one `pingInterval` even if `SignalPeers` never fires. The `peersChanged` nudge only *accelerates* that to
+  sub-second (see "Peer discovery" below).
 
 - **The derived budget is per DATABASE, so the observed replica count R splits it**: each replica
   takes `max(2, open/R)`. The knee belongs to the shard's server, not to one replica - R replicas
-  each holding the full budget overshoot it R times over. R is never declared: the engine observes
-  it live via peer-discovery signals (hello/ping/goodbye - see "Peer discovery"), and every fleet
-  change pushes recomputed pools to the open shards immediately. The `SetMaxOpenConns` override is a
-  per-replica exact number and is never divided.
+  each holding the full budget overshoot it R times over. R is never declared: the engine reads it
+  from the shared `dwarf_peers` registry (see "Peer discovery"), and every fleet change pushes
+  recomputed pools to the open shards immediately. The `SetMaxOpenConns` override is a per-replica
+  exact number and is never divided.
 
-**Peer discovery (observed replica count, `peers.go`).** The engine discovers how many replicas share
-its shards from three peer-signal ops: `hello` on Startup (receivers reply with an immediate `ping`,
-so a joiner converges in one round trip), `ping` re-announced every `pingInterval` (20s) by
-`runPeersLoop`, `goodbye` on graceful Shutdown (first thing in `drainRuntime`, so peers regrow
-without waiting out the expiry). Each replica keeps `map[instanceID]lastSeen` (self included,
-initialized at construction, refreshed by its own loop); the loop prunes entries not heard from for
-3 x `pingInterval` - a CRASHED peer's goodbye never comes - and `observedReplicas()` is a plain `len`
-under `peersLock`. Design posture, decided 2026-07-13: this is a **lookup, not a control loop** (the
-count is exact/discrete and independent of the actuation - a shrunk pool still pings); R is a
-**tuning** number (a wrong count mis-sizes pools, corrupts nothing), which is why - unlike the
-doorbell and statusChange signals - it rides best-effort transport with **no database backstop**.
-Asymmetry by construction: a new peer shrinks pools at once (hello/ping handled inline); a vanished
-peer regrows them lazily (only at the loop's prune).
+**Peer discovery (observed replica count, `peers.go`).** The engine reads how many replicas share its shards' databases
+from the shared **`dwarf_peers`** registry, NOT from the host transport. Each replica heartbeats its own row
+`(engine_id, seen_at)` into **every** shard via `OnEach` every `pingInterval` (30s) and reads
+R = `MAX(COUNT WHERE seen_at > NOW - 4x pingInterval)` across shards (MAX because every shard holds the same
+population; a lagging shard only under-counts, which grows pools - the safe direction). A row unheard-from for 4x is
+no longer counted (a crashed peer, whose owner sends no goodbye, drops out on its own) and is DELETED past 8x
+(hygiene). `Startup` registers + reads synchronously (above); `Shutdown` deletes the row and nudges peers so they
+regrow without waiting out the expiry. `observedReplicas()` is a lock-free atomic read of the last count.
+
+The host's **`peersChanged`** signal is a *best-effort nudge* only: a receiver re-reads the registry on it, which
+accelerates convergence from the heartbeat cadence to sub-second, but correctness rests on the registry + heartbeat.
+So a host that no-ops `SignalPeers` degrades convergence **speed, not the count** - the decisive change from the old
+signal-only scheme, where a no-op `SignalPeers` left every replica believing R=1 and over-connecting. The registry is
+now the database backstop the old design explicitly lacked. Placement: written/read on ALL shards (forward-looking -
+a future shard-fault-tolerant `OnEach` reads the count from survivors with no change here; today `OnEach` is
+all-or-nothing, which is correct because today a down shard fails everything, so the count degrades in lockstep).
+Design posture: still a **lookup, not a control loop** (the count is exact/discrete and independent of the actuation -
+a shrunk pool still heartbeats); R is a **tuning** number (a wrong count mis-sizes pools, corrupts nothing).
+Asymmetry by construction: a new peer shrinks pools promptly (its row + a nudge); a vanished peer regrows them lazily
+(only once its row ages past 4x on some replica's heartbeat recount).
 
 **Every APPLICATION of a pool size is serialized under `poolsLock`** - both writers: the derived
-recompute (`recomputePools`) and the live override (`SetMaxOpenConns`). The `lastAppliedR` dedupe
-skips a no-op recompute but does **not order two live ones**: two peers saying hello microseconds
-apart during a rolling deploy each read a different R, and with nothing serializing read-of-R
-through push, the **R=2 sizes can land AFTER the R=3 sizes** - every replica then holds a half-budget
+recompute (`recomputePools`, driven by `refreshReplicaCount` on the heartbeat or a `peersChanged` nudge) and the live
+override (`SetMaxOpenConns`). The `lastAppliedR` dedupe skips a no-op recompute but does **not order two live ones**:
+two recounts microseconds apart during a rolling deploy each read a different R, and with nothing serializing
+read-of-R through push, the **R=2 sizes can land AFTER the R=3 sizes** - every replica then holds a half-budget
 pool against a fleet of three, over-connecting the shard's server, and it is *sticky* (the next
 recompute sees R unchanged and skips). The override races the same way and worse: `recomputePools`
 reads `maxOpenConns` and only *then* pushes, so a `SetMaxOpenConns` landing in that window has its
 **pinned pools silently overwritten by derived ones** - the operator's explicit pin evaporates. With
 the lock spanning read through push, whichever writer goes second sees a settled world (the override
 applies last, or the recompute early-returns because the override is now set). Lock order:
-`poolsLock` -> `peersLock` (via `observedReplicas`) -> `shardsLock`; both peer-signal call sites
-release `peersLock` before calling, so it cannot cycle. Pinned by
+`poolsLock` -> `shardsLock` (`observedReplicas` is now a lock-free atomic, so it drops out of the order). Pinned by
 `TestPoolSizing_ConcurrentRecomputeAppliesLatestR` and
 `TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride` (both drive the interleaving with the
-`slowPoolPush` seam rather than racing for it; without the lock they measure 24 instead of 16, and a
-pinned 7 turning into 24). A multi-replica host that leaves `SignalPeers`
-a no-op now silently over-connects (each replica sees R=1) - wiring it was already the documented
-multi-replica requirement. `engine_id`/`instanceID` (random per process, fresh on restart) is also
-**stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - pure
-forensic provenance ("which replica created/ran this row"), deliberately unindexed. It also keeps a
-ledger-based R count available as a fallback should the signal-only posture ever prove insufficient:
-distinct `engine_id`s over an `ORDER BY step_id DESC LIMIT 1000` backward PK tail-scan (index-free, and
-the rows age out on their own). That fallback is not implemented - the signals own R.
+`slowPoolPush` seam rather than racing for it - setting `observedR` directly so the two recomputes read the two
+counts the race needs; without the lock they measure 24 instead of 16, and a pinned 7 turning into 24).
+`engine_id`/`instanceID` (random per process, fresh on restart) is the id a replica writes into `dwarf_peers`; it is
+also **stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - forensic
+provenance there ("which replica created/ran this row"), deliberately unindexed.
+
+**A note on tests sharing the registry (`peers.go` / `poolsizing_test.go`).** Because the count is now DB-backed, two
+engines that share a test database (`RunInTest`/`SetInTest` keyed by the same name) share one `dwarf_peers` and count
+each other - which is exactly right for a genuine multi-replica test (`fixtures/crossreplicaawait_test.go`), and
+exactly wrong for a single test that spins up several *independent* engines to assert their solo pool sizes. The
+latter (`TestPoolSizing_DerivedWorkers`) uses `startSolo`, a unique per-engine test-DB key, so each reads R=1. The
+sizing tests drive fleet size by writing fake peer rows (`addPeerRow`/`delPeerRow` + a forced `refreshReplicaCount`)
+rather than through signals.
 - **`VirtualCPUs = 0` (undeclared) assumes `defaultVirtualCPUs = 2`** (pool 12). The vCPU count is a fact
   off the spec sheet - something an operator KNOWS - so this covers the zero-config case, not a guess
   anyone should rely on. It is bounded, not reckless: 2 is the FLOOR of every current-gen AWS RDS class,
@@ -1627,11 +1629,11 @@ The worker count is split into two numbers, because they answer different questi
   holds no connection and dispatches nothing, so a ceiling-sized cache would scan far more of the backlog
   than the replica can ever claim.
   **The CACHE follows the pool split; the RESIDENT WORKER COUNT does not, and that asymmetry is deliberate.**
-  `workersDispatch` is computed once in `Startup`, when peer discovery has not run yet (`observedReplicas()` is
-  still 1), so `sum(per-shard open)` is the FULL per-database budget. Every later fleet change re-divides the
-  pools by R (`recomputePools`), which now **also re-derives the dispatch count from the post-split budget and
-  `cache.Resize`s to it** - the same "every path that changes a pool must re-derive what depends on it" rule the
-  worker ceiling obeys.
+  `workersDispatch` is computed once in `Startup`, from the pools already sized for the R **discovered there** (for
+  a solo start that is R=1, so `sum(per-shard open)` is the full per-database budget). Every later fleet change
+  re-divides the pools by R (`recomputePools`), which **also re-derives the dispatch count from the post-split
+  budget and `cache.Resize`s to it** - the same "every path that changes a pool must re-derive what depends on it"
+  rule the worker ceiling obeys - but does **not** re-spawn the resident worker set.
   - The **cache** had to follow, because it was the half that costs throughput. The refiller scans up to the
     cache's capacity *per fairness key* and wholesale-replaces it, so a replica in a fleet of 8 holding a cache
     sized for the whole budget is handed ~6x more candidates than it can ever claim: stale hints whose claim CAS

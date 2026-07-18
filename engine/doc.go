@@ -40,8 +40,9 @@ limitations under the License.
 // SetTracerProvider) return an error if called after Startup. Tuning derives from the facts the host
 // declares plus what the engine observes: ShardSpec.VirtualCPUs drives each shard's connection budget
 // and its placement weight; the budget is automatically split across the engine replicas sharing the
-// databases, discovered live via peer signals (hello/ping/goodbye over SignalPeers - no replica count
-// is ever declared); and the worker maximum is derived from the crash-recovery lease margin and the
+// databases, counted from a shared peer registry the replicas heartbeat into (no replica count is ever
+// declared, and the SignalPeers transport only accelerates convergence, never determines it); and the
+// worker maximum is derived from the crash-recovery lease margin and the
 // round-trip time measured at Startup, so it holds for any task duration (the pool grows into it only
 // on demand, so short-task deployments never pay for the headroom). The SetWorkers/SetMaxOpenConns
 // overrides exist for tests, benchmarks, and externally-constrained hosts.
