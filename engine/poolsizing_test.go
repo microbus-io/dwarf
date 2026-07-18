@@ -183,6 +183,45 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget restored by the heartbeat recount")
 }
 
+// TestPeers_HeartbeatPrunesStragglers pins the conditional prune: a crashed peer's straggler row (older
+// than the 8x delete window) is removed by the heartbeat pass, while this replica's own fresh row - the
+// one it just upserted - is never touched (the prune predicate is `seen_at < NOW - 8x`, which a fresh
+// row structurally cannot match). Solo (R=1), so the 1/R prune roll always fires when there is something
+// stale, making the assertion deterministic; a larger fleet would prune the same rows, just spread the
+// dice roll so ~one replica per round does it.
+func TestPeers_HeartbeatPrunesStragglers(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(noopHost{}))
+	e.RunInTest(t) // solo: R=1, so a stale row is always pruned on the next heartbeat pass
+
+	// A crashed peer's straggler: a row far older than the 8x prune window.
+	staleMs := e.peerStragglerAge().Milliseconds() + 60_000
+	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		_, err := db.ExecContext(ctx,
+			"INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (?, DATE_ADD_MILLIS(NOW_UTC(), ?))",
+			int64(999001), -staleMs)
+		return err
+	})
+	assert.NoError(err)
+
+	// One heartbeat pass: upsert self (fresh), see stale>0, prune.
+	_, err = e.heartbeatPeers(ctx)
+	assert.NoError(err)
+
+	count := func(id int64) int {
+		var n int
+		assert.NoError(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+			return db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_peers WHERE engine_id=?", id).Scan(&n)
+		}))
+		return n
+	}
+	assert.Equal(0, count(999001), "the straggler row is pruned")
+	assert.Equal(1, count(e.engineID), "this replica's own fresh row survives the prune")
+}
+
 // TestPoolSizing_PoolGrowsForLongTasks pins the grow-on-demand pool: with every worker parked in a
 // slow ExecuteTask and more work waiting, the pool spawns beyond its resident set (up to the ceiling),
 // so long tasks are not capped by the connection-derived dispatch count. This is the whole point of

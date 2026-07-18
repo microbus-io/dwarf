@@ -1560,9 +1560,20 @@ from the shared **`dwarf_peers`** registry, NOT from the host transport. Each re
 `(engine_id, seen_at)` into **every** shard via `OnEach` every `pingInterval` (30s) and reads
 R = `MAX(COUNT WHERE seen_at > NOW - 4x pingInterval)` across shards (MAX because every shard holds the same
 population; a lagging shard only under-counts, which grows pools - the safe direction). A row unheard-from for 4x is
-no longer counted (a crashed peer, whose owner sends no goodbye, drops out on its own) and is DELETED past 8x
-(hygiene). `Startup` registers + reads synchronously (above); `Shutdown` deletes the row and nudges peers so they
-regrow without waiting out the expiry. `observedReplicas()` is a lock-free atomic read of the last count.
+no longer counted (a crashed peer, whose owner sends no goodbye, drops out on its own) and becomes eligible for the
+prune DELETE past 8x. `Startup` registers + reads synchronously (above); `Shutdown` deletes the row and nudges peers
+so they regrow without waiting out the expiry. `observedReplicas()` is a lock-free atomic read of the last count.
+
+**The prune is conditional and statistical, so steady state issues no range-DELETEs at all.** The heartbeat reads
+the fresh count and the stale count (`seen_at <= NOW - 8x`) in **one** scan (`heartbeatPeers`, two `CASE`-`SUM`s -
+no extra round trip), and runs the prune `DELETE` only when `stale > 0` **and** the replica wins a `1/R` dice roll
+(`rand.IntN(fresh) == 0`). So in a healthy fleet the *only* writes touching `dwarf_peers` are conflict-free per-PK
+upserts - the range-`DELETE` (the one op with MySQL gap-lock/deadlock potential on the shared table) never fires -
+and a crash's stragglers are cleaned by ~one replica per round rather than an N-way concurrent DELETE burst right
+when a node died. Pruning is pure hygiene (the fresh filter already excludes stale rows from the count), so a
+delayed or skipped prune is harmless, and a solo replica (R=1) always wins the roll so its own restart stragglers
+never linger. Only the **heartbeat** pass prunes; the `peersChanged` nudge and the Startup read are pure count
+reads (no write). Pinned by `TestPeers_HeartbeatPrunesStragglers`.
 
 The host's **`peersChanged`** signal is a *best-effort nudge* only: a receiver re-reads the registry on it, which
 accelerates convergence from the heartbeat cadence to sub-second, but correctness rests on the registry + heartbeat.

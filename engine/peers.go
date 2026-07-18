@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -181,8 +182,9 @@ func (e *Engine) observedReplicas() int {
 // peerFreshWindow / peerStragglerAge are derived from the heartbeat cadence: a replica beating every
 // pingInterval is COUNTED while its row is younger than 4x the cadence (so up to ~3 missed beats are
 // tolerated before it drops out - a crashed peer's row, whose owner never sends goodbye, ages out of
-// the count on its own), and its dead row is DELETED once older than 8x (pure table hygiene, well past
-// the point it stopped being counted).
+// the count on its own), and its dead row becomes eligible for the DELETE once older than 8x (pure table
+// hygiene, well past the point it stopped being counted; conditionally/statistically pruned - see
+// heartbeatPeers).
 func (e *Engine) peerFreshWindow() time.Duration  { return 4 * e.pingInterval }
 func (e *Engine) peerStragglerAge() time.Duration { return 8 * e.pingInterval }
 
@@ -209,26 +211,29 @@ func (e *Engine) upsertSelf(ctx context.Context, db *sequel.DB) error {
 	return errors.Trace(err)
 }
 
-// writePeerHeartbeat upserts this replica's row and prunes long-dead rows on every shard (parallel via
-// OnEach). Called once at Startup and every pingInterval by runPeersLoop.
-func (e *Engine) writePeerHeartbeat(ctx context.Context) error {
-	straggleMs := e.peerStragglerAge().Milliseconds()
+// registerSelf upserts this replica's row on every shard (parallel via OnEach). The Startup register
+// (pre-settle); it does NOT prune, so the settle sees a clean write pass - pruning is the heartbeat's
+// job (heartbeatPeers), and any stragglers from a prior crashed instance are cleaned there within a
+// heartbeat (the count filter excludes them meanwhile).
+func (e *Engine) registerSelf(ctx context.Context) error {
 	return e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		if err := e.upsertSelf(ctx, db); err != nil {
-			return errors.Trace(err)
-		}
-		// Prune rows older than peerStragglerAge - hygiene, not counting (the read filter already excludes
-		// them). A crashed peer's row is removed here; the survivors keep the table tiny (one row per live
-		// replica), so the unindexed full scan the count relies on stays trivially fast.
-		_, err := db.ExecContext(ctx,
-			"DELETE FROM dwarf_peers WHERE seen_at < DATE_ADD_MILLIS(NOW_UTC(), ?)", -straggleMs)
-		return errors.Trace(err)
+		return errors.Trace(e.upsertSelf(ctx, db))
 	})
 }
 
+// maxReplicaCount folds per-shard fresh counts into R, never below 1 (this replica's own row is always
+// fresh; a transient shard miss only under-counts, which grows pools - the safe direction).
+func maxReplicaCount(counts []int) int {
+	r := 1
+	for _, n := range counts {
+		r = max(r, n)
+	}
+	return r
+}
+
 // readReplicaCount reads R from the registry: COUNT of rows seen within peerFreshWindow on each shard
-// (parallel via OnEach), taking the MAX across shards. Never returns below 1 (this replica's own row is
-// always fresh; a transient miss under-counts, which only grows pools).
+// (parallel via OnEach), taking the MAX across shards. Pure read - no write, no prune - so it is the
+// path the peersChanged nudge and the Startup post-settle read use.
 func (e *Engine) readReplicaCount(ctx context.Context) (int, error) {
 	freshMs := e.peerFreshWindow().Milliseconds()
 	indices, pos := e.shardOrdinals()
@@ -247,26 +252,74 @@ func (e *Engine) readReplicaCount(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
-	r := 1
-	for _, n := range counts {
-		r = max(r, n)
-	}
-	return r, nil
+	return maxReplicaCount(counts), nil
 }
 
-// refreshReplicaCount re-reads R and, when it changed, recomputes the pools. The peersChanged handler
-// and the heartbeat loop share it. A read error is logged and dropped (R is a tuning number; the next
-// heartbeat retries) - it never disturbs the last good count.
+// heartbeatPeers is the heartbeat's single per-shard pass: upsert self, read the fresh AND stale counts
+// in one scan, and conditionally prune - then return R = MAX fresh across shards. The prune runs only
+// when a shard has stale rows (`stale > 0`) AND this replica wins a 1/R dice roll, so:
+//   - steady state issues ZERO range-DELETEs (only conflict-free per-PK upserts touch the table), which
+//     removes the one op with any lock-contention potential (the MySQL gap-lock on `seen_at <`) from the
+//     common path; and
+//   - a crash's stragglers are cleaned by ~one replica per round rather than an N-way concurrent DELETE
+//     burst exactly when a node died.
+//
+// Pruning is pure hygiene - the fresh filter already excludes stale rows from the count - so a delayed
+// or skipped prune is harmless; a solo replica (R=1) always wins the roll, so its own restart stragglers
+// never linger. The stale count rides the same scan that reads R, so this costs no extra round trip.
+func (e *Engine) heartbeatPeers(ctx context.Context) (int, error) {
+	freshMs := e.peerFreshWindow().Milliseconds()
+	straggleMs := e.peerStragglerAge().Milliseconds()
+	indices, pos := e.shardOrdinals()
+	counts := make([]int, len(indices))
+	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		if err := e.upsertSelf(ctx, db); err != nil {
+			return errors.Trace(err)
+		}
+		var fresh, stale int
+		err := db.QueryRowContext(ctx,
+			"SELECT"+
+				" COALESCE(SUM(CASE WHEN seen_at > DATE_ADD_MILLIS(NOW_UTC(), ?) THEN 1 ELSE 0 END), 0),"+
+				" COALESCE(SUM(CASE WHEN seen_at <= DATE_ADD_MILLIS(NOW_UTC(), ?) THEN 1 ELSE 0 END), 0)"+
+				" FROM dwarf_peers",
+			-freshMs, -straggleMs,
+		).Scan(&fresh, &stale)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		counts[pos[shard]] = fresh
+		if stale > 0 && rand.IntN(max(1, fresh)) == 0 {
+			_, err := db.ExecContext(ctx,
+				"DELETE FROM dwarf_peers WHERE seen_at < DATE_ADD_MILLIS(NOW_UTC(), ?)", -straggleMs)
+			if err != nil {
+				return errors.Trace(err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	return maxReplicaCount(counts), nil
+}
+
+// applyReplicaCount stores R and recomputes the pools. recomputePools dedupes on lastAppliedR, so an
+// unchanged R is a cheap no-op; it also early-returns under a SetMaxOpenConns override.
+func (e *Engine) applyReplicaCount(r int) {
+	e.observedR.Store(int32(r))
+	e.recomputePools()
+}
+
+// refreshReplicaCount re-reads R (pure read) and applies it - the peersChanged nudge's path. A read
+// error is logged and dropped (R is a tuning number; the next heartbeat retries), never disturbing the
+// last good count.
 func (e *Engine) refreshReplicaCount(ctx context.Context) {
 	r, err := e.readReplicaCount(ctx)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "Reading peer replica count", "error", err)
 		return
 	}
-	e.observedR.Store(int32(r))
-	// recomputePools dedupes on lastAppliedR, so an unchanged R is a cheap no-op; it also early-returns
-	// under a SetMaxOpenConns override.
-	e.recomputePools()
+	e.applyReplicaCount(r)
 }
 
 // discoverReplicasAtStartup registers this replica in the registry, nudges peers to re-read it, waits
@@ -280,7 +333,7 @@ func (e *Engine) refreshReplicaCount(ctx context.Context) {
 // starters' inserts and sees a partial fleet. It is skipped under an override (R does not size the
 // pools then) and disabled in tests (startupPeerSettle=0).
 func (e *Engine) discoverReplicasAtStartup(ctx context.Context, override int) int {
-	if err := e.writePeerHeartbeat(ctx); err != nil {
+	if err := e.registerSelf(ctx); err != nil {
 		e.logger.ErrorContext(ctx, "Registering peer at startup", "error", err)
 	}
 	if override > 0 {
@@ -323,10 +376,13 @@ func (e *Engine) runPeersLoop() {
 			return
 		case <-ticker.C:
 		}
-		if err := e.writePeerHeartbeat(e.lifetimeCtx); err != nil {
-			e.logger.ErrorContext(e.lifetimeCtx, "Writing peer heartbeat", "error", err)
+		// One pass: upsert + read R + conditional prune. Apply the fresh count directly (no separate read).
+		r, err := e.heartbeatPeers(e.lifetimeCtx)
+		if err != nil {
+			e.logger.ErrorContext(e.lifetimeCtx, "Peer heartbeat", "error", err)
+			continue
 		}
-		e.refreshReplicaCount(e.lifetimeCtx)
+		e.applyReplicaCount(r)
 	}
 }
 
