@@ -697,9 +697,16 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		// (also lease_seq-preserving) would be terminalized out from under the peer re-claiming it. This is the
 		// first write in the transaction, so a zero-row match means nothing was written - commit the empty tx and
 		// report fenced so the caller abandons without failing a flow that is cancelled or that a peer is re-running.
+		// A failing branch never reaches its fan-in, so its own row is the branch's last one and carries
+		// the arrival. It rides this UPDATE for free. A trunk step is in no cohort and writes the 0 it
+		// already has.
+		arrivedMark := cohortNotArrived
+		if stepLineageID != 0 {
+			arrivedMark = cohortArrivedFailed
+		}
 		res, uerr := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"') AND lease_seq=?",
-			workflow.StatusFailed, parkedNone, errMsg, stepID, leaseSeq,
+			"UPDATE dwarf_steps SET status=?, parked=?, error=?, cohort_arrived=?, updated_at=NOW_UTC() WHERE step_id=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"') AND lease_seq=?",
+			workflow.StatusFailed, parkedNone, errMsg, arrivedMark, stepID, leaseSeq,
 		)
 		if uerr != nil {
 			return errors.Trace(uerr)
@@ -777,7 +784,14 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	return false, nil
 }
 
-// propagateCohortFailure bumps a spawn step's cohort_arrivals and cohort_failures.
+// propagateCohortFailure bumps a spawn step's cohort_arrivals and cohort_failures, walking UP the lineage
+// chain: a nested cohort's failure must surface to every enclosing cohort, because the inner fan-in never
+// fires and so no outer member would otherwise ever settle.
+//
+// The cohort_arrived marker sits one level BELOW the counter it shadows: the counter bumps `current`, the
+// spawn of the cohort the settled entity belongs to, while the marker goes on that settled entity itself -
+// the failing step at the first level (marked by failStep), and the previous `current` above it. So an
+// inner spawn row carries both, in its two roles: cohort_size as spawn, cohort_arrived as outer member.
 func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor, spawnStepID int) (bool, error) {
 	current := spawnStepID
 	for {
@@ -801,6 +815,14 @@ func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor,
 		}
 		if lineageID == 0 {
 			return true, nil
+		}
+		// This cohort settled, badly, so `current` has itself settled as a member of the cohort above.
+		_, err = tx.ExecContext(ctx,
+			"UPDATE dwarf_steps SET cohort_arrived=? WHERE step_id=?",
+			cohortArrivedFailed, current,
+		)
+		if err != nil {
+			return false, errors.Trace(err)
 		}
 		current = lineageID
 	}

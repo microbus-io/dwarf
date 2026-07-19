@@ -73,6 +73,22 @@ func assertInvariants(t *testing.T, e *Engine) {
 		check("cohort counter overshoot",
 			"SELECT COUNT(*) FROM dwarf_steps WHERE cohort_size>0 AND (cohort_arrivals>cohort_size OR cohort_failures>cohort_arrivals)")
 
+		// 4b. The per-member cohort_arrived markers must reproduce the counters exactly. Transitional: it
+		// exists to license dropping the counters, and goes when they do.
+		//
+		// Forked flows are excluded because Fork marks nothing - it clones rows (carrying the origin's
+		// markers) and then overwrites the counters with a recomputed branch count, so the two legitimately
+		// disagree, most visibly for a rewound branch and for a cancelled branch, which Fork counts as an
+		// arrival though nothing marked it.
+		members := func(pred string) string {
+			return "(SELECT COUNT(*) FROM dwarf_steps m WHERE m.flow_id=sp.flow_id AND m.lineage_id=sp.step_id AND m." + pred + ")"
+		}
+		check("cohort_arrived markers disagree with the cohort counters",
+			"SELECT COUNT(*) FROM dwarf_steps sp JOIN dwarf_flows f ON f.flow_id=sp.flow_id"+
+				" WHERE sp.cohort_size>0 AND f.forked_from_step=0 AND ("+
+				"sp.cohort_arrivals<>"+members("cohort_arrived>0")+
+				" OR sp.cohort_failures<>"+members("cohort_arrived=2")+")")
+
 		// 5. Every subgraph child's surgraph links resolve: the caller step exists, and the caller flow exists
 		// and shares this child's root_flow_id (same tree).
 		check("dangling surgraph link",

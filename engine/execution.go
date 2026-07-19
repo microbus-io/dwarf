@@ -938,6 +938,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			}
 
 			if fanInArrivals > 0 {
+				// Record this branch's arrival on its own exit step. It cannot ride the step-completion
+				// UPDATE above, which runs before transitions are evaluated and so cannot yet know this
+				// step is an arrival.
+				tx.ExecContext(ctx,
+					"UPDATE dwarf_steps SET cohort_arrived=? WHERE step_id=?",
+					cohortArrivedOK, stepID,
+				)
 				// Bump the cohort counter and read the post-bump values in ONE round-trip where the driver
 				// supports it (the same RETURNING/OUTPUT split as the claim CAS above).
 				//
@@ -1009,6 +1016,15 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 				} else if fullyResolved && failures > 0 {
 					failFlow := spawnLineageID == 0
 					if !failFlow {
+						// This cohort settled badly, so its spawn has itself settled as a member of the cohort
+						// above; the branch produced no fan-in step, so the spawn row is its last row. There are
+						// TWO entry points into a cohort failure and both must mark: propagateCohortFailure when
+						// the failing branch arrives last, and this one when a healthy sibling resolves the
+						// cohort instead. Arrival order alone decides which, so missing either is intermittent.
+						tx.ExecContext(ctx,
+							"UPDATE dwarf_steps SET cohort_arrived=? WHERE step_id=?",
+							cohortArrivedFailed, cohortSpawnID,
+						)
 						var pcfErr error
 						failFlow, pcfErr = e.propagateCohortFailure(ctx, tx, spawnLineageID)
 						if pcfErr != nil {
