@@ -65,15 +65,6 @@ const (
 
 	parkedNone     = 0
 	parkedSubgraph = 1
-
-	// cohort_arrived records that one BRANCH of a fan-out cohort settled, written on the branch's last
-	// row - its exit step, or the step that failed, since a failing branch never reaches its fan-in.
-	// Three values rather than a bool because a cohort fires only when every branch settled AND none
-	// settled badly; a plain completion count could never reach cohort_size once a branch failed. Only an
-	// unhandled failure marks Failed - an onError-routed branch arrives normally.
-	cohortNotArrived    = 0
-	cohortArrivedOK     = 1
-	cohortArrivedFailed = 2
 )
 
 // The recovery/await/reap timing knobs (leaseMargin, wedgeSweepInterval, parkWedgeThreshold,
