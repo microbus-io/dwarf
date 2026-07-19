@@ -778,6 +778,45 @@ converges and the flow recovers via the handler -> fan-in path; likewise a `canc
 `fan_out_ordinal`, just `status='pending'` and the prior error/park slot cleared. The merge query sees one row per
 branch regardless of attempts, so retry can't double-count.
 
+**Do NOT replace the shared `cohort_arrivals` counter with per-member arrival state. It was built, measured
+and reverted (2026-07-19).** The idea is sound and keeps re-suggesting itself, so here is the record.
+
+*The motivation.* Every sibling of a cohort bumps `cohort_arrivals` on the SAME spawn row, and that row's write
+lock is held until COMMIT, so siblings serialize. That is real and measurable: at fan-out width 64 the wait was
+~84% of an arrival transaction locally. `docs/benchmark-cloud.md` also (wrongly - see below) blamed it for the
+~9,400 steps/s fan-out ceiling.
+
+*What was built.* `cohort_arrived` on each member's own row plus `cohort_resolved` on the spawn as an
+exactly-one-resolver claim, so a branch marks its own row, COMMITS, and only then counts the cohort and
+resolves it in a second transaction. Committing before counting is required, not stylistic: counting inside the
+arrival's own transaction lets the last two members each miss the other's uncommitted mark under READ
+COMMITTED, so neither resolves and the cohort strands silently forever.
+
+*It worked, and it did not pay.* Contention fell 12-40x locally and 4.4x on the cloud rig. Throughput went the
+wrong way: six A/B points on the ceiling rig (3x 8-vCPU shards, 4-vCPU engine, width 16, interleaved, n=3, fresh
+databases) gave +7.5%, -12.1%, -11.0%, -0.5%, -9.7%, -29.1%. Only the least production-like point was positive.
+**It degrades as load gets realistic** - it trades a lock wait for an extra transaction, and at the ceiling the
+scarce resource is round trips and connection occupancy, not lock time.
+
+*Three collateral findings worth keeping:*
+
+- **The convoy is intra-cohort.** Spreading a cohort's branches over ~100ms of task latency HALVES the spawn-row
+  contention. So production, where branches finish at different times, has less of this than any zero-delay
+  benchmark - while the extra transaction costs the same. The two effects compound against the redesign.
+- **It does not reduce write amplification.** Marking each member's own row REDISTRIBUTES row versions rather
+  than removing them (5.59 -> 6.18 updates per step, HOT ratio flat). The hoped-for fix for the volume finding
+  is not there.
+- **The ceiling diagnosis in `docs/benchmark-cloud.md` was wrong** and has been corrected. Row-lock waits are
+  ~15% of active backends, not "the great majority"; the "W serialized fsyncs" mechanism is refuted (width held
+  fixed while varying workers moved lock wait 31x - the queue is `min(width, workers)` and the serialized
+  quantity is round trips inside the hold); and eliminating the lock entirely did not raise the ceiling. **What
+  binds at ~9,400 steps/s is an open question.**
+
+*If you are tempted again,* first show that the cohort row lock is the BINDING constraint on the target
+workload - it was not, on any of six points. The measurement recipe is a single long-lived `psql` session
+sampling `pg_stat_activity` (`wait_event='transactionid'` is a row-lock wait, `'tuple'` is the queue behind it,
+exclude `ClientRead` from the denominator); it needs no engine rebuild and instruments both arms identically.
+
 ### State refs — a large carried field is stored once (`staterefs.go`)
 
 A step's `state` is a full input snapshot, so a field that is *carried* but not *changed* is re-serialized into

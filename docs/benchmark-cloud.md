@@ -173,20 +173,38 @@ expressed in those terms.
 ~70% CPU, and the connection pool at roughly 60% of what its per-step database time would support.
 Throughput nonetheless stops climbing, and pushing concurrency higher *lowers* it.
 
-### What limits it: one row, locked across a commit
+### What limits it: not yet identified
 
-Sampling `pg_stat_activity` during fan-out load shows where the work queues: the great majority of
-active backends are blocked on a row lock, all executing the same statement — the fan-in arrival
-counter that every sibling of a cohort must update on one shared row — with WAL-write waits behind
-it. Those are one critical path, not two: **the lock is held across the holder's commit**, so
-siblings of a cohort cannot share a group commit, and each arrival costs a serialized flush. A
-width-`W` cohort therefore pays `W` serialized fsyncs no matter how much WAL bandwidth is idle.
+An earlier version of this document attributed the ceiling to one row: the fan-in arrival counter that
+every sibling of a cohort updates on a single shared row, whose lock is held across the holder's
+commit. **That diagnosis was wrong, and it was tested directly rather than merely doubted.** It is
+recorded here because the wrong answer is instructive and because it should not be re-derived.
+
+Two claims were made and both failed:
+
+- *"The great majority of active backends are blocked on that row lock."* Re-sampling
+  `pg_stat_activity` on the same configuration puts it at **~15%** of active backends — real, and the
+  largest single identifiable wait, but not a majority.
+- *"A width-`W` cohort pays `W` serialized fsyncs."* Holding cohort width fixed while varying only the
+  worker count moved lock wait **31×**, which a width-driven mechanism cannot explain. The serialized
+  quantity is round trips *inside* the lock hold, not flushes; the queue length is
+  `min(width, workers)`. Disabling synchronous commit changed the picture very little.
+
+The decisive test was to **remove the contention entirely** — replacing the shared counter with
+per-member arrival state, so siblings write disjoint rows. That reduced row-lock waits by 4.4× on this
+rig (and 12–40× on a laptop rig at widths 64 and 256), and **throughput did not improve**: it was flat
+to 29% *worse* across six A/B points spanning two concurrency levels and three task-latency profiles,
+degrading most in the most production-like condition, where the replacement's extra round trip costs
+more than the lock time it saves. The change was reverted.
+
+So **the cohort row lock is real, removable, and not what caps throughput.** What does cap it is
+currently unknown, and the elimination table below should be read as genuinely open-ended rather than
+as pointing at a residual explanation.
 
 The degraded regime looks like queueing rather than load: engine CPU *falls* (to as little as 0.86 of
 4 cores) while median latency climbs into the tens of seconds.
 
-Because a cohort's siblings all belong to one flow, they contend on that one row regardless of how
-work is spread elsewhere. Two things follow, both measured:
+Two further behaviours are measured and hold regardless of what the underlying cause turns out to be:
 
 - **Fairness-key cardinality does not help**, at either width, over a 1000× range. At width 16 /
   concurrency 256, medians across 1, 8, 32, 256 and 1024 keys span 6,622–7,056 steps/s — a 6.5%
@@ -195,9 +213,11 @@ work is spread elsewhere. Two things follow, both measured:
   2.1–2.2×, so the group differences sit an order of magnitude beneath the noise. Spreading keys
   interleaves different flows; it cannot de-synchronize one flow's own siblings, which is exactly who
   contends.
-- **Wider is worse.** Width 16 was the best of the widths measured; width 64 peaked lower and
-  degraded at lower concurrency, which is what concentrating more siblings onto a single counter
-  predicts. Narrower fan-outs are cheaper per step than one wide one covering the same work.
+- **Wider is worse.** Width 16 was the best of the widths measured; width 64 peaked lower and degraded
+  at lower concurrency. Narrower fan-outs are cheaper per step than one wide one covering the same
+  work. (This was originally read as evidence for the counter-row explanation. It survives that
+  explanation's retirement as an empirical result, but it is no longer evidence *for* any particular
+  mechanism.)
 
 Adding per-task time (5 ms plus 10 ms jitter) did not raise throughput either — at fixed concurrency
 it lowered it 7–15%, since task time adds directly to flow latency. It did keep latency well behaved
@@ -206,8 +226,8 @@ cannot show contention relief it never gets close enough to need.
 
 ### What the ceiling is *not*
 
-Every resource that could plausibly bind was measured and eliminated, which is why the residual
-explanation is a serialization point rather than a capacity limit:
+Every resource that could plausibly bind was measured and eliminated. No capacity limit accounts for
+the ceiling, and neither does the serialization point this list once pointed at:
 
 | candidate | evidence it is not binding |
 |---|---|
@@ -217,11 +237,16 @@ explanation is a serialization point rather than a capacity limit:
 | worker goroutines | flat at 1,167 across every concurrency point, never growing |
 | candidate-cache size | doubling the connection budget (M 48→96) doubles the cache but bought only ×1.09 |
 | fairness-key layout | flat over a 1000× cardinality range, at two widths |
+| fan-in cohort row lock | removed outright (per-member arrival state); waits fell 4.4×, throughput did not rise |
 
-The last row deserves emphasis because it is the one operators can control: **no amount of key
-spreading helps**, because a cohort's siblings share one flow, hence one key, hence one counter row.
-Relieving this needs a representation change — per-member arrival state instead of a shared
-counter — not tuning.
+The fairness-key row deserves emphasis because it is the one operators can control: **no amount of key
+spreading helps**, because a cohort's siblings share one flow and therefore one key. That is a fact
+about the workload, not about any particular contention point, so it stands unchanged.
+
+**Practical guidance is unaffected by the open question.** Size from `steps/core` (2,600–2,980, stable
+across every shard count, pool size, width, key layout and volume measured), do not plan a 4 vCPU
+engine above ~10,000 steps/s, prefer narrower fan-outs, and expect less on a mature database. What
+remains unknown is *why* the ceiling sits where it does — not where to plan against it.
 
 ### Caveat: fan-out churn is far more volume-sensitive than linear load
 
