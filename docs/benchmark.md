@@ -8,8 +8,7 @@ dispatch-latency percentiles.
 > **These numbers are reference points for relative comparison, not a capacity guarantee.** They were taken on a
 > single developer laptop with every database in a local Docker container on the same host — a *co-located*
 > setup that is a dev/test shape, not production. Read the ratios and trends (which dialect is faster, how
-> latency changes with load, what sharding does), not the absolute numbers, which reflect one laptop on a single
-> run.
+> latency changes with load, what sharding does), not the absolute numbers, which reflect one laptop.
 
 ## Running
 
@@ -58,7 +57,7 @@ less useful here.
 | Client concurrency | 32 goroutines | offered load; matched to the worker pool so the pool stays saturated |
 | Worker pool | 32 | fixed across dialects/shard counts |
 | Per-shard connection pool | 30, pinned via the `SetMaxOpenConns` override | the test default (8) starves 32 workers and would measure the pool, not the engine; 30 keeps 3 co-located shards under PostgreSQL's default `max_connections=100` (≈90) |
-| Flows per pass | 1000 (`-benchtime=1000x`) | one measured pass per shard count |
+| Flows per pass | 1000 (`-benchtime=1000x`) | one measured pass per shard count; repeat the whole invocation ≥3× and take medians, since a single pass is not reproducible (see the results note) |
 
 Because the tasks are no-ops, essentially all of each step's time is its **durable DB transaction** (claim CAS
 + transition commit). So these numbers isolate the engine's own per-step cost — the database work and commit
@@ -67,62 +66,72 @@ overhead, would dominate the time; these numbers are the engine's floor.
 
 ## Results
 
-Hardware: Apple M1 Pro (arm64, macOS); PostgreSQL, MariaDB 10, and SQL Server 2019 each in a local Docker
-container on the same host. One representative run; expect ±10–15% run-to-run variance.
+Hardware: Apple M1 Pro (arm64, macOS); PostgreSQL 18, MariaDB 10.11, and SQL Server 2019 each in a local
+Docker container on the same host.
+
+![Steps throughput by dialect and shard count](benchmark-dialects.png)
+
+**Each cell is the median of three runs.** Run-to-run variance on a shared laptop is larger than it looks:
+SQLite was reproducible to within 4%, but PostgreSQL spanned up to 2.1× and SQL Server 1.7× between rounds
+on the same configuration. A single run of any server dialect here can land far from its median, so treat
+differences under ~25% as noise and never quote a single pass.
 
 ### SQLite (in-memory)
 
 | Shards | flows/s | steps/s | p50 ms | p95 ms | p99 ms |
 |---|---|---|---|---|---|
-| 1 | 417 | 1252 | 72.7 | 111.8 | 130.8 |
-| 2 | 639 | 1918 | 47.5 | 86.7 | 106.0 |
-| 3 | 682 | 2045 | 41.9 | 86.9 | 114.5 |
+| 1 | 460 | 1381 | 65.8 | 100.8 | 117.0 |
+| 2 | 672 | 2016 | 42.5 | 93.1 | 116.9 |
+| 3 | 664 | 1992 | 35.6 | 100.8 | 129.6 |
 
 ### PostgreSQL
 
 | Shards | flows/s | steps/s | p50 ms | p95 ms | p99 ms |
 |---|---|---|---|---|---|
-| 1 | 364 | 1093 | 80.9 | 160.8 | 195.3 |
-| 2 | 333 | 1000 | 91.8 | 129.6 | 159.2 |
-| 3 | 290 | 869 | 106.9 | 147.8 | 170.2 |
+| 1 | 384 | 1152 | 73.6 | 174.2 | 256.4 |
+| 2 | 409 | 1226 | 73.5 | 109.8 | 154.4 |
+| 3 | 370 | 1109 | 77.4 | 110.3 | 238.4 |
 
 ### MySQL / MariaDB
 
 | Shards | flows/s | steps/s | p50 ms | p95 ms | p99 ms |
 |---|---|---|---|---|---|
-| 1 | 248 | 743 | 126.4 | 153.0 | 165.9 |
-| 2 | 200 | 600 | 135.5 | 314.0 | 585.5 |
-| 3 | 201 | 603 | 145.3 | 246.8 | 383.9 |
+| 1 | 282 | 848 | 109.4 | 149.2 | 176.1 |
+| 2 | 240 | 719 | 118.6 | 177.1 | 253.6 |
+| 3 | 263 | 789 | 114.4 | 176.6 | 230.4 |
 
 ### SQL Server
 
 | Shards | flows/s | steps/s | p50 ms | p95 ms | p99 ms |
 |---|---|---|---|---|---|
-| 1 | 152 | 455 | 195.5 | 346.0 | 435.7 |
-| 2 | 137 | 411 | 211.5 | 380.5 | 506.5 |
-| 3 | 135 | 405 | 222.2 | 357.8 | 571.4 |
+| 1 | 147 | 441 | 185.4 | 432.3 | 641.5 |
+| 2 | 163 | 489 | 181.5 | 295.3 | 422.0 |
+| 3 | 158 | 473 | 186.7 | 301.9 | 449.9 |
 
 ## How to read these
 
-- **Dialect ranking (1 shard):** PostgreSQL is the fastest real server (≈1093 steps/s), then MariaDB (≈743),
-  then SQL Server (≈455) — consistent with the deployment guidance that recommends PostgreSQL for production.
+- **Dialect ranking (1 shard):** PostgreSQL is the fastest real server (≈1152 steps/s), then MariaDB (≈848),
+  then SQL Server (≈441) — consistent with the deployment guidance that recommends PostgreSQL for production.
   SQLite in-memory is fastest of all but is single-instance dev/test only.
 
-- **Sharding on a single host does not add throughput; for server databases it actually reduces it.** Every
-  server dialect is fastest at 1 shard and slower at 2–3. When the shards are separate databases on the *same*
-  server, they add connection and coordination overhead without adding any hardware, so throughput drops. This
-  is expected: sharding is a way to scale *across* servers (one shard per database server — see
-  [deployment](deployment.md)), and a single-host benchmark can only show its cost, never its benefit. So treat
-  the shard results here as a reliability check — proof that a multi-database engine still routes and completes
-  every flow correctly — rather than as a scaling demo.
+- **Sharding on a single host neither helps nor hurts much for server databases.** Across three rounds every
+  server dialect stayed within ~15% of its own 1-shard median at 2 and 3 shards, with no consistent direction:
+  PostgreSQL and SQL Server happened to peak at 2 shards, MariaDB at 1. Those gaps sit inside the run-to-run
+  spread above, so the honest reading is *no measurable effect*, not a cost and not a gain. That is the
+  expected result — when shards are separate databases on the *same* server they add connection and
+  coordination overhead without adding hardware, and sharding is a way to scale *across* servers (one shard
+  per database server — see [deployment](deployment.md)). A single-host benchmark can only show its overhead,
+  never its benefit, so treat the shard rows as a reliability check — proof that a multi-database engine still
+  routes and completes every flow correctly — rather than as a scaling demo.
 
-- **SQLite is the exception, and for an instructive reason.** It gets *faster* with more shards (417 → 682
+- **SQLite is the exception, and for an instructive reason.** It gets *faster* with more shards (460 → 672
   flows/s) because each shard is a separate in-memory database with its own single-writer lock, so sharding
-  parallelizes the one-writer-at-a-time bottleneck that is SQLite's defining constraint. That gain is specific
-  to independent in-memory databases and does not transfer to a shared server.
+  parallelizes the one-writer-at-a-time bottleneck that is SQLite's defining constraint. The gain lands by 2
+  shards and does not continue at 3. It is specific to independent in-memory databases and does not transfer
+  to a shared server.
 
-- **Latency comes mainly from durable commits.** A ~80 ms p50 for a 3-step flow on PostgreSQL works out to
-  ~27 ms per step, and each step is a synchronously-committed transaction (claim + transition) running under
+- **Latency comes mainly from durable commits.** A ~74 ms p50 for a 3-step flow on PostgreSQL works out to
+  ~25 ms per step, and each step is a synchronously-committed transaction (claim + transition) running under
   32-way concurrency on laptop Docker. A real workload adds task time on top of this, so treat these figures as
   the engine's baseline latency, not the total you would see in production.
 
@@ -132,42 +141,55 @@ container on the same host. One representative run; expect ±10–15% run-to-run
 through every step (each step persists `merge(prevState, changes)`, and no-op tasks forward state unchanged),
 so the engine serializes, writes, and re-merges the whole payload once per step — 3× per flow here. The
 headline metric is **payloadMB/s = payload size × steps/sec**: the rate at which caller state bytes move
-through durable storage. Persisted bytes are ~3–4× that, since every step stores its own copy. Fixed at 1
-shard. (Same hardware/config as above; one representative run at `-benchtime=100x`.)
+through durable storage. Fixed at 1 shard. (Same hardware/config as above; median of three runs at
+`-benchtime=100x`.)
+
+**Persisted bytes are no longer a fixed multiple of this number.** The engine avoids re-storing a payload a
+step did not change, referring to the copy the predecessor already stored instead. How many bytes actually
+land on disk therefore depends on the flow's shape: a chain that *rewrites* the payload at every step (what
+this benchmark measures, the worst case) stores roughly one copy per step, while a chain that merely
+*carries* a payload it never touches stores far less than one. Size storage from your own workload's shape,
+not from a constant.
+
+![Caller state bytes moved per second by payload size](benchmark-dialects-payload.png)
 
 payloadMB/s by payload size:
 
 | Payload | SQLite | PostgreSQL | MariaDB | SQL Server |
 |---|---|---|---|---|
-| 4 KB | 4.0 | 3.1 | 2.3 | 1.2 |
-| 64 KB | 24.1 | 45.5 | 22.4 | 12.9 |
-| 256 KB | 30.5 | 124.4 | 45.3 | 21.3 |
-| 1 MB | 31.8 | 157.4 | 72.6 | 7.8 |
+| 4 KB | 5.1 | 3.9 | 2.5 | 1.8 |
+| 64 KB | 44.0 | 59.0 | 31.7 | 22.5 |
+| 256 KB | 74.1 | 128.0 | 71.5 | 63.7 |
+| 1 MB | 83.0 | 211.7 | 92.1 | 100.5 |
 
 What a 1 MB payload costs — throughput drops sharply and latency rises:
 
 | | SQLite | PostgreSQL | MariaDB | SQL Server |
 |---|---|---|---|---|
-| flows/s | 10.6 | 52.5 | 24.2 | 2.6 |
-| p50 latency | 2.4 s | 0.5 s | 1.2 s | 12.2 s |
+| flows/s | 27.7 | 70.5 | 30.7 | 33.5 |
+| p50 latency | 0.93 s | 0.37 s | 0.85 s | 0.84 s |
 
 Reading it:
 
-- **The byte rate rises with payload size, then levels off.** With a tiny payload, each step's fixed overhead
-  dominates, so few caller bytes move per second. A larger payload spreads that fixed cost over more bytes, so
-  the rate climbs — until it reaches the engine-plus-database byte-bandwidth limit and levels off.
+- **The byte rate rises steeply with payload size.** With a tiny payload, each step's fixed overhead
+  dominates, so few caller bytes move per second; a larger payload spreads that fixed cost over more bytes, so
+  the rate climbs — by roughly 20–50× from 4 KB to 1 MB on every dialect. SQLite is the only one clearly
+  flattening by 1 MB (74 → 83 MB/s), which is its single writer reaching its limit; PostgreSQL was still
+  climbing at the largest size measured, so its ceiling lies above this range.
 - **The dialect ranking flips compared with small state.** SQLite led on tiny-state flow rate, but at 1 MB
-  **PostgreSQL is well ahead (~157 MB/s)**, then MariaDB (~73), SQLite (~32), and SQL Server (~8). For large
-  payloads, what matters is how well the database parallelizes big writes: PostgreSQL and MySQL spread them
-  across many connections, whereas SQLite has a single writer that handles them one at a time (so its byte rate
-  levels off early), and SQL Server's `NVARCHAR(MAX)` large-object handling is the slowest here (a 1 MB flow
-  takes ~12 s at the median). So the best dialect depends on how large your state is, not just on the raw flow
-  rate.
-- **Large state is expensive.** A flow carrying 1 MB of state takes seconds, not milliseconds. Because every
-  step stores its own copy of the state, a large payload is written many times over per flow. Workflows that
-  move large documents should trim state early with `flow.Del`, and keep big blobs in object
-  storage — passing only a key through flow state. (`final_state` is `JSON`/`JSONB`/`NVARCHAR(MAX)`/`TEXT` per
-  dialect, so it holds arbitrarily large output on all four — there is no 64 KB cap.)
+  **PostgreSQL is well ahead (~212 MB/s)**, then SQL Server (~101), MariaDB (~92), and SQLite (~83). For large
+  payloads what matters is how well the database parallelizes big writes: PostgreSQL and MySQL spread them
+  across many connections, whereas SQLite has a single writer that handles them one at a time, so its byte
+  rate levels off early. So the best dialect depends on how large your state is, not just on the raw flow rate.
+- **SQL Server improved dramatically at large payloads** — from the slowest dialect by a wide margin to
+  mid-pack (a 1 MB flow's median latency fell from ~12 s to ~0.8 s). Its JSON payload columns are stored as
+  binary rather than UTF-16 text, which halves the bytes written and read for the same caller payload and
+  avoids the large-object path that dominated the old figure.
+- **Large state is still expensive.** A flow carrying 1 MB of state takes hundreds of milliseconds, not
+  milliseconds, and small payloads move caller bytes 20–50× less efficiently than large ones. Workflows that
+  move large documents should trim state early with `flow.Del`, and keep big blobs in object storage — passing
+  only a key through flow state. (`final_state` holds arbitrarily large output on all four dialects — there is
+  no 64 KB cap.)
 
 ## What this does *not* measure
 

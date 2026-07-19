@@ -2,16 +2,25 @@
 
 `bench/` (the standalone benchmark host in this repository) measured the engine against managed cloud
 PostgreSQL across a real network hop — the production shape the in-repo
-[laptop benchmarks](benchmark.md) deliberately cannot represent. Five measurement sessions, ~220 valid runs, zero
-reliability events (no flow errors, no lease recoveries, no wedges) across all of them.
+[laptop benchmarks](benchmark.md) deliberately cannot represent. Six measurement sessions, ~300 valid runs, zero
+reliability events (no flow errors, no lease recoveries, no wedges) across all of them — including the
+later campaign's 76 runs / 116 measurement points, which recorded zero client errors, zero lease
+recoveries and zero unwedged steps while deliberately driving the engine into throughput collapse.
 
 > **Environment.** Engine host: GCE `c4a-standard-4` (4 vCPU, ARM). Database: Cloud SQL for
 > PostgreSQL 16, `db-custom-{1,2,4,8}` tiers (1–8 vCPU), 100 GB SSD, private-IP, same-zone
-> (RTT ≈ 0.3–0.6 ms). One engine replica; one shard per database instance (two for the scale-out
-> runs). Fresh database per configuration (accumulated volume costs a one-time settling — measured
-> [below](#volume-accumulated-rows-and-bytes-cost-a-one-time-settling)). Closed-loop
+> (RTT ≈ 0.3–0.6 ms). One engine replica; one shard per database instance (up to three for the
+> scale-out and fan-out runs). Fresh database per configuration (accumulated volume costs a one-time
+> settling — measured [below](#volume-accumulated-rows-and-bytes-cost-a-one-time-settling)). Closed-loop
 > load; 60 s measured windows after warmup; a run is invalid if any error/recovery/unwedge counter
 > fires. Raw artifacts: one self-contained JSON per run.
+
+> **Two campaigns.** The [fan-out ceiling](#fan-out-the-engines-own-ceiling) and
+> [scale-out](#scale-out) sections are from the later campaign, run against three 8-vCPU shards after
+> several engine changes (most relevant here: a deferred flow-row write on fan-in arrival, a
+> three-phase refill, and an extended selection index). Everything else — the tier ladder, the
+> latency sweep, workers, volume, and self-tuning — is from the earlier campaign and was **not**
+> re-measured; those sections are marked where it matters. Where the two overlap, the later numbers win.
 
 ## Terms and notation
 
@@ -131,14 +140,141 @@ proportion, so byte-bound deployments should measure before buying disk. The eng
 `dwarf_state_write_bytes` metric (labelled by workflow and by the column
 written) is the operational gauge against this ceiling.
 
+## Fan-out: the engine's own ceiling
+
+![Fan-out throughput ceiling on a 4 vCPU engine](benchmark-cloud-fanout.png)
+
+The tier table above measures what a *database* supplies. This section measures what one **4 vCPU
+engine host** can drive, using fan-out to raise the pending-step backlog far above the submitter
+count (a linear flow holds one pending step per in-flight flow, so a closed-loop generator can never
+build a deep backlog; a `forEach` of width `W` makes the backlog roughly `concurrency × W`). Three
+8-vCPU shards, so the database is not the constraint.
+
+**The highest sustained rates measured were ~9,400 steps/s, and the shape of the work did not change
+that:**
+
+| workload | concurrency | steps/s | engine CPU | steps/core |
+|---|---|---|---|---|
+| linear, 3 shards | 4096 | 9,392 | 3.16 / 4 (79%) | 2,972 |
+| fan-out width 16 | 1024 | 9,402 | 3.16 / 4 (79%) | 2,976 |
+
+The two agree to 0.1%, at the same CPU. So **fan-out costs the engine nothing extra per step** — the
+cohort bookkeeping is not a throughput tax — and `steps/core ≈ 2,970` is the number to size with.
+
+**Read the rate as a planning limit, not a reproducible constant.** Across the campaign the same
+configuration measured anywhere from ~3,000 to ~9,400 steps/s depending on how much data the database
+had accumulated (see the caveat below), so the honest operating guidance is: **do not plan a 4 vCPU
+engine above ~10,000 steps/s**, expect less on a mature database, and size from `steps/core` with
+your own measurement. What *is* stable is `steps/core`, which stayed within 2,600–2,980 across every
+shard count, pool size, width, key layout and volume measured — which is why the sizing rule is
+expressed in those terms.
+
+**Nothing is saturated at the top rate.** At 9,400 steps/s the engine sits at 79%, the databases at
+~70% CPU, and the connection pool at roughly 60% of what its per-step database time would support.
+Throughput nonetheless stops climbing, and pushing concurrency higher *lowers* it.
+
+### What limits it: one row, locked across a commit
+
+Sampling `pg_stat_activity` during fan-out load shows where the work queues: the great majority of
+active backends are blocked on a row lock, all executing the same statement — the fan-in arrival
+counter that every sibling of a cohort must update on one shared row — with WAL-write waits behind
+it. Those are one critical path, not two: **the lock is held across the holder's commit**, so
+siblings of a cohort cannot share a group commit, and each arrival costs a serialized flush. A
+width-`W` cohort therefore pays `W` serialized fsyncs no matter how much WAL bandwidth is idle.
+
+The degraded regime looks like queueing rather than load: engine CPU *falls* (to as little as 0.86 of
+4 cores) while median latency climbs into the tens of seconds.
+
+Because a cohort's siblings all belong to one flow, they contend on that one row regardless of how
+work is spread elsewhere. Two things follow, both measured:
+
+- **Fairness-key cardinality does not help**, at either width, over a 1000× range. At width 16 /
+  concurrency 256, medians across 1, 8, 32, 256 and 1024 keys span 6,622–7,056 steps/s — a 6.5%
+  range, inside the 1.06–1.21× spread *within* each cardinality, with no latency penalty. At width 64
+  the between-cardinality medians span 16% (4,553–5,266) while runs at a *single* cardinality span
+  2.1–2.2×, so the group differences sit an order of magnitude beneath the noise. Spreading keys
+  interleaves different flows; it cannot de-synchronize one flow's own siblings, which is exactly who
+  contends.
+- **Wider is worse.** Width 16 was the best of the widths measured; width 64 peaked lower and
+  degraded at lower concurrency, which is what concentrating more siblings onto a single counter
+  predicts. Narrower fan-outs are cheaper per step than one wide one covering the same work.
+
+Adding per-task time (5 ms plus 10 ms jitter) did not raise throughput either — at fixed concurrency
+it lowered it 7–15%, since task time adds directly to flow latency. It did keep latency well behaved
+(p99 ≈ 1.1 s at concurrency 256) and produced no collapse, but a benchmark at fixed concurrency
+cannot show contention relief it never gets close enough to need.
+
+### What the ceiling is *not*
+
+Every resource that could plausibly bind was measured and eliminated, which is why the residual
+explanation is a serialization point rather than a capacity limit:
+
+| candidate | evidence it is not binding |
+|---|---|
+| engine CPU | 79% at the ceiling; *falls* to 20–40% in the collapsed regime |
+| database CPU | 51–89%, versus the 91–100% a saturated instance shows |
+| connection pool | ~60% of what the measured per-step database time would support |
+| worker goroutines | flat at 1,167 across every concurrency point, never growing |
+| candidate-cache size | doubling the connection budget (M 48→96) doubles the cache but bought only ×1.09 |
+| fairness-key layout | flat over a 1000× cardinality range, at two widths |
+
+The last row deserves emphasis because it is the one operators can control: **no amount of key
+spreading helps**, because a cohort's siblings share one flow, hence one key, hence one counter row.
+Relieving this needs a representation change — per-member arrival state instead of a shared
+counter — not tuning.
+
+### Caveat: fan-out churn is far more volume-sensitive than linear load
+
+This campaign reused one database per shard across its runs, so volume grew monotonically to **15.2M
+step rows (13.9 GB) with 2.8M dead tuples**. That turned out to matter enormously, and it is a
+finding rather than only a flaw. Repeating one configuration eight times on the loaded database
+against four times on a freshly created one:
+
+| database | runs (steps/s) | spread |
+|---|---|---|
+| accumulated, 15.2M rows | 3,021 · 3,204 · 3,254 · 3,347 · 3,986 · 4,061 · 4,076 · 7,029 | **2.33×** |
+| fresh per run | 6,333 · 6,465 · 7,549 · 7,579 | **1.20×** |
+
+Two things follow. A fresh database is **reproducible to about ±10%**, so wide scatter is a symptom
+of accumulated volume rather than an intrinsic property of the workload. And the penalty is large —
+roughly halved throughput at 15M rows — which is **not** what the [volume fills](#volume-accumulated-rows-and-bytes-cost-a-one-time-settling)
+below found. Those measured a `linear` workload, whose pending count stays flat, and found only a
+one-time 15–20% settling out to 100M rows. Fan-out churn is a different regime: the pending set
+swings by orders of magnitude, autovacuum trails the deletes, and the cost does not plateau the same
+way. **Do not carry the "volume is a one-time 15–20%" result across to fan-out-heavy workloads**; it
+was measured on linear load and does not transfer.
+
+Consequently every cross-time comparison in this section is untrustworthy, and only the interleaved
+A/B results above (key cardinality, pool size, task delay, shard count) support conclusions.
+
 ## Scale-out
 
 ![Two shards vs one: measured scaling factors](benchmark-cloud-scaleout.png)
 
 Two 8-vCPU shards (each its own database instance) at saturation scaled to **×1.81** over a single
-shard. The ~19% shortfall from perfect ×2 scaling is unattributed (engine-host-side or a
-closed-loop-load artifact) and worth revisiting at four shards. Shard-per-server scales both steps and
-bytes near-linearly at its first test.
+shard, and byte throughput scaled ×1.77/×1.82 — shard-per-server scales both steps and bytes
+near-linearly at its first test.
+
+![Steps and tail latency by shard count](benchmark-cloud-shardladder.png)
+
+A later campaign re-measured the steps axis out to three shards, each arm on its own freshly created
+database (`linear`, concurrency 4096, 4 vCPU engine):
+
+| shards | steps/s | vs 1 shard | p99 latency |
+|---|---|---|---|
+| 1 | 2,793 | — | 17.8 s |
+| 2 | 5,692 | **×2.04** | 8.6 s |
+| 3 | 6,105 | ×2.19 | **18.2 s** |
+
+**The first shard added scales essentially perfectly (×2.04); the second adds only 7%.** The latency
+column says why, and it is the more useful signal: p99 *halves* going from one shard to two, then
+*doubles* going to three. Every multi-shard query fans out concurrently but completes only when its
+slowest shard does, so the engine increasingly waits on stragglers as shard count grows — a tail-latency
+tax that rises with the number of shards and eventually cancels the added capacity. Adding shards
+therefore buys throughput readily at small counts, and buys progressively less as the fan-out widens.
+
+Note this is one engine replica driving all the shards. Scaling *replicas* alongside shards is a
+different axis and remains [untested](#known-gaps).
 
 ## Volume: accumulated rows and bytes cost a one-time settling
 
@@ -156,8 +292,12 @@ directly as `M ÷ throughput` at every checkpoint:
   count stays in a range the rows fill proved cheap). Per-step DB time rose from 8.9 ms to a
   ~10.7 ms plateau by ~32 GB and stayed in a 10–11.3 ms band to 405 GB.
 
-Both axes tell one story: **a one-time ~15–20% settling as the database matures from empty, then a
-plateau — no cliff, no compounding decay.** Three mechanisms were checked directly at every checkpoint:
+Both axes tell one story **for this workload**: a one-time ~15–20% settling as the database matures
+from empty, then a plateau — no cliff, no compounding decay. Both fills used `linear`/`state` shapes
+whose pending count stays flat; a later campaign found fan-out churn far more volume-sensitive
+(roughly halved throughput by 15M rows), so this result does
+[not transfer to fan-out-heavy workloads](#caveat-fan-out-churn-is-far-more-volume-sensitive-than-linear-load).
+Three mechanisms were checked directly at every checkpoint:
 
 - **Cache pressure barely materializes.** Buffer-cache hit ratios stayed ≥ 99.7% (index) and ≥ 99.2%
   (heap/TOAST) even at 13× RAM — the access pattern is recency-dominated (active flows touch recent
@@ -224,6 +364,29 @@ Worked example — an 8-vCPU shard, same-zone (L = 0.5 ms), 50 ms tasks: M = 6×
 db ≈ 12×0.5 + 4.4 ≈ 10.4 ms; T ≈ 60 ms; N = M × T/db ≈ 48 × 5.8 ≈ 280 workers. Predicted ceiling
 ≈ min(4600, 4600, C_db ≈ 4600) steps/s — the database binds, as designed.
 
+### How many engine hosts, and how much database behind them
+
+The formula above sizes one shard. Two further rules size the *engine* fleet, both measured on a
+4 vCPU engine host:
+
+```
+engine steps/s   ≈ 2,970 × engine vCPUs × utilisation   # steps/core, stable across every configuration
+plan limit       ≈ 10,000 steps/s per 4 vCPU engine     # do not exceed; add replicas past this
+database vCPUs   ≈ 6 × engine vCPUs                     # at a ~70% database utilisation target
+```
+
+`steps/core ≈ 2,970` is the durable constant — it held within 2,600–2,980 across shard counts, pool
+sizes, fan-out widths, key layouts and volumes, and is identical for linear and fan-out work. The
+plan limit is the operating ceiling: past roughly 10,000 steps/s per 4 vCPU host, more offered load
+stopped buying throughput and began costing latency.
+
+**The database ratio is only meaningful together with the utilisation it assumes.** The measured
+point was 9,400 steps/s from a 4 vCPU engine (79% busy) against three 8-vCPU shards running ~70% CPU.
+Sizing so the database *stays* near 70% — the sane target, since a database at 100% has nothing left
+for autovacuum, checkpoints or a traffic spike — gives **1 engine vCPU : 6 database vCPUs**. If you
+were instead willing to drive the database to saturation the same measurement reads as ~1:4. Prefer
+1:6: an under-provisioned engine merely queues, while an over-driven database degrades non-linearly.
+
 **The engine applies this automatically**: provide `ShardSpec.VirtualCPUs` and it derives each
 shard's connection pool (divided by the replica count it reads live from the shared databases —
 nothing to declare), its capacity-proportional share of new-flow placement, and — in aggregate — the
@@ -246,6 +409,18 @@ derived default, and blocked workers are cheap (a goroutine and a socket each).
   (memory, goroutines, connection recycling) that no 60 s window can see.
 - **The 1→2 vCPU non-scaling** is hypothesized (WAL-insert-lock), not confirmed.
 - **Small-tier variance** (±40% at 1 vCPU) is unexplained; treat 1-vCPU numbers as indicative.
+- **The fan-out ceiling is bounded but not positively attributed.** Engine CPU, database CPU,
+  connection pool, worker count, candidate-cache size and fairness-key layout were each measured and
+  eliminated as the binding resource; the direct observation is that most active backends block on
+  the shared cohort-arrival row, whose lock is held across commit. What has *not* been done is a
+  before/after measurement of the structural fix (per-member arrival state replacing the shared
+  counter), which is the only way to confirm that row is the cause rather than a symptom.
+- **Fan-out volume sensitivity is measured but not explained.** Throughput roughly halved by 15M rows
+  under fan-out churn while the linear fills plateaued at −15–20% out to 100M. Whether the difference
+  is autovacuum lag, index bloat on the churned selection index, or planner drift is untested.
+- **Absolute fan-out rates on a mature database are unquantified.** The fresh-database runs are
+  reproducible to ±10%, but the campaign lacks a controlled volume ladder for fan-out, so "expect less
+  than 10,000 steps/s as the database matures" is a direction, not a number.
 - Absolute numbers are one cloud, one dialect (PostgreSQL — the fastest per the
   [in-repo benchmarks](benchmark.md)), one region; ratios and shapes are the durable findings.
 

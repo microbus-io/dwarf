@@ -111,3 +111,157 @@ ax.set_ylabel("throughput vs a single shard")
 ax.set_ylim(0, 2.3)
 ax.grid(axis="x", visible=False)
 finish(fig, ax, f"{OUT}/benchmark-cloud-scaleout.png")
+
+# ---- 5. Fan-out: the engine-bound step ceiling on a 4 vCPU host ----
+# Two stacked panels sharing an x-axis (never a dual y-axis): throughput on top,
+# the engine CPU that bought it underneath, against the host's 4-core wall.
+HOST_CORES = 4.0
+
+def med(vals):
+    vals = sorted(v for v in vals if v is not None)
+    if not vals:
+        return None
+    n = len(vals)
+    return vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+
+def fanout_series(width):
+    """median steps/s and engine cores per concurrency across the interleaved rounds"""
+    byconc = {}
+    for r in (1, 2, 3):
+        try:
+            a = json.load(open(f"bench/results/r-fanout-w{width}-r{r}.json"))
+        except FileNotFoundError:
+            continue
+        for res in a["results"]:
+            byconc.setdefault(res["concurrency"], []).append(
+                (res["stepsPerSec"], res["host"]["cpuCores"]))
+    out = []
+    for c in sorted(byconc):
+        out.append((c, med([s for s, _ in byconc[c]]), med([k for _, k in byconc[c]])))
+    return out
+
+widths = [(4, S1), (16, S2), (64, S3)]
+series = [(w, color, fanout_series(w)) for w, color in widths]
+if any(pts for _, _, pts in series):
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6.4), sharex=True,
+                                   gridspec_kw={"height_ratios": [1.45, 1]})
+    peak = 0
+    for w, color, pts in series:
+        if not pts:
+            continue
+        xs = [p[0] for p in pts]
+        ax1.plot(xs, [p[1] for p in pts], color=color, linewidth=2, marker="o",
+                 markersize=6, markeredgecolor=SURFACE, markeredgewidth=1.5,
+                 label=f"width {w}")
+        ax2.plot(xs, [p[2] for p in pts], color=color, linewidth=2, marker="o",
+                 markersize=6, markeredgecolor=SURFACE, markeredgewidth=1.5,
+                 label=f"width {w}")
+        peak = max(peak, max(p[1] for p in pts))
+    ax1.set_title("Fan-out throughput ceiling on a 4 vCPU engine (3 × 8-vCPU shards)")
+    ax1.set_ylabel("steps / second")
+    ax1.legend(loc="upper left", frameon=False, fontsize=9.5)
+    ax1.set_ylim(0, peak * 1.18)
+    ax2.axhline(HOST_CORES, color=MUTED, linewidth=1.5, linestyle="--", zorder=1)
+    ax2.annotate("all 4 vCPUs", (0.99, HOST_CORES), xycoords=("axes fraction", "data"),
+                 xytext=(0, 5), textcoords="offset points", color=INK2, fontsize=9.5,
+                 ha="right", va="bottom")
+    ax2.set_ylabel("engine CPU (cores)")
+    ax2.set_xlabel("closed-loop concurrency (flows in flight)")
+    ax2.set_ylim(0, HOST_CORES * 1.15)
+    ax2.set_xscale("log", base=2)
+    allx = sorted({p[0] for _, _, pts in series for p in pts})
+    ax2.set_xticks(allx)
+    ax2.get_xaxis().set_major_formatter(plt.ScalarFormatter())
+    fig.tight_layout()
+    fig.savefig(f"{OUT}/benchmark-cloud-fanout.png", dpi=200, facecolor=SURFACE,
+                bbox_inches="tight")
+    plt.close(fig)
+    print("wrote", f"{OUT}/benchmark-cloud-fanout.png")
+
+# ---- 6. Local four-dialect comparison (docs/benchmark.md) ----
+# Medians of three runs from fixtures/benchmark_test.go; those come from `go test`
+# output rather than a JSON artifact, so they are transcribed here.
+DIALECTS = ["SQLite", "PostgreSQL", "MariaDB", "SQL Server"]
+STEPS_BY_SHARD = {              # shards -> steps/s per dialect, median of 3 runs
+    1: [1381, 1152, 848, 441],
+    2: [2016, 1226, 719, 489],
+    3: [1992, 1109, 789, 473],
+}
+fig, ax = plt.subplots(figsize=(8, 4.4))
+xs = range(len(DIALECTS))
+w = 0.21
+for i, (shards, color) in enumerate([(1, S1), (2, S2), (3, S3)]):
+    # 2px surface gap between adjacent bars comes from the width/offset pair below.
+    off = (i - 1) * (w + 0.015)
+    bars = ax.bar([x + off for x in xs], STEPS_BY_SHARD[shards], width=w,
+                  color=color, zorder=2, label=f"{shards} shard" + ("s" if shards > 1 else ""))
+    if shards == 1:  # direct-label one series only; a number on every bar is noise
+        for b, v in zip(bars, STEPS_BY_SHARD[shards]):
+            ax.annotate(f"{v}", (b.get_x() + b.get_width() / 2, v), xytext=(0, 4),
+                        textcoords="offset points", ha="center", color=INK, fontsize=9.5)
+ax.set_title("Steps throughput by dialect and shard count (laptop, co-located)")
+ax.set_ylabel("steps / second")
+ax.set_xticks(list(xs))
+ax.set_xticklabels(DIALECTS)
+ax.set_ylim(0, 2300)
+ax.legend(loc="upper right", frameon=False, fontsize=9.5)
+ax.grid(axis="x", visible=False)
+finish(fig, ax, f"{OUT}/benchmark-dialects.png")
+
+# ---- 7. Local state-payload byte rate (docs/benchmark.md) ----
+SIZES = [4, 64, 256, 1024]       # KB
+PAYLOAD_MBPS = {                 # dialect -> payloadMB/s, median of 3 runs
+    "SQLite":     [5.1, 44.0, 74.1, 83.0],
+    "PostgreSQL": [3.9, 59.0, 128.0, 211.7],
+    "MariaDB":    [2.5, 31.7, 71.5, 92.1],
+    "SQL Server": [1.8, 22.5, 63.7, 100.5],
+}
+fig, ax = plt.subplots(figsize=(8, 4.4))
+# SQL Server and SQLite cross between 256 KB and 1 MB, so they take the best-separated
+# pair of hues (ΔE 22.9) rather than the two greens the natural ordering would give them.
+for (name, color) in [("PostgreSQL", S1), ("SQL Server", S2), ("SQLite", S3), ("MariaDB", S4)]:
+    ys = PAYLOAD_MBPS[name]
+    ax.plot(SIZES, ys, color=color, linewidth=2, marker="o", markersize=6,
+            markeredgecolor=SURFACE, markeredgewidth=1.5, label=name)
+    ax.annotate(name, (SIZES[-1], ys[-1]), xytext=(8, 0), textcoords="offset points",
+                color=INK, fontsize=9.5, va="center")
+ax.set_title("Caller state bytes moved per second, by payload size")
+ax.set_xlabel("payload carried through every step")
+ax.set_ylabel("payload MB / second")
+ax.set_xscale("log", base=2)
+ax.set_xticks(SIZES)
+ax.set_xticklabels(["4 KB", "64 KB", "256 KB", "1 MB"])
+ax.set_xlim(3, 2400)
+ax.set_ylim(0, 235)
+ax.legend(loc="upper left", frameon=False, fontsize=9.5)
+finish(fig, ax, f"{OUT}/benchmark-dialects-payload.png")
+
+# ---- 8. Shard ladder: steps/s and tail latency vs shard count (fresh DB per arm) ----
+SHARDS = [1, 2, 3]
+LADDER_STEPS = [2793.2, 5692.3, 6105.4]
+LADDER_P99 = [17.8, 8.6, 18.2]          # seconds
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.2, 6.0), sharex=True,
+                               gridspec_kw={"height_ratios": [1.35, 1]})
+bars = ax1.bar([str(s) for s in SHARDS], LADDER_STEPS, width=0.4, color=S1, zorder=2)
+for b, v, s in zip(bars, LADDER_STEPS, SHARDS):
+    lbl = "baseline" if s == 1 else f"×{v/LADDER_STEPS[0]:.2f}"
+    ax1.annotate(lbl, (b.get_x() + b.get_width()/2, v), xytext=(0, 5),
+                 textcoords="offset points", ha="center", color=INK,
+                 fontsize=11, fontweight="bold")
+ax1.set_title("Adding shards: the first one pays, the second much less")
+ax1.set_ylabel("steps / second")
+ax1.set_ylim(0, max(LADDER_STEPS) * 1.22)
+ax1.grid(axis="x", visible=False)
+# Tail latency is the mechanism, so it gets its own panel rather than a second y-axis.
+ax2.plot([str(s) for s in SHARDS], LADDER_P99, color=S3, linewidth=2, marker="o",
+         markersize=8, markeredgecolor=SURFACE, markeredgewidth=1.5)
+ax2.annotate("every query waits on\nits slowest shard", (1, LADDER_P99[1]),
+             xytext=(0, -40), textcoords="offset points", color=INK2, fontsize=9.5, ha="center")
+ax2.set_ylabel("p99 flow latency (s)")
+ax2.set_xlabel("shards (one 8-vCPU database instance each)")
+ax2.set_ylim(0, max(LADDER_P99) * 1.35)
+ax2.grid(axis="x", visible=False)
+fig.tight_layout()
+fig.savefig(f"{OUT}/benchmark-cloud-shardladder.png", dpi=200, facecolor=SURFACE, bbox_inches="tight")
+plt.close(fig)
+print("wrote", f"{OUT}/benchmark-cloud-shardladder.png")
