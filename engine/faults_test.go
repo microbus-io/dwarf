@@ -20,6 +20,7 @@ package engine
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -72,6 +73,34 @@ func awaitNextStop(t *testing.T, e *Engine) func() {
 	return func() {
 		cpWaitFor(t, e, checkpointFlowStopped, 10*time.Second)
 		e.seams.Resume(checkpointFlowStopped)
+	}
+}
+
+// drivePollBackstop drives lease recovery until `landed` reports the re-dispatch happened, or retryDuration
+// elapses and the caller's own assertion reports it.
+//
+// This DRIVES the engine rather than merely observing it, which is why it is not a pollPredicate: without the
+// e.pollPendingSteps call the recovery never happens inside a test's lifetime, measured - every run of the
+// lease-fence battery fails on the wait.
+//
+// Drive it in a loop rather than sleeping past the lease and polling once. pollPendingSteps only resets a
+// `running` step whose lease has ALREADY expired, so a single fixed-sleep poll has to land between the lease
+// lapsing and the caller giving up - and the delay before the lease even starts is variable (the dispatch,
+// and for a subgraph the spawn and the child's claim too). A poll that lands early resets nothing, and a
+// fenced or abandoned attempt schedules no recovery of its own, so nothing re-polls and the flow never
+// advances. Measured on SQL Server: the poll arriving 7ms early, failing 7% idle and 45% under load. Looping
+// is timing-independent - whichever poll first sees the lapsed lease does the reset - and cannot
+// over-dispatch, since the reset needs `running` plus an expired lease, true only once the previous attempt
+// has finished and its lease has run out.
+func drivePollBackstop(t *testing.T, e *Engine, retryDuration time.Duration, landed func() bool) {
+	t.Helper()
+	ctx := context.Background()
+	for range max(1, int(retryDuration/retryInterval)) {
+		if landed() {
+			return
+		}
+		time.Sleep(retryInterval)
+		e.pollPendingSteps(ctx)
 	}
 }
 
@@ -246,8 +275,9 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	g.SetEndpoint("A", "flease/a")
 	g.AddTransition("A", workflow.END)
 	proxy.HandleGraph("flease/g", g)
-	var runs int
-	proxy.HandleTask("flease/a", func(ctx context.Context, f *workflow.Flow) error { runs++; return nil })
+	// Atomic: the worker goroutine writes it while the test goroutine waits on it below.
+	var runs atomic.Int32
+	proxy.HandleTask("flease/a", func(ctx context.Context, f *workflow.Flow) error { runs.Add(1); return nil })
 
 	e := NewEngine()
 	e.SetHost(proxy)
@@ -265,11 +295,11 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	waitDone := awaitNextStop(t, e)
 	fk, err := e.Create(ctx, "flease/g", nil, nil)
 	assert.NoError(err)
-	time.Sleep(400 * time.Millisecond) // inherent wall-clock: the 300ms lease must lapse before recovery re-runs A
-	e.pollPendingSteps(ctx)            // the lease-recovery backstop (the background poll may also drive it)
+	// The 300ms lease must lapse before recovery re-runs A; drive the backstop until it does.
+	drivePollBackstop(t, e, pollBackstopWait, func() bool { return runs.Load() >= 2 })
 	waitDone()
 	assert.Equal(workflow.StatusCompleted, flowStatus(t, e, fk))
-	assert.Equal(2, runs)
+	assert.Equal(int32(2), runs.Load())
 }
 
 // --- Signal / doorbell faults (process-wide) ---

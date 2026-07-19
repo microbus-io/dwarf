@@ -43,12 +43,25 @@ func assertInvariants(t *testing.T, e *Engine) {
 			continue
 		}
 
+		// These are checked against a LIVE database, so a violation can be work in flight rather than a broken
+		// invariant. The clearest case is a cohort mid-resolve: the arrival that completes a cohort commits
+		// first and the fan-in step is inserted a moment later, so the flow briefly has every step terminal
+		// while still running - genuinely the orphan shape, just transient.
+		//
+		// So settle, then assert. The alternative - excluding that shape from the query - would blind this
+		// check to a cohort that is stranded complete-but-unresolved, which is precisely the bug the resolve
+		// window can produce and the reconciler exists to fix. A real strand never clears; a transient does.
 		check := func(label, query string) {
 			var n int
-			if !assert.NoError(db.QueryRowContext(ctx, query).Scan(&n)) {
+			var qerr error
+			pollPredicate(invariantSettleWait, func() bool {
+				qerr = db.QueryRowContext(ctx, query).Scan(&n)
+				return qerr != nil || n == 0
+			})
+			if !assert.NoError(qerr) {
 				return
 			}
-			assert.Equal(0, n, "shard %d: invariant violated: %s (%d offending rows)", shard, label, n)
+			assert.Equal(0, n, "shard %d: invariant violated: %s (%d offending rows, still violated after settling)", shard, label, n)
 		}
 
 		// 1. No terminal flow retains a non-terminal step. Delete-marked flows (delete_after_ms>0) are excluded:

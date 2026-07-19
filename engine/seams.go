@@ -59,6 +59,7 @@ const (
 
 	// Process-wide (no scope):
 	faultInterruptStaleWrite = "interruptStaleWrite" // handleInterrupt's in-tx leaf lease_seq read is forced to mismatch (zombie)
+	faultInterruptChainWrite = "interruptChainWrite" // handleInterrupt's combined chain UPDATE fails and applies nothing (deadlock victim)
 	faultDropSignalStop      = "dropSignalStop"      // signalStop delivers nothing (lost terminal wake)
 	faultDropDoorbell        = "dropDoorbell"        // the enqueue doorbell is dropped (lost wake)
 	faultRecoveryResetErr    = "recoveryResetErr"    // the processStep recovery defer's own reset UPDATE errors
@@ -138,6 +139,7 @@ func (e *Engine) flowRowWriteCount(flowID int) int {
 const (
 	checkpointResumeBeforeFlowWrite   = "resumeBeforeFlowWrite"   // resume(), just before its transaction's flow-status gate write
 	checkpointBeforeTransitionTx      = "beforeTransitionTx"      // processStep, after the step is marked completed, before the transition transaction
+	checkpointAfterArrivalTx          = "afterArrivalTx"          // processStep, after a cohort arrival has committed, before the cohort resolve
 	checkpointAfterCallerPark         = "afterCallerPark"         // processStep, after the subgraph caller step is parked, before createSubgraphFlow
 	checkpointBeforeRetryRewind       = "beforeRetryRewind"       // processStep, before the flow.Retry rewind transaction
 	checkpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // completeFlow(), just before its transaction's status-gate write

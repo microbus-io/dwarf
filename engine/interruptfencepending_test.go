@@ -110,6 +110,40 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		assert.Equal(workflow.StatusRunning, flowStatus(t, db, 2), "the child flow must not be interrupted")
 	})
 
+	// A FAILED chain UPDATE is a transaction failure, not a fence. The two look identical through the fence
+	// read - both leave the leaf `running` - but they demand opposite handling: a fence means a peer owns the
+	// step (abandon quietly, return nil), while a failed statement means nothing was written and the interrupt
+	// must be RETRIED. Reading them as the same thing wedged parallel subgraph interrupts on SQL Server: two
+	// callers interrupting at once deadlock (flipping running->interrupted deletes keys from the three
+	// status-filtered dwarf_steps indexes, so disjoint row sets still cycle), the victim's UPDATE applies
+	// nothing, and the fence read returned the pre-UPDATE row - so handleInterrupt returned nil, abandoning a
+	// leaf it still owned. Its flow sat `running` with no interrupt until the lease lapsed (budget + margin),
+	// and a Resume landing in that window flipped the parent back to `running` for good, since the lost branch
+	// never marked its caller step interrupted.
+	//
+	// This pins the contract rather than any one layer's implementation of it: a failed chain write must leave
+	// handleInterrupt as a retryable error, never as a fence. Today the engine enforces it by checking the
+	// transaction's health before trusting the fence read; if sequel ever makes QueryRow short-circuit like
+	// its other statement methods, that check becomes redundant and this test keeps guarding the outcome.
+	t.Run("failed_chain_write_is_retryable_not_fenced", func(t *testing.T) {
+		assert := testarossa.For(t)
+		e, db := setup(t, workflow.StatusRunning)
+		e.seams.Inject(faultInterruptChainWrite)
+		defer e.seams.Withdraw(faultInterruptChainWrite)
+
+		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), map[string]any{"ask": "approve?"})
+		assert.Error(err, "a failed chain UPDATE must surface as an error so Transact retries it, NOT be swallowed as a fence")
+
+		// Nothing committed: the leaf is still ours to re-interrupt on the retry.
+		leafStatus, _ := stepState(t, db, 2)
+		assert.Equal(workflow.StatusRunning, leafStatus, "the leaf we still own must be left running, not abandoned interrupted-less")
+		callerStatus, callerParked := stepState(t, db, 1)
+		assert.Equal(workflow.StatusRunning, callerStatus)
+		assert.Equal(parkedSubgraph, callerParked, "the ancestor caller must stay parkedSubgraph")
+		assert.Equal(workflow.StatusRunning, flowStatus(t, db, 1), "the parent flow must not be interrupted")
+		assert.Equal(workflow.StatusRunning, flowStatus(t, db, 2), "the child flow must not be interrupted")
+	})
+
 	// Control: a `running` leaf we still own (same generation) interrupts the whole chain normally - the fix must
 	// not over-fence the legitimate case.
 	t.Run("running_leaf_interrupts_the_chain", func(t *testing.T) {

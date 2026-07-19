@@ -938,133 +938,23 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			}
 
 			if fanInArrivals > 0 {
-				// Record this branch's arrival on its own exit step. It cannot ride the step-completion
-				// UPDATE above, which runs before transitions are evaluated and so cannot yet know this
-				// step is an arrival.
+				// Record this branch's arrival on its own exit step - a row no sibling touches, so a cohort no
+				// longer serializes on one shared counter. It cannot ride the step-completion UPDATE above, which
+				// runs before transitions are evaluated and so cannot yet know this step is an arrival.
+				//
+				// Whether the cohort is now COMPLETE is deliberately not asked here. resolveCohort asks it after
+				// this transaction commits, because a count taken inside it would miss concurrent siblings and
+				// could leave a cohort with every branch arrived and nobody resolving it.
 				tx.ExecContext(ctx,
 					"UPDATE dwarf_steps SET cohort_arrived=? WHERE step_id=?",
 					cohortArrivedOK, stepID,
 				)
-				// Bump the cohort counter and read the post-bump values in ONE round-trip where the driver
-				// supports it (the same RETURNING/OUTPUT split as the claim CAS above).
-				//
-				// This is a CONTENTION fix, not merely a round-trip saving. The bump takes the spawn row's
-				// write lock and holds it until COMMIT, so every sibling of a cohort queues on it - and the
-				// queue drains at the rate of the LOCK HOLD, i.e. the work still outstanding after the bump
-				// returns. Dropping this read from the hold shortens it by roughly a third, and each sibling
-				// waiting behind the lock is paid that saving. Measured on PostgreSQL at fan-out width 64:
-				// the cohort-row statement went 10.1ms -> 6.7ms and the whole arrival transaction 11.3ms ->
-				// 7.9ms, for +7-13% fan-out throughput and a halved p99 on the statement.
-				//
-				// The two forms are equivalent: RETURNING/OUTPUT INSERTED yields the row AS UPDATED, which is
-				// exactly what the follow-up SELECT read inside this transaction. cohort_size/cohort_failures/
-				// lineage_id are untouched by this statement, and cohort_arrivals is read post-increment either
-				// way. A zero-row match yields sql.ErrNoRows from both forms, preserving the existing error path
-				// (the trunk-step-into-a-fan-in case, guarded above).
-				var arrivals, size, failures, spawnLineageID int
-				var err error
-				switch db.DriverName() {
-				case "pgx", "sqlite":
-					err = tx.QueryRowContext(ctx,
-						"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?"+
-							" RETURNING cohort_arrivals, cohort_size, cohort_failures, lineage_id",
-						fanInArrivals, cohortSpawnID,
-					).Scan(&arrivals, &size, &failures, &spawnLineageID)
-				case "mssql":
-					err = tx.QueryRowContext(ctx,
-						"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ?"+
-							" OUTPUT INSERTED.cohort_arrivals, INSERTED.cohort_size, INSERTED.cohort_failures, INSERTED.lineage_id"+
-							" WHERE step_id=?",
-						fanInArrivals, cohortSpawnID,
-					).Scan(&arrivals, &size, &failures, &spawnLineageID)
-				default:
-					// MySQL lacks RETURNING, so the bump and the read stay two statements. They run in one
-					// transaction on one connection, so they are already serial and the read still sees the
-					// post-bump value; only the shorter lock hold is unavailable there.
-					tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?", fanInArrivals, cohortSpawnID)
-					err = tx.QueryRowContext(ctx,
-						"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM dwarf_steps WHERE step_id=?",
-						cohortSpawnID,
-					).Scan(&arrivals, &size, &failures, &spawnLineageID)
-				}
-				if err != nil {
-					return errors.Trace(err)
-				}
-				fullyResolved := size > 0 && arrivals >= size
-				// The cohort resolves here, so this arrival is about to extend (fan-in step) or terminalize
-				// (cohort failure) the flow - exactly the writes the terminal guard protects. A deferred grab is
-				// taken now, before either, so the guard sits in front of them just as it did when every arrival
-				// grabbed the row. A zero-row match means Cancel/failStep won the race: bail as a clean no-op.
-				if fullyResolved && !flowRowLocked {
-					ok, lerr := lockFlowRow()
-					if lerr != nil {
-						return lerr
-					}
-					if !ok {
-						return nil
-					}
-				}
-				if fullyResolved && failures == 0 {
-					fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
-					if err != nil {
-						return errors.Trace(err)
-					}
-					txBytes.stateWritten += fanInBytes.stateWritten
-					txBytes.stateRead += fanInBytes.stateRead
-					txBytes.changesRead += fanInBytes.changesRead
-					newStepIDs = append(newStepIDs, fanInStepID)
-				} else if fullyResolved && failures > 0 {
-					failFlow := spawnLineageID == 0
-					if !failFlow {
-						// This cohort settled badly, so its spawn has itself settled as a member of the cohort
-						// above; the branch produced no fan-in step, so the spawn row is its last row. There are
-						// TWO entry points into a cohort failure and both must mark: propagateCohortFailure when
-						// the failing branch arrives last, and this one when a healthy sibling resolves the
-						// cohort instead. Arrival order alone decides which, so missing either is intermittent.
-						tx.ExecContext(ctx,
-							"UPDATE dwarf_steps SET cohort_arrived=? WHERE step_id=?",
-							cohortArrivedFailed, cohortSpawnID,
-						)
-						var pcfErr error
-						failFlow, pcfErr = e.propagateCohortFailure(ctx, tx, spawnLineageID)
-						if pcfErr != nil {
-							return errors.Trace(pcfErr)
-						}
-					}
-					if failFlow {
-						var sampleErr string
-						tx.QueryRowContext(ctx,
-							"SELECT error FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusFailed+"' AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
-							flowID,
-						).Scan(&sampleErr)
-						sampleErr = strings.TrimSpace(sampleErr)
-						if sampleErr == "" {
-							sampleErr = "cohort failed"
-						}
-						finalStateJSON, _, cfsErr := e.computeFinalState(ctx, tx, shardNum, flowID)
-						if cfsErr != nil {
-							return errors.Trace(cfsErr)
-						}
-						tx.ExecContext(ctx,
-							"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
-							finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
-						)
-						flowFailed = true
-						// The cohort fully resolved here (this branch completed last), so every sibling has
-						// settled - nothing is stranded. If this flow is a subgraph child, deliver the failure
-						// to the parked parent caller step rather than notifying directly.
-						var parentStepID int
-						tx.QueryRowContext(ctx, "SELECT surgraph_step_id, awaited FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID, &flowFailedAwaited)
-						if parentStepID != 0 {
-							rd, derr := e.deliverFlowFailureToParent(ctx, tx, parentStepID, sampleErr)
-							if derr != nil {
-								return errors.Trace(derr)
-							}
-							flowFailedParentStepID = parentStepID
-							flowFailedReDispatchParent = rd
-						}
-					}
-				}
+				// The shared counters are still maintained so the invariant comparing them against the markers
+				// keeps running; nothing reads them to make a decision any more.
+				tx.ExecContext(ctx,
+					"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?",
+					fanInArrivals, cohortSpawnID,
+				)
 			}
 
 			nextFlowStepID := 0
@@ -1096,6 +986,31 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)
 	e.metricStateReadBytes(ctx, workflowURL, "state", txBytes.stateRead)
 	e.metricStateReadBytes(ctx, workflowURL, "changes", txBytes.changesRead)
+
+	// The arrival is committed; now settle the cohort if this branch was the last. Deliberately a separate
+	// transaction - see resolveCohort.
+	if fanInArrivals > 0 && cohortSpawnID != 0 {
+		e.seams.Checkpoint(ctx, checkpointAfterArrivalTx)
+		res, rerr := e.resolveCohort(ctx, db, shardNum, flowID, cohortSpawnID, stepID)
+		if rerr != nil {
+			// The arrival is already durable, so this error must NOT propagate: the recovery defer would rewind
+			// the completed step and re-execute the task, re-firing its side effects for a failure the task had
+			// no part in. An unresolved cohort is what the reconciler sweeps for, so leave it to that.
+			e.logger.ErrorContext(ctx, "Cohort resolve failed; left for the reconciler",
+				"flow", keys.CorrelationID(shardNum, flowID), "spawnStep", cohortSpawnID, "error", rerr)
+			return nil
+		}
+		e.metricStateWriteBytes(ctx, workflowURL, "state", res.bytes.stateWritten)
+		e.metricStateReadBytes(ctx, workflowURL, "state", res.bytes.stateRead)
+		e.metricStateReadBytes(ctx, workflowURL, "changes", res.bytes.changesRead)
+		if res.fanInStepID != 0 {
+			newStepIDs = append(newStepIDs, res.fanInStepID)
+		}
+		flowFailed = res.flowFailed
+		flowFailedParentStepID = res.parentStepID
+		flowFailedReDispatchParent = res.reDispatchParent
+		flowFailedAwaited = res.failedAwaited
+	}
 
 	if flowFailed {
 		if flowFailedParentStepID != 0 {
@@ -1152,10 +1067,13 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		stepPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"
 		stepArgs := []any{stepID, changesJSON, stepID, workflow.StatusInterrupted, parkedNone}
 		stepArgs = append(stepArgs, allStepIDs...)
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+stepPlaceholders+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
-			stepArgs...,
-		)
+		chainSQL := "UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN (" + stepPlaceholders + ") AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "')"
+		// faultInterruptChainWrite reproduces a deadlock victim dialect-independently: the statement errors and
+		// applies NOTHING, so the leaf stays `running` - the shape that used to read back as a genuine fence.
+		if e.seams.IsFault(faultInterruptChainWrite) {
+			chainSQL, stepArgs = "UPDATE dwarf_steps SET no_such_column=1 WHERE step_id=?", []any{stepID}
+		}
+		tx.ExecContext(ctx, chainSQL, stepArgs...)
 
 		// Lease fence - on BOTH the generation AND the leaf's own transition. The combined UPDATE above locked
 		// and re-parked the whole chain (in PK order, before any flow row - the ordering the comment guards),
@@ -1173,6 +1091,19 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		// matches. On either failure roll the entire interrupt back (undoing the ancestor re-park) and abandon;
 		// the peer that (re-)claims the pending leaf then performs the interrupt in full. The check reads the leaf
 		// inside the tx (not a same-table subquery, which MySQL rejects on an UPDATE target) after the lock.
+		// The fence read's error check is load-bearing in a way it is nowhere else, because this is the one
+		// site that turns a READ into a control decision the caller reports as SUCCESS. A failed chain UPDATE
+		// leaves the leaf `running` - EXACTLY what a genuine fence looks like - so a read that returned the
+		// pre-UPDATE row instead of the transaction's error would make the fence below trip on a merely-
+		// contended write and `return nil`: a leaf we still own, abandoned with no interrupt, no error and no
+		// retry, its flow stuck `running` until the lease lapses (minutes) - permanently if a Resume lands in
+		// that window, since the lost branch never marked its caller step interrupted. That was the live bug
+		// while sequel's QueryRow uniquely neither short-circuited nor latched; it now reports the
+		// transaction's error like every other statement method, so the check below catches it and Transact
+		// retries. Observed on SQL Server, where two parallel subgraph callers interrupting at once deadlock:
+		// moving a step running->interrupted deletes keys from the three status-filtered dwarf_steps indexes,
+		// so even disjoint row sets cycle. Never let this error go unchecked, and never decide the fence ahead
+		// of it.
 		var curLeaseSeq int
 		var curStatus string
 		if serr := tx.QueryRowContext(ctx, "SELECT lease_seq, status FROM dwarf_steps WHERE step_id=?", stepID).Scan(&curLeaseSeq, &curStatus); serr != nil {

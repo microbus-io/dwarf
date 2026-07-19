@@ -525,11 +525,35 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 				continue // this branch re-runs in the fork; it has not arrived
 			}
 			arrivals++
+			mark := cohortArrivedOK
 			if branchFailed {
 				failures++
+				mark = cohortArrivedFailed
+			}
+			// Record the arrival per member, the way the live path does. The marker is written HERE rather
+			// than cloned, because Fork counts a branch as arrived on grounds the live path never marks for -
+			// a CANCELLED branch settles nothing and carries no marker, yet the fork must still treat it as
+			// arrived or its cohort could never resolve and the fork would hang. Writing from this walk keeps
+			// the clone self-consistent whatever the origin looked like.
+			//
+			// Any single row of the branch will do: every step of a per-element sub-pipeline inherits the
+			// spawn's lineage, so the count is over rows with lineage_id = spawn and one mark per branch is
+			// what makes it a BRANCH count. The head is the row that always exists.
+			if _, merr := tx.ExecContext(ctx,
+				"UPDATE dwarf_steps SET cohort_arrived=? WHERE step_id=?", mark, idMap[head.oldID],
+			); merr != nil {
+				return 0, nil, errors.Trace(merr)
 			}
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals=?, cohort_failures=? WHERE step_id=?", arrivals, failures, idMap[s.oldID])
+		// A cohort that is already complete keeps its resolution: its fan-in step was cloned with it, and
+		// re-resolving would insert a second one. One that is NOT complete - the rewound branch's ancestors -
+		// must be claimable again, or the arbiter's `WHERE cohort_resolved=0` never matches and the fork hangs
+		// with every worker idle.
+		resolved := 0
+		if arrivals >= s.cohortSize {
+			resolved = 1
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals=?, cohort_failures=?, cohort_resolved=? WHERE step_id=?", arrivals, failures, resolved, idMap[s.oldID])
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}
@@ -552,7 +576,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if isLeafFlow && rewind == cc.leafStepID {
 			// Leaf fork step: merged input, cleared output/park/cohort, gated `created`.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, cohort_arrived=0, cohort_resolved=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
 				workflow.StatusCreated, parkedNone, cc.mergedLeafState, emptyJSON, emptyJSON, emptyJSON, emptyJSON, newRewindID,
 			)
 			cc.newLeafStepID = newRewindID

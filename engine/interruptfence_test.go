@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,9 +59,10 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 		}
 		return nil
 	})
-	var xCalls int
+	// Atomic: the worker goroutine writes it while the test goroutine waits on it below.
+	var xCalls atomic.Int32
 	proxy.HandleTask("fisw/x", func(ctx context.Context, f *workflow.Flow) error {
-		xCalls++
+		xCalls.Add(1)
 		yield, err := f.Interrupt(map[string]any{"ask": "approve?"}, nil)
 		if yield || err != nil {
 			return err
@@ -79,16 +81,15 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	assert.NoError(err)
 
 	// The fenced first attempt rolls back and returns nil (abandon quietly), leaving the child step
-	// running-and-leased — it does not schedule its own recovery, so drive the lease-recovery backstop
-	// explicitly. Inherent wall-clock: the 300ms lease must lapse before pollPendingSteps resets the step.
-	time.Sleep(400 * time.Millisecond)
-	e.pollPendingSteps(ctx)
+	// running-and-leased — it does not schedule its own recovery, so drive the lease-recovery backstop until
+	// the re-dispatch lands (see drivePollBackstop; this is the site whose fixed-sleep version flaked).
+	drivePollBackstop(t, e, pollBackstopWait, func() bool { return xCalls.Load() >= 2 })
 
 	// The flow reaches interrupted only via that recovered second attempt — the fenced first attempt rolled
 	// back, so the interrupt could not take on the first try.
 	waitFlowStatus(t, e, fk, workflow.StatusInterrupted, 10*time.Second)
-	assert.Equal(2, xCalls) // fenced attempt + recovered real attempt: proof the fence forced a re-dispatch
-	assertInvariants(t, e)  // no strand: the rollback undid the ancestor re-park, so no terminal-flow-with-live-step
+	assert.Equal(int32(2), xCalls.Load()) // fenced attempt + recovered real attempt: proof the fence forced a re-dispatch
+	assertInvariants(t, e)                // no strand: the rollback undid the ancestor re-park, so no terminal-flow-with-live-step
 
 	// The rollback left a clean, resumable tree: Resume threads down to the leaf and the whole tree completes.
 	err = e.Resume(ctx, fk, map[string]any{"answer": "yes"})

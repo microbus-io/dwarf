@@ -715,12 +715,13 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 			fenced = true
 			return nil
 		}
-		if !failFlow {
-			var err error
-			failFlow, err = e.propagateCohortFailure(ctx, tx, stepLineageID)
-			if err != nil {
-				return errors.Trace(err)
-			}
+		// Transitional: keep the shared counters in step with the marker above, so the invariant comparing
+		// the two still holds. Goes when the counters go.
+		if stepLineageID != 0 {
+			tx.ExecContext(ctx,
+				"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + 1, cohort_failures = cohort_failures + 1 WHERE step_id=?",
+				stepLineageID,
+			)
 		}
 		if failFlow {
 			var err error
@@ -762,6 +763,29 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// The step is now failed regardless of whether the whole flow fails - count it.
 	e.metricStepExecuted(ctx, taskName, workflow.StatusFailed)
 
+	// A failed branch has settled, so its cohort may now be complete. Hand that decision to resolveCohort -
+	// the SAME resolver the completing path uses - rather than deciding here. Two deciders was a real bug:
+	// this path used to walk up and settle enclosing cohorts without claiming anything, so a sibling
+	// resolving concurrently could settle the same cohort a second time and double-count it.
+	if stepLineageID != 0 {
+		res, rerr := e.resolveCohort(ctx, db, shardNum, flowID, stepLineageID, stepID)
+		if rerr != nil {
+			// The failure is already durable; an unresolved cohort is the reconciler's to sweep. Returning the
+			// error here would re-drive a step that has already failed.
+			e.logger.ErrorContext(ctx, "Cohort resolve failed after a branch failure; left for the reconciler",
+				"flow", keys.CorrelationID(shardNum, flowID), "spawnStep", stepLineageID, "error", rerr)
+			return false, nil
+		}
+		if !res.flowFailed {
+			return false, nil
+		}
+		failFlow = true
+		awaited = res.failedAwaited
+		if res.parentStepID != 0 {
+			isSubgraphChild, parentStepID, reDispatchParent = true, res.parentStepID, res.reDispatchParent
+		}
+	}
+
 	if !failFlow {
 		return false, nil
 	}
@@ -782,50 +806,6 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))
 	e.signalStop(ctx, compositeID, workflow.StatusFailed, awaited)
 	return false, nil
-}
-
-// propagateCohortFailure bumps a spawn step's cohort_arrivals and cohort_failures, walking UP the lineage
-// chain: a nested cohort's failure must surface to every enclosing cohort, because the inner fan-in never
-// fires and so no outer member would otherwise ever settle.
-//
-// The cohort_arrived marker sits one level BELOW the counter it shadows: the counter bumps `current`, the
-// spawn of the cohort the settled entity belongs to, while the marker goes on that settled entity itself -
-// the failing step at the first level (marked by failStep), and the previous `current` above it. So an
-// inner spawn row carries both, in its two roles: cohort_size as spawn, cohort_arrived as outer member.
-func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor, spawnStepID int) (bool, error) {
-	current := spawnStepID
-	for {
-		_, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + 1, cohort_failures = cohort_failures + 1 WHERE step_id=?",
-			current,
-		)
-		if err != nil {
-			return false, errors.Trace(err)
-		}
-		var arrivals, size, lineageID int
-		err = tx.QueryRowContext(ctx,
-			"SELECT cohort_arrivals, cohort_size, lineage_id FROM dwarf_steps WHERE step_id=?",
-			current,
-		).Scan(&arrivals, &size, &lineageID)
-		if err != nil {
-			return false, errors.Trace(err)
-		}
-		if arrivals < size {
-			return false, nil
-		}
-		if lineageID == 0 {
-			return true, nil
-		}
-		// This cohort settled, badly, so `current` has itself settled as a member of the cohort above.
-		_, err = tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET cohort_arrived=? WHERE step_id=?",
-			cohortArrivedFailed, current,
-		)
-		if err != nil {
-			return false, errors.Trace(err)
-		}
-		current = lineageID
-	}
 }
 
 // dynamicSubgraphParent reports whether the given flow is a subgraph child. It also returns the flow's
