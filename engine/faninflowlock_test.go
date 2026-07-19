@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -94,7 +95,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 
 		_, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
-		return e.flowRowWriteCount(flowID)
+		return e.seams.Visits(checkpointFlowRowWrite, strconv.Itoa(flowID))
 	}
 
 	var narrow, wide int

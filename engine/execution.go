@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -828,7 +829,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			// Reports whether the flow is still non-terminal; a false return means the caller must bail (nil).
 			flowRowLocked := false
 			lockFlowRow := func() (bool, error) {
-				e.countFlowRowWrite(ctx, flowID)
+				if e.seams.Enabled() { // counting checkpoint; Enabled gates the throwaway scope string in production
+					e.seams.Checkpoint(ctx, checkpointFlowRowWrite, strconv.Itoa(flowID))
+				}
 				flowRes, flowErr := tx.ExecContext(ctx,
 					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 					flowID,
@@ -1060,7 +1063,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			// flow's hottest row (two extra tuple versions per sibling; 126 per 64-wide cohort) plus the lock
 			// hold that serializes the cohort. Every path that DOES advance the flow holds the row by here.
 			if !flowFailed && flowRowLocked {
-				e.countFlowRowWrite(ctx, flowID)
+				if e.seams.Enabled() { // counting checkpoint; Enabled gates the throwaway scope string in production
+					e.seams.Checkpoint(ctx, checkpointFlowRowWrite, strconv.Itoa(flowID))
+				}
 				tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", nextFlowStepID, flowID)
 			}
 			return nil

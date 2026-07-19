@@ -61,27 +61,39 @@ func linear2(proxy *TestProxy, prefix string, calls map[string]*int) {
 	}
 }
 
-// awaitNextStop arms a race-free rendezvous for the NEXT flow stop (completed/failed/cancelled/
-// interrupted), replacing a status poll / sleep with an exact wait. Call it BEFORE the action that triggers
-// the stop; the returned wait blocks until a flow has reached its (post-commit) signalStop, then releases the
-// engine. Because the breakpoint is armed now, it cannot miss a stop that fires before the wait - immune to
-// both the "a background poll drove it first" race a bare waitFor carries and the "slow CI missed the window"
-// flake a poll loop carries. It catches the FIRST stop, so use it in single-flow-of-interest windows.
+// awaitNextStop arms a rendezvous for the NEXT flow stop (completed/failed/cancelled/interrupted) and returns
+// the wait half, replacing a status poll / sleep with an exact wait on the (post-commit) signalStop. Call it
+// BEFORE the action that triggers the stop, then call the returned func after: the waiter is registered by the
+// time awaitNextStop returns, so a stop firing in between is observed rather than lost. That closes both the
+// "a background poll drove it first" race and the "slow CI missed the window" flake a poll loop carries.
+//
+// It used to arm a Break and Resume it after the wait, purely to be race-free; a Waiter is race-free on its own
+// without freezing a worker at signalStop, so the breakpoint is gone.
+//
+// Two constraints. It catches the FIRST stop of ANY flow, so use it only in single-flow-of-interest windows.
+// And chaining two of them - wait for stop A, then arm for stop B - is safe only where B genuinely cannot
+// happen until the test drives it: nothing holds the engine between the first wait returning and the second
+// arming, so an unblocked B could slip through that gap unobserved.
 func awaitNextStop(t *testing.T, e *Engine) func() {
 	t.Helper()
-	e.seams.Break(checkpointFlowStopped)
+	reached := e.seams.Waiter(checkpointFlowStopped)
 	return func() {
-		cpWaitFor(t, e, checkpointFlowStopped, 10*time.Second)
-		e.seams.Resume(checkpointFlowStopped)
+		t.Helper()
+		select {
+		case <-reached:
+		case <-time.After(10 * time.Second):
+			t.Fatal("no flow reached a stop")
+		}
 	}
 }
 
 // drivePollBackstop drives lease recovery until `landed` reports the re-dispatch happened, or retryDuration
 // elapses and the caller's own assertion reports it.
 //
-// This DRIVES the engine rather than merely observing it, which is why it is not a pollPredicate: without the
-// e.pollPendingSteps call the recovery never happens inside a test's lifetime, measured - every run of the
-// lease-fence battery fails on the wait.
+// This DRIVES the engine rather than merely observing it, which is why it is the one helper here that still
+// loops: without the e.pollPendingSteps call the recovery never happens inside a test's lifetime, measured -
+// every run of the lease-fence battery fails on the wait. A loop that makes the thing happen is not the
+// spin-wait-on-an-observation that every other wait in this package was converted away from.
 //
 // Drive it in a loop rather than sleeping past the lease and polling once. pollPendingSteps only resets a
 // `running` step whose lease has ALREADY expired, so a single fixed-sleep poll has to land between the lease
@@ -346,7 +358,7 @@ func TestFault_DropDoorbell(t *testing.T) {
 	fk, err := e.Create(ctx, "fdoor/g", nil, nil)
 	assert.NoError(err)
 	e.pollPendingSteps(ctx) // the backstop that recovers a lost doorbell
-	waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 }
 
 // --- Background-recovery faults ---

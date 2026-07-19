@@ -201,7 +201,7 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		// (see drivePollBackstop). Anchored on the flow's own status rather than calls["a"], which is a plain *int shared
 		// across this battery and would race a read from here.
 		drivePollBackstop(t, e, pollBackstopWait, func() bool { return flowStatus(t, e, fk) == workflow.StatusCompleted })
-		waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+		awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 		assert.Equal(baseFS, readFinalState(t, e, fk), "final_state diverged from the no-fault baseline")
 		assert.Equal(2, *calls["a"]) // fenced dispatch + clean re-run

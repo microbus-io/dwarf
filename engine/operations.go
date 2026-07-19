@@ -506,10 +506,13 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 // is caught by its own periodic re-snapshot. When the flag is unknown (a read failed), pass true -
 // broadcasting is always safe; skipping is only the optimization.
 func (e *Engine) signalStop(ctx context.Context, flowKey string, status string, awaited bool) {
-	// Test rendezvous: a flow just reached a committed stop (this runs post-commit). Placed before the
-	// drop-fault below so it fires even when the wake itself is dropped - a test waiting on "the flow stopped"
-	// should observe the DB-committed stop regardless of wake delivery. Inert in production.
+	// Test rendezvous: a flow just reached a committed stop (this runs post-commit). Fired both unscoped and
+	// scoped to this flow+status, so a test can wait for "any stop" or for one specific flow to reach one
+	// specific status. Placed before the drop-fault below so both fire even when the wake itself is dropped - a
+	// test waiting on "the flow stopped" should observe the DB-committed stop regardless of wake delivery.
+	// Inert in production: the Enabled gate short-circuits before the scoped name is built.
 	e.seams.Checkpoint(ctx, checkpointFlowStopped)
+	e.seams.Checkpoint(ctx, checkpointFlowStopped, flowKey, status)
 	// faultDropSignalStop simulates a lost terminal wake (worker crash between commit and signal, dropped
 	// broadcast, no-op SignalPeers) so a test can prove Await still returns via its periodic re-snapshot.
 	if e.seams.IsFault(faultDropSignalStop) {

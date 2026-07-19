@@ -18,7 +18,6 @@ package engine
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,26 +28,6 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
-
-// waitFlowStatus polls the flow row until it reaches want, failing the test on timeout. Used where the
-// settled status is reached after a transient one (e.g. interrupted -> failed) so Await is unsuitable.
-func waitFlowStatus(t *testing.T, e *Engine, flowKey, want string, timeout time.Duration) {
-	t.Helper()
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
-	testarossa.For(t).NoError(err)
-	db, err := e.db.Shard(shardNum)
-	testarossa.For(t).NoError(err)
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		var s string
-		db.QueryRowContext(context.Background(), "SELECT status FROM dwarf_flows WHERE flow_id=? AND flow_token=?", flowID, flowToken).Scan(&s)
-		if strings.TrimSpace(s) == want {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("flow %s did not reach status %q within %s", flowKey, want, timeout)
-}
 
 // shardFlowCount returns the number of flows on a shard.
 func shardFlowCount(t *testing.T, e *Engine, shardNum int) int {
@@ -256,7 +235,7 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 
 	fk, err := e.Create(ctx, "doc/failing", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	waitFlowStatus(t, e, fk, workflow.StatusFailed, 5*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusFailed, 5*time.Second)
 
 	// The failed flow row is still present (not auto-deleted).
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)

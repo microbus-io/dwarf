@@ -306,7 +306,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 
 	// One sweep re-drives the wedged l2 caller; the normal completion cascade then carries l2 -> l1 -> root.
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
-	waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 	// The tree ends structurally clean. Unlike the other composition cases in this file, the wedge alarm is *expected* to have
 	// fired exactly once here - this test's whole point is that a genuinely-wedged caller was recovered by the

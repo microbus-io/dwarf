@@ -61,14 +61,14 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 	e.seams.Break(checkpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cvt/g", nil, nil)
 	assert.NoError(err)
-	cpWaitFor(t, e, checkpointBeforeTransitionTx, 10*time.Second)
+	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeTransitionTx), "engine never reached checkpoint checkpointBeforeTransitionTx")
 
 	// Cancel wins while A's transition is held: the flow goes cancelled under the flow-row lock.
 	assert.NoError(e.Cancel(ctx, fk, "test"))
 
 	// Release A: its transition tx's guard (status NOT IN terminal) matches zero rows and inserts nothing.
 	e.seams.Resume(checkpointBeforeTransitionTx)
-	waitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
@@ -125,7 +125,7 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 	e.seams.Break(checkpointAfterCallerPark)
 	fk, err := e.Create(ctx, "cvs/parent", nil, nil)
 	assert.NoError(err)
-	cpWaitFor(t, e, checkpointAfterCallerPark, 10*time.Second)
+	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointAfterCallerPark), "engine never reached checkpoint checkpointAfterCallerPark")
 
 	// Cancel the tree while the child does not yet exist: teardown works from a scan taken before the child.
 	assert.NoError(e.Cancel(ctx, fk, "test"))
@@ -197,14 +197,14 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 	e.seams.Break(checkpointBeforeRetryRewind)
 	fk, err := e.Create(ctx, "rrc/g", nil, nil)
 	assert.NoError(err)
-	cpWaitFor(t, e, checkpointBeforeRetryRewind, 10*time.Second)
+	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeRetryRewind), "engine never reached checkpoint checkpointBeforeRetryRewind")
 
 	// Cancel wins: A's running step is flipped cancelled under the cancel transaction.
 	assert.NoError(e.Cancel(ctx, fk, "test"))
 
 	// Release A: the rewind's status='running' guard matches zero rows, so the cancelled step is not revived.
 	e.seams.Resume(checkpointBeforeRetryRewind)
-	waitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)

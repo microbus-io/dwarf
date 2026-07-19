@@ -21,47 +21,42 @@ import (
 	"time"
 )
 
-// retryInterval is the cadence shared by the settle-and-retry helpers.
 const (
+	// retryInterval is the cadence of drivePollBackstop, the one helper that still loops - it DRIVES the engine
+	// (it calls pollPendingSteps) rather than waiting for it, so it is not a spin-wait on an observation.
 	retryInterval = 20 * time.Millisecond
 
 	// pollBackstopWait bounds a lease-recovery re-dispatch - see drivePollBackstop.
 	pollBackstopWait = 2 * time.Second
-
-	// invariantSettleWait bounds how long an invariant may stay violated before it counts as broken rather
-	// than as work still in flight - see the check helper in invariants_test.go.
-	invariantSettleWait = 3 * time.Second
 )
 
-// pollPredicate re-evaluates `pred` every retryInterval until it reports true or retryDuration elapses, and
-// reports whether it did. It exists for one job: letting an assertion settle against a live engine, where a
-// condition that is about to become true is not the same as one that is broken.
+// awaitFlowStatus blocks until the given flow has reached the given stop status, failing the test on timeout. It
+// replaced a helper that polled the flow row every 10ms until the status matched. The poll was two-sided-wrong:
+// too short a timeout flakes on a loaded CI box, and a long one silently reports a genuine hang as a slow pass.
+// The checkpoint fires post-commit inside signalStop, so a return here means the status is durable - the same
+// fact the poll was sampling for, observed exactly once and at the moment it becomes true.
 //
-// `pred` must be SIDE-EFFECT FREE - it observes, it does not make the thing happen. A helper that needs to
-// drive the engine to reach its condition is a different operation and says so in its own name; see
-// drivePollBackstop, which deliberately does not route through here.
+// This is the one wait that needs a helper rather than a bare e.seams.WaitTimeout: the flow key is not known
+// until Create returns, so the flow can genuinely stop before the test can arm, and neither a plain wait (which
+// would arm too late) nor a bare Visits check (which would race a stop landing just after it) covers that alone.
+// So it does BOTH, and the order is load-bearing: arm FIRST, check Visits SECOND. A stop before the call is then
+// caught by the count, one after by the wait, and one landing between the two lines by the wait - because the
+// waiter is already registered. Reversing the two lines reintroduces exactly the race the split-arming Waiter
+// exists to remove.
 //
-// The bound is a DURATION and the iteration count is derived from it, because that is the number a caller can
-// reason about: "give it two seconds" survives a change to the cadence, a hardcoded count silently does not.
-func pollPredicate(retryDuration time.Duration, pred func() bool) bool {
-	for range max(1, int(retryDuration/retryInterval)) {
-		if pred() {
-			return true
-		}
-		time.Sleep(retryInterval)
-	}
-	return pred()
-}
-
-// cpWaitFor blocks until the engine reaches (or is already frozen at) the named checkpoint, failing the
-// test on timeout rather than hanging to the suite deadline. Shared by every checkpoint-driven test.
-func cpWaitFor(t *testing.T, e *Engine, name string, timeout time.Duration) {
+// Two limits. It only sees stops routed through signalStop (completed/failed/cancelled/interrupted) - a status
+// reached any other way has no rendezvous. And because Visits is monotonic, a REPEATED status (a flow
+// interrupted, resumed, then interrupted again) is satisfied by the earlier occurrence; wait on such a status
+// with e.seams.Waiter armed around the specific trigger instead.
+func awaitFlowStatus(t *testing.T, e *Engine, flowKey, want string, timeout time.Duration) {
 	t.Helper()
-	reached := make(chan struct{})
-	go func() { e.seams.Wait(name); close(reached) }()
+	reached := e.seams.Waiter(checkpointFlowStopped, flowKey, want) // arm first...
+	if e.seams.Visits(checkpointFlowStopped, flowKey, want) > 0 {
+		return // ...then catch a stop that beat us to it
+	}
 	select {
 	case <-reached:
 	case <-time.After(timeout):
-		t.Fatalf("engine never reached checkpoint %q", name)
+		t.Fatalf("flow %s never reached status %q within %s", flowKey, want, timeout)
 	}
 }

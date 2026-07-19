@@ -16,20 +16,12 @@ limitations under the License.
 
 package engine
 
-import (
-	"context"
-	"strconv"
-	"strings"
-
-	"github.com/microbus-io/sequel"
-)
-
 // Fault and checkpoint names for the engine's test-only instrumentation seams. The mechanism (the registry,
 // its locking, the production-inert gate, scoping, and the Wait/Break/Resume composition) lives in the
 // seamster package and is documented there. The engine embeds one seamster.Seamster as e.seams (enabled under
 // testing.Testing() in NewEngine) and consults it directly: e.seams.IsFault / Checkpoint / Inject / Wait /
 // Break / Resume. The names live here, next to the code they mark, so the valid set is discoverable and a test
-// cannot arm a fault or checkpoint no site consumes. deliverFailureLost is the one consult that needs a DB read.
+// cannot arm a fault or checkpoint no site consumes.
 
 // --- Fault injection ---
 const (
@@ -74,67 +66,6 @@ const (
 	faultForkCommit          = "forkCommit"          // the Fork clone transaction errors
 )
 
-// deliverFailureLost consults faultDeliverFailureErr, the seam that simulates a subgraph child's
-// failure-delivery to its parked caller being lost (wedging the caller for recoverWedgedSubgraphParks to
-// backstop). It fires either unscoped (the single-level lost-delivery pin) OR scoped to the parked caller's task name,
-// so a multi-level test drops the delivery at one chosen level while the other level's succeeds - each caller
-// task's FIRST delivery is lost and its sweep-driven re-delivery goes through, letting a depth-N tree wedge
-// (and unwedge) at every level. Inert in production: the enabled gate short-circuits before the scope
-// SELECT, so a live binary runs neither the query nor any consult.
-func (e *Engine) deliverFailureLost(ctx context.Context, tx sequel.Executor, parentStepID int) bool {
-	if !e.seams.Enabled() {
-		return false
-	}
-	if e.seams.IsFault(faultDeliverFailureErr) {
-		return true
-	}
-	var taskName string
-	if err := tx.QueryRowContext(ctx, "SELECT task_name FROM dwarf_steps WHERE step_id=?", parentStepID).Scan(&taskName); err != nil {
-		return false
-	}
-	return e.seams.IsFault(faultDeliverFailureErr, strings.TrimSpace(taskName))
-}
-
-// --- Test-only statement counters ---
-
-// The flow-row-write counter is a COUNTING checkpoint (seamster's Visits), not a rendezvous: countFlowRowWrite
-// fires checkpointFlowRowWrite scoped to the flow at each dwarf_flows UPDATE the transition transaction issues,
-// and flowRowWriteCount reads the accrued Visits count. No test arms Wait/Break on these flow-scoped names, so
-// Checkpoint just increments and returns.
-//
-// It exists for a single pin, and that pin guards a performance property no correctness test can see: a
-// NON-FINAL cohort arrival must issue ZERO flow-row statements. Grabbing the flow row for every arrival
-// serializes an entire cohort on one row (measured at fan-out width 64: 20 of 43 active backends queued on
-// that one statement), so the grab is deferred to the arrival that actually resolves the cohort. Nothing about
-// the flow's OUTCOME changes if someone reintroduces a per-arrival flow-row write - the fan-in still fires and
-// every existing fixture still passes - it just costs ~20% throughput silently. Hence a counter rather than a
-// state assertion.
-//
-// Counts are per flow and cumulative across the flow's whole life (Visits never resets), so a test reads the
-// delta it cares about. A Transact contention retry re-runs the closure and legitimately re-counts, so a test
-// asserting an exact count must be single-worker and contention-free.
-
-// flowRowWriteCheckpoint is the flow-scoped name of the flow-row-write counting checkpoint. Scoped by flow id
-// so concurrent flows count independently, mirroring the old per-flow map key.
-func flowRowWriteCheckpoint(flowID int) string {
-	return "flowRowWrite:" + strconv.Itoa(flowID)
-}
-
-// countFlowRowWrite records one dwarf_flows UPDATE issued by the transition transaction for a flow. Inert in
-// production: the Enabled gate short-circuits before the scoped checkpoint name is built, so a live binary
-// allocates no throwaway string and consults nothing.
-func (e *Engine) countFlowRowWrite(ctx context.Context, flowID int) {
-	if !e.seams.Enabled() {
-		return
-	}
-	e.seams.Checkpoint(ctx, flowRowWriteCheckpoint(flowID))
-}
-
-// flowRowWriteCount reports how many dwarf_flows UPDATEs the transition transaction has issued for a flow.
-func (e *Engine) flowRowWriteCount(flowID int) int {
-	return e.seams.Visits(flowRowWriteCheckpoint(flowID))
-}
-
 // --- Execution checkpoints ---
 const (
 	checkpointResumeBeforeFlowWrite   = "resumeBeforeFlowWrite"   // resume(), just before its transaction's flow-status gate write
@@ -146,7 +77,31 @@ const (
 	checkpointBeforeReviveWrite       = "beforeReviveWrite"       // completeSurgraphFlow(), just before its transaction's caller-revive write
 	checkpointBeforeRecoveryReset     = "beforeRecoveryReset"     // processStep recovery defer, just before its fenced step-reset transaction
 
+	// A COUNTING checkpoint (read with Visits, never a rendezvous), scoped by flow id so concurrent flows
+	// count independently. No test arms Wait/Break on it, so Checkpoint just increments and returns; both the
+	// count site (execution.go) and the read site (faninflowlock_test.go) consult e.seams directly.
+	//
+	// It exists for a single pin, and that pin guards a performance property no correctness test can see: a
+	// NON-FINAL cohort arrival must issue ZERO flow-row statements. Grabbing the flow row for every arrival
+	// serializes an entire cohort on one row (measured at fan-out width 64: 20 of 43 active backends queued on
+	// that one statement), so the grab is deferred to the arrival that actually resolves the cohort. Nothing
+	// about the flow's OUTCOME changes if someone reintroduces a per-arrival flow-row write - the fan-in still
+	// fires and every existing fixture still passes - it just costs ~20% throughput silently. Hence a counter
+	// rather than a state assertion.
+	//
+	// Counts are per flow and cumulative across the flow's whole life (Visits never resets), so a test reads
+	// the delta it cares about. A Transact contention retry re-runs the closure and legitimately re-counts, so
+	// a test asserting an exact count must be single-worker and contention-free.
+	checkpointFlowRowWrite = "flowRowWrite" // a dwarf_flows UPDATE issued by the transition transaction
+
 	// Lifecycle rendezvous (fired at an event, used with Wait - not a freeze site): lets a test wait for
-	// exact engine progress instead of polling status / sleeping.
+	// exact engine progress instead of polling status / sleeping. signalStop fires it BOTH unscoped and scoped
+	// by (flowKey, status): the unscoped name catches whichever flow stops first, which is all a single-flow
+	// test needs, while the scoped one lets a test wait for ONE flow to reach ONE status while other flows (a
+	// subgraph child, a fan-out sibling, a peer replica's work) stop concurrently. Both are needed because a
+	// scoped fire does not wake an unscoped waiter.
+	//
+	// The scoped form is meaningful only because signalStop runs POST-COMMIT: when it fires, the status is
+	// durable, so a test reading the row immediately after sees it - the exact guarantee a status poll spun for.
 	checkpointFlowStopped = "flowStopped" // signalStop(), a flow just reached a stop (completed/failed/cancelled/interrupted)
 )

@@ -43,25 +43,18 @@ func assertInvariants(t *testing.T, e *Engine) {
 			continue
 		}
 
-		// These are checked against a LIVE database, so a violation can be work in flight rather than a broken
-		// invariant. The clearest case is a cohort mid-resolve: the arrival that completes a cohort commits
-		// first and the fan-in step is inserted a moment later, so the flow briefly has every step terminal
-		// while still running - genuinely the orphan shape, just transient.
-		//
-		// So settle, then assert. The alternative - excluding that shape from the query - would blind this
-		// check to a cohort that is stranded complete-but-unresolved, which is precisely the bug the resolve
-		// window can produce and the reconciler exists to fix. A real strand never clears; a transient does.
+		// Asserted ONCE, against the state as it stands. This used to retry for a few seconds first, on the
+		// theory that a violation might be work still in flight (a cohort mid-resolve briefly shows every step
+		// terminal while the flow is still running - the orphan shape, transient). That settle was removed
+		// deliberately: it could only ever HIDE a real violation, never surface one, and a check that waits for
+		// an invariant to come true is not asserting an invariant. The precondition is the caller's to meet -
+		// call this only after the workload has quiesced (all Awaits returned).
 		check := func(label, query string) {
 			var n int
-			var qerr error
-			pollPredicate(invariantSettleWait, func() bool {
-				qerr = db.QueryRowContext(ctx, query).Scan(&n)
-				return qerr != nil || n == 0
-			})
-			if !assert.NoError(qerr) {
+			if !assert.NoError(db.QueryRowContext(ctx, query).Scan(&n)) {
 				return
 			}
-			assert.Equal(0, n, "shard %d: invariant violated: %s (%d offending rows, still violated after settling)", shard, label, n)
+			assert.Equal(0, n, "shard %d: invariant violated: %s (%d offending rows)", shard, label, n)
 		}
 
 		// 1. No terminal flow retains a non-terminal step. Delete-marked flows (delete_after_ms>0) are excluded:

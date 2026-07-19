@@ -110,7 +110,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		e.seams.Break(checkpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		cpWaitFor(t, e, checkpointBeforeCompleteFlowWrite, 10*time.Second)
+		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeCompleteFlowWrite), "engine never reached checkpoint checkpointBeforeCompleteFlowWrite")
 
 		// Release completion FIRST: the child completes and completeSurgraphFlow revives the caller, which
 		// re-dispatches and blocks (running).
@@ -124,7 +124,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 
 		// Cancel now tears the running caller (and its root flow) down cleanly.
 		assert.NoError(e.Cancel(ctx, fk, "test"))
-		waitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+		awaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
 		assert.Equal(workflow.StatusCancelled, flowStatus(t, e, fk))
 		assert.Equal(workflow.StatusCancelled, callStatus(t, e, fk))
 		assertInvariants(t, e)
@@ -139,7 +139,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		e.seams.Break(checkpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		cpWaitFor(t, e, checkpointBeforeCompleteFlowWrite, 10*time.Second)
+		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeCompleteFlowWrite), "engine never reached checkpoint checkpointBeforeCompleteFlowWrite")
 
 		// Cancel wins while the child's completion is held: the whole tree (root, its parked Call caller, and the
 		// still-running child) is terminalized under the cancel transaction.

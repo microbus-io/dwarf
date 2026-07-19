@@ -66,7 +66,7 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	e.seams.Break(checkpointBeforeReviveWrite)
 	fk, err := e.Create(ctx, "rvc/parent", nil, nil)
 	assert.NoError(err)
-	cpWaitFor(t, e, checkpointBeforeReviveWrite, 10*time.Second)
+	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeReviveWrite), "engine never reached checkpoint checkpointBeforeReviveWrite")
 
 	// Cancel wins: the parked caller step is flipped cancelled under the cancel transaction.
 	assert.NoError(e.Cancel(ctx, fk, "test"))
@@ -74,7 +74,7 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	// Release the revive: its running+parkedSubgraph guard matches zero rows, so the cancelled caller is not
 	// resurrected to pending and not re-dispatched.
 	e.seams.Resume(checkpointBeforeReviveWrite)
-	waitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)

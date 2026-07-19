@@ -87,13 +87,13 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 
 	// The flow reaches interrupted only via that recovered second attempt — the fenced first attempt rolled
 	// back, so the interrupt could not take on the first try.
-	waitFlowStatus(t, e, fk, workflow.StatusInterrupted, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusInterrupted, 10*time.Second)
 	assert.Equal(int32(2), xCalls.Load()) // fenced attempt + recovered real attempt: proof the fence forced a re-dispatch
 	assertInvariants(t, e)                // no strand: the rollback undid the ancestor re-park, so no terminal-flow-with-live-step
 
 	// The rollback left a clean, resumable tree: Resume threads down to the leaf and the whole tree completes.
 	err = e.Resume(ctx, fk, map[string]any{"answer": "yes"})
 	assert.NoError(err)
-	waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 	assertInvariants(t, e)
 }

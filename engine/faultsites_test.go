@@ -236,7 +236,7 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 
 	// Retry (fault consumed): Resume succeeds and the flow completes.
 	assert.NoError(e.Resume(ctx, fk, nil))
-	waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 	assertFaultRecoveryClean(t, e, reader)
 }
 
@@ -353,7 +353,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	// The wedge sweep re-drives the lost delivery (minAge 0 bypasses the steady-state age guard); the parent
 	// then terminalizes failed.
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
-	waitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
 
 	// Unlike the other faults in this file, this one drives a step into a genuinely-wedged state on purpose, so the
 	// always-on alarm SHOULD fire exactly once - proving the backstop engaged. The structural invariants must
@@ -437,7 +437,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 		return countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusFailed+"'", rootFlowID) == 1
 	})
 	assert.True(got, "expected the sweep to propagate the failure up both levels to the root")
-	waitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
 
 	// The two wedges (Call2, Call1) were each unwedged exactly once, and the tree ends structurally clean.
 	assertInvariants(t, e)
@@ -469,7 +469,7 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 
 	fk, err := e.Create(ctx, "ftbreapsel/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	waitFlowStatus(t, e, fk, workflow.StatusCompleted, 5*time.Second)
+	awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 5*time.Second)
 	shard, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	time.Sleep(5 * time.Millisecond) // let the 1ms window elapse

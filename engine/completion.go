@@ -910,8 +910,24 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 	// re-armed - the wedge shape (caller running+parkedSubgraph with a terminal child) that
 	// recoverWedgedSubgraphParks must backstop. Returning (false, nil), not an error, so the child's
 	// terminalization is NOT rolled back (an error would retry and deliver, producing no wedge).
-	if e.deliverFailureLost(ctx, tx, parentStepID) {
-		return false, nil
+	//
+	// It fires either unscoped (the single-level lost-delivery pin) OR scoped to the parked caller's task
+	// name, so a multi-level test drops the delivery at one chosen level while the other level's succeeds -
+	// each caller task's FIRST delivery is lost and its sweep-driven re-delivery goes through, letting a
+	// depth-N tree wedge (and unwedge) at every level. This is the one fault consult needing a DB read to
+	// build its scope, so the Enabled gate short-circuits ahead of the SELECT: a live binary runs neither the
+	// query nor any consult.
+	if e.seams.Enabled() {
+		lost := e.seams.IsFault(faultDeliverFailureErr)
+		if !lost {
+			var taskName string
+			if err := tx.QueryRowContext(ctx, "SELECT task_name FROM dwarf_steps WHERE step_id=?", parentStepID).Scan(&taskName); err == nil {
+				lost = e.seams.IsFault(faultDeliverFailureErr, strings.TrimSpace(taskName))
+			}
+		}
+		if lost {
+			return false, nil
+		}
 	}
 	res, err := tx.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",

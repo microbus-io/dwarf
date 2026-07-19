@@ -33,7 +33,8 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// cpWaitFor lives in checkpointhelpers_test.go (shared by every checkpoint-driven test).
+// The checkpoint rendezvous is e.seams.WaitTimeout; awaitFlowStatus (checkpointhelpers_test.go) is the
+// flow-status wait shared by every checkpoint-driven test.
 
 // flowStatus reads a flow's current status by key.
 func flowStatus(t *testing.T, e *Engine, flowKey string) string {
@@ -76,7 +77,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		e.seams.Break(checkpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		cpWaitFor(t, e, checkpointBeforeCompleteFlowWrite, 10*time.Second)
+		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeCompleteFlowWrite), "engine never reached checkpoint checkpointBeforeCompleteFlowWrite")
 
 		// Cancel wins while completion is held: the flow goes cancelled under the flow-row lock.
 		assert.NoError(e.Cancel(ctx, fk, "test"))
@@ -84,7 +85,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		// Release completion: its status-gate write (status NOT IN terminal) matches zero rows - a clean no-op,
 		// the flow stays cancelled.
 		e.seams.Resume(checkpointBeforeCompleteFlowWrite)
-		waitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+		awaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
 		assert.Equal(workflow.StatusCancelled, flowStatus(t, e, fk))
 		assertInvariants(t, e)
 	})
@@ -98,9 +99,9 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		e.seams.Break(checkpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		cpWaitFor(t, e, checkpointBeforeCompleteFlowWrite, 10*time.Second)
+		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeCompleteFlowWrite), "engine never reached checkpoint checkpointBeforeCompleteFlowWrite")
 		e.seams.Resume(checkpointBeforeCompleteFlowWrite)
-		waitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+		awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 		// Cancel now arrives on a terminal flow: it 409s and the flow stays completed.
 		err = e.Cancel(ctx, fk, "test")
@@ -170,8 +171,8 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		cpWaitFor(t, e, checkpointResumeBeforeFlowWrite, 10*time.Second)
-		cpWaitFor(t, e, checkpointBeforeDeleteWrite, 10*time.Second)
+		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointResumeBeforeFlowWrite), "engine never reached checkpoint checkpointResumeBeforeFlowWrite")
+		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeDeleteWrite), "engine never reached checkpoint checkpointBeforeDeleteWrite")
 
 		// Resume wins: released first, it flips interrupted->running and returns cleanly (the gate re-dispatches
 		// and blocks, so the flow rests running).
@@ -199,8 +200,8 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		cpWaitFor(t, e, checkpointResumeBeforeFlowWrite, 10*time.Second)
-		cpWaitFor(t, e, checkpointBeforeDeleteWrite, 10*time.Second)
+		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointResumeBeforeFlowWrite), "engine never reached checkpoint checkpointResumeBeforeFlowWrite")
+		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeDeleteWrite), "engine never reached checkpoint checkpointBeforeDeleteWrite")
 
 		// Delete wins: released first, it flips interrupted->cancelled and stamps deletion, returning cleanly.
 		e.seams.Resume(checkpointBeforeDeleteWrite)

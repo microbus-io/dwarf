@@ -334,7 +334,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	cpWaitFor(t, eng, checkpointBeforeRecoveryReset, 15*time.Second)
+	assert.True(eng.seams.WaitTimeout(ctx, 15*time.Second, checkpointBeforeRecoveryReset), "engine never reached checkpoint checkpointBeforeRecoveryReset")
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {

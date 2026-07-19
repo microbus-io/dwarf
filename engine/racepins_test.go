@@ -77,19 +77,13 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
 
-	// Freeze resume at the checkpoint before its transaction, then launch it. waitFor returns once resume is
-	// frozen there (whether it arrives before or after this waitFor).
+	// Freeze resume at the checkpoint before its transaction, then launch it. The wait returns once resume is
+	// frozen there, whether it arrives before or after the wait is armed.
 	e.seams.Break(checkpointResumeBeforeFlowWrite)
 	resumeDone := make(chan error, 1)
 	go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 
-	waited := make(chan struct{})
-	go func() { e.seams.Wait(checkpointResumeBeforeFlowWrite); close(waited) }()
-	select {
-	case <-waited:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Resume never reached the checkpoint")
-	}
+	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointResumeBeforeFlowWrite), "Resume never reached the checkpoint")
 
 	// Resume is frozen before its flow-status gate write. Drive a Delete to completion: it flips the flow
 	// interrupted->cancelled and stamps delete_after_ms under the flow-row lock.
