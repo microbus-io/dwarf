@@ -65,21 +65,21 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	}
 
 	// Phase 1: one aggregate row per key regardless of backlog depth, carrying that key's due count.
-	band, keys, err := e.scanBandKeys(ctx)
+	band, rows, err := e.scanShardBandKeys(ctx, 1)
 	if !assert.NoError(err) {
 		return
 	}
-	assert.Equal(2, len(keys), "one aggregate row per tenant, not per step in the %d-step backlog", 2*perTenant)
+	assert.Equal(2, len(rows), "one aggregate row per tenant, not per step in the %d-step backlog", 2*perTenant)
 	counts := map[string]int{}
-	for _, k := range keys {
-		counts[k.key] = k.count
+	for _, r := range rows {
+		counts[r.key] = r.count
 	}
 	assert.Equal(perTenant, counts["tenant-a"])
 	assert.Equal(perTenant, counts["tenant-b"])
 
 	// Phase 3: the fetch cuts each key at perKey - not the backlog - and every key still reaches the batch.
 	for _, perKey := range []int{1, 3, 10} {
-		byKey, err := e.fetchBandSteps(ctx, band, tenants, perKey)
+		byKey, err := e.fetchShardBandSteps(ctx, 1, band, tenants, perKey)
 		if !assert.NoError(err) {
 			return
 		}
@@ -91,11 +91,11 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 
 	// And the fetch keeps the OLDEST step of each key: the single row for a key at perKey=1 is its oldest
 	// (smallest step_id here, since steps are created in age order).
-	one, err := e.fetchBandSteps(ctx, band, tenants, 1)
+	one, err := e.fetchShardBandSteps(ctx, 1, band, tenants, 1)
 	if !assert.NoError(err) {
 		return
 	}
-	all, err := e.fetchBandSteps(ctx, band, tenants, perTenant)
+	all, err := e.fetchShardBandSteps(ctx, 1, band, tenants, perTenant)
 	if !assert.NoError(err) {
 		return
 	}

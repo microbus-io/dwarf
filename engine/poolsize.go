@@ -242,6 +242,9 @@ func (e *Engine) recomputePools() {
 	// shrinking it needs a worker-retirement protocol whose only prize is goroutine stacks.
 	dispatch := max(64, workersPerConnBudget*postSplitConns)
 	e.cache.Resize(min(dispatch, int(e.workers.Load())))
+	// The refill scan floor is measured against the cache's capacity, so it follows the same split -
+	// the same rule the dispatch count and worker ceiling obey just above.
+	e.recomputeScanFloors()
 	e.logger.Info("Derived pools recomputed", "replicas", replicas, "dispatch", dispatch)
 	e.recomputeWorkerCeiling(e.lifetimeCtx)
 }

@@ -267,6 +267,12 @@ func run() error {
 	}
 	defer dbs.close()
 
+	// Server-side statement timings (Postgres with pg_stat_statements preloaded; nil elsewhere). Like
+	// the two samplers above it watches shard 1 only - the local-harness shape; multi-shard attribution
+	// wants a sampler per shard.
+	pgss := startPgssSampler(dsns[0].dsn)
+	defer pgss.close()
+
 	art := artifact{
 		Label:     *label,
 		StartedAt: time.Now().UTC(),
@@ -328,7 +334,7 @@ func run() error {
 		fmt.Printf("%-6s %10s %10s %10s %8s %8s %8s %7s %7s %9s %8s %8s %7s\n",
 			"conc", "flows/s", "steps/s", "MB/s", "p50ms", "p95ms", "p99ms", "cpuCore", "cpu%", "steps/core", "netRxMB", "netTxMB", "errors")
 		for _, k := range ks {
-			res := runStep(ctx, engines, readers, sharedBytes, pick, k, *fairnessKeys, *warmup, *window)
+			res := runStep(ctx, engines, readers, pgss, sharedBytes, pick, k, *fairnessKeys, *warmup, *window)
 			art.Results = append(art.Results, res)
 			fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %7.2f %7.1f %9.0f %8.1f %8.1f %7d\n",
 				k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms,

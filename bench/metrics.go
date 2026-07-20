@@ -20,8 +20,10 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -200,6 +202,77 @@ func histogramDeltas(before, after []histSample) []histSample {
 			continue
 		}
 		out = append(out, s)
+	}
+	return out
+}
+
+// collectGauges snapshots the observable-gauge instruments - notably sequel's connection-pool gauges,
+// whose sequel_pool_wait_count / sequel_pool_wait_duration_seconds carry sql.DBStats' CUMULATIVE
+// pool-wait totals. A window delta of those two is the only recorded signal that separates "the query
+// was slow" from "the query waited for a connection": every duration histogram (the engine's and
+// sequel's alike) times the whole QueryContext, inside which the pool wait hides. Keyed like histSample:
+// instrument name plus sorted attributes.
+func collectGauges(reader *sdkmetric.ManualReader) map[string]float64 {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var rm metricdata.ResourceMetrics
+	err := reader.Collect(ctx, &rm)
+	if err != nil {
+		return nil
+	}
+	out := map[string]float64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			for _, kv := range gaugePoints(m) {
+				out[kv.key] = kv.value
+			}
+		}
+	}
+	return out
+}
+
+// gaugeKV is one gauge data point flattened to a stable string key, so before/after maps subtract.
+type gaugeKV struct {
+	key   string
+	value float64
+}
+
+// gaugePoints flattens a gauge metric's data points (int64 or float64) to keyed values; non-gauge
+// metrics yield nothing.
+func gaugePoints(m metricdata.Metrics) []gaugeKV {
+	var out []gaugeKV
+	add := func(attrs attribute.Set, v float64) {
+		k := m.Name
+		kvs := attrs.ToSlice()
+		slices.SortFunc(kvs, func(a, b attribute.KeyValue) int { return strings.Compare(string(a.Key), string(b.Key)) })
+		for _, kv := range kvs {
+			k += "|" + string(kv.Key) + "=" + kv.Value.String()
+		}
+		out = append(out, gaugeKV{key: k, value: v})
+	}
+	switch data := m.Data.(type) {
+	case metricdata.Gauge[int64]:
+		for _, dp := range data.DataPoints {
+			add(dp.Attributes, float64(dp.Value))
+		}
+	case metricdata.Gauge[float64]:
+		for _, dp := range data.DataPoints {
+			add(dp.Attributes, dp.Value)
+		}
+	}
+	return out
+}
+
+// collectAllGauges sums collectGauges across every replica's reader. Summing is right for the pool-wait
+// totals (each replica owns distinct pools, so the fleet total is their sum) and merely approximate for
+// point-in-time gauges like open-connection counts, which is acceptable: those are recorded for context,
+// not arithmetic.
+func collectAllGauges(readers []*sdkmetric.ManualReader) map[string]float64 {
+	out := map[string]float64{}
+	for _, r := range readers {
+		for name, v := range collectGauges(r) {
+			out[name] += v
+		}
 	}
 	return out
 }

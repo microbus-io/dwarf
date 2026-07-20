@@ -252,8 +252,8 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	// Two passes over the same stable backlog. The first fills the cache; the second replaces it, so
 	// everything the first selected is discarded un-popped.
 	assert.True(e.cache.Capacity() > 0)
-	e.runRefill(ctx)
-	e.runRefill(ctx)
+	e.runShardRefill(ctx, 1)
+	e.runShardRefill(ctx, 1)
 
 	var rm metricdata.ResourceMetrics
 	if !assert.NoError(reader.Collect(ctx, &rm)) {

@@ -58,6 +58,17 @@ type stepResult struct {
 	// separates "one shard is slow" from "the cross-shard fan-out wait is expensive" from "the refiller is
 	// not the constraint at all". Recorded as buckets, so percentiles are recoverable after the run.
 	EngineHists []histSample `json:"engineHistograms,omitempty"`
+	// GaugesBefore/GaugesAfter snapshot the observable gauges at the window edges. The pair worth the
+	// field: sequel_pool_wait_count / sequel_pool_wait_duration_seconds are cumulative sql.DBStats
+	// totals, so their window delta is the pool-wait the engine paid inside the window - the signal
+	// that decomposes any client-observed query duration (which includes that wait) against the
+	// server-side time in PgStatements (which excludes it).
+	GaugesBefore map[string]float64 `json:"gaugesBefore,omitempty"`
+	GaugesAfter  map[string]float64 `json:"gaugesAfter,omitempty"`
+	// PgStatements is the window delta of pg_stat_statements (top statements by server-side exec time),
+	// present only on Postgres with the extension preloaded. Server-side clocks: excludes pool wait,
+	// wire time and client scheduling - the other half of the attribution above.
+	PgStatements []pgssRow `json:"pgStatements,omitempty"`
 	// Host is what the throughput COST this engine host - CPU cores and network bandwidth over the
 	// measurement window. StepsPerCore is the engine-sizing headline: steps/s driven per engine CPU core.
 	Host hostUsage `json:"host"`
@@ -68,7 +79,7 @@ type stepResult struct {
 // claimed cluster-wide by whichever replica wins the CAS, so execution distributes regardless of which
 // replica a flow was submitted to. The warmup segment is discarded; only flows completing inside the
 // measurement window count. Returns the measured result.
-func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader,
+func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler,
 	bytesWritten *atomic.Int64, pick func() *workload, k, fairnessKeys int, warmup, window time.Duration) stepResult {
 
 	// The refiller bounds its scan PER fairness key (ROW_NUMBER partitioned by it). With every flow on
@@ -118,6 +129,8 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	time.Sleep(warmup)
 	before := collectAllCounters(readers)
 	histBefore := collectAllHistograms(readers)
+	gaugesBefore := collectAllGauges(readers)
+	pgssBefore := pgss.snapshot(ctx)
 	bytesBefore := bytesWritten.Load()
 	hostBefore := sampleHost()
 	windowStart := time.Now()
@@ -128,6 +141,8 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	hostAfter := sampleHost()
 	after := collectAllCounters(readers)
 	histAfter := collectAllHistograms(readers)
+	gaugesAfter := collectAllGauges(readers)
+	pgssAfter := pgss.snapshot(ctx)
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
 	submitters.Wait()
@@ -152,6 +167,9 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		Goroutines:     runtime.NumGoroutine(),
 		EngineCounters: deltas,
 		EngineHists:    histogramDeltas(histBefore, histAfter),
+		GaugesBefore:   gaugesBefore,
+		GaugesAfter:    gaugesAfter,
+		PgStatements:   pgssDelta(pgssBefore, pgssAfter),
 		Host:           host,
 	}
 }

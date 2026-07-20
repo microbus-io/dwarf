@@ -56,9 +56,9 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_steps_write_failed` | counter | `task_name` | steps terminalized because their outcome could not be stored while the database was reachable (nonzero = latent bug) | `dwarf_steps_write_failed_total` |
 | `dwarf_state_write_bytes` | counter | `workflow`, `column` | payload bytes written to step rows on the execution path | `dwarf_state_write_bytes_total` |
 | `dwarf_state_read_bytes` | counter | `workflow`, `column` | payload bytes read from step rows on the execution path | `dwarf_state_read_bytes_total` |
-| `dwarf_refill_candidates_selected` | counter | — | step candidates selected into the local worker cache | `dwarf_refill_candidates_selected_total` |
-| `dwarf_refill_candidates_discarded` | counter | — | cached candidates replaced un-popped (cost, not loss — the steps stay pending and are re-selected) | `dwarf_refill_candidates_discarded_total` |
-| `dwarf_refill_duration_seconds` | histogram | — | wall clock of a complete candidate-selection pass across every shard | `dwarf_refill_duration_seconds` |
+| `dwarf_refill_candidates_selected` | counter | `shard` | step candidates selected into the local worker cache | `dwarf_refill_candidates_selected_total` |
+| `dwarf_refill_candidates_discarded` | counter | `shard` | cached candidates replaced un-popped (cost, not loss — the steps stay pending and are re-selected) | `dwarf_refill_candidates_discarded_total` |
+| `dwarf_refill_duration_seconds` | histogram | `shard` | wall clock of one shard's complete candidate-selection pass | `dwarf_refill_duration_seconds` |
 | `dwarf_refill_query_duration_seconds` | histogram | `shard`, `phase` | one shard's candidate-selection query | `dwarf_refill_query_duration_seconds` |
 | `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
 | `dwarf_steps_pending` | gauge | `priority` | due pending steps per priority band | `dwarf_steps_pending` |

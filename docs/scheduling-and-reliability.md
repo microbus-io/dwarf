@@ -13,9 +13,12 @@ eng.Create(ctx, "report", state, &workflow.FlowOptions{Priority: 5})
 ```
 
 Lower numbers run first. An unset priority (0) uses the engine default (`SetDefaultPriority`, 100 by
-default). Priority is **strict and cluster-wide**: as long as any priority-5 work is due, no priority-10
-work runs. There is no aging — a steady stream of high-priority flows will starve lower bands by design, so
-reserve the top bands for genuinely urgent work.
+default). Priority is **strict and cluster-wide**: once the engine observes due priority-5 work, no
+priority-10 work is selected until it drains. The guarantee is over *observed* work — the scheduler works
+from periodic snapshots of what is due, so priority-10 work already picked up may briefly continue for one
+selection cycle after priority-5 work arrives elsewhere in the cluster; priority is never preemptive.
+There is no aging — a steady stream of high-priority flows will starve lower bands by design, so reserve
+the top bands for genuinely urgent work.
 
 Step order *within* a flow is dictated by the graph, not by priority.
 

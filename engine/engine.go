@@ -161,12 +161,27 @@ type Engine struct {
 	workersDispatch int
 	shardRTTMs      map[int]float64
 
-	// Single-slot refiller
-	refillTrigger chan struct{}
-	refillStop    chan struct{}
-	refiller      sync.WaitGroup
-	// Most recent refill's selected band and its distinct-fairness-key count, observed by the
-	// dwarf_steps_fairness_keys gauge. Written by the single refiller goroutine, read at metric
+	// Per-shard refillers: one goroutine per shard, each with its own single-slot trigger (the same
+	// buffered(1) non-blocking-send coalescing the old single trigger used), sharing one stop channel
+	// and one WaitGroup. The map is created in initRuntime before started flips true and is read-only
+	// thereafter. The census is the shared map the removed cross-shard barrier used to be: each
+	// refiller publishes its shard's phase-1 result and plans globally over a snapshot of all live
+	// entries (see "The census" in scheduling.go). maxRefillPassNs scales the census TTL to the
+	// slowest observed pass, so a slow shard is not mistaken for a dead one.
+	refillTriggers map[int]chan struct{}
+	// refillDemand carries the URGENT subset of refill nudges - the ones that must not wait out the
+	// scan floor. See requestRefillDemand.
+	refillDemand map[int]chan struct{}
+	refillStop   chan struct{}
+	refiller     sync.WaitGroup
+	// refillState holds each refiller's adaptive fetch depth. Entries are created before the refillers
+	// start and each is touched only by its own refiller goroutine, so they carry no lock.
+	refillState     map[int]*shardRefillState
+	censusLock      sync.Mutex
+	census          map[int]*shardCensus
+	maxRefillPassNs atomic.Int64
+	// Most recent refill's global band and its distinct-fairness-key count, observed by the
+	// dwarf_steps_fairness_keys gauge. Written by whichever refiller passed last, read at metric
 	// collection time. lastRefillBand < 0 means no refill has selected a band yet.
 	lastRefillLock sync.Mutex
 	lastRefillBand int
@@ -663,8 +678,17 @@ func (e *Engine) initRuntime() {
 	// unresolved-dispatch case to fall back from.
 	e.cache.Init(min(resident, e.workersDispatch))
 	e.drainStop = make(chan struct{})
-	e.refillTrigger = make(chan struct{}, 1)
+	e.refillTriggers = make(map[int]chan struct{})
+	e.refillDemand = make(map[int]chan struct{})
+	e.refillState = make(map[int]*shardRefillState)
+	for _, idx := range e.db.Indices() {
+		e.refillTriggers[idx] = make(chan struct{}, 1)
+		e.refillDemand[idx] = make(chan struct{}, 1)
+		e.refillState[idx] = &shardRefillState{}
+	}
 	e.refillStop = make(chan struct{})
+	e.census = make(map[int]*shardCensus)
+	e.maxRefillPassNs.Store(0)
 	e.wakeTimer = make(chan struct{}, 1)
 	e.timerStop = make(chan struct{})
 	e.recoveryStop = make(chan struct{})
@@ -685,6 +709,10 @@ func (e *Engine) initRuntime() {
 	// Resolve the tracer (no-op unless a TracerProvider was injected or the global SDK is configured).
 	e.initTracer()
 
+	// Derive each shard's refill scan floor now that the cache is sized and R is known. recomputePools
+	// re-derives it on every later fleet change.
+	e.recomputeScanFloors()
+
 	// Spawn the resident set eagerly; the rest of the ceiling is spawned on demand by a worker that finds
 	// every peer parked inside ExecuteTask (see maybeSpawnWorker) - the long-task case, where the resident
 	// set alone would cap throughput because nobody is left to dispatch.
@@ -699,9 +727,11 @@ func (e *Engine) initRuntime() {
 	e.timerWorker.Go(func() {
 		e.timerLoop(e.lifetimeCtx)
 	})
-	e.refiller.Go(func() {
-		e.refillerLoop(e.lifetimeCtx)
-	})
+	for idx := range e.refillTriggers {
+		e.refiller.Go(func() {
+			e.refillerLoop(e.lifetimeCtx, idx)
+		})
+	}
 	e.recoveryWorker.Go(func() {
 		e.recoveryLoop(e.lifetimeCtx)
 	})
@@ -715,7 +745,7 @@ func (e *Engine) initRuntime() {
 	e.peersLoop.Go(func() {
 		e.runPeersLoop()
 	})
-	e.requestRefill()
+	e.requestRefillAll()
 }
 
 // spawnWorker adds one worker goroutine to the pool, unless the pool is draining (spawnClosed) or the
@@ -824,11 +854,56 @@ func (e *Engine) drainRuntime() {
 	}
 }
 
-// requestRefill asks the refiller to run a selection scan.
-func (e *Engine) requestRefill() {
+// requestRefill asks ONE shard's refiller to run a selection scan. Every origination site names the
+// shard it observed: a worker's low-water pop and post-processStep nudge name the popped step's shard,
+// the doorbells name the announced step's shard. An unknown shard (a peer signal naming a shard this
+// replica does not have) is a silent no-op.
+func (e *Engine) requestRefill(shard int) {
+	ch, ok := e.refillTriggers[shard]
+	if !ok {
+		return
+	}
 	select {
-	case e.refillTrigger <- struct{}{}:
+	case ch <- struct{}{}:
 	default:
+	}
+}
+
+// requestRefillDemand rings a shard's refiller AND breaks it out of the scan floor, for the two
+// nudges that mean "serving is blocked right now" rather than "there may be more work":
+//
+//   - Offer found the partition EMPTY. It deliberately declines to head-insert the first arrival (an
+//     arbitrary-priority step must not jump an idle replica's queue), so the only way that step gets
+//     served is a scan - waiting out the floor would idle workers with due work in hand.
+//   - Offer HEAD-INSERTED a better band. Only one pioneer is accepted per band-opening, so the REST of
+//     an arriving high-priority burst is served by the wholesale replace on the next scan. Pulling
+//     that scan forward is what bounds priority latency by signal delivery instead of by scan rate.
+//
+// This is what lets the floor be a debounce rather than a policy timer: it never has to be short
+// enough to cover an urgent event, because urgent events wake it directly. The routine nudges
+// (post-processStep, low-water) deliberately do NOT come here - they fire on every completed step and
+// every half-drained partition, and letting them bypass the floor is precisely the 100%-duty-cycle
+// hot loop the floor exists to stop.
+func (e *Engine) requestRefillDemand(shard int) {
+	e.requestRefill(shard)
+	ch, ok := e.refillDemand[shard]
+	if !ok {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// requestRefillAll rings every shard's refiller - reserved for the sites that cannot know which
+// shard's backlog they observed (the backstop poll, startup).
+func (e *Engine) requestRefillAll() {
+	for _, ch := range e.refillTriggers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
 	}
 }
 

@@ -377,32 +377,37 @@ func (e *Engine) metricStateReadBytes(ctx context.Context, workflowURL, column s
 		attribute.String("workflow", workflowURL), attribute.String("column", column)))
 }
 
-// metricRefillPass records one complete refiller pass: its wall clock, the batch it selected, and the
-// candidates that batch discarded. Called once per pass, off the per-step hot path.
+// metricRefillPass records one complete refill pass of ONE shard's refiller: its wall clock, the batch
+// it selected, and the candidates that batch discarded. Called once per pass, off the per-step hot
+// path. All three instruments carry the shard attribute - the refillers are per-shard now, so a pass IS
+// a shard's pass. (The old barrier made this instrument a merged-pass duration, and its divergence from
+// the per-shard query maximum measured the fan-out straggler tax; that discriminator dissolved with the
+// barrier.)
 //
 // A pass that returns early on a scan/fetch error is deliberately NOT recorded here, while the per-shard
 // query histogram DOES record it (its defer fires whatever the closure returns). The asymmetry is the
 // point: a failed pass has no meaningful end-to-end duration - it is a truncated pass, and folding one
 // into the distribution would drag the percentiles toward an error path that is already logged and
-// counted elsewhere. The per-shard instrument still shows which shard was slow on the way to failing,
+// counted elsewhere. The query instrument still shows which shard was slow on the way to failing,
 // which is the part worth keeping.
-func (e *Engine) metricRefillPass(ctx context.Context, d time.Duration, selected, discarded int) {
+func (e *Engine) metricRefillPass(ctx context.Context, shardNum int, d time.Duration, selected, discarded int) {
 	if e.metrics == nil {
 		return
 	}
-	e.metrics.refillDuration.Record(ctx, d.Seconds())
+	attrs := metric.WithAttributes(attribute.Int("shard", shardNum))
+	e.metrics.refillDuration.Record(ctx, d.Seconds(), attrs)
 	if selected > 0 {
-		e.metrics.refillSelected.Add(ctx, int64(selected))
+		e.metrics.refillSelected.Add(ctx, int64(selected), attrs)
 	}
 	if discarded > 0 {
-		e.metrics.refillDiscarded.Add(ctx, int64(discarded))
+		e.metrics.refillDiscarded.Add(ctx, int64(discarded), attrs)
 	}
 }
 
-// metricRefillQuery records one shard's scan query duration. This is the instrument that distinguishes a
-// genuinely slow shard from a straggler wait: OnEach fans out concurrently and returns only when the last
-// shard does, so a divergence between the per-shard maximum here and dwarf_refill_duration_seconds is the
-// fan-out tax, while a divergence BETWEEN shards is the shard itself.
+// metricRefillQuery records one shard's scan query duration, split by phase (band_keys / fetch_steps).
+// The phase split is what makes the band scan's backlog dependence visible - phase 1 is where the
+// measured cost concentrates, and its plan can flip between an index scan and a sequential scan on
+// statistics freshness, which is indistinguishable from a slow shard without the split.
 func (e *Engine) metricRefillQuery(ctx context.Context, shardNum int, phase string, d time.Duration) {
 	if e.metrics == nil {
 		return
