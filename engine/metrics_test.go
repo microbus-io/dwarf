@@ -59,6 +59,37 @@ func sumCounter(rm metricdata.ResourceMetrics, name, attrKey, attrVal string) (i
 	return 0, false
 }
 
+// histCount returns the total sample count of a float64 Histogram metric, optionally filtered to points
+// carrying ALL of the given attributes (nil = no filter).
+func histCount(rm metricdata.ResourceMetrics, name string, attrs map[string]string) (uint64, bool) {
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				return 0, false
+			}
+			var total uint64
+			matched := false
+		points:
+			for _, dp := range hist.DataPoints {
+				for k, want := range attrs {
+					v, ok := dp.Attributes.Value(attribute.Key(k))
+					if !ok || v.String() != want {
+						continue points
+					}
+				}
+				total += dp.Count
+				matched = true
+			}
+			return total, matched
+		}
+	}
+	return 0, false
+}
+
 // gaugePresent reports whether an int64 observable gauge with the given name emitted any data point.
 func gaugePresent(rm metricdata.ResourceMetrics, name string) bool {
 	for _, sm := range rm.ScopeMetrics {
@@ -179,6 +210,78 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 
 	// The queue-depth observable gauge always emits a point at collection time.
 	assert.True(gaugePresent(rm, "dwarf_steps_queue_depth"), "dwarf_steps_queue_depth gauge should be present")
+}
+
+// TestMetrics_RefillInstrumented pins the refiller's four instruments, which exist to answer a question no
+// other instrument can: what the refiller actually costs, and how much of that cost is wasted.
+//
+// The waste is structural rather than a bug. The refiller is triggered after EVERY processStep, coalesced
+// into a single slot, and each pass wholesale-REPLACES the cache - so whenever it turns faster than the
+// workers drain (the deep-backlog case it exists for), it discards candidates the previous pass selected
+// and paid a round-trip to fetch. Those steps stay `pending` and are re-selected, so it is cost, not loss.
+// The selected/discarded ratio is the only way to see it.
+//
+// SetWorkers(0) makes all of this deterministic: nothing dispatches, so the backlog is stable and the
+// second pass necessarily discards exactly what the first one cached.
+func TestMetrics_RefillInstrumented(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("R")
+	g.SetEndpoint("A", "refillmetrics/a")
+	g.AddTransition("A", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("refillmetrics/g", g)
+	proxy.HandleTask("refillmetrics/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngine()
+	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetMeterProvider(mp))
+	assert.NoError(e.SetWorkers(0)) // nothing dispatches: the backlog stays put
+	e.RunInTest(t)
+
+	for range 8 {
+		_, err := e.Create(ctx, "refillmetrics/g", nil, &workflow.FlowOptions{FairnessKey: "tenant"})
+		assert.NoError(err)
+	}
+
+	// Two passes over the same stable backlog. The first fills the cache; the second replaces it, so
+	// everything the first selected is discarded un-popped.
+	assert.True(e.cache.Capacity() > 0)
+	e.runRefill(ctx)
+	e.runRefill(ctx)
+
+	var rm metricdata.ResourceMetrics
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+
+	// The whole-pass histogram records every pass, including the ones that select nothing.
+	passes, ok := histCount(rm, "dwarf_refill_duration_seconds", nil)
+	assert.True(ok, "dwarf_refill_duration_seconds should be present")
+	assert.True(passes >= 2, "expected at least the 2 forced passes, got %d", passes)
+
+	// The per-shard query histogram is the one that isolates a straggler, so BOTH scan phases must be
+	// labelled and attributed to a shard - a pass that timed only the aggregate would be unable to tell a
+	// slow band scan (the plan-instability case) from a slow targeted fetch.
+	for _, phase := range []string{refillPhaseBandKeys, refillPhaseFetchSteps} {
+		n, ok := histCount(rm, "dwarf_refill_query_duration_seconds", map[string]string{"phase": phase, "shard": "1"})
+		assert.True(ok, "dwarf_refill_query_duration_seconds{phase=%s,shard=1} should be present", phase)
+		assert.True(n > 0, "phase %s recorded no samples", phase)
+	}
+
+	// Selected and discarded: the first pass cached a batch, the second threw it away.
+	selected, ok := sumCounter(rm, "dwarf_refill_candidates_selected", "", "")
+	assert.True(ok, "dwarf_refill_candidates_selected should be present")
+	assert.True(selected > 0, "expected candidates to be selected from an 8-step backlog, got %d", selected)
+
+	discarded, ok := sumCounter(rm, "dwarf_refill_candidates_discarded", "", "")
+	assert.True(ok, "dwarf_refill_candidates_discarded should be present")
+	assert.True(discarded > 0, "the second pass must discard the first pass's un-popped batch, got %d", discarded)
 }
 
 // TestMetrics_ForkCountsAsStarted pins that a Fork increments dwarf_flows_started. A fork builds its new

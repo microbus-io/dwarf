@@ -236,30 +236,67 @@ ax.set_ylim(0, 235)
 ax.legend(loc="upper left", frameon=False, fontsize=9.5)
 finish(fig, ax, f"{OUT}/benchmark-dialects-payload.png")
 
-# ---- 8. Shard ladder: steps/s and tail latency vs shard count (fresh DB per arm) ----
-SHARDS = [1, 2, 3]
-LADDER_STEPS = [2793.2, 5692.3, 6105.4]
-LADDER_P99 = [17.8, 8.6, 18.2]          # seconds
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.2, 6.0), sharex=True,
-                               gridspec_kw={"height_ratios": [1.35, 1]})
-bars = ax1.bar([str(s) for s in SHARDS], LADDER_STEPS, width=0.4, color=S1, zorder=2)
-for b, v, s in zip(bars, LADDER_STEPS, SHARDS):
-    lbl = "baseline" if s == 1 else f"×{v/LADDER_STEPS[0]:.2f}"
-    ax1.annotate(lbl, (b.get_x() + b.get_width()/2, v), xytext=(0, 5),
-                 textcoords="offset points", ha="center", color=INK,
-                 fontsize=11, fontweight="bold")
-ax1.set_title("Adding shards: the first one pays, the second much less")
+# ---- 8. Shard ladder: steps/s vs shard count, and the refiller headroom behind the taper ----
+# Supersedes an n=1 campaign that reported "the second shard doubles, the third does nothing" and
+# attributed it to cross-shard straggler waits. That campaign ran on a 4-vCPU engine host which was
+# ITSELF the bottleneck: per-shard database CPU fell from ~82% at one shard to ~51% at three while
+# the engine saturated, and the knee moved when the engine was resized - so the plateau was a
+# property of the load generator, not of sharding. Re-measured on a 16-vCPU host, n=3 interleaved,
+# a dedicated Cloud SQL instance and a fresh database per run, 256 fairness keys and a 5ms task
+# delay (the single-key zero-delay corner exaggerates the refiller's cost).
+LADDER = {}
+for f in glob.glob("bench/results/r-shardladder6-*shard-r*.json"):
+    a = json.load(open(f))
+    n = int(os.path.basename(f).split("-")[2].replace("shard", ""))
+    r = a["results"][0]
+    c = r["engineCounters"]
+    sel = c.get("dwarf_refill_candidates_selected", 0)
+    LADDER.setdefault(n, []).append((
+        r["stepsPerSec"],
+        sel / r["windowSec"] / r["stepsPerSec"] if r["stepsPerSec"] else 0,
+    ))
+
+SHARDS = sorted(LADDER)
+steps = [med([v[0] for v in LADDER[n]]) for n in SHARDS]
+lo = [min(v[0] for v in LADDER[n]) for n in SHARDS]
+hi = [max(v[0] for v in LADDER[n]) for n in SHARDS]
+head = [med([v[1] for v in LADDER[n]]) for n in SHARDS]
+ideal = [steps[0] * n for n in SHARDS]
+
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.2, 6.4), sharex=True,
+                               gridspec_kw={"height_ratios": [1.45, 1]})
+x = [str(n) for n in SHARDS]
+# Ideal linear is a reference, not a measurement - dashed and recessive so it never reads as data.
+ax1.plot(x, ideal, color=MUTED, linewidth=2, linestyle=(0, (5, 4)), zorder=1)
+ax1.annotate("ideal linear", (x[-1], ideal[-1]), xytext=(-6, -14),
+             textcoords="offset points", ha="right", color=MUTED, fontsize=9.5)
+ax1.errorbar(x, steps, yerr=[[s - l for s, l in zip(steps, lo)],
+                             [h - s for s, h in zip(steps, hi)]],
+             color=S1, linewidth=2, marker="o", markersize=8, capsize=4,
+             markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=3)
+for xi, s_, n in zip(x, steps, SHARDS):
+    if n == len(SHARDS):
+        ax1.annotate(f"x{s_/steps[0]:.1f} vs 1 shard", (xi, s_), xytext=(-8, 12),
+                     textcoords="offset points", ha="right",
+                     color=INK, fontsize=11, fontweight="bold")
+# Title states only what n=3 supports. The refiller headroom below explains the taper toward six
+# shards; it does NOT explain the flat step at three (headroom is at its HIGHEST there), and that
+# arm's wide replicate spread is left visible rather than smoothed away.
+ax1.set_title("Shards keep paying past three; the refiller binds at the top")
 ax1.set_ylabel("steps / second")
-ax1.set_ylim(0, max(LADDER_STEPS) * 1.22)
+ax1.set_ylim(0, max(ideal) * 1.06)
 ax1.grid(axis="x", visible=False)
-# Tail latency is the mechanism, so it gets its own panel rather than a second y-axis.
-ax2.plot([str(s) for s in SHARDS], LADDER_P99, color=S3, linewidth=2, marker="o",
-         markersize=8, markeredgecolor=SURFACE, markeredgewidth=1.5)
-ax2.annotate("every query waits on\nits slowest shard", (1, LADDER_P99[1]),
-             xytext=(0, -40), textcoords="offset points", color=INK2, fontsize=9.5, ha="center")
-ax2.set_ylabel("p99 flow latency (s)")
+
+# The mechanism panel. Headroom is how far the refiller's candidate supply runs ahead of what the
+# workers consume; at 1.0 it is handing out exactly what is taken and IS the ceiling.
+ax2.plot(x, head, color=S3, linewidth=2, marker="o", markersize=8,
+         markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=3)
+ax2.axhline(1.0, color=MUTED, linewidth=1, linestyle=(0, (5, 4)))
+ax2.annotate("refiller is the ceiling", (x[-1], 1.0), xytext=(-6, 6),
+             textcoords="offset points", ha="right", color=INK2, fontsize=9.5)
+ax2.set_ylabel("refiller headroom (supply / used)")
 ax2.set_xlabel("shards (one 8-vCPU database instance each)")
-ax2.set_ylim(0, max(LADDER_P99) * 1.35)
+ax2.set_ylim(0.9, max(head) * 1.12)
 ax2.grid(axis="x", visible=False)
 fig.tight_layout()
 fig.savefig(f"{OUT}/benchmark-cloud-shardladder.png", dpi=200, facecolor=SURFACE, bbox_inches="tight")

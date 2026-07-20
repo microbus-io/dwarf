@@ -280,23 +280,42 @@ Two 8-vCPU shards (each its own database instance) at saturation scaled to **×1
 shard, and byte throughput scaled ×1.77/×1.82 — shard-per-server scales both steps and bytes
 near-linearly at its first test.
 
-![Steps and tail latency by shard count](benchmark-cloud-shardladder.png)
+![Steps and refiller headroom by shard count](benchmark-cloud-shardladder.png)
 
-A later campaign re-measured the steps axis out to three shards, each arm on its own freshly created
-database (`linear`, concurrency 4096, 4 vCPU engine):
+An earlier campaign measured this axis to three shards on a **4-vCPU** engine and reported that the
+second shard scaled perfectly (×2.04) while the third added only 7% — attributing the flattening to
+cross-shard straggler waits. **That conclusion was wrong, and the cause was the load generator.** On
+that host the engine was itself the bottleneck: per-shard database CPU fell from ~82% at one shard to
+~51% at three while the engine saturated, and `stepsPerCore` stayed flat at ~2,100–2,900 across every
+arm — the signature of an engine-bound system. Re-running the same ladder on a 16-vCPU engine moved the
+knee from three shards to five. A plateau that moves when you resize the client is a property of the
+client.
 
-| shards | steps/s | vs 1 shard | p99 latency |
-|---|---|---|---|
-| 1 | 2,793 | — | 17.8 s |
-| 2 | 5,692 | **×2.04** | 8.6 s |
-| 3 | 6,105 | ×2.19 | **18.2 s** |
+Re-measured on a 16-vCPU engine, n=3 interleaved, one dedicated Cloud SQL instance and a fresh database
+per run, 256 fairness keys and a 5 ms task delay (`linear`, concurrency 4096):
 
-**The first shard added scales essentially perfectly (×2.04); the second adds only 7%.** The latency
-column says why, and it is the more useful signal: p99 *halves* going from one shard to two, then
-*doubles* going to three. Every multi-shard query fans out concurrently but completes only when its
-slowest shard does, so the engine increasingly waits on stragglers as shard count grows — a tail-latency
-tax that rises with the number of shards and eventually cancels the added capacity. Adding shards
-therefore buys throughput readily at small counts, and buys progressively less as the fan-out widens.
+| shards | steps/s | replicate range | vs 1 shard | refiller headroom |
+|---|---|---|---|---|
+| 1 | 3,458 | 3,301–3,631 | — | 1.32× |
+| 2 | 6,944 | 6,592–7,171 | ×2.01 | 1.39× |
+| 3 | 8,079 | 6,894–10,095 | ×2.34 | 1.47× |
+| 4 | 12,461 | 11,436–13,448 | ×3.60 | 1.29× |
+| 5 | 14,737 | 14,153–15,520 | ×4.26 | 1.15× |
+| 6 | 14,913 | 14,512–15,196 | ×4.31 | **1.04×** |
+
+**Sharding keeps paying well past three shards** — ×3.6 at four, ×4.3 at six — at roughly 90% of linear
+through four shards and tapering after. What binds at the top is the **refiller**, not the databases.
+The headroom column is its candidate supply divided by what the workers consume: at 1.04× it is handing
+out almost exactly what is taken, so throughput is set by how fast it can select rather than by how fast
+the shards can execute.
+
+Two things this table does *not* establish. The flat step at three shards is unexplained: the refiller
+has its **most** headroom there (1.47×), so the ceiling above does not account for it, and that arm's
+replicate range is wide enough (6,894–10,095) that its position is uncertain. And the refiller's own
+cost model — measured per shard as roughly `46 ms + 0.0085 ms per due row` — means a shard's scan cost
+falls as sharding divides the backlog, while the *fixed* term is paid per shard per pass and does not.
+Whether that fixed floor is query time or connection-pool queueing is not yet distinguished; the
+`dwarf_refill_*` instruments time the whole call.
 
 Note this is one engine replica driving all the shards. Scaling *replicas* alongside shards is a
 different axis and remains [untested](#known-gaps).

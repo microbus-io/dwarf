@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"strconv"
+	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -49,8 +50,23 @@ type engineMetrics struct {
 	flowsOrphaned     metric.Int64Counter
 	stateWriteBytes   metric.Int64Counter
 	stateReadBytes    metric.Int64Counter
+	refillSelected    metric.Int64Counter
+	refillDiscarded   metric.Int64Counter
+
+	refillDuration      metric.Float64Histogram
+	refillQueryDuration metric.Float64Histogram
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
+}
+
+// refillBuckets are the explicit bucket boundaries for the refill histograms, in SECONDS. The OTEL default
+// boundaries are tuned for millisecond-valued instruments and would put every one of these samples in the
+// first bucket. The span that matters runs from a warm same-zone index scan (~0.3ms) to a band scan whose
+// plan flipped to a sequential scan (~100ms measured on identical data minutes apart, as statistics went
+// stale) - so the boundaries must resolve both ends, and the tail must stay open past 1s to catch a shard
+// that is genuinely sick rather than merely slow.
+var refillBuckets = []float64{
+	0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 }
 
 // initMetrics creates the engine's instruments from the resolved MeterProvider and registers the
@@ -96,6 +112,25 @@ func (e *Engine) initMetrics() error {
 	// the introspection APIs (List/History/Snapshot) and flow-row writes (final_state) are not counted.
 	m.stateWriteBytes = bytesCtr("dwarf_state_write_bytes", "Counts payload bytes written to step rows on the execution path, labelled by workflow and by column (state, changes, interrupt_payload).")
 	m.stateReadBytes = bytesCtr("dwarf_state_read_bytes", "Counts payload bytes read from step rows on the execution path, labelled by workflow and by column (state, changes, resume_data, subgraph_result).")
+
+	// Refiller instruments. The refiller is triggered after every processStep and fans its two scan phases
+	// across all shards with OnEach, which returns only when the SLOWEST shard does - so a single slow shard
+	// gates dispatch for the whole replica. These four make that visible: the per-shard query histogram
+	// isolates the straggler (and the index-scan/seq-scan plan flip), the whole-pass histogram against the
+	// per-shard max prices the straggler wait, and selected-vs-discarded prices the oversupply.
+	m.refillSelected = ctr("dwarf_refill_candidates_selected", "Counts step candidates the refiller selected into the cache. Compare against dwarf_refill_candidates_discarded for the refiller's oversupply ratio.")
+	m.refillDiscarded = ctr("dwarf_refill_candidates_discarded", "Counts cached step candidates thrown away un-popped by a wholesale refill - the refiller's waste signal. The steps stay pending and are re-selected, so this is cost, not loss; a ratio near 1 against dwarf_refill_candidates_selected means the refiller is turning far faster than the workers drain.")
+
+	secHist := func(name, desc string) metric.Float64Histogram {
+		h, err := meter.Float64Histogram(name, metric.WithDescription(desc), metric.WithUnit("s"),
+			metric.WithExplicitBucketBoundaries(refillBuckets...))
+		if err != nil {
+			errs = append(errs, errors.Trace(err))
+		}
+		return h
+	}
+	m.refillDuration = secHist("dwarf_refill_duration_seconds", "Wall-clock duration of a complete refiller pass, both scan phases across every shard. Exceeds the per-shard max of dwarf_refill_query_duration_seconds by the cross-shard straggler wait.")
+	m.refillQueryDuration = secHist("dwarf_refill_query_duration_seconds", "Duration of one shard's refiller scan query, labelled by shard and by phase (band_keys, fetch_steps).")
 
 	gauge := func(name, desc, unit string) metric.Int64ObservableGauge {
 		g, err := meter.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit(unit))
@@ -340,6 +375,40 @@ func (e *Engine) metricStateReadBytes(ctx context.Context, workflowURL, column s
 	}
 	e.metrics.stateReadBytes.Add(ctx, int64(n), metric.WithAttributes(
 		attribute.String("workflow", workflowURL), attribute.String("column", column)))
+}
+
+// metricRefillPass records one complete refiller pass: its wall clock, the batch it selected, and the
+// candidates that batch discarded. Called once per pass, off the per-step hot path.
+//
+// A pass that returns early on a scan/fetch error is deliberately NOT recorded here, while the per-shard
+// query histogram DOES record it (its defer fires whatever the closure returns). The asymmetry is the
+// point: a failed pass has no meaningful end-to-end duration - it is a truncated pass, and folding one
+// into the distribution would drag the percentiles toward an error path that is already logged and
+// counted elsewhere. The per-shard instrument still shows which shard was slow on the way to failing,
+// which is the part worth keeping.
+func (e *Engine) metricRefillPass(ctx context.Context, d time.Duration, selected, discarded int) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.refillDuration.Record(ctx, d.Seconds())
+	if selected > 0 {
+		e.metrics.refillSelected.Add(ctx, int64(selected))
+	}
+	if discarded > 0 {
+		e.metrics.refillDiscarded.Add(ctx, int64(discarded))
+	}
+}
+
+// metricRefillQuery records one shard's scan query duration. This is the instrument that distinguishes a
+// genuinely slow shard from a straggler wait: OnEach fans out concurrently and returns only when the last
+// shard does, so a divergence between the per-shard maximum here and dwarf_refill_duration_seconds is the
+// fan-out tax, while a divergence BETWEEN shards is the shard itself.
+func (e *Engine) metricRefillQuery(ctx context.Context, shardNum int, phase string, d time.Duration) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.refillQueryDuration.Record(ctx, d.Seconds(), metric.WithAttributes(
+		attribute.Int("shard", shardNum), attribute.String("phase", phase)))
 }
 
 func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string) {

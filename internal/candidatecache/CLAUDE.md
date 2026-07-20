@@ -24,6 +24,15 @@ wholesale-replace a healthy cache with nothing because the database blipped - id
 they cost nothing, since a worker popping a stale one just loses its claim CAS. Pinned by
 `TestCandidateCache_RefillEmptyIsWholesale` and `engine`'s `TestFault_RefillScanErrPreservesCache`.
 
+**`Refill` returns the number of candidates it discarded un-popped**, which the engine feeds to
+`dwarf_refill_candidates_discarded`. It is a *measurement* of the wholesale replace, not a new behavior:
+the refiller is triggered after every `processStep` and, under a deep backlog, turns faster than the
+workers drain, so a replace routinely drops a batch the previous pass paid a round-trip to fetch. Discarded
+steps stay `pending` and are re-selected, so this is cost, never loss - but the ratio against the batch size
+is the only visibility into how much of the refiller's work is thrown away, and nothing else in the engine
+can see it. A **closed** cache reports `0`: the replace is a no-op there, and counting it would double-count
+candidates the drain already abandoned.
+
 The `floor`/`lowWater`/`Offer`-vs-`Refill` behavior is a protocol with the engine's refiller: any change to their
 semantics must stay consistent with the selection algorithm described in the engine doc. The godoc on each method
 states the local contract; the *why* (priority bands, urgent-arrival head-insert, liveness after `processStep`)

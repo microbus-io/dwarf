@@ -262,6 +262,8 @@ func (e *Engine) scanBandKeys(ctx context.Context) (band int, keys []bandKeyAgg,
 	_, pos := e.shardOrdinals()
 	results := make([]*shardResult, len(pos))
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		started := time.Now()
+		defer func() { e.metricRefillQuery(ctx, shard, refillPhaseBandKeys, time.Since(started)) }()
 		// One row per fairness key at this shard's minimum due band: COUNT(*) OVER the key's due steps,
 		// and the age/weight of its oldest (rn=1). All rows are already filtered to the min band, so the
 		// returned priority is that band. rn=1 selects the oldest step whose fairness_weight is the one
@@ -414,6 +416,8 @@ func (e *Engine) fetchBandSteps(ctx context.Context, band int, chosen []string, 
 	var mu sync.Mutex
 	byKey := map[string][]fetchStep{}
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		started := time.Now()
+		defer func() { e.metricRefillQuery(ctx, shard, refillPhaseFetchSteps, time.Since(started)) }()
 		args := make([]any, 0, len(chosen)+2)
 		args = append(args, band)
 		for _, k := range chosen {
@@ -490,6 +494,7 @@ func (e *Engine) fetchBandSteps(ctx context.Context, band int, chosen []string, 
 // pacing gates on.
 func (e *Engine) runRefill(ctx context.Context) (full bool) {
 	capacity := e.cache.Capacity()
+	started := time.Now()
 
 	// Phase 1: one aggregate row per fairness key at the global-minimum due band (or MaxInt band when
 	// nothing is due).
@@ -520,14 +525,14 @@ func (e *Engine) runRefill(ctx context.Context) (full bool) {
 		// Nothing due: wholesale-replace with an empty batch (MaxInt floor), exactly as draining the cache
 		// dry does - a still-cached candidate would be a dead hint under a floor advertising a band the
 		// cache no longer holds.
-		e.cache.Refill(nil, math.MaxInt)
+		e.metricRefillPass(ctx, time.Since(started), 0, e.cache.Refill(nil, math.MaxInt))
 		return false
 	}
 
 	// Phase 2: weighted pick over the aggregates -> ordered plan of keys, and the per-key demand it implies.
 	plan := planBatch(keys, capacity)
 	if len(plan) == 0 {
-		e.cache.Refill(nil, math.MaxInt)
+		e.metricRefillPass(ctx, time.Since(started), 0, e.cache.Refill(nil, math.MaxInt))
 		return false
 	}
 	needed := map[string]int{}
@@ -570,6 +575,13 @@ func (e *Engine) runRefill(ctx context.Context) (full bool) {
 	e.logger.DebugContext(ctx, "Refill batch", "band", band, "distinctKeys", len(keys), "size", len(batch))
 	// The floor is the cached batch's actual band so the doorbell's priority-preemption decision
 	// (head-insert when a strictly more important step arrives) is made against the right threshold.
-	e.cache.Refill(batch, band)
+	discarded := e.cache.Refill(batch, band)
+	e.metricRefillPass(ctx, time.Since(started), len(batch), discarded)
 	return len(batch) == capacity
 }
+
+// Refiller scan phases, the `phase` attribute on dwarf_refill_query_duration_seconds.
+const (
+	refillPhaseBandKeys   = "band_keys"   // phase 1: one aggregate row per fairness key at the min due band
+	refillPhaseFetchSteps = "fetch_steps" // phase 3: the selected steps for the chosen keys
+)

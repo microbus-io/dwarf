@@ -116,12 +116,19 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 // The caller must NOT route a *failed* scan here: a scan error means "unknown", not "nothing is due", and
 // wholesale-replacing a healthy cache with nothing on a transient DB blip would idle every worker in Pop.
 // runRefill returns early instead (see the error path in engine/scheduling.go).
-func (c *Cache) Refill(batch []Job, floor int) {
+//
+// discarded is the number of candidates the replace threw away un-popped. It is the refiller's WASTE
+// signal: the refiller is triggered after every processStep and turns far faster than the workers drain,
+// so a replace routinely discards candidates the previous scan selected and paid to fetch. Those steps
+// stay `pending` and are simply re-selected, so this is cost, never loss - but the ratio against the batch
+// size is what says whether the refiller is oversupplying, which no other instrument can see.
+func (c *Cache) Refill(batch []Job, floor int) (discarded int) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return
+		return 0
 	}
+	discarded = len(c.items)
 	if len(batch) == 0 {
 		batch = nil // Pop's empty representation, so Len/append behave identically either way
 	}
@@ -133,6 +140,7 @@ func (c *Cache) Refill(batch []Job, floor int) {
 	c.floor = floor
 	c.mu.Unlock()
 	c.cond.Broadcast()
+	return discarded
 }
 
 // Offer front-loads a single higher-priority candidate. It returns needRefill=true when the cache is

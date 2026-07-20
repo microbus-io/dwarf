@@ -216,6 +216,36 @@ func TestCandidateCache_RefillEmptyIsWholesale(t *testing.T) {
 	assert.Expect(c.Len(), 0)
 }
 
+// TestCandidateCache_RefillReportsDiscarded pins the count Refill returns: the candidates a wholesale
+// replace threw away un-popped. It is the refiller's WASTE signal - the refiller is triggered after every
+// processStep and turns far faster than the workers drain, so under load it routinely replaces a batch it
+// just paid a round-trip to fetch. The discarded steps stay `pending` and are re-selected, so this is cost,
+// never loss; without the count there is no way to see how much of the refiller's work is thrown away.
+func TestCandidateCache_RefillReportsDiscarded(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(4)
+
+	// Nothing cached yet: nothing to discard.
+	assert.Equal(0, c.Refill([]Job{{StepID: 1}, {StepID: 2}, {StepID: 3}}, 5))
+
+	// One popped, so the replace discards the two that were left.
+	_, ok, _ := c.Pop()
+	assert.True(ok)
+	assert.Equal(2, c.Refill([]Job{{StepID: 4}}, 5))
+
+	// An empty batch is a real replace, so it discards too.
+	assert.Equal(1, c.Refill(nil, math.MaxInt))
+	assert.Equal(0, c.Refill(nil, math.MaxInt))
+
+	// A closed cache discards nothing - the replace is a no-op, so reporting a discard would double-count
+	// candidates the drain already abandoned.
+	c.Refill([]Job{{StepID: 5}}, 5)
+	c.Close()
+	assert.Equal(0, c.Refill([]Job{{StepID: 6}}, 5))
+}
+
 func TestCandidateCache_RefillClosedIsNoop(t *testing.T) {
 	assert := testarossa.For(t)
 

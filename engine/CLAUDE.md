@@ -1852,7 +1852,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 15 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 19 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so both `Startup` and `RunInTest` get them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
@@ -1871,7 +1871,70 @@ flow-level sibling of `dwarf_steps_unwedged`, counted at the same site as its er
 and the two persist alarms `dwarf_steps_write_retried` / `dwarf_steps_write_failed` (detailed under "Persisting
 a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Startup).
 
-**10 counters** in total: the 8 event counters above plus two byte counters,
+**2 refiller counters + 2 refiller histograms** (`dwarf_refill_candidates_selected` /
+`_discarded`, `dwarf_refill_duration_seconds`, `dwarf_refill_query_duration_seconds{shard,phase}`). These
+exist because **the refiller was the one hot-path subsystem with no timing instrument at all**, so the
+question "what binds at the ceiling" could not be asked of it - and `docs/benchmark-cloud.md`'s
+straggler-wait explanation for the flat 3-shard arm was inference, never a measurement (it has since been
+retracted; the arm was load-generator-bound). They are placed to discriminate three hypotheses that look
+identical from outside (the rules below record which one won):
+
+- **One shard is slow** - `refill_query_duration{shard}` diverges *between* shards. Recorded per shard
+  inside each `OnEach` closure, timing query + row scan (what `OnEach` actually waits on).
+- **The cross-shard fan-out wait is the cost** - `refill_duration` diverges from the per-shard *max*.
+  `OnEach` returns only when the slowest shard does, so the gap IS the straggler tax; ~0 at one shard.
+- **The refiller oversupplies** - `discarded/selected` approaches 1. Every pass wholesale-replaces the
+  cache while being triggered after every `processStep`, so whenever it turns faster than the workers
+  drain it throws away a batch it just paid to fetch. `Cache.Refill` returns the discarded count for this.
+  (Measured 0-10%: this one is dead. The instrument stays because it is the cheap readout that would
+  catch the regime changing.)
+
+The `phase` label (`band_keys` / `fetch_steps`) separates phase 1 from phase 3, which matters for a reason
+found while writing the degradation harness: the band scan's plan flips between an index scan and a
+**sequential** scan on Postgres statistics freshness - **0.29ms vs 99.8ms on identical data minutes apart**.
+That is indistinguishable from a slow shard without the phase split, and phase 1 is where the measured cost
+concentrates, so the split is what makes the band scan's backlog dependence visible at all.
+
+Explicit second-valued bucket boundaries (`refillBuckets`) are mandatory: the OTEL defaults are tuned for
+millisecond-valued instruments and would file every sample in bucket 0. Both helpers no-op on
+`e.metrics == nil` before building attributes, so an unconfigured engine allocates nothing per pass.
+
+**What the instruments measured, as rules.** The campaign detail (rigs, dates, artifacts, per-arm
+numbers) is deliberately not here - it is measurement, it expires, and it lives with the benchmark
+worklist. These are the parts that would make a future change WRONG if unknown:
+
+- **The refiller is what binds** - candidate supply runs only 1.04-1.47x ahead of consumption. Treat it
+  as a throughput-critical path, not a background chore.
+- **The "independent of the backlog" claim above is true of WIRE cost only.** Server-side, phase 1 still
+  touches every due row (`COUNT(*) OVER (PARTITION BY ...)` plus the `MIN(priority)` subquery), so its
+  cost is `~46ms fixed + ~0.0085ms per due row per shard`. Do not cite the three-phase split as evidence
+  that backlog depth is free.
+- **Do NOT re-derive a per-shard fetch cap.** Phase 3 really does fetch ~`S * capacity` rows to use
+  `capacity`, so capping each shard at its share looks free - but `rn <= perKey` filters AFTER the
+  window function, so it cuts rows *returned*, not rows *processed*. Built twice, measured twice
+  (n=3 then n=5), phase-3 time unchanged both times, reverted. The over-fetch is a wire cost and the
+  wire is not where the time goes.
+
+- **Do NOT approximate `scanBandKeys`' per-key `count`.** It looks like a mere hint, and a cheap
+  approximate count is what would let phase 1 use a loose index scan (enumerate distinct keys in
+  O(keys x log n) instead of touching every due row). It is not a hint: `count` becomes `remaining[i]`
+  in `planBatch`, capping how many batch slots a key wins in the weighted sampling, AND the resulting
+  plan sets `maxNeeded`, phase 3's `rn <= ?` on every shard. So over-estimating lets a key out-compete
+  its peers for the batch (a real fairness distortion) *and* inflates phase 3's fetch; under-estimating
+  caps a key below its weighted share every pass. Only the skip-on-shortfall path is benign; the
+  fairness allocation built on the count is not. An exact count needs every row in the key's run, so
+  O(keys x log n) and exactness are mutually exclusive - reviving the skip scan means first showing how
+  the fairness contract survives.
+- **The window functions are NOT the expensive part** (post-covering-index). A `GROUP BY`/`DISTINCT ON`
+  rewrite of phase 1 was tried and measured *slower* - the planner picks a `HashAggregate` and needs a
+  LATERAL seek per key for the oldest row's weight. The premise came from a profile taken BEFORE the
+  selection index carried the due-predicates; once the scan is index-only there is nothing left to
+  reclaim. General rule: re-derive the cost split after any change that moves the baseline.
+
+**The oversupply hypothesis is dead** (`discarded/selected` measured 0-10%, never the ~100% it
+predicted). Do not re-propose it without new evidence.
+
+**12 counters** in total: the 8 event counters above plus two byte counters plus the two refiller counters,
 `dwarf_state_write_bytes` / `dwarf_state_read_bytes` (labels `workflow` + `column`, unit `By`) - payload
 bytes the engine writes to / reads from **step rows on the execution path**. The `column` label is the
 dwarf_steps column the bytes moved through (`state` snapshots, `changes` task-output deltas,

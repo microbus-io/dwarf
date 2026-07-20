@@ -40,7 +40,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 15 instruments — 10 counters and 5 gauges. Counter instrument names carry **no** `_total`
+The engine emits 19 instruments — 12 counters, 5 gauges, and 2 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -56,6 +56,10 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_steps_write_failed` | counter | `task_name` | steps terminalized because their outcome could not be stored while the database was reachable (nonzero = latent bug) | `dwarf_steps_write_failed_total` |
 | `dwarf_state_write_bytes` | counter | `workflow`, `column` | payload bytes written to step rows on the execution path | `dwarf_state_write_bytes_total` |
 | `dwarf_state_read_bytes` | counter | `workflow`, `column` | payload bytes read from step rows on the execution path | `dwarf_state_read_bytes_total` |
+| `dwarf_refill_candidates_selected` | counter | — | step candidates selected into the local worker cache | `dwarf_refill_candidates_selected_total` |
+| `dwarf_refill_candidates_discarded` | counter | — | cached candidates replaced un-popped (cost, not loss — the steps stay pending and are re-selected) | `dwarf_refill_candidates_discarded_total` |
+| `dwarf_refill_duration_seconds` | histogram | — | wall clock of a complete candidate-selection pass across every shard | `dwarf_refill_duration_seconds` |
+| `dwarf_refill_query_duration_seconds` | histogram | `shard`, `phase` | one shard's candidate-selection query | `dwarf_refill_query_duration_seconds` |
 | `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
 | `dwarf_steps_pending` | gauge | `priority` | due pending steps per priority band | `dwarf_steps_pending` |
 | `dwarf_steps_oldest_pending_age_seconds` | gauge | `priority` | age of the oldest due pending step | `dwarf_steps_oldest_pending_age_seconds` |
@@ -83,6 +87,26 @@ reading of these is not obtainable from a shared database, and the engine does n
 
 Labels are deliberately bounded: there are no per-`fairness_key` labels (that would be unbounded
 cardinality), so fairness/priority metrics are aggregate-only.
+
+**Reading the two refill histograms.** They answer "is candidate selection costing me throughput, and if so
+where." Selection queries every shard concurrently and proceeds only when the last one answers, so:
+
+- `dwarf_refill_query_duration_seconds` split **by `shard`** shows whether one database is slower than its
+  peers. A single shard's tail dragging while the others stay flat is the shard, not the engine — and because
+  the whole pass waits for it, that one shard bounds dispatch for the entire replica.
+- The same metric split **by `phase`** separates the two queries a pass runs. A tail that appears only on
+  `band_keys` and only intermittently, on a backlog that has not changed, points at the database's query
+  planner rather than at load (on PostgreSQL, stale table statistics can flip this query between an index scan
+  and a sequential scan — measured on one rig at 0.3 ms versus 100 ms on identical data). `ANALYZE` on
+  `dwarf_steps`, or more aggressive autovacuum settings for it, is the fix.
+- `dwarf_refill_duration_seconds` minus the per-shard maximum is the price of waiting for the slowest shard.
+  On a one-shard deployment it is ~0 by construction.
+
+`dwarf_refill_candidates_discarded` over `dwarf_refill_candidates_selected` is the selection **waste ratio**.
+Each pass replaces the cache wholesale, so anything the workers had not yet picked up is dropped and
+re-selected later — always safe, never lost work, but a ratio approaching 1 means selection is running far
+ahead of what the workers can consume and most of its database round-trips are being thrown away. A ratio
+near 0 means the opposite: selection is the slower half.
 
 ## Tracing
 

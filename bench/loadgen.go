@@ -53,6 +53,11 @@ type stepResult struct {
 	P99ms          float64          `json:"p99Ms"`
 	Goroutines     int              `json:"goroutines"`     // at the end of the window: the engine's pool is most of this
 	EngineCounters map[string]int64 `json:"engineCounters"` // dwarf_* deltas over the window
+	// EngineHists carries the dwarf_* histogram distributions over the window, one row per instrument per
+	// attribute set - notably dwarf_refill_query_duration_seconds per shard per phase, which is what
+	// separates "one shard is slow" from "the cross-shard fan-out wait is expensive" from "the refiller is
+	// not the constraint at all". Recorded as buckets, so percentiles are recoverable after the run.
+	EngineHists []histSample `json:"engineHistograms,omitempty"`
 	// Host is what the throughput COST this engine host - CPU cores and network bandwidth over the
 	// measurement window. StepsPerCore is the engine-sizing headline: steps/s driven per engine CPU core.
 	Host hostUsage `json:"host"`
@@ -112,6 +117,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 
 	time.Sleep(warmup)
 	before := collectAllCounters(readers)
+	histBefore := collectAllHistograms(readers)
 	bytesBefore := bytesWritten.Load()
 	hostBefore := sampleHost()
 	windowStart := time.Now()
@@ -121,6 +127,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	elapsed := time.Since(windowStart)
 	hostAfter := sampleHost()
 	after := collectAllCounters(readers)
+	histAfter := collectAllHistograms(readers)
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
 	submitters.Wait()
@@ -144,6 +151,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		P99ms:          percentileMs(latencies, 0.99),
 		Goroutines:     runtime.NumGoroutine(),
 		EngineCounters: deltas,
+		EngineHists:    histogramDeltas(histBefore, histAfter),
 		Host:           host,
 	}
 }
