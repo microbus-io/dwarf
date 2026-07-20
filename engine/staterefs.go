@@ -61,8 +61,9 @@ import (
 type stateRefs map[string]int
 
 const (
-	// stateRefFloor is the size below which a field is never ref'd: the bookkeeping (a refs entry, a place in
-	// the resolve IN-list) is not worth it, and a small field costs little to copy.
+	// stateRefFloor is the LINEAR per-field candidacy bar: with one successor the bookkeeping (a refs entry, a
+	// place in the resolve IN-list) is not worth it below this, and a small field costs little to copy. At a
+	// fan-out it is divided by the branch count - see stateRefCandidateFloor.
 	stateRefFloor = 1024
 	// stateRefThreshold is the bar for OPENING a new anchor for a single (linear) successor.
 	stateRefThreshold = 4096
@@ -72,10 +73,58 @@ const (
 	// writes buys. Divided by the fan-out width, it is the bar for opening an anchor whose cost is amortized
 	// over N branches - see stateRefOpenThreshold.
 	stateRefBudget = 23 * 1024
+	// stateRefMinField is the absolute floor no width scaling may cross. A ref replaces a field's bytes with a
+	// state_refs entry (~20-25 bytes stored: two JEntries, the key, an integer), so a field smaller than a few
+	// times that LOSES bytes on every branch. It is deliberately NOT adjusted by the dialect factor below:
+	// both sides of that comparison are stored bytes, so the inflation cancels.
+	stateRefMinField = 64
+	// stateRefPostgresInflation is how much marshalled-JSON-TEXT length understates what PostgreSQL's jsonb
+	// actually stores for the shape a fan-out replicates: measured 862 bytes stored for a 183-byte text array
+	// of 64 small ints (4.7x, rounded to 5). jsonb spends ~4 bytes per element on top of the value, so the
+	// gap is widest for arrays/objects of many small scalars - exactly a forEach source array - and closes to
+	// ~1x for one large string. This is an approximation with a known failure direction (string-heavy state
+	// refs ~5x more eagerly than its true cost warrants), not a calibrated model: a structural estimator was
+	// considered and rejected because at a fan-out the bar is already tiny (73 bytes at N=64, 18 at N=256), so
+	// a 5x error moves nothing across it. That is also why it applies ONLY at n>1 - the linear bar of 4096 is
+	// where estimate accuracy would genuinely decide cases.
+	stateRefPostgresInflation = 5
 	// maxStateAnchors bounds the resolve IN-list. It is the SAME knob as the threshold seen from the other
 	// end (the cost model prices anchor ROWS), and the scheme is correct at any value.
 	maxStateAnchors = 4
 )
+
+// stateRefInflation is the factor by which marshalled-JSON-text length understates this dialect's stored
+// size. PostgreSQL is the ONLY dialect that needs correcting, which is a measured fact rather than a default:
+// for the same 183-byte text array of 64 small ints, PostgreSQL jsonb stores 862 bytes (4.7x) while MySQL 8.4
+// binary JSON stores 197 (1.08x) and MariaDB 11.8 stores it verbatim (its JSON column is a LONGTEXT alias,
+// 1.00x). The schema's other two column types cannot inflate at all - SQL Server holds VARBINARY(MAX) and
+// SQLite TEXT, both the marshalled bytes as-is. PostgreSQL is the outlier because jsonb spends a 4-byte
+// JEntry per element AND widens every number to arbitrary-precision numeric, so an array of small ints is
+// close to its worst case; the other binary format (MySQL's) packs small integers inline behind variable-width
+// offsets and stays near 1x.
+//
+// One consequence worth knowing: MySQL and MariaDB share the driver name "mysql" and have genuinely different
+// JSON storage engines, so a factor keyed on the driver name could not tell them apart - but both measure ~1x,
+// so the ambiguity is moot and no server-version probe is needed.
+func stateRefInflation(driver string, successors int) int {
+	if successors > 1 && driver == "pgx" {
+		return stateRefPostgresInflation
+	}
+	return 1
+}
+
+// stateRefCandidateFloor is the per-field bar for being a ref CANDIDATE at all. Once an anchor is open the
+// marginal read cost of including one more field is zero (every candidate lives in that same row), so the
+// only question left is whether the field outweighs its own refs entry - a test in which N CANCELS, because
+// over N successors both the saving (N*size) and the cost (N*refsEntry) scale identically. That is what
+// stateRefMinField encodes, and above N~16 it is the whole rule; the stateRefFloor/N term only shapes the
+// narrow fan-outs in between, and at n=1 it reproduces the linear bar exactly.
+func stateRefCandidateFloor(successors int) int {
+	if successors < 1 {
+		successors = 1
+	}
+	return max(stateRefMinField, stateRefFloor/successors)
+}
 
 // stateRefOpenThreshold is the size bar for opening a NEW anchor, given how many successor steps are about to
 // carry this state. Fan-out width is the primary axis, not a refinement:
@@ -86,12 +135,20 @@ const (
 //     the SAME anchor set), while savings are S*N. Break-even becomes S*N >= stateRefBudget, so the bar falls
 //     as 1/N - at N=100 even a few hundred bytes pays for itself.
 //
-// The floor still applies, so a wide fan-out refs everything meaningful and nothing trivial.
-func stateRefOpenThreshold(successors int) int {
+// The clamp is stateRefMinField, NOT stateRefFloor. Clamping at the floor made the 1/N term dead code for
+// every fan-out wider than stateRefBudget/stateRefFloor = 23: the bar sat at a flat 1024 at width 24 and at
+// width 10,000 alike, so the "at N=100 even a few hundred bytes pays" case above could never actually fire.
+// A forEach's branch count IS its source array's element count, so an un-ref'd array costs N copies of an
+// N-element array - quadratic, and worse again under nesting - which is what that dead clamp was silently
+// buying.
+func stateRefOpenThreshold(successors int, inflation int) int {
 	if successors < 1 {
 		successors = 1
 	}
-	return max(stateRefFloor, min(stateRefThreshold, stateRefBudget/successors))
+	if inflation < 1 {
+		inflation = 1
+	}
+	return max(stateRefMinField, min(stateRefThreshold, stateRefBudget/successors)) / inflation
 }
 
 // mintStateRefs decides which of a successor step's state fields are stored by reference rather than by
@@ -109,7 +166,9 @@ func stateRefOpenThreshold(successors int) int {
 //
 // Minting needs no database read: state was resolved at dispatch, so every literal is already in hand and
 // "inlining" is simply declining to omit a field.
-func mintStateRefs(merged workflow.State, changes workflow.State, inherited stateRefs, anchorID int, successors int, exclude map[string]bool) ([]byte, []byte, error) {
+// driver is the shard's SQL driver name, used only to correct the size estimate at a fan-out
+// (see stateRefInflation); it is irrelevant at successors == 1, where the factor is always 1.
+func mintStateRefs(merged workflow.State, changes workflow.State, inherited stateRefs, anchorID int, successors int, exclude map[string]bool, driver string) ([]byte, []byte, error) {
 	refs := stateRefs{}
 	type candidate struct {
 		key  string
@@ -138,7 +197,7 @@ func mintStateRefs(merged workflow.State, changes workflow.State, inherited stat
 			return nil, nil, errors.Trace(err)
 		}
 		raw[k] = data
-		if !exclude[k] && len(data) >= stateRefFloor {
+		if !exclude[k] && len(data) >= stateRefCandidateFloor(successors) {
 			candidates = append(candidates, candidate{k, len(data)})
 		}
 	}
@@ -151,7 +210,7 @@ func mintStateRefs(merged workflow.State, changes workflow.State, inherited stat
 	for _, c := range candidates {
 		sum += c.size
 	}
-	if sum >= stateRefOpenThreshold(successors) {
+	if sum >= stateRefOpenThreshold(successors, stateRefInflation(driver, successors)) {
 		for _, c := range candidates {
 			refs[c.key] = anchorID
 			delete(raw, c.key)

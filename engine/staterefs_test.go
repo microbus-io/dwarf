@@ -73,20 +73,54 @@ func TestStateRefs_OpenThreshold(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// Linear: the full threshold, never lower.
-	assert.Equal(stateRefThreshold, stateRefOpenThreshold(1))
-	assert.Equal(stateRefThreshold, stateRefOpenThreshold(0)) // degenerate n is clamped to 1
+	assert.Equal(stateRefThreshold, stateRefOpenThreshold(1, 1))
+	assert.Equal(stateRefThreshold, stateRefOpenThreshold(0, 1)) // degenerate n is clamped to 1
 
 	// Fan-out: the bar falls as budget/N ...
-	assert.Equal(stateRefBudget/8, stateRefOpenThreshold(8))
-	assert.True(stateRefOpenThreshold(8) < stateRefThreshold)
+	assert.Equal(stateRefBudget/8, stateRefOpenThreshold(8, 1))
+	assert.True(stateRefOpenThreshold(8, 1) < stateRefThreshold)
 
-	// ... but never below the floor, so a wide fan-out refs everything meaningful and nothing trivial.
-	assert.Equal(stateRefFloor, stateRefOpenThreshold(100))
-	assert.Equal(stateRefFloor, stateRefOpenThreshold(10000))
+	// ... and KEEPS falling past stateRefFloor, down to stateRefMinField. Clamping at the floor instead made
+	// the 1/N term dead code for every fan-out wider than stateRefBudget/stateRefFloor = 23, which is what let
+	// a forEach source array stay inline in all N branches - the quadratic case this policy exists to stop.
+	assert.Equal(stateRefBudget/100, stateRefOpenThreshold(100, 1))
+	assert.True(stateRefOpenThreshold(100, 1) < stateRefFloor)
+	assert.Equal(stateRefMinField, stateRefOpenThreshold(10000, 1)) // floors at minField, never 0
+
+	// The dialect factor divides the bar, and applies only at a fan-out.
+	assert.Equal(1, stateRefInflation("pgx", 1))
+	assert.Equal(stateRefPostgresInflation, stateRefInflation("pgx", 64))
+	assert.Equal(1, stateRefInflation("sqlite", 64))
+	assert.Equal(1, stateRefInflation("mysql", 64))
+	assert.Equal(stateRefOpenThreshold(64, 1)/stateRefPostgresInflation, stateRefOpenThreshold(64, stateRefPostgresInflation))
+	// Linear is untouched by the dialect on every driver - that is where estimate accuracy would decide cases.
+	assert.Equal(stateRefThreshold, stateRefOpenThreshold(1, stateRefInflation("pgx", 1)))
 
 	// Monotone in N: more branches never raise the bar.
 	for n := 1; n < 64; n++ {
-		assert.True(stateRefOpenThreshold(n+1) <= stateRefOpenThreshold(n))
+		assert.True(stateRefOpenThreshold(n+1, 1) <= stateRefOpenThreshold(n, 1))
+	}
+}
+
+// TestStateRefs_CandidateFloor pins the per-field candidacy bar. Once an anchor is open the marginal read
+// cost of one more field is zero (they share the row), so the only question is whether a field outweighs its
+// own state_refs entry - a test in which N cancels, since saving and cost both scale with it.
+func TestStateRefs_CandidateFloor(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// Linear reproduces the old flat floor exactly.
+	assert.Equal(stateRefFloor, stateRefCandidateFloor(1))
+	assert.Equal(stateRefFloor, stateRefCandidateFloor(0))
+
+	// Fan-out scales down, but never below the refs-entry break-even: a field smaller than its own entry
+	// LOSES bytes on every branch, so the floor is what keeps "ref everything" from becoming a regression.
+	assert.Equal(stateRefFloor/8, stateRefCandidateFloor(8))
+	assert.Equal(stateRefMinField, stateRefCandidateFloor(64))
+	assert.Equal(stateRefMinField, stateRefCandidateFloor(10000))
+
+	for n := 1; n < 64; n++ {
+		assert.True(stateRefCandidateFloor(n+1) <= stateRefCandidateFloor(n))
+		assert.True(stateRefCandidateFloor(n) >= stateRefMinField)
 	}
 }
 
@@ -98,7 +132,7 @@ func TestStateRefs_MintTiers(t *testing.T) {
 
 	mint := func(t *testing.T, state map[string]any, changes map[string]any, inherited stateRefs, successors int) (workflow.State, stateRefs) {
 		t.Helper()
-		stateJSON, refsJSON, err := mintStateRefs(state, changes, inherited, anchor, successors, nil)
+		stateJSON, refsJSON, err := mintStateRefs(state, changes, inherited, anchor, successors, nil, "sqlite")
 		testarossa.For(t).NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -205,7 +239,7 @@ func TestStateRefs_MintTiers(t *testing.T) {
 		// dangle. Even a huge element stays inline. (The same exclusion carries a cohort member's contribution
 		// past the fan-in's mint, whose bytes are likewise not in the anchor's row.)
 		state := map[string]any{"item": blob(50000), "doc": blob(50000)}
-		stateJSON, refsJSON, err := mintStateRefs(state, map[string]any{}, nil, anchor, 32, map[string]bool{"item": true})
+		stateJSON, refsJSON, err := mintStateRefs(state, map[string]any{}, nil, anchor, 32, map[string]bool{"item": true}, "sqlite")
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
@@ -214,6 +248,52 @@ func TestStateRefs_MintTiers(t *testing.T) {
 		assert.Contains(stored, "item")
 		assert.Equal(anchor, refs["doc"], "its neighbours still ref normally")
 		assert.NotContains(stored, "doc")
+	})
+
+	t.Run("foreach_source_array_is_refd_at_width", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// THE motivating case, and the one that regressed silently for as long as the open threshold clamped at
+		// stateRefFloor. A forEach's branch count IS its source array's element count, so leaving the array
+		// inline costs N copies of an N-element array - quadratic, and worse under nesting. A 64-element int
+		// array marshals to ~183 bytes, which the old flat 1024 bar rejected outright.
+		items := make([]any, 64)
+		for i := range items {
+			items[i] = i
+		}
+		state := map[string]any{"items": items, "item": 7, "itemIndex": 7, "itemCount": 64}
+		noRef := map[string]bool{"item": true, "itemIndex": true, "itemCount": true}
+
+		// PostgreSQL: jsonb stores this array ~4.7x larger than its text length, which the dialect factor
+		// corrects for, so the array refs.
+		stateJSON, refsJSON, err := mintStateRefs(state, map[string]any{}, nil, anchor, 64, noRef, "pgx")
+		assert.NoError(err)
+		var stored workflow.State
+		_ = stored.UnmarshalJSON(stateJSON)
+		refs := parseStateRefs(refsJSON)
+		assert.Equal(anchor, refs["items"], "the forEach source array must be ref'd at width 64")
+		assert.NotContains(stored, "items", "one stored copy on the spawn row, not one per branch")
+		// The synthesized per-branch bookkeeping is still never ref'd - its bytes are in no step row.
+		for _, k := range []string{"item", "itemIndex", "itemCount"} {
+			assert.NotContains(refs, k)
+			assert.Contains(stored, k)
+		}
+
+		// A narrow fan-out keeps it inline: at width 4 the array is ~9 bytes and the quadratic term is nothing.
+		few := make([]any, 4)
+		for i := range few {
+			few[i] = i
+		}
+		_, refsFew := mint(t, map[string]any{"items": few}, map[string]any{}, nil, 4)
+		assert.NotContains(refsFew, "items", "a 4-element array is not worth a refs entry")
+	})
+
+	t.Run("subrefsentry_field_stays_inline_at_any_width", func(t *testing.T) {
+		assert := testarossa.For(t)
+		// The floor that keeps "ref everything on a fan-out" from becoming a regression: a field smaller than
+		// its own state_refs entry loses bytes on every branch, so no width may drag it below stateRefMinField.
+		state := map[string]any{"tiny": "abc", "flag": true, "n": 42}
+		_, refs := mint(t, state, map[string]any{}, nil, 4096)
+		assert.Equal(0, len(refs), "trivial scalars are never ref'd, however wide the fan-out")
 	})
 
 	t.Run("max_anchors_inlines_the_cheapest", func(t *testing.T) {
