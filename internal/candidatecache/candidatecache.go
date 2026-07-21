@@ -266,20 +266,29 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 }
 
 // Offer front-loads a single higher-priority candidate onto its shard's partition (routing is
-// j.Shard). It returns needRefill=true when that partition is empty (the caller should nudge that
-// shard's refiller); a candidate whose priority is no better than the partition's floor is dropped.
-func (c *Cache) Offer(j Job, priority int) (needRefill bool) {
+// j.Shard). It reports two things the caller routes differently:
+//
+//   - needRefill: this partition needs the refiller. True when it is empty (a scan must supply it) or
+//     when a head-insert happened (top up the band). A candidate whose priority is no better than the
+//     partition's floor is dropped and needs nothing.
+//   - urgent: the offer HEAD-INSERTED a strictly-better band, i.e. genuinely higher-priority work just
+//     arrived. ONLY this justifies bypassing the refiller's scan floor. An EMPTY partition is *not*
+//     urgent: it is the ordinary deep-backlog drain signal, and bypassing the floor on it would let a
+//     drained partition re-scan on every step completion - exactly the 100%-duty-cycle hot loop the
+//     floor exists to stop. (The floor adds no latency in light load anyway: it is measured from the
+//     last pass, and when passes are rare that gap already exceeds it, so the next scan runs at once.)
+func (c *Cache) Offer(j Job, priority int) (needRefill, urgent bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return false
+		return false, false
 	}
 	p := c.parts[j.Shard]
 	if p == nil || len(p.items) == 0 {
-		return true
+		return true, false
 	}
 	if priority >= p.floor() {
-		return false
+		return false, false
 	}
 	j.Priority = priority
 	p.items = append([]Job{j}, p.items...)
@@ -287,7 +296,7 @@ func (c *Cache) Offer(j Job, priority int) (needRefill bool) {
 		p.items = p.items[:len(p.items)-1]
 	}
 	c.cond.Signal()
-	return true
+	return true, true
 }
 
 // Len returns the number of buffered candidates across all partitions.

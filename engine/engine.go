@@ -96,11 +96,12 @@ type Engine struct {
 	shardSpecs map[int]ShardSpec
 
 	// Configuration (atomically updated, safe to change after Startup)
-	workers         atomic.Int32
-	workersSet      atomic.Bool // SetWorkers was called: skip the derived default
-	timeBudgetMs    atomic.Int64
-	defaultPriority atomic.Int32
-	maxOpenConns    atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
+	workers                 atomic.Int32
+	workersSet              atomic.Bool // SetWorkers was called: skip the derived default
+	timeBudgetMs            atomic.Int64
+	defaultPriority         atomic.Int32
+	maxOpenConns            atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
+	refillScanFloorOverride atomic.Int64 // expert override (nanoseconds): pins the refill scan floor; <=0 = derive
 
 	// engineID is a random positive identifier minted per engine instance (fresh on every restart).
 	// It is stamped on every flow/step INSERT (creator) and overwritten by the claim CAS (claimer) -
@@ -109,6 +110,14 @@ type Engine struct {
 	// SignalPeers echoes the broadcast back, and the peer-discovery map is keyed by it.
 	engineID   int64
 	instanceID string
+
+	// flowsStartedCount / flowsTerminatedCount are cheap in-memory lifecycle counts, incremented
+	// alongside the dwarf_flows_started / dwarf_flows_terminated OTEL counters but WITHOUT needing a
+	// configured meter (the default provider is a no-op). They let an embedder read in-flight work
+	// (started - terminated) with an atomic load - no OTEL reader, no query. Used by the open-loop load
+	// generator to bound outstanding flows; generally useful for backpressure.
+	flowsStartedCount    atomic.Int64
+	flowsTerminatedCount atomic.Int64
 
 	// Peer discovery: the observed replica count R, read from the shared dwarf_peers registry by the
 	// Startup discovery and the heartbeat loop (see peers.go). R divides the derived per-shard
@@ -185,6 +194,13 @@ type Engine struct {
 	// collection time. lastRefillBand < 0 means no refill has selected a band yet.
 	lastRefillLock sync.Mutex
 	lastRefillBand int
+	// lastGlobalBand mirrors lastRefillBand for the hot doorbell path (enqueueStepDue/handleEnqueue),
+	// which reads it lock-free to decide whether an arrival at an EMPTY partition is a genuine priority
+	// escalation (priority strictly better than the current global band -> bypass the scan floor so the
+	// new band publishes fast enough for strict cross-shard priority) or ordinary backlog (>= the band
+	// -> respect the floor, so a drained deep backlog does not re-scan on every completion). MaxInt when
+	// nothing is due.
+	lastGlobalBand atomic.Int64
 	lastRefillKeys int
 
 	// Timer goroutine
@@ -256,6 +272,7 @@ func NewEngine() *Engine {
 	// sets lastAppliedR=R; the heartbeat's recompute then dedupes against that. shardPool clamps
 	// replicas=max(1,...), so the 0 sentinel never reaches the arithmetic.
 	e.lastAppliedR.Store(0)
+	e.lastGlobalBand.Store(int64(math.MaxInt))
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
 	e.pingInterval = 30 * time.Second
@@ -429,6 +446,28 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	}
 	return nil
 }
+
+// SetRefillScanFloor is an expert override that PINS every shard's refill scan floor to d, replacing the
+// value the engine derives from capacity/vCPUs/R (deriveScanFloor). d <= 0 restores derivation. Operators
+// normally never call this - the derived floor tracks the cache sizing it depends on automatically. The
+// override exists for benchmarking (scan-rate sweeps): the floor is measured, not tuned, so finding its
+// optimum needs to hold it at a series of fixed values. Live: re-derivation (or re-pinning) applies on the
+// next recomputeScanFloors, and this triggers one immediately on a running engine.
+func (e *Engine) SetRefillScanFloor(d time.Duration) error {
+	e.refillScanFloorOverride.Store(int64(d))
+	if e.started.Load() {
+		e.recomputeScanFloors()
+	}
+	return nil
+}
+
+// FlowsStarted returns the count of flows this engine has started (Create/Continue/Fork/subgraph),
+// a cheap atomic read that needs no configured meter. FlowsTerminated is its completion counterpart;
+// started - terminated approximates in-flight work for backpressure.
+func (e *Engine) FlowsStarted() int64 { return e.flowsStartedCount.Load() }
+
+// FlowsTerminated returns the count of flows this engine has completed/failed/cancelled. See FlowsStarted.
+func (e *Engine) FlowsTerminated() int64 { return e.flowsTerminatedCount.Load() }
 
 // SetHost registers the host the engine reaches the outside world through: it loads graphs, executes
 // tasks, and (optionally) receives flow-stop notifications and carries cross-replica coordination signals.
@@ -867,6 +906,28 @@ func (e *Engine) requestRefill(shard int) {
 	case ch <- struct{}{}:
 	default:
 	}
+}
+
+// routeRefill dispatches a doorbell after an Offer that returned needRefill, choosing between the
+// floor-bypassing demand nudge and the floor-respecting one. Bypass when EITHER:
+//   - urgent: Offer head-inserted a strictly-better band into a NON-empty partition (local preemption); or
+//   - the step's priority is strictly better than the current GLOBAL band: a genuine cross-shard
+//     escalation whose new band must publish fast, or strict priority breaks - a peer shard, not seeing
+//     the new lower band yet (this shard is floor-gated and has not re-scanned to publish it), plans and
+//     dispatches its own lower-priority work first. This is exactly the empty-partition case a completing
+//     high-priority arrival hits.
+//
+// Otherwise floor-gate. Crucially a step at or below the current band (in priority-number terms, >=
+// globalBand) is ordinary backlog - a deep backlog's completing steps create successors at the SAME band -
+// so it must NOT bypass, or a drained partition re-scans on every completion and the floor is defeated
+// (measured: a pinned 110ms floor ran at ~19ms effective). Strict `<` is what separates a real escalation
+// from same-band churn.
+func (e *Engine) routeRefill(shard, priority int, urgent bool) {
+	if urgent || int64(priority) < e.lastGlobalBand.Load() {
+		e.requestRefillDemand(shard)
+		return
+	}
+	e.requestRefill(shard)
 }
 
 // requestRefillDemand rings a shard's refiller AND breaks it out of the scan floor, for the two

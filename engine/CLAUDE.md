@@ -663,38 +663,48 @@ batch). Both costs are smaller than the cross-replica fairness softness the desi
 these by flushing, per-item priority tracking, or re-floor-on-pop: each trades the latency win the head-insert
 exists for and only shaves an already-bounded refiller cycle off a path the refiller already backstops.
 
-**The scan floor is the refiller's supply control (`refillScanInterval`, 150ms), and it is a FIXED constant
-on purpose.** Each shard's refiller waits out the floor after every pass, measured from the pass *start* so
-a slow pass pays for itself. It exists because the trigger is re-armed by every completed step, which ran
-the refillers at a **100% duty cycle** - measured, in *both* the merged and decoupled builds: every refiller
-scanning back to back for a whole 60s window. The merged pass was accidentally self-limiting (its straggler
-wait made it slow); deleting the barrier made each pass fast and the loop hot, raising phase-1 scan load
-**3.4x**. **Phase 1 costs per DUE ROW regardless of how many rows the pass then fetches**, which is why
-sizing the batch can never substitute for scanning less often.
+**The scan floor is the refiller's supply control, DERIVED per shard (`deriveScanFloor` /
+`recomputeScanFloors`, ~141ms at the reference config) - NOT a fixed constant.** Each shard's refiller waits
+out the floor after every pass, measured from the pass *start* so a slow pass pays for itself. It exists
+because the trigger is re-armed by every completed step, which ran the refillers at a **100% duty cycle** -
+measured, in *both* the merged and decoupled builds: every refiller scanning back to back for a whole 60s
+window. The merged pass was accidentally self-limiting (its straggler wait made it slow); deleting the
+barrier made each pass fast and the loop hot, raising phase-1 scan load **3.4x**. **Phase 1 costs per DUE
+ROW regardless of how many rows the pass then fetches**, which is why sizing the batch can never substitute
+for scanning less often.
 
-*The number is DERIVED at Startup and re-derived in `recomputePools`* (`deriveScanFloor` /
-`recomputeScanFloors`), per shard, from static configuration only - capacity, that shard's declared vCPUs,
-and the observed replica count. It reads **no observed rate**, and that is the whole distinction: an
-interval set from measured *consumption* oscillates (consumption is `min(demand, supply)`, so the actuation
-contaminates its own measurement) and was measured doing exactly that. Static arithmetic cannot. It lives on
-the same "every path that changes a pool must re-derive what depends on it" rule as the dispatch count and
-the cache, because it is measured against the cache's capacity. The arithmetic: workers drain
-a partition at `c` candidates/sec and a pass hands it at most `capacity/N`, so covering the gap needs
-`T <= (capacity/N)/c`; half that leaves 2x headroom. Substituting the engine's own constants
-(`6·vCPUs/R` conns, `8x` dispatch workers, `2x` cache, ~450 steps/s/vCPU) gives `96·vCPUs/R ÷ (900·vCPUs/R)`
-≈ **107ms with vCPUs and R cancelling** - capacity and throughput both scale in `vCPUs/R`, so their ratio is
-configuration-independent. That is *why* one constant works. Two caveats before turning it into a formula:
-`workersDispatch`'s `max(64, …)` floor breaks the cancellation on small deployments, and 450 steps/s/vCPU is
-workload-shaped (a byte-heavy or fan-out shape drains slower, which makes the safe interval **longer**).
+*The number is DERIVED at Startup and re-derived in `recomputePools`*, per shard, from static configuration
+only - capacity, that shard's declared vCPUs, and the observed replica count. It reads **no observed rate**,
+and that is the whole distinction: an interval set from measured *consumption* oscillates (consumption is
+`min(demand, supply)`, so the actuation contaminates its own measurement) and was measured doing exactly
+that. Static arithmetic cannot. It lives on the same "every path that changes a pool must re-derive what
+depends on it" rule as the dispatch count and the cache, because it is measured against the cache's
+capacity. The arithmetic: workers drain a partition at `drain = sustainedDrainPerVCPU·vCPUs/R` candidates/s
+and a pass hands it at most `capacity/N = 96·vCPUs/R`, so `T = bufferShare/(headroom·drain)`. Substituting
+the engine's own constants (`6·vCPUs/R` conns, `8x` dispatch workers, `2x` cache; `sustainedDrainPerVCPU` =
+**340**, the MEASURED sustained drain, not `capacityWeight`'s 450 placement peak) gives `96/(2·340)` ≈
+**141ms with vCPUs and R cancelling** - capacity and drain both scale in `vCPUs/R`, so their ratio is
+configuration-independent. That is *why* one constant works. `headroom` = **2.0**, chosen for MAXIMUM
+THROUGHPUT (see the measured paragraph): a ~2x supply buffer absorbs the drain-rate jitter that briefly
+stalls workers at a tighter margin. Two caveats before treating the value as universal: `workersDispatch`'s
+`max(64, …)` floor breaks the cancellation on small deployments, and 340 steps/s/vCPU is workload-shaped (a
+byte-heavy or fan-out shape drains slower, which makes the optimum interval **longer**).
+
+**Do NOT re-derive `headroom` from "waste" (discarded/selected).** Waste looked like the tuning lever on an
+IOPS-throttled disk, where slow dispatch piled up a deep pending backlog and the refiller over-supplied it
+(waste 25-50%, apparently trading against throughput). That was a **disk artifact**: on a healthy disk steps
+dispatch fast, the pending backlog stays shallow, the refiller supplies close to consumption, and waste is
+~2% across the whole good interval range - flat, so it does not distinguish the optimum. Throughput does.
+Confirmed after the IOPS diagnostic (below) made throughput resolvable.
 
 **THE FLOOR DEPENDS ON `workersPerConnBudget` (8) THROUGH THE CACHE - which is why it is derived rather
 than hardcoded.** `capacity = 2 x workersDispatch = 2 x 8 x conns`, so anything changing the 8 rescales the
 buffer this floor is measured against, proportionally. That nearly happened: campaign 11 found the 8 assumes
 `T/db≈8` while 5ms tasks measure ~1.5-2, so the resident worker count overshoots ~4x. The overshoot was
 deliberately KEPT (it is throughput-neutral - surplus workers queue for a connection and connections are
-never idle), but had it been "corrected" with a hardcoded 150ms floor, capacity would have fallen ~4x, the
-per-partition share 768 -> 192 and the supply ceiling 271ms -> ~68ms, leaving the floor **longer than the
-buffer can cover** - the measured i300 starvation mode (-10% throughput). Deriving it closes that by
+never idle), but had it been "corrected" with a hardcoded floor, capacity would have fallen ~4x, the
+per-partition share 768 -> 192 and the supply ceiling proportionally, leaving the floor **longer than the
+buffer can cover** - the measured starvation mode (-10% throughput). Deriving it closes that by
 construction. **A change to worker or cache sizing now rescales the floor automatically; do not reintroduce
 a constant here.**
 
@@ -705,15 +715,27 @@ Measured across the floor sweep: phase 1 fell from ~36ms at the unlimited and 15
 300ms arm**. It is also what makes per-shard pass durations diverge (28ms vs 125ms) on hardware whose RTT
 differs by 0.036ms - that spread is pool wait, not a slow shard, so do not read it as one.
 
-*Measured (6 shards, 16-vCPU host, linear, R=1):* unlimited scanning cost 8% candidate churn and a **77%
-worse p99** while buying no throughput; 150ms gave **+19% throughput and a tail at or better than the
-barriered baseline**; 300ms starved exactly as the bound predicts (supply `B/T` matched its degraded
-throughput to within 1%). **Two adaptive alternatives were built and both lost** - see `refillScanInterval`
-in `scheduling.go` for the numbers. Do not re-propose either without new evidence: an adaptive fetch DEPTH
-was *inert* (batch moved 179→173→190 across a 60% margin change, because the batch is set by the backlog and
-the plan slice, never by a target), and a DERIVED interval was *actively harmful* (same scan count and batch
-as the fixed floor, ~1,000x the discard, 2.4x the p99) because supply set from measured consumption
-oscillates - consumption is `min(demand, supply)`, so the actuation contaminates its own measurement.
+*Measured.* On 500GB/6-shard (linear, R=1): unlimited scanning cost 8% candidate churn and a **77% worse
+p99** while buying no throughput; a fixed 150ms gave **+19% throughput and a tail at or better than the
+barriered baseline**. But throughput there was **bimodal** (40-86% run-to-run spread) - the disk, not the
+engine (see the IOPS finding below), so the exact optimum was unresolvable. On a **1TB / 16-vCPU single
+shard** (IOPS non-binding, spread collapsed to ~4%): throughput peaks at **110-150ms** and falls off ~15% by
+~260ms - which is the `headroom=2.0` derivation (`96/(2·340) ≈ 141ms`), and why headroom is 2.0 not lower.
+The decline past the peak is drain-rate jitter stalling workers at a tight buffer.
+
+**Two adaptive alternatives were built and both lost** - see the `deriveScanFloor` comment in
+`scheduling.go`. Do not re-propose either without new evidence: an adaptive fetch DEPTH was *inert* (batch
+moved 179→173→190 across a 60% margin change, because the batch is set by the backlog and the plan slice,
+never by a target), and a DERIVED interval (set from observed consumption) was *actively harmful* (~1,000x
+the discard, 2.4x the p99) because consumption is `min(demand, supply)`, so the actuation contaminates its
+own measurement. The FIXED-headroom static formula beats both.
+
+**The throughput bimodality was IOPS contention, not engine noise.** Cloud SQL provisions IOPS by disk size
+(~30 IOPS/GB); the 500GB/8-vCPU shards throttled under the write-heavy load, producing the 40-86% run-to-run
+swing that made every 500GB throughput number suspect (this is why the campaign leaned on *waste*, a
+DB-independent phase metric, over throughput). A 16-vCPU/1TB shard (30k IOPS) collapsed the spread to ~4%,
+confirming it. Operator guidance (size disk throughput to the workload's `dwarf_state_write_bytes` rate) is
+in `docs/deployment.md`.
 
 **Urgent nudges bypass the floor; routine ones do not (`requestRefillDemand`).** This split is what lets the
 floor be a debounce rather than a policy timer - it never has to be short enough to cover an event, because
@@ -743,7 +765,7 @@ tuned against a ~100ms merged cycle and is a proportionally larger share of an i
 against the `discarded` ratio (`_SHARD_DECOUPLING.md` sequencing step 3). Liveness is unchanged: the trigger
 stays armed through the pause, so a drained-early partition waits at most the remainder.
 
-**`refillPace` is now largely subsumed by the scan floor, and that is an OPEN item.** The floor (150ms,
+**`refillPace` is now largely subsumed by the scan floor, and that is an OPEN item.** The floor (~141ms,
 unconditional) is both larger and broader than the pace (20ms, full-plan only), so a full-plan pass currently
 waits *both* - 170ms - and every other pass waits only the floor. In the measured linear workload the plan is
 almost never capacity-bound (batch ~437 against a ~4,608 capacity), so `refillFull` rarely fires and the pace

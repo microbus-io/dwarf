@@ -207,7 +207,8 @@ func TestCandidateCache_DerivedFloorAfterOfferPop(t *testing.T) {
 	c.Refill(2, []Job{{StepID: 21, Shard: 2}, {StepID: 22, Shard: 2}}, 3)
 
 	// A band-1 pioneer head-inserts onto shard 1, making it the best partition.
-	assert.True(c.Offer(Job{StepID: 99, Shard: 1}, 1))
+	nr, _ := c.Offer(Job{StepID: 99, Shard: 1}, 1)
+	assert.True(nr)
 	j, _, _ := c.Pop()
 	assert.Expect(j, Job{StepID: 99, Shard: 1, Priority: 1})
 
@@ -222,18 +223,39 @@ func TestCandidateCache_DerivedFloorAfterOfferPop(t *testing.T) {
 	assert.Expect(j.Shard, 1)
 }
 
-func TestCandidateCache_OfferEmptyWakesIdleNoInsert(t *testing.T) {
+// TestCandidateCache_OfferEmptyIsNotUrgent pins the load-bearing distinction between Offer's two
+// needRefill cases. An EMPTY partition needs a refill but is NOT urgent - it is the ordinary
+// deep-backlog drain signal (a completing step offers its successor into a drained partition), so the
+// caller must route it to the floor-respecting refill, never the floor-bypassing one, or a drained
+// partition re-scans on every step and the scan floor is defeated. A HEAD-INSERT (strictly-better band
+// arrived) IS urgent and bypasses the floor for priority latency.
+func TestCandidateCache_OfferEmptyIsNotUrgent(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var c Cache
 	c.Init(4)
-	assert.True(c.Offer(Job{StepID: 7, Shard: 1}, 5))
+	nr, urgent := c.Offer(Job{StepID: 7, Shard: 1}, 5)
+	assert.True(nr, "an empty partition needs a refill")
+	assert.False(urgent, "...but an empty partition is NOT urgent - it must respect the scan floor")
 	assert.Expect(c.Len(), 0)
 
 	// An empty PARTITION declines the same way even when another partition holds work.
 	c.Refill(2, []Job{{StepID: 21, Shard: 2}}, 3)
-	assert.True(c.Offer(Job{StepID: 8, Shard: 1}, 5))
+	nr, urgent = c.Offer(Job{StepID: 8, Shard: 1}, 5)
+	assert.True(nr)
+	assert.False(urgent)
 	assert.Expect(c.Len(), 1)
+
+	// A head-insert of a strictly-better band IS urgent.
+	c.Refill(1, []Job{{StepID: 30, Shard: 1}}, 5)
+	nr, urgent = c.Offer(Job{StepID: 31, Shard: 1}, 2)
+	assert.True(nr, "a head-insert needs the band topped up")
+	assert.True(urgent, "a strictly-better band is genuinely urgent and bypasses the floor")
+
+	// A no-better offer neither refills nor is urgent.
+	nr, urgent = c.Offer(Job{StepID: 32, Shard: 1}, 9)
+	assert.False(nr)
+	assert.False(urgent)
 }
 
 func TestCandidateCache_OfferPriorityJumpNoFlush(t *testing.T) {
@@ -243,11 +265,14 @@ func TestCandidateCache_OfferPriorityJumpNoFlush(t *testing.T) {
 	c.Init(4)
 	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 5)
 
-	assert.False(c.Offer(Job{StepID: 8, Shard: 1}, 7))
-	assert.False(c.Offer(Job{StepID: 9, Shard: 1}, 5))
+	nr, _ := c.Offer(Job{StepID: 8, Shard: 1}, 7)
+	assert.False(nr)
+	nr, _ = c.Offer(Job{StepID: 9, Shard: 1}, 5)
+	assert.False(nr)
 	assert.Expect(c.Len(), 2)
 
-	assert.True(c.Offer(Job{StepID: 99, Shard: 1}, 3))
+	nr, _ = c.Offer(Job{StepID: 99, Shard: 1}, 3)
+	assert.True(nr)
 	assert.Expect(c.Len(), 3)
 	assert.Expect(c.parts[1].floor(), 3)
 	j, _, _ := c.Pop()
@@ -267,7 +292,8 @@ func TestCandidateCache_OfferRoutesByShard(t *testing.T) {
 
 	// Priority 3 is worse than shard 1's floor (2) but better than shard 2's (5): routed to shard 2,
 	// it inserts there.
-	assert.True(c.Offer(Job{StepID: 99, Shard: 2}, 3))
+	nr, _ := c.Offer(Job{StepID: 99, Shard: 2}, 3)
+	assert.True(nr)
 	assert.Expect(len(c.parts[2].items), 2)
 	assert.Expect(len(c.parts[1].items), 1)
 	assert.Expect(c.parts[2].floor(), 3)
@@ -279,7 +305,8 @@ func TestCandidateCache_OfferBoundsToSize(t *testing.T) {
 	var c Cache
 	c.Init(1) // size 2
 	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 5)
-	assert.True(c.Offer(Job{StepID: 99, Shard: 1}, 1))
+	nr, _ := c.Offer(Job{StepID: 99, Shard: 1}, 1)
+	assert.True(nr)
 	assert.Expect(c.Len(), 2)
 	j, _, _ := c.Pop()
 	assert.Expect(j, Job{StepID: 99, Shard: 1, Priority: 1})
@@ -293,7 +320,8 @@ func TestCandidateCache_OfferClosedIsNoop(t *testing.T) {
 	var c Cache
 	c.Init(2)
 	c.Close()
-	assert.False(c.Offer(Job{StepID: 1, Shard: 1}, 0))
+	nr, _ := c.Offer(Job{StepID: 1, Shard: 1}, 0)
+	assert.False(nr)
 }
 
 // TestCandidateCache_RefillEmptyIsWholesale pins that an EMPTY batch is a real refill, not a no-op: it
@@ -317,7 +345,8 @@ func TestCandidateCache_RefillEmptyIsWholesale(t *testing.T) {
 	// An arrival on the emptied partition asks for a refill rather than head-inserting (the refiller
 	// picks the strictly-best step); the point here is that it is not weighed against a floor the
 	// partition no longer has.
-	assert.True(c.Offer(Job{StepID: 9, Shard: 1}, 7))
+	nr, _ := c.Offer(Job{StepID: 9, Shard: 1}, 7)
+	assert.True(nr)
 	assert.Expect(len(c.parts[1].items), 0)
 }
 

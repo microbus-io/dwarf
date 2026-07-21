@@ -46,13 +46,20 @@ type stepResult struct {
 	// It is also drawn from a wider population than FlowsPerSec: an errored flow is excluded from Flows (below)
 	// while its steps still count here. The two are therefore only comparable on a run with Errors == 0, which is
 	// exactly the run main.go marks valid.
-	StepsPerSec    float64          `json:"stepsPerSec"`
-	MBPerSec       float64          `json:"mbPerSec"` // state payload bytes written by tasks
-	P50ms          float64          `json:"p50Ms"`    // end-to-end flow latency percentiles
-	P95ms          float64          `json:"p95Ms"`
-	P99ms          float64          `json:"p99Ms"`
-	Goroutines     int              `json:"goroutines"`     // at the end of the window: the engine's pool is most of this
-	EngineCounters map[string]int64 `json:"engineCounters"` // dwarf_* deltas over the window
+	StepsPerSec float64 `json:"stepsPerSec"`
+	MBPerSec    float64 `json:"mbPerSec"` // state payload bytes written by tasks
+	P50ms       float64 `json:"p50Ms"`    // end-to-end (create->complete) flow latency percentiles
+	P95ms       float64 `json:"p95Ms"`
+	P99ms       float64 `json:"p99Ms"`
+	// Admission (Create-call) latency percentiles - open-loop only. In closed-loop these stay zero.
+	// The pair with P50/P99 is the point of open-loop: admission latency is how fast the engine ACCEPTS
+	// work (a DB insert), separable from end-to-end which is dominated by backlog wait. A rising
+	// admission latency under a growing backlog is the engine's own backpressure showing through.
+	CreateP50ms    float64          `json:"createP50Ms,omitzero"`
+	CreateP99ms    float64          `json:"createP99Ms,omitzero"`
+	MaxOutstanding int              `json:"maxOutstandingObserved,omitzero"` // peak in-flight flows seen during the window
+	Goroutines     int              `json:"goroutines"`                      // at the end of the window: the engine's pool is most of this
+	EngineCounters map[string]int64 `json:"engineCounters"`                  // dwarf_* deltas over the window
 	// EngineHists carries the dwarf_* histogram distributions over the window, one row per instrument per
 	// attribute set - notably dwarf_refill_query_duration_seconds per shard per phase, which is what
 	// separates "one shard is slow" from "the cross-shard fan-out wait is expensive" from "the refiller is
@@ -164,6 +171,176 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		P50ms:          percentileMs(latencies, 0.50),
 		P95ms:          percentileMs(latencies, 0.95),
 		P99ms:          percentileMs(latencies, 0.99),
+		Goroutines:     runtime.NumGoroutine(),
+		EngineCounters: deltas,
+		EngineHists:    histogramDeltas(histBefore, histAfter),
+		GaugesBefore:   gaugesBefore,
+		GaugesAfter:    gaugesAfter,
+		PgStatements:   pgssDelta(pgssBefore, pgssAfter),
+		Host:           host,
+	}
+}
+
+// runStepOpenLoop drives the fleet OPEN-loop: `creators` goroutines create flows as fast as the
+// outstanding cap allows, WITHOUT waiting for completion, so the backlog grows past the goroutine count
+// and can bury the refiller's per-shard cache many times over (the closed loop pins in-flight FLOWS to
+// the goroutine count, which for a linear workload - ~1 pending step per flow - keeps the whole backlog
+// inside the cache at higher shard counts, so the refiller is never stressed and its scan interval has
+// nothing to bind on). Open loop is what puts the refiller under the deep backlog it exists for, and it
+// separates two latencies the closed loop conflates: admission (the Create call) and end-to-end.
+//
+// Outstanding is bounded to maxOutstanding (created - Sum(FlowsTerminated) across engines, a cheap
+// atomic read - no per-flow Await, which under a deep backlog would make every flow's Await re-snapshot
+// the DB every 5s and swamp the workload). Completion latency is SAMPLED by a small bounded pool of
+// Await goroutines, not one per flow. arrivalPerSec>0 rate-limits creation (fixed offered load); 0 runs
+// flat-out to saturation (find max throughput vs the scan interval).
+func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler,
+	bytesWritten *atomic.Int64, pick func() *workload, creators, fairnessKeys, maxOutstanding, arrivalPerSec int,
+	warmup, window time.Duration) stepResult {
+
+	flowOpts := func() *workflow.FlowOptions {
+		if fairnessKeys <= 1 {
+			return nil
+		}
+		return &workflow.FlowOptions{FairnessKey: fmt.Sprintf("k%d", rand.IntN(fairnessKeys))}
+	}
+	terminated := func() int64 {
+		var n int64
+		for _, e := range engines {
+			n += e.FlowsTerminated()
+		}
+		return n
+	}
+	baseTerminated := terminated()
+
+	var (
+		measuring   atomic.Bool
+		stop        atomic.Bool
+		created     atomic.Int64 // flows successfully created this run
+		measCreated atomic.Int64 // ... within the measurement window (for arrival accounting)
+		errCount    atomic.Int64
+		peakOut     atomic.Int64
+		latMu       sync.Mutex
+		createLat   []time.Duration // admission latency (every create, while measuring)
+		doneLat     []time.Duration // end-to-end latency (sampled)
+		creatorsWG  sync.WaitGroup
+		awaitWG     sync.WaitGroup
+	)
+	// outstanding = created - (terminated - baseTerminated). Read cheaply from the engine atomics.
+	outstanding := func() int64 { return created.Load() - (terminated() - baseTerminated) }
+
+	// Sampled completion latency: a bounded pool, cancelled at stop so a still-pending sample never
+	// blocks the drain. One in `sampleEvery` created flows is measured.
+	awaitCtx, cancelAwaits := context.WithCancel(ctx)
+	defer cancelAwaits()
+	sampleSem := make(chan struct{}, 256)
+	const sampleEvery = 64
+
+	var arrival <-chan time.Time
+	if arrivalPerSec > 0 {
+		tk := time.NewTicker(time.Second / time.Duration(arrivalPerSec))
+		defer tk.Stop()
+		arrival = tk.C
+	}
+
+	for i := range creators {
+		eng := engines[i%len(engines)]
+		creatorsWG.Go(func() {
+			var n int64
+			for !stop.Load() {
+				if outstanding() >= int64(maxOutstanding) {
+					time.Sleep(time.Millisecond) // backpressure: let completions drain the backlog
+					continue
+				}
+				if arrival != nil {
+					select {
+					case <-arrival:
+					case <-ctx.Done():
+						return
+					}
+				}
+				w := pick()
+				born := time.Now()
+				key, err := eng.Create(ctx, w.graphURL, w.initialState(), flowOpts())
+				createElapsed := time.Since(born)
+				if err != nil {
+					errCount.Add(1)
+					continue
+				}
+				created.Add(1)
+				if o := outstanding(); o > peakOut.Load() {
+					peakOut.Store(o)
+				}
+				if measuring.Load() {
+					measCreated.Add(1)
+					latMu.Lock()
+					createLat = append(createLat, createElapsed)
+					latMu.Unlock()
+				}
+				// Sample end-to-end latency on 1-in-sampleEvery, bounded so it cannot storm the DB.
+				n++
+				if n%sampleEvery == 0 {
+					select {
+					case sampleSem <- struct{}{}:
+						awaitWG.Go(func() {
+							defer func() { <-sampleSem }()
+							oc, aerr := eng.Await(awaitCtx, key)
+							if measuring.Load() && aerr == nil && oc.Status == workflow.StatusCompleted {
+								latMu.Lock()
+								doneLat = append(doneLat, time.Since(born))
+								latMu.Unlock()
+							}
+						})
+					default: // pool full: skip this sample rather than block creation
+					}
+				}
+			}
+		})
+	}
+
+	time.Sleep(warmup)
+	before := collectAllCounters(readers)
+	histBefore := collectAllHistograms(readers)
+	gaugesBefore := collectAllGauges(readers)
+	pgssBefore := pgss.snapshot(ctx)
+	bytesBefore := bytesWritten.Load()
+	hostBefore := sampleHost()
+	windowStart := time.Now()
+	measuring.Store(true)
+	time.Sleep(window)
+	measuring.Store(false)
+	elapsed := time.Since(windowStart)
+	hostAfter := sampleHost()
+	after := collectAllCounters(readers)
+	histAfter := collectAllHistograms(readers)
+	gaugesAfter := collectAllGauges(readers)
+	pgssAfter := pgss.snapshot(ctx)
+	bytesAfter := bytesWritten.Load()
+	stop.Store(true)
+	cancelAwaits()
+	creatorsWG.Wait()
+	awaitWG.Wait()
+
+	deltas := counterDeltas(before, after)
+	sec := elapsed.Seconds()
+	host := usageSince(hostBefore, hostAfter)
+	if host.CPUCores > 0 {
+		host.StepsPerCore = float64(deltas["dwarf_steps_executed"]) / sec / host.CPUCores
+	}
+	return stepResult{
+		Concurrency:    creators,
+		WindowSec:      sec,
+		Flows:          int(measCreated.Load()),
+		Errors:         int(errCount.Load()),
+		FlowsPerSec:    float64(measCreated.Load()) / sec, // admission rate (open-loop): flows accepted/sec
+		StepsPerSec:    float64(deltas["dwarf_steps_executed"]) / sec,
+		MBPerSec:       float64(bytesAfter-bytesBefore) / (1 << 20) / sec,
+		P50ms:          percentileMs(doneLat, 0.50),
+		P95ms:          percentileMs(doneLat, 0.95),
+		P99ms:          percentileMs(doneLat, 0.99),
+		CreateP50ms:    percentileMs(createLat, 0.50),
+		CreateP99ms:    percentileMs(createLat, 0.99),
+		MaxOutstanding: int(peakOut.Load()),
 		Goroutines:     runtime.NumGoroutine(),
 		EngineCounters: deltas,
 		EngineHists:    histogramDeltas(histBefore, histAfter),

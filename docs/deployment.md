@@ -67,6 +67,28 @@ MariaDB 10.5+ for `JSON`.
 Single-writer, so deadlocks are structurally impossible but throughput tops out at one transaction at a
 time. Used automatically by `RunInTest`. Do not run SQLite in production.
 
+## Disk throughput
+
+Write bandwidth is a throughput ceiling **separate from CPU and connections**, and it is the one most
+often mis-sized, because on managed cloud databases disk performance is usually provisioned by disk
+*size* rather than set directly. GCP Cloud SQL, for example, scales IOPS with the disk (~30 IOPS/GB) up
+to a per-instance cap; a small disk therefore silently caps a write-heavy workload no matter how many
+CPUs the instance has.
+
+The symptom is distinctive and worth recognizing: a disk at its throughput limit does not just make the
+engine slower, it makes throughput **swing run-to-run** — a fixed configuration stops giving a
+repeatable number, because the disk alternates between keeping up and falling behind. If your throughput
+is bistable rather than steady, suspect the disk before the engine.
+
+Size the disk to the **workload's measured write rate, not to a round number.** The engine emits
+`dwarf_state_write_bytes` (payload bytes written to step rows — see [observability](observability.md));
+sum its delta over a representative window and divide by the window to get the sustained write MB/s, then
+provision the disk's throughput comfortably above that. Leave headroom: checkpoints and the write-ahead
+log write on top of the step payload, so the disk sees more than `dwarf_state_write_bytes` alone. This is
+strongly workload-dependent — a carry-heavy or fan-out graph writes far more per step than a small-state
+one — which is exactly why the right disk size is something you measure rather than guess. When
+throughput is repeatable, the disk has enough headroom; provisioning past that point buys nothing.
+
 ## Sharding
 
 Registering multiple shards with `SetShard` partitions flows across databases (or schemas) to scale write

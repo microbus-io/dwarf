@@ -605,12 +605,10 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 	if e.seams.IsFault(faultDropDoorbell) {
 		return
 	}
-	ring := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
-	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "ring", ring)
+	ring, urgent := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "ring", ring, "urgent", urgent)
 	if ring {
-		// Empty partition, or a better band just head-inserted: both mean waiting out the scan floor
-		// would hold work back. See requestRefillDemand.
-		e.requestRefillDemand(shard)
+		e.routeRefill(shard, priority, urgent)
 	}
 	e.signalEnqueue(ctx, shard, stepID)
 }
@@ -632,12 +630,10 @@ func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 		e.logger.DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
 		return
 	}
-	ring := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
-	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "ring", ring)
+	ring, urgent := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "ring", ring, "urgent", urgent)
 	if ring {
-		// Same as enqueueStepDue: this is the PEER doorbell path, so a high-priority step created on
-		// another replica reaches this one's cache here and gets the same wake.
-		e.requestRefillDemand(shard)
+		e.routeRefill(shard, priority, urgent)
 	}
 }
 

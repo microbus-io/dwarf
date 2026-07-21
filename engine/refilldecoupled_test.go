@@ -309,6 +309,86 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 	assert.Equal(2, len(shardsSeen), "placement should have used both shards (key prefix is the shard)")
 }
 
+// TestRouteRefill_EscalationBypassesFloorSameBandDoesNot pins the doorbell routing that reconciles two
+// requirements the empty-partition case put in tension: strict CROSS-SHARD priority needs a
+// genuinely-higher-priority arrival to publish its new band fast (bypass the floor), while a deep
+// backlog needs same-band successors NOT to bypass (or a drained partition re-scans every completion and
+// the floor is defeated). The rule is priority STRICTLY BETTER than the current global band = escalation
+// = bypass; at or below = ordinary backlog = floor-gated.
+//
+// The regression this guards: with a blanket empty-partition bypass, TestShardedflow's priority-1 holder
+// arrived at an empty partition but its band-1 was not published before peer shards planned, so they
+// dispatched lower-priority work first ([p2 holder ...] instead of [holder p2 ...]). With no bypass at
+// all, the holder was never escalated and the same break occurred. Only the band-aware rule fixes both.
+func TestRouteRefill_EscalationBypassesFloorSameBandDoesNot(t *testing.T) {
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	e.refillTriggers = map[int]chan struct{}{1: make(chan struct{}, 1)}
+	e.refillDemand = map[int]chan struct{}{1: make(chan struct{}, 1)}
+	drainDemand := func() bool {
+		select {
+		case <-e.refillDemand[1]:
+			return true
+		default:
+			return false
+		}
+	}
+
+	// Global band is 5 (something at priority 5 is due cluster-wide).
+	e.lastGlobalBand.Store(5)
+
+	// A step STRICTLY better than the band (priority 2 < 5) is an escalation: bypass the floor.
+	e.routeRefill(1, 2, false)
+	assert.True(drainDemand(), "priority 2 beats global band 5: a genuine escalation must bypass the floor")
+
+	// A step AT the band (priority 5) is ordinary backlog: floor-gated, no bypass.
+	e.routeRefill(1, 5, false)
+	assert.False(drainDemand(), "priority 5 == global band: same-band backlog must respect the floor (no hot loop)")
+
+	// A step BELOW the band (priority 9 > 5) is likewise floor-gated.
+	e.routeRefill(1, 9, false)
+	assert.False(drainDemand(), "priority 9 below the band must respect the floor")
+
+	// urgent (a head-insert into a non-empty partition) always bypasses, regardless of the global band.
+	e.routeRefill(1, 9, true)
+	assert.True(drainDemand(), "an urgent head-insert always bypasses (local preemption)")
+
+	// Nothing due (band MaxInt): the first arrival at any priority is an escalation from nothing.
+	e.lastGlobalBand.Store(int64(math.MaxInt))
+	e.routeRefill(1, 100, false)
+	assert.True(drainDemand(), "into an idle cluster, any due step is an escalation and bypasses")
+}
+
+// TestRefillScanFloor_OverridePinsAndRestores// TestRefillScanFloor_OverridePinsAndRestores pins the benchmarking override (SetRefillScanFloor): a
+// positive value pins every shard's floor, and <=0 restores derivation. It exists so a scan-rate sweep
+// can hold the floor at a series of fixed values; the derived value is otherwise not externally settable.
+func TestRefillScanFloor_OverridePinsAndRestores(t *testing.T) {
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	e.refillState = map[int]*shardRefillState{1: {}}
+	e.census = map[int]*shardCensus{}
+	e.cache.Init(96) // capacity 192 -> share 192 at 1 shard
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+
+	// Derived by default.
+	e.recomputeScanFloors()
+	derived := e.refillState[1].wait(time.Now())
+	assert.True(derived > 0)
+
+	// Pinned to an explicit value.
+	assert.NoError(e.SetRefillScanFloor(42 * time.Millisecond))
+	e.recomputeScanFloors()
+	pinned := e.refillState[1].wait(time.Now())
+	assert.True(pinned > 40*time.Millisecond && pinned <= 42*time.Millisecond, "got %v", pinned)
+
+	// Back to derived.
+	assert.NoError(e.SetRefillScanFloor(0))
+	e.recomputeScanFloors()
+	assert.Equal(derived.Round(time.Millisecond), e.refillState[1].wait(time.Now()).Round(time.Millisecond))
+}
+
 // TestRefillScanFloor_UrgentNudgesBypassRoutineOnesDoNot pins the split that lets the scan floor be a
 // debounce instead of a policy timer.
 //
@@ -317,10 +397,14 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 // floor that ALSO delays urgent work would have to be short enough to cover priority latency, which is
 // what forces it back down toward the hot loop. So the two nudge classes are separated:
 //
-//   - Urgent (Offer found the partition empty, or head-inserted a better band): rings the trigger AND
-//     the demand channel, which cuts the wait short.
-//   - Routine (post-processStep, low-water): rings the trigger only, and waits out the floor. These
-//     fire on every step and every half-drained partition - letting them bypass is the hot loop.
+//   - Urgent (Offer head-inserted a strictly-better band - genuinely higher-priority work): rings the
+//     trigger AND the demand channel, which cuts the floor short.
+//   - Routine (post-processStep, low-water, AND an empty partition): rings the trigger only, and waits
+//     out the floor. An empty partition is deliberately routine, not urgent: it is the ordinary
+//     deep-backlog drain signal (enqueueStepDue hits it on every completed step once the partition
+//     drains), so bypassing the floor on it re-creates the exact 100%-duty-cycle hot loop - measured,
+//     it defeated the floor entirely (a pinned 110ms floor ran at ~19ms effective). The floor adds no
+//     latency in light load regardless, since it is measured from the last pass.
 //
 // A derived/adaptive floor was tried instead and measured WORSE than a fixed one (same scan count and
 // batch size, ~1,000x the discard, 2.4x the p99): setting supply from observed consumption oscillates,
@@ -396,14 +480,15 @@ func TestRefillScanFloor_UrgentNudgesBypassRoutineOnesDoNot(t *testing.T) {
 func TestRefillScanFloor_DerivedFromStaticConfig(t *testing.T) {
 	assert := testarossa.For(t)
 
-	// The measured rig: 6 shards, 8 vCPUs, R=1 -> a 768-candidate partition share. The configuration
-	// terms cancel (bufferShare is 96*vCPUs/R and the drain ceiling 450*vCPUs/R), so the derived floor
-	// is ~107ms and is the SAME at any vCPU or replica count.
+	// The measured rig: 8 vCPUs, R=1 -> a 768-candidate partition share. The configuration terms cancel
+	// (bufferShare is 96*vCPUs/R and the sustained drain 340*vCPUs/R), so the derived floor is
+	// 96/(2*340) ~= 141ms and is the SAME at any vCPU or replica count. That is the measured throughput
+	// optimum (headroom 2.0): a ~2x supply buffer absorbs drain-rate jitter that a tighter one stalls on.
 	rig := deriveScanFloor(768, 8, 1)
-	assert.True(rig > 100*time.Millisecond && rig < 115*time.Millisecond,
-		"expected ~107ms at the measured configuration, got %v", rig)
+	assert.True(rig > 130*time.Millisecond && rig < 152*time.Millisecond,
+		"expected ~141ms at the measured configuration, got %v", rig)
 	assert.Equal(rig, deriveScanFloor(768*4/4, 8, 1))
-	// Doubling vCPUs doubles BOTH the buffer share and the drain ceiling, so the floor is unchanged.
+	// Doubling vCPUs doubles BOTH the buffer share and the drain, so the floor is unchanged.
 	assert.Equal(rig, deriveScanFloor(1536, 16, 1))
 	// Same for replicas: R halves the share and the per-replica drain together.
 	assert.Equal(rig, deriveScanFloor(384, 8, 2))
@@ -417,6 +502,6 @@ func TestRefillScanFloor_DerivedFromStaticConfig(t *testing.T) {
 	// restore the 100%-duty-cycle hot loop.
 	assert.Equal(refillScanFloorCap, deriveScanFloor(4096, 2, 8))
 	assert.Equal(refillScanFloorCap, deriveScanFloor(0, 8, 1))
-	assert.Equal(refillScanFloorCap, deriveScanFloor(768, 0, 1), "vCPUs default via capacityWeight, never 0 divide")
+	assert.Equal(refillScanFloorCap, deriveScanFloor(768, 0, 1), "zero drain (0 vCPUs) falls back to the cap, never a 0 divide")
 	assert.True(deriveScanFloor(1, 64, 1) >= refillScanFloorMin)
 }

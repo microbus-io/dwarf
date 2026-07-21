@@ -837,6 +837,7 @@ func (e *Engine) runShardRefill(ctx context.Context, shard int) refillOutcome {
 	e.lastRefillBand = globalBand
 	e.lastRefillKeys = len(keys)
 	e.lastRefillLock.Unlock()
+	e.lastGlobalBand.Store(int64(globalBand))
 
 	if band == math.MaxInt {
 		// Nothing due on this shard at all: wholesale-replace the partition with an empty batch,
@@ -959,9 +960,34 @@ func (e *Engine) runShardRefill(ctx context.Context, shard int) refillOutcome {
 // and events are handled by waking on them (see the demand-nudge interrupt in refillerLoop), not by
 // standing scan frequency. That is what keeps this a debounce floor rather than a policy timer.
 const (
-	refillSupplyHeadroom = 2                      // run at half the supply ceiling
-	refillScanFloorCap   = 150 * time.Millisecond // the largest floor we will derive (see below)
-	refillScanFloorMin   = 5 * time.Millisecond   // degenerate-configuration guard only
+	// refillSupplyHeadroom is the supply margin over the sustained drain, chosen for MAXIMUM THROUGHPUT.
+	// 2.0 is the measured optimum: on a database whose disk is not the bottleneck, throughput peaks at a
+	// derived floor of ~140ms (this headroom) and falls off ~15% by ~260ms (headroom 1.1) - because near
+	// the supply ceiling ordinary drain-rate jitter briefly empties the buffer and stalls workers, and a
+	// ~2x buffer absorbs that jitter where a ~1.1x one does not.
+	//
+	// Do NOT re-derive this from "waste" (discarded/selected). Waste looked like the tuning lever on an
+	// IOPS-throttled disk, where slow dispatch piled up a deep pending backlog and the refiller
+	// over-supplied it (waste ran 25-50%, and it seemed to trade against throughput). That was a disk
+	// artifact: on a healthy disk steps dispatch fast, the pending backlog stays shallow, the refiller
+	// supplies close to consumption, and waste is ~2% across the whole good interval range - so waste is
+	// nearly flat and does not distinguish the optimum. Throughput does. (Confirmed after a 1TB / 16-vCPU
+	// single-shard sweep showed throughput bimodality collapse from ~2x to ~4%, making the peak
+	// resolvable at ~110-150ms with ~2% waste.)
+	refillSupplyHeadroom = 2.0
+	// sustainedDrainPerVCPU is the MEASURED sustained per-shard drain (steps/s/vCPU). It is deliberately
+	// NOT capacityWeight's 450: that is the PEAK placement ceiling, while the sustained rate a refiller
+	// actually drains is ~75% of it (~2,300-2,900 steps/s on an 8-vCPU shard; ~5,850 on a 16-vCPU shard,
+	// = ~365/vCPU - measured across the interval sweeps). Placement wants the peak; the scan floor wants
+	// the sustained rate - same units, different quantity. With headroom 2.0 this puts the derived floor
+	// at 96/(2*340) ~= 141ms, the measured throughput optimum.
+	sustainedDrainPerVCPU = 340
+	// refillScanFloorCap is a lost-signal backstop, NOT a priority timer. Priority latency is handled by
+	// the escalation bypass (routeRefill wakes the refiller the instant a strictly-higher-priority step
+	// arrives), so the floor never has to be short enough to cover a priority event, and the cap only
+	// bounds how long a genuinely-lost doorbell can delay a scan.
+	refillScanFloorCap = 1 * time.Second
+	refillScanFloorMin = 5 * time.Millisecond // degenerate-configuration guard only
 )
 
 // deriveScanFloor computes ONE shard's scan floor from static configuration - capacity, that shard's
@@ -970,29 +996,28 @@ const (
 // version that DID (interval set from measured consumption) oscillated badly and was removed.
 //
 //	bufferShare = capacity/N        the most one pass can hand this partition
-//	c           = capacityWeight(vCPUs)/R   this replica's share of the shard's steps/s ceiling
-//	T           = bufferShare / (headroom * c)
+//	drain       = sustainedDrainPerVCPU * vCPUs / R   this replica's sustained drain of one shard
+//	T           = bufferShare / (headroom * drain)
 //
 // Substituting the engine's own constants makes the configuration terms CANCEL - bufferShare is
-// 2*8*6*vCPUs/R = 96*vCPUs/R and c is 450*vCPUs/R, so T is ~107ms at any vCPU count or replica count.
-// That is why a single hardcoded constant worked at all, and deriving it rather than hardcoding it is
-// what keeps it correct if the sizing it depends on ever moves: capacity is 2 x workersPerConnBudget x
-// conns, so a change to worker or cache sizing silently rescales the buffer this floor is measured
-// against. (Nearly shipped: campaign 11 found workersPerConnBudget overshoots ~4x. Had it been
-// "corrected", capacity would have fallen 4x and a hardcoded 150ms would have exceeded what the buffer
-// could cover - the measured i300 starvation mode. The overshoot was deliberately kept as
-// throughput-neutral, but the near-miss is the argument for computing this.)
+// 2*8*6*vCPUs/R = 96*vCPUs/R and drain is 340*vCPUs/R, so T = 96/(2*340) ~= 141ms at any vCPU count
+// or replica count. So it evaluates to a CONSTANT (~140ms) today; the reason to keep it a formula
+// rather than hardcode 140ms is that bufferShare tracks the cache-sizing constants (connsPerVCPU,
+// workersPerConnBudget, the 2x cache), so a change to worker/cache sizing rescales the floor
+// automatically. (Nearly shipped: campaign 11 found workersPerConnBudget overshoots ~4x. Had it been
+// "corrected", capacity would have fallen 4x and a hardcoded floor would have exceeded what the buffer
+// could cover - the measured i300 starvation mode. The overshoot was kept as throughput-neutral, but
+// the near-miss is the argument for computing this rather than pinning a number.)
 //
 // The cap governs where the cancellation breaks - workersDispatch's max(64, ...) floor at small or
-// high-R configurations - and is a lost-signal backstop, not a priority timer: urgent events cut the
-// wait short directly (see requestRefillDemand), so this never has to be short enough to cover one.
+// high-R configurations - and is a lost-signal backstop (see the constant).
 func deriveScanFloor(bufferShare, virtualCPUs, replicas int) time.Duration {
-	c := capacityWeight(virtualCPUs) / max(1, replicas)
-	if bufferShare <= 0 || c <= 0 {
+	drain := float64(sustainedDrainPerVCPU) * float64(virtualCPUs) / float64(max(1, replicas))
+	if bufferShare <= 0 || drain <= 0 {
 		return refillScanFloorCap
 	}
-	t := time.Duration(float64(bufferShare) / float64(refillSupplyHeadroom*c) * float64(time.Second))
-	return min(max(t, refillScanFloorMin), refillScanFloorCap)
+	t := float64(bufferShare) / (refillSupplyHeadroom * drain) // seconds: buffer covers headroom x the drain
+	return min(max(time.Duration(t*float64(time.Second)), refillScanFloorMin), refillScanFloorCap)
 }
 
 // recomputeScanFloors re-derives every shard's scan floor. Called at Startup and from recomputePools -
@@ -1002,6 +1027,7 @@ func (e *Engine) recomputeScanFloors() {
 	n := max(1, e.db.NumShards())
 	share := e.cache.Capacity() / n
 	replicas := max(1, int(e.observedR.Load()))
+	override := time.Duration(e.refillScanFloorOverride.Load())
 	e.shardsLock.Lock()
 	specs := make(map[int]ShardSpec, len(e.shardSpecs))
 	for idx, spec := range e.shardSpecs {
@@ -1009,6 +1035,10 @@ func (e *Engine) recomputeScanFloors() {
 	}
 	e.shardsLock.Unlock()
 	for idx, st := range e.refillState {
+		if override > 0 {
+			st.setFloor(override)
+			continue
+		}
 		vcpus := defaultVirtualCPUs
 		if spec, ok := specs[idx]; ok {
 			vcpus = effectiveVirtualCPUs(spec.VirtualCPUs)
