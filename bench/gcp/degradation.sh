@@ -39,6 +39,10 @@ AXIS="${1:?usage: degradation.sh A|B|F}"
 DSN="${DSN:?set DSN}"
 BENCH="${BENCH:-./dwarf-bench}"
 OUT="${OUT:-./degradation-results}"
+# FILL_CONNS sizes the fill's connection pool. Default 48 = 6x an 8-vCPU DB; on a larger DB set it to
+# 6x its vCPUs (e.g. 192 for 32-vCPU) or the fill throttles on connections and the bigger box is wasted.
+# The PROBES stay at M=8 deliberately (connection-bound methodology); only the fill scales.
+FILL_CONNS="${FILL_CONNS:-48}"
 mkdir -p "$OUT"
 
 # The probe is deliberately CONNECTION-BOUND (M=8), far under the database's CPU ceiling: per-step
@@ -62,26 +66,26 @@ case "$AXIS" in
 A)
   DEFAULT_CHECKPOINTS="1 5 10 20 30 40 50 60 70 80 90 100"   # millions of dwarf_steps rows
   UNIT="Mrows"
-  FILL_ARGS=(-workload linear -workers 512 -max-open-conns 48 -concurrency 512 -warmup 0s)
+  FILL_ARGS=(-workload linear -workers 512 -max-open-conns "$FILL_CONNS" -concurrency 512 -warmup 0s)
   RATE=4500   # initial fill-rate guess (rows/s at the measured ~4,600 steps/s ceiling); re-measured per leg
   ;;
 B)
   DEFAULT_CHECKPOINTS="8 16 32 48 64 100 150 200 250 300 350 400"   # GB of pg_database_size
   UNIT="GB"
-  FILL_ARGS=(-workload state -payload 65536 -workers 512 -max-open-conns 48 -concurrency 512 -warmup 0s)
+  FILL_ARGS=(-workload state -payload 65536 -workers 512 -max-open-conns "$FILL_CONNS" -concurrency 512 -warmup 0s)
   RATE=0   # measured after the first leg
   ;;
 F)
   DEFAULT_CHECKPOINTS="1 5 10 20 30 40 50 60 70 80 90 100"   # millions of dwarf_steps rows, same axis as A
   UNIT="Mrows"
   FILL_ARGS=(-workload fanout -fanout-width "$WIDTH" -fairness-keys "$KEYS"
-             -workers 512 -max-open-conns 48 -concurrency 512 -warmup 0s)
+             -workers 512 -max-open-conns "$FILL_CONNS" -concurrency 512 -warmup 0s)
   PROBE_ARGS=(-workload fanout -fanout-width "$WIDTH" -fairness-keys "$KEYS"
               -workers 512 -max-open-conns 8 -concurrency 512 -window 60s -warmup 15s)
   # Same flags as axis A's probe, so the two arms' linear numbers are directly comparable.
   CROSS_PROBE_ARGS=(-workload linear -workers 512 -max-open-conns 8 -concurrency 512
                     -window 60s -warmup 15s)
-  RATE=2400   # fan-out costs ~15% more engine work per step and runs slower; re-measured per leg
+  RATE=7000   # measured fan-out fill rate on a 16-vCPU DB with fix1+fix2 (was 2400 pre-fix); re-measured per leg
   ;;
 *) echo "axis must be A, B or F" >&2; exit 1 ;;
 esac
