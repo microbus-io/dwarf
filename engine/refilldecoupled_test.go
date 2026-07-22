@@ -483,12 +483,12 @@ func TestRefillScanFloor_DerivedFromStaticConfig(t *testing.T) {
 	// The DERIVED path: a shard's pool is connsPerVCPU*vCPUs/R, so the two drain channels agree and the
 	// min is a no-op. The measured rig: 8 vCPUs, R=1 -> a 48-conn pool and a 768-candidate partition
 	// share. The configuration terms cancel (bufferShare is 96*vCPUs/R and the sustained drain
-	// 340*vCPUs/R), so the derived floor is 96/(2*340) ~= 141ms and is the SAME at any vCPU or replica
-	// count. That is the measured throughput optimum (headroom 2.0): a ~2x supply buffer absorbs
-	// drain-rate jitter that a tighter one stalls on.
+	// 720*vCPUs/R), so the derived floor is 96/(2*720) ~= 67ms and is the SAME at any vCPU or replica
+	// count. 67ms sits inside the measured-good band (10-80ms on the 2026-07-22 rig M-sweep); the earlier
+	// 340 constant put it at 141ms, the worst point in that band.
 	rig := deriveScanFloor(768, 8, 48, 1)
-	assert.True(rig > 130*time.Millisecond && rig < 152*time.Millisecond,
-		"expected ~141ms at the measured configuration, got %v", rig)
+	assert.True(rig > 60*time.Millisecond && rig < 74*time.Millisecond,
+		"expected ~67ms at the measured configuration, got %v", rig)
 	// Doubling vCPUs doubles the buffer share, the pool, AND the drain, so the floor is unchanged.
 	assert.Equal(rig, deriveScanFloor(1536, 16, 96, 1))
 	// Same for replicas: R halves the share, the pool, and the per-replica drain together.
@@ -502,7 +502,7 @@ func TestRefillScanFloor_DerivedFromStaticConfig(t *testing.T) {
 	// The buffer is sized off the big pool; the drain must follow the SAME pool. Deriving it from the
 	// default 2 vCPUs instead (the old bug) overshot the floor to the 1s cap and starved the refiller -
 	// the rig's 20-80s fan-out latency. With the pool driving the drain, the floor stays at the optimum.
-	assert.True(deriveScanFloor(3072, 0, 192, 1) > 130*time.Millisecond && deriveScanFloor(3072, 0, 192, 1) < 152*time.Millisecond,
+	assert.True(deriveScanFloor(3072, 0, 192, 1) > 60*time.Millisecond && deriveScanFloor(3072, 0, 192, 1) < 74*time.Millisecond,
 		"a big pinned pool with undeclared vCPUs must derive drain from the pool, not clamp to the cap")
 	// The SAME buffer on a genuinely slow 2-vCPU shard (small pool to match) correctly caps - it really
 	// is that slow. The fix distinguishes "big pool, vCPUs just unset" from "actually a 2-vCPU shard".

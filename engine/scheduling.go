@@ -975,13 +975,15 @@ const (
 	// single-shard sweep showed throughput bimodality collapse from ~2x to ~4%, making the peak
 	// resolvable at ~110-150ms with ~2% waste.)
 	refillSupplyHeadroom = 2.0
-	// sustainedDrainPerVCPU is the MEASURED sustained per-shard drain (steps/s/vCPU). It is deliberately
-	// NOT capacityWeight's 450: that is the PEAK placement ceiling, while the sustained rate a refiller
-	// actually drains is ~75% of it (~2,300-2,900 steps/s on an 8-vCPU shard; ~5,850 on a 16-vCPU shard,
-	// = ~365/vCPU - measured across the interval sweeps). Placement wants the peak; the scan floor wants
-	// the sustained rate - same units, different quantity. With headroom 2.0 this puts the derived floor
-	// at 96/(2*340) ~= 141ms, the measured throughput optimum.
-	sustainedDrainPerVCPU = 340
+	// sustainedDrainPerVCPU is the MEASURED sustained per-shard drain in steps/s/vCPU: the per-connection
+	// rate x connsPerVCPU. The measured per-connection rate is ~120 steps/s, roughly constant across
+	// connection counts, instance sizes, and backlog volumes - which is what lets one constant stand in for
+	// it - so 120 x connsPerVCPU(6) = 720. With headroom 2.0 this derives a 96/(2*720) ~= 67ms floor (see
+	// deriveScanFloor). NOT capacityWeight's 450, the PEAK placement ceiling: placement wants the peak, the
+	// scan floor wants the SUSTAINED rate, and conflating them undershoots the drain and overshoots the
+	// floor (the earlier 340 - ~57/conn - put it at 141ms, a starved regime giving ~half the throughput of
+	// the good band at high connection counts).
+	sustainedDrainPerVCPU = 720
 	// refillScanFloorCap is a lost-signal backstop, NOT a priority timer. Priority latency is handled by
 	// the escalation bypass (routeRefill wakes the refiller the instant a strictly-higher-priority step
 	// arrives), so the floor never has to be short enough to cover a priority event, and the cap only
@@ -1014,9 +1016,9 @@ const (
 // alone (the best estimate available, erring toward over-scan rather than starvation).
 //
 // Substituting the engine's own constants makes the configuration terms CANCEL in the derived path -
-// bufferShare is 2*8*6*vCPUs/R = 96*vCPUs/R and drain is 340*vCPUs/R, so T = 96/(2*340) ~= 141ms at any
-// vCPU count or replica count. So it evaluates to a CONSTANT (~140ms) there; the reason to keep it a
-// formula rather than hardcode 140ms is that bufferShare tracks the cache-sizing constants (connsPerVCPU,
+// bufferShare is 2*8*6*vCPUs/R = 96*vCPUs/R and drain is 720*vCPUs/R, so T = 96/(2*720) ~= 67ms at any
+// vCPU count or replica count. So it evaluates to a CONSTANT (~67ms) there; the reason to keep it a
+// formula rather than hardcode 67ms is that bufferShare tracks the cache-sizing constants (connsPerVCPU,
 // workersPerConnBudget, the 2x cache), so a change to worker/cache sizing rescales the floor
 // automatically. (Nearly shipped: campaign 11 found workersPerConnBudget overshoots ~4x. Had it been
 // "corrected", capacity would have fallen 4x and a hardcoded floor would have exceeded what the buffer

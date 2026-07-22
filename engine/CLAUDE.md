@@ -664,7 +664,7 @@ these by flushing, per-item priority tracking, or re-floor-on-pop: each trades t
 exists for and only shaves an already-bounded refiller cycle off a path the refiller already backstops.
 
 **The scan floor is the refiller's supply control, DERIVED per shard (`deriveScanFloor` /
-`recomputeScanFloors`, ~141ms at the reference config) - NOT a fixed constant.** Each shard's refiller waits
+`recomputeScanFloors`, ~67ms at the reference config) - NOT a fixed constant.** Each shard's refiller waits
 out the floor after every pass, measured from the pass *start* so a slow pass pays for itself. It exists
 because the trigger is re-armed by every completed step, which ran the refillers at a **100% duty cycle** -
 measured, in *both* the merged and decoupled builds: every refiller scanning back to back for a whole 60s
@@ -682,13 +682,14 @@ depends on it" rule as the dispatch count and the cache, because it is measured 
 capacity. The arithmetic: workers drain a partition at `drain = sustainedDrainPerVCPU·vCPUs/R` candidates/s
 and a pass hands it at most `capacity/N = 96·vCPUs/R`, so `T = bufferShare/(headroom·drain)`. Substituting
 the engine's own constants (`6·vCPUs/R` conns, `8x` dispatch workers, `2x` cache; `sustainedDrainPerVCPU` =
-**340**, the MEASURED sustained drain, not `capacityWeight`'s 450 placement peak) gives `96/(2·340)` ≈
-**141ms with vCPUs and R cancelling** - capacity and drain both scale in `vCPUs/R`, so their ratio is
-configuration-independent. That is *why* one constant works. `headroom` = **2.0**, chosen for MAXIMUM
-THROUGHPUT (see the measured paragraph): a ~2x supply buffer absorbs the drain-rate jitter that briefly
-stalls workers at a tighter margin. Two caveats before treating the value as universal: `workersDispatch`'s
-`max(64, …)` floor breaks the cancellation on small deployments, and 340 steps/s/vCPU is workload-shaped (a
-byte-heavy or fan-out shape drains slower, which makes the optimum interval **longer**).
+**720**, the MEASURED sustained drain of ~120 steps/s/conn × the 6 conns/vCPU, not `capacityWeight`'s 450
+placement peak) gives `96/(2·720)` ≈ **67ms with vCPUs and R cancelling** - capacity and drain both scale in
+`vCPUs/R`, so their ratio is configuration-independent. That is *why* one constant works. `headroom` =
+**2.0**, chosen for MAXIMUM THROUGHPUT (see the measured paragraph): a ~2x supply buffer absorbs the
+drain-rate jitter that briefly stalls workers at a tighter margin. Two caveats before treating the value as
+universal: `workersDispatch`'s `max(64, …)` floor breaks the cancellation on small deployments, and 720
+steps/s/vCPU is workload-shaped (a byte-heavy or fan-out shape drains slower, which makes the optimum
+interval **longer**).
 
 **Do NOT re-derive `headroom` from "waste" (discarded/selected).** Waste looked like the tuning lever on an
 IOPS-throttled disk, where slow dispatch piled up a deep pending backlog and the refiller over-supplied it
@@ -719,16 +720,26 @@ differs by 0.036ms - that spread is pool wait, not a slow shard, so do not read 
 p99** while buying no throughput; a fixed 150ms gave **+19% throughput and a tail at or better than the
 barriered baseline**. But throughput there was **bimodal** (40-86% run-to-run spread) - the disk, not the
 engine (see the IOPS finding below), so the exact optimum was unresolvable. On a **1TB / 16-vCPU single
-shard** (IOPS non-binding, spread collapsed to ~4%): throughput peaks at **110-150ms** and falls off ~15% by
-~260ms - which is the `headroom=2.0` derivation (`96/(2·340) ≈ 141ms`), and why headroom is 2.0 not lower.
-The decline past the peak is drain-rate jitter stalling workers at a tight buffer.
+shard** (IOPS non-binding, spread collapsed to ~4%): throughput peaked at **110-150ms** and fell off ~15% by
+~260ms. A later M-sweep measured the drain per CONNECTION directly - sustained ~120 steps/s/conn, roughly
+flat across connection counts, instance sizes, and backlog volumes - and recalibrated `sustainedDrainPerVCPU`
+340→720, moving the reference floor 141ms→**67ms**, inside a flat-good 10-80ms band at high connection
+counts. (The two peaks were taken on different rigs/loads; the connection-rate measurement is what the
+constant now encodes, since it held across the widest range - and a validation sweep at 67ms beat the old
+141ms by ~50% at M=8 and M=64.) headroom stays **2.0**: the decline past the peak is drain-rate jitter
+stalling workers at a tight buffer, which a ~2x buffer absorbs.
 
-**Two adaptive alternatives were built and both lost** - see the `deriveScanFloor` comment in
-`scheduling.go`. Do not re-propose either without new evidence: an adaptive fetch DEPTH was *inert* (batch
+**Three adaptive alternatives were built and all lost** - see the `deriveScanFloor` comment in
+`scheduling.go`. Do not re-propose any without new evidence: an adaptive fetch DEPTH was *inert* (batch
 moved 179→173→190 across a 60% margin change, because the batch is set by the backlog and the plan slice,
-never by a target), and a DERIVED interval (set from observed consumption) was *actively harmful* (~1,000x
+never by a target); a DERIVED interval (set from observed consumption) was *actively harmful* (~1,000x
 the discard, 2.4x the p99) because consumption is `min(demand, supply)`, so the actuation contaminates its
-own measurement. The FIXED-headroom static formula beats both.
+own measurement; and an AIMD loop that crawled each shard's floor toward its own optimum won at low
+connection counts but was *unprovable* - its over-supply signal (`discarded`) measures only worker
+starvation, blind to refiller scan cost, so it could not find the high-connection optimum and over-crawled
+to the clamp. It was rig-validated, then SHELVED for the recalibrated static floor it could not be proven to
+beat (only bounded) - the same `control-loops-must-be-simple` bar the removed rate valve failed. The
+FIXED-headroom static formula beats all three.
 
 **The throughput bimodality was IOPS contention, not engine noise.** Cloud SQL provisions IOPS by disk size
 (~30 IOPS/GB); the 500GB/8-vCPU shards throttled under the write-heavy load, producing the 40-86% run-to-run
@@ -762,12 +773,12 @@ the pace must stay well under the cache drain time (capacity = 2x workers x one 
 become the throughput ceiling (<= capacity/pace pops/s) - over-pacing measurably inverts the gain. The pace
 bound is unchanged by partitioning (`(capacity/N)/pace x N = capacity/pace` - the N cancels), but 20ms was
 tuned against a ~100ms merged cycle and is a proportionally larger share of an independent one - re-measure
-against the `discarded` ratio (`_SHARD_DECOUPLING.md` sequencing step 3). Liveness is unchanged: the trigger
+against the `discarded` ratio if it is revisited. Liveness is unchanged: the trigger
 stays armed through the pause, so a drained-early partition waits at most the remainder.
 
-**`refillPace` is now largely subsumed by the scan floor, and that is an OPEN item.** The floor (~141ms,
+**`refillPace` is now largely subsumed by the scan floor, and that is an OPEN item.** The floor (~67ms,
 unconditional) is both larger and broader than the pace (20ms, full-plan only), so a full-plan pass currently
-waits *both* - 170ms - and every other pass waits only the floor. In the measured linear workload the plan is
+waits *both* - ~87ms - and every other pass waits only the floor. In the measured linear workload the plan is
 almost never capacity-bound (batch ~437 against a ~4,608 capacity), so `refillFull` rarely fires and the pace
 is near-dead in practice. It is deliberately **kept for now** rather than deleted, because the arms that
 validated the floor (`i150`) ran *with* it, so removing it would ship a configuration nothing has measured -
@@ -2102,7 +2113,7 @@ identical from outside (the rules below record how each resolved):
   faster than the workers drain it throws away a batch it just paid to fetch. `Cache.Refill` returns the
   discarded count for this. (Measured 0-10% pre-decoupling: dead then. The instrument stays because it is
   the cheap readout that would catch the regime changing - and it is the gauge for re-tuning `refillPace`
-  against the shorter independent cycle, `_SHARD_DECOUPLING.md` sequencing step 3.)
+  against the shorter independent cycle if that is revisited.)
 
 The `phase` label (`band_keys` / `fetch_steps`) separates phase 1 from phase 3, which matters for a reason
 found while writing the degradation harness: the band scan's plan flips between an index scan and a

@@ -46,7 +46,7 @@ import (
 //
 // The number of Work branches equals the number of clauses that match the input `gate`, and the `add` reducer
 // sums exactly that many deltas. Nothing overshoots cohort_size: a cohort of width W has W arrivals. This is
-// the shape once suspected of "double-counting cohort_arrivals" (_BUGS.md #1, since retired) - it does not; it
+// the shape once suspected of "double-counting cohort_arrivals" (since retired) - it does not; it
 // is an ordinary conditional fan-out whose width happens to be author-surprising.
 func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 	ctx := context.Background()
