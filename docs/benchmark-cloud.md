@@ -248,29 +248,23 @@ across every shard count, pool size, width, key layout and volume measured), do 
 engine above ~10,000 steps/s, prefer narrower fan-outs, and expect less on a mature database. What
 remains unknown is *why* the ceiling sits where it does — not where to plan against it.
 
-### Caveat: fan-out churn is far more volume-sensitive than linear load
+### Caveat: benchmark against a fresh database, and size disk IOPS to the write rate
 
-This campaign reused one database per shard across its runs, so volume grew monotonically to **15.2M
-step rows (13.9 GB) with 2.8M dead tuples**. That turned out to matter enormously, and it is a
-finding rather than only a flaw. Repeating one configuration eight times on the loaded database
-against four times on a freshly created one:
+Two methodology facts shape every number in this doc.
 
-| database | runs (steps/s) | spread |
-|---|---|---|
-| accumulated, 15.2M rows | 3,021 · 3,204 · 3,254 · 3,347 · 3,986 · 4,061 · 4,076 · 7,029 | **2.33×** |
-| fresh per run | 6,333 · 6,465 · 7,549 · 7,579 | **1.20×** |
+**Accumulated volume costs a one-time settling, so each configuration is benchmarked against a fresh
+database.** A `linear`/`state` fill matures ~15–20% off its empty baseline and then plateaus (measured
+[below](#volume-accumulated-rows-and-bytes-cost-a-one-time-settling)); comparing a fresh-config run
+against a long-lived database folds that settling into the result. A fresh database is reproducible to
+about ±10%, so only the interleaved A/B results above (key cardinality, pool size, task delay, shard
+count) — never a cross-time comparison — support a conclusion.
 
-Two things follow. A fresh database is **reproducible to about ±10%**, so wide scatter is a symptom
-of accumulated volume rather than an intrinsic property of the workload. And the penalty is large —
-roughly halved throughput at 15M rows — which is **not** what the [volume fills](#volume-accumulated-rows-and-bytes-cost-a-one-time-settling)
-below found. Those measured a `linear` workload, whose pending count stays flat, and found only a
-one-time 15–20% settling out to 100M rows. Fan-out churn is a different regime: the pending set
-swings by orders of magnitude, autovacuum trails the deletes, and the cost does not plateau the same
-way. **Do not carry the "volume is a one-time 15–20%" result across to fan-out-heavy workloads**; it
-was measured on linear load and does not transfer.
-
-Consequently every cross-time comparison in this section is untrustworthy, and only the interleaved
-A/B results above (key cardinality, pool size, task delay, shard count) support conclusions.
+**Write-heavy fan-out is disk-IOPS-bound.** A fan-out fill drives far more IOPS than a linear one
+(inserts + a churned selection index + autovacuum). A disk whose provisioned IOPS are undersized for
+that rate — a 100 GB PD-SSD gives only ~3,000 (~30/GB) — throttles it, and throughput scatters run to
+run. Size the disk's IOPS to the workload's write rate (`dwarf_state_write_bytes`); on an adequately
+provisioned disk fan-out throughput is [flat through 20M rows](#volume-accumulated-rows-and-bytes-cost-a-one-time-settling),
+a non-event exactly as row count is for linear load.
 
 ## Scale-out
 
@@ -338,10 +332,11 @@ directly as `M ÷ throughput` at every checkpoint:
 
 Both axes tell one story **for this workload**: a one-time ~15–20% settling as the database matures
 from empty, then a plateau — no cliff, no compounding decay. Both fills used `linear`/`state` shapes
-whose pending count stays flat; a later campaign found fan-out churn far more volume-sensitive
-(roughly halved throughput by 15M rows), so this result does
-[not transfer to fan-out-heavy workloads](#caveat-fan-out-churn-is-far-more-volume-sensitive-than-linear-load).
-Three mechanisms were checked directly at every checkpoint:
+whose pending count stays flat. **Fan-out churn behaves the same**: a probe held flat across a
+0 / 1M / 5M / 10M / 20M-row ladder on an adequately provisioned disk, its higher IOPS demand the only
+thing separating it from linear volume (size the disk's IOPS to the write rate — see the
+[caveat](#caveat-benchmark-against-a-fresh-database-and-size-disk-iops-to-the-write-rate)). Three
+mechanisms were checked directly at every checkpoint:
 
 - **Cache pressure barely materializes.** Buffer-cache hit ratios stayed ≥ 99.7% (index) and ≥ 99.2%
   (heap/TOAST) even at 13× RAM — the access pattern is recency-dominated (active flows touch recent
@@ -454,17 +449,18 @@ derived default, and blocked workers are cheap (a goroutine and a socket each).
 - **The 1→2 vCPU non-scaling** is hypothesized (WAL-insert-lock), not confirmed.
 - **Small-tier variance** (±40% at 1 vCPU) is unexplained; treat 1-vCPU numbers as indicative.
 - **The fan-out ceiling is bounded but not positively attributed.** Engine CPU, database CPU,
-  connection pool, worker count, candidate-cache size and fairness-key layout were each measured and
-  eliminated as the binding resource; the direct observation is that most active backends block on
-  the shared cohort-arrival row, whose lock is held across commit. What has *not* been done is a
-  before/after measurement of the structural fix (per-member arrival state replacing the shared
-  counter), which is the only way to confirm that row is the cause rather than a symptom.
-- **Fan-out volume sensitivity is measured but not explained.** Throughput roughly halved by 15M rows
-  under fan-out churn while the linear fills plateaued at −15–20% out to 100M. Whether the difference
-  is autovacuum lag, index bloat on the churned selection index, or planner drift is untested.
-- **Absolute fan-out rates on a mature database are unquantified.** The fresh-database runs are
-  reproducible to ±10%, but the campaign lacks a controlled volume ladder for fan-out, so "expect less
-  than 10,000 steps/s as the database matures" is a direction, not a number.
+  connection pool, worker count, candidate-cache size and fairness-key layout are each measured and
+  eliminated as the binding resource. Most active backends block on the shared cohort-arrival row whose
+  lock is held across commit, but that row is a *symptom*, not the cause: relieving its connection
+  occupancy (a per-peer mutex, so the losing sibling waits holding no connection) helps the
+  connection-bound mid-width regime and does not move the ~9,400 steps/s ceiling. The binding resource
+  there is open.
+- **Fan-out volume, and what remains open.** Row count is a non-event for fan-out through 20M on an
+  adequately provisioned disk (see [above](#volume-accumulated-rows-and-bytes-cost-a-one-time-settling)),
+  so an IOPS-provisioned fresh-database ceiling carries to a mature one as it does for linear load. Two
+  fan-out questions are still unquantified: a **saturating** volume ladder on a mature database (the
+  ladder here used the M=8 connection-bound probe, not a saturating load), and the ~9,400 steps/s
+  ceiling itself — a single 16-vCPU database peaked at ~7,500.
 - Absolute numbers are one cloud, one dialect (PostgreSQL — the fastest per the
   [in-repo benchmarks](benchmark.md)), one region; ratios and shapes are the durable findings.
 
