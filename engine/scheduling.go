@@ -991,18 +991,32 @@ const (
 )
 
 // deriveScanFloor computes ONE shard's scan floor from static configuration - capacity, that shard's
-// declared vCPUs, and the observed replica count. It is arithmetic over values known at Startup, NOT a
-// controller: nothing here reads an observed rate, which is the distinction that matters, because the
-// version that DID (interval set from measured consumption) oscillated badly and was removed.
+// pool and declared vCPUs, and the observed replica count. It is arithmetic over values known at
+// Startup, NOT a controller: nothing here reads an observed rate, which is the distinction that matters,
+// because the version that DID (interval set from measured consumption) oscillated badly and was removed.
 //
 //	bufferShare = capacity/N        the most one pass can hand this partition
-//	drain       = sustainedDrainPerVCPU * vCPUs / R   this replica's sustained drain of one shard
+//	drain       = sustainedDrainPerVCPU * min(poolConns/connsPerVCPU, vCPUs/R)   this replica's drain
 //	T           = bufferShare / (headroom * drain)
 //
-// Substituting the engine's own constants makes the configuration terms CANCEL - bufferShare is
-// 2*8*6*vCPUs/R = 96*vCPUs/R and drain is 340*vCPUs/R, so T = 96/(2*340) ~= 141ms at any vCPU count
-// or replica count. So it evaluates to a CONSTANT (~140ms) today; the reason to keep it a formula
-// rather than hardcode 140ms is that bufferShare tracks the cache-sizing constants (connsPerVCPU,
+// The drain is bounded by the TIGHTER of two channels, because sustained throughput cannot exceed
+// either: the connection pool (this replica can only push poolConns/connsPerVCPU vCPUs of work through
+// its pool) or the database CPU (the shard's vCPUs, split across the fleet). In the DERIVED path the two
+// are equal by construction (pool = connsPerVCPU*vCPUs/R, so poolConns/connsPerVCPU == vCPUs/R) and the
+// min is a no-op - it bites only when an operator pins the pool with SetMaxOpenConns *independently* of
+// the declared vCPUs, which is exactly the footgun it protects against:
+//   - a large pinned pool with vCPUs left undeclared no longer derives its drain from the default 2
+//     vCPUs (which made the buffer/drain terms disagree and overshot the floor to the 1s cap, starving
+//     the refiller - the rig's 20-80s fan-out latency);
+//   - a small pooler-capped pool (many vCPUs, few connections) no longer over-scans on a drain the pool
+//     cannot actually sustain.
+// vCPUs <= 0 means undeclared: the CPU ceiling is unknown, so the drain falls to the connection channel
+// alone (the best estimate available, erring toward over-scan rather than starvation).
+//
+// Substituting the engine's own constants makes the configuration terms CANCEL in the derived path -
+// bufferShare is 2*8*6*vCPUs/R = 96*vCPUs/R and drain is 340*vCPUs/R, so T = 96/(2*340) ~= 141ms at any
+// vCPU count or replica count. So it evaluates to a CONSTANT (~140ms) there; the reason to keep it a
+// formula rather than hardcode 140ms is that bufferShare tracks the cache-sizing constants (connsPerVCPU,
 // workersPerConnBudget, the 2x cache), so a change to worker/cache sizing rescales the floor
 // automatically. (Nearly shipped: campaign 11 found workersPerConnBudget overshoots ~4x. Had it been
 // "corrected", capacity would have fallen 4x and a hardcoded floor would have exceeded what the buffer
@@ -1011,8 +1025,11 @@ const (
 //
 // The cap governs where the cancellation breaks - workersDispatch's max(64, ...) floor at small or
 // high-R configurations - and is a lost-signal backstop (see the constant).
-func deriveScanFloor(bufferShare, virtualCPUs, replicas int) time.Duration {
-	drain := float64(sustainedDrainPerVCPU) * float64(virtualCPUs) / float64(max(1, replicas))
+func deriveScanFloor(bufferShare, virtualCPUs, poolConns, replicas int) time.Duration {
+	drain := float64(sustainedDrainPerVCPU) * float64(poolConns) / float64(connsPerVCPU) // connection channel
+	if virtualCPUs > 0 {                                                                 // cap by the CPU ceiling, when it is known
+		drain = min(drain, float64(sustainedDrainPerVCPU)*float64(virtualCPUs)/float64(max(1, replicas)))
+	}
 	if bufferShare <= 0 || drain <= 0 {
 		return refillScanFloorCap
 	}
@@ -1028,6 +1045,7 @@ func (e *Engine) recomputeScanFloors() {
 	share := e.cache.Capacity() / n
 	replicas := max(1, int(e.observedR.Load()))
 	override := time.Duration(e.refillScanFloorOverride.Load())
+	pinned := int(e.maxOpenConns.Load()) // >0 when SetMaxOpenConns pins every shard's pool
 	e.shardsLock.Lock()
 	specs := make(map[int]ShardSpec, len(e.shardSpecs))
 	for idx, spec := range e.shardSpecs {
@@ -1039,11 +1057,12 @@ func (e *Engine) recomputeScanFloors() {
 			st.setFloor(override)
 			continue
 		}
-		vcpus := defaultVirtualCPUs
-		if spec, ok := specs[idx]; ok {
-			vcpus = effectiveVirtualCPUs(spec.VirtualCPUs)
-		}
-		st.setFloor(deriveScanFloor(share, vcpus, replicas))
+		// Pass the shard's ACTUAL pool (shardPool resolves the SetMaxOpenConns pin) and its RAW declared
+		// vCPUs (0 = undeclared), so the drain is bounded by whichever channel is real - the pinned pool,
+		// not a defaulted vCPU count. An unconfigured shard's zero-value spec falls to the conn channel.
+		spec := specs[idx]
+		_, pool := shardPool(spec, pinned, replicas)
+		st.setFloor(deriveScanFloor(share, spec.VirtualCPUs, pool, replicas))
 	}
 }
 

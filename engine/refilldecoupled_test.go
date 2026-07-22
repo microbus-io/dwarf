@@ -480,28 +480,46 @@ func TestRefillScanFloor_UrgentNudgesBypassRoutineOnesDoNot(t *testing.T) {
 func TestRefillScanFloor_DerivedFromStaticConfig(t *testing.T) {
 	assert := testarossa.For(t)
 
-	// The measured rig: 8 vCPUs, R=1 -> a 768-candidate partition share. The configuration terms cancel
-	// (bufferShare is 96*vCPUs/R and the sustained drain 340*vCPUs/R), so the derived floor is
-	// 96/(2*340) ~= 141ms and is the SAME at any vCPU or replica count. That is the measured throughput
-	// optimum (headroom 2.0): a ~2x supply buffer absorbs drain-rate jitter that a tighter one stalls on.
-	rig := deriveScanFloor(768, 8, 1)
+	// The DERIVED path: a shard's pool is connsPerVCPU*vCPUs/R, so the two drain channels agree and the
+	// min is a no-op. The measured rig: 8 vCPUs, R=1 -> a 48-conn pool and a 768-candidate partition
+	// share. The configuration terms cancel (bufferShare is 96*vCPUs/R and the sustained drain
+	// 340*vCPUs/R), so the derived floor is 96/(2*340) ~= 141ms and is the SAME at any vCPU or replica
+	// count. That is the measured throughput optimum (headroom 2.0): a ~2x supply buffer absorbs
+	// drain-rate jitter that a tighter one stalls on.
+	rig := deriveScanFloor(768, 8, 48, 1)
 	assert.True(rig > 130*time.Millisecond && rig < 152*time.Millisecond,
 		"expected ~141ms at the measured configuration, got %v", rig)
-	assert.Equal(rig, deriveScanFloor(768*4/4, 8, 1))
-	// Doubling vCPUs doubles BOTH the buffer share and the drain, so the floor is unchanged.
-	assert.Equal(rig, deriveScanFloor(1536, 16, 1))
-	// Same for replicas: R halves the share and the per-replica drain together.
-	assert.Equal(rig, deriveScanFloor(384, 8, 2))
+	// Doubling vCPUs doubles the buffer share, the pool, AND the drain, so the floor is unchanged.
+	assert.Equal(rig, deriveScanFloor(1536, 16, 96, 1))
+	// Same for replicas: R halves the share, the pool, and the per-replica drain together.
+	assert.Equal(rig, deriveScanFloor(384, 8, 24, 2))
 
-	// A bigger buffer covers a longer gap; a faster shard needs more frequent scans.
-	assert.True(deriveScanFloor(1536, 8, 1) > rig)
-	assert.True(deriveScanFloor(768, 32, 1) < rig)
+	// A bigger buffer covers a longer gap; a faster shard (bigger pool) needs more frequent scans.
+	assert.True(deriveScanFloor(1536, 8, 48, 1) > rig)
+	assert.True(deriveScanFloor(768, 32, 192, 1) < rig)
+
+	// The FOOTGUN: an operator pins a large pool with SetMaxOpenConns but leaves VirtualCPUs undeclared.
+	// The buffer is sized off the big pool; the drain must follow the SAME pool. Deriving it from the
+	// default 2 vCPUs instead (the old bug) overshot the floor to the 1s cap and starved the refiller -
+	// the rig's 20-80s fan-out latency. With the pool driving the drain, the floor stays at the optimum.
+	assert.True(deriveScanFloor(3072, 0, 192, 1) > 130*time.Millisecond && deriveScanFloor(3072, 0, 192, 1) < 152*time.Millisecond,
+		"a big pinned pool with undeclared vCPUs must derive drain from the pool, not clamp to the cap")
+	// The SAME buffer on a genuinely slow 2-vCPU shard (small pool to match) correctly caps - it really
+	// is that slow. The fix distinguishes "big pool, vCPUs just unset" from "actually a 2-vCPU shard".
+	assert.Equal(refillScanFloorCap, deriveScanFloor(3072, 2, 12, 1))
+
+	// Both provided, connection-constrained (32-vCPU DB behind a 48-conn pooler): the drain follows the
+	// tighter CONNECTION channel, identical to leaving the vCPUs unset.
+	assert.Equal(deriveScanFloor(768, 0, 48, 1), deriveScanFloor(768, 32, 48, 1))
+	// Both provided, CPU-constrained (4-vCPU DB with an over-provisioned 192-conn pool): the drain
+	// follows the tighter CPU channel, so the extra connections do not shorten the floor.
+	assert.Equal(deriveScanFloor(768, 4, 24, 1), deriveScanFloor(768, 4, 192, 1))
 
 	// The cap governs where the cancellation breaks - workersDispatch's max(64, ...) floor at small or
 	// high-R configurations - and degenerate inputs fall back to it rather than to zero, which would
 	// restore the 100%-duty-cycle hot loop.
-	assert.Equal(refillScanFloorCap, deriveScanFloor(4096, 2, 8))
-	assert.Equal(refillScanFloorCap, deriveScanFloor(0, 8, 1))
-	assert.Equal(refillScanFloorCap, deriveScanFloor(768, 0, 1), "zero drain (0 vCPUs) falls back to the cap, never a 0 divide")
-	assert.True(deriveScanFloor(1, 64, 1) >= refillScanFloorMin)
+	assert.Equal(refillScanFloorCap, deriveScanFloor(4096, 2, 2, 8))
+	assert.Equal(refillScanFloorCap, deriveScanFloor(0, 8, 48, 1))
+	assert.Equal(refillScanFloorCap, deriveScanFloor(768, 0, 0, 1), "zero pool -> zero drain falls back to the cap, never a 0 divide")
+	assert.True(deriveScanFloor(1, 64, 384, 1) >= refillScanFloorMin)
 }
