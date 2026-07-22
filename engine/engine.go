@@ -287,7 +287,7 @@ func NewEngine() *Engine {
 	e.lastGlobalBand.Store(int64(math.MaxInt))
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
-	e.pingInterval = 30 * time.Second
+	e.pingInterval = 10 * time.Second
 	e.refillPace = 20 * time.Millisecond
 	e.wedgeSweepInterval = 5 * time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute
@@ -391,6 +391,31 @@ func (e *Engine) SetWorkers(n int) error {
 	}
 	e.workers.Store(int32(n))
 	e.workersSet.Store(true)
+	return nil
+}
+
+// SetEngineID pins this replica's identity, overriding the random identifier minted per instance. The
+// identity is what a replica registers in the shared peer registry to be counted for the connection-pool
+// split across replicas. The default is random and fresh on every restart, which is correct for the common
+// case (including several engines in one process, which must count as distinct replicas) but leaves a stale
+// registry entry behind when a replica crashes: the entry lingers until it ages out, transiently over-counting
+// replicas and shrinking every live replica's pool share in the meantime. Pinning a value that is STABLE
+// across a replica's restarts (for example, derived from the deployment's own per-instance identity) lets a
+// restarted replica reuse its entry instead, so a crash-restart never inflates the count.
+//
+// The id must be positive (0 is reserved) and UNIQUE among replicas concurrently sharing the same databases:
+// two live replicas with the same id register as one, under-counting replicas and over-sizing pools. Leave it
+// unset (random) unless a stable, unique value is genuinely available - a wrong stable id is worse than the
+// random default. Construction-time only.
+func (e *Engine) SetEngineID(id int64) error {
+	if e.started.Load() {
+		return errSetAfterStartup("engine id")
+	}
+	if id <= 0 {
+		return errors.New("engine id must be positive", http.StatusBadRequest)
+	}
+	e.engineID = id
+	e.instanceID = strconv.FormatInt(id, 36)
 	return nil
 }
 

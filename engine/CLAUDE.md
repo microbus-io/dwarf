@@ -1833,12 +1833,43 @@ engine policy — below.
 
 **Peer discovery (observed replica count, `peers.go`).** The engine reads how many replicas share its shards' databases
 from the shared **`dwarf_peers`** registry, NOT from the host transport. Each replica heartbeats its own row
-`(engine_id, seen_at)` into **every** shard via `OnEach` every `pingInterval` (30s) and reads
+`(engine_id, seen_at)` into **every** shard via `OnEach` every `pingInterval` (10s) and reads
 R = `MAX(COUNT WHERE seen_at > NOW - 4x pingInterval)` across shards (MAX because every shard holds the same
-population; a lagging shard only under-counts, which grows pools - the safe direction). A row unheard-from for 4x is
-no longer counted (a crashed peer, whose owner sends no goodbye, drops out on its own) and becomes eligible for the
-prune DELETE past 8x. `Startup` registers + reads synchronously (above); `Shutdown` deletes the row and nudges peers
-so they regrow without waiting out the expiry. `observedReplicas()` is a lock-free atomic read of the last count.
+population; a lagging shard only under-counts, which grows pools - the safe direction). A row unheard-from for 4x
+(40s) is no longer counted (a crashed peer, whose owner sends no goodbye, drops out on its own) and becomes eligible
+for the prune DELETE past 8x (80s). `Startup` registers + reads synchronously (above); `Shutdown` deletes the row and
+nudges peers so they regrow without waiting out the expiry. `observedReplicas()` is a lock-free atomic read of the
+last count.
+
+*Why the cadence is 10s (was 30s), and why not lower.* The cadence governs the **ghost-peer window**: a *crashed*
+replica sends no goodbye, so its row lingers for the 4x counting window before it stops inflating R. A shorter
+cadence shrinks that window; the decisive constraint on how short is **false death**. The two R-errors are
+asymmetric - a ghost *over*-counts R -> pools too small -> under-connect (the *safe* direction; costs throughput,
+stays healthy), while falsely declaring a *live* replica dead *under*-counts R -> pools too big -> over-connect (the
+*dangerous* direction, which collapses a database). A live replica is declared dead only if it misses ~4 consecutive
+beats (a >4x stall), and the heartbeat is itself a pooled DB write, so under heavy load it can starve for a
+connection - exactly when growing pools is most harmful. 10s/40s keeps a comfortable false-death margin while cutting
+the ghost window from ~2min to ~40s; **do not chase 4s** (a 4s stale window has essentially no margin and risks a
+starvation feedback loop - heartbeat starves -> peers grow pools -> more load -> more starvation). The
+ghost-*accumulation* case (a fast crashloop with random ids piling up rows faster than they age out) is not fixed by
+the cadence at all - it is fixed structurally by `SetEngineID` (below).
+
+**`SetEngineID(id int64)` pins the identity, defaulting to random.** `engine_id` (a `BIGINT`, minted
+`rand.Uint64()>>1` per instance in `NewEngine`) is the peer-registry PK and the flow/step provenance stamp. Random is
+correct for the common case *including several engines in one process* (each `NewEngine` mints its own, so bundled
+replicas - e.g. an integration test exercising cross-replica behavior - count as distinct peers automatically), and
+its only cost is ghosts: a crash-restart mints a *new* id, orphaning the old row for the counting window, and a fast
+crashloop *accumulates* orphans (each restart a fresh id) faster than 4x ages them out, ballooning R. `SetEngineID`
+lets a host pin a value **stable across a replica's restarts** (derived from the deployment's own per-instance
+identity - e.g. a StatefulSet pod name/ordinal, or `os.Hostname()`, which survives container restarts as a pod-level
+property with no manifest change), so a restart re-upserts its one row and R never inflates. It is construction-time
+only (the id is registered at Startup and baked into signal-echo suppression), rejects `id <= 0` (0 is the
+pre-column/no-engine sentinel), and the host owns the contract that the id is **unique among concurrently-live
+replicas sharing the databases** - a collision registers two live replicas as one (under-count -> over-size -> the
+dangerous direction), so it is opt-in and a wrong stable id is worse than the random default. The multiple-engines-
+per-process case (bundled host) deliberately does *not* opt in: it keeps the random default (correct distinct
+count), and its test-teardown ghosts are handled by clean `Shutdown` (deletes the row) + fresh-DB-per-run, not by an
+identity.
 
 **The prune is conditional and statistical, so steady state issues no range-DELETEs at all.** The heartbeat reads
 the fresh count and the stale count (`seen_at <= NOW - 8x`) in **one** scan (`heartbeatPeers`, two `CASE`-`SUM`s -

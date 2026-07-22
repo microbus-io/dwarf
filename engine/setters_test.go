@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"math"
+	"strconv"
 	"testing"
 	"time"
 
@@ -40,6 +41,7 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	// Construction-time-only: rejected after Startup.
 	assert.Error(e.SetShard(ShardSpec{Index: 2, DSN: "file:other.sqlite"})) // shard set is immutable after Startup
 	assert.Error(e.SetWorkers(8))
+	assert.Error(e.SetEngineID(12345)) // id is registered at Startup and baked into signal-echo suppression
 	assert.Error(e.SetHost(noopHost{}))
 	assert.Error(e.SetLogger(nil))
 	assert.Error(e.SetDebugLogger())
@@ -50,6 +52,25 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 	assert.NoError(e.SetDefaultPriority(5))
 	assert.NoError(e.SetMaxOpenConns(4))
+}
+
+// TestSetEngineID_PinsIdentity pins SetEngineID: a positive id overrides the random default (and its base-36
+// instanceID form, the peer-signal echo-suppression key), while 0 and negatives are rejected. 0 is the
+// pre-column/no-engine sentinel, so accepting it would stamp provenance and heartbeat rows that read as
+// "no engine"; the invariant is a positive identifier. The stable-id opt-in exists so a crash-restart reuses
+// its one registry row instead of leaving a ghost that transiently over-counts replicas.
+func TestSetEngineID_PinsIdentity(t *testing.T) {
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.NotEqual(int64(0), e.engineID, "the default id is random and non-zero")
+
+	assert.Error(e.SetEngineID(0), "0 is the pre-column/no-engine sentinel")
+	assert.Error(e.SetEngineID(-1), "the id must be a positive identifier")
+
+	assert.NoError(e.SetEngineID(424242))
+	assert.Equal(int64(424242), e.engineID)
+	assert.Equal(strconv.FormatInt(424242, 36), e.instanceID, "instanceID is the base-36 form of the pinned id")
 }
 
 // TestSetDefaultPriority_RejectsNonPositive pins the validation on the engine-level default. A flow stamped

@@ -147,6 +147,20 @@ these constants are in the [cloud benchmarks](benchmark-cloud.md).
 > wiring `SignalPeers` only makes the count converge faster (sub-second, rather than within one
 > heartbeat). (`SetMaxOpenConns`, when used, is an exact per-replica number and is never divided.)
 
+> **Crashing replicas and `SetEngineID`.** A replica identifies itself in the registry by an id that is
+> random by default. A replica that *crashes* (rather than shutting down cleanly) leaves its last entry
+> behind until it ages out, so for a short window the fleet counts one replica too many and every live
+> replica takes a slightly smaller pool share — a self-correcting, safe-direction dip. If a replica
+> restarts under a *fresh* random id each time (a crashloop), those entries can pile up faster than they
+> age out and shrink the shares more. To avoid this, call `SetEngineID(id)` before `Startup` with a value
+> that is **stable across that replica's restarts** and **unique across your live replicas** — for example
+> one derived from the deployment's own per-instance identity (a StatefulSet pod name/ordinal, or the
+> hostname). A restarting replica then reuses its one entry instead of leaving a ghost. Leave it unset
+> (random) if you don't have such a value — a stable id that collides between two live replicas counts
+> them as one and *over*-sizes pools, which is the harmful direction; random is the safe default.
+> Several engines in one process are fine on the default (each gets its own id and counts as a distinct
+> replica).
+
 ## Workers
 
 Workers are goroutines that dispatch steps: claim, call `ExecuteTask`, write the result. The count needs
