@@ -964,8 +964,12 @@ COMMITTED, so neither resolves and the cohort strands silently forever.
 *It worked, and it did not pay.* Contention fell 12-40x locally and 4.4x on the cloud rig. Throughput went the
 wrong way: six A/B points on the ceiling rig (3x 8-vCPU shards, 4-vCPU engine, width 16, interleaved, n=3, fresh
 databases) gave +7.5%, -12.1%, -11.0%, -0.5%, -9.7%, -29.1%. Only the least production-like point was positive.
-**It degrades as load gets realistic** - it trades a lock wait for an extra transaction, and at the ceiling the
-scarce resource is round trips and connection occupancy, not lock time.
+**It degrades as load gets realistic** - it trades a lock wait for an extra transaction. The binding resource at
+the ceiling is connection occupancy and round trips - and a blocked lock IS connection occupancy: a sibling
+queued on the spawn row holds its connection for the whole wait. (An earlier phrasing here - "the scarce resource
+is round trips and connection occupancy, *not lock time*" - drew a false line: lock wait is a *driver* of
+occupancy, not a thing apart from it.) So relieving the lock pays only if the relief does not itself occupy
+connections *more*. A second transaction does. A per-peer mutex does not - which is the next section.
 
 *Three collateral findings worth keeping:*
 
@@ -985,6 +989,43 @@ scarce resource is round trips and connection occupancy, not lock time.
 workload - it was not, on any of six points. The measurement recipe is a single long-lived `psql` session
 sampling `pg_stat_activity` (`wait_event='transactionid'` is a row-lock wait, `'tuple'` is the queue behind it,
 exclude `ClientRead` from the denominator); it needs no engine rebuild and instruments both arms identically.
+
+**The lock's connection occupancy IS relievable per-peer - with a Go mutex, not a schema redesign (2026-07-21).**
+The reverted redesign attacked the lock the expensive way (per-member rows + a second transaction). The cheap way
+keeps the shared `cohort_arrivals` counter and its single-transaction atomicity untouched and instead serializes a
+cohort's arrivals THROUGH THIS PEER before they reach the database. Each worker takes a fixed striped Go mutex
+(`e.cohortLocks`, keyed on the cohort's spawn via `cohortLockStripe`) BEFORE opening the transition (`processStep`)
+or failure (`failStep`) transaction - the point a losing sibling would otherwise take its connection and then queue
+on the spawn row's write lock. The loser now parks on the mutex holding NO connection; the row stays the cross-peer
+source of truth, so the count and the fan-in trigger are byte-for-byte unchanged. Spawn-row connection occupancy
+drops from cohort-width to R (one in-flight arrival per peer).
+
+This is the counter-proof to the "not lock time" correction above: it relieves the *same* lock, adds NO round trip,
+and throughput RISES where the per-member redesign fell. Measured locally (single peer, width 64, conc 64, 16-vCPU
+pool): the spawn-row `tuple` waiters - the queue the reverted section names - went 146 -> 0, width-64 throughput
+rose (~+30-40%, noisy locally) and p50 fell. It is **not** a ceiling fix: at width 256 it is throughput-NEUTRAL,
+because the binding lock there is no longer the spawn row (`tuple` -> 0) but relation-extension (`extend`, from the
+successor-INSERT firehose) plus closed-loop queue depth - consistent with the reverted section's finding that the
+cohort lock was never the ~9,400 ceiling. Freeing its connection occupancy helps the mid-width regime, not the
+ultimate ceiling, which stays open. A single-workload bench also UNDERSTATES it: the freed connections serve OTHER
+flows in a real multi-tenant engine, which the bench cannot see.
+
+*Implementation load-bearers (`processStep`, `failStep`, `cohortLockStripe`):*
+- **Fixed striped array, never resized.** A stripe array's mutual exclusion rests on a key always mapping to the
+  same mutex instance; a resize (e.g. to track a changing worker ceiling) would hand two goroutines different
+  mutexes for one key and silently lose exclusion. Sized generously (8192), not tuned: a collision is benign - two
+  live cohorts sharing a stripe cost one arrival a brief connection-free wait, never correctness.
+- **Acquired before any DB work, at most one per worker, leaf-level only.** The stripe is the direct (bottom)
+  cohort level; `propagateCohortFailure`'s ancestor bumps walk UP and stay DB-serialized. Because every worker
+  takes its one stripe BEFORE holding any database lock and never takes a second, no Go/DB lock cycle can form.
+- **Released before `processStep`'s post-commit switch.** A non-contention persist error routes to
+  `failOnPersistError` -> `failStep`, which re-locks the SAME stripe, and `sync.Mutex` is not reentrant - so the
+  normal release is explicit there; the deferred unlock is only the panic backstop.
+- **Coalescing was considered and rejected.** Folding a peer's arrivals into one `+k` write would split a member's
+  result-commit from its arrival-count, and either order leaves a crash window that strands (result committed,
+  in-memory arrival lost on a peer crash -> the cohort never reaches `cohort_size`) or double-handles a member. The
+  single-transaction coupling of (own result + arrival) is the same invariant the reverted redesign's
+  commit-before-count wrestled with. Serialize-only keeps it intact, and connection occupancy was the whole cost.
 
 ### State refs — a large carried field is stored once (`staterefs.go`)
 
