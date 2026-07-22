@@ -119,6 +119,18 @@ type Engine struct {
 	flowsStartedCount    atomic.Int64
 	flowsTerminatedCount atomic.Int64
 
+	// cohortLocks serializes a fan-out cohort's arrivals THROUGH THIS PEER, so its siblings queue on a Go
+	// mutex holding no database connection instead of on the spawn step's row lock each holding one. The
+	// arrival bump takes that row's write lock and holds it to COMMIT (processStep's transition tx, and the
+	// failure-side twin in failStep), so without this every sibling of a wide cohort ties up a connection in
+	// lock-wait - measured at fan-out width 64 as ~85% of the pool trapped and throughput inverting past
+	// width 16. Taking the stripe before the tx opens (the spawn id is known from the claim) drops the pool's
+	// exposure to one in-flight arrival per peer, R across the fleet; the row stays the cross-peer source of
+	// truth, so the count and the fan-in trigger are unchanged. A fixed striped array, never resized - see
+	// cohortLockStripe. Only the DIRECT (bottom) cohort level is taken here; propagateCohortFailure's ancestor
+	// bumps walk UP and stay DB-serialized, which is why one leaf-level stripe per worker cannot form a cycle.
+	cohortLocks [cohortLockStripes]sync.Mutex
+
 	// Peer discovery: the observed replica count R, read from the shared dwarf_peers registry by the
 	// Startup discovery and the heartbeat loop (see peers.go). R divides the derived per-shard
 	// connection pools - a lookup, not a control loop. peersStop/peersLoop drive the heartbeat.

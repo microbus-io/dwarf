@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/faninmap"
@@ -35,6 +36,26 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
+
+const (
+	// cohortLockStripesLog2 sizes e.cohortLocks at 2^13 = 8192 stripes (~64KB of sync.Mutex). Fixed, never
+	// resized: a stripe array's mutual exclusion rests on a key always mapping to the same mutex instance,
+	// which any resize would break for a holder in flight. The number is generous rather than tuned because
+	// a collision is benign - two live cohorts sharing a stripe cost one arrival a brief connection-free
+	// wait, never correctness - so there is no cliff to size against, only a birthday-bound to stay clear
+	// of (expected collisions stay < 1 up to ~90 concurrent live cohorts on one peer, well past the pool).
+	cohortLockStripesLog2 = 13
+	cohortLockStripes     = 1 << cohortLockStripesLog2
+)
+
+// cohortLockStripe maps a cohort's spawn step to one of e.cohortLocks. Fibonacci hashing (multiply by the
+// golden-ratio constant, keep the high bits) spreads the per-shard, near-sequential step ids so cohorts
+// spaced by a constant stride do not cluster onto one stripe; the shard is mixed in because step-id
+// sequences are per-shard, not global.
+func cohortLockStripe(shard, spawnStepID int) int {
+	h := (uint64(spawnStepID) ^ uint64(shard)*0x9E3779B97F4A7C15) * 0x9E3779B97F4A7C15
+	return int(h >> (64 - cohortLockStripesLog2))
+}
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
 func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err error) {
@@ -795,6 +816,24 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	// loop: the recovery defer rewinds it to pending and the task RE-EXECUTES. Retry the transaction in place
 	// first (Transact re-runs its own closure, which re-derives every value it writes), and if it will not land,
 	// classify it rather than spin - see persist / failOnPersistError.
+	//
+	// Serialize this cohort's arrivals through a per-peer stripe (e.cohortLocks) BEFORE the transition tx
+	// opens - the point a losing sibling would otherwise take its connection and then queue on the spawn
+	// row's write lock, tying that connection up until the holder commits. cohortSpawnID (the dispatched
+	// step's lineage_id) is already in hand from the claim, so the key costs no read. It is released the
+	// instant persist returns (below), NOT at function exit: a non-contention persist error runs
+	// failOnPersistError -> failStep on this SAME stripe, and sync.Mutex is not reentrant. The deferred
+	// unlock is only the panic backstop; the normal release is the explicit one before the switch.
+	var cohortMu *sync.Mutex
+	if fanInArrivals > 0 && cohortSpawnID != 0 {
+		cohortMu = &e.cohortLocks[cohortLockStripe(shardNum, cohortSpawnID)]
+		cohortMu.Lock()
+		defer func() {
+			if cohortMu != nil {
+				cohortMu.Unlock()
+			}
+		}()
+	}
 	err = e.persist(ctx, db, shardNum, stepID, leaseSeq, func() error {
 		return db.Transact(ctx, func(tx *sequel.Tx) error {
 			newStepIDs = newStepIDs[:0]
@@ -1071,6 +1110,13 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 			return nil
 		})
 	})
+	if cohortMu != nil {
+		// Release before the post-commit switch: a non-contention error routes to failOnPersistError ->
+		// failStep, which re-locks this same stripe, and sync.Mutex is not reentrant. The arrival's DB work
+		// is committed by here, so no sibling needs us to hold it any longer.
+		cohortMu.Unlock()
+		cohortMu = nil
+	}
 	switch {
 	case errors.Is(err, errPersistFenced), errors.Is(err, errPersistDrained):
 		return nil // a peer owns the step now; abandon it silently

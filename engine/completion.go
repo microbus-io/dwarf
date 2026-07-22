@@ -678,6 +678,17 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	failFlow := false
 	reDispatchParent := false
 	var finalStateJSON []byte
+	// Serialize a failing BRANCH's arrival through the same per-peer stripe the success path uses (keyed on
+	// its cohort's spawn, stepLineageID), so a failed sibling parks on the Go mutex holding no connection
+	// rather than piling onto the spawn row's write lock. A trunk step (lineage 0) fails the flow directly,
+	// with no cohort to contend, so it takes nothing. Only this bottom level is locked; propagateCohortFailure's
+	// ancestor bumps walk UP and stay DB-serialized, which is what keeps the stripe leaf-only and cycle-free.
+	// A simple defer suffices here: nothing in this transaction or its post-commit tail re-locks the stripe.
+	if stepLineageID != 0 {
+		mu := &e.cohortLocks[cohortLockStripe(shardNum, stepLineageID)]
+		mu.Lock()
+		defer mu.Unlock()
+	}
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		fenced = false
 		// A trunk step (lineage_id==0) has no concurrent sibling, so its failure fails the flow at once.
