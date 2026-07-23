@@ -116,6 +116,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 				return terr
 			})
 		}
+		// This step is being deliberately re-offered to the same replica, so drop its in-flight reservation
+		// rather than let it linger the full window - otherwise the immediate re-poll below re-selects the
+		// step and this replica skips its own re-dispatch until the reservation expires (up to ~2s). A peer
+		// would still take it, but a solo replica would eat the delay. Safe in the fenced-zombie case too: a
+		// peer that re-claimed owns it via its own tracker, and this relinquish at worst costs one lost CAS.
+		e.claims.RelinquishClaim(shardNum, stepID)
 		e.shortenNextPoll(time.Now())
 	}()
 	db, err := e.db.Shard(shardNum)
@@ -595,6 +601,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		if !rewound {
 			return nil
 		}
+		// The step was rewound in place for re-dispatch; drop this replica's reservation so the immediate
+		// re-offer below (enqueueStepDue on a zero-backoff retry) is not skipped by its own still-live entry.
+		e.claims.RelinquishClaim(shardNum, stepID)
 		e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
 		if retrySleepMs > 0 {
 			e.shortenNextPoll(time.Now().Add(time.Duration(retrySleepMs) * time.Millisecond))
