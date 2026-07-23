@@ -36,6 +36,7 @@ import (
 	"log/slog"
 
 	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/claimstracker"
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/workflow"
@@ -131,8 +132,8 @@ type Engine struct {
 	// bumps walk UP and stay DB-serialized, which is why one leaf-level stripe per worker cannot form a cycle.
 	cohortLocks [cohortLockStripes]sync.Mutex
 
-	// claimsInFlight holds the steps this replica has a claim CAS in flight on - the intra-peer half of
-	// candidate de-duplication, whose cross-peer half is the step_id partition (see partitionPredicate).
+	// claims holds the steps this replica has a claim CAS in flight on - the intra-peer half of candidate
+	// de-duplication, whose cross-peer half is the step_id partition (see partitionPredicate).
 	//
 	// It exists because the selection predicate filters COMMITTED state: a claim that has been issued but
 	// not committed still reads `pending` with a free lease, so the refiller's next pass legitimately
@@ -143,11 +144,12 @@ type Engine struct {
 	//
 	// Same move as cohortLocks: keep the database row as the source of truth and use a Go structure to
 	// avoid paying a round trip to rediscover what this process already knows. Strictly ADVISORY - the CAS
-	// remains the only thing that grants a step, so a missed entry costs one wasted round trip (today's
-	// behaviour) and a stale one costs a skipped candidate the next pass re-selects. Neither is a
-	// correctness question, which is what keeps this consistent with the cache's hints-not-ownership rule.
-	claimsLock     sync.Mutex
-	claimsInFlight map[stepRef]time.Time
+	// remains the only thing that grants a step, so a missed entry costs one wasted round trip and a stale
+	// one costs a skipped candidate the next pass re-selects; neither is a correctness question, which is
+	// what keeps this consistent with the cache's hints-not-ownership rule. The two-generation window holds
+	// a reservation 1-2s (over the max scan floor between refill passes, so a step is never re-selected
+	// while its own claim is still in flight) and expires it with no per-entry sweep - see the package doc.
+	claims *claimstracker.Tracker
 
 	// Peer discovery: the observed replica count R, read from the shared dwarf_peers registry by the
 	// Startup discovery and the heartbeat loop (see peers.go). R divides the derived per-shard
@@ -164,7 +166,7 @@ type Engine struct {
 	// (so it divides the pools) but selects nothing (so it must not own a slice of the candidates).
 	observedDispatchers atomic.Int32
 	peersStop           chan struct{}
-	peersLoop       sync.WaitGroup
+	peersLoop           sync.WaitGroup
 	// lastAppliedR is the replica count the pools were last derived with, to skip no-op recomputes.
 	lastAppliedR atomic.Int32
 	// poolsLock serializes every APPLICATION of a pool size - the derived recompute (recomputePools) and
@@ -302,7 +304,7 @@ func NewEngine() *Engine {
 	e := &Engine{
 		logger:         slog.New(slog.DiscardHandler),
 		lastRefillBand: -1,
-		claimsInFlight: map[stepRef]time.Time{},
+		claims:         claimstracker.New(),
 	}
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))

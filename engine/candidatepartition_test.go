@@ -20,7 +20,6 @@ import (
 	"context"
 	"math"
 	"testing"
-	"time"
 
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
@@ -220,77 +219,7 @@ func addPeerRowWithDispatch(t *testing.T, e *Engine, id int64, dispatches bool) 
 	e.refreshReplicaCount(ctx)
 }
 
-// TestClaimReservation_ExpiresSoAnEntryCannotStrandAStep pins the safety valve on the intra-peer
-// reservation. The reservation suppresses a duplicate claim while a worker runs the step; if an entry
-// ever outlived its worker WITHOUT an expiry, this replica would refuse to claim that step for the rest
-// of the process's life - converting an optimization into a permanent loss of one step. The expiry makes
-// the worst case a delay instead.
-func TestClaimReservation_ExpiresSoAnEntryCannotStrandAStep(t *testing.T) {
-	t.Parallel()
-	e := NewEngine()
-
-	testarossa.True(t, e.beginClaim(1, 42), "first reservation must be granted")
-	testarossa.False(t, e.beginClaim(1, 42), "a sibling worker must be turned away while it is held")
-
-	// The shard is part of the key: step 42 exists on every shard, and a step-id-only key would turn
-	// away live candidates on every shard but the one holding the reservation.
-	testarossa.True(t, e.beginClaim(2, 42), "same step id on another shard is a different step")
-
-	// Simulate an entry that outlived its worker by backdating it past the horizon.
-	e.claimsLock.Lock()
-	e.claimsInFlight[stepRef{shard: 1, stepID: 42}] = time.Now().Add(-time.Second)
-	e.claimsLock.Unlock()
-	testarossa.True(t, e.beginClaim(1, 42), "an expired reservation must not keep the step unclaimable")
-
-	// Explicit release is by key, and leaves the other shard's reservation intact.
-	e.endClaim(1, 42)
-	testarossa.True(t, e.beginClaim(1, 42))
-	testarossa.False(t, e.beginClaim(2, 42), "releasing shard 1 must not release shard 2")
-
-	// Idempotent, so a caller need not track whether it already released.
-	e.endClaim(1, 42)
-	e.endClaim(1, 42)
-	testarossa.True(t, e.beginClaim(1, 42))
-}
-
-// TestClaimReservation_DoesNotOutlastALease is the regression test for the shape that broke
-// TestLeaseFence_CompletionNoDuplicateSuccessor: a worker parked in a long ExecuteTask must not keep its
-// reservation for the whole task, or a step whose lease expired mid-execution (an overrun, a DB clock
-// step) can never be re-claimed by a sibling worker - single-replica lease recovery stops working.
-// The reservation is a TIMEOUT, and it must sit far below leaseMargin.
-func TestClaimReservation_DoesNotOutlastALease(t *testing.T) {
-	t.Parallel()
-	e := NewEngine()
-	testarossa.True(t, claimReservationTTL < e.leaseMargin,
-		"a reservation outliving the lease margin would block the very re-claim lease recovery exists to perform")
-
-	prev := claimReservationTTL
-	claimReservationTTL = 20 * time.Millisecond
-	defer func() { claimReservationTTL = prev }()
-
-	testarossa.True(t, e.beginClaim(1, 7))
-	testarossa.False(t, e.beginClaim(1, 7), "held while the window stands")
-	time.Sleep(40 * time.Millisecond)
-	testarossa.True(t, e.beginClaim(1, 7), "a sibling must be able to re-claim once the window lapses")
-}
-
-// TestClaimReservation_SweepBoundsLeakedEntries pins that the map cannot grow without bound. Entries are
-// released by a defer, so a leak needs a fatal throw - but "cannot happen" is not a memory bound.
-func TestClaimReservation_SweepBoundsLeakedEntries(t *testing.T) {
-	t.Parallel()
-	e := NewEngine()
-	e.workers.Store(4)
-
-	// Far more expired entries than live dispatch could account for, as a leak would eventually produce.
-	e.claimsLock.Lock()
-	for i := range 200 {
-		e.claimsInFlight[stepRef{shard: 1, stepID: i}] = time.Now().Add(-time.Minute)
-	}
-	e.claimsLock.Unlock()
-
-	testarossa.True(t, e.beginClaim(1, 9999))
-	e.claimsLock.Lock()
-	remaining := len(e.claimsInFlight)
-	e.claimsLock.Unlock()
-	testarossa.Equal(t, 1, remaining, "the sweep should leave only the live reservation")
-}
+// The intra-peer claim reservation lives in internal/claimstracker with its own tests (the roll window,
+// relinquish, shard-keying, and concurrency under -race). The engine-level guard that its window can never
+// break single-replica lease recovery - a worker whose step's lease expires mid-execution must still be
+// re-claimable by a sibling - is the integration test TestLeaseFence_CompletionNoDuplicateSuccessor.

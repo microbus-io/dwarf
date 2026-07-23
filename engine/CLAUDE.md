@@ -1107,7 +1107,10 @@ two distinct mechanisms, and each is useless against the other's case:
 - **Intra-peer.** The selection predicate filters **committed** state, and a claim that has been issued
   but not committed still reads `pending` with a free lease. So *this* replica's own next pass legitimately
   re-selects a step *this* replica is mid-claim on. No SQL filter can see an uncommitted write - only the
-  process can. Handled by `beginClaim`/`endClaim` over `claimsInFlight`.
+  process can. Handled by the `claims` tracker (`internal/claimstracker`): `TryClaim(shard, stepID)` in the
+  worker loop, before `processStep`, skips a step a sibling worker in this replica already has a claim CAS
+  in flight on. Keyed on `(shard, stepID)` - `step_id` is a per-shard auto-increment, so a step-id-only key
+  would report shard 2's step 42 as in-flight because shard 1's is.
 
 Both are **advisory**: the claim CAS remains the only thing that grants a step, so a stale or missing entry
 costs a wasted round trip or a deferred dispatch, never correctness. That is the same posture as the
@@ -1127,13 +1130,14 @@ peer contention eliminated, and R=2 throughput goes **flat** against R=1 (×1.04
 outcome for replicas sharing one database's fixed capacity. Intra-peer: at a 0ms floor (scanning flat out)
 claim miss fell **7.3% -> 0.1%** at unchanged throughput.
 
-**The reservation is a TIMEOUT (`claimReservationTTL`, 1s), not a lifetime tied to the step. Both bounds
-were established by breaking them:**
+**The reservation is a bounded WINDOW (1-2s), not a lifetime tied to the step. Both bounds were
+established by breaking them:**
 
 - **Too short - releasing when the CAS returns** was built and measured and barely worked (7.3% -> 5.7%).
   The gap to span runs from SELECTION to POP, not the round trip between them: the refiller selects a step
   whose claim is uncommitted, the entry sits in the cache, and by pop time a CAS-scoped reservation is long
-  gone. The window is ~one round trip plus roughly one refill cycle - tens of ms.
+  gone. The window must outlast the max scan floor between refill passes (~1s) so a step is never
+  re-selected while its own claim is still in flight.
 - **Too long - holding for the whole STEP** was tried next and is worse. A worker parked in a long
   `ExecuteTask` keeps its reservation for the entire task, so if that step's lease expires meanwhile (an
   overrun, a DB clock step) **no sibling worker can re-claim it and single-replica lease recovery stops
@@ -1141,12 +1145,17 @@ were established by breaking them:**
   exactly that shape. Step-scoped only appeared to work because steps in that benchmark take ~15ms; it is
   workload-dependent and unbounded above.
 
-So the TTL is sized against the window it must span, with a wide margin, and kept **far below
-`leaseMargin` (30s)** so it can never be the reason a lease-recovered step fails to re-dispatch promptly -
-an invariant pinned by `TestClaimReservation_DoesNotOutlastALease`. Nothing on the dispatch path releases
-early; entries expire on their own, and `sweepExpiredClaimsLocked` drops them once the map outgrows what
-live dispatch accounts for, so memory is bounded too. The expiry is what makes the whole thing safe to be
-advisory: a reservation can only ever DELAY this replica's dispatch of a step, never prevent it.
+The window is a fixed 1-2s (`internal/claimstracker`), well over the scan floor and **far below
+`leaseMargin` (30s)** so it can never be the reason a lease-recovered step fails to re-dispatch - the
+integration guard is `TestLeaseFence_CompletionNoDuplicateSuccessor`. The tracker gets both bounds and
+expiry from a **two-generation rolling window** rather than a per-entry TTL + sweep: two maps hold the
+current whole-second bucket and the previous one, a lookup checks both, and once a second the maps ROLL
+(current -> previous, previous dropped, fresh current) - O(1), three pointer assignments, no per-entry
+walk. This is what closes the sweep's failure mode: a per-entry-timestamped map under a *pinned* worker
+pool at high throughput (`SetWorkers(512)` at thousands of steps/s) outgrows any size gate and gets walked
+on every claim under one lock; the rolling window has no scan at all. An entry lives 1-2s (from its point
+in the second to the drop two rolls later), which is the whole safety argument - a reservation can only
+ever DELAY this replica's dispatch of a step by a bounded window, never prevent it. See the package doc.
 
 **Two implementation load-bearers:**
 

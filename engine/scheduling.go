@@ -52,7 +52,7 @@ func (e *Engine) workerLoop(ctx context.Context) {
 		// costs nothing; issuing the claim would cost a round trip to be told we lost. Checked HERE rather
 		// than inside processStep so a skip does not pay for its setup, and the cache has already removed
 		// the entry, so nothing re-pops it this generation.
-		if !e.beginClaim(j.Shard, j.StepID) {
+		if !e.claims.TryClaim(j.Shard, j.StepID) {
 			e.metricStepClaimPreempted(ctx)
 			continue
 		}
@@ -1074,6 +1074,7 @@ const (
 //     the refiller - the rig's 20-80s fan-out latency);
 //   - a small pooler-capped pool (many vCPUs, few connections) no longer over-scans on a drain the pool
 //     cannot actually sustain.
+//
 // vCPUs <= 0 means undeclared: the CPU ceiling is unknown, so the drain falls to the connection channel
 // alone (the best estimate available, erring toward over-scan rather than starvation).
 //
@@ -1180,76 +1181,3 @@ const (
 	refillPhaseBandKeys   = "band_keys"   // phase 1: one aggregate row per fairness key at the min due band
 	refillPhaseFetchSteps = "fetch_steps" // phase 3: the selected steps for the chosen keys
 )
-
-// stepRef identifies one step across the whole fleet. The shard is part of the key, not decoration:
-// step_id is a per-shard auto-increment, so every shard has a step 42 and a step-id-only key would make
-// shard 2's step 42 look in-flight because shard 1's is - silently skipping live candidates on every
-// shard but one.
-type stepRef struct {
-	shard  int
-	stepID int
-}
-
-// beginClaim reserves the right to run the claim CAS for one step within THIS replica, reporting false
-// when a sibling worker already has one in flight for it. The check and the insert are one critical
-// section: split, two workers could both read "free" and both proceed, which is the race this closes.
-//
-// A false return means "pop something else", never "this step is taken" - the step may still be pending
-// (the sibling's CAS can lose to a peer, or find the row cancelled), and the next refill re-selects it.
-func (e *Engine) beginClaim(shard, stepID int) bool {
-	ref := stepRef{shard: shard, stepID: stepID}
-	now := time.Now()
-	e.claimsLock.Lock()
-	defer e.claimsLock.Unlock()
-	if until, held := e.claimsInFlight[ref]; held && now.Before(until) {
-		return false
-	}
-	// The expiry is what makes this safe to be advisory: a reservation can only ever DELAY a dispatch of
-	// its step by this replica, never prevent one. Past it a sibling simply takes the step and the CAS
-	// arbitrates - i.e. exactly the behaviour that predates this map.
-	e.claimsInFlight[ref] = now.Add(claimReservationTTL)
-	e.sweepExpiredClaimsLocked(now)
-	return true
-}
-
-// claimReservationTTL is how long a reservation stands. It is a TIMEOUT, not a lifetime tied to the
-// step, and BOTH halves of that are load-bearing:
-//
-//   - It must OUTLAST the step's claim, because the gap to cover runs from SELECTION to POP: the refiller
-//     selects a step whose claim is uncommitted, the entry sits in the cache, and it is popped some time
-//     later. Releasing when the CAS returns was built and measured and barely worked (7.3% -> 5.7%) - by
-//     pop time the reservation was already gone.
-//   - It must NOT last as long as the STEP, which was the next thing tried and is worse: a worker parked
-//     in a long ExecuteTask would hold its reservation for the whole task, and if that step's lease
-//     expired meanwhile (an overrun, a DB clock step) NO sibling worker could re-claim it - single-replica
-//     lease recovery stops working. Caught by TestLeaseFence_CompletionNoDuplicateSuccessor, whose blocked
-//     first dispatch is exactly that shape.
-//
-// So it is sized against the window it must span - one round trip plus roughly one refill cycle, tens of
-// ms - with a wide margin, and kept far below leaseMargin (30s) so it can never be the reason a
-// lease-recovered step fails to re-dispatch promptly. A var, not a const, only so a test can shorten it.
-var claimReservationTTL = time.Second
-
-// sweepExpiredClaimsLocked drops expired entries once the map has grown past what live dispatch can
-// account for. Without it a leaked entry is inert but immortal, so a long-lived process would accrete
-// them; the size gate keeps the O(n) walk off the common path, where the map holds at most one entry per
-// busy worker. Caller holds claimsLock.
-func (e *Engine) sweepExpiredClaimsLocked(now time.Time) {
-	if len(e.claimsInFlight) <= 4*int(e.workers.Load()) {
-		return
-	}
-	for ref, until := range e.claimsInFlight {
-		if !now.Before(until) {
-			delete(e.claimsInFlight, ref)
-		}
-	}
-}
-
-// endClaim drops a reservation early. Nothing on the dispatch path calls it - reservations expire on
-// their own (see claimReservationTTL) - it exists for tests and for any future site that knows a step is
-// settled sooner than the TTL.
-func (e *Engine) endClaim(shard, stepID int) {
-	e.claimsLock.Lock()
-	delete(e.claimsInFlight, stepRef{shard: shard, stepID: stepID})
-	e.claimsLock.Unlock()
-}
