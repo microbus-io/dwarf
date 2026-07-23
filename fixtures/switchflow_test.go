@@ -26,6 +26,7 @@ import (
 )
 
 func TestSwitchflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -121,6 +122,7 @@ func TestSwitchflow(t *testing.T) {
 }
 
 func TestSwitchflow_NoMatch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

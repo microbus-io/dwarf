@@ -31,6 +31,7 @@ import (
 // filter and deletes only the matching flows. Two graphs share neither URL nor display name, so the
 // filter must distinguish them by name (not URL).
 func TestQuery_WorkflowName(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -101,6 +102,7 @@ func TestQuery_WorkflowName(t *testing.T) {
 // status with no matches returns empty, and an unknown status is rejected 400 (it is inlined as a literal
 // after validation, so an invalid value must never reach the SQL string).
 func TestQuery_StatusFilter(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -147,6 +149,7 @@ func TestQuery_StatusFilter(t *testing.T) {
 // query into an unbounded full-table scan that matches every flow. One graph's display name carries a
 // literal underscore; the others do not.
 func TestQuery_SearchEscapesWildcards(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

@@ -29,6 +29,7 @@ import (
 // linear A->B->C flow, the middle step B must resolve to A as its previous and C as its next, so a UI
 // can offer ?step= links across the execution DAG.
 func TestStepnavflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

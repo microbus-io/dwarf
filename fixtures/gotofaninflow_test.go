@@ -35,6 +35,7 @@ import (
 // cohort's arrival counter while inserting no step - silently dropping the branch and letting the outer fan-in
 // fire early, yet reporting the flow completed.
 func TestGotoFanInFlow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -106,6 +107,7 @@ func TestGotoFanInFlow(t *testing.T) {
 // own (inner) fan-in must remain a member of its OUTER cohort, so the outer fan-in still counts it. Before the
 // fix this branch was silently dropped and the flow reported completed with a cell missing from the result.
 func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

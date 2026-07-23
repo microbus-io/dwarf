@@ -26,6 +26,7 @@ import (
 // cohort member). Both dispositions are pinned: the branch propagating the child error (the cohort escalates
 // and the flow fails) and the branch swallowing it (every branch converges and the flow completes).
 func TestSubgraphFanOutFailflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// Inner child: succeeds for most items, fails for the poisoned one.

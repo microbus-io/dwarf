@@ -32,6 +32,7 @@ import (
 // its steps, not just the root - and that Purge rejects Query.IncludeSubgraphs with 400 (a subgraph child is
 // never purged independently).
 func TestPurgeSubgraphflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

@@ -42,6 +42,7 @@ import (
 // nextPoll RMW. That seam is consciously deferred (low regression risk, small documented branch), so this
 // predicate-level pin stands in for it as the cheap, deterministic guard against re-simplifying the branch away.
 func TestShortenNextPoll_PastDeadlineReplace(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngine() // bare engine: no Startup, so no timer/poll goroutine mutates nextPoll under us
 

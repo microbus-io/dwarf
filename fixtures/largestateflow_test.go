@@ -33,6 +33,7 @@ import (
 // MySQL too. This fixture runs against whatever `SEQUEL_TESTING_DSN` points at, so on a regressed schema it
 // fails on MySQL and passes on the other three — a clean four-dialect tripwire.
 func TestLargeFinalStateflow(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

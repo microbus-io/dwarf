@@ -34,6 +34,7 @@ import (
 // final_state while History still showed the step had written it. A name collision, keyed on a name the author
 // was never told was reserved, producing silent data loss.
 func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -85,6 +86,7 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 // on. Stripping every forEach in the graph at every fan-in deleted the outer cohort's bookkeeping at the inner
 // fan-in, blinding the rest of the outer branch.
 func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -158,6 +160,7 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 // have the lowest step_id donates its element to the flow's final_state, and with 3+ branches which one wins is
 // arbitrary. Here the merge base IS inside the cohort, so its lineage names the spawn and the strip fires.
 func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -208,6 +211,7 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 // hole, so the two paths disagreed on what a fan-out's terminal state means. The failed path now runs the same
 // merge: spawn base + every completed member's changes, in fan_out_ordinal order.
 func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

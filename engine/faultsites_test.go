@@ -74,6 +74,7 @@ func orphanShapeCount(t *testing.T, e *Engine, shard int) int {
 // surfaces (log-only). This is the one fault outcome that is NOT self-healing, so it asserts the orphan
 // exists (by SQL) rather than a clean world.
 func TestFaultSite_RecoveryResetErr(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -118,6 +119,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 // (execution.go's park-then-create ordering) fails the caller cleanly rather than leaving it parked forever,
 // and leaves no orphan child flow.
 func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("Parent")
@@ -184,6 +186,7 @@ func registerGate(proxy *TestProxy, prefix string) {
 // TestFaultSite_CancelCommit pins that a Cancel whose transaction fails once rolls back atomically (the tree
 // is untouched, flow still interrupted) and a retry then cancels cleanly.
 func TestFaultSite_CancelCommit(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -213,6 +216,7 @@ func TestFaultSite_CancelCommit(t *testing.T) {
 // TestFaultSite_ResumeCommit pins that a Resume whose transaction fails once rolls back atomically (the flow
 // stays interrupted, its steps untouched) and a retry then resumes to completion.
 func TestFaultSite_ResumeCommit(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -244,6 +248,7 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 // clone transaction fails once mutates neither the origin (byte-identical final_state) nor the flow table
 // (zero partial clone rows), and a retry then forks cleanly.
 func TestFaultSite_ForkCommit(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	e, reader, _ := newFaultBatteryEngine(t, "ftbfork", nil)
@@ -287,6 +292,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 // panics on the terminal statusChange broadcast, the boundary CatchPanic swallows it and flow completion /
 // the local Await are unaffected (distinct from dropSignalStop, which returns cleanly).
 func TestFaultSite_SignalPeersPanic(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -312,6 +318,7 @@ func TestFaultSite_SignalPeersPanic(t *testing.T) {
 // lost (the child terminalizes failed, but the caller is never re-armed), the parked-step wedge sweep
 // backstops it: recoverWedgedSubgraphParks re-drives the delivery and the parent still terminalizes failed.
 func TestFaultSite_DeliverFailureErr(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -382,6 +389,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 // not just the deepest. Asserts the root terminalizes, dwarf_steps_unwedged{park_type=subgraph} fired once per
 // level (==2), and the tree ends structurally clean.
 func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -453,6 +461,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 // faultReapMidTree, which covers the delete half): the pass logs and bails without deleting, and the NEXT
 // pass reaps cleanly.
 func TestFaultSite_ReapSelectErr(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()

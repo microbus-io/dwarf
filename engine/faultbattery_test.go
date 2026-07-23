@@ -127,6 +127,7 @@ func batteryRun(t *testing.T, e *Engine, url string) (string, *workflow.FlowOutc
 // silent, and a byte-identical final_state (fault-transparency). Each fault is a subtest with its own
 // isolated engine, so their leases and DBs never interfere.
 func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
+	t.Parallel()
 	// The auto-recovering re-dispatch faults: a blocking Run drives recovery entirely in-band.
 	cases := []struct {
 		label      string

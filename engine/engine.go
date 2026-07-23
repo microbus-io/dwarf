@@ -181,6 +181,10 @@ type Engine struct {
 
 	// Database
 	db database.ShardSet
+	// testConnCap caps each shard's pool (and reserves that much global connection budget) in test mode,
+	// so parallel per-test engines against one server stay under its max_connections. Seeded from
+	// testConnCapDefault; 0 disables it. Only ever consulted when testHashedID != "".
+	testConnCap int
 	// testHashedID is the hashed test database id when the engine was started in test mode (RunInTest),
 	// empty in production. It becomes Config.TestID at Open, wrapping each shard in an isolated test
 	// database. Written once during single-threaded startup before started.Store(true), read only after
@@ -299,12 +303,18 @@ type Engine struct {
 	seams *seamster.Seamster
 }
 
+// defaultTestConnCap seeds every engine's test-mode per-shard connection cap (see the testConnCap field).
+// A test that must observe the real derived pool sizes (the pool-sizing tests) sets e.testConnCap = 0 on
+// its own engine before Startup. Inert outside test mode (only consulted when testHashedID != "").
+const defaultTestConnCap = 4
+
 // NewEngine creates a new workflow engine.
 func NewEngine() *Engine {
 	e := &Engine{
 		logger:         slog.New(slog.DiscardHandler),
 		lastRefillBand: -1,
 		claims:         claimstracker.New(),
+		testConnCap:    defaultTestConnCap,
 	}
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
@@ -638,9 +648,17 @@ func (e *Engine) Startup(ctx context.Context) error {
 		shards[1] = database.ShardConfig{MaxIdleConns: startupBootstrapConns, MaxOpenConns: startupBootstrapConns}
 	}
 
+	// TestConnCap engages only in test mode (TestID != ""): it caps each shard's pool and reserves a
+	// per-driver global connection budget so many parallel per-test engines against one server stay under
+	// its max_connections. Passed only when in test mode so a production Open never carries it.
+	testConnCap := 0
+	if e.testHashedID != "" {
+		testConnCap = e.testConnCap
+	}
 	err := e.db.Open(ctx, database.Config{
 		Shards:         shards,
 		TestID:         e.testHashedID,
+		TestConnCap:    testConnCap,
 		Logger:         e.logger,
 		TracerProvider: e.tracerProvider,
 		MeterProvider:  e.meterProvider,

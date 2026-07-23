@@ -38,6 +38,7 @@ import (
 // because it fixed one field by hand while every other carried field paid the same cost. Refs own it now, and
 // they own it without lying to the branch: a branch still sees the array its own element came from.
 func TestStaterefsflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -255,6 +256,7 @@ func TestStaterefsflow(t *testing.T) {
 // Every task returns an error if it cannot see the whole document, so StatusCompleted alone proves the middle
 // steps - the ones dispatched from a "{}" state column - resolved the ref.
 func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

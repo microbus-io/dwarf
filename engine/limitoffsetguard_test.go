@@ -40,6 +40,7 @@ import (
 // different `+`-joined literals of the same statement are seen together), and fails any flattened SQL that
 // contains "LIMIT_OFFSET(" but not "ORDER BY".
 func TestNoLimitOffsetWithoutOrderBy(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	goFiles, err := filepath.Glob("*.go")

@@ -46,6 +46,7 @@ func interruptedStepCount(t *testing.T, eng *engine.Engine, flowKey string) int 
 // interrupt; sibling A interrupts first (earliest updated_at) while B is gated. Snapshot must report A; the
 // removed `ORDER BY step_depth DESC, step_id DESC` selection would have reported B.
 func TestInterruptSnapshotMatchesResume(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -143,6 +144,7 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 // two same-depth callers). Resuming each turn delivers a distinct token to exactly one child; the flow
 // completes with both children's own results, proving no cross-delivery / double-resume.
 func TestInterruptParallelSubgraphResume(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

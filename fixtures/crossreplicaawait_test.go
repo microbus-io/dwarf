@@ -33,6 +33,7 @@ import (
 // the only path by which eng1's Await can return is the cross-replica notification. Without that wiring
 // this test would block until its context deadline.
 func TestCrossReplicaAwait(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

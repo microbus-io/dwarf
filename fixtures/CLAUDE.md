@@ -50,29 +50,56 @@ hides exactly the bugs the others catch - MySQL's `RowsAffected` counting *chang
 gap locks under `REPEATABLE READ`, SQL Server's filtered-index/parameterization rules and its `OUTPUT INSERTED`
 claim path, and Postgres's real MVCC lock ordering. Expect the run to be slower there: SQL Server takes ~3x SQLite.
 
-#### Per-test engine + sequential execution (connection-load control)
+#### Per-test engine + parallel execution (connection-budget control)
 
-**Each `RunInTest` engine opens its own connection pool - 12 connections per shard.** `RunInTest` sets no
-`SetMaxOpenConns` override and a fixture declares no `VirtualCPUs`, so the pool is *derived* like any other:
-`connsPerVCPU (6) x defaultVirtualCPUs (2) = 12` (`engine/poolsize.go`). It is **not** the `MaxOpenConns: 8`
-in `internal/database`, which is only a fallback for a shard map the engine always populates - a plausible
-misreading that understates the real per-engine pool by 50%, in the one paragraph whose whole purpose is the
-budget arithmetic below. **Each fixture stands up its own engine** (`engine.NewEngine()` + `SetHost(proxy)` + `RunInTest(t)`, with a
-fresh `proxy := engine.NewTestProxy()` per test), and `RunInTest` registers a `t.Cleanup` that shuts it down - so a
-fixture's pool is open only for the duration of that one test. There is **no** shared/`TestMain`-built engine; the
-suite was deliberately moved off one.
+**The suite runs `t.Parallel()`.** Each fixture stands up its own engine (`engine.NewEngine()` + `SetHost(proxy)`
++ `RunInTest(t)`, a fresh `proxy := engine.NewTestProxy()` per test) against its own isolated database
+(`t.Name()`), and `RunInTest` registers a `t.Cleanup` shutdown - so nothing is shared across tests and the
+config that mattered (the timing knobs, the peer registry key) is per-engine. There is **no** shared/`TestMain`-built
+engine. The suite parallelizes cleanly because the isolation is per-test, not because the tests were written to
+cooperate.
 
-What keeps the pools from summing past a server's connection cap is that **the fixtures do not run with
-`t.Parallel()`** - they run **sequentially**, so at most ~one engine (plus the one being torn down by `t.Cleanup`) is
-live at a time. With `t.Parallel()`, `go test` runs up to `-parallel` (defaults to `GOMAXPROCS`) tests at once, and
-each per-test engine would multiply into *N parallel engines × pool × shards* connections to the **same** server - a
-sum that overruns the cap (**PostgreSQL defaults to `max_connections = 100`**; MySQL 151, SQL Server ~32k, SQLite
-none, so Postgres trips first). A pool opening a connection past the cap is *rejected* with an error (not blocked); the
-engine then fails the operation or, on a `pollPendingSteps` sizing query, briefly re-polls (the "Sizing-error clamp"
-in `engine/CLAUDE.md`). Retrying does not fix *structural* oversubscription (3 replicas each wanting 60 against a 100-cap server) - the
-only fix is to keep the **sum of live pools under the cap**, which serial execution does. So a fixture must **not** add
-`t.Parallel()`; if the suite is ever parallelized, connection load must be re-controlled (a shared engine, or a
-per-test `SetMaxOpenConns` low enough that `parallel × pool × shards` stays under the cap).
+**Connection load is bounded by two mechanisms, both engaged only in test mode** (`Config.TestID != ""`), so
+`N parallel engines × pool × shards` can never overrun a shared server's `max_connections`:
+
+- **A per-shard pool CAP.** In test mode each shard's pool is clamped to `defaultTestConnCap` (**4**, `engine.go`)
+  instead of the derived `connsPerVCPU (6) × defaultVirtualCPUs (2) = 12`. The engine still *derives* 12 and sizes
+  its worker ceiling / refill floor from that (those read the engine's notion, not the physical pool), but the
+  physical pool is clamped at open and on every `SetMaxOpenConns` push (`internal/database/database.go`). Four
+  connections is plenty for a fixture; the cap only bounds fan-out concurrency, which SQLite serializes anyway.
+- **A per-driver global connection BUDGET** (`internal/database/testbudget.go`). Each `ShardSet.Open` reserves
+  `cap × shards` from a process-wide weighted semaphore keyed on the driver (`db.DriverName()`), and releases at
+  `Close`. The reservation is one atomic acquire per engine (never per connection or per shard - a per-connection
+  limiter deadlocks the moment one engine's multi-shard `OnEach` needs several connections while the count is
+  exhausted by peers each holding one). Budgets: **pgx 80** (Postgres default 100), mysql 120, mssql 4000,
+  **sqlite effectively unbounded** (no server cap). So on the default in-memory SQLite suite the budget never
+  blocks and every test runs concurrently on its own database; against a real `SEQUEL_TESTING_DSN` server the
+  budget throttles concurrency to stay under the cap (~80/4 ≈ 20 live engines on Postgres), `Acquire` blocking the
+  21st engine until one finishes rather than letting it open a connection the server would reject.
+
+**Two DISTINCT opt-outs, for two distinct reasons - do not conflate them:**
+
+- **A test that asserts the real DERIVED pool sizes sets `e.testConnCap = 0` before Startup** (uncaps its pools).
+  Only the pool-sizing tests need this (`TestPoolSizing_ObservedReplicasLive`,
+  `_ConcurrentRecomputeDoesNotClobberOverride`, `_LiveOverride` in `engine/poolsizing_test.go`) - they read
+  physical `db.DB.Stats().MaxOpenConnections` and a cap would make them read 4 instead of 48. They still run
+  parallel; they just use real pools (fine - the budget covers uncapped engines too, and on SQLite there is no cap
+  to exceed).
+- **A test that asserts an upper-bound REACTION LATENCY omits `t.Parallel()`** so it runs in the serial phase with
+  no CPU competition. CPU oversubscription from co-running parallel tests inflates measured latency past the bound.
+  These are `crossshardpriorityflow` (urgent burst < 3s), `awaitshutdownflow` / `tworeplicaflow` (prompt wake < 2s),
+  and `taskdeadlineflow` (fail at ~budget < 3s safety net). The rule: an **outcome** assertion tolerates parallelism
+  (it just waits longer); an upper-bound **timing** assertion does not. A lower-bound timing assertion (`sleepflow`:
+  elapsed `>=` the sleep) is parallel-safe, since oversubscription can only make it longer.
+
+**Under `-race`, the engine's shared wait helpers stretch their "don't hang" ceilings.** `-race` slows execution
+~10x, and with the whole suite parallel that compounds with CPU oversubscription, so a recovery that finishes in
+seconds serially can exceed a 15s ceiling. `boundedRun` and `awaitFlowStatus` multiply their timeouts by
+`testTimeoutScale` - a build-tagged constant that is **5 under `-race`, 1 otherwise** (`engine/timeoutscale_*_test.go`).
+The ceilings guard against a genuine hang, not a timing contract, so stretching them under `-race` keeps every test
+parallel without masking a real wedge (a wedged flow never completes and still trips even the stretched ceiling).
+This applies to the engine package's helpers; a fixture with its own hardcoded ceiling that flakes under `-race`
+either routes through those helpers or gets the same treatment.
 
 Each fixture owns its own engine *and* its own `TestProxy`, so there is no cross-test sharing to coordinate. `TestProxy`
 still guards its handler maps with a `RWMutex` because the engine's own worker goroutines dispatch concurrently while

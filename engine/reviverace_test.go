@@ -33,6 +33,7 @@ import (
 // pending. The checkpoint freezes the worker at the revive (holding no lock - completeFlow's own transaction
 // already committed the child's completion), making the Cancel-wins ordering deterministic.
 func TestReviveVsCancel_Deterministic(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

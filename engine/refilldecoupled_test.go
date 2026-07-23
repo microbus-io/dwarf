@@ -59,6 +59,7 @@ func mkCensusEntry(shard, band int, at time.Time, rows ...censusRow) censusShard
 // the remaining slots split proportional to per-shard counts with deterministic largest-remainder
 // rounding. Shards at a worse band are invisible to the split - they are not competing at this band.
 func TestRefillSlice_FirstSlotToOldestThenProportional(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	now := time.Now()
 
@@ -100,6 +101,7 @@ func TestRefillSlice_FirstSlotToOldestThenProportional(t *testing.T) {
 // purely proportional split of a small demand rounds the quiet shard to zero pass after pass; the
 // first-slot rule hands it the head slot because it holds the key's oldest step.
 func TestRefillSlice_StarvationGuard(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	now := time.Now()
 
@@ -116,6 +118,7 @@ func TestRefillSlice_StarvationGuard(t *testing.T) {
 // the globally-oldest step's weight winning a key's weight (so a tenant cannot self-promote with newer
 // high-weight tasks); and worse-band shards contributing nothing.
 func TestRefillCensus_MergeMatchesBarrierSemantics(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	now := time.Now()
 
@@ -149,6 +152,7 @@ func TestRefillCensus_MergeMatchesBarrierSemantics(t *testing.T) {
 // band (the fleet-wedge failure the barrier made impossible and the decoupling introduced), and its
 // keys cannot keep winning plan slots into a slice nobody fetches.
 func TestRefillCensus_TTLDropsDeadShard(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -178,6 +182,7 @@ func TestRefillCensus_TTLDropsDeadShard(t *testing.T) {
 //   - A shard with NOTHING due reports refillIdle and parks on the doorbell as always, even when other
 //     shards hold work.
 func TestRefillOutcome_AboveBandVsNothingDue(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -237,6 +242,7 @@ func TestRefillOutcome_AboveBandVsNothingDue(t *testing.T) {
 // waited. Worse, a parked shard stops refreshing its census entry, so past the TTL its keys vanish
 // from peers' plans and it cannot win slots even in principle - the starvation becomes self-sustaining.
 func TestRefillOutcome_StarvedNeverParksOnTheDoorbell(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -273,6 +279,7 @@ func TestRefillOutcome_StarvedNeverParksOnTheDoorbell(t *testing.T) {
 // two per-shard refillers planning globally over the census and fetching only their own slices, a
 // backlog spread across both by placement - everything completes.
 func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -321,6 +328,7 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 // dispatched lower-priority work first ([p2 holder ...] instead of [holder p2 ...]). With no bypass at
 // all, the holder was never escalated and the same break occurred. Only the band-aware rule fixes both.
 func TestRouteRefill_EscalationBypassesFloorSameBandDoesNot(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -364,6 +372,7 @@ func TestRouteRefill_EscalationBypassesFloorSameBandDoesNot(t *testing.T) {
 // positive value pins every shard's floor, and <=0 restores derivation. It exists so a scan-rate sweep
 // can hold the floor at a series of fixed values; the derived value is otherwise not externally settable.
 func TestRefillScanFloor_OverridePinsAndRestores(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -410,6 +419,7 @@ func TestRefillScanFloor_OverridePinsAndRestores(t *testing.T) {
 // batch size, ~1,000x the discard, 2.4x the p99): setting supply from observed consumption oscillates,
 // because consumption is min(demand, supply) and the actuation contaminates its own measurement.
 func TestRefillScanFloor_UrgentNudgesBypassRoutineOnesDoNot(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -478,6 +488,7 @@ func TestRefillScanFloor_UrgentNudgesBypassRoutineOnesDoNot(t *testing.T) {
 // capacity is 2 x workersPerConnBudget x conns, so a change there silently rescales the buffer this
 // floor is measured against. Campaign 11 nearly made exactly that change.
 func TestRefillScanFloor_DerivedFromStaticConfig(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	// The DERIVED path: a shard's pool is connsPerVCPU*vCPUs/R, so the two drain channels agree and the

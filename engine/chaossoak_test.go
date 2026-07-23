@@ -41,6 +41,7 @@ import (
 // are clean, and (c) the dwarf_steps_unwedged "latent bug" alarm never fired. The RNG seed is logged so a
 // failure reproduces (DWARF_SOAK_SEED overrides it).
 func TestChaosSoak(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

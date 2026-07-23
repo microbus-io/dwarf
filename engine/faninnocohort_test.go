@@ -42,6 +42,7 @@ import (
 // The test forges the state that shape produces (a cohort branch whose lineage_id is cleared to 0) rather
 // than a graph the validator would now reject, so it exercises the runtime path exactly.
 func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

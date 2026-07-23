@@ -35,6 +35,7 @@ import (
 // That path too must signalStop the child key, so an Await already blocked on the (read-only) child key is
 // woken by the signal - not left to the awaitPollInterval lost-wake backstop.
 func TestSubgraphCohortFailWaitflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

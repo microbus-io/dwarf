@@ -54,6 +54,7 @@ func flowStatus(t *testing.T, e *Engine, flowKey string) string {
 // a Cancel arrives. Released completion-first the flow completes and the later Cancel 409s (terminal);
 // released Cancel-first the flow cancels and completeFlow's status-gate (status NOT IN terminal) no-ops.
 func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
+	t.Parallel()
 	newEngine := func(t *testing.T, prefix string) (*Engine, string) {
 		proxy := NewTestProxy()
 		g := workflow.NewGraph("Solo")
@@ -119,6 +120,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 // rolls back with an honest 409. The Delete-wins direction mirrors the existing (single-freeze) TestDeleteResumeRace pin; the
 // Resume-wins direction is the untested mirror.
 func TestDeleteVsResume_BothOrders(t *testing.T) {
+	t.Parallel()
 	// newGate builds an interrupted flow whose gate task, on resume, BLOCKS on gateBlock - so a resumed flow
 	// rests `running` (not racing to completion) while the test inspects the Delete outcome.
 	newGate := func(t *testing.T, prefix string) (*Engine, chan struct{}) {
@@ -229,6 +231,7 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 // blocks until the test confirms IX's payload landed on the shared ancestor, then interrupts - so IX is always
 // the first writer and IY always the guarded no-op writer.
 func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

@@ -39,6 +39,7 @@ import (
 // child is still `running` after one branch has failed and the sibling is parked on a grandchild subgraph;
 // the whole tree then converges to a clean terminal state with the branch error surfaced to the root.
 func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

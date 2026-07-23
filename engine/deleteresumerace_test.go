@@ -39,6 +39,7 @@ import (
 // The test hammers the race ~50 times per variant. Both operations may error (404/409) or succeed on either
 // side - all outcomes are legitimate; only the forbidden state is asserted against.
 func TestDeleteResumeRace(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := NewTestProxy()

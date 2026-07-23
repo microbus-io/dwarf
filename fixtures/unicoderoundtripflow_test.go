@@ -47,6 +47,7 @@ const (
 )
 
 func TestUnicoderoundtripflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// Quotes and backslashes ride along so JSON escaping stays honest through the round trip.

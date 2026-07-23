@@ -30,6 +30,7 @@ import (
 // below capacity - never waits out a pace interval between steps. The pace is set absurdly high (2s);
 // if the gate ever paced a partial batch, a 5-step flow would take >10s and blow the deadline.
 func TestRefillPace_LightLoadUnpaced(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -60,6 +61,7 @@ func TestRefillPace_LightLoadUnpaced(t *testing.T) {
 // times the capacity, everything still completes - the armed trigger resumes the refiller after each
 // pause, and the pause only bounds scan frequency, never delivery.
 func TestRefillPace_DeepBacklogLiveness(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

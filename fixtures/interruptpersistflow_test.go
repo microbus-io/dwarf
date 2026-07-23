@@ -34,6 +34,7 @@ import (
 // The crux assertion is the creation counter: if the pre-park write were dropped at the park, the
 // guard would see an empty identifier on re-entry and "create" the resource a second time.
 func TestInterruptpersistflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

@@ -34,6 +34,7 @@ import (
 // owner is healthily re-executing (the "late error → healthy-flow kill" race), while the current owner
 // still fails it normally.
 func TestLeaseFence_FailStep(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// setup inserts one running root flow (flow_id=1) whose only step (step_id=1) is running under lease
@@ -153,6 +154,7 @@ func zombieDispatch(t *testing.T, eng *Engine, flowURL, blockTaskName string, ta
 // zombie, a peer re-runs A to completion (creating exactly one B), then the zombie is released and its
 // fenced completion must be a no-op.
 func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -217,6 +219,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 // fan-in). A -> {X, Y} -> J (fan-in) -> END; X's first dispatch is the zombie, a peer re-runs X so the
 // cohort resolves and J fires exactly once, then the released zombie's fenced arrival must be a no-op.
 func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -297,6 +300,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 // back to `pending` (as lease recovery would) so a peer re-claims it (bumping to N+1) and drives the flow to
 // completion, then release the zombie. Its reset, fenced on generation N, must be a no-op.
 func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -396,6 +400,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 // (the deleteSubgraphFlowsRootedAt reap + re-dispatch) never runs. A -> END; A's first dispatch is the zombie, a
 // peer re-runs A (arming a *real* retry, then completing), then the released zombie's fenced rewind is a no-op.
 func TestLeaseFence_RetryRewindFenced(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -466,6 +471,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 // matches zero rows and createSubgraphFlow never runs. A (calls a subgraph) -> END; A's first dispatch is the
 // zombie, a peer re-runs A so the real child spawns and completes, then the released zombie's fenced park is a no-op.
 func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

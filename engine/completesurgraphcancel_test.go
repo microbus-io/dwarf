@@ -43,6 +43,7 @@ import (
 // This composes the checkpoint seam with the revive guard TestReviveVsCancel_Deterministic pins, but across the
 // child's completion boundary and in both orders.
 func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
+	t.Parallel()
 	// newEngine builds Parent(Call -> subgraph Child(X)). On the caller's post-subgraph re-dispatch the Call task
 	// signals callResumed then blocks on callBlock, so a revived caller rests `running` (not racing to completion)
 	// while the test drives the Cancel. callBlock is closed at cleanup to release the parked worker goroutine.

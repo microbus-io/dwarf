@@ -32,6 +32,7 @@ import (
 // (Resume/Cancel/Delete/Continue) reject it with 400 - they act on the whole flow/tree and must be addressed
 // by the root key - while introspection (Snapshot/History) still works on the child key.
 func TestSubflowGuardflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

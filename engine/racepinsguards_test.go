@@ -38,6 +38,7 @@ import (
 // must make the transition a clean no-op - no successor step is inserted into the cancelled flow, and no
 // orphan results. The checkpoint makes the Cancel-wins ordering deterministic.
 func TestCancelVsTransition_Deterministic(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -86,6 +87,7 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 // under a terminal parent - an orphan no lifecycle op reaches. The wedge sweep's recoverOrphanedSubgraphChildren
 // must cancel it. The checkpoint manufactures this residue deterministically (vs. the Cancel-vs-spawn timing race).
 func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -173,6 +175,7 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 // step to pending and from reaping the cancelled tree's children. The checkpoint makes the Cancel-wins ordering
 // deterministic.
 func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

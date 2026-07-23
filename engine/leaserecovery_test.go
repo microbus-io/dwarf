@@ -35,6 +35,7 @@ import (
 // flow completes on the second execution - and pins two properties: the dwarf_steps_recovered metric fires,
 // and lease recovery is NOT a retry (the step's attempt counter stays 0, unlike flow.Retry which bumps it).
 func TestLeaseRecovery_EndToEnd(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

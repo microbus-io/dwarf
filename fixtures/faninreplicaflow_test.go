@@ -36,6 +36,7 @@ import (
 )
 
 func TestFanInReplicaflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	const base = "faninreplica.verify:428"

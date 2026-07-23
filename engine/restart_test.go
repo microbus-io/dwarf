@@ -38,6 +38,7 @@ import (
 // exactly-once execution per step (shared counters across both engines), the correct final state, and a clean
 // invariant sweep.
 func TestRestartSurvival(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// mkEngine builds an engine bound to a file DSN under dir (so two engines resolve to the same on-disk DB)

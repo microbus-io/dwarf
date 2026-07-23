@@ -50,6 +50,7 @@ import (
 // Single worker, no injected faults: a Transact contention retry re-runs the closure and would legitimately
 // re-count, so the exact-count form of this assertion requires a contention-free run.
 func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// The flow-row writes the transition tx makes for a healthy fan-out flow, independent of cohort width:

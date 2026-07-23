@@ -51,6 +51,7 @@ func spanAttrString(s sdktrace.ReadOnlySpan, key string) string {
 // Await, and its span ends in a defer that fires just after - so its span may not be flushed when Run
 // returns. Keeping `done` last (and not asserting on it) makes every span we DO assert on deterministic.
 func TestTracing_SpansEmittedOnRun(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -172,6 +173,7 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 }
 
 func TestTraceIDFromParent(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	traceID := "4bf92f3577b34da6a3ce929d0e0e4736"
 	assert.Equal(traceID, traceIDFromParent("00-"+traceID+"-00f067aa0ba902b7-01"), "well-formed W3C traceparent")

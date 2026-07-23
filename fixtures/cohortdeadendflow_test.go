@@ -39,6 +39,7 @@ import (
 // convergence structure). The branch that dead-ends must fail loudly, and - the load-bearing part - the flow
 // must NOT report completed while the fan-in and a live sibling were skipped.
 func TestCohortDeadEndFlow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -109,6 +110,7 @@ func TestCohortDeadEndFlow(t *testing.T) {
 // cohort member (lineage_id != 0); a fan-in step is trunk (its lineage is its spawn source's own, 0 for a
 // top-level cohort), so a normal fan-out that fully converges completes exactly as before.
 func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

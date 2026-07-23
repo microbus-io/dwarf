@@ -41,6 +41,7 @@ import (
 // no trace of its step writes (the leaf stays `interrupted`, not flipped to `pending`). The pause fault makes
 // the Delete-wins ordering deterministic instead of relying on goroutine timing.
 func TestResumeLosesToDelete_Deterministic(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -131,6 +132,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 // Cancel-vs-spawn orphan residue) is deleted anyway. Here the descendant is forged into `running` under a
 // terminal root, then the reaper removes it along with the root.
 func TestReaperDeletesRunningDescendant(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

@@ -26,6 +26,7 @@ import (
 // interrupted one does not terminalize. After the root is resumed, the interrupted branch completes, the cohort
 // resolves with a failure, the child fails, and that failure is delivered to the parent's flow.Subgraph call.
 func TestSubgraphInterruptFailflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

@@ -36,6 +36,7 @@ import (
 // Cell with an override that makes it pass. The single-step branch of the existing fork fixtures is exactly
 // the degenerate case (members == branches) where the bug is invisible.
 func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -133,6 +134,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 // rewinds that branch from its second step, so its already-completed Cell is still a kept lineage member -
 // and counting members would score that Cell as an arrival of a branch that has not arrived.
 func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -257,6 +259,7 @@ func nestedForkGraph(t *testing.T, proxy *TestProxy, brokenChunk string) *workfl
 // arrivals PAST size - the very `cohort_arrivals <= cohort_size` invariant the branch-counting fix exists to
 // hold, breaking one nesting level deeper.
 func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -308,6 +311,7 @@ func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
 // resolved with zero failures, and the fork COMPLETED - silently reporting success for a flow whose failed
 // branch was never recovered, with that branch's output missing from the merge.
 func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

@@ -35,6 +35,7 @@ import (
 // then blocks so the test can register an Await while the child is still running; releasing it fails the child.
 // The Await must be woken by the failure's signalStop, not left to time out against its context deadline.
 func TestSubgraphErrorWaitflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

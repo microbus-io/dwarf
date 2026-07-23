@@ -59,6 +59,7 @@ func subgraphTask(childURL string) func(context.Context, *workflow.Flow) error {
 // defer, the cohort still converges exactly once (no double-count), and the fan-in sees both branches. This
 // is the fault-driven analog of the leasefence cohort test, deterministic via the seam (no zombie timing).
 func TestFaultComposition_FanOutBranch(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	var aCalls, xCalls, yCalls, jCalls atomic.Int64
 
@@ -130,6 +131,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 // without stranding the parent: the child's failed transition is reset and re-dispatched, the child still
 // completes, and completeSurgraphFlow revives the parent caller so the whole tree terminalizes.
 func TestFaultComposition_SubgraphChild(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	var xCalls, yCalls atomic.Int64
 
@@ -171,6 +173,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 // yet the flow reaches a clean terminal state (bounded, no crash-loop) with a final_state byte-identical to a
 // no-fault baseline.
 func TestFaultComposition_RepeatedFault(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	e, reader, calls := newFaultBatteryEngine(t, "fcrep", nil)
 
@@ -201,6 +204,7 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 // (signalStop) are lost, the two independent backstops still cover the flow: pollPendingSteps dispatches the
 // stranded pending step, and Await's periodic re-snapshot returns the DB-committed completion.
 func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -252,6 +256,7 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 // l3(leaf): l3's completion revive is dropped, wedging l2's caller; one sweep pass re-drives it and the normal
 // completion cascade carries l2 -> l1 -> root to terminal.
 func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()

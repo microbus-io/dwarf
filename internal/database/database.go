@@ -66,6 +66,11 @@ type Config struct {
 	// TestID, when non-empty, wraps each shard via sequel.CreateTestingDatabase into an isolated, auto-dropped
 	// database keyed on (driver, baseDSN, TestID) - the resolved per-shard DSNs already distinguish the shards.
 	TestID string
+	// TestConnCap, when > 0 (and TestID != ""), caps every shard's pool at this many connections and
+	// reserves TestConnCap*numShards from a per-driver global budget for the Open->Close lifetime, so many
+	// parallel test engines against one server stay under its max_connections (see testbudget.go). Ignored
+	// entirely in production (TestID == "").
+	TestConnCap int
 
 	Logger         *slog.Logger
 	TracerProvider trace.TracerProvider // nil → otel.GetTracerProvider()
@@ -80,6 +85,11 @@ type ShardSet struct {
 	mu      sync.RWMutex
 	dbs     map[int]*sequel.DB
 	indices []int // sorted ascending
+	// testConnCap (>0 only in test mode) caps every SetMaxOpenConns push so the engine's derived pool sizing
+	// can never grow a pool past what was reserved from the global budget at Open; releaseBudget frees that
+	// reservation, called exactly once at Close (or Open's failure path). See testbudget.go.
+	testConnCap   int
+	releaseBudget func()
 }
 
 // Open opens and migrates every shard, applying cfg's pool sizes and telemetry. On any shard failure it closes
@@ -99,10 +109,26 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 	}
 	slices.Sort(indices)
 	dbs := make(map[int]*sequel.DB, len(indices))
+
+	// Reserve the whole engine's connection budget up front (test mode only), before any pool opens a
+	// connection during migration. The driver is read from a throwaway lazy handle - sequel.Open opens no
+	// connection, so this costs nothing and needs no server round trip. One atomic acquire of the full
+	// cap*shards weight; see testbudget.go for why it is not per-connection or per-shard.
+	releaseBudget := func() {}
+	if cfg.TestID != "" && cfg.TestConnCap > 0 {
+		probe, err := sequel.Open("", resolveShardDSN(cfg, indices[0], shards[indices[0]].DSN))
+		if err != nil {
+			return errors.Trace(err)
+		}
+		driver := probe.DriverName()
+		probe.Close()
+		releaseBudget = acquireTestBudget(driver, int64(cfg.TestConnCap)*int64(len(indices)))
+	}
 	closeAll := func() {
 		for _, db := range dbs {
 			db.Close()
 		}
+		releaseBudget()
 	}
 	seen := make(map[string]int, len(indices))
 	for _, idx := range indices {
@@ -124,6 +150,10 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 	s.mu.Lock()
 	s.dbs = dbs
 	s.indices = indices
+	if cfg.TestID != "" {
+		s.testConnCap = cfg.TestConnCap
+	}
+	s.releaseBudget = releaseBudget
 	s.mu.Unlock()
 	return nil
 }
@@ -178,8 +208,15 @@ func openAndMigrate(cfg Config, dsn string, sc ShardConfig) (*sequel.DB, error) 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	db.SetMaxIdleConns(sc.MaxIdleConns)
-	db.SetMaxOpenConns(sc.MaxOpenConns)
+	idle, open := sc.MaxIdleConns, sc.MaxOpenConns
+	if cfg.TestID != "" && cfg.TestConnCap > 0 {
+		// Clamp the initial pool too, not just the engine's later SetMaxOpenConns pushes, so a shard's
+		// migration and bootstrap never open more than the reserved budget.
+		idle = min(idle, cfg.TestConnCap)
+		open = min(open, cfg.TestConnCap)
+	}
+	db.SetMaxIdleConns(idle)
+	db.SetMaxOpenConns(open)
 	// Drain idle connections and recycle aged ones - but not on SQLite, whose in-memory test databases are
 	// dropped the moment their last connection closes (a closed idle/expired conn would lose the data).
 	if db.DriverName() != "sqlite" {
@@ -284,18 +321,26 @@ func (s *ShardSet) OnEach(ctx context.Context, op func(ctx context.Context, db *
 	return nil
 }
 
-// SetMaxIdleConns applies the given idle-connection pool size to every open shard.
+// SetMaxIdleConns applies the given idle-connection pool size to every open shard, clamped to the
+// test-mode cap so the engine's derived sizing can never grow a pool past the reserved budget.
 func (s *ShardSet) SetMaxIdleConns(n int) {
 	s.mu.RLock()
+	if s.testConnCap > 0 && n > s.testConnCap {
+		n = s.testConnCap
+	}
 	for _, db := range s.dbs {
 		db.SetMaxIdleConns(n)
 	}
 	s.mu.RUnlock()
 }
 
-// SetMaxOpenConns applies the given open-connection pool ceiling to every open shard.
+// SetMaxOpenConns applies the given open-connection pool ceiling to every open shard, clamped to the
+// test-mode cap (see SetMaxIdleConns).
 func (s *ShardSet) SetMaxOpenConns(n int) {
 	s.mu.RLock()
+	if s.testConnCap > 0 && n > s.testConnCap {
+		n = s.testConnCap
+	}
 	for _, db := range s.dbs {
 		db.SetMaxOpenConns(n)
 	}
@@ -310,5 +355,12 @@ func (s *ShardSet) Close() {
 	}
 	s.dbs = nil
 	s.indices = nil
+	s.testConnCap = 0
+	release := s.releaseBudget
+	s.releaseBudget = nil
 	s.mu.Unlock()
+	// Release the global test budget outside the lock (it may wake a blocked Open on another goroutine).
+	if release != nil {
+		release()
+	}
 }

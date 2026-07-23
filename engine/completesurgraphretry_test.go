@@ -37,6 +37,7 @@ import (
 // faultCompleteSurgraphErr fails the FIRST revive with a non-contention error; the retry (fault consumed) must
 // re-drive it and the whole parent+child tree must complete promptly - not wait out the wedge sweep.
 func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	shortPersistBackoff(t)

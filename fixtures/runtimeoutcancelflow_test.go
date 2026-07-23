@@ -33,6 +33,7 @@ import (
 // footgun (and the earlier "cancel on the caller's behalf" both never ran - the await ctx was already expired -
 // and was the wrong intent). Teardown-on-timeout is the caller's explicit choice: it Cancels via the returned key.
 func TestRuntimeoutcancelflow(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

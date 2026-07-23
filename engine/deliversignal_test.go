@@ -72,6 +72,7 @@ func (r *enqueueRecorder) count() int {
 // any task nor panic. DeliverSignal returns an error only for genuinely malformed input (bad JSON, unknown
 // op), and the engine keeps processing new work afterward.
 func TestDeliverSignal_IdempotentAndSpoofSafe(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -162,6 +163,7 @@ func TestDeliverSignal_IdempotentAndSpoofSafe(t *testing.T) {
 // work (there is no cache), must not wake a waiter, and must not re-read the peer registry (its shards
 // are closed) - a peersChanged nudge to a dead replica is inert.
 func TestDeliverSignal_OfflineEngineIgnoresSignals(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -196,6 +198,7 @@ func TestDeliverSignal_OfflineEngineIgnoresSignals(t *testing.T) {
 // discards a payload whose Origin is its own. A payload with a foreign or absent Origin (an older
 // build's signal) is processed normally.
 func TestDeliverSignal_IgnoresOwnEcho(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

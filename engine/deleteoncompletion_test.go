@@ -72,6 +72,7 @@ func shortenDeletion(e *Engine, grace, interval time.Duration) {
 // TestDeleteOnCompletion_ReaperDeletesOnSuccess asserts a flow created with DeleteOnCompletion is removed (row
 // and steps) by the background reaper once its grace window elapses.
 func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -100,6 +101,7 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 // flow stays `completed` for the grace window so Await/Snapshot serve its outcome, then the reaper removes it
 // and reads 404. A long reapInterval keeps the background reaper out; the test forces one reap pass itself.
 func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -142,6 +144,7 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 // TestDeleteOnCompletion_RunReturnsOutcome asserts Run on a disposable flow returns the completed outcome
 // (observable during the grace window), not a 404.
 func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -172,6 +175,7 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 // reaper then removes the root AND its subgraph child (keyed on root_flow_id) - the no-orphan guarantee. A
 // long reapInterval keeps the background reaper out; the test forces one reap pass.
 func TestPurge_ReaperRemovesTree(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -217,6 +221,7 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 // TestDeleteOnCompletion_KeepsFailedFlow asserts a failed flow is retained even with DeleteOnCompletion set
 // - failures stay available for diagnosis / Fork.
 func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -250,6 +255,7 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 // TestDeleteOnCompletion_ReaperCascadesSubgraph asserts that when a disposable root flow completes, the reaper
 // removes it AND its subgraph descendants (keyed on root_flow_id; the child carries no flag of its own).
 func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -302,6 +308,7 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 // flow stays observable during its grace window). A long reapInterval keeps the reaper from removing any flow
 // mid-test, so a missing/errored outcome would signal a real defect (torn completion write, lost outcome).
 func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := NewTestProxy()

@@ -53,6 +53,7 @@ func (c *childCapture) keys() []string {
 // (X -> iter1 -> iter2 -> Y) when the model is single-path. We capture iteration 1's child step key
 // before the retry and assert it can no longer be loaded afterward, while iteration 2's child can.
 func TestRetrySubgraphReapflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

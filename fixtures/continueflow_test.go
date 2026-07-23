@@ -26,6 +26,7 @@ import (
 )
 
 func TestContinueflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -76,6 +77,7 @@ func TestContinueflow(t *testing.T) {
 // TestContinueInheritsThreadPolicy verifies a Continue turn (which no longer takes FlowOptions) inherits
 // the thread's policy: scheduling priority (not reset to the engine default).
 func TestContinueInheritsThreadPolicy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -119,6 +121,7 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 // TestCreateWithThreadKeyJoinsThread verifies FlowOptions.ThreadKey places a new flow into an existing
 // thread (the explicit-policy counterpart to Continue), and that a bad key is rejected.
 func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

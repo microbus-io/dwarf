@@ -32,6 +32,7 @@ import (
 // size. Before the fix, the empty-cohort path (fireFanInDirect) merged with nil reducers, so the delta
 // replaced the base (sum -> 5) past an empty array while a non-empty array reduced correctly.
 func TestEmptyforeachreducerflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

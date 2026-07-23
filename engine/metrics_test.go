@@ -109,6 +109,7 @@ func gaugePresent(rm metricdata.ResourceMetrics, name string) bool {
 // but holds no executing slot, so counting it would inflate task concurrency and contradict the saturation
 // index's documented purpose (its (status, parked, task_url) shape excludes parked rows).
 func TestCountRunningByTask_ExcludesParked(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -144,6 +145,7 @@ func TestCountRunningByTask_ExcludesParked(t *testing.T) {
 }
 
 func TestMetrics_EmittedOnRun(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -224,6 +226,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 // SetWorkers(0) makes all of this deterministic: nothing dispatches, so the backlog is stable and the
 // second pass necessarily discards exactly what the first one cached.
 func TestMetrics_RefillInstrumented(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -290,6 +293,7 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 // was counted on the way out and never on the way in: the standard in-flight panel (started - terminated)
 // drifts NEGATIVE by one per fork, or permanently understates. Both counters must move together.
 func TestMetrics_ForkCountsAsStarted(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -352,6 +356,7 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 // orphan the recovery defer could not cover without scraping the error log. It forges the same orphan shape the
 // log-only test uses (a completed flow flipped back to running, its step backdated stale) and asserts the count.
 func TestOrphanDetection_EmitsMetric(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

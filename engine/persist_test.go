@@ -70,6 +70,7 @@ func persistFlow(t *testing.T, name string) (*Engine, *TestProxy, *atomic.Int32)
 // Re-dispatching instead (which is what happens with no retry: the step is left `running` and lease recovery
 // takes it) would have re-run the task. That is the difference this test exists to pin.
 func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 	shortPersistBackoff(t)
@@ -96,6 +97,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 // PAYLOAD is at fault. The failure is permanent, so the step fails, naming the driver's error - and the task has
 // run exactly ONCE.
 func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 	shortPersistBackoff(t)
@@ -138,6 +140,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 // Both directions are pinned, because the guard must be neither too wide (fence the pending reset) nor too
 // narrow (running-only would wrongly fence the transition retry, which runs while the step is `completed`).
 func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// setup inserts one running flow (flow_id=1) and its single step (step_id=1) in the given status under
@@ -216,6 +219,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 // at once. That DOES re-execute the task - it is the at-least-once contract, and it is what would have happened
 // at lease expiry anyway, only sooner.
 func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

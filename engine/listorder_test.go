@@ -35,6 +35,7 @@ import (
 // created_at - the obvious repair - would compare two different database servers' CLOCKS. The doc was the
 // bug; this test is what stops someone "fixing" the code to match the old promise.
 func TestList_NewestFirstIsPerShardNotGlobal(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

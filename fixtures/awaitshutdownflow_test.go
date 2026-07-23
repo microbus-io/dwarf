@@ -32,6 +32,8 @@ import (
 // non-stopped flow's waiter re-blocked on a channel no goroutine would ever signal again and only escaped when
 // its own ctx expired (or, up to a full poll interval later, when a ticker re-snapshot happened to hit the
 // now-closed database). The sentinel makes Await return promptly with a shutting-down error instead.
+// NOT t.Parallel: asserts an upper-bound reaction latency (Await returns < 2s after Shutdown), which CPU oversubscription
+// from co-running parallel tests can inflate past the bound.
 func TestAwaitShutdownflow(t *testing.T) {
 	ctx := context.Background()
 

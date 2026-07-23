@@ -39,6 +39,7 @@ import (
 // re-snapshot, the only wake path left once the signal is gone. The cross-replica analog of
 // TestFault_DropSignalStop.
 func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -105,6 +106,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 // at-least-once), but the persisted outcome is state-correct and the invariant sweep is clean - the property
 // that matters for at-least-once + idempotent tasks, proven across a replica boundary.
 func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	dir := t.TempDir() // a file DB so the flow survives replica A's shutdown

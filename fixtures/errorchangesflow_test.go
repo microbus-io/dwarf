@@ -40,6 +40,7 @@ import (
 // code, trace id and properties), or - for an external side effect that must be compensated - lives in its own
 // task, so its success is durably recorded before anything downstream can fail.
 func TestErrorchangesflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

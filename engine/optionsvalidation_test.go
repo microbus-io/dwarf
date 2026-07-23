@@ -32,6 +32,7 @@ import (
 // hid a caller bug). 0 still means "use the default" for all three, so a zero-valued FlowOptions and a nil
 // FlowOptions both create fine.
 func TestCreate_RejectsNegativeOptions(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -88,6 +89,7 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 // setter IS the default. A non-positive (or sub-millisecond, hence truncating-to-zero) value would hand
 // EVERY new flow a task deadline that has already passed, silently and engine-wide, so it is rejected.
 func TestSetTimeBudget_RejectsNonPositive(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngine()
 

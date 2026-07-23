@@ -34,7 +34,7 @@ import (
 // boundedRun is Create+Await with a ceiling, so a wedge fails the test instead of hanging.
 func boundedRun(t *testing.T, e *Engine, url string) *workflow.FlowOutcome {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second*testTimeoutScale)
 	defer cancel()
 	_, out, err := e.Run(ctx, url, nil, nil)
 	testarossa.For(t).NoError(err)
@@ -119,6 +119,7 @@ func drivePollBackstop(t *testing.T, e *Engine, retryDuration time.Duration, lan
 // --- Dispatch faults (scoped by task name) ---
 
 func TestFault_ExecuteTask(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	proxy := NewTestProxy()
 	proxy.HandleTask("fexec/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -160,6 +161,7 @@ func TestFault_ExecuteTask(t *testing.T) {
 }
 
 func TestFault_PanicExecuteTask(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	proxy := NewTestProxy()
 	proxy.HandleTask("fpanic/boom", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -183,6 +185,7 @@ func TestFault_PanicExecuteTask(t *testing.T) {
 }
 
 func TestFault_LoadGraph(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -210,6 +213,7 @@ func TestFault_LoadGraph(t *testing.T) {
 // --- Transaction / recovery faults ---
 
 func TestFault_TransitionCommit(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	proxy := NewTestProxy()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
@@ -234,6 +238,7 @@ func TestFault_TransitionCommit(t *testing.T) {
 }
 
 func TestFault_Contention(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	proxy := NewTestProxy()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
@@ -254,6 +259,7 @@ func TestFault_Contention(t *testing.T) {
 }
 
 func TestFault_CompleteFlowCommit(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -280,6 +286,7 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 }
 
 func TestFault_LeaseStaleWrite(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -317,6 +324,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 // --- Signal / doorbell faults (process-wide) ---
 
 func TestFault_DropSignalStop(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -339,6 +347,7 @@ func TestFault_DropSignalStop(t *testing.T) {
 }
 
 func TestFault_DropDoorbell(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -364,6 +373,7 @@ func TestFault_DropDoorbell(t *testing.T) {
 // --- Background-recovery faults ---
 
 func TestFault_SubgraphReviveLost(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -410,6 +420,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 }
 
 func TestFault_ReapMidTree(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
@@ -445,6 +456,7 @@ func TestFault_ReapMidTree(t *testing.T) {
 // --- Poll / refill clamp faults (process-wide) ---
 
 func TestFault_RefillScanErr(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
@@ -471,6 +483,7 @@ func TestFault_RefillScanErr(t *testing.T) {
 // due", and replacing a healthy partition with nothing on a transient DB blip would idle its workers in Pop
 // until the 1s re-poll. The hints cost nothing to keep - a worker popping a stale one just loses its claim CAS.
 func TestFault_RefillScanErrPreservesCache(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -490,6 +503,7 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 }
 
 func TestFault_PollSizingErr(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()

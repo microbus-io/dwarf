@@ -33,6 +33,7 @@ import (
 // subgraph children - a transient zombie plus an immutability violation. With the guard, the rewind is a
 // no-op against the cancelled step: it stays cancelled and is never re-dispatched.
 func TestRetryCancelRaceflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

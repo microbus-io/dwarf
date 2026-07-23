@@ -39,6 +39,7 @@ import (
 // A completed run of the same graph is asserted alongside as the control: whatever a converged fan-in yields
 // for these fields, the failed path yields too.
 func TestFailedforeachstateflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

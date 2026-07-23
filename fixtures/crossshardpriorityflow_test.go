@@ -44,6 +44,9 @@ import (
 // The workload deliberately holds a DEEP low-priority backlog in the caches when the urgent work
 // arrives: that is the case where the caches are full of band-100 candidates and a band-1 arrival must
 // preempt them, rather than the trivial case of an idle engine.
+// NOT t.Parallel: this test asserts the fleet's urgent-burst REACTION LATENCY (< 3s against an expected
+// ~350ms), which CPU oversubscription from co-running parallel tests inflates past the bound. It measures
+// timing, not just an outcome, so it must run without competition.
 func TestCrossShardPriorityflow(t *testing.T) {
 	ctx := context.Background()
 

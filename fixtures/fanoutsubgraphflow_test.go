@@ -37,6 +37,7 @@ import (
 // repro is transport-timing-specific (observed over a real bus transport), tracked separately. The short
 // drain bound makes a stranded flow fail rather than hang.
 func TestFanoutSubgraphflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

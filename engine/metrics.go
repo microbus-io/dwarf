@@ -40,19 +40,19 @@ const metricScope = "github.com/microbus-io/dwarf"
 // engineMetrics holds the engine's OpenTelemetry instruments. The counters are incremented inline at
 // their event sites; the gauges are observable (async) and pulled by observeGauges at collection time.
 type engineMetrics struct {
-	flowsStarted      metric.Int64Counter
-	flowsTerminated   metric.Int64Counter
-	stepsExecuted     metric.Int64Counter
-	stepsRecovered    metric.Int64Counter
-	stepsUnwedged     metric.Int64Counter
-	stepsWriteRetried metric.Int64Counter
-	stepsWriteFailed  metric.Int64Counter
-	flowsOrphaned     metric.Int64Counter
-	stateWriteBytes   metric.Int64Counter
-	stateReadBytes    metric.Int64Counter
-	refillSelected    metric.Int64Counter
-	refillDiscarded   metric.Int64Counter
-	stepsClaimLost    metric.Int64Counter
+	flowsStarted        metric.Int64Counter
+	flowsTerminated     metric.Int64Counter
+	stepsExecuted       metric.Int64Counter
+	stepsRecovered      metric.Int64Counter
+	stepsUnwedged       metric.Int64Counter
+	stepsWriteRetried   metric.Int64Counter
+	stepsWriteFailed    metric.Int64Counter
+	flowsOrphaned       metric.Int64Counter
+	stateWriteBytes     metric.Int64Counter
+	stateReadBytes      metric.Int64Counter
+	refillSelected      metric.Int64Counter
+	refillDiscarded     metric.Int64Counter
+	stepsClaimLost      metric.Int64Counter
 	stepsClaimPreempted metric.Int64Counter
 
 	refillDuration      metric.Float64Histogram

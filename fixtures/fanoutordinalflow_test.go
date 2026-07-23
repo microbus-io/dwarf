@@ -37,6 +37,7 @@ import (
 // REVERSE input order - the completion order and the input order disagree, and the result must follow input
 // order regardless.
 func TestFanOutOrdinalFlow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -94,6 +95,7 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 // completion order. Each cell runs a one-chunk inner fan-out; the chunk sleeps longest for the earliest cell,
 // so the cells converge in REVERSE order. The outer append reducer must still be in cell input order.
 func TestFanOutOrdinalFlow_Nested(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

@@ -56,7 +56,7 @@ func awaitFlowStatus(t *testing.T, e *Engine, flowKey, want string, timeout time
 	}
 	select {
 	case <-reached:
-	case <-time.After(timeout):
-		t.Fatalf("flow %s never reached status %q within %s", flowKey, want, timeout)
+	case <-time.After(timeout * testTimeoutScale):
+		t.Fatalf("flow %s never reached status %q within %s", flowKey, want, timeout*testTimeoutScale)
 	}
 }

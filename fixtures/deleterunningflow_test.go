@@ -31,6 +31,7 @@ import (
 // must Cancel first), and succeeds once the flow is terminal. The flow is held reliably in `running` by a
 // task that signals it has started and then blocks until the test releases it.
 func TestDeleteRunningflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

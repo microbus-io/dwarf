@@ -32,6 +32,7 @@ import (
 // transitioned to the fan-in (successor_id still 0) is an exit. Branch lengths are asymmetric (one branch loops,
 // one does not), so the fan-in also exercises deterministic reducer folding across uneven branches.
 func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

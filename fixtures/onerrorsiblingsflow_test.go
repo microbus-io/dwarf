@@ -27,6 +27,7 @@ import (
 )
 
 func TestOnerrorsiblingsflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

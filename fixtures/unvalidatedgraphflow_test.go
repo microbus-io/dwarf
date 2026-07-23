@@ -47,6 +47,7 @@ func (nilGraphHost) LoadGraph(ctx context.Context, url string) (*workflow.Graph,
 }
 
 func TestUnvalidatedGraphflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// The engine validates an unvalidated graph at Create and derives its fan-in routing at dispatch, so an

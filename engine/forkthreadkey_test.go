@@ -36,6 +36,7 @@ import (
 // completed prefix (A, RunInner, and RunInner's child) is cloned - the child as an OFF-path flow
 // (rewind==0), which is exactly the shape whose thread_token=” was permanent.
 func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

@@ -62,6 +62,7 @@ func (r *statusChangeRecorder) statusesFor(flowKey string) []string {
 // only purpose is to wake remote Await/Poll callers, so a flow that was never awaited stops without
 // broadcasting, while a flow some caller awaited (its `awaited` column stamped 1) broadcasts its stop.
 func TestAwaited_GatesStatusChangeBroadcast(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

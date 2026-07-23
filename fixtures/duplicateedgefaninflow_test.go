@@ -49,6 +49,7 @@ import (
 // the shape once suspected of "double-counting cohort_arrivals" (since retired) - it does not; it
 // is an ordinary conditional fan-out whose width happens to be author-surprising.
 func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -128,6 +129,7 @@ func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 // reaches Join with []. One node, two lineage stacks -> rejected. There is no runtime miscount because the
 // graph never runs.
 func TestDuplicateEdge_CohortMemberOneRejectedByValidate(t *testing.T) {
+	t.Parallel()
 	graph := workflow.NewGraph("DupMemberOne")
 	graph.SetEndpoint("Split", "duplicateedgefaninflow.verify:701/m-split")
 	graph.SetEndpoint("WorkA", "duplicateedgefaninflow.verify:701/m-worka")
@@ -150,6 +152,7 @@ func TestDuplicateEdge_CohortMemberOneRejectedByValidate(t *testing.T) {
 // never popped, so Validate rejects it the OTHER way: a branch reaches END with an unpopped [Split] frame. So
 // the member-double-count shape is unreachable regardless of whether one or all members carry the extra edge.
 func TestDuplicateEdge_CohortMemberAllRejectedByValidate(t *testing.T) {
+	t.Parallel()
 	graph := workflow.NewGraph("DupMemberAll")
 	graph.SetEndpoint("Split", "duplicateedgefaninflow.verify:701/a-split")
 	graph.SetEndpoint("WorkA", "duplicateedgefaninflow.verify:701/a-worka")
@@ -176,6 +179,7 @@ func TestDuplicateEdge_CohortMemberAllRejectedByValidate(t *testing.T) {
 // member steps (both "children" are the fan-in itself), so the fan-in fires once on the source's own state.
 // Self-consistent - this is what a "member with two edges to its fan-in" collapses to once it validates.
 func TestDuplicateEdge_TrunkSourceIntoFanInIsDegenerate(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

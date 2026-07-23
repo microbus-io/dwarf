@@ -34,6 +34,7 @@ import (
 // rejects a non-terminal root. This is the structural guarantee behind the fork.go cloneSubtree guard - the
 // interrupted step never reaches a fork clone in the first place.
 func TestForkInterruptedCohortFlow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

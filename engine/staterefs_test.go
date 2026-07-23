@@ -70,6 +70,7 @@ func stepIDsByTask(t *testing.T, e *Engine, taskName string) []int {
 // barely pay for a pure linear carry - cost is ~D resolves and savings are S*D, so the depth cancels), while a
 // wide fan-out amortizes one cache-missed resolve over N branches and so refs far smaller fields.
 func TestStateRefs_OpenThreshold(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Linear: the full threshold, never lower.
@@ -106,6 +107,7 @@ func TestStateRefs_OpenThreshold(t *testing.T) {
 // cost of one more field is zero (they share the row), so the only question is whether a field outweighs its
 // own state_refs entry - a test in which N cancels, since saving and cost both scale with it.
 func TestStateRefs_CandidateFloor(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Linear reproduces the old flat floor exactly.
@@ -128,6 +130,7 @@ func TestStateRefs_CandidateFloor(t *testing.T) {
 // decision is made. The read cost of a ref is paid per ANCHOR ROW, never per field - so every case here is
 // really asking "is this row worth opening?", and once it is open everything else in it is free.
 func TestStateRefs_MintTiers(t *testing.T) {
+	t.Parallel()
 	const anchor = 42
 
 	mint := func(t *testing.T, state map[string]any, changes map[string]any, inherited stateRefs, successors int) (workflow.State, stateRefs) {
@@ -362,6 +365,7 @@ func TestStateRefs_MintTiers(t *testing.T) {
 // INITIAL INPUT at the entry step (no task produced it, so it appears in no changes anywhere), and a fan-in's
 // reducer output. A changes-only resolver silently misses both, and the initial-input case is the headline one.
 func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -414,6 +418,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 // document. It also pins the two rules that make the fan-out case work: the injected element is never ref'd,
 // and a carried ref crosses the fan-in still pointing at its ORIGINAL anchor rather than being re-anchored.
 func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -495,6 +500,7 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 // folding a delta onto an absent base would silently lose everything accumulated so far. The reduced result
 // then exists nowhere else, so it is inlined into the fan-in step's own state, which becomes its anchor.
 func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -554,6 +560,7 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 // Distinct from the member-written case above: here no cohort member touches the field, so the only reason it
 // must not be anchored is that the SPAWN combined it. Without the fix, logLen reads 1 (just the spawn delta).
 func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

@@ -33,6 +33,7 @@ import (
 // completion, capture a step key from each child off the carrier, delete the root, and assert every
 // descendant's step can no longer be loaded.
 func TestDeletecascadeflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

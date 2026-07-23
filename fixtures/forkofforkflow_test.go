@@ -35,6 +35,7 @@ import (
 // still fails because Y's cloned failure keeps cohort_failures>0. Fixing Y and forking again from the fork's
 // cloned Y step finally completes, with both branches' outputs merged at J. Neither origin is ever mutated.
 func TestForkOfForkflow(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

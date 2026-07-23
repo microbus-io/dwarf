@@ -34,6 +34,7 @@ import (
 // cohort accounting normally prevents (a flow does not terminalize with a live sibling), so it is injected
 // directly: run a single-node flow to completion, insert a running straggler off the fork path, then fork.
 func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

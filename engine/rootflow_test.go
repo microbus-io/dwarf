@@ -44,6 +44,7 @@ func rootFlowIDOf(t *testing.T, e *Engine, shard, flowID int) int {
 // TestRootFlowID_CreateAndSubgraph asserts a top-level flow is its own root and a subgraph child inherits
 // the parent's root_flow_id (the whole tree shares one root pointer).
 func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -102,6 +103,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 // TestRootFlowID_ForkIsItsOwnRoot asserts a forked flow is its own root - it does not inherit the origin's
 // root_flow_id - so the clone is a self-contained tree.
 func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -152,6 +154,7 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 // TestRootFlowID_ContinueStartsFreshRoot asserts a Continue turn starts its own root rather than inheriting
 // the prior turn's.
 func TestRootFlowID_ContinueStartsFreshRoot(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

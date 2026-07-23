@@ -40,6 +40,7 @@ func (oneTaskHost) ExecuteTask(ctx context.Context, name string, f *workflow.Flo
 func (oneTaskHost) SignalPeers(context.Context, string, []byte)                          {}
 
 func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -65,6 +66,7 @@ func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
 // invalid indices are rejected, and on a running engine SetShard is rejected - the set is immutable for
 // the engine's life (changing it needs a coordinated restart, since flow keys encode the shard).
 func TestSetShard(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -111,6 +113,7 @@ func TestSetShard(t *testing.T) {
 }
 
 func TestDatabase_ShardOutOfRange(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -126,6 +129,7 @@ func TestDatabase_ShardOutOfRange(t *testing.T) {
 }
 
 func TestDatabase_EachShardSingleShard(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()

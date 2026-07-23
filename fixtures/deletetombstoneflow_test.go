@@ -29,6 +29,7 @@ import (
 // FlowOutcome.State - not carried forever as a JSON null tombstone. The host sees the key gone, matching
 // Flow.Del's contract ("the following merge drops it") rather than a leaked "drop": null.
 func TestDeletetombstoneflow(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

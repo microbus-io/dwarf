@@ -35,6 +35,7 @@ import (
 // and Fork already rejects a non-terminal root), so the test manufactures the broken invariant directly by
 // doctoring a completed cohort member to `interrupted`, then forks a sibling.
 func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

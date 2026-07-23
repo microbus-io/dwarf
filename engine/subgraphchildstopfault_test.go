@@ -36,6 +36,7 @@ import (
 // via the periodic re-snapshot backstop - bounding the hang to one awaitPollInterval rather than the caller's
 // ctx deadline. This proves the child-key introspection contract survives a lost wake, not just a delivered one.
 func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

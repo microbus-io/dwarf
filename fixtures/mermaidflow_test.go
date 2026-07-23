@@ -32,6 +32,7 @@ import (
 // structural invariants of the Mermaid output rather than exact bytes, so it pins that the renderer runs
 // end-to-end and decomposes subgraphs/cohorts without pinning cosmetic formatting.
 func TestMermaidflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

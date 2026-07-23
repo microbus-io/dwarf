@@ -39,6 +39,7 @@ import (
 // attempt (fault consumed) drives the real interrupt up the whole chain with no strand. A root Resume then
 // threads back down to the leaf and the tree completes — proving the rollback left the ancestor park intact.
 func TestFault_InterruptStaleWriteRollback(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()

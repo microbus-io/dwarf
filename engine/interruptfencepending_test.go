@@ -40,6 +40,7 @@ import (
 // directly: a parent caller step parked on its subgraph child, whose leaf recovery has reset to `pending` under
 // the same generation. handleInterrupt must fence (roll back) and touch nothing.
 func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// setup builds a two-flow surgraph tree on shard 1:

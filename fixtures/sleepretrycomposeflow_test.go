@@ -36,6 +36,7 @@ import (
 // each gap between attempts must be ~400ms. The lower-bound assertion of 350ms proves the two were
 // summed: Sleep-only or backoff-only would be ~200ms.
 func TestSleepRetryComposeflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

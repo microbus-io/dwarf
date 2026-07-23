@@ -38,6 +38,7 @@ import (
 )
 
 func TestDisposableflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

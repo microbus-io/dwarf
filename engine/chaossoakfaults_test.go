@@ -47,6 +47,7 @@ import (
 // sweep within the window. Seed is logged (DWARF_SOAK_SEED overrides); DWARF_LONGSOAK=1 lengthens the window
 // and raises fault density.
 func TestChaosSoak_Faults(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

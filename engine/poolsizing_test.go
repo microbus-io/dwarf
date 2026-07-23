@@ -84,6 +84,7 @@ func delPeerRow(t *testing.T, e *Engine, id int64) {
 }
 
 func TestPoolSizing_ShardPool(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	cases := []struct {
@@ -118,10 +119,12 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 // further; a departure regrows it; a duplicate recount is a no-op; and the SetMaxOpenConns override,
 // once set, is never divided by fleet changes.
 func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	e := NewEngine()
+	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	e.RunInTest(t)
@@ -158,6 +161,7 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 // (4x the heartbeat cadence). The heartbeat loop re-reads R on its own and regrows the pool - no signal
 // is involved, which is exactly what makes a vanished peer recoverable without cooperation.
 func TestPoolSizing_PeerExpiry(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -190,6 +194,7 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 // stale, making the assertion deterministic; a larger fleet would prune the same rows, just spread the
 // dice roll so ~one replica per round does it.
 func TestPeers_HeartbeatPrunesStragglers(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -227,6 +232,7 @@ func TestPeers_HeartbeatPrunesStragglers(t *testing.T) {
 // so long tasks are not capped by the connection-derived dispatch count. This is the whole point of
 // deriving the worker maximum from the lease margin rather than from the connection budget.
 func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -275,6 +281,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 // the only one that can re-derive it, because recomputePools (the fleet-change path) early-returns while
 // an override pins the pools.
 func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -303,6 +310,7 @@ func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
 // which includes that queueing - made "every worker busy" mean "saturated", so any backlog grew the pool
 // toward the ceiling: measured at ~20% throughput loss and a ~1,300-worker pool where ~512 sufficed.
 func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -347,6 +355,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 // 1- and 2-vCPU tiers ceiling at the same ~745 steps/s), then ~450 steps/s per vCPU. An undeclared
 // count weighs as the assumed default (2 vCPUs), so every shard carries a positive weight.
 func TestPoolSizing_CapacityWeight(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	assert.Equal(745, capacityWeight(0)) // undeclared: assume 2 vCPUs
@@ -360,6 +369,7 @@ func TestPoolSizing_CapacityWeight(t *testing.T) {
 // follow the capacity curve (an 8-vCPU shard drawing ~4.8x a 1-vCPU shard's flows), and a shard that
 // declares no CPUs is placed as the assumed 2-vCPU default.
 func TestPoolSizing_PickShard(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -383,6 +393,7 @@ func TestPoolSizing_PickShard(t *testing.T) {
 // TestPoolSizing_AllCordoned pins the loud failure: when every shard is cordoned there is nowhere to
 // place a new flow, and pickShard errors rather than silently violating the cordon.
 func TestPoolSizing_AllCordoned(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -404,6 +415,7 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 // driven directly (observedR + recomputePools) rather than through the registry, so the two recomputes
 // read the two different counts the race needs.
 func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -449,9 +461,11 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 // the override applies last, or the recompute early-returns because the override is already set. Either way
 // the pin stands.
 func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
+	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derived budget 48
 	e.RunInTest(t)
@@ -485,6 +499,7 @@ func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
 // flight when Shutdown lands, is an ordinary race, and indexing the empty index slice (rand.IntN(0)) took
 // the host's whole process down with it. Create must surface a 503, not a panic.
 func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
@@ -555,9 +570,11 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 // TestPoolSizing_LiveOverride pins that SetMaxOpenConns pushes the pinned pool to every live shard
 // immediately (the expert/benchmark path).
 func TestPoolSizing_LiveOverride(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
+	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	for i := 1; i <= 2; i++ {
 		assert.NoError(e.SetShard(ShardSpec{Index: i, VirtualCPUs: 1}))
@@ -586,6 +603,7 @@ func TestPoolSizing_LiveOverride(t *testing.T) {
 // and the RTT probed at Startup) - no task duration appears, which is the property that makes it a
 // derivable default rather than a guess.
 func TestPoolSizing_WorkerCeiling(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Same-zone (RTT 0.3ms): txTime = 7*0.3 + 3 = 5.1ms. M=48 -> 48 * 30000/5.1 * 0.25 = 70,588.
@@ -605,6 +623,7 @@ func TestPoolSizing_WorkerCeiling(t *testing.T) {
 // cache stay sized by the connection budget (8x conns, floor 64), because a worker parked in a long
 // ExecuteTask holds no connection and must not inflate the refill scan.
 func TestPoolSizing_DerivedWorkers(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	// Zero-config: one default shard (undeclared CPUs -> the assumed 2-vCPU pool of 12). The max is the
@@ -662,6 +681,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 // Severity is nil at R=1 - where the two numbers agree by construction - which is why this escaped every test and
 // every single-replica deployment.
 func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -695,6 +715,7 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 // the only one), so there is no async grace window and no cap-then-release: the derived 48 is in place
 // before any worker dispatches.
 func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -715,6 +736,7 @@ func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
 // the count comes from the database, not from waiting on signals. It also pins that the count propagates
 // with no signal wiring at all (noopHost): eng1 converges to R=2 purely via its heartbeat recount.
 func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -758,6 +780,7 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 // pins the pool exactly at Startup and is not divided by R (the discovery still runs so peers count this
 // replica, but the override is never second-guessed).
 func TestPoolSizing_StartupOverridePins(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()

@@ -35,6 +35,7 @@ import (
 // carried ref rather than drop the field. A dropped carry is silent, permanent data loss: the fan-in task and
 // every downstream step see the field as empty, and it vanishes from final_state.
 func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	const docLen = 40000

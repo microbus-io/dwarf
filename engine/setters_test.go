@@ -32,6 +32,7 @@ import (
 // safe knobs (time budget, pool size, shard count) hot while refusing the unsafe ones (DSN, workers,
 // host, providers) rather than silently no-op'ing.
 func TestSetters_ConstructionTimeOnly(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -60,6 +61,7 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 // "no engine"; the invariant is a positive identifier. The stable-id opt-in exists so a crash-restart reuses
 // its one registry row instead of leaving a ghost that transiently over-counts replicas.
 func TestSetEngineID_PinsIdentity(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
@@ -80,6 +82,7 @@ func TestSetEngineID_PinsIdentity(t *testing.T) {
 // unchecked. The int32 upper bound matters for the same reason - a value that overflows the column's width
 // (3_000_000_000, say) wraps NEGATIVE and produces exactly that hang.
 func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()

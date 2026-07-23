@@ -67,6 +67,7 @@ func (c *orphanLogCapture) seen() []string {
 // fix prevents it), so the test forges the DB state the bug would leave and backdates the caller past
 // parkWedgeThreshold, then calls the recovery directly (bypassing the time gate).
 func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -168,6 +169,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 // SELECTed `WHERE flow_id=0` -> sql.ErrNoRows), so dwarf_steps_unwedged never moved and the flow hung
 // forever - only Delete got it out.
 func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -256,6 +258,7 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 // blind because the caller step is cancelled, not running+parked). recoverOrphanedSubgraphChildren must cancel
 // it, while leaving a healthy subgraph child (running under a still-running parent) untouched.
 func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -392,6 +395,7 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 // a genuinely-running flow (with a live non-terminal step) is left alone even when equally old. Log-only by
 // design: the detector is the last-resort alarm, not a recovery, so the assertion is on the emitted error log.
 func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -489,6 +493,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 // forges exactly that window - a `running` flow, backdated flow row, but a RECENTLY-updated completed step -
 // and asserts silence. (It is the forged orphan of the test above minus the step backdate.)
 func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

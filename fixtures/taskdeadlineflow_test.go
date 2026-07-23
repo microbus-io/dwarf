@@ -36,6 +36,8 @@ import (
 // fails to deadline the call (the migration regression), ctx.Done()
 // never fires, the task only returns when its safety net trips, and the flow completes instead of
 // failing — which this fixture catches.
+// NOT t.Parallel: asserts an upper-bound reaction latency (flow fails at ~budget, elapsed < 3s safety net), which CPU oversubscription
+// from co-running parallel tests can inflate past the bound.
 func TestTaskdeadlineflow(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)

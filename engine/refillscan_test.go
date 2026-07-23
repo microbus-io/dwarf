@@ -36,6 +36,7 @@ import (
 // that kept the newest would starve the head of every queue. This test checks all of it: one aggregate
 // row per key (not per step), the per-key fetch cut, and that the fetched steps are the oldest.
 func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

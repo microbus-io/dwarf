@@ -34,6 +34,8 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
+// NOT t.Parallel: asserts an upper-bound reaction latency (cross-replica wake via peer signal < 2s), which CPU oversubscription
+// from co-running parallel tests can inflate past the bound.
 func TestTwoReplicaflow(t *testing.T) {
 	ctx := context.Background()
 

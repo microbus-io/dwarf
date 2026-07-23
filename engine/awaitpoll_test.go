@@ -33,6 +33,7 @@ import (
 // running flow, then forges the terminal commit directly in the DB (bypassing signalStop entirely), and
 // asserts Await still wakes via its periodic re-snapshot rather than hanging until ctx (here, forever).
 func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
@@ -124,6 +125,7 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 // running, Poll returns a non-terminal outcome with no error (so a caller can re-poll), whereas Await turns the
 // same deadline into a timeout error. Once the flow stops, Poll returns the terminal outcome.
 func TestPoll_RunningThenStopped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
 

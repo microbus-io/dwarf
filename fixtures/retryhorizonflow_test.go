@@ -33,6 +33,7 @@ import (
 // always-failing task with a bounded horizon retries a few times and then fails, rather than looping
 // forever or giving up on the first try.
 func TestRetryHorizonflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

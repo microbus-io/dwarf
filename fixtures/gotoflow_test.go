@@ -26,6 +26,7 @@ import (
 )
 
 func TestGotoflow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -81,6 +82,7 @@ func TestGotoflow(t *testing.T) {
 }
 
 func TestGotoflow_BadGoto(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()

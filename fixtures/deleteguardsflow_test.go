@@ -38,6 +38,7 @@ import (
 // Both roads to a doomed flow are covered: an author's DeleteOnCompletion (stamped on success, grace window),
 // and an operator's Delete (stamped due immediately).
 func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -134,6 +135,7 @@ func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
 // would seed the next turn from a flow that the reaper removes moments later - the thread silently continues
 // from a doomed base, and its carried state is whatever that vanishing turn happened to hold.
 func TestDeleteguardsflow_ContinueSkipsADeletedTurn(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

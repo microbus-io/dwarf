@@ -39,6 +39,7 @@ import (
 // completion UPDATE still succeeds), then the task is released with an empty forEach array so processStep
 // completes the step and reaches fireFanInDirect.
 func TestFanInDirectCancel_NoExtendCancelledFlow(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 

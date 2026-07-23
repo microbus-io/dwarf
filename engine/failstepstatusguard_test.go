@@ -35,6 +35,7 @@ import (
 // branch failure that a later Fork re-derives from step status. The guard still admits the `completed` case
 // failOnPersistError relies on (fail an already-completed step whose transition tx could not be persisted).
 func TestFailStep_TerminalStatusGuard(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
 	// setup inserts one flow (flow_id=1) and its single trunk step (step_id=1, lineage_id=0) in the given
