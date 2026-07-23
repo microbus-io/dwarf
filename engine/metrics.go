@@ -52,6 +52,8 @@ type engineMetrics struct {
 	stateReadBytes    metric.Int64Counter
 	refillSelected    metric.Int64Counter
 	refillDiscarded   metric.Int64Counter
+	stepsClaimLost    metric.Int64Counter
+	stepsClaimPreempted metric.Int64Counter
 
 	refillDuration      metric.Float64Histogram
 	refillQueryDuration metric.Float64Histogram
@@ -120,6 +122,8 @@ func (e *Engine) initMetrics() error {
 	// per-shard max prices the straggler wait, and selected-vs-discarded prices the oversupply.
 	m.refillSelected = ctr("dwarf_refill_candidates_selected", "Counts step candidates the refiller selected into the cache. Compare against dwarf_refill_candidates_discarded for the refiller's oversupply ratio.")
 	m.refillDiscarded = ctr("dwarf_refill_candidates_discarded", "Counts cached step candidates thrown away un-popped by a wholesale refill - the refiller's waste signal. The steps stay pending and are re-selected, so this is cost, not loss; a ratio near 1 against dwarf_refill_candidates_selected means the refiller is turning far faster than the workers drain.")
+	m.stepsClaimPreempted = ctr("dwarf_steps_claim_preempted", "Counts popped candidates skipped without a claim attempt because a sibling worker in this replica already had one in flight for that step - round trips SAVED, the counterpart to dwarf_steps_claim_lost. The refiller re-selects a step whose claim is uncommitted (the selection predicate reads committed state), so this rises with the scan rate rather than with the replica count. Compare the two: a healthy engine converts what would have been lost claims into skips.")
+	m.stepsClaimLost = ctr("dwarf_steps_claim_lost", "Counts claim attempts whose CAS matched no row - the step was already claimed by a peer, or left the claimable state (cancelled, resumed, parked) between selection and claim. The lease-contention signal: measured against dwarf_steps_executed it is the share of dispatch round trips that produced no work, and it rises with the replica count when replicas select overlapping candidates. Not an error - the step is simply someone else's - but a high ratio means the fleet is paying for round trips it cannot use.")
 
 	secHist := func(name, desc string) metric.Float64Histogram {
 		h, err := meter.Float64Histogram(name, metric.WithDescription(desc), metric.WithUnit("s"),
@@ -452,6 +456,25 @@ func (e *Engine) metricStepWriteFailed(ctx context.Context, taskName string) {
 		return
 	}
 	e.metrics.stepsWriteFailed.Add(ctx, 1, metric.WithAttributes(attribute.String("task_name", taskName)))
+}
+
+// metricStepClaimLost records a claim CAS that matched no row. Unlabelled: a lost claim knows only the
+// step id it failed on - the task name lives in the row it did not get to read - and the useful reading
+// is fleet-wide anyway (the ratio against dwarf_steps_executed).
+func (e *Engine) metricStepClaimLost(ctx context.Context) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.stepsClaimLost.Add(ctx, 1)
+}
+
+// metricStepClaimPreempted records a candidate dropped before its claim, the saving that pairs with
+// metricStepClaimLost. Unlabelled for the same reason: the useful reading is the fleet-wide rate.
+func (e *Engine) metricStepClaimPreempted(ctx context.Context) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.stepsClaimPreempted.Add(ctx, 1)
 }
 
 func (e *Engine) metricStepUnwedged(ctx context.Context, parkType string) {

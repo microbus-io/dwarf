@@ -47,6 +47,15 @@ func (e *Engine) workerLoop(ctx context.Context) {
 			return
 		}
 		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.StepID, "shard", j.Shard, "needRefill", needRefill)
+		// A sibling worker in this process already has a claim CAS in flight on this step - the refiller
+		// re-selected it because the uncommitted claim still reads `pending`. Popping the next candidate
+		// costs nothing; issuing the claim would cost a round trip to be told we lost. Checked HERE rather
+		// than inside processStep so a skip does not pay for its setup, and the cache has already removed
+		// the entry, so nothing re-pops it this generation.
+		if !e.beginClaim(j.Shard, j.StepID) {
+			e.metricStepClaimPreempted(ctx)
+			continue
+		}
 		err := errors.CatchPanic(func() error {
 			return e.processStep(ctx, j.StepID, j.Shard)
 		})
@@ -518,6 +527,31 @@ type bandKeyAgg struct {
 // single-key flood scan millions of rows every pass). See engine/CLAUDE.md "The scan is capped, not
 // exact" for the cross-dialect rationale (why COUNT(*) OVER was O(backlog), why rn<=cap is the fix, and
 // why the sibling phase-3 window was left alone).
+// partitionPredicate restricts a selection scan to this replica's residue class of step_id, so R
+// replicas sharing a database select DISJOINT candidates instead of racing for the same rows. It
+// returns ("", nil) - selecting everything, exactly as before replicas were partitioned - whenever
+// partitioning must not apply (a solo replica, or an ordinal this replica cannot determine).
+//
+// WHY IT IS NEEDED AT ALL. planBatch's key pick is independently random per replica, but within a key
+// the fetch is deterministic (`ORDER BY created_at, step_id`), so every replica that picks a key
+// fetches the SAME oldest rows and all but one lose the claim CAS. Measured: claim miss rose 25% -> 63%
+// from R=1 to R=8 while throughput FELL 42%, because a lost claim is a full round trip that produces no
+// work. Sizing the candidate cache down by R (poolsize.go) bounds how many candidates a replica holds
+// but not WHICH, so it does not help; disjoint selection does.
+//
+// `step_id % R` is not sargable - the scan still walks the band and filters - so this reduces claims,
+// not scan cost. That is the intended trade: the scan was never the contended resource.
+//
+// The residue class is a RESIDENCY, not a lock: the claim CAS remains the only thing that grants a
+// step, so a stale or overlapping (R, ordinal) costs a lost claim, never correctness.
+func (e *Engine) partitionPredicate() (string, []any) {
+	replicas, ordinal, ok := e.observedPartition()
+	if !ok {
+		return "", nil
+	}
+	return " AND step_id % ? = ?", []any{replicas, ordinal}
+}
+
 func (e *Engine) scanShardBandKeys(ctx context.Context, shard int) (band int, rows []censusRow, err error) {
 	// faultRefillScanErr simulates the band scan failing so the test proves runShardRefill logs and
 	// shortens the next poll (re-scan soon) instead of refilling empty and idling the shard's workers.
@@ -535,6 +569,15 @@ func (e *Engine) scanShardBandKeys(ctx context.Context, shard int) (band int, ro
 	// age/weight (the weight the picker must use). All inner rows are filtered to the min band, so
 	// MAX(priority) is that band. On Postgres the rn<=? cut becomes a run-condition early-stop; on the
 	// other dialects it still avoids the extra COUNT(*) OVER aggregation pass (see engine/CLAUDE.md).
+	// The partition filters the ROWS this replica censuses, but deliberately NOT the MIN(priority)
+	// subquery: the band is a cluster-wide fact (strict priority is global), so mining it from one
+	// replica's slice would let replicas disagree on which band is open. A replica holding nothing at
+	// the global band therefore censuses zero rows and parks - correct, since its own work is at a worse
+	// band that must not be served until the better one drains.
+	part, partArgs := e.partitionPredicate()
+	scanArgs := make([]any, 0, len(partArgs)+1)
+	scanArgs = append(scanArgs, partArgs...)
+	scanArgs = append(scanArgs, e.cache.Capacity())
 	qrows, err := db.QueryContext(ctx,
 		"SELECT fairness_key, MAX(rn) AS cnt,"+
 			" MAX(CASE WHEN rn=1 THEN age_ms ELSE NULL END) AS age_ms,"+
@@ -546,10 +589,11 @@ func (e *Engine) scanShardBandKeys(ctx context.Context, shard int) (band int, ro
 			" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
 			" FROM dwarf_steps"+
 			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
+			part+
 			" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
 			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC())"+
 			") t WHERE rn<=? GROUP BY fairness_key",
-		e.cache.Capacity(),
+		scanArgs...,
 	)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
@@ -758,11 +802,16 @@ func (e *Engine) fetchShardBandSteps(ctx context.Context, shard int, band int, c
 	started := time.Now()
 	defer func() { e.metricRefillQuery(ctx, shard, refillPhaseFetchSteps, time.Since(started)) }()
 	placeholders := strings.Repeat("?,", len(chosen)-1) + "?"
-	args := make([]any, 0, len(chosen)+2)
+	// The SAME partition the census used. Phase 1 alone would not do: it only shapes the per-key counts,
+	// while THIS query returns the step ids the workers claim - unfiltered, every replica would fetch the
+	// same globally-oldest rows per key and collide exactly as before.
+	part, partArgs := e.partitionPredicate()
+	args := make([]any, 0, len(chosen)+len(partArgs)+2)
 	args = append(args, band)
 	for _, k := range chosen {
 		args = append(args, k)
 	}
+	args = append(args, partArgs...)
 	args = append(args, perKey)
 	// Band is bound (priority=?), not the min-subquery: the plan committed to this band, and re-mining
 	// here could pick a lower band that arrived between phases and mismatch the chosen keys. A binding
@@ -775,6 +824,7 @@ func (e *Engine) fetchShardBandSteps(ctx context.Context, shard int, band int, c
 			" FROM dwarf_steps"+
 			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
 			" AND priority=? AND fairness_key IN ("+placeholders+")"+
+			part+
 			") t WHERE rn<=? ORDER BY step_id",
 		args...,
 	)
@@ -1130,3 +1180,76 @@ const (
 	refillPhaseBandKeys   = "band_keys"   // phase 1: one aggregate row per fairness key at the min due band
 	refillPhaseFetchSteps = "fetch_steps" // phase 3: the selected steps for the chosen keys
 )
+
+// stepRef identifies one step across the whole fleet. The shard is part of the key, not decoration:
+// step_id is a per-shard auto-increment, so every shard has a step 42 and a step-id-only key would make
+// shard 2's step 42 look in-flight because shard 1's is - silently skipping live candidates on every
+// shard but one.
+type stepRef struct {
+	shard  int
+	stepID int
+}
+
+// beginClaim reserves the right to run the claim CAS for one step within THIS replica, reporting false
+// when a sibling worker already has one in flight for it. The check and the insert are one critical
+// section: split, two workers could both read "free" and both proceed, which is the race this closes.
+//
+// A false return means "pop something else", never "this step is taken" - the step may still be pending
+// (the sibling's CAS can lose to a peer, or find the row cancelled), and the next refill re-selects it.
+func (e *Engine) beginClaim(shard, stepID int) bool {
+	ref := stepRef{shard: shard, stepID: stepID}
+	now := time.Now()
+	e.claimsLock.Lock()
+	defer e.claimsLock.Unlock()
+	if until, held := e.claimsInFlight[ref]; held && now.Before(until) {
+		return false
+	}
+	// The expiry is what makes this safe to be advisory: a reservation can only ever DELAY a dispatch of
+	// its step by this replica, never prevent one. Past it a sibling simply takes the step and the CAS
+	// arbitrates - i.e. exactly the behaviour that predates this map.
+	e.claimsInFlight[ref] = now.Add(claimReservationTTL)
+	e.sweepExpiredClaimsLocked(now)
+	return true
+}
+
+// claimReservationTTL is how long a reservation stands. It is a TIMEOUT, not a lifetime tied to the
+// step, and BOTH halves of that are load-bearing:
+//
+//   - It must OUTLAST the step's claim, because the gap to cover runs from SELECTION to POP: the refiller
+//     selects a step whose claim is uncommitted, the entry sits in the cache, and it is popped some time
+//     later. Releasing when the CAS returns was built and measured and barely worked (7.3% -> 5.7%) - by
+//     pop time the reservation was already gone.
+//   - It must NOT last as long as the STEP, which was the next thing tried and is worse: a worker parked
+//     in a long ExecuteTask would hold its reservation for the whole task, and if that step's lease
+//     expired meanwhile (an overrun, a DB clock step) NO sibling worker could re-claim it - single-replica
+//     lease recovery stops working. Caught by TestLeaseFence_CompletionNoDuplicateSuccessor, whose blocked
+//     first dispatch is exactly that shape.
+//
+// So it is sized against the window it must span - one round trip plus roughly one refill cycle, tens of
+// ms - with a wide margin, and kept far below leaseMargin (30s) so it can never be the reason a
+// lease-recovered step fails to re-dispatch promptly. A var, not a const, only so a test can shorten it.
+var claimReservationTTL = time.Second
+
+// sweepExpiredClaimsLocked drops expired entries once the map has grown past what live dispatch can
+// account for. Without it a leaked entry is inert but immortal, so a long-lived process would accrete
+// them; the size gate keeps the O(n) walk off the common path, where the map holds at most one entry per
+// busy worker. Caller holds claimsLock.
+func (e *Engine) sweepExpiredClaimsLocked(now time.Time) {
+	if len(e.claimsInFlight) <= 4*int(e.workers.Load()) {
+		return
+	}
+	for ref, until := range e.claimsInFlight {
+		if !now.Before(until) {
+			delete(e.claimsInFlight, ref)
+		}
+	}
+}
+
+// endClaim drops a reservation early. Nothing on the dispatch path calls it - reservations expire on
+// their own (see claimReservationTTL) - it exists for tests and for any future site that knows a step is
+// settled sooner than the TTL.
+func (e *Engine) endClaim(shard, stepID int) {
+	e.claimsLock.Lock()
+	delete(e.claimsInFlight, stepRef{shard: shard, stepID: stepID})
+	e.claimsLock.Unlock()
+}

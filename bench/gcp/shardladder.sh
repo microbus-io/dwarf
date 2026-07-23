@@ -170,6 +170,17 @@ for rep in $(seq 1 "$REPS"); do
     echo "-- ${tag}"
     "$BENCH" "${args[@]}"
 
+    # Read the peer registry BEFORE dropping. The fresh database above already guarantees an empty
+    # dwarf_peers (the table does not exist until migrations recreate it), so this asserts that
+    # guarantee rather than establishing it - but the failure it guards against is severe and silent:
+    # a replica row that outlives its engine inflates the observed R, halves every derived pool, and
+    # craters throughput (~180 vs ~7,500 steps/s, results/10-fanout-fix-degradation-20260722). This
+    # ladder runs one engine, so a clean run must leave exactly 0 rows after graceful deregistration.
+    for i in $(seq 0 $((arm - 1))); do
+      left=$(psq "$(dsn_with_db "${DSNS[$i]}" "$db")" "SELECT COUNT(*) FROM dwarf_peers" 2>/dev/null || echo "?")
+      [[ "$left" == "0" ]] || echo "   WARNING: shard $((i + 1)) left ${left} dwarf_peers row(s) after shutdown"
+    done
+
     # Reclaim immediately: an accumulating instance is control 1's whole point, and the next arm
     # runs on these same instances.
     for i in $(seq 0 $((arm - 1))); do

@@ -200,7 +200,20 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if n == 0 || flowID == 0 {
+	if n == 0 {
+		// A lost claim is routine, not an error: the candidate cache holds hints, not ownership, so the row
+		// may have been claimed by a peer or left the claimable state between selection and claim. Counted
+		// because the RATE is the lease-contention signal - it is the one cost of overlapping candidate
+		// selection that no other instrument sees (refill waste counts candidates dropped before dispatch,
+		// not round trips spent losing the CAS).
+		//
+		// Gated on n==0 ALONE, not on the flowID==0 arm below: on the MySQL path a successful claim (n==1)
+		// whose follow-up read finds no row leaves flowID at 0, and counting that as a lost claim would
+		// attribute a read miss to contention - in the one instrument whose whole purpose is attribution.
+		e.metricStepClaimLost(ctx)
+		return nil
+	}
+	if flowID == 0 {
 		return nil
 	}
 

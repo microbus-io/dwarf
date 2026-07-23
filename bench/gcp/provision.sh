@@ -7,7 +7,8 @@
 # host. Idempotent-ish: each resource is skipped if it already exists.
 #
 # Billable resources: the Cloud SQL instance and the VM. Tear down with
-# teardown.sh at the end of every session.
+# teardown.sh at the end of every session. Note DB_DISK_GB defaults to 1TB
+# (see below) - a multi-shard ladder provisions that per instance.
 #
 # Usage:
 #   DB_PASSWORD=... ./provision.sh
@@ -22,7 +23,12 @@ ZONE="${ZONE:-${REGION}-a}"
 NETWORK="dwarf-bench-net"
 DB_INSTANCE="${DB_INSTANCE:-dwarf-bench-db}"
 DB_TIER="${DB_TIER:-db-custom-2-8192}"   # baseline: 2 vCPU / 8GB
-DB_DISK_GB="${DB_DISK_GB:-100}"          # disk size is the IOPS proxy on Cloud SQL
+# Disk size is the IOPS proxy on Cloud SQL: PD-SSD provisions ~30 IOPS/GB, so the former 100GB default
+# capped a rig at ~3,000 IOPS. That was enough for linear load (whose write-IOPS peaked at half the
+# budget) but throttled every write-heavy fan-out fill, and it manufactured a "volume cliff" at ~16M
+# rows that vanished on a 1TB disk. 1TB gives ~30,000 IOPS - deliberately not the binding resource, so
+# a campaign measures the engine rather than the disk. Drop it only to measure the disk on purpose.
+DB_DISK_GB="${DB_DISK_GB:-1000}"
 DB_MAX_CONNECTIONS="${DB_MAX_CONNECTIONS:-}" # empty = tier default
 VM_NAME="${VM_NAME:-dwarf-bench-vm}"
 VM_TYPE="${VM_TYPE:-c4a-standard-4}"     # baseline host: 4 vCPU ARM

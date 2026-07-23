@@ -14,27 +14,31 @@
 
 -- DRIVER: mysql
 CREATE TABLE IF NOT EXISTS dwarf_peers (
-    engine_id BIGINT      NOT NULL,
-    seen_at   DATETIME(3) NOT NULL DEFAULT NOW_UTC(),
+    engine_id  BIGINT      NOT NULL,
+    seen_at    DATETIME(3) NOT NULL DEFAULT NOW_UTC(),
+    dispatches TINYINT     NOT NULL DEFAULT 1,
     PRIMARY KEY (engine_id)
 );
 
 -- DRIVER: pgx
 CREATE TABLE IF NOT EXISTS dwarf_peers (
-    engine_id BIGINT      NOT NULL,
-    seen_at   TIMESTAMPTZ NOT NULL DEFAULT NOW_UTC(),
+    engine_id  BIGINT      NOT NULL,
+    seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW_UTC(),
+    dispatches SMALLINT    NOT NULL DEFAULT 1,
     PRIMARY KEY (engine_id)
 );
 
 -- DRIVER: mssql
 CREATE TABLE dwarf_peers (
-    engine_id BIGINT       NOT NULL,
-    seen_at   DATETIME2(3) NOT NULL DEFAULT NOW_UTC(),
+    engine_id  BIGINT       NOT NULL,
+    seen_at    DATETIME2(3) NOT NULL DEFAULT NOW_UTC(),
+    dispatches TINYINT      NOT NULL DEFAULT 1,
     PRIMARY KEY (engine_id)
 );
 
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_peers (
-    engine_id INTEGER  NOT NULL PRIMARY KEY,
-    seen_at   DATETIME NOT NULL DEFAULT NOW_UTC()
+    engine_id  INTEGER  NOT NULL PRIMARY KEY,
+    seen_at    DATETIME NOT NULL DEFAULT NOW_UTC(),
+    dispatches INTEGER  NOT NULL DEFAULT 1
 );

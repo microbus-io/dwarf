@@ -131,12 +131,40 @@ type Engine struct {
 	// bumps walk UP and stay DB-serialized, which is why one leaf-level stripe per worker cannot form a cycle.
 	cohortLocks [cohortLockStripes]sync.Mutex
 
+	// claimsInFlight holds the steps this replica has a claim CAS in flight on - the intra-peer half of
+	// candidate de-duplication, whose cross-peer half is the step_id partition (see partitionPredicate).
+	//
+	// It exists because the selection predicate filters COMMITTED state: a claim that has been issued but
+	// not committed still reads `pending` with a free lease, so the refiller's next pass legitimately
+	// re-selects it and a second worker pays a full round trip to lose the CAS. No SQL filter can see an
+	// uncommitted write; only this process knows. Measured at R=1 (no peers at all): 7.3% of claims wasted
+	// when scanning flat-out, and 0% once passes are spaced past the in-flight window - so the whole
+	// baseline is this one effect.
+	//
+	// Same move as cohortLocks: keep the database row as the source of truth and use a Go structure to
+	// avoid paying a round trip to rediscover what this process already knows. Strictly ADVISORY - the CAS
+	// remains the only thing that grants a step, so a missed entry costs one wasted round trip (today's
+	// behaviour) and a stale one costs a skipped candidate the next pass re-selects. Neither is a
+	// correctness question, which is what keeps this consistent with the cache's hints-not-ownership rule.
+	claimsLock     sync.Mutex
+	claimsInFlight map[stepRef]time.Time
+
 	// Peer discovery: the observed replica count R, read from the shared dwarf_peers registry by the
 	// Startup discovery and the heartbeat loop (see peers.go). R divides the derived per-shard
 	// connection pools - a lookup, not a control loop. peersStop/peersLoop drive the heartbeat.
 	observedR atomic.Int32
-	peersStop chan struct{}
-	peersLoop sync.WaitGroup
+	// observedOrdinal is this engine's 0-based position in the SAME fresh-peer roster observedR was counted
+	// from, engine_id-sorted - the other half of the (R, ordinal) pair that partitions candidate selection
+	// across replicas (see partitionPredicate). -1 means "unknown" (self absent from the roster), which
+	// DISABLES partitioning rather than guessing: a wrong ordinal strands a slice, while no partitioning
+	// only restores the overlapping-selection behaviour that predates it.
+	observedOrdinal atomic.Int32
+	// observedDispatchers is how many of those peers actually claim work (dispatches=1). It is the
+	// partition divisor, deliberately distinct from observedR: an await-only replica holds connections
+	// (so it divides the pools) but selects nothing (so it must not own a slice of the candidates).
+	observedDispatchers atomic.Int32
+	peersStop           chan struct{}
+	peersLoop       sync.WaitGroup
 	// lastAppliedR is the replica count the pools were last derived with, to skip no-op recomputes.
 	lastAppliedR atomic.Int32
 	// poolsLock serializes every APPLICATION of a pool size - the derived recompute (recomputePools) and
@@ -274,6 +302,7 @@ func NewEngine() *Engine {
 	e := &Engine{
 		logger:         slog.New(slog.DiscardHandler),
 		lastRefillBand: -1,
+		claimsInFlight: map[stepRef]time.Time{},
 	}
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))

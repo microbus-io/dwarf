@@ -19,7 +19,9 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 	"time"
 
@@ -179,6 +181,31 @@ func (e *Engine) observedReplicas() int {
 	return max(1, int(e.observedR.Load()))
 }
 
+// observedPartition returns the (R, ordinal) pair that partitions candidate selection across replicas,
+// or ok=false when selection must NOT be partitioned - a solo replica (nothing to divide) or an unknown
+// ordinal (self missing from the roster). Both halves come from ONE roster read: deriving R from one
+// shard's count and the ordinal from another's list could place two replicas on the same ordinal, or
+// leave a residue class owned by nobody.
+func (e *Engine) observedPartition() (replicas, ordinal int, ok bool) {
+	// The DISPATCHER count, not R: R divides connection pools (every peer holds connections), while this
+	// divides work (only peers with workers ever claim it). Using R here would assign a residue class to
+	// an await-only replica, and nothing would ever select it.
+	d := int(e.observedDispatchers.Load())
+	o := int(e.observedOrdinal.Load())
+	if d < 2 || o < 0 || o >= d {
+		return d, 0, false
+	}
+	return d, o, true
+}
+
+// rosterOrdinal finds engineID's 0-based position among engine_id-sorted ids, or -1 when absent. The
+// sort is what makes the assignment agree across replicas without any coordination: every replica reads
+// the same registry rows and orders them the same way, so each computes a distinct ordinal from the
+// same list.
+func rosterOrdinal(ids []int64, engineID int64) int {
+	return slices.Index(ids, engineID)
+}
+
 // peerFreshWindow / peerStragglerAge are derived from the heartbeat cadence: a replica beating every
 // pingInterval is COUNTED while its row is younger than 4x the cadence (so up to ~3 missed beats are
 // tolerated before it drops out - a crashed peer's row, whose owner never sends goodbye, ages out of
@@ -194,7 +221,11 @@ func (e *Engine) peerStragglerAge() time.Duration { return 8 * e.pingInterval }
 // come from the database clock (NOW_UTC()), never a bound Go time, so every shard's freshness compare
 // runs on one clock.
 func (e *Engine) upsertSelf(ctx context.Context, db *sequel.DB) error {
-	res, err := db.ExecContext(ctx, "UPDATE dwarf_peers SET seen_at=NOW_UTC() WHERE engine_id=?", e.engineID)
+	// dispatches rides every heartbeat rather than only the INSERT, so a replica that changes its worker
+	// count (SetWorkers on a live engine, or the derived ceiling landing after Startup) republishes it
+	// without waiting for its row to be pruned and re-inserted.
+	res, err := db.ExecContext(ctx,
+		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), dispatches=? WHERE engine_id=?", e.dispatchesFlag(), e.engineID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -207,7 +238,8 @@ func (e *Engine) upsertSelf(ctx context.Context, db *sequel.DB) error {
 	if n > 0 {
 		return nil
 	}
-	_, err = db.ExecContext(ctx, "INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (?, NOW_UTC())", e.engineID)
+	_, err = db.ExecContext(ctx,
+		"INSERT INTO dwarf_peers (engine_id, seen_at, dispatches) VALUES (?, NOW_UTC(), ?)", e.engineID, e.dispatchesFlag())
 	return errors.Trace(err)
 }
 
@@ -223,36 +255,108 @@ func (e *Engine) registerSelf(ctx context.Context) error {
 
 // maxReplicaCount folds per-shard fresh counts into R, never below 1 (this replica's own row is always
 // fresh; a transient shard miss only under-counts, which grows pools - the safe direction).
-func maxReplicaCount(counts []int) int {
-	r := 1
-	for _, n := range counts {
-		r = max(r, n)
+// shardRoster is one shard's view of the fleet: the engine_id-sorted fresh peers, and how stale that
+// view is (the age of its most recent heartbeat).
+type shardRoster struct {
+	// ids is every fresh peer - what R (the pool divisor) counts, since an await-only replica still holds
+	// connections. dispatchers is the subset with workers, which is what the candidate partition divides.
+	ids         []int64
+	dispatchers []int64
+	// freshest is ms since this shard's newest heartbeat; math.MaxFloat64 when the shard reported none.
+	// float64 because DATE_DIFF_MILLIS is fractional on SQLite (scanning it into an int64 fails outright),
+	// the same type censusRow.ageMs carries for the identical expression.
+	freshest float64
+}
+
+// freshestRoster picks the shard whose registry saw a heartbeat most recently, and returns that shard's
+// roster whole. Picking ONE shard's view is the point: R is its length and the ordinal is a position
+// within it, so assembling them from two shards could seat two replicas on one ordinal or leave a
+// residue class owned by nobody.
+//
+// Ranked on AGE, never on raw seen_at. Every shard stamps its own NOW_UTC(), so timestamps are not
+// comparable across shards - a shard whose clock runs fast would always look freshest and would win
+// every pick regardless of its actual staleness. `NOW_UTC() - seen_at` puts both terms on one shard's
+// clock, so the offset cancels exactly (the same cancellation the refiller's per-shard age relies on).
+// Ties break on the lexicographically smaller roster so every replica resolves an exact tie identically.
+func freshestRoster(rosters []shardRoster) shardRoster {
+	best := -1
+	for i, r := range rosters {
+		if len(r.ids) == 0 {
+			continue
+		}
+		if best < 0 || r.freshest < rosters[best].freshest ||
+			(r.freshest == rosters[best].freshest && slices.Compare(r.ids, rosters[best].ids) < 0) {
+			best = i
+		}
 	}
-	return r
+	if best < 0 {
+		return shardRoster{}
+	}
+	return rosters[best]
+}
+
+// dispatchesFlag reports whether this replica claims work at all. An await-only replica (SetWorkers(0))
+// holds connections - so it still counts toward R, which divides the pools - but selects nothing, so it
+// must be excluded from the candidate partition: a residue class assigned to it would never be served.
+func (e *Engine) dispatchesFlag() int {
+	if e.workers.Load() > 0 {
+		return 1
+	}
+	return 0
+}
+
+// scanFreshPeers reads one shard's engine_id-sorted roster of peers inside peerFreshWindow, plus the age
+// of its newest heartbeat. ORDER BY in SQL rather than in Go so the ordering is the database's, identical
+// for every replica reading the same rows - which is what lets each replica compute a distinct ordinal
+// from the same list with no coordination.
+func (e *Engine) scanFreshPeers(ctx context.Context, db *sequel.DB, freshMs int64) (shardRoster, error) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT engine_id, dispatches, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS age_ms FROM dwarf_peers"+
+			" WHERE seen_at > DATE_ADD_MILLIS(NOW_UTC(), ?) ORDER BY engine_id", -freshMs,
+	)
+	if err != nil {
+		return shardRoster{}, errors.Trace(err)
+	}
+	defer rows.Close()
+	roster := shardRoster{freshest: math.MaxFloat64}
+	for rows.Next() {
+		var id int64
+		var dispatches int
+		var ageMs float64
+		if err := rows.Scan(&id, &dispatches, &ageMs); err != nil {
+			return shardRoster{}, errors.Trace(err)
+		}
+		roster.ids = append(roster.ids, id)
+		if dispatches > 0 {
+			roster.dispatchers = append(roster.dispatchers, id)
+		}
+		roster.freshest = min(roster.freshest, ageMs)
+	}
+	if err := rows.Err(); err != nil {
+		return shardRoster{}, errors.Trace(err)
+	}
+	return roster, nil
 }
 
 // readReplicaCount reads R from the registry: COUNT of rows seen within peerFreshWindow on each shard
 // (parallel via OnEach), taking the MAX across shards. Pure read - no write, no prune - so it is the
 // path the peersChanged nudge and the Startup post-settle read use.
-func (e *Engine) readReplicaCount(ctx context.Context) (int, error) {
+func (e *Engine) readReplicaCount(ctx context.Context) (shardRoster, error) {
 	freshMs := e.peerFreshWindow().Milliseconds()
 	indices, pos := e.shardOrdinals()
-	counts := make([]int, len(indices))
+	rosters := make([]shardRoster, len(indices))
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		var n int
-		err := db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM dwarf_peers WHERE seen_at > DATE_ADD_MILLIS(NOW_UTC(), ?)", -freshMs,
-		).Scan(&n)
+		roster, err := e.scanFreshPeers(ctx, db, freshMs)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		counts[pos[shard]] = n
+		rosters[pos[shard]] = roster
 		return nil
 	})
 	if err != nil {
-		return 0, errors.Trace(err)
+		return shardRoster{}, errors.Trace(err)
 	}
-	return maxReplicaCount(counts), nil
+	return freshestRoster(rosters), nil
 }
 
 // heartbeatPeers is the heartbeat's single per-shard pass: upsert self, read the fresh AND stale counts
@@ -267,28 +371,33 @@ func (e *Engine) readReplicaCount(ctx context.Context) (int, error) {
 // Pruning is pure hygiene - the fresh filter already excludes stale rows from the count - so a delayed
 // or skipped prune is harmless; a solo replica (R=1) always wins the roll, so its own restart stragglers
 // never linger. The stale count rides the same scan that reads R, so this costs no extra round trip.
-func (e *Engine) heartbeatPeers(ctx context.Context) (int, error) {
+func (e *Engine) heartbeatPeers(ctx context.Context) (shardRoster, error) {
 	freshMs := e.peerFreshWindow().Milliseconds()
 	straggleMs := e.peerStragglerAge().Milliseconds()
 	indices, pos := e.shardOrdinals()
-	counts := make([]int, len(indices))
+	rosters := make([]shardRoster, len(indices))
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		if err := e.upsertSelf(ctx, db); err != nil {
 			return errors.Trace(err)
 		}
-		var fresh, stale int
-		err := db.QueryRowContext(ctx,
-			"SELECT"+
-				" COALESCE(SUM(CASE WHEN seen_at > DATE_ADD_MILLIS(NOW_UTC(), ?) THEN 1 ELSE 0 END), 0),"+
-				" COALESCE(SUM(CASE WHEN seen_at <= DATE_ADD_MILLIS(NOW_UTC(), ?) THEN 1 ELSE 0 END), 0)"+
-				" FROM dwarf_peers",
-			-freshMs, -straggleMs,
-		).Scan(&fresh, &stale)
+		// The roster replaces the fresh COUNT: it carries the same number (its length) plus the identities
+		// the ordinal needs, so this still costs one scan. The stale count keeps its own aggregate, which
+		// cannot ride the roster query - stale rows are excluded from it by construction.
+		roster, err := e.scanFreshPeers(ctx, db, freshMs)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		counts[pos[shard]] = fresh
-		if stale > 0 && rand.IntN(max(1, fresh)) == 0 {
+		var stale int
+		err = db.QueryRowContext(ctx,
+			"SELECT COALESCE(SUM(CASE WHEN seen_at <= DATE_ADD_MILLIS(NOW_UTC(), ?) THEN 1 ELSE 0 END), 0)"+
+				" FROM dwarf_peers",
+			-straggleMs,
+		).Scan(&stale)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		rosters[pos[shard]] = roster
+		if stale > 0 && rand.IntN(max(1, len(roster.ids))) == 0 {
 			_, err := db.ExecContext(ctx,
 				"DELETE FROM dwarf_peers WHERE seen_at < DATE_ADD_MILLIS(NOW_UTC(), ?)", -straggleMs)
 			if err != nil {
@@ -298,15 +407,26 @@ func (e *Engine) heartbeatPeers(ctx context.Context) (int, error) {
 		return nil
 	})
 	if err != nil {
-		return 0, errors.Trace(err)
+		return shardRoster{}, errors.Trace(err)
 	}
-	return maxReplicaCount(counts), nil
+	return freshestRoster(rosters), nil
 }
 
 // applyReplicaCount stores R and recomputes the pools. recomputePools dedupes on lastAppliedR, so an
 // unchanged R is a cheap no-op; it also early-returns under a SetMaxOpenConns override.
-func (e *Engine) applyReplicaCount(r int) {
-	e.observedR.Store(int32(r))
+func (e *Engine) applyReplicaCount(roster shardRoster) {
+	// Store the ordinal BEFORE R. Both are read together by observedPartition, and the pair is only ever
+	// used to EXCLUDE rows: publishing a stale-low ordinal against a fresh-high R is inert (it selects a
+	// residue class this replica already owned), while a stale-high ordinal against a fresh-low R would
+	// fail the o<r bound and disable partitioning - the safe direction either way.
+	if len(roster.ids) == 0 {
+		// A transient read miss: keep the last good triple rather than collapsing to R=1, which would
+		// re-expand the pools on a blip.
+		return
+	}
+	e.observedOrdinal.Store(int32(rosterOrdinal(roster.dispatchers, e.engineID)))
+	e.observedDispatchers.Store(int32(len(roster.dispatchers)))
+	e.observedR.Store(int32(max(1, len(roster.ids))))
 	e.recomputePools()
 }
 
@@ -314,12 +434,12 @@ func (e *Engine) applyReplicaCount(r int) {
 // error is logged and dropped (R is a tuning number; the next heartbeat retries), never disturbing the
 // last good count.
 func (e *Engine) refreshReplicaCount(ctx context.Context) {
-	r, err := e.readReplicaCount(ctx)
+	roster, err := e.readReplicaCount(ctx)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "Reading peer replica count", "error", err)
 		return
 	}
-	e.applyReplicaCount(r)
+	e.applyReplicaCount(roster)
 }
 
 // discoverReplicasAtStartup registers this replica in the registry, nudges peers to re-read it, waits
@@ -339,8 +459,8 @@ func (e *Engine) discoverReplicasAtStartup(ctx context.Context, override int) in
 	if override > 0 {
 		// Pools are pinned to the override and never divided by R, so there is nothing to settle for or
 		// size from. Still register (above) so peers count this replica against the server budget.
-		if r, err := e.readReplicaCount(ctx); err == nil {
-			return r
+		if roster, err := e.readReplicaCount(ctx); err == nil {
+			return max(1, len(roster.ids))
 		}
 		return 1
 	}
@@ -354,12 +474,16 @@ func (e *Engine) discoverReplicasAtStartup(ctx context.Context, override int) in
 		case <-time.After(startupPeerSettle):
 		}
 	}
-	r, err := e.readReplicaCount(ctx)
+	roster, err := e.readReplicaCount(ctx)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "Reading peer replica count at startup", "error", err)
 		return 1
 	}
-	return r
+	// Startup seeds the ordinal too: the refiller may run before the first heartbeat, and an unset
+	// ordinal would leave partitioning disabled for a whole ping interval.
+	e.observedOrdinal.Store(int32(rosterOrdinal(roster.dispatchers, e.engineID)))
+	e.observedDispatchers.Store(int32(len(roster.dispatchers)))
+	return max(1, len(roster.ids))
 }
 
 // runPeersLoop is the heartbeat: every pingInterval, upsert this replica's row + prune dead rows, then
@@ -377,12 +501,12 @@ func (e *Engine) runPeersLoop() {
 		case <-ticker.C:
 		}
 		// One pass: upsert + read R + conditional prune. Apply the fresh count directly (no separate read).
-		r, err := e.heartbeatPeers(e.lifetimeCtx)
+		roster, err := e.heartbeatPeers(e.lifetimeCtx)
 		if err != nil {
 			e.logger.ErrorContext(e.lifetimeCtx, "Peer heartbeat", "error", err)
 			continue
 		}
-		e.applyReplicaCount(r)
+		e.applyReplicaCount(roster)
 	}
 }
 

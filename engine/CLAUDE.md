@@ -1093,6 +1093,100 @@ flows in a real multi-tenant engine, which the bench cannot see.
   single-transaction coupling of (own result + arrival) is the same invariant the reverted redesign's
   commit-before-count wrestled with. Serialize-only keeps it intact, and connection occupancy was the whole cost.
 
+### Candidate de-duplication: the partition (cross-peer) and the claim map (intra-peer)
+
+A candidate the refiller selects can be one another worker is already claiming, and every such duplicate
+costs a **full dispatch round trip to be told it lost the CAS**. There are two distinct sources, they need
+two distinct mechanisms, and each is useless against the other's case:
+
+- **Cross-peer.** `planBatch`'s key pick is independently random per replica, but *within* a key the fetch
+  is deterministic (`ORDER BY created_at, step_id`), so every replica that picks a key fetches the SAME
+  oldest rows. Handled by `partitionPredicate` - `AND step_id % R = ordinal` in **both** phase 1 (so the
+  census reflects the owned slice) and phase 3 (so the fetched ids actually are owned). Phase 1 alone is
+  not enough: it only shapes per-key counts, while phase 3 returns the ids workers claim.
+- **Intra-peer.** The selection predicate filters **committed** state, and a claim that has been issued
+  but not committed still reads `pending` with a free lease. So *this* replica's own next pass legitimately
+  re-selects a step *this* replica is mid-claim on. No SQL filter can see an uncommitted write - only the
+  process can. Handled by `beginClaim`/`endClaim` over `claimsInFlight`.
+
+Both are **advisory**: the claim CAS remains the only thing that grants a step, so a stale or missing entry
+costs a wasted round trip or a deferred dispatch, never correctness. That is the same posture as the
+candidate cache holding "hints, not ownership", and it is what keeps either mechanism from becoming a
+distributed lock.
+
+**Three metrics price the three stages of candidate waste, and they are not interchangeable:**
+`dwarf_refill_candidates_discarded` (selected, never popped - refiller oversupply),
+`dwarf_steps_claim_preempted` (popped, skipped before any claim - round trips SAVED by the map), and
+`dwarf_steps_claim_lost` (popped, claimed, lost the CAS - round trips WASTED). A healthy engine converts
+what would have been *lost* into *preempted*; comparing the two is how you tell the map is working rather
+than over-suppressing.
+
+**Measured (local Postgres, `linear`, 256 keys).** Cross-peer: claim miss at R=2 fell **41.3% -> 11.6%**,
+and with re-delivery suppressed (a 250ms scan floor, where the R=1 baseline is 0%) R=2 measures **0.12%** -
+peer contention eliminated, and R=2 throughput goes **flat** against R=1 (×1.04), which is the correct
+outcome for replicas sharing one database's fixed capacity. Intra-peer: at a 0ms floor (scanning flat out)
+claim miss fell **7.3% -> 0.1%** at unchanged throughput.
+
+**The reservation is a TIMEOUT (`claimReservationTTL`, 1s), not a lifetime tied to the step. Both bounds
+were established by breaking them:**
+
+- **Too short - releasing when the CAS returns** was built and measured and barely worked (7.3% -> 5.7%).
+  The gap to span runs from SELECTION to POP, not the round trip between them: the refiller selects a step
+  whose claim is uncommitted, the entry sits in the cache, and by pop time a CAS-scoped reservation is long
+  gone. The window is ~one round trip plus roughly one refill cycle - tens of ms.
+- **Too long - holding for the whole STEP** was tried next and is worse. A worker parked in a long
+  `ExecuteTask` keeps its reservation for the entire task, so if that step's lease expires meanwhile (an
+  overrun, a DB clock step) **no sibling worker can re-claim it and single-replica lease recovery stops
+  working**. Caught by `TestLeaseFence_CompletionNoDuplicateSuccessor`, whose blocked first dispatch is
+  exactly that shape. Step-scoped only appeared to work because steps in that benchmark take ~15ms; it is
+  workload-dependent and unbounded above.
+
+So the TTL is sized against the window it must span, with a wide margin, and kept **far below
+`leaseMargin` (30s)** so it can never be the reason a lease-recovered step fails to re-dispatch promptly -
+an invariant pinned by `TestClaimReservation_DoesNotOutlastALease`. Nothing on the dispatch path releases
+early; entries expire on their own, and `sweepExpiredClaimsLocked` drops them once the map outgrows what
+live dispatch accounts for, so memory is bounded too. The expiry is what makes the whole thing safe to be
+advisory: a reservation can only ever DELAY this replica's dispatch of a step, never prevent it.
+
+**Two implementation load-bearers:**
+
+- **Key on `(shard, stepID)`.** `step_id` is a per-shard auto-increment, so every shard has a step 42; a
+  step-id-only key would turn away live candidates on every shard but the one holding the reservation.
+- **Check in the worker loop, not inside `processStep`.** A skip then costs nothing but the next `Pop`
+  (which blocks when the cache is empty, so there is no busy-spin), and skips are self-limiting: in-flight
+  claims are bounded by the workers currently in the claim window, against a cache of 2x the worker count.
+  Do **not** `requestRefill` on the skip path - it was tried, and at a 0ms floor it feeds an already-
+  spinning refiller (throughput 1,632 -> 941).
+
+**The partition divides DISPATCHERS, not R** - see `dwarf_peers.dispatches`. An await-only replica
+(`SetWorkers(0)`) holds connections, so it counts toward R and divides the pools, but it claims nothing:
+giving it a residue class means *nothing ever selects those steps*. This shipped broken in the first cut
+and hung `fixtures/crossreplicaawait_test.go`, which uses exactly that configuration; `observedDispatchers`
+is now the partition divisor and `observedR` stays the pool divisor.
+
+**Everything fails open.** Solo replica, unknown ordinal (self absent from the roster), or an ordinal out of
+range for the divisor all disable partitioning, restoring pre-change behavior. Partitioning EXCLUDES rows,
+so a wrong `(R, ordinal)` strands a residue class while declining to partition only restores overlapping
+selection - slower but complete. R and the ordinal therefore come from **one shard's roster**
+(`freshestRoster`), never assembled from two, or two replicas could seat on one ordinal.
+
+*Ranked on AGE, never raw `seen_at`.* Each shard stamps its own `NOW_UTC()`, so timestamps are not
+comparable across shards and a clock-fast shard would always look freshest; `NOW_UTC() - seen_at` puts both
+terms on one clock and the offset cancels - the same cancellation the refiller's per-shard age relies on.
+
+**The doorbell is deliberately NOT partitioned, and needs no fix.** `Offer` inserts a specific step only on
+the strictly-better-band path (`priority < floor`); an empty partition requests a *partitioned* refill and an
+equal band is a no-op. So a uniform-priority workload never head-inserts at all, and a mixed one inserts at
+most one pioneer per band-opening. Partitioning it would be actively wrong - the head-insert exists to give
+an urgent step immediate dispatch, and skipping it because a peer owns that residue class would delay
+exactly what it is for. The CAS still arbitrates, so the worst case is one lost claim.
+
+**Known residual: replica death strands a slice for up to `peerFreshWindow` (40s).** A dead replica's
+residue class is owned by nobody until its row ages out of the count and ordinals re-seat. Self-healing,
+accepted deliberately rather than papered over with an age-based fuse (a fuse threshold above normal
+queueing delay - which is *seconds* under load - would not fire when needed, and below it would disable
+partitioning under exactly the load it is for).
+
 ### State refs — a large carried field is stored once (`staterefs.go`)
 
 A step's `state` is a full input snapshot, so a field that is *carried* but not *changed* is re-serialized into
