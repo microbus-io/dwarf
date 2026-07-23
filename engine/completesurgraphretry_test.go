@@ -40,7 +40,6 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	shortPersistBackoff(t)
 
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("Parent")
@@ -70,6 +69,7 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 
 	e := NewEngine()
 	e.SetHost(proxy)
+	e.persistBackoff = shortPersistBackoff
 	e.RunInTest(t)
 
 	// The first completeSurgraphFlow (driven by the child's completion) errors; persist must re-drive it.

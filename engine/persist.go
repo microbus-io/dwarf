@@ -50,12 +50,6 @@ const (
 	persistLeaseExtensionMs = 30_000
 )
 
-// persistBackoff is short and exponential because the errors it exists for resolve in SECONDS. A minutes-long
-// backoff would be slow in both directions - slow to recover from a blip that already cleared, and slow to
-// report a permanent failure we could have named after the second attempt. (A `var`, not a `const`, only so a
-// test can shorten it - the same reason awaitPollInterval and deletionGrace are.)
-var persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-
 var (
 	// errPersistFenced: a peer re-claimed the step while we were failing. We are a zombie; abandon silently.
 	errPersistFenced = errors.New("step lease was re-granted to a peer")
@@ -115,7 +109,7 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		}
 	}
 
-	for _, backoff := range persistBackoff {
+	for _, backoff := range e.persistBackoff {
 		select {
 		case <-e.drainStop:
 			// Shutting down. Hand the step back NOW rather than making a peer wait out the lease we just

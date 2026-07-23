@@ -295,6 +295,12 @@ type Engine struct {
 	orphanFlowThreshold time.Duration // min age before a stepless running flow is reported orphaned (5m)
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
+	// persistBackoff is the outcome-write retry schedule, short and exponential because the errors it
+	// exists for resolve in SECONDS. A minutes-long backoff would be slow in both directions - slow to
+	// recover from a blip that already cleared, and slow to report a permanent failure we could have named
+	// after the second attempt. A per-engine field (not a package var) so a test shortens it on its own
+	// engine without racing a parallel peer.
+	persistBackoff []time.Duration
 
 	// Test-only instrumentation seams (see seams.go), delegated to a seamster.Seamster constructed enabled
 	// under testing.Testing() in NewEngine. Every consult is a lock-free bool read in production. The
@@ -328,6 +334,7 @@ func NewEngine() *Engine {
 	e.lastGlobalBand.Store(int64(math.MaxInt))
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
+	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	e.pingInterval = 10 * time.Second
 	e.refillPace = 20 * time.Millisecond
 	e.wedgeSweepInterval = 5 * time.Minute
