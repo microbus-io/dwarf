@@ -62,12 +62,6 @@ var (
 // than the whole server can never block forever (it just serializes against everything else).
 func acquireTestBudget(driver string, n int64) func() {
 	capacity := driverConnCap(driver)
-	if n > capacity {
-		n = capacity
-	}
-	if n < 1 {
-		n = 1
-	}
 	testBudgetMu.Lock()
 	sem := testBudgets[driver]
 	if sem == nil {
@@ -75,7 +69,18 @@ func acquireTestBudget(driver string, n int64) func() {
 		testBudgets[driver] = sem
 	}
 	testBudgetMu.Unlock()
+	return acquireFrom(sem, capacity, n)
+}
 
+// acquireFrom is the driver-agnostic core, split out so the block/clamp/release-once behavior is testable
+// against a private semaphore rather than the process-global per-driver map.
+func acquireFrom(sem *semaphore.Weighted, capacity, n int64) func() {
+	if n > capacity {
+		n = capacity
+	}
+	if n < 1 {
+		n = 1
+	}
 	// context.Background(): the wait is for a slot to free as other tests finish, not a cancellable
 	// operation. Acquire only errors on a cancelled context, so with Background it cannot fail.
 	_ = sem.Acquire(context.Background(), n)
