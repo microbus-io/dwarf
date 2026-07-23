@@ -47,11 +47,12 @@ func (e *Engine) workerLoop(ctx context.Context) {
 			return
 		}
 		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.StepID, "shard", j.Shard, "needRefill", needRefill)
-		// A sibling worker in this process already has a claim CAS in flight on this step - the refiller
-		// re-selected it because the uncommitted claim still reads `pending`. Popping the next candidate
-		// costs nothing; issuing the claim would cost a round trip to be told we lost. Checked HERE rather
-		// than inside processStep so a skip does not pay for its setup, and the cache has already removed
-		// the entry, so nothing re-pops it this generation.
+		// A sibling worker in this process reserved this step within the last ~second - its claim CAS may
+		// still be in flight, or may have committed already (the reservation deliberately outlives the CAS
+		// to span selection -> pop; see internal/claimstracker). Either way the refiller re-selected it
+		// because an uncommitted claim reads `pending`, so issuing our own claim would cost a round trip to
+		// be told we lost. Popping the next candidate costs nothing. Checked HERE rather than inside
+		// processStep so a skip does not pay for its setup, and the cache has already removed the entry.
 		if !e.claims.TryClaim(j.Shard, j.StepID) {
 			e.metricStepClaimPreempted(ctx)
 			continue

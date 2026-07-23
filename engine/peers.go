@@ -253,8 +253,6 @@ func (e *Engine) registerSelf(ctx context.Context) error {
 	})
 }
 
-// maxReplicaCount folds per-shard fresh counts into R, never below 1 (this replica's own row is always
-// fresh; a transient shard miss only under-counts, which grows pools - the safe direction).
 // shardRoster is one shard's view of the fleet: the engine_id-sorted fresh peers, and how stale that
 // view is (the age of its most recent heartbeat).
 type shardRoster struct {
@@ -338,9 +336,10 @@ func (e *Engine) scanFreshPeers(ctx context.Context, db *sequel.DB, freshMs int6
 	return roster, nil
 }
 
-// readReplicaCount reads R from the registry: COUNT of rows seen within peerFreshWindow on each shard
-// (parallel via OnEach), taking the MAX across shards. Pure read - no write, no prune - so it is the
-// path the peersChanged nudge and the Startup post-settle read use.
+// readReplicaCount reads the peer roster from the registry: each shard's engine_id-sorted fresh peers
+// (parallel via OnEach), returning the freshest shard's roster whole - R is its length, the ordinal a
+// position within it, so both must come from one shard's view (see freshestRoster). Pure read - no write,
+// no prune - so it is the path the peersChanged nudge and the Startup post-settle read use.
 func (e *Engine) readReplicaCount(ctx context.Context) (shardRoster, error) {
 	freshMs := e.peerFreshWindow().Milliseconds()
 	indices, pos := e.shardOrdinals()
@@ -359,8 +358,8 @@ func (e *Engine) readReplicaCount(ctx context.Context) (shardRoster, error) {
 	return freshestRoster(rosters), nil
 }
 
-// heartbeatPeers is the heartbeat's single per-shard pass: upsert self, read the fresh AND stale counts
-// in one scan, and conditionally prune - then return R = MAX fresh across shards. The prune runs only
+// heartbeatPeers is the heartbeat's single per-shard pass: upsert self, read the fresh roster AND the
+// stale count, and conditionally prune - then return the freshest shard's roster. The prune runs only
 // when a shard has stale rows (`stale > 0`) AND this replica wins a 1/R dice roll, so:
 //   - steady state issues ZERO range-DELETEs (only conflict-free per-PK upserts touch the table), which
 //     removes the one op with any lock-contention potential (the MySQL gap-lock on `seen_at <`) from the
@@ -368,9 +367,10 @@ func (e *Engine) readReplicaCount(ctx context.Context) (shardRoster, error) {
 //   - a crash's stragglers are cleaned by ~one replica per round rather than an N-way concurrent DELETE
 //     burst exactly when a node died.
 //
-// Pruning is pure hygiene - the fresh filter already excludes stale rows from the count - so a delayed
+// Pruning is pure hygiene - the fresh filter already excludes stale rows from the roster - so a delayed
 // or skipped prune is harmless; a solo replica (R=1) always wins the roll, so its own restart stragglers
-// never linger. The stale count rides the same scan that reads R, so this costs no extra round trip.
+// never linger. The stale count is a second aggregate query (it cannot ride the roster scan, which lists
+// only fresh rows) - the one place the heartbeat costs a round trip the pure-read path does not.
 func (e *Engine) heartbeatPeers(ctx context.Context) (shardRoster, error) {
 	freshMs := e.peerFreshWindow().Milliseconds()
 	straggleMs := e.peerStragglerAge().Milliseconds()

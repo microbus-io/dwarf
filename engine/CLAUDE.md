@@ -1991,9 +1991,14 @@ engine policy — below.
 
 **Peer discovery (observed replica count, `peers.go`).** The engine reads how many replicas share its shards' databases
 from the shared **`dwarf_peers`** registry, NOT from the host transport. Each replica heartbeats its own row
-`(engine_id, seen_at)` into **every** shard via `OnEach` every `pingInterval` (10s) and reads
-R = `MAX(COUNT WHERE seen_at > NOW - 4x pingInterval)` across shards (MAX because every shard holds the same
-population; a lagging shard only under-counts, which grows pools - the safe direction). A row unheard-from for 4x
+`(engine_id, seen_at, dispatches)` into **every** shard via `OnEach` every `pingInterval` (10s) and reads the
+engine_id-sorted **roster** of rows fresh within `4x pingInterval` on each shard, taking the **freshest shard's
+roster whole** (freshest by heartbeat age, not raw `seen_at` - each shard stamps its own `NOW_UTC()`, so ages are
+comparable across shards where timestamps are not). One roster, not a per-shard `MAX(COUNT)`, because it carries two
+coupled values that must agree: **R** = its length (the pool divisor - every peer holds connections) and this
+replica's **ordinal** = its position in it (the candidate-partition divisor - see §"Candidate de-duplication").
+Reading R from one shard and the ordinal from another could seat two replicas on one ordinal. A lagging shard only
+shortens the roster, which under-counts R and grows pools - the safe direction. A row unheard-from for 4x
 (40s) is no longer counted (a crashed peer, whose owner sends no goodbye, drops out on its own) and becomes eligible
 for the prune DELETE past 8x (80s). `Startup` registers + reads synchronously (above); `Shutdown` deletes the row and
 nudges peers so they regrow without waiting out the expiry. `observedReplicas()` is a lock-free atomic read of the
