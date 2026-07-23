@@ -505,9 +505,10 @@ claim time rather than dispatched, so a parked step in a stale cache entry never
 workers, decide *what* runs. Each shard's refiller runs three phases against its own shard only
 (`scanShardBandKeys` -> `planBatch` over the census merge -> `fetchShardBandSteps`, driven by
 `runShardRefill`), with **no barrier anywhere** between shards. (1) **Aggregate scan** (`scanShardBandKeys`):
-the shard returns *one row per fairness key* at its strict-minimum `priority` band - a `COUNT(*) OVER
-(PARTITION BY fairness_key)` of the key's due steps plus the age and `fairness_weight` of its *oldest* due
-step (`ROW_NUMBER()=1`). The band is a `priority=(SELECT MIN(priority) ... due)` subquery, so band and
+the shard returns *one row per fairness key* at its strict-minimum `priority` band - the key's due
+**count CAPPED at cache capacity** (`MAX(rn)` under a `rn <= capacity` cut, not `COUNT(*) OVER`; see "The
+scan count is CAPPED, not exact" below) plus the age and `fairness_weight` of its *oldest* due step
+(`ROW_NUMBER()=1`). The band is a `priority=(SELECT MIN(priority) ... due)` subquery, so band and
 aggregates are self-consistent within the statement. The result is **published to the census** - a shared
 `map[shard]*shardCensus` of immutable, timestamped entries - which is what replaced the barrier: phase 1's
 output already *is* the per-key census, so retaining it costs one struct and zero extra queries. (2) **Global
@@ -607,6 +608,60 @@ a scaling problem. The uniform cap stays complete for every key (a key's globall
 one shard, so the per-shard `rn<=maxNeeded` cut captures them all; the cross-shard merge then sorts by age). The
 resulting batch is *identical* to what the earlier fully-materialized pick produced. Pinned by
 `TestRefillScan_BoundedPerFairnessKey` (one aggregate row per key, the per-key fetch cut, oldest-first).
+
+**The phase-1 scan count is CAPPED, not exact - the three-phase split fixed WIRE cost, this fixes SERVER
+SCAN cost.** The three-phase split bounds the *rows crossing the wire* to `capacity^2`, but phase 1's
+server-side scan was still **O(backlog)**: `COUNT(*) OVER (PARTITION BY fairness_key)` must read every due
+row of a key to count it. That is invisible on a fragmented backlog (many tiny keys) but catastrophic on a
+**single-key flood** - a `forEach` fan-out's N branches all inherit the flow's `fairness_key`, so a 3M-way
+fan-out is *one* key with 3M due steps, counted in full **every refiller pass**. Measured (`engine/refillfetchscaling_test.go`):
+~15-23s per pass at 3M on Postgres (→ the ~99s seen on a loaded rig), which stalls dispatch fleet-wide.
+
+The fix: the census `count` is now `min(count, capacity)` - computed as `MAX(rn)` under a `rn <= capacity`
+cut (`scanShardBandKeys`), never `COUNT(*) OVER`. **The cap is LOSSLESS, and this is the whole point:**
+`planBatch` builds a plan of at most `capacity` entries, so a single key can be picked at most `capacity`
+times (`remaining[i]` values above `capacity` are unreachable), and `maxNeeded`/`sliceDemand` are `<= capacity`
+too. So a count above `capacity` is indistinguishable from `capacity` for every downstream consumer. **This is
+NOT the forbidden "approximate count"** (below): an approximation is wrong in *either* direction and distorts
+fairness; a cap is *exact* where it matters (`count < capacity`) and *saturated-correct* above it. The oldest
+step's age/weight still come from the `rn=1` row (`MAX(CASE WHEN rn=1 ...)`); `MAX(priority)` returns the band
+(all inner rows are at the min band).
+
+**The cross-dialect behavior is load-bearing - `rn <= cap` early-stops ONLY on Postgres 15+.** The `rn <= N`
+cut becomes a `WindowAgg` **run condition** (an executor early-stop) *only* on PostgreSQL 15+ (measured:
+`Run Condition: (row_number() OVER w1 <= '4608')`). MySQL 8, SQL Server, and SQLite have **no** equivalent -
+they compute the window over all rows and filter after. So off-Postgres the scan is still O(backlog); the win
+there is *only* from dropping the second window-aggregation pass (`COUNT(*) OVER`). It is still a win
+everywhere (measured: PG flood 15.3s→2.2s @3M; PG fragmented 1.47s→0.76s; SQLite flood 4.6s→3.2s), just for
+different reasons. **Even on Postgres it is not sub-linear:** `PARTITION BY` resets `row_number`, so PG cannot
+terminate the scan of a *single* flooded partition (it must keep scanning in case another partition begins) -
+the run condition skips per-partition *output* past cap, not the scan. Truly sub-linear phase 1 needs distinct-
+key enumeration (skip-scan: PG18+, or a portable recursive-CTE loose index scan) - deliberately **deferred**
+(not portable, and O(backlog)-with-a-small-constant is acceptable). The **correctness** of the cap depends on
+none of this; only the flood's *speed* does.
+
+*Aurora / managed variants:* Aurora PostgreSQL runs the **stock PG planner/executor** (Aurora replaces only
+the storage layer), so the run condition is present **iff the Aurora PG major version is >= 15** - verify with
+`EXPLAIN` (look for `Run Condition`). Aurora **Limitless** (distributed) is unverified and a *poor fit* anyway
+- dwarf already shards at the application layer (`ShardSet`), so a dwarf shard on Limitless is double-sharded,
+and whether the run condition survives its distributed planner is unknown. **Do not assume; `EXPLAIN` on the
+actual target.** Where the run condition is absent, a single-key flood is O(backlog) per pass (the constant is
+one scan, not the old two), which is why the cap is still the right change even there.
+
+**Why the sibling phase-3 window (`fetchShardBandSteps`) was deliberately LEFT ALONE.** Phase 3's
+`ROW_NUMBER() OVER (PARTITION BY key) WHERE rn<=perKey` has the *same* run-condition dependency. On Postgres 15+
+it already early-stops (measured 2ms on a 3M flood), so a per-key `ORDER BY ... LIMIT` rewrite is **no faster**
+- and it would replace one query with a **UNION-ALL branch per chosen key**, which hits SQLite's
+`SQLITE_MAX_COMPOUND_SELECT` (500-term) wall and was measured at **121s** on a 500k-key fragmented backlog
+(vs the window's 276ms). On MySQL/SQL Server the phase-3 window *is* O(backlog) for a flood and a per-key
+`LIMIT`/`TOP` (which the executor honors as a hard early-stop on every engine, unlike `rn<=N`) **would** help -
+a gated (few chosen keys) + chunked (`<=500` UNION branches / `<=900` IN-keys) hybrid was designed for that,
+then **deferred** as unneeded for the recommended Postgres deployment. **Do not revive the phase-3 rewrite
+without a MySQL/SQL Server flood workload showing it binds** (and if you do, it must be gated + chunked - an
+unconditional UNION is a 121s footgun on the fragmented regime and on SQLite tests).
+
+Reproduce/measure any of the above with `engine/refillfetchscaling_test.go` (opt-in: `DWARF_BENCH_ROWS`;
+targets a real DB via `SEQUEL_TESTING_DSN`; `DWARF_BENCH_EXPLAIN=1` prints the plans).
 
 **Queue-as-cache, doorbell, per-shard single-slot triggers.** The enqueue signal carries no step to a queue; it is a **doorbell**
 (`candidatecache.Cache.Offer`). The generic path (`handleEnqueue`) resolves the announced step's priority *and*
@@ -2162,10 +2217,13 @@ worklist. These are the parts that would make a future change WRONG if unknown:
 
 - **The refiller is what binds** - candidate supply runs only 1.04-1.47x ahead of consumption. Treat it
   as a throughput-critical path, not a background chore.
-- **The "independent of the backlog" claim above is true of WIRE cost only.** Server-side, phase 1 still
-  touches every due row (`COUNT(*) OVER (PARTITION BY ...)` plus the `MIN(priority)` subquery), at
-  roughly `0.004-0.005ms per due row on that shard` (covering index, Postgres). Do not cite the
-  three-phase split as evidence that backlog depth is free.
+- **The "independent of the backlog" claim above is true of WIRE cost only, and the SERVER scan is now
+  CAPPED per key.** Phase 1's server-side scan was O(backlog) (`COUNT(*) OVER (PARTITION BY ...)` reads
+  every due row of a key); it is now `MAX(rn)` under `rn <= capacity`, so per key it touches at most
+  `capacity` rows (on Postgres 15+ a run-condition early-stop; elsewhere still a scan but without the
+  extra COUNT pass) - see "The phase-1 scan count is CAPPED, not exact" above. Fragmented backlogs (many
+  tiny keys) still cost O(distinct keys); do not cite the three-phase split as evidence that backlog depth
+  is free.
 - **The band scan's client-observed "fixed floor" is CONNECTION-POOL WAIT, not query work** — measured
   by decomposing the client clock against `pg_stat_statements` and the pool-wait gauges (additive,
   every run), and causally: a dedicated refill connection collapses the floor to server + RTT. Its
@@ -2198,21 +2256,23 @@ worklist. These are the parts that would make a future change WRONG if unknown:
   plan slice as a *correctness* consequence of the global-plan split - fine, but do not credit it with a
   phase-3 latency win, and do not add further caps chasing one.)
 
-- **Do NOT approximate `scanShardBandKeys`' per-key `count`.** It looks like a mere hint, and a cheap
-  approximate count is what would let phase 1 use a loose index scan (enumerate distinct keys in
-  O(keys x log n) instead of touching every due row). It is not a hint: `count` becomes `remaining[i]`
-  in `planBatch`, capping how many batch slots a key wins in the weighted sampling, AND the resulting
-  plan sets `maxNeeded`, phase 3's `rn <= ?` on every shard. So over-estimating lets a key out-compete
-  its peers for the batch (a real fairness distortion) *and* inflates phase 3's fetch; under-estimating
-  caps a key below its weighted share every pass. Only the skip-on-shortfall path is benign; the
-  fairness allocation built on the count is not. An exact count needs every row in the key's run, so
-  O(keys x log n) and exactness are mutually exclusive - reviving the skip scan means first showing how
-  the fairness contract survives.
-- **The window functions are NOT the expensive part** (post-covering-index). A `GROUP BY`/`DISTINCT ON`
-  rewrite of phase 1 was tried and measured *slower* - the planner picks a `HashAggregate` and needs a
-  LATERAL seek per key for the oldest row's weight. The premise came from a profile taken BEFORE the
-  selection index carried the due-predicates; once the scan is index-only there is nothing left to
-  reclaim. General rule: re-derive the cost split after any change that moves the baseline.
+- **CAP the count, do NOT APPROXIMATE it - they are different, and only one is safe.** `count` becomes
+  `remaining[i]` in `planBatch` (how many batch slots a key wins) AND sets `maxNeeded` (phase 3's
+  `rn <= ?`). A genuine *approximation* is wrong in either direction: over-estimating lets a key
+  out-compete its peers *and* inflates phase 3's fetch; under-estimating caps a key below its weighted
+  share. So an approximate count (e.g. a loose index scan enumerating distinct keys in O(keys x log n))
+  is forbidden - the fairness allocation built on it breaks. A **cap** (`min(count, capacity)`, the
+  current `MAX(rn) ... rn<=capacity`) is *not* an approximation: it is exact for `count < capacity` and
+  saturated-correct above it, and lossless because `planBatch` can never consume more than `capacity`
+  from one key. The cap does not enable the loose-index-scan shortcut (it still visits every due row
+  server-side off-Postgres, and up to `capacity` rows per key on PG); reviving a truly sub-linear phase 1
+  still needs distinct-key enumeration (skip-scan) AND a proof the fairness contract survives.
+- **The window functions are NOT the expensive part** (post-covering-index) - but note phase 1 now DOES
+  use `GROUP BY` (over a windowed subquery, with `MAX(CASE WHEN rn=1 ...)` for the oldest row - NOT the
+  rejected `HashAggregate`+per-key-`LATERAL` rewrite, which was slower). This `GROUP BY` measured *faster*
+  than the old double-window (`COUNT(*) OVER` + `ROW_NUMBER`) because it drops a full aggregation pass, not
+  because `GROUP BY` is cheap. General rule: re-derive the cost split after any change that moves the
+  baseline.
 
 **The oversupply hypothesis is dead** (`discarded/selected` measured 0-10%, never the ~100% it
 predicted). Do not re-propose it without new evidence.

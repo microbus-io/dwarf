@@ -506,10 +506,18 @@ type bandKeyAgg struct {
 
 // scanShardBandKeys returns ONE shard's minimum due priority band and, for every fairness key at that
 // band, a single aggregate row (count + oldest step's age/weight). This is phase 1 of a three-phase
-// refill, and its point is that it returns O(distinct keys) rows, NOT O(backlog): the per-key
-// COUNT/ROW_NUMBER window collapses each key to one row server-side, so the wire and heap cost scales
-// with key cardinality alone. Phase 2 (planBatch over the census merge) decides per-key demand from
-// these aggregates and phase 3 (fetchShardBandSteps) fetches only the selected steps.
+// refill; it returns O(distinct keys) rows, NOT O(backlog). Phase 2 (planBatch over the census merge)
+// decides per-key demand from these aggregates and phase 3 (fetchShardBandSteps) fetches only the
+// selected steps.
+//
+// The per-key count is CAPPED at the cache capacity (min(count, capacity)) rather than exact: it is
+// computed as MAX(rn) under a `rn <= capacity` cut, not COUNT(*) OVER. The cap is lossless - planBatch
+// can never assign one key more than the whole batch (capacity), so a count above capacity is
+// indistinguishable from capacity - and it is what lets the scan stop touching a key's rows past
+// capacity instead of scanning the whole partition to count it (the O(backlog) cost that made a
+// single-key flood scan millions of rows every pass). See engine/CLAUDE.md "The scan is capped, not
+// exact" for the cross-dialect rationale (why COUNT(*) OVER was O(backlog), why rn<=cap is the fix, and
+// why the sibling phase-3 window was left alone).
 func (e *Engine) scanShardBandKeys(ctx context.Context, shard int) (band int, rows []censusRow, err error) {
 	// faultRefillScanErr simulates the band scan failing so the test proves runShardRefill logs and
 	// shortens the next poll (re-scan soon) instead of refilling empty and idling the shard's workers.
@@ -522,14 +530,17 @@ func (e *Engine) scanShardBandKeys(ctx context.Context, shard int) (band int, ro
 	}
 	started := time.Now()
 	defer func() { e.metricRefillQuery(ctx, shard, refillPhaseBandKeys, time.Since(started)) }()
-	// One row per fairness key at this shard's minimum due band: COUNT(*) OVER the key's due steps,
-	// and the age/weight of its oldest (rn=1). All rows are already filtered to the min band, so the
-	// returned priority is that band. rn=1 selects the oldest step whose fairness_weight is the one
-	// the picker must use.
+	// One row per fairness key at this shard's minimum due band. rn numbers a key's due steps oldest-first;
+	// MAX(rn) under the rn<=capacity cut is the capped count; the rn=1 row carries the oldest step's
+	// age/weight (the weight the picker must use). All inner rows are filtered to the min band, so
+	// MAX(priority) is that band. On Postgres the rn<=? cut becomes a run-condition early-stop; on the
+	// other dialects it still avoids the extra COUNT(*) OVER aggregation pass (see engine/CLAUDE.md).
 	qrows, err := db.QueryContext(ctx,
-		"SELECT fairness_key, cnt, age_ms, weight, priority FROM ("+
+		"SELECT fairness_key, MAX(rn) AS cnt,"+
+			" MAX(CASE WHEN rn=1 THEN age_ms ELSE NULL END) AS age_ms,"+
+			" MAX(CASE WHEN rn=1 THEN weight ELSE NULL END) AS weight,"+
+			" MAX(priority) AS priority FROM ("+
 			"SELECT fairness_key, priority,"+
-			" COUNT(*) OVER (PARTITION BY fairness_key) AS cnt,"+
 			" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms,"+
 			" fairness_weight AS weight,"+
 			" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
@@ -537,7 +548,8 @@ func (e *Engine) scanShardBandKeys(ctx context.Context, shard int) (band int, ro
 			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
 			" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
 			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC())"+
-			") t WHERE rn=1",
+			") t WHERE rn<=? GROUP BY fairness_key",
+		e.cache.Capacity(),
 	)
 	if err != nil {
 		return 0, nil, errors.Trace(err)

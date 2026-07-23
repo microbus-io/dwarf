@@ -64,7 +64,10 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 		}
 	}
 
-	// Phase 1: one aggregate row per key regardless of backlog depth, carrying that key's due count.
+	// Phase 1: one aggregate row per key regardless of backlog depth, carrying that key's due count
+	// CAPPED at the cache capacity (min(due, capacity)) - the scan stops counting a key past capacity,
+	// which is all planBatch can ever consume from one key, so the cap is lossless. SetWorkers(0) makes
+	// this fixture's capacity small, so the assertion is the capped value, not the raw backlog depth.
 	band, rows, err := e.scanShardBandKeys(ctx, 1)
 	if !assert.NoError(err) {
 		return
@@ -74,8 +77,9 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	for _, r := range rows {
 		counts[r.key] = r.count
 	}
-	assert.Equal(perTenant, counts["tenant-a"])
-	assert.Equal(perTenant, counts["tenant-b"])
+	capped := min(perTenant, e.cache.Capacity())
+	assert.Equal(capped, counts["tenant-a"])
+	assert.Equal(capped, counts["tenant-b"])
 
 	// Phase 3: the fetch cuts each key at perKey - not the backlog - and every key still reaches the batch.
 	for _, perKey := range []int{1, 3, 10} {
