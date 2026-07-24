@@ -769,25 +769,25 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 // test needs several engines in SEPARATE databases, or a benchmark reused across passes needs a distinct
 // key each time, override the key with SetTestName.
 //
-// Logging default: a *testing.T logs to stderr at Info so a CI failure has engine-level clues - flow-status
-// transitions show where a flow got stuck, and the Error logs surface wedge sweeps / poll / refill faults
-// (stderr, not t.Log, because a `go test` timeout panic drops buffered t.Log output but not stderr). A
-// benchmark or fuzz target (*testing.B / *testing.F) defaults to SILENT, since per-iteration logging would
-// dominate the measurement / flood the fuzz output. DWARF_TEST_LOG_LEVEL overrides the level (e.g. "error"
-// to quiet local runs, "debug" for the full play-by-play); "silent" or "off" forces the discard logger,
-// and any explicit level un-silences a benchmark/fuzz. SetLogger before Startup takes over entirely.
+// Logging default: a *testing.T logs to stderr at Error, so a CI failure surfaces the engine-level alarms
+// (wedge sweeps / poll / refill faults) without the Info-level play-by-play noise (stderr, not t.Log,
+// because a `go test` timeout panic drops buffered t.Log output but not stderr). A benchmark or fuzz target
+// (*testing.B / *testing.F) defaults to SILENT, since per-iteration logging would dominate the measurement /
+// flood the fuzz output. DWARF_TEST_LOG_LEVEL overrides the level (e.g. "info" or "debug" for the
+// flow-status play-by-play; "silent" or "off" to force the discard logger); any explicit level un-silences a
+// benchmark/fuzz. SetLogger before Startup takes over entirely.
 func NewEngineUnderTest(t testing.TB) *Engine {
 	t.Helper()
 	e := NewEngine()
 	e.t = t
-	// Silent by default for the high-volume harnesses; a plain test gets Info-to-stderr. The env var wins
+	// Silent by default for the high-volume harnesses; a plain test gets Error-to-stderr. The env var wins
 	// either way, and "silent"/"off" forces discard.
 	silent := false
 	switch t.(type) {
 	case *testing.B, *testing.F:
 		silent = true
 	}
-	level := slog.LevelInfo
+	level := slog.LevelError
 	if s := os.Getenv("DWARF_TEST_LOG_LEVEL"); s != "" {
 		switch s {
 		case "silent", "off":

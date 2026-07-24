@@ -33,14 +33,13 @@ import (
 
 func TestCancelinterruptedflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Flow")
 	graph.SetEndpoint("TaskA", "cancelinterruptedflow.verify:428/task-a")

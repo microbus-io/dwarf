@@ -54,9 +54,7 @@ func TestShardinfoflow(t *testing.T) {
 	for i := 1; i <= numShards; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	const total = 30
 	for range total {

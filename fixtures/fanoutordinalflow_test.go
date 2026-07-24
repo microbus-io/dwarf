@@ -38,14 +38,13 @@ import (
 // order regardless.
 func TestFanOutOrdinalFlow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("FanOutOrdinal")
 	graph.SetEndpoint("Split", "fanoutordinalflow.verify:828/split")
@@ -56,9 +55,7 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 	graph.SetReducer("results", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Split", "Work", "items", "item")
 	graph.AddTransitionChain("Work", "Post", "Join", workflow.END)
-	if err := graph.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("fanoutordinalflow.verify:828/fan-out-ordinal", graph)
 
 	proxy.HandleTask("fanoutordinalflow.verify:828/split", func(ctx context.Context, f *workflow.Flow) error {
@@ -82,7 +79,6 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 		return nil
 	})
 
-	assert := testarossa.For(t)
 	_, outcome, err := eng.Run(ctx, "fanoutordinalflow.verify:828/fan-out-ordinal",
 		map[string]any{"items": []string{"a", "b", "c", "d"}}, nil)
 	assert.NoError(err)
@@ -98,14 +94,13 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 // so the cells converge in REVERSE order. The outer append reducer must still be in cell input order.
 func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("NestedOrdinal")
 	graph.SetEndpoint("Seed", "fanoutordinalflow.verify:828/n-seed")
@@ -120,9 +115,7 @@ func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 	graph.AddTransitionForEach("Cell", "Chunk", "chunks", "chunk")
 	graph.AddTransitionChain("Chunk", "JoinChunk")
 	graph.AddTransitionChain("JoinChunk", "JoinCell", workflow.END)
-	if err := graph.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("fanoutordinalflow.verify:828/nested-ordinal", graph)
 
 	proxy.HandleTask("fanoutordinalflow.verify:828/n-seed", func(ctx context.Context, f *workflow.Flow) error {
@@ -150,7 +143,6 @@ func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 		return nil
 	})
 
-	assert := testarossa.For(t)
 	_, outcome, err := eng.Run(ctx, "fanoutordinalflow.verify:828/nested-ordinal",
 		map[string]any{"cells": []string{"a", "b", "c"}}, nil)
 	assert.NoError(err)

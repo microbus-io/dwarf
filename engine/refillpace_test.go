@@ -47,9 +47,7 @@ func TestRefillPace_LightLoadUnpaced(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.refillPace = 2 * time.Second // before Startup; would dominate the runtime if the gate misfired
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	start := time.Now()
 	_, outcome, err := e.Run(ctx, "refillpace.verify:428/chain", nil, nil)
@@ -78,9 +76,7 @@ func TestRefillPace_DeepBacklogLiveness(t *testing.T) {
 	e.SetHost(proxy)
 	e.SetWorkers(1)                      // capacity 2: a backlog of 10 keeps every refill full
 	e.refillPace = 50 * time.Millisecond // the over-pacing regime; must still drain, just slower
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	keys := make([]string, 10)
 	for i := range keys {

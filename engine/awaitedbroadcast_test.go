@@ -92,9 +92,7 @@ func TestAwaited_GatesStatusChangeBroadcast(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(2))
 	eng.SetHost(rec)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Awaited flow: Poll stamps awaited=1 while the entry task is still blocked, so the completion
 	// deterministically reads the flag and broadcasts the stop.

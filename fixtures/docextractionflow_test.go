@@ -31,6 +31,7 @@ import (
 
 func TestDocextractionflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -104,9 +105,7 @@ func TestDocextractionflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetWorkers(4)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("extracts_every_page", func(t *testing.T) {
 		assert := testarossa.For(t)

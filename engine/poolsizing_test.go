@@ -43,14 +43,11 @@ import (
 // when a test spins up multiple engines that are meant to be separate deployments, not one fleet.
 func startSolo(t *testing.T, e *Engine, key string) {
 	t.Helper()
+	assert := testarossa.For(t)
 	// e must be a NewEngineUnderTest engine; SetTestName overrides its t.Name() key with a per-engine
 	// unique one so these independent engines land in separate databases and never count each other.
-	if err := e.SetTestName(t.Name() + "#" + key); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.Startup(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.SetTestName(t.Name() + "#" + key))
+	assert.NoError(e.Startup(context.Background()))
 	// Startup registered the t.Cleanup shutdown (e was built with NewEngineUnderTest).
 }
 
@@ -129,9 +126,7 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -172,9 +167,7 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	e.pingInterval = 50 * time.Millisecond // freshness window = 4x = 200ms
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -207,9 +200,7 @@ func TestPeers_HeartbeatPrunesStragglers(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(noopHost{}))
 	// solo: R=1, so a stale row is always pruned on the next heartbeat pass
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// A crashed peer's straggler: a row far older than the 8x prune window.
 	staleMs := e.peerStragglerAge().Milliseconds() + 60_000
@@ -261,9 +252,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	resident := e.workersResident.Load()
 	assert.Equal(int32(96), resident, "resident set is the connection-derived dispatch count")
 
@@ -298,9 +287,7 @@ func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	derived := int(e.workers.Load()) // the ceiling for the derived pool of 48
 	assert.True(derived > 1000, "the derived ceiling is large (got %d)", derived)
@@ -341,9 +328,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	assert.NoError(e.SetHost(proxy))
 	// A deliberately tiny pool makes the connection the binding resource: workers WILL queue on it.
 	assert.NoError(e.SetMaxOpenConns(2))
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	resident := e.workersResident.Load()
 
 	// A deep backlog of DB-bound steps: every worker is contending for 2 connections, continuously.
@@ -436,9 +421,7 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // budget 48
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	if !assert.NoError(err) {
@@ -485,9 +468,7 @@ func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derived budget 48
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	if !assert.NoError(err) {
@@ -544,9 +525,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	e2 := NewEngineUnderTest(t)
 	e2.SetHost(proxy)
 	// Startup registers a t.Cleanup Shutdown; shutting down early here is idempotent.
-	if err := e2.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e2.Startup(t.Context()))
 	flowKey, err := e2.Create(ctx, "shutdownrace/g", nil, nil)
 	assert.NoError(err) // sanity: it works while live
 	assert.NoError(e2.Shutdown(ctx))
@@ -601,9 +580,7 @@ func TestPoolSizing_LiveOverride(t *testing.T) {
 	for i := 1; i <= 2; i++ {
 		assert.NoError(e.SetShard(ShardSpec{Index: i, VirtualCPUs: 1}))
 	}
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Derived from VirtualCPUs=1: open = 6.
 	for i := 1; i <= 2; i++ {
@@ -711,9 +688,7 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // open = 6 x 8 = 48 at R=1
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	assert.Equal(1, e.observedReplicas())
 	solo := e.cache.Capacity()
@@ -747,9 +722,7 @@ func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derives 48 at R=1
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -814,9 +787,7 @@ func TestPoolSizing_StartupOverridePins(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.SetMaxOpenConns(40))
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)

@@ -56,9 +56,7 @@ func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	var workRuns atomic.Int32
 
@@ -185,14 +183,13 @@ func TestDuplicateEdge_CohortMemberAllRejectedByValidate(t *testing.T) {
 // Self-consistent - this is what a "member with two edges to its fan-in" collapses to once it validates.
 func TestDuplicateEdge_TrunkSourceIntoFanInIsDegenerate(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	var joinRuns atomic.Int32
 
@@ -206,7 +203,6 @@ func TestDuplicateEdge_TrunkSourceIntoFanInIsDegenerate(t *testing.T) {
 	graph.AddTransitionWhen("Work", "Join", "gate > 0")
 	graph.AddTransitionChain("Join", workflow.END)
 
-	assert := testarossa.For(t)
 	assert.NoError(graph.Validate(), "a trunk fan-out source converging directly on its fan-in validates")
 	proxy.HandleGraph("duplicateedgefaninflow.verify:701/dup-trunk", graph)
 

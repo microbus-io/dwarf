@@ -70,9 +70,7 @@ func TestFanInDirectCancel_NoExtendCancelledFlow(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Empty forEach source: the spawn produces no branches, so processStep reaches the empty-cohort fan-in.
 	flowKey, err := e.Create(ctx, "fidc/g", map[string]any{"items": []string{}}, nil)
@@ -92,7 +90,8 @@ func TestFanInDirectCancel_NoExtendCancelledFlow(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("spawn task never started")
+		assert.True(false, "spawn task never started")
+		return
 	}
 
 	// Cancel the flow row only (mirrors the completed-step-then-cancel window: the spawn step is left
@@ -120,7 +119,8 @@ func TestFanInDirectCancel_NoExtendCancelledFlow(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("spawn step never completed after release")
+			assert.True(false, "spawn step never completed after release")
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

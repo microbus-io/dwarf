@@ -40,14 +40,13 @@ import (
 // must NOT report completed while the fan-in and a live sibling were skipped.
 func TestCohortDeadEndFlow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// A sibling that runs to completion while the dead-end branch is being disposed of. If the old bug were
 	// present, the dead end would complete the flow and Run would return before this fired.
@@ -64,9 +63,7 @@ func TestCohortDeadEndFlow(t *testing.T) {
 	// this - statically every branch converges on Join.
 	graph.AddTransitionWhen("Work", "Join", "ok == true")
 	graph.AddTransitionChain("Join", workflow.END)
-	if err := graph.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("cohortdeadendflow.verify:664/cohort-dead-end", graph)
 
 	proxy.HandleTask("cohortdeadendflow.verify:664/spawn", func(ctx context.Context, f *workflow.Flow) error {
@@ -90,7 +87,6 @@ func TestCohortDeadEndFlow(t *testing.T) {
 		return nil
 	})
 
-	assert := testarossa.For(t)
 	_, outcome, err := eng.Run(ctx, "cohortdeadendflow.verify:664/cohort-dead-end",
 		map[string]any{"items": []int{0, 1}}, nil)
 	assert.NoError(err)
@@ -113,14 +109,13 @@ func TestCohortDeadEndFlow(t *testing.T) {
 // top-level cohort), so a normal fan-out that fully converges completes exactly as before.
 func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("CohortConverges")
 	graph.SetEndpoint("Spawn", "cohortdeadendflow.verify:664/c-spawn")
@@ -130,9 +125,7 @@ func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 	graph.SetReducer("done", workflow.ReducerAdd)
 	graph.AddTransitionForEach("Spawn", "Work", "items", "item")
 	graph.AddTransitionChain("Work", "Join", workflow.END)
-	if err := graph.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("cohortdeadendflow.verify:664/cohort-converges", graph)
 
 	proxy.HandleTask("cohortdeadendflow.verify:664/c-spawn", func(ctx context.Context, f *workflow.Flow) error {
@@ -146,7 +139,6 @@ func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 		return nil
 	})
 
-	assert := testarossa.For(t)
 	_, outcome, err := eng.Run(ctx, "cohortdeadendflow.verify:664/cohort-converges",
 		map[string]any{"items": []int{0, 1, 2}}, nil)
 	assert.NoError(err)

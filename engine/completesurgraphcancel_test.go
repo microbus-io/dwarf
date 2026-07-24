@@ -83,9 +83,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 
 		e = NewEngineUnderTest(t)
 		e.SetHost(proxy)
-		if err := e.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(e.Startup(t.Context()))
 		t.Cleanup(func() { close(callBlock) })
 		return e, prefix + "/parent", callResumed, callBlock
 	}
@@ -121,7 +119,8 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		select {
 		case <-callResumed:
 		case <-time.After(10 * time.Second):
-			t.Fatal("caller never revived after the child completed")
+			assert.True(false, "caller never revived after the child completed")
+			return
 		}
 		assert.Equal(workflow.StatusRunning, callStatus(t, e, fk)) // caller revived and running
 

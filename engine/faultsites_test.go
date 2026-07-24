@@ -87,9 +87,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// A completes (marked `completed`), the flow-completion tx fails (faultCompleteFlowCommit), then the
 	// recovery defer's reset also fails (faultRecoveryResetErr) - so A never returns to `pending` and the flow
@@ -138,9 +136,7 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// The caller parks, then createSubgraphFlow errors (no child inserted): failAndReturn must fail the caller
 	// step (un-parked) and the flow, not strand it parked.
@@ -199,9 +195,7 @@ func TestFaultSite_CancelCommit(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	fk := createInterruptedFlow(t, e, "ftbcancel/g")
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
@@ -231,9 +225,7 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	fk := createInterruptedFlow(t, e, "ftbresume/g")
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
@@ -312,9 +304,7 @@ func TestFaultSite_SignalPeersPanic(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Every statusChange broadcast panics inside the CatchPanic boundary; the local waiter wake (separate from
 	// the peer broadcast) still delivers, so Await returns the completed outcome.
@@ -349,9 +339,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// The child fails, but its re-dispatch of the parked caller is lost: the caller wedges running+parkedSubgraph
 	// with a terminal (failed) child.
@@ -428,9 +416,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 	assert.NoError(e.SetWorkers(4))
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Drop each level's FIRST failure-delivery independently (scoped by the parked caller's task name). Each
 	// caller's sweep-driven re-delivery (the second consult of its scope) succeeds, so the sweep can recover it.
@@ -488,9 +474,7 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	fk, err := e.Create(ctx, "ftbreapsel/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)

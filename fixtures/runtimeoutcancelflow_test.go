@@ -40,9 +40,7 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// A blocked task holds the flow running past Run's short deadline. Released at test teardown before the
 	// engine drains (registered after Startup, so LIFO ordering runs it before the engine's shutdown cleanup).

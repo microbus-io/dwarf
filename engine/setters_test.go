@@ -37,9 +37,7 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(noopHost{})
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Construction-time-only: rejected after Startup.
 	assert.Error(e.SetShard(ShardSpec{Index: 2, DSN: "file:other.sqlite"})) // shard set is immutable after Startup
@@ -106,9 +104,7 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	e2 := NewEngineUnderTest(t)
 	assert.NoError(e2.SetHost(proxy))
 	assert.NoError(e2.SetDefaultPriority(7))
-	if err := e2.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e2.Startup(t.Context()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -77,9 +77,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 
 		eng := engine.NewEngineUnderTest(t)
 		eng.SetHost(proxy)
-		if err := eng.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(eng.Startup(t.Context()))
 
 		_, outcome, err := eng.Run(ctx, "unvalidated.verify:428/g", map[string]any{"items": []int{}}, nil)
 		if !assert.NoError(err) {
@@ -96,9 +94,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		assert := testarossa.For(t)
 		eng := engine.NewEngineUnderTest(t)
 		eng.SetHost(nilGraphHost{engine.NewTestProxy()})
-		if err := eng.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(eng.Startup(t.Context()))
 
 		_, err := eng.Create(ctx, "anything", nil, nil)
 		if !assert.Error(err) {
@@ -121,9 +117,7 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 
 		eng := engine.NewEngineUnderTest(t)
 		eng.SetHost(proxy)
-		if err := eng.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(eng.Startup(t.Context()))
 
 		_, err := eng.Create(ctx, "invalid.verify:428/g", nil, nil)
 		if !assert.Error(err) {

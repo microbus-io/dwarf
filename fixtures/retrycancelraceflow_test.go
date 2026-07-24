@@ -34,14 +34,13 @@ import (
 // no-op against the cancelled step: it stays cancelled and is never re-dispatched.
 func TestRetryCancelRaceflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -65,8 +64,6 @@ func TestRetryCancelRaceflow(t *testing.T) {
 		return nil
 	})
 
-	assert := testarossa.For(t)
-
 	flowKey, err := eng.Create(ctx, "retrycancelraceflow.verify:428/retry-cancel-race", nil, nil)
 	if !assert.NoError(err) {
 		return
@@ -76,7 +73,8 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("task never started")
+		assert.True(false, "task never started")
+		return
 	}
 
 	// Cancel mid-task: the running step and the flow go cancelled.

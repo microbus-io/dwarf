@@ -33,14 +33,13 @@ import (
 // never purged independently).
 func TestPurgeSubgraphflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("TaskA", "purgesub.verify:428/task-a")
@@ -72,7 +71,6 @@ func TestPurgeSubgraphflow(t *testing.T) {
 	})
 
 	rootKey, outcome, err := eng.Run(ctx, "purgesub.verify:428/parent", map[string]any{}, nil)
-	assert := testarossa.For(t)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 

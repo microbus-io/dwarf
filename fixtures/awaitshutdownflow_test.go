@@ -35,14 +35,13 @@ import (
 // NOT t.Parallel: asserts an upper-bound reaction latency (Await returns < 2s after Shutdown), which CPU oversubscription
 // from co-running parallel tests can inflate past the bound.
 func TestAwaitShutdownflow(t *testing.T) {
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("AwaitShutdown")
 	graph.SetEndpoint("Gate", "awaitshutdownflow.verify:428/gate")
@@ -60,8 +59,6 @@ func TestAwaitShutdownflow(t *testing.T) {
 	proxy.HandleTask("awaitshutdownflow.verify:428/after", func(ctx context.Context, f *workflow.Flow) error {
 		return nil
 	})
-
-	assert := testarossa.For(t)
 
 	flowKey, err := eng.Create(ctx, "awaitshutdownflow.verify:428/await-shutdown", nil, nil)
 	if !assert.NoError(err) {
@@ -104,6 +101,7 @@ func TestAwaitShutdownflow(t *testing.T) {
 		}
 		assert.True(time.Since(shutStart) < 2*time.Second, "Await did not return promptly after Shutdown: %v", time.Since(shutStart))
 	case <-time.After(10 * time.Second):
-		t.Fatal("Await never returned after Shutdown")
+		assert.True(false, "Await never returned after Shutdown")
+		return
 	}
 }

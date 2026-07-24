@@ -36,9 +36,7 @@ func TestDeletetombstoneflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("DeleteTombstone")
 	graph.SetEndpoint("TaskA", "deletetombstoneflow.verify:428/task-a")

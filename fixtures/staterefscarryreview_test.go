@@ -53,12 +53,11 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 	}
 
 	newEngine := func(t *testing.T) (*engine.Engine, *engine.TestProxy) {
+		assert := testarossa.For(t)
 		proxy := engine.NewTestProxy()
 		eng := engine.NewEngineUnderTest(t)
 		eng.SetHost(proxy)
-		if err := eng.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(eng.Startup(t.Context()))
 		return eng, proxy
 	}
 

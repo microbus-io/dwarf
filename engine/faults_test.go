@@ -77,13 +77,15 @@ func linear2(proxy *TestProxy, prefix string, calls map[string]*int) {
 // arming, so an unblocked B could slip through that gap unobserved.
 func awaitNextStop(t *testing.T, e *Engine) func() {
 	t.Helper()
+	assert := testarossa.For(t)
 	reached := e.seams.Waiter(checkpointFlowStopped)
 	return func() {
 		t.Helper()
 		select {
 		case <-reached:
 		case <-time.After(10 * time.Second):
-			t.Fatal("no flow reached a stop")
+			assert.True(false, "no flow reached a stop")
+			return
 		}
 	}
 }
@@ -142,9 +144,7 @@ func TestFault_ExecuteTask(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// No onError -> the injected failure fails the flow.
 	e.seams.Inject(faultExecuteTask, "Work")
@@ -175,9 +175,7 @@ func TestFault_PanicExecuteTask(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// A panic in the host call is caught at the boundary and fails the step (no wedge/crash-loop).
 	e.seams.Inject(faultPanicExecuteTask, "Boom")
@@ -202,9 +200,7 @@ func TestFault_LoadGraph(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Armed: Create fails (the graph "cannot be loaded"). Disarmed: it creates and completes.
 	e.seams.Inject(faultLoadGraph, "floadg/g")
@@ -228,9 +224,7 @@ func TestFault_TransitionCommit(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// A's transition transaction fails once with a non-contention error, after A was marked completed. It is
 	// retried IN PLACE (see persist), so it lands on the next attempt and the flow completes - and A runs ONCE.
@@ -255,9 +249,7 @@ func TestFault_Contention(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// A's transition transaction returns a lock-contention error once: Transact retries the closure to a
 	// clean commit, transparently - the flow completes and A ran only once (retry is inside the tx).
@@ -282,9 +274,7 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// The flow-completion transaction fails once after the terminal step was marked completed with a
 	// non-contention error: persist retries the transaction in place, so the flow still completes (no `running`
@@ -315,9 +305,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	e.SetHost(proxy)
 	e.SetTimeBudget(200 * time.Millisecond)
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so it expires quickly
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// A's completion write carries a stale lease generation (a zombie): the fence rejects it (no-op), so the
 	// step stays claimable and lease recovery re-runs it cleanly - a stale write never corrupts or
@@ -351,9 +339,7 @@ func TestFault_DropSignalStop(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.awaitPollInterval = 20 * time.Millisecond // the backstop must fire fast for the test
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// The terminal wake is dropped, so Await cannot rely on the signal; it must return via its periodic
 	// re-snapshot of the DB-committed stop.
@@ -376,9 +362,7 @@ func TestFault_DropDoorbell(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// The create-time doorbell is dropped, so the entry step sits pending until the poll backstop rings the
 	// local doorbell. Drive the backstop directly, then the flow completes.
@@ -415,9 +399,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// The child's revive of the parked caller is lost: the caller wedges running+parkedSubgraph with a
 	// terminal child. The wedge sweep must re-drive the release. Arm, create, wait for the wedge, then
@@ -454,9 +436,7 @@ func TestFault_ReapMidTree(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	waitDone := awaitNextStop(t, e) // rendezvous on completion instead of polling status
 	fk, err := e.Create(ctx, "freap/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
@@ -490,9 +470,7 @@ func TestFault_RefillScanErr(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// The refiller's band scan errors once. Instead of refilling empty and idling every worker forever, it
 	// logs and shortens the next poll, so the flow is still dispatched and completes (just after a re-scan).
@@ -515,9 +493,7 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(NewTestProxy())
 	assert.NoError(e.SetWorkers(0)) // no workers, so nothing drains the cache underneath the assertion
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Seed the cache as a healthy refill would have, then make every scan fail (sticky, so the background
 	// refiller cannot slip a legitimate empty refill in and wipe the cache on its own).
@@ -536,9 +512,7 @@ func TestFault_PollSizingErr(t *testing.T) {
 	proxy := NewTestProxy()
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// A sizing-query failure must clamp the next poll to pollErrorRetryInterval (re-poll soon) rather than
 	// sleeping maxPollInterval on an unknown backlog. Drive one poll with the fault armed and assert the

@@ -54,14 +54,13 @@ func (c *childCapture) keys() []string {
 // before the retry and assert it can no longer be loaded afterward, while iteration 2's child can.
 func TestRetrySubgraphReapflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	captured := &childCapture{}
 
@@ -113,8 +112,6 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 		f.SetString("result", "Z("+f.GetString("innerResult")+")")
 		return nil
 	})
-
-	assert := testarossa.For(t)
 
 	flowKey, outcome, err := eng.Run(ctx, "retrysubgraphreapflow.verify:428/parent", map[string]any{"seed": "s"}, nil)
 	assert.NoError(err)

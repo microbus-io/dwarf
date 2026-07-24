@@ -61,9 +61,7 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze the worker at the caller revive, after the child completed (its completion transaction committed).
 	e.seams.Break(checkpointBeforeReviveWrite)

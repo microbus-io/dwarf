@@ -66,9 +66,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 		e := NewEngineUnderTest(t)
 		e.SetHost(proxy)
-		if err := e.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(e.Startup(t.Context()))
 		return e, prefix + "/g"
 	}
 
@@ -145,9 +143,7 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		})
 		e := NewEngineUnderTest(t)
 		e.SetHost(proxy)
-		if err := e.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(e.Startup(t.Context()))
 		t.Cleanup(func() { close(gateBlock) })
 		return e, gateBlock
 	}
@@ -291,9 +287,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	fk, err := e.Create(ctx, "cip/parent", nil, nil)
 	assert.NoError(err)

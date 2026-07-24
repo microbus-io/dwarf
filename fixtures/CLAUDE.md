@@ -17,11 +17,12 @@ the same constructor serves `*testing.B` and `*testing.F`.
   key (`b.Name()+"-"+seq`). `SetTestName` is construction-time only and rejects an engine not built with
   `NewEngineUnderTest` (`e.t == nil`). There is no `*testing.T`-free hook anymore — a host under an external
   harness that needs shared isolation drives `NewEngineUnderTest` with its own `testing.TB`.
-- **Logger default.** A `*testing.T` logs to **stderr at Info** (CI clues: flow-status transitions and Error-level
-  wedge/poll/refill faults; stderr not `t.Log`, since a `go test` timeout panic drops buffered `t.Log` but not
-  stderr). A `*testing.B`/`*testing.F` defaults to **silent** (per-iteration logging would dominate the
-  measurement / flood the fuzz output). `DWARF_TEST_LOG_LEVEL` overrides the level; `silent`/`off` forces discard,
-  any explicit level un-silences a benchmark/fuzz. `SetLogger` before `Startup` takes over entirely.
+- **Logger default.** A `*testing.T` logs to **stderr at Error** (the CI alarms: wedge/poll/refill faults;
+  stderr not `t.Log`, since a `go test` timeout panic drops buffered `t.Log` but not stderr). A
+  `*testing.B`/`*testing.F` defaults to **silent** (per-iteration logging would dominate the measurement /
+  flood the fuzz output). `DWARF_TEST_LOG_LEVEL` overrides the level (`info`/`debug` for the flow-status
+  play-by-play; `silent`/`off` forces discard); any explicit level un-silences a benchmark/fuzz. `SetLogger`
+  before `Startup` takes over entirely.
 
 The `testHashedID` switches the open path into test mode: `openDatabaseShard`
 resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN` (the same variable

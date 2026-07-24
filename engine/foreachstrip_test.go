@@ -41,9 +41,7 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("Collide")
 	g.SetEndpoint("Split", "c/split")
@@ -95,9 +93,7 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Split -forEach(pages, as=page)-> Page -forEach(chunks, as=chunk)-> Chunk -> JoinChunk -> JoinPage
 	g := workflow.NewGraph("Nested")
@@ -171,9 +167,7 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("FailFan")
 	g.SetEndpoint("Split", "ff/split")
@@ -224,9 +218,7 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Two-STEP branches: Cell writes, then Enrich writes. Cell's output survives only in Enrich's `state`.
 	g := workflow.NewGraph("MultiStepBranch")

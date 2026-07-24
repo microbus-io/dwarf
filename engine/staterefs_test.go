@@ -375,9 +375,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -430,9 +428,7 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	const doc = 20000
 	g := workflow.NewGraph("Refs")
@@ -514,9 +510,7 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("Reduced")
 	g.SetEndpoint("Seed", "red/seed")
@@ -576,9 +570,7 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("SpawnCombined")
 	g.SetEndpoint("Seed", "sc/seed")

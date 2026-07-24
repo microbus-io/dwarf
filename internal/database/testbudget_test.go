@@ -30,6 +30,7 @@ import (
 // a connection the server rejects.
 func TestBudget_BlocksThenReleases(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	sem := semaphore.NewWeighted(4)
 
 	release := acquireFrom(sem, 4, 4) // take the whole budget
@@ -39,7 +40,8 @@ func TestBudget_BlocksThenReleases(t *testing.T) {
 	go func() { got <- acquireFrom(sem, 4, 1) }()
 	select {
 	case <-got:
-		t.Fatal("acquire succeeded while the budget was fully reserved")
+		assert.True(false, "acquire succeeded while the budget was fully reserved")
+		return
 	case <-time.After(100 * time.Millisecond):
 		// still blocked, as required
 	}
@@ -50,7 +52,8 @@ func TestBudget_BlocksThenReleases(t *testing.T) {
 	case release2 := <-got:
 		release2() // the blocked acquire proceeded
 	case <-time.After(2 * time.Second):
-		t.Fatal("acquire did not proceed after the budget was released")
+		assert.True(false, "acquire did not proceed after the budget was released")
+		return
 	}
 }
 
@@ -59,6 +62,7 @@ func TestBudget_BlocksThenReleases(t *testing.T) {
 // engine bigger than the server just serializes against everything else.
 func TestBudget_ClampsOversizeRequest(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	sem := semaphore.NewWeighted(4)
 
 	done := make(chan func(), 1)
@@ -67,7 +71,8 @@ func TestBudget_ClampsOversizeRequest(t *testing.T) {
 	case release := <-done:
 		release()
 	case <-time.After(2 * time.Second):
-		t.Fatal("an oversize request blocked forever instead of clamping to the budget")
+		assert.True(false, "an oversize request blocked forever instead of clamping to the budget")
+		return
 	}
 
 	// Clamped to 4, so after release the full budget is free again: a fresh full acquire succeeds at once.
@@ -76,7 +81,8 @@ func TestBudget_ClampsOversizeRequest(t *testing.T) {
 	select {
 	case <-got:
 	case <-time.After(2 * time.Second):
-		t.Fatal("the clamped request over-reserved: the budget was not fully released")
+		assert.True(false, "the clamped request over-reserved: the budget was not fully released")
+		return
 	}
 }
 
@@ -85,6 +91,7 @@ func TestBudget_ClampsOversizeRequest(t *testing.T) {
 // can both fire the release, so this must hold.
 func TestBudget_ReleaseIsIdempotent(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	sem := semaphore.NewWeighted(2)
 
 	release := acquireFrom(sem, 2, 2) // whole budget held
@@ -99,7 +106,8 @@ func TestBudget_ReleaseIsIdempotent(t *testing.T) {
 	go func() { acquireFrom(sem, 2, 1)(); blocked <- struct{}{} }()
 	select {
 	case <-blocked:
-		t.Fatal("budget capacity leaked: an acquire past the cap succeeded after a double-release")
+		assert.True(false, "budget capacity leaked: an acquire past the cap succeeded after a double-release")
+		return
 	case <-time.After(100 * time.Millisecond):
 		// correctly blocked - capacity was not inflated
 	}

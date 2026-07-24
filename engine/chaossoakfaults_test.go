@@ -72,9 +72,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 	assert.NoError(eng.SetWorkers(8))
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	shapes := []string{
 		"chaossoak.verify:428/linear",

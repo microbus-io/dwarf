@@ -79,9 +79,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "nocohort/g", map[string]any{"items": []int{1}}, nil)
 	if !assert.NoError(err) {
@@ -99,7 +97,8 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("branch task never started")
+		assert.True(false, "branch task never started")
+		return
 	}
 
 	// Forge it: the branch loses its cohort. Its next task is the fan-in, so on completion it arrives at a

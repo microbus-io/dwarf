@@ -115,9 +115,7 @@ func TestCountRunningByTask_ExcludesParked(t *testing.T) {
 
 	eng := NewEngineUnderTest(t)
 	eng.SetHost(noopHost{})
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	db, err := eng.db.Shard(1)
 	if !assert.NoError(err) {
@@ -167,9 +165,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	_, outcome, err := eng.Run(ctx, "metricsflow.verify:428/g", nil, nil)
 	if !assert.NoError(err) {
@@ -249,9 +245,7 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetMeterProvider(mp))
 	assert.NoError(e.SetWorkers(0)) // nothing dispatches: the backlog stays put
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	for range 8 {
 		_, err := e.Create(ctx, "refillmetrics/g", nil, &workflow.FlowOptions{FairnessKey: "tenant"})
@@ -317,9 +311,7 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// One flow, run to completion: started=1, terminated=1.
 	flowKey, outcome, err := eng.Run(ctx, "forkmetric.verify:428/g", nil, nil)
@@ -381,9 +373,7 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	key, err := eng.Create(ctx, "orphanmetric.verify:428/g", nil, nil)
 	if !assert.NoError(err) {

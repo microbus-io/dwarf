@@ -49,9 +49,7 @@ func TestListflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	const total = 5
 	created := make(map[string]bool, total)

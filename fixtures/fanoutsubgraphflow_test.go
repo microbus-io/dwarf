@@ -38,6 +38,7 @@ import (
 // drain bound makes a stranded flow fail rather than hang.
 func TestFanoutSubgraphflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -81,9 +82,7 @@ func TestFanoutSubgraphflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetWorkers(4)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("every_flow_terminates", func(t *testing.T) {
 		assert := testarossa.For(t)

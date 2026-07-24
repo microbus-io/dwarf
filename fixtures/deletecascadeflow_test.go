@@ -34,15 +34,13 @@ import (
 // descendant's step can no longer be loaded.
 func TestDeletecascadeflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	var mu sync.Mutex
 	childStepKeys := map[string]string{} // task name -> step key

@@ -127,7 +127,8 @@ func TestCandidateCache_PopBlocksThenRefillWakes(t *testing.T) {
 
 	select {
 	case <-done:
-		t.Fatal("pop returned before any refill")
+		assert.True(false, "pop returned before any refill")
+		return
 	case <-time.After(100 * time.Millisecond):
 	}
 
@@ -136,7 +137,8 @@ func TestCandidateCache_PopBlocksThenRefillWakes(t *testing.T) {
 	case j := <-done:
 		assert.Expect(j, Job{StepID: 99, Shard: 2, Priority: 7})
 	case <-time.After(2 * time.Second):
-		t.Fatal("pop did not wake after refill")
+		assert.True(false, "pop did not wake after refill")
+		return
 	}
 }
 
@@ -152,7 +154,8 @@ func TestCandidateCache_CloseUnblocksBlockedPop(t *testing.T) {
 	}()
 	select {
 	case <-done:
-		t.Fatal("pop returned before close")
+		assert.True(false, "pop returned before close")
+		return
 	case <-time.After(100 * time.Millisecond):
 	}
 
@@ -161,7 +164,8 @@ func TestCandidateCache_CloseUnblocksBlockedPop(t *testing.T) {
 	case ok := <-done:
 		assert.False(ok)
 	case <-time.After(2 * time.Second):
-		t.Fatal("close did not unblock pop")
+		assert.True(false, "close did not unblock pop")
+		return
 	}
 }
 

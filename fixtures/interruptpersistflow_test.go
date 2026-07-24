@@ -35,14 +35,13 @@ import (
 // guard would see an empty identifier on re-entry and "create" the resource a second time.
 func TestInterruptpersistflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("InterruptPersist")
 	graph.SetEndpoint("ParkAfterWrite", "interruptpersistflow.verify:428/park-after-write")

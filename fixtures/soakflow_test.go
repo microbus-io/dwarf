@@ -30,6 +30,7 @@ import (
 
 func TestSoakflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -128,9 +129,7 @@ func TestSoakflow(t *testing.T) {
 	eng.SetShard(engine.ShardSpec{Index: 1})
 	eng.SetShard(engine.ShardSpec{Index: 2})
 	eng.SetWorkers(4)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("all_flows_terminate", func(t *testing.T) {
 		assert := testarossa.For(t)

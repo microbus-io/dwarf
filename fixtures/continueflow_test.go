@@ -27,6 +27,7 @@ import (
 
 func TestContinueflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -43,9 +44,7 @@ func TestContinueflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("counter_persists_across_continue_turns", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -80,6 +79,7 @@ func TestContinueflow(t *testing.T) {
 // the thread's policy: scheduling priority (not reset to the engine default).
 func TestContinueInheritsThreadPolicy(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -91,10 +91,7 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Turn 1 with a distinctive priority (7, not the engine default of 100).
 	turn1, err := eng.Create(ctx, "continuepolicy.verify:428/g", map[string]any{},
@@ -126,6 +123,7 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 // thread (the explicit-policy counterpart to Continue), and that a bad key is rejected.
 func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -137,10 +135,7 @@ func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Flow A starts its own thread.
 	a, _, err := eng.Run(ctx, "threadjoin.verify:428/g", map[string]any{}, nil)

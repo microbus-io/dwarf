@@ -48,40 +48,38 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	//   flow 2 (child),       step 2 = the leaf, in `leafStatus` under generation 7
 	// not_before/lease_expires are far future so the engine's own poll/recovery leave the rows alone.
 	setup := func(t *testing.T, leafStatus string) (*Engine, *sequel.DB) {
-		at := testarossa.For(t)
+		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t)
 		e.SetHost(NewTestProxy())
-		if err := e.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
-		at.NoError(err)
+		assert.NoError(err)
 
 		// Parent (root) flow and its caller step, parked on the subgraph.
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, surgraph_flow_id, surgraph_step_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			"ptok", "u", "P", []byte("{}"), workflow.StatusRunning, 1, 1, 0, 0, 1000,
 		)
-		at.NoError(err)
+		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, parked, time_budget_ms, lease_seq, not_before, lease_expires)"+
 				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
 			1, 1, "pstok", "Call", "u", workflow.StatusRunning, parkedSubgraph, 1000, 1,
 		)
-		at.NoError(err)
+		assert.NoError(err)
 
 		// Child flow (points back at the caller) and its leaf step in the requested status.
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, surgraph_flow_id, surgraph_step_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			"ctok", "u", "C", []byte("{}"), workflow.StatusRunning, 1, 2, 1, 1, 1000,
 		)
-		at.NoError(err)
+		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, parked, time_budget_ms, lease_seq, not_before, lease_expires)"+
 				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000), DATE_ADD_MILLIS(NOW_UTC(), 999000))",
 			2, 2, "cstok", "X", "u", leafStatus, parkedNone, 1000, 7,
 		)
-		at.NoError(err)
+		assert.NoError(err)
 		return e, db
 	}
 

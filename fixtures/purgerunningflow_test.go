@@ -56,9 +56,7 @@ func TestPurgerunningflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetWorkers(2)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, err := eng.Create(ctx, "purgerunningflow.verify:428/flow", nil, nil)
 	if !assert.NoError(err) {
@@ -70,7 +68,8 @@ func TestPurgerunningflow(t *testing.T) {
 	case <-running:
 	case <-time.After(10 * time.Second):
 		close(release)
-		t.Fatal("task never started")
+		assert.True(false, "task never started")
+		return
 	}
 
 	// Purge everything for this workflow. The running flow must be skipped.

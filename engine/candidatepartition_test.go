@@ -138,15 +138,9 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t)
-	if err := e.SetHost(noopHost{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.Startup(t.Context()))
 
 	// Solo: registered, but nothing to divide.
 	_, _, ok := e.observedPartition()
@@ -183,15 +177,9 @@ func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t)
-	if err := e.SetHost(noopHost{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.Startup(t.Context()))
 
 	// A peer that holds connections but dispatches nothing.
 	addPeerRowWithDispatch(t, e, 4242, false)

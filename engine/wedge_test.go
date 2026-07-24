@@ -101,9 +101,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
 
 	flowKey, err := e.Create(ctx, "wedgesub.verify:0/parent", nil, nil)
@@ -202,9 +200,7 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
 
 	flowKey, err := e.Create(ctx, "wedgenochild.verify:0/parent", nil, nil)
@@ -312,9 +308,7 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
 
 	// Orphan: create, await the interrupt, then forge a Cancel that raced the spawn - the parent tree is
@@ -428,9 +422,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.SetLogger(slog.New(capture)))
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
 
 	// A flow run to completion, then forged back to `running`: its step stays `completed`, so the flow is now
@@ -517,9 +509,7 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.SetLogger(slog.New(capture)))
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	key, err := e.Create(ctx, "orphanwin.verify:0/solo", nil, nil)
 	if !assert.NoError(err) {

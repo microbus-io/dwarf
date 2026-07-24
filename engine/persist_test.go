@@ -64,9 +64,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	e.seams.InjectN(1, faultPersistErr, "A") // ONE failing attempt, then the database is fine again
 
 	_, outcome, err := e.Run(ctx, "p/transient/wf", nil, nil)
@@ -108,9 +106,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	e.seams.InjectN(1000, faultPersistErr, "A") // every attempt fails: the payload, not the database
 
 	_, outcome, err := e.Run(ctx, "p/permanent/wf", nil, nil)
@@ -159,9 +155,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 		e := NewEngineUnderTest(t)
 		e.SetHost(NewTestProxy())
 		e.persistBackoff = shortPersistBackoff
-		if err := e.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,

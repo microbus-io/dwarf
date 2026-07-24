@@ -42,9 +42,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("RunInner", "subgraphcohortfailwait.verify:0/run-inner")
@@ -155,7 +153,8 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 			assert.Equal(workflow.StatusFailed, aw.out.Status)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Await(childKey) was not woken by the child's cohort failure")
+		assert.True(false, "Await(childKey) was not woken by the child's cohort failure")
+		return
 	}
 
 	// The parent observes the child failure through its flow.Subgraph call and fails in turn.
@@ -166,6 +165,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 			assert.Equal(workflow.StatusFailed, ro.out.Status)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("parent flow did not stop")
+		assert.True(false, "parent flow did not stop")
+		return
 	}
 }

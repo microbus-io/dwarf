@@ -75,9 +75,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	e.SetHost(proxy)
 	e.SetTimeBudget(200 * time.Millisecond)
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so lease recovery re-dispatches fast
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	e.seams.Inject(faultInterruptStaleWrite)
 	fk, err := e.Create(ctx, "fisw/parent", nil, nil)

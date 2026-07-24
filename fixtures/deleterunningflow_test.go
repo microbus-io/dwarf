@@ -32,14 +32,13 @@ import (
 // task that signals it has started and then blocks until the test releases it.
 func TestDeleteRunningflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -55,8 +54,6 @@ func TestDeleteRunningflow(t *testing.T) {
 		return nil
 	})
 
-	assert := testarossa.For(t)
-
 	flowKey, err := eng.Create(ctx, "deleterunningflow.verify:428/delete-running", nil, nil)
 	assert.NoError(err)
 
@@ -64,7 +61,8 @@ func TestDeleteRunningflow(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("task never started")
+		assert.True(false, "task never started")
+		return
 	}
 
 	// Delete must refuse a running flow with 409.

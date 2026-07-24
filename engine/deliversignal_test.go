@@ -96,9 +96,7 @@ func TestDeliverSignal_IdempotentAndSpoofSafe(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(2))
 	eng.SetHost(rec)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Run a flow to completion, capturing a real enqueue payload for its (now-completed) entry step.
 	_, outcome, err := eng.Run(ctx, "ds/g", nil, nil)
@@ -175,9 +173,7 @@ func TestDeliverSignal_OfflineEngineIgnoresSignals(t *testing.T) {
 
 	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetHost(rec))
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 	assert.NoError(eng.Shutdown(ctx)) // the post-shutdown engine is the target
 
 	emittedByShutdown := rec.count() // the shutdown deregister nudge is legitimate; anything after it is not
@@ -208,9 +204,7 @@ func TestDeliverSignal_IgnoresOwnEcho(t *testing.T) {
 
 	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetHost(noopHost{}))
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// A statusChange echo observability hook: register a waiter and see whether a signal wakes it.
 	// The waiters map is created lazily by the first Await, so initialize it here.

@@ -41,14 +41,13 @@ import (
 // task, so its success is durably recorded before anything downstream can fail.
 func TestErrorchangesflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Handled: Work errors after writing, and an onError handler runs next.
 	handled := workflow.NewGraph("HandledErrorChanges")

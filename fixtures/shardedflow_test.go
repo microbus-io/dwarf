@@ -32,6 +32,7 @@ import (
 
 func TestShardedflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -61,9 +62,7 @@ func TestShardedflow(t *testing.T) {
 	for i := 1; i <= 8; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("strict_priority_across_shards", func(t *testing.T) {
 		assert := testarossa.For(t)

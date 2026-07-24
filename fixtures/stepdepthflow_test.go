@@ -51,6 +51,7 @@ func depthByTask(steps []workflow.FlowStep, taskName string) (int, bool) {
 // the caller: if the caller step is at depth X, the subgraph's entry step is at X+1.
 func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -80,10 +81,7 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, _, err := eng.Run(ctx, "depthsub.verify:428/parent", map[string]any{}, nil)
 	assert.NoError(err)
@@ -155,9 +153,7 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(4)) // so the gated shallow branch doesn't starve the deep one
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, err := eng.Create(ctx, "depthfanin.verify:428/g", map[string]any{}, nil)
 	assert.NoError(err)

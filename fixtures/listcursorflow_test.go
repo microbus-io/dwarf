@@ -57,9 +57,7 @@ func TestListCursorflow(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i}) // test mode gives each shard its own in-memory database
 	}
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	const total = 25
 	created := make(map[string]bool, total)

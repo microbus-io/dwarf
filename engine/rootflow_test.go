@@ -71,9 +71,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, out, err := e.Run(ctx, "rootid.verify:0/parent", nil, nil)
 	if !assert.NoError(err) {
@@ -121,9 +119,7 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, out, err := e.Run(ctx, "rootidfork.verify:0/lin", nil, nil)
 	if !assert.NoError(err) {
@@ -171,9 +167,7 @@ func TestRootFlowID_ContinueStartsFreshRoot(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	firstKey, out, err := e.Run(ctx, "rootidcont.verify:0/turn", nil, nil)
 	if !assert.NoError(err) {

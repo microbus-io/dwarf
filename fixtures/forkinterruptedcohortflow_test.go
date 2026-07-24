@@ -35,14 +35,13 @@ import (
 // interrupted step never reaches a fork clone in the first place.
 func TestForkInterruptedCohortFlow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("ForkInterruptedCohort")
 	graph.SetEndpoint("Src", "forkinterruptedcohortflow.verify:428/src")

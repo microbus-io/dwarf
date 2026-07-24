@@ -62,9 +62,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Create and wait for it to rest interrupted.
 	fk, err := e.Create(ctx, "rld/g", nil, nil)
@@ -100,7 +98,8 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 		assert.Error(resumeErr)
 		assert.Equal(409, errors.StatusCode(resumeErr)) // honest 409, not a silent success
 	case <-time.After(10 * time.Second):
-		t.Fatal("Resume did not return after release")
+		assert.True(false, "Resume did not return after release")
+		return
 	}
 
 	// The flow is cancelled (Delete won) with a live deletion stamp.
@@ -158,9 +157,7 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Run parent to completion; the subgraph child completes too, giving a two-flow tree (root + child).
 	fk, out, err := e.Run(ctx, "rdd/parent", nil, nil)

@@ -91,9 +91,7 @@ func TestReducerDeleteflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// stringsOf extracts a []string from a JSON-round-tripped []any, or reports absence.
 	stringsOf := func(v any) ([]string, bool) {

@@ -64,9 +64,7 @@ func TestDeleteResumeRace(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// assertNoOrphan proves the forbidden state is absent for one flow: if the flow row still exists and is
 	// non-terminal (`running`/`interrupted`), it must carry at least one step row.

@@ -80,9 +80,7 @@ func TestForkOfForkflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Initial run: both branches fail -> the flow fails.
 	originKey, out0, err := eng.Run(ctx, "forkoffork.verify:428/g", nil, nil)

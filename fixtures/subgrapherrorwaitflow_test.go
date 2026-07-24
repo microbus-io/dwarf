@@ -42,9 +42,7 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("RunInner", "subgrapherrwait.verify:0/run-inner")
@@ -92,7 +90,8 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	select {
 	case <-captured:
 	case <-time.After(5 * time.Second):
-		t.Fatal("inner (child) task never ran")
+		assert.True(false, "inner (child) task never ran")
+		return
 	}
 	mu.Lock()
 	child := childKey
@@ -124,7 +123,8 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 			assert.Equal("child boom", aw.out.Error)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Await(childKey) not woken within 2s — a failing subgraph child did not signalStop its Await waiters")
+		assert.True(false, "Await(childKey) not woken within 2s — a failing subgraph child did not signalStop its Await waiters")
+		return
 	}
 
 	// The parent flow (root) fails too, since flow.Subgraph surfaces the child error and the caller returns it.

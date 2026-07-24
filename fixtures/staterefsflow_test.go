@@ -39,14 +39,13 @@ import (
 // they own it without lying to the branch: a branch still sees the array its own element came from.
 func TestStaterefsflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Big enough to be worth an anchor at any fan-out width, and distinctive enough that a truncated or
 	// mis-resolved carry is impossible to mistake for the real thing.
@@ -61,9 +60,7 @@ func TestStaterefsflow(t *testing.T) {
 	graph.SetReducer("transcript", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Split", "Page", "pages", "page")
 	graph.AddTransitionChain("Page", "Collect", workflow.END)
-	if err := graph.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("staterefsflow.verify:429/doc-refs", graph)
 
 	// The entry task adds nothing to the payload; it exists so the fan-out has a spawn. The document arrives
@@ -259,14 +256,13 @@ func TestStaterefsflow(t *testing.T) {
 // steps - the ones dispatched from a "{}" state column - resolved the ref.
 func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	const docLen = 40000
 	pdf := strings.Repeat("P", docLen)
@@ -276,9 +272,7 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	graph.SetEndpoint("B", "staterefsflow.verify:429/sole-b")
 	graph.SetEndpoint("C", "staterefsflow.verify:429/sole-c")
 	graph.AddTransitionChain("A", "B", "C", workflow.END)
-	if err := graph.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("staterefsflow.verify:429/sole", graph)
 
 	// The entry task adds nothing: the document arrives as initial state and is the flow's ONLY field, so the
@@ -305,7 +299,6 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 		return nil
 	})
 
-	assert := testarossa.For(t)
 	flowKey, outcome, err := eng.Run(ctx, "staterefsflow.verify:429/sole", map[string]any{"pdf": pdf}, nil)
 	assert.NoError(err)
 	// Completed proves A, B and C each saw the whole document; a dropped ref would fail B with StatusFailed.

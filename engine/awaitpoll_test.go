@@ -59,9 +59,7 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 	e.SetHost(proxy)
 	// Read once when Await builds its ticker, so set it before Startup.
 	e.awaitPollInterval = 20 * time.Millisecond
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "awaitpoll.verify:0/g", nil, nil)
 	if !assert.NoError(err) {
@@ -118,7 +116,8 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 			assert.True(ok, "final_state should surface through the poll-fallback wake")
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Await hung past the lost signal; the poll fallback did not fire")
+		assert.True(false, "Await hung past the lost signal; the poll fallback did not fire")
+		return
 	}
 	rel()
 }
@@ -152,9 +151,7 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.awaitPollInterval = 20 * time.Millisecond
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "polltest.verify:0/g", nil, nil)
 	if !assert.NoError(err) {

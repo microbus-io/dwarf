@@ -27,6 +27,7 @@ import (
 
 func TestGotoflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -58,9 +59,7 @@ func TestGotoflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("loops_one_then_falls_through", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -85,6 +84,7 @@ func TestGotoflow(t *testing.T) {
 
 func TestGotoflow_BadGoto(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -102,9 +102,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("goto_to_unregistered_target_fails_flow", func(t *testing.T) {
 		assert := testarossa.For(t)

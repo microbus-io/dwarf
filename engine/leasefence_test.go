@@ -71,9 +71,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t)
 		e.SetHost(NewTestProxy())
-		if err := e.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(e.Startup(t.Context()))
 		setup(t, e, 5) // the owner holds generation 5
 
 		// A zombie holding the prior generation 4 returns an error late. It must write nothing.
@@ -90,9 +88,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t)
 		e.SetHost(NewTestProxy())
-		if err := e.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(e.Startup(t.Context()))
 		setup(t, e, 5)
 
 		// The current owner (generation 5) fails the step normally.
@@ -191,9 +187,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, outcome := zombieDispatch(t, eng, "lfb/g", "A", &aCalls, aStarted, aRelease)
 	if !assert.NotNil(outcome) {
@@ -266,9 +260,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, outcome := zombieDispatch(t, eng, "lfc/g", "X", &xCalls, xStarted, xRelease)
 	if !assert.NotNil(outcome) {
@@ -330,9 +322,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// The first (zombie) dispatch of A completes, its transition tx fails, and the recovery defer freezes at the
 	// reset checkpoint with A `completed` under generation N.
@@ -447,9 +437,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, outcome := zombieDispatch(t, eng, "lfr/g", "A", &aCalls, aStarted, aRelease)
 	if !assert.NotNil(outcome) {
@@ -528,9 +516,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	flowKey, outcome := zombieDispatch(t, eng, "lfs/g", "A", &aCalls, aStarted, aRelease)
 	if !assert.NotNil(outcome) {

@@ -42,6 +42,7 @@ type tagStruct struct {
 
 func TestContinuecanonicalflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -60,10 +61,7 @@ func TestContinuecanonicalflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Turn 1 establishes the element in state, via the ordinary (decoded) path.
 	flowKey, outcome, err := eng.Run(ctx, "continuecanonical.verify:428/g",

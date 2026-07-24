@@ -33,9 +33,7 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Inner child: fan out over items; "wait" interrupts, "bad" fails, others complete.
 	inner := workflow.NewGraph("Inner")

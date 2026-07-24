@@ -94,9 +94,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	assert.NoError(e.SetWorkers(4))
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// X's transition transaction fails once after X was marked completed with a non-contention error: persist
 	// retries the transaction in place, so X's task runs only ONCE and the cohort arrival is still bumped
@@ -155,9 +153,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// X's transition (X->Y) inside the child fails once after X was marked completed: persist retries the
 	// transaction in place, so the child proceeds to Y->END and completes without re-running X, and the parent
@@ -222,9 +218,7 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	e.SetHost(proxy)
 	e.awaitPollInterval = 20 * time.Millisecond // the re-snapshot backstop must fire fast for the test
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Drop the create-time doorbell AND the terminal signalStop: neither wake reaches its consumer.
 	e.seams.Inject(faultDropDoorbell)
@@ -251,7 +245,8 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 			assert.Equal(workflow.StatusCompleted, out.Status)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("Await did not return despite both backstops")
+		assert.True(false, "Await did not return despite both backstops")
+		return
 	}
 
 	assertFaultRecoveryClean(t, e, reader)
@@ -292,9 +287,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// The first completeSurgraphFlow to run is the deepest (l3 reviving l2's caller): drop that one revive so
 	// l2's caller wedges running+parkedSubgraph with a terminal child.

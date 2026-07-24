@@ -33,14 +33,13 @@ import (
 // replaced the base (sum -> 5) past an empty array while a non-empty array reduced correctly.
 func TestEmptyforeachreducerflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("EmptyForEachReducer")
 	graph.SetEndpoint("TaskA", "emptyforeachreducerflow.verify:428/task-a")
@@ -54,9 +53,7 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 	// Validate requires the fan-out to converge on a SetFanIn node, which is what makes the empty-cohort path
 	// route to the fan-in (fireFanInDirect) rather than fall into its complete-at-the-source fallback. (The
 	// routing map itself is derived engine-side at dispatch, not stored on the graph by Validate.)
-	if err := graph.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("emptyforeachreducerflow.verify:428/empty-for-each-reducer", graph)
 
 	// The spawn (fan-out source) writes a delta to the reducer-managed "sum" field, then fans out.

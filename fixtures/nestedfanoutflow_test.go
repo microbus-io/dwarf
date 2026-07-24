@@ -28,14 +28,13 @@ import (
 
 func TestNestedfanoutflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Outer graph: A -> {NormalB, RunInner} -> J
 	outer := workflow.NewGraph("Nested")

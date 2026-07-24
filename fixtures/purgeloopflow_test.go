@@ -39,6 +39,7 @@ import (
 
 func TestPurgeLoopflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -99,11 +100,7 @@ func TestPurgeLoopflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	// 6 plain completed flows + 1 parent-with-subgraph = 7 completed roots.
 	const roots = 7

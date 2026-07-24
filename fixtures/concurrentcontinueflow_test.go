@@ -45,6 +45,7 @@ import (
 
 func TestConcurrentContinueflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -75,10 +76,7 @@ func TestConcurrentContinueflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Turn 1: run to completion (task not armed). counter 0 -> 1.
 	turn1, outcome, err := eng.Run(ctx, "concurrentcontinue.verify:428/counting", map[string]any{"counter": 0}, nil)

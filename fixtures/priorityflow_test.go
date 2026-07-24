@@ -31,6 +31,7 @@ import (
 
 func TestPriorityflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -57,9 +58,7 @@ func TestPriorityflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetWorkers(1)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("strict_priority_ordering", func(t *testing.T) {
 		assert := testarossa.For(t)

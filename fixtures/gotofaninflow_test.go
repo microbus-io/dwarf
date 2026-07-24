@@ -36,14 +36,13 @@ import (
 // fire early, yet reporting the flow completed.
 func TestGotoFanInFlow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("GotoFanIn")
 	graph.SetEndpoint("Split", "gotofaninflow.verify:645/split")
@@ -55,9 +54,7 @@ func TestGotoFanInFlow(t *testing.T) {
 	// The escape hatch: when there is nothing to fan out on, the source steers straight to its fan-in.
 	graph.AddTransitionGoto("Split", "Join")
 	graph.AddTransitionChain("Work", "Join", workflow.END)
-	if err := graph.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("gotofaninflow.verify:645/goto-fan-in", graph)
 
 	proxy.HandleTask("gotofaninflow.verify:645/split", func(ctx context.Context, f *workflow.Flow) error {
@@ -110,14 +107,13 @@ func TestGotoFanInFlow(t *testing.T) {
 // fix this branch was silently dropped and the flow reported completed with a cell missing from the result.
 func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("NestedGotoFanIn")
 	graph.SetEndpoint("Seed", "gotofaninflow.verify:645/n-seed")
@@ -134,9 +130,7 @@ func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 	graph.AddTransitionGoto("Cell", "JoinChunk")
 	graph.AddTransitionChain("Chunk", "JoinChunk")
 	graph.AddTransitionChain("JoinChunk", "JoinCell", workflow.END)
-	if err := graph.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("gotofaninflow.verify:645/nested-goto-fan-in", graph)
 
 	proxy.HandleTask("gotofaninflow.verify:645/n-seed", func(ctx context.Context, f *workflow.Flow) error {
@@ -161,7 +155,6 @@ func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 		return nil
 	})
 
-	assert := testarossa.For(t)
 	_, outcome, err := eng.Run(ctx, "gotofaninflow.verify:645/nested-goto-fan-in",
 		map[string]any{"cells": []string{"a", "b", "c"}}, nil)
 	assert.NoError(err)

@@ -39,9 +39,7 @@ func TestMermaidflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Parent: Start -> (forEach items -> Work) -> Collect (fan-in) -> CallSub (subgraph) -> Finish -> END
 	parent := workflow.NewGraph("MermaidParent")

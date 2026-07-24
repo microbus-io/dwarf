@@ -54,6 +54,7 @@ func (h *baggageRecordingHost) ExecuteTask(ctx context.Context, taskName string,
 
 func TestBaggageflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -107,9 +108,7 @@ func TestBaggageflow(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(host)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("baggage_reaches_loader_and_every_task_including_subgraph", func(t *testing.T) {
 		assert := testarossa.For(t)

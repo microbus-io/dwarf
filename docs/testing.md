@@ -10,9 +10,10 @@ interrupts, retries — with no database to set up and no transport to stand up.
   `Startup` and cleanup registered via `t.Cleanup` — no DSN, no teardown code. You still call `Startup(ctx)`
   yourself (it registers the auto-shutdown), so any `Set*` configuration goes in between. It accepts any
   `testing.TB`, so it also serves benchmarks (`*testing.B`) and fuzz targets (`*testing.F`) — those default
-  to a silent logger, while a `*testing.T` logs to stderr at Info for CI clues (`DWARF_TEST_LOG_LEVEL`
-  overrides; `silent`/`off` quiets it). `Engine.SetTestName(name)` overrides the `t.Name()` key — give
-  several engines the same name to share one database, or distinct names to isolate them.
+  to a silent logger, while a `*testing.T` logs to stderr at Error for CI clues (`DWARF_TEST_LOG_LEVEL`
+  overrides — `info`/`debug` for the flow-status play-by-play, `silent`/`off` to quiet it).
+  `Engine.SetTestName(name)` overrides the `t.Name()` key — give several engines the same name to share one
+  database, or distinct names to isolate them.
 - **`engine.TestProxy`** is an in-memory implementation of the `Host` interface. Register graphs and task
   functions on it, then register it with `SetHost(proxy)` — its `LoadGraph`/`ExecuteTask` back the
   required methods, and its peer methods are no-ops.

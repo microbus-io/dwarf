@@ -65,9 +65,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 		proxy := NewTestProxy()
 		e.SetHost(proxy)
 		e.SetWorkers(1) // determinism: one worker, so no sibling races and no contention retries
-		if err := e.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(e.Startup(t.Context()))
 
 		g := workflow.NewGraph("Fan")
 		g.SetEndpoint("Split", "fl/split")

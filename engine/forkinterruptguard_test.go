@@ -58,9 +58,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, out, err := e.Run(ctx, "forkguard.verify:0/g", nil, nil)
 	if !assert.NoError(err) {

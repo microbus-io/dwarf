@@ -76,9 +76,7 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.awaitPollInterval = 20 * time.Millisecond // the re-snapshot backstop must fire fast for the test
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Run the parent (root) in the background; Run blocks until the root flow stops.
 	rootDone := make(chan struct{})
@@ -91,7 +89,8 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	select {
 	case <-captured:
 	case <-time.After(10 * time.Second):
-		t.Fatal("inner (child) task never ran")
+		assert.True(false, "inner (child) task never ran")
+		return
 	}
 	mu.Lock()
 	child := childKey
@@ -131,14 +130,16 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 			assert.Equal("child boom", aw.out.Error)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("Await(childKey) not woken after a dropped signalStop — the re-snapshot backstop did not recover it")
+		assert.True(false, "Await(childKey) not woken after a dropped signalStop — the re-snapshot backstop did not recover it")
+		return
 	}
 
 	// The root flow fails too (the child error surfaces through flow.Subgraph); its wake was not dropped.
 	select {
 	case <-rootDone:
 	case <-time.After(10 * time.Second):
-		t.Fatal("root Run never returned")
+		assert.True(false, "root Run never returned")
+		return
 	}
 	assertInvariants(t, e)
 }

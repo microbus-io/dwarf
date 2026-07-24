@@ -39,14 +39,13 @@ import (
 // and an operator's Delete (stamped due immediately).
 func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("ForkGuard")
 	graph.SetEndpoint("A", "deleteguardsflow.verify:428/a")
@@ -144,9 +143,7 @@ func TestDeleteguardsflow_ContinueSkipsADeletedTurn(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("ContinueGuard")
 	graph.SetEndpoint("Turn", "deleteguardsflow2.verify:428/turn")

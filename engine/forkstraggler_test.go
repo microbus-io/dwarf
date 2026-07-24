@@ -50,9 +50,7 @@ func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	fk, _, err := e.Run(ctx, "sl/g", nil, nil)
 	if !assert.NoError(err) {

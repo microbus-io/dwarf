@@ -48,6 +48,7 @@ import (
 // ~350ms), which CPU oversubscription from co-running parallel tests inflates past the bound. It measures
 // timing, not just an outcome, so it must run without competition.
 func TestCrossShardPriorityflow(t *testing.T) {
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -81,11 +82,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	// One worker: dispatch order is then observable directly as completion order, with no interleaving
 	// to reason around.
 	assertSetup.NoError(eng.SetWorkers(1))
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	// A deep low-priority backlog, created first and spread across all three shards.
 	const lowCount = 24

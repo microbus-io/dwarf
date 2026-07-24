@@ -37,14 +37,13 @@ import (
 // summed: Sleep-only or backoff-only would be ~200ms.
 func TestSleepRetryComposeflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	const sleep = 200 * time.Millisecond
 	const backoff = 200 * time.Millisecond
@@ -67,8 +66,6 @@ func TestSleepRetryComposeflow(t *testing.T) {
 		f.Retry(backoff, 1.0, time.Second, 0)
 		return nil
 	})
-
-	assert := testarossa.For(t)
 
 	_, outcome, err := eng.Run(ctx, "sleepretrycomposeflow.verify:428/compose", map[string]any{}, nil)
 	assert.NoError(err)

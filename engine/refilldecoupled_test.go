@@ -196,9 +196,7 @@ func TestRefillOutcome_AboveBandVsNothingDue(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetWorkers(0)) // nothing dispatches; refills are driven by hand
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Nothing due anywhere: refillIdle.
 	assert.Equal(refillIdle, e.runShardRefill(ctx, 1))
@@ -258,9 +256,7 @@ func TestRefillOutcome_StarvedNeverParksOnTheDoorbell(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetWorkers(0)) // capacity 1: any competitor holding the key's oldest step takes the slot
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Real due work on this shard, at the default band.
 	_, err := e.Create(ctx, "starved/g", nil, &workflow.FlowOptions{FairnessKey: "t"})
@@ -299,9 +295,7 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	keys := make([]string, 24)
 	for i := range keys {

@@ -53,9 +53,7 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetWorkers(0))
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// A deep backlog on two tenants: 40 steps each, far past any per-key limit used below.
 	const perTenant = 40

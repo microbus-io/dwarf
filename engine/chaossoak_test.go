@@ -66,9 +66,7 @@ func TestChaosSoak(t *testing.T) {
 	assert.NoError(eng.SetWorkers(8))
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Shapes: (a) linear, (b) fan-out+fan-in, (c) parent+subgraph child with a random interrupt/retry.
 	shapes := []struct {

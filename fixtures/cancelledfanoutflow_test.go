@@ -30,6 +30,7 @@ import (
 
 func TestCancelledfanoutflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -76,9 +77,7 @@ func TestCancelledfanoutflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetWorkers(1)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("cancel_mid_fan_out", func(t *testing.T) {
 		assert := testarossa.For(t)

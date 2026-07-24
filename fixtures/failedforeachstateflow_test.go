@@ -40,14 +40,13 @@ import (
 // for these fields, the failed path yields too.
 func TestFailedforeachstateflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("FailedForEachState")
 	graph.SetEndpoint("Seed", "failedforeachstateflow.verify:428/seed")

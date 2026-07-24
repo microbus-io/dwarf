@@ -48,6 +48,7 @@ func (v *visitCounter) get(name string) int {
 
 func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestProxy, *visitCounter) {
 	t.Helper()
+	assert := testarossa.For(t)
 
 	proxy := engine.NewTestProxy()
 
@@ -128,9 +129,7 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 	for i := 1; i <= numShards; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	return eng, proxy, visits
 }

@@ -69,9 +69,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetTimeBudget(budget)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	start := time.Now()
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

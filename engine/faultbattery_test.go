@@ -97,6 +97,7 @@ func assertFaultRecoveryClean(t *testing.T, e *Engine, reader sdkmetric.Reader) 
 // stateLinear graph under prefix. cfg tweaks the engine before Startup (e.g. shorten the lease).
 func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Engine, sdkmetric.Reader, map[string]*int) {
 	t.Helper()
+	assert := testarossa.For(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	proxy := NewTestProxy()
@@ -108,9 +109,7 @@ func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Eng
 	if cfg != nil {
 		cfg(e)
 	}
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	return e, reader, calls
 }
 

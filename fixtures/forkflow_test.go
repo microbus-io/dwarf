@@ -77,6 +77,7 @@ func failedCellKeyByIndex(t *testing.T, eng *engine.Engine, flowKey string, idx 
 // and confirms the fork re-runs from there with the override while the original stays untouched.
 func TestForkflow_LinearWithOverride(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -104,10 +105,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow.verify:428/linear", map[string]any{"seed": "orig"}, nil)
 	assert.NoError(err)
@@ -141,6 +139,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 // succeed, confirming the fork completes while the original stays failed (non-destructive recovery).
 func TestForkflow_RecoverFailedStep(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -167,10 +166,7 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow2.verify:428/g", map[string]any{}, nil)
 	assert.NoError(err)
@@ -197,6 +193,7 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 // to Continue, which bases the next turn on the original completed flow, not the fork.
 func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -215,10 +212,7 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow3.verify:428/g", map[string]any{"seed": "origin"}, nil)
 	assert.NoError(err)
@@ -249,6 +243,7 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 // limbo - and the second fork (of the first) completes once both branches are fixed.
 func TestForkflow_FanoutForkOfFork(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -287,10 +282,7 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forkflow4.verify:428/g", map[string]any{}, nil)
 	assert.NoError(err)
@@ -368,16 +360,14 @@ func subgraphForkProxy(childRuns *int32) *engine.TestProxy {
 // the override flows into the child. History of the fork re-shows the subgraph (its new child).
 func TestForkflow_AtSubgraphCaller(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	var childRuns int32
 	proxy := subgraphForkProxy(&childRuns)
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forksub.verify:428/parent", map[string]any{"seed": "orig"}, nil)
 	assert.NoError(err)
@@ -420,16 +410,14 @@ func TestForkflow_AtSubgraphCaller(t *testing.T) {
 // the caller revives and execution bubbles back to the root. The override reaches the inner step.
 func TestForkflow_InsideSubgraph(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	var childRuns int32
 	proxy := subgraphForkProxy(&childRuns)
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "forksub.verify:428/parent", map[string]any{"seed": "orig"}, nil)
 	assert.NoError(err)
@@ -595,6 +583,7 @@ func nestedSubgraphProxy(rec *budgetRec) *engine.TestProxy {
 // re-running step at every nesting level - including the deepest, which lives in a descendant flow.
 func TestForkflow_NestedSubgraphBudgetInherited(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	// The tasks that re-run when forking at C, across all three nesting levels.
@@ -604,10 +593,7 @@ func TestForkflow_NestedSubgraphBudgetInherited(t *testing.T) {
 	proxy := nestedSubgraphProxy(rec)
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	assert := testarossa.For(t)
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Original runs with a distinctive 75s budget (inherited by every nested subgraph).
 	originKey, outcome, err := eng.Run(ctx, "forknest.verify:428/outer",

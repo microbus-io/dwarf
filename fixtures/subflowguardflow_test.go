@@ -33,14 +33,13 @@ import (
 // by the root key - while introspection (Snapshot/History) still works on the child key.
 func TestSubflowGuardflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
 	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	// Parent: A -> RunInner. Inner: X (captures its own - the child's - flow key).
 	parent := workflow.NewGraph("Parent")
@@ -76,7 +75,6 @@ func TestSubflowGuardflow(t *testing.T) {
 	})
 
 	rootKey, outcome, err := eng.Run(ctx, "subflowguard.verify:428/parent", map[string]any{}, nil)
-	assert := testarossa.For(t)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 

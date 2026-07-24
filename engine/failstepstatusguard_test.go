@@ -41,30 +41,28 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 	// setup inserts one flow (flow_id=1) and its single trunk step (step_id=1, lineage_id=0) in the given
 	// statuses under lease generation 5, lease far future so the engine's own recovery poll leaves it alone.
 	setup := func(t *testing.T, flowStatus, stepStatus string) (*Engine, *sequel.DB) {
-		at := testarossa.For(t)
+		assert := testarossa.For(t)
 		e := NewEngineUnderTest(t)
 		e.SetHost(NewTestProxy())
-		if err := e.Startup(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
-		at.NoError(err)
+		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			"ftok", "u", "W", []byte("{}"), flowStatus, 1, 1, 1000,
 		)
-		at.NoError(err)
+		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, lineage_id, time_budget_ms, lease_seq, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
 			1, 1, "stok", "T", "u", stepStatus, 0, 1000, 5,
 		)
-		at.NoError(err)
+		assert.NoError(err)
 		return e, db
 	}
 	statuses := func(t *testing.T, db *sequel.DB) (flowStatus, stepStatus string) {
-		at := testarossa.For(t)
-		at.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=1").Scan(&flowStatus))
-		at.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=1").Scan(&stepStatus))
+		assert := testarossa.For(t)
+		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=1").Scan(&flowStatus))
+		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=1").Scan(&stepStatus))
 		return strings.TrimSpace(flowStatus), strings.TrimSpace(stepStatus)
 	}
 

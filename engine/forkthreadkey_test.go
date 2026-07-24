@@ -76,9 +76,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 
 	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	if err := eng.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(eng.Startup(t.Context()))
 
 	originKey, outcome, err := eng.Run(ctx, "fktk/parent", nil, nil)
 	if !assert.NoError(err) {

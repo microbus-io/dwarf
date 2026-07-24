@@ -56,9 +56,7 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze A after it is marked completed, before it inserts B.
 	e.seams.Break(checkpointBeforeTransitionTx)
@@ -120,9 +118,7 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 	// Release X AFTER Startup so this cleanup runs BEFORE the engine's Shutdown cleanup (LIFO): Shutdown drains
 	// workers, so a worker still blocked in X must be unblocked first or the drain deadlocks.
 	t.Cleanup(func() { close(xRelease) })
@@ -198,9 +194,7 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	if err := e.Startup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze A before its retry rewind.
 	e.seams.Break(checkpointBeforeRetryRewind)
