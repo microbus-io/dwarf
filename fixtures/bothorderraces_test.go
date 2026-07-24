@@ -18,7 +18,7 @@ limitations under the License.
 // deterministically by freezing the racing operations at checkpoints and releasing them in a chosen order -
 // where a probabilistic loop only ever samples "whichever won this time". These use the checkpoint seam's
 // setBreakpoint on one or two sites to drive each order.
-package engine
+package fixtures
 
 import (
 	"context"
@@ -27,27 +27,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
-// The checkpoint rendezvous is e.seams.WaitTimeout; awaitFlowStatus (checkpointhelpers_test.go) is the
+// The checkpoint rendezvous is e.Seams().WaitTimeout; awaitFlowStatus (checkpointhelpers_test.go) is the
 // flow-status wait shared by every checkpoint-driven test.
-
-// flowStatus reads a flow's current status by key.
-func flowStatus(t *testing.T, e *Engine, flowKey string) string {
-	t.Helper()
-	assert := testarossa.For(t)
-	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
-	assert.NoError(err)
-	db, err := e.db.Shard(shard)
-	assert.NoError(err)
-	var status string
-	assert.NoError(db.QueryRowContext(context.Background(), "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status))
-	return strings.TrimSpace(status)
-}
 
 // TestCompleteFlowVsCancel_BothOrders pins the completeFlow-vs-Cancel race in both directions. The window:
 // the terminal step is already marked completed, and completeFlow is about to flip the flow to completed when
@@ -55,16 +44,16 @@ func flowStatus(t *testing.T, e *Engine, flowKey string) string {
 // released Cancel-first the flow cancels and completeFlow's status-gate (status NOT IN terminal) no-ops.
 func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 	t.Parallel()
-	newEngine := func(t *testing.T, prefix string) (*Engine, string) {
+	newEngine := func(t *testing.T, prefix string) (*engine.Engine, string) {
 		assert := testarossa.For(t)
-		proxy := NewTestProxy()
+		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("Solo")
 		g.SetEndpoint("A", prefix+"/a")
 		g.AddTransition("A", workflow.END)
 		assert.NoError(g.Validate())
 		proxy.HandleGraph(prefix+"/g", g)
 		proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-		e := NewEngineUnderTest(t)
+		e := engine.NewEngineUnderTest(t)
 		e.SetHost(proxy)
 		assert.NoError(e.Startup(t.Context()))
 		return e, prefix + "/g"
@@ -76,20 +65,20 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		e, url := newEngine(t, "cfvc1")
 
 		// Freeze the worker just before completeFlow's transaction (A is already marked completed).
-		e.seams.Break(checkpointBeforeCompleteFlowWrite)
+		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeCompleteFlowWrite), "engine never reached checkpoint checkpointBeforeCompleteFlowWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeCompleteFlowWrite), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
 
 		// Cancel wins while completion is held: the flow goes cancelled under the flow-row lock.
 		assert.NoError(e.Cancel(ctx, fk, "test"))
 
 		// Release completion: its status-gate write (status NOT IN terminal) matches zero rows - a clean no-op,
 		// the flow stays cancelled.
-		e.seams.Resume(checkpointBeforeCompleteFlowWrite)
-		awaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
-		assert.Equal(workflow.StatusCancelled, flowStatus(t, e, fk))
-		assertInvariants(t, e)
+		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+		assert.Equal(workflow.StatusCancelled, enginetest.FlowStatus(t, e, fk))
+		enginetest.AssertInvariants(t, e)
 	})
 
 	t.Run("completion_first", func(t *testing.T) {
@@ -98,19 +87,19 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		e, url := newEngine(t, "cfvc2")
 
 		// Freeze at the same window, then release completion FIRST so the flow completes.
-		e.seams.Break(checkpointBeforeCompleteFlowWrite)
+		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeCompleteFlowWrite), "engine never reached checkpoint checkpointBeforeCompleteFlowWrite")
-		e.seams.Resume(checkpointBeforeCompleteFlowWrite)
-		awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeCompleteFlowWrite), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
+		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 		// Cancel now arrives on a terminal flow: it 409s and the flow stays completed.
 		err = e.Cancel(ctx, fk, "test")
 		assert.Error(err)
 		assert.Equal(409, errors.StatusCode(err))
-		assert.Equal(workflow.StatusCompleted, flowStatus(t, e, fk))
-		assertInvariants(t, e)
+		assert.Equal(workflow.StatusCompleted, enginetest.FlowStatus(t, e, fk))
+		enginetest.AssertInvariants(t, e)
 	})
 }
 
@@ -124,10 +113,10 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 	t.Parallel()
 	// newGate builds an interrupted flow whose gate task, on resume, BLOCKS on gateBlock - so a resumed flow
 	// rests `running` (not racing to completion) while the test inspects the Delete outcome.
-	newGate := func(t *testing.T, prefix string) (*Engine, chan struct{}) {
+	newGate := func(t *testing.T, prefix string) (*engine.Engine, chan struct{}) {
 		assert := testarossa.For(t)
 		gateBlock := make(chan struct{})
-		proxy := NewTestProxy()
+		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("Gate")
 		g.SetEndpoint("Gate", prefix+"/gate")
 		g.AddTransition("Gate", workflow.END)
@@ -141,14 +130,14 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 			<-gateBlock // on resume, hold the flow running so Delete deterministically sees a running flow
 			return nil
 		})
-		e := NewEngineUnderTest(t)
+		e := engine.NewEngineUnderTest(t)
 		e.SetHost(proxy)
 		assert.NoError(e.Startup(t.Context()))
 		t.Cleanup(func() { close(gateBlock) })
 		return e, gateBlock
 	}
 
-	createInterrupted := func(t *testing.T, e *Engine, url string) string {
+	createInterrupted := func(t *testing.T, e *engine.Engine, url string) string {
 		assert := testarossa.For(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -169,27 +158,27 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		fk := createInterrupted(t, e, "dvr1/g")
 
 		// Freeze both operations before their transactions, then launch them.
-		e.seams.Break(checkpointResumeBeforeFlowWrite)
-		e.seams.Break(checkpointBeforeDeleteWrite)
+		e.Seams().Break(engine.CheckpointResumeBeforeFlowWrite)
+		e.Seams().Break(engine.CheckpointBeforeDeleteWrite)
 		resumeDone := make(chan error, 1)
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointResumeBeforeFlowWrite), "engine never reached checkpoint checkpointResumeBeforeFlowWrite")
-		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeDeleteWrite), "engine never reached checkpoint checkpointBeforeDeleteWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointResumeBeforeFlowWrite), "engine never reached checkpoint engine.CheckpointResumeBeforeFlowWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeDeleteWrite), "engine never reached checkpoint engine.CheckpointBeforeDeleteWrite")
 
 		// Resume wins: released first, it flips interrupted->running and returns cleanly (the gate re-dispatches
 		// and blocks, so the flow rests running).
-		e.seams.Resume(checkpointResumeBeforeFlowWrite)
+		e.Seams().Resume(engine.CheckpointResumeBeforeFlowWrite)
 		assert.NoError(<-resumeDone)
 
 		// Delete now sees a running flow -> 409, and never stamps deletion.
-		e.seams.Resume(checkpointBeforeDeleteWrite)
+		e.Seams().Resume(engine.CheckpointBeforeDeleteWrite)
 		delErr := <-deleteDone
 		assert.Error(delErr)
 		assert.Equal(409, errors.StatusCode(delErr))
-		assert.NotEqual(workflow.StatusCancelled, flowStatus(t, e, fk)) // Resume won; not cancelled
-		assertInvariants(t, e)
+		assert.NotEqual(workflow.StatusCancelled, enginetest.FlowStatus(t, e, fk)) // Resume won; not cancelled
+		enginetest.AssertInvariants(t, e)
 	})
 
 	t.Run("delete_first", func(t *testing.T) {
@@ -198,27 +187,27 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		e, _ := newGate(t, "dvr2")
 		fk := createInterrupted(t, e, "dvr2/g")
 
-		e.seams.Break(checkpointResumeBeforeFlowWrite)
-		e.seams.Break(checkpointBeforeDeleteWrite)
+		e.Seams().Break(engine.CheckpointResumeBeforeFlowWrite)
+		e.Seams().Break(engine.CheckpointBeforeDeleteWrite)
 		resumeDone := make(chan error, 1)
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointResumeBeforeFlowWrite), "engine never reached checkpoint checkpointResumeBeforeFlowWrite")
-		assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeDeleteWrite), "engine never reached checkpoint checkpointBeforeDeleteWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointResumeBeforeFlowWrite), "engine never reached checkpoint engine.CheckpointResumeBeforeFlowWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeDeleteWrite), "engine never reached checkpoint engine.CheckpointBeforeDeleteWrite")
 
 		// Delete wins: released first, it flips interrupted->cancelled and stamps deletion, returning cleanly.
-		e.seams.Resume(checkpointBeforeDeleteWrite)
+		e.Seams().Resume(engine.CheckpointBeforeDeleteWrite)
 		assert.NoError(<-deleteDone)
 
 		// Resume now finds the flow no longer interrupted: its gate write matches zero rows, the whole
 		// transaction rolls back, and it returns an honest 409 (not a silent success).
-		e.seams.Resume(checkpointResumeBeforeFlowWrite)
+		e.Seams().Resume(engine.CheckpointResumeBeforeFlowWrite)
 		resErr := <-resumeDone
 		assert.Error(resErr)
 		assert.Equal(409, errors.StatusCode(resErr))
-		assert.Equal(workflow.StatusCancelled, flowStatus(t, e, fk)) // Delete won
-		assertInvariants(t, e)
+		assert.Equal(workflow.StatusCancelled, enginetest.FlowStatus(t, e, fk)) // Delete won
+		enginetest.AssertInvariants(t, e)
 	})
 }
 
@@ -242,7 +231,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(yGate) }) }
 	t.Cleanup(release)
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	// Parent: one subgraph caller. Its Call step is the shared ancestor both child branches interrupt up to.
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("Call", "cip/call")
@@ -285,7 +274,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	})
 	proxy.HandleTask("cip/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -293,7 +282,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	assert.NoError(err)
 	shard, parentFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shard)
+	db, err := e.DB().Shard(shard)
 	assert.NoError(err)
 
 	callPayload := func() string {
@@ -303,7 +292,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	}
 
 	// IX's interrupt propagates its payload onto the shared Call step (the first writer wins it).
-	got := waitUntil(t, 10*time.Second, func() bool {
+	got := enginetest.WaitUntil(t, 10*time.Second, func() bool {
 		p := callPayload()
 		return p != "" && p != "{}"
 	})
@@ -313,8 +302,8 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	// Release IY: its interrupt now reaches the payload write, but the guard (interrupt_payload='{}') matches
 	// zero rows on the already-written Call step - a no-op.
 	release()
-	got = waitUntil(t, 10*time.Second, func() bool {
-		return countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE task_name='IY' AND status='"+workflow.StatusInterrupted+"'") == 1
+	got = enginetest.WaitUntil(t, 10*time.Second, func() bool {
+		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE task_name='IY' AND status='"+workflow.StatusInterrupted+"'") == 1
 	})
 	assert.True(got, "IY never interrupted")
 
@@ -322,5 +311,5 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	p := callPayload()
 	assert.True(strings.Contains(p, "X"), "ancestor payload should still be IX's, got %q", p)
 	assert.True(!strings.Contains(p, "Y"), "IY must not have clobbered the shared ancestor payload, got %q", p)
-	assertInvariants(t, e)
+	enginetest.AssertInvariants(t, e)
 }

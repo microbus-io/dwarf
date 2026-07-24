@@ -67,8 +67,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		graph, lerr = e.host.LoadGraph(loaderCtx, workflowURL)
 		return lerr
 	})
-	if err == nil && e.seams.IsFault(faultLoadGraph, workflowURL) {
-		err = errors.New("injected fault: "+faultLoadGraph+" "+workflowURL, http.StatusInternalServerError)
+	if err == nil && e.seams.IsFault(FaultLoadGraph, workflowURL) {
+		err = errors.New("injected fault: "+FaultLoadGraph+" "+workflowURL, http.StatusInternalServerError)
 	}
 	if err != nil {
 		return "", errors.Trace(err)
@@ -511,11 +511,11 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string, 
 	// specific status. Placed before the drop-fault below so both fire even when the wake itself is dropped - a
 	// test waiting on "the flow stopped" should observe the DB-committed stop regardless of wake delivery.
 	// Inert in production: the Enabled gate short-circuits before the scoped name is built.
-	e.seams.Checkpoint(ctx, checkpointFlowStopped)
-	e.seams.Checkpoint(ctx, checkpointFlowStopped, flowKey, status)
-	// faultDropSignalStop simulates a lost terminal wake (worker crash between commit and signal, dropped
+	e.seams.Checkpoint(ctx, CheckpointFlowStopped)
+	e.seams.Checkpoint(ctx, CheckpointFlowStopped, flowKey, status)
+	// FaultDropSignalStop simulates a lost terminal wake (worker crash between commit and signal, dropped
 	// broadcast, no-op SignalPeers) so a test can prove Await still returns via its periodic re-snapshot.
-	if e.seams.IsFault(faultDropSignalStop) {
+	if e.seams.IsFault(FaultDropSignalStop) {
 		return
 	}
 	e.notifyStatusChange(flowKey, status)
@@ -584,9 +584,9 @@ func (e *Engine) notifyStatusChange(flowKey string, status string) {
 // inbound peer signal): re-broadcasting an inbound doorbell would echo back to the sender and storm.
 // That path uses the local-only handleEnqueue primitive.
 func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
-	// faultDropDoorbell simulates a lost work doorbell so a test can prove the pending step is still picked
+	// FaultDropDoorbell simulates a lost work doorbell so a test can prove the pending step is still picked
 	// up by the pollPendingSteps backstop rather than stranding.
-	if e.seams.IsFault(faultDropDoorbell) {
+	if e.seams.IsFault(FaultDropDoorbell) {
 		return
 	}
 	e.handleEnqueue(ctx, shard, stepID)
@@ -601,8 +601,8 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 // unchanged: a receiving replica still resolves the step itself in handleEnqueue - the signal payload
 // stays shard+stepID, and a peer shouldn't trust this replica's snapshot of due-ness anyway.
 func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int) {
-	// faultDropDoorbell: see enqueueStep.
-	if e.seams.IsFault(faultDropDoorbell) {
+	// FaultDropDoorbell: see enqueueStep.
+	if e.seams.IsFault(FaultDropDoorbell) {
 		return
 	}
 	ring, urgent := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
@@ -673,7 +673,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	// The root has no ancestors by construction, so this walks DOWN only - see cancelSubtree, which the orphan
 	// sweep shares. A racing terminalization that empties the flow UPDATE is a 409 here: the caller asked to stop
 	// something that had already stopped.
-	return errors.Trace(e.cancelSubtree(ctx, shardNum, flowID, flowToken, reason, faultCancelCommit, true))
+	return errors.Trace(e.cancelSubtree(ctx, shardNum, flowID, flowToken, reason, FaultCancelCommit, true))
 }
 
 // deleteFlow schedules a flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete rows
@@ -693,8 +693,8 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 
 	// Test checkpoint: a breakpoint here freezes Delete just before its transaction (holding no lock, so a
 	// racing Resume can commit), letting a test drive the Delete-vs-Resume race in either order. Placed before
-	// the transaction, not inside, for the same SQLite-deadlock reason as checkpointResumeBeforeFlowWrite.
-	e.seams.Checkpoint(ctx, checkpointBeforeDeleteWrite)
+	// the transaction, not inside, for the same SQLite-deadlock reason as CheckpointResumeBeforeFlowWrite.
+	e.seams.Checkpoint(ctx, CheckpointBeforeDeleteWrite)
 	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
 		var flowStatus string
 		var surgraphFlowID, deleteAfterMs int

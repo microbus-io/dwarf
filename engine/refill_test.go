@@ -18,13 +18,12 @@ package engine
 
 import (
 	"context"
-	"math"
-	"testing"
-	"time"
-
 	"github.com/microbus-io/dwarf/internal/candidatecache"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
+	"math"
+	"testing"
+	"time"
 )
 
 // eventuallyCacheLen waits briefly for the cache to hold want candidates. It exists because a test
@@ -533,4 +532,165 @@ func TestRefillScanFloor_DerivedFromStaticConfig(t *testing.T) {
 	assert.Equal(refillScanFloorCap, deriveScanFloor(0, 8, 48, 1))
 	assert.Equal(refillScanFloorCap, deriveScanFloor(768, 0, 0, 1), "zero pool -> zero drain falls back to the cap, never a 0 divide")
 	assert.True(deriveScanFloor(1, 64, 384, 1) >= refillScanFloorMin)
+}
+
+// TestRefillPace_LightLoadUnpaced pins the pacing gate's light-load-inert property: pacing applies only
+// after a refill that filled the cache to capacity, so a sequential flow - whose refill batches are far
+// below capacity - never waits out a pace interval between steps. The pace is set absurdly high (2s);
+// if the gate ever paced a partial batch, a 5-step flow would take >10s and blow the deadline.
+func TestRefillPace_LightLoadUnpaced(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Chain")
+	names := []string{"A", "B", "C", "D", "E", workflow.END}
+	for _, n := range names[:5] {
+		g.SetEndpoint(n, "refillpace.verify:428/nop")
+	}
+	g.AddTransitionChain(names...)
+	proxy.HandleGraph("refillpace.verify:428/chain", g)
+	proxy.HandleTask("refillpace.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngineUnderTest(t)
+	e.SetHost(proxy)
+	e.refillPace = 2 * time.Second // before Startup; would dominate the runtime if the gate misfired
+	assert.NoError(e.Startup(t.Context()))
+
+	start := time.Now()
+	_, outcome, err := e.Run(ctx, "refillpace.verify:428/chain", nil, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+	assert.True(time.Since(start) < 2*time.Second, "light-load flow must not absorb a pace interval (took %v)", time.Since(start))
+}
+
+// TestRefillPace_DeepBacklogLiveness pins that pacing cannot wedge a deep backlog: with a single worker
+// (cache capacity 2, so every refill is full and every cycle is paced) and a backlog of flows several
+// times the capacity, everything still completes - the armed trigger resumes the refiller after each
+// pause, and the pause only bounds scan frequency, never delivery.
+func TestRefillPace_DeepBacklogLiveness(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("One")
+	g.SetEndpoint("Do", "refillpaceliveness.verify:428/nop")
+	g.AddTransition("Do", workflow.END)
+	proxy.HandleGraph("refillpaceliveness.verify:428/one", g)
+	proxy.HandleTask("refillpaceliveness.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngineUnderTest(t)
+	e.SetHost(proxy)
+	e.SetWorkers(1)                      // capacity 2: a backlog of 10 keeps every refill full
+	e.refillPace = 50 * time.Millisecond // the over-pacing regime; must still drain, just slower
+	assert.NoError(e.Startup(t.Context()))
+
+	keys := make([]string, 10)
+	for i := range keys {
+		k, err := e.Create(ctx, "refillpaceliveness.verify:428/one", nil, nil)
+		assert.NoError(err)
+		keys[i] = k
+	}
+	deadline, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	for _, k := range keys {
+		outcome, err := e.Await(deadline, k)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+	}
+}
+
+// TestRefillScan_BoundedPerFairnessKey pins that the refiller's band scan cost scales with fairness-key
+// CARDINALITY, not with the backlog. Phase 1 (scanBandKeys) collapses each key to a single aggregate row
+// server-side, so a deep backlog on N tenants returns N rows, not N*capacity. Phase 3 (fetchBandSteps)
+// then reads only the selected steps - at most perKey OLDEST per chosen key. The old single-query scan
+// cut each key at the cache capacity and streamed up to capacity rows PER KEY across the wire, only to
+// discard all but `capacity` of them total - so under a deep backlog with high key cardinality it
+// materialized hundreds of thousands of rows every refillPace (20ms).
+//
+// The fetch keeps every key oldest-first because the picker dispatches oldest-first within a key; a bound
+// that kept the newest would starve the head of every queue. This test checks all of it: one aggregate
+// row per key (not per step), the per-key fetch cut, and that the fetched steps are the oldest.
+func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Scan")
+	g.SetEndpoint("A", "scan/a")
+	g.AddTransition("A", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("scan/g", g)
+	proxy.HandleTask("scan/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	// SetWorkers(0): nothing dispatches, so every created flow's entry step stays `pending` and the scan
+	// sees a real backlog.
+	e := NewEngineUnderTest(t)
+	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetWorkers(0))
+	assert.NoError(e.Startup(t.Context()))
+
+	// A deep backlog on two tenants: 40 steps each, far past any per-key limit used below.
+	const perTenant = 40
+	tenants := []string{"tenant-a", "tenant-b"}
+	for _, tenant := range tenants {
+		for range perTenant {
+			_, err := e.Create(ctx, "scan/g", nil, &workflow.FlowOptions{FairnessKey: tenant})
+			assert.NoError(err)
+		}
+	}
+
+	// Phase 1: one aggregate row per key regardless of backlog depth, carrying that key's due count
+	// CAPPED at the cache capacity (min(due, capacity)) - the scan stops counting a key past capacity,
+	// which is all planBatch can ever consume from one key, so the cap is lossless. SetWorkers(0) makes
+	// this fixture's capacity small, so the assertion is the capped value, not the raw backlog depth.
+	band, rows, err := e.scanShardBandKeys(ctx, 1)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(2, len(rows), "one aggregate row per tenant, not per step in the %d-step backlog", 2*perTenant)
+	counts := map[string]int{}
+	for _, r := range rows {
+		counts[r.key] = r.count
+	}
+	capped := min(perTenant, e.cache.Capacity())
+	assert.Equal(capped, counts["tenant-a"])
+	assert.Equal(capped, counts["tenant-b"])
+
+	// Phase 3: the fetch cuts each key at perKey - not the backlog - and every key still reaches the batch.
+	for _, perKey := range []int{1, 3, 10} {
+		byKey, err := e.fetchShardBandSteps(ctx, 1, band, tenants, perKey)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(2, len(byKey), "both tenants are represented (fairness is not sacrificed to the bound)")
+		for key, list := range byKey {
+			assert.Equal(perKey, len(list), "key %q is cut at perKey", key)
+		}
+	}
+
+	// And the fetch keeps the OLDEST step of each key: the single row for a key at perKey=1 is its oldest
+	// (smallest step_id here, since steps are created in age order).
+	one, err := e.fetchShardBandSteps(ctx, 1, band, tenants, 1)
+	if !assert.NoError(err) {
+		return
+	}
+	all, err := e.fetchShardBandSteps(ctx, 1, band, tenants, perTenant)
+	if !assert.NoError(err) {
+		return
+	}
+	for key, list := range all {
+		oldest := list[0].stepID
+		for _, fs := range list {
+			if fs.stepID < oldest {
+				oldest = fs.stepID
+			}
+		}
+		if assert.Equal(1, len(one[key])) {
+			assert.Equal(oldest, one[key][0].stepID, "the single fetched row for %q is its oldest step", key)
+		}
+	}
 }

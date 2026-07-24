@@ -2941,7 +2941,7 @@ encodes its shard (`{shard}-{id}-{token}`), so a flow created on a shard unknown
 their original shard). Doing dynamic growth *correctly* - cross-replica agreement plus rollout sequencing - was
 designed but deliberately deferred; until then the set is fixed per process.
 
-## Test-only instrumentation seams (`engine/seams.go`)
+## Test-only instrumentation seams (`engine/engineundertest.go`)
 
 Recovery and race paths are hard to trigger on demand (a lost revive, a commit that loses to a contention storm, a
 Delete landing in a one-statement window inside another operation's transaction). Rather than forge DB rows or
@@ -2957,9 +2957,11 @@ deterministically:
 
 **Both are inert in production by construction:** every consult short-circuits on the `enabled` bool the engine
 passes to `seamster.New` (cached from `testing.Testing()` in `NewEngine`), so a production binary pays a single
-bool read per site and neither seam can arm or fire. The mechanism lives in the `seamster` package; `seams.go`
-holds **only the names** - it is a pure catalogue, no imports and no functions, so the valid set stays
-discoverable and a test cannot arm a fault or checkpoint no site consumes.
+bool read per site and neither seam can arm or fire. The mechanism lives in the `seamster` package;
+`engineundertest.go` holds **only the names** (a pure catalogue folded in beside the test-support constructor
+and the `DB`/`Seams` accessors), so the valid set stays discoverable and a test cannot arm a fault or
+checkpoint no site consumes. The names stay in `package engine` - unlike the shared test helpers, which belong
+in a test-only package - because they are fired from production engine code, not only from tests.
 
 **Consults are written inline at the site they affect, never wrapped in a helper.** A wrapper puts the fault's
 effect a jump away from the code it perturbs, which is exactly backwards for a seam whose whole purpose is to be

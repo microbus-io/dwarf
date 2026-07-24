@@ -14,12 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -38,8 +39,8 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
-	proxy := NewTestProxy()
+	e := engine.NewEngineUnderTest(t)
+	proxy := engine.NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -90,8 +91,8 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
-	proxy := NewTestProxy()
+	e := engine.NewEngineUnderTest(t)
+	proxy := engine.NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -164,8 +165,8 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
-	proxy := NewTestProxy()
+	e := engine.NewEngineUnderTest(t)
+	proxy := engine.NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -215,8 +216,8 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
-	proxy := NewTestProxy()
+	e := engine.NewEngineUnderTest(t)
+	proxy := engine.NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

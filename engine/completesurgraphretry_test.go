@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -34,7 +35,7 @@ import (
 // must be re-driven from the !completed branch rather than silently skipped - otherwise the parent's caller
 // step strands running+parkedSubgraph until the ~10m parked-step wedge sweep (with a false wedge alarm).
 //
-// faultCompleteSurgraphErr fails the FIRST revive with a non-contention error; the retry (fault consumed) must
+// FaultCompleteSurgraphErr fails the FIRST revive with a non-contention error; the retry (fault consumed) must
 // re-drive it and the whole parent+child tree must complete promptly - not wait out the wedge sweep.
 func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 	t.Parallel()
@@ -73,7 +74,7 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// The first completeSurgraphFlow (driven by the child's completion) errors; persist must re-drive it.
-	e.seams.InjectN(1, faultCompleteSurgraphErr)
+	e.seams.InjectN(1, FaultCompleteSurgraphErr)
 
 	fk, err := e.Create(ctx, "csr/parent", nil, nil)
 	if !assert.NoError(err) {
@@ -83,9 +84,9 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 	// With the fix the retry re-drives the revive within a backoff, so the tree completes promptly. Without it
 	// the parent strands running+parkedSubgraph and only the ~10m wedge sweep would recover it - so this wait
 	// times out, which is the failure this test pins.
-	awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 15*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 15*time.Second)
 
 	assert.Equal(int32(1), xRuns.Load(), "the child task runs once; persist retries the WRITE, not the task")
 	assert.Equal(int32(2), callRuns.Load(), "the caller parks, then re-enters exactly once after the revive lands")
-	assertInvariants(t, e) // no strand: no terminal flow left with a live parked caller
+	enginetest.AssertInvariants(t, e) // no strand: no terminal flow left with a live parked caller
 }

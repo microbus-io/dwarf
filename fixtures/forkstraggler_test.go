@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -38,7 +39,7 @@ func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("SL")
 	g.SetEndpoint("A", "sl/a")
 	g.AddTransition("A", workflow.END)
@@ -48,7 +49,7 @@ func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
 	// a no-op so an accidental dispatch would not fail the fork step instead of surfacing the real defect.
 	proxy.HandleTask("sl/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -58,7 +59,7 @@ func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
 	}
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shardNum)
+	db, err := e.DB().Shard(shardNum)
 	assert.NoError(err)
 
 	// The completed entry step A is the fork point.

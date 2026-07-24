@@ -14,13 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
 	"net/http"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -35,7 +36,7 @@ func TestQuery_WorkflowName(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	alpha := workflow.NewGraph("AlphaFlow")
 	alpha.SetEndpoint("A", "q.verify:0/a")
 	alpha.AddTransition("A", workflow.END)
@@ -47,7 +48,7 @@ func TestQuery_WorkflowName(t *testing.T) {
 	proxy.HandleTask("q.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
 	proxy.HandleTask("q.verify:0/b", func(context.Context, *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(ctx))
 
@@ -106,14 +107,14 @@ func TestQuery_StatusFilter(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("StatusFlow")
 	g.SetEndpoint("A", "qs.verify:0/a")
 	g.AddTransition("A", workflow.END)
 	proxy.HandleGraph("qs.verify:0/g", g)
 	proxy.HandleTask("qs.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(ctx))
 
@@ -153,7 +154,7 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	// Display names: only "Under_Score" contains a LIKE metacharacter. URLs and task names carry none, and
 	// flow tokens are hex, so the underscore appears in exactly one searched column across all flows.
 	plain := workflow.NewGraph("PlainName")
@@ -167,7 +168,7 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 	proxy.HandleTask("q.esc:0/a", func(context.Context, *workflow.Flow) error { return nil })
 	proxy.HandleTask("q.esc:0/b", func(context.Context, *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(ctx))
 

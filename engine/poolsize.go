@@ -180,7 +180,7 @@ const startupBootstrapConns = 4
 // persistBackoff are.
 var startupPeerSettle = 250 * time.Millisecond
 
-// slowPoolPushDelay is how long the faultSlowPoolPush seam stalls a recompute between reading R and pushing
+// slowPoolPushDelay is how long the FaultSlowPoolPush seam stalls a recompute between reading R and pushing
 // the derived sizes. Test-only (the fault is inert in production); a var so it stays adjustable.
 var slowPoolPushDelay = 200 * time.Millisecond
 
@@ -210,7 +210,7 @@ func (e *Engine) recomputePools() {
 	// here to hold a stale R while a peer's fresher one races past (see TestPoolSizing_ConcurrentRecompute-
 	// AppliesLatestR). Deliberately a FAULT, not a checkpoint: a breakpoint would freeze the racing recompute
 	// at this same site too, and the test needs it to run through.
-	if e.seams.IsFault(faultSlowPoolPush) {
+	if e.seams.IsFault(FaultSlowPoolPush) {
 		time.Sleep(slowPoolPushDelay)
 	}
 	e.shardsLock.Lock()

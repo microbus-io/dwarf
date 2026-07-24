@@ -14,13 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
 	"net/http"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -39,7 +40,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("FanForkGuard")
 	g.SetEndpoint("Src", "forkguard.verify:0/src")
 	g.SetEndpoint("A", "forkguard.verify:0/a")
@@ -56,7 +57,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	proxy.HandleTask("forkguard.verify:0/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("forkguard.verify:0/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -70,7 +71,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	db, err := e.DB().Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}
@@ -111,7 +112,7 @@ func mustFlowToken(t *testing.T, flowKey string) string {
 }
 
 // stepKeyByTaskName returns the key of the first step in the flow's history whose task matches taskName.
-func stepKeyByTaskName(t *testing.T, e *Engine, flowKey, taskName string) string {
+func stepKeyByTaskName(t *testing.T, e *engine.Engine, flowKey, taskName string) string {
 	t.Helper()
 	hist, err := e.History(context.Background(), flowKey)
 	if err != nil {

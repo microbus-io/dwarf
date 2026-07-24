@@ -14,10 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
+	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"testing"
 )
 
@@ -39,11 +41,11 @@ func FuzzDeliverSignal(f *testing.F) {
 	f.Add("", []byte(nil))
 
 	// One engine per fuzz worker process (workers are separate processes, each with its own in-memory
-	// SQLite test databases), built before f.Fuzz and shut down by NewEngineUnderTest's f.Cleanup at the
+	// SQLite test databases), built before f.Fuzz and shut down by engine.NewEngineUnderTest's f.Cleanup at the
 	// end of the run. A *testing.F keeps the engine's logger silent. A Startup failure skips the target
 	// rather than failing it, so the run degrades cleanly on an environment problem.
-	e := NewEngineUnderTest(f)
-	_ = e.SetHost(noopHost{})
+	e := engine.NewEngineUnderTest(f)
+	_ = e.SetHost(enginetest.NoopHost{})
 	if err := e.Startup(context.Background()); err != nil {
 		f.Skip("fuzz engine failed to start: " + err.Error())
 	}

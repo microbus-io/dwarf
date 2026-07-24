@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -242,7 +243,7 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 
 	fk, err := e.Create(ctx, "doc/failing", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	awaitFlowStatus(t, e, fk, workflow.StatusFailed, 5*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusFailed, 5*time.Second)
 
 	// The failed flow row is still present (not auto-deleted).
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)

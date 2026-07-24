@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -84,7 +85,7 @@ func readFinalState(t *testing.T, e *Engine, flowKey string) string {
 func assertFaultRecoveryClean(t *testing.T, e *Engine, reader sdkmetric.Reader) {
 	t.Helper()
 	assert := testarossa.For(t)
-	assertInvariants(t, e)
+	enginetest.AssertInvariants(t, e)
 	var rm metricdata.ResourceMetrics
 	if assert.NoError(reader.Collect(context.Background(), &rm)) {
 		if unwedged, ok := sumCounter(rm, "dwarf_steps_unwedged", "", ""); ok {
@@ -140,14 +141,14 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		// A's transition tx fails once after A was marked completed with a NON-contention error: persist retries
 		// the transaction in place, so it lands and A runs only ONCE. (It used to run twice - the recovery defer
 		// rewound and re-dispatched it, re-executing the task to recover from a database blip.)
-		{"transitionCommit", func(e *Engine) { e.seams.Inject(faultTransitionCommit, "A") }, 1, 1},
+		{"transitionCommit", func(e *Engine) { e.seams.Inject(FaultTransitionCommit, "A") }, 1, 1},
 		// A's transition tx returns a retryable lock-contention error: Transact retries the closure inside the
 		// tx, transparently - A runs only once.
-		{"contention", func(e *Engine) { e.seams.Inject(faultContention, "A") }, 1, 1},
+		{"contention", func(e *Engine) { e.seams.Inject(FaultContention, "A") }, 1, 1},
 		// B's flow-completion tx fails once after B was marked completed (B is the terminal node) with a
 		// non-contention error: persist retries the transaction in place, so B runs only ONCE. (It used to run
 		// twice - the recovery defer rewound and re-dispatched it.)
-		{"completeFlowCommit", func(e *Engine) { e.seams.Inject(faultCompleteFlowCommit) }, 1, 1},
+		{"completeFlowCommit", func(e *Engine) { e.seams.Inject(FaultCompleteFlowCommit) }, 1, 1},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -197,14 +198,14 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		// A's completion write carries a stale lease generation (a zombie): the fence rejects it, so the step
 		// stays claimable and lease recovery re-runs it cleanly - A ran twice, state preserved.
 		*calls["a"], *calls["b"] = 0, 0
-		e.seams.Inject(faultLeaseStaleWrite, "A")
+		e.seams.Inject(FaultLeaseStaleWrite, "A")
 		fk, err := e.Create(ctx, "fbatlease/g", nil, nil)
 		assert.NoError(err)
 		// The 300ms lease must lapse before recovery resets the fenced step; drive the backstop until it does
 		// (see drivePollBackstop). Anchored on the flow's own status rather than calls["a"], which is a plain *int shared
 		// across this battery and would race a read from here.
-		drivePollBackstop(t, e, pollBackstopWait, func() bool { return flowStatus(t, e, fk) == workflow.StatusCompleted })
-		awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+		drivePollBackstop(t, e, pollBackstopWait, func() bool { return enginetest.FlowStatus(t, e, fk) == workflow.StatusCompleted })
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 		assert.Equal(baseFS, readFinalState(t, e, fk), "final_state diverged from the no-fault baseline")
 		assert.Equal(2, *calls["a"]) // fenced dispatch + clean re-run

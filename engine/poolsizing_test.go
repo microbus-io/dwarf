@@ -430,7 +430,7 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 
 	// Stall the first recompute (one-shot) after it has read R=2, before it pushes 48/2=24.
-	e.seams.InjectN(1, faultSlowPoolPush)
+	e.seams.InjectN(1, FaultSlowPoolPush)
 	var wg sync.WaitGroup
 	e.observedR.Store(2)
 	wg.Go(func() {
@@ -476,7 +476,7 @@ func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
 	}
 
 	// A recompute reads R=2 (derived 24) and stalls before pushing.
-	e.seams.InjectN(1, faultSlowPoolPush)
+	e.seams.InjectN(1, FaultSlowPoolPush)
 	var wg sync.WaitGroup
 	e.observedR.Store(2)
 	wg.Go(func() {

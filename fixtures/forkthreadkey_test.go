@@ -14,13 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
 	"fmt"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -40,7 +42,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("A", "fktk/a")
@@ -74,7 +76,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -110,7 +112,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(shardNum)
+	db, err := eng.DB().Shard(shardNum)
 	if !assert.NoError(err) {
 		return
 	}
@@ -148,5 +150,5 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 	}
 	assert.True(found)
 
-	assertInvariants(t, eng)
+	enginetest.AssertInvariants(t, eng)
 }

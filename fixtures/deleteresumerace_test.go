@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -43,7 +44,7 @@ func TestDeleteResumeRace(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("DRR")
 	g.SetEndpoint("Gate", "drr/gate")
 	g.SetEndpoint("Done", "drr/done")
@@ -62,7 +63,7 @@ func TestDeleteResumeRace(t *testing.T) {
 	})
 	proxy.HandleTask("drr/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -74,7 +75,7 @@ func TestDeleteResumeRace(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		db, err := e.db.Shard(shardNum)
+		db, err := e.DB().Shard(shardNum)
 		if !assert.NoError(err) {
 			return
 		}
@@ -113,7 +114,7 @@ func TestDeleteResumeRace(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		db, err := e.db.Shard(shardNum)
+		db, err := e.DB().Shard(shardNum)
 		if !assert.NoError(err) {
 			return
 		}

@@ -14,21 +14,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 // rootFlowIDOf reads the denormalized root_flow_id column for a flow id.
-func rootFlowIDOf(t *testing.T, e *Engine, shard, flowID int) int {
+func rootFlowIDOf(t *testing.T, e *engine.Engine, shard, flowID int) int {
 	t.Helper()
-	db, err := e.db.Shard(shard)
+	db, err := e.DB().Shard(shard)
 	if err != nil {
 		t.Fatalf("shard: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("P", "rootid.verify:0/p")
 	parent.AddTransition("P", workflow.END)
@@ -69,7 +70,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -88,7 +89,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 	assert.Equal(parentFlowID, rootFlowIDOf(t, e, shard, parentFlowID))
 
 	// The subgraph child inherits the parent's root_flow_id.
-	db, _ := e.db.Shard(shard)
+	db, _ := e.DB().Shard(shard)
 	var childFlowID, childRoot int
 	err = db.QueryRowContext(ctx,
 		"SELECT flow_id, root_flow_id FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID,
@@ -107,7 +108,7 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Lin")
 	g.SetEndpoint("A", "rootidfork.verify:0/a")
 	g.SetEndpoint("B", "rootidfork.verify:0/b")
@@ -117,7 +118,7 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 	proxy.HandleTask("rootidfork.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("rootidfork.verify:0/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -158,14 +159,14 @@ func TestRootFlowID_ContinueStartsFreshRoot(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Turn")
 	g.SetEndpoint("T", "rootidcont.verify:0/t")
 	g.AddTransition("T", workflow.END)
 	proxy.HandleGraph("rootidcont.verify:0/turn", g)
 	proxy.HandleTask("rootidcont.verify:0/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

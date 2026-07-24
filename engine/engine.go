@@ -18,8 +18,6 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"maps"
@@ -308,7 +306,7 @@ type Engine struct {
 	// engine without racing a parallel peer.
 	persistBackoff []time.Duration
 
-	// Test-only instrumentation seams (see seams.go), delegated to a seamster.Seamster constructed enabled
+	// Test-only instrumentation seams (see engineundertest.go), delegated to a seamster.Seamster constructed enabled
 	// under testing.Testing() in NewEngine. Every consult is a lock-free bool read in production. The
 	// per-flow flow-row-write counter is a counting checkpoint on this same seams (Visits); it holds no
 	// engine-side state.
@@ -752,81 +750,6 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 	}
 	e.drainRuntime()
 	e.db.Close()
-	return nil
-}
-
-// NewEngineUnderTest constructs an engine wired for testing: per-test isolated, auto-dropped databases
-// (keyed by t.Name()) plus automatic teardown - the subsequent Startup registers a t.Cleanup that
-// Shutdowns the engine at test end, so a test needs no explicit defer e.Shutdown. It lets a test
-// configure the engine (SetHost, SetShard, ...) and drive Startup itself:
-//
-//	e := NewEngineUnderTest(t)
-//	e.SetHost(h)
-//	e.Startup(ctx)          // registers the cleanup; a later defer e.Shutdown(ctx) is optional
-//
-// It accepts any testing.TB, so it also serves *testing.B and *testing.F. When several engines must share
-// one isolated database (a multi-replica test), give each the same t (they all key by t.Name()); when a
-// test needs several engines in SEPARATE databases, or a benchmark reused across passes needs a distinct
-// key each time, override the key with SetTestName.
-//
-// Logging default: a *testing.T logs to stderr at Error, so a CI failure surfaces the engine-level alarms
-// (wedge sweeps / poll / refill faults) without the Info-level play-by-play noise (stderr, not t.Log,
-// because a `go test` timeout panic drops buffered t.Log output but not stderr). A benchmark or fuzz target
-// (*testing.B / *testing.F) defaults to SILENT, since per-iteration logging would dominate the measurement /
-// flood the fuzz output. DWARF_TEST_LOG_LEVEL overrides the level (e.g. "info" or "debug" for the
-// flow-status play-by-play; "silent" or "off" to force the discard logger); any explicit level un-silences a
-// benchmark/fuzz. SetLogger before Startup takes over entirely.
-func NewEngineUnderTest(t testing.TB) *Engine {
-	t.Helper()
-	e := NewEngine()
-	e.t = t
-	// Silent by default for the high-volume harnesses; a plain test gets Error-to-stderr. The env var wins
-	// either way, and "silent"/"off" forces discard.
-	silent := false
-	switch t.(type) {
-	case *testing.B, *testing.F:
-		silent = true
-	}
-	level := slog.LevelError
-	if s := os.Getenv("DWARF_TEST_LOG_LEVEL"); s != "" {
-		switch s {
-		case "silent", "off":
-			silent = true
-		default:
-			silent = false
-			_ = level.UnmarshalText([]byte(s))
-		}
-	}
-	if silent {
-		_ = e.SetLogger(slog.New(slog.DiscardHandler))
-	} else {
-		_ = e.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
-	}
-	// SetTestName owns the key; e.t is set above so it cannot reject, and a fresh engine is never started.
-	if err := e.SetTestName(t.Name()); err != nil {
-		t.Fatal(err)
-	}
-	return e
-}
-
-// SetTestName sets the test-database key for an engine built with NewEngineUnderTest, overriding the
-// t.Name() default the constructor installs. Construction-time only (rejected once started), and rejected
-// on an engine not under test (e.t == nil). Use it to give several engines in one test SEPARATE isolated
-// databases (a distinct key each, so they are independent deployments rather than one shared fleet), or to
-// give a benchmark reused across passes a fresh key per pass.
-func (e *Engine) SetTestName(name string) error {
-	if e.t == nil {
-		return errors.New("SetTestName requires an engine created with NewEngineUnderTest")
-	}
-	if e.started.Load() {
-		return errSetAfterStartup("test name")
-	}
-	// Hash the name to a short, bounded id so the testing-database name sequel derives stays within the
-	// strictest SQL identifier limit (Postgres 63 / MySQL 64), whatever the name's length. A non-empty
-	// testHashedID becomes Config.TestID at Open, which switches the ShardSet's open path onto the
-	// isolated-test path; it is set before initRuntime flips started, so it is in place before any shard opens.
-	sum := sha256.Sum256([]byte(name))
-	e.testHashedID = hex.EncodeToString(sum[:])[:16]
 	return nil
 }
 

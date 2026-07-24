@@ -14,12 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -40,7 +42,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("ForkCohort")
 	g.SetEndpoint("Seed", "fkc/seed")
 	g.SetEndpoint("Cell", "fkc/cell")
@@ -66,7 +68,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	})
 	proxy.HandleTask("fkc/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -114,7 +116,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(1)
+	db, err := eng.DB().Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
@@ -126,7 +128,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	assert.Equal(3, arrivals) // 2 cloned-as-arrived + the 1 that re-ran; NOT the 6 lineage members
 	assert.Equal(0, failures) // the clone dropped the origin's failure with the branch that re-runs
 
-	assertInvariants(t, eng)
+	enginetest.AssertInvariants(t, eng)
 }
 
 // TestForkCohort_RewindMidBranchExcludesWholeBranch is the other half of the branch-vs-member fix: the
@@ -138,7 +140,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("ForkCohortMid")
 	g.SetEndpoint("Seed", "fkm/seed")
 	g.SetEndpoint("Cell", "fkm/cell")
@@ -159,7 +161,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	})
 	proxy.HandleTask("fkm/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -199,7 +201,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.db.Shard(1)
+	db, err := eng.DB().Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
@@ -210,7 +212,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	assert.Equal(2, size)
 	assert.Equal(2, arrivals) // 1 cloned-as-arrived + the rewound branch re-arriving; its kept Cell is not an arrival
 
-	assertInvariants(t, eng)
+	enginetest.AssertInvariants(t, eng)
 }
 
 // nestedForkGraph builds Seed -forEach(cells)-> Cell -forEach(chunks)-> Chunk -> JoinChunk -> JoinCell, the
@@ -220,7 +222,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 // is reachable only THROUGH those Chunks (its predecessor is the inner cohort's last completer). A recompute
 // that filtered children on `lineage_id == spawn` therefore dead-ended the outer walk at the inner spawn and
 // never saw the rest of the branch.
-func nestedForkGraph(t *testing.T, proxy *TestProxy, brokenChunk string) *workflow.Graph {
+func nestedForkGraph(t *testing.T, proxy *engine.TestProxy, brokenChunk string) *workflow.Graph {
 	t.Helper()
 	assert := testarossa.For(t)
 	g := workflow.NewGraph("NestedFork")
@@ -264,10 +266,10 @@ func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	nestedForkGraph(t, proxy, "")
 
-	eng := NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -303,7 +305,7 @@ func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
 	// The counter must not overshoot. Counting the rewound outer branch as already-arrived wrote
 	// arrivals == size on the clone, and the re-run branch's real arrival then pushed it to size+1.
-	assertInvariants(t, eng)
+	enginetest.AssertInvariants(t, eng)
 }
 
 // TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork pins the worse consequence, and the one that
@@ -316,10 +318,10 @@ func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	nestedForkGraph(t, proxy, "b1") // a chunk of the "b" cell fails, with no onError
 
-	eng := NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -364,5 +366,5 @@ func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
 	// make impossible (fix one failed branch at a time; the fork re-fails cleanly until every one is fixed).
 	assert.Equal(workflow.StatusFailed, forkOutcome.Status,
 		"a failure inside a KEPT branch's nested cohort must survive the clone and re-fail the fork")
-	assertInvariants(t, eng)
+	enginetest.AssertInvariants(t, eng)
 }

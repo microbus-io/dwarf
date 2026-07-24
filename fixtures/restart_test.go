@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -44,20 +46,20 @@ func TestRestartSurvival(t *testing.T) {
 	// mkEngine builds an engine bound to a file DSN under dir (so two engines resolve to the same on-disk DB)
 	// with its own worker count. Not test mode: SetShard uses the DSN directly and migrations run at Startup
 	// (idempotent, so engine 2 re-opening the migrated DB is a no-op).
-	mkEngine := func(t *testing.T, proxy *TestProxy, dir string, workers int) *Engine {
+	mkEngine := func(t *testing.T, proxy *engine.TestProxy, dir string, workers int) *engine.Engine {
 		assert := testarossa.For(t)
-		e := NewEngine()
+		e := engine.NewEngine()
 		e.SetHost(proxy)
-		assert.NoError(e.SetShard(ShardSpec{Index: 1, DSN: fmt.Sprintf("file:%s/db%%d.sqlite?_pragma=busy_timeout(5000)", dir)}))
+		assert.NoError(e.SetShard(engine.ShardSpec{Index: 1, DSN: fmt.Sprintf("file:%s/db%%d.sqlite?_pragma=busy_timeout(5000)", dir)}))
 		assert.NoError(e.SetWorkers(workers))
 		return e
 	}
 
 	// waitFor polls a COUNT(*) query on e's shard 1 until it returns >0 or the deadline passes.
-	waitFor := func(t *testing.T, e *Engine, query string, args ...any) bool {
+	waitFor := func(t *testing.T, e *engine.Engine, query string, args ...any) bool {
 		t.Helper()
 		assert := testarossa.For(t)
-		db, err := e.db.Shard(1)
+		db, err := e.DB().Shard(1)
 		if !assert.NoError(err) {
 			return false
 		}
@@ -77,7 +79,7 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var aCalls atomic.Int64
 
-		proxy := NewTestProxy()
+		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("R1")
 		g.SetEndpoint("A", "r1/a")
 		g.AddTransition("A", workflow.END)
@@ -100,9 +102,9 @@ func TestRestartSurvival(t *testing.T) {
 		assert.NoError(e2.Startup(ctx))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
-		awaitAndAssertComplete(t, e2, flowKey)
+		enginetest.AwaitAndAssertComplete(t, e2, flowKey)
 		assert.Equal(int64(1), aCalls.Load()) // executed exactly once, on engine 2
-		assertInvariants(t, e2)
+		enginetest.AssertInvariants(t, e2)
 	})
 
 	t.Run("sleeping_step", func(t *testing.T) {
@@ -110,7 +112,7 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var aCalls, bCalls atomic.Int64
 
-		proxy := NewTestProxy()
+		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("R2")
 		g.SetEndpoint("A", "r2/a")
 		g.SetEndpoint("B", "r2/b")
@@ -147,10 +149,10 @@ func TestRestartSurvival(t *testing.T) {
 		assert.NoError(e2.Startup(ctx))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
-		awaitAndAssertComplete(t, e2, flowKey)
+		enginetest.AwaitAndAssertComplete(t, e2, flowKey)
 		assert.Equal(int64(1), aCalls.Load()) // A ran once on engine 1
 		assert.Equal(int64(1), bCalls.Load()) // B ran once on engine 2 after the sleep elapsed
-		assertInvariants(t, e2)
+		enginetest.AssertInvariants(t, e2)
 	})
 
 	t.Run("parked_on_sleeping_subgraph", func(t *testing.T) {
@@ -158,7 +160,7 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var caCalls, cbCalls, parentDone atomic.Int64
 
-		proxy := NewTestProxy()
+		proxy := engine.NewTestProxy()
 		parent := workflow.NewGraph("R3P")
 		parent.SetEndpoint("P0", "r3/p0")
 		parent.AddTransition("P0", workflow.END)
@@ -205,11 +207,11 @@ func TestRestartSurvival(t *testing.T) {
 		assert.NoError(e2.Startup(ctx))
 		defer func() { assert.NoError(e2.Shutdown(ctx)) }()
 
-		awaitAndAssertComplete(t, e2, flowKey)
+		enginetest.AwaitAndAssertComplete(t, e2, flowKey)
 		assert.Equal(int64(1), caCalls.Load())    // CA ran once on engine 1
 		assert.Equal(int64(1), cbCalls.Load())    // CB ran once on engine 2 after the sleep
 		assert.Equal(int64(1), parentDone.Load()) // the parent was revived and completed on engine 2
-		assertInvariants(t, e2)
+		enginetest.AssertInvariants(t, e2)
 	})
 
 	t.Run("interrupted_resume", func(t *testing.T) {
@@ -217,7 +219,7 @@ func TestRestartSurvival(t *testing.T) {
 		dir := t.TempDir()
 		var gateCalls, doneCalls atomic.Int64
 
-		proxy := NewTestProxy()
+		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("R4")
 		g.SetEndpoint("Gate", "r4/gate")
 		g.SetEndpoint("Done", "r4/done")
@@ -243,7 +245,7 @@ func TestRestartSurvival(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		out, err := boundedAwait(t, e1, flowKey)
+		out, err := enginetest.BoundedAwait(t, e1, flowKey)
 		if !assert.NoError(err) || !assert.NotNil(out) {
 			return
 		}
@@ -256,32 +258,12 @@ func TestRestartSurvival(t *testing.T) {
 
 		// Resume on the fresh engine drives the flow to completion.
 		assert.NoError(e2.Resume(ctx, flowKey, nil))
-		final := awaitAndAssertComplete(t, e2, flowKey)
+		final := enginetest.AwaitAndAssertComplete(t, e2, flowKey)
 		if final != nil {
 			assert.Equal("yes", final.State["resumed"])
 		}
 		assert.Equal(int64(2), gateCalls.Load()) // Gate: once to interrupt (e1), once resumed (e2)
 		assert.Equal(int64(1), doneCalls.Load()) // Done ran once on engine 2
-		assertInvariants(t, e2)
+		enginetest.AssertInvariants(t, e2)
 	})
-}
-
-// boundedAwait awaits a flow with a 30s ctx bound so a wedge fails the test instead of hanging.
-func boundedAwait(t *testing.T, e *Engine, flowKey string) (*workflow.FlowOutcome, error) {
-	t.Helper()
-	awaitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	return e.Await(awaitCtx, flowKey)
-}
-
-// awaitAndAssertComplete awaits a flow (bounded) and asserts it completed, returning the outcome.
-func awaitAndAssertComplete(t *testing.T, e *Engine, flowKey string) *workflow.FlowOutcome {
-	t.Helper()
-	assert := testarossa.For(t)
-	out, err := boundedAwait(t, e, flowKey)
-	if !assert.NoError(err) || !assert.NotNil(out) {
-		return nil
-	}
-	assert.Equal(workflow.StatusCompleted, out.Status)
-	return out
 }

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -43,7 +44,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	release := make(chan struct{})
 	var once sync.Once
 	releaseGC := func() { once.Do(func() { close(release) }) }
@@ -109,7 +110,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -121,7 +122,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.db.Shard(shard)
+	db, err := e.DB().Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}

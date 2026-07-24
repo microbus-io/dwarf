@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -30,7 +31,7 @@ import (
 
 // TestSubgraphChildStopSignal_DroppedThenBackstopped is the dropped-wake variant of
 // TestSubgraphErrorWaitflow. That fixture proves a failing subgraph child's signalStop wakes an Await blocked
-// on its (read-only) child key promptly, well under awaitPollInterval. Here we arm faultDropSignalStop so the
+// on its (read-only) child key promptly, well under awaitPollInterval. Here we arm FaultDropSignalStop so the
 // child's terminal wake is LOST (the first signalStop consult is the child's failure; the fault fires once and
 // is consumed there, so the root's later wake is delivered normally). The child-key Await must STILL return -
 // via the periodic re-snapshot backstop - bounding the hang to one awaitPollInterval rather than the caller's
@@ -113,10 +114,10 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	// Let the Await goroutine register its waiter and block on the still-running child.
 	time.Sleep(100 * time.Millisecond)
 
-	// Drop the child's terminal wake: with faultDropSignalStop armed, the child's failStep signalStop delivers
+	// Drop the child's terminal wake: with FaultDropSignalStop armed, the child's failStep signalStop delivers
 	// nothing. The fault fires once and is consumed on the child's (first) stop, so the root's later wake is
 	// unaffected.
-	e.seams.Inject(faultDropSignalStop)
+	e.seams.Inject(FaultDropSignalStop)
 	close(release) // the child now fails via failStep's subgraph-child path, whose signalStop is dropped
 
 	// Despite the lost signal, Await(childKey) must still return - the only remaining wake path is the periodic
@@ -141,5 +142,5 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 		assert.True(false, "root Run never returned")
 		return
 	}
-	assertInvariants(t, e)
+	enginetest.AssertInvariants(t, e)
 }

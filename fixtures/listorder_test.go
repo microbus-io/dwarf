@@ -14,12 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -39,17 +40,17 @@ func TestList_NewestFirstIsPerShardNotGlobal(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "listorder/a")
 	g.AddTransition("A", workflow.END)
 	proxy.HandleGraph("listorder/g", g)
 	proxy.HandleTask("listorder/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
+	assert.NoError(e.SetShard(engine.ShardSpec{Index: 1}))
+	assert.NoError(e.SetShard(engine.ShardSpec{Index: 2}))
 	assert.NoError(e.Startup(ctx))
 
 	// Enough flows that placement (a weighted-random pick) lands some on each shard with overwhelming odds.

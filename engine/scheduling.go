@@ -279,10 +279,10 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 		}
 		shardErr := err != nil
 
-		// faultPollSizingErr simulates a transient sizing-query failure so the test proves the poll clamps
+		// FaultPollSizingErr simulates a transient sizing-query failure so the test proves the poll clamps
 		// nextPoll to pollErrorRetryInterval (re-poll soon) instead of sleeping maxPollInterval on an
 		// unknown backlog.
-		if e.seams.IsFault(faultPollSizingErr) {
+		if e.seams.IsFault(FaultPollSizingErr) {
 			shardErr = true
 		}
 
@@ -554,10 +554,10 @@ func (e *Engine) partitionPredicate() (string, []any) {
 }
 
 func (e *Engine) scanShardBandKeys(ctx context.Context, shard int) (band int, rows []censusRow, err error) {
-	// faultRefillScanErr simulates the band scan failing so the test proves runShardRefill logs and
+	// FaultRefillScanErr simulates the band scan failing so the test proves runShardRefill logs and
 	// shortens the next poll (re-scan soon) instead of refilling empty and idling the shard's workers.
-	if e.seams.IsFault(faultRefillScanErr) {
-		return math.MaxInt, nil, errors.New("injected fault: " + faultRefillScanErr)
+	if e.seams.IsFault(FaultRefillScanErr) {
+		return math.MaxInt, nil, errors.New("injected fault: " + FaultRefillScanErr)
 	}
 	db, err := e.db.Shard(shard)
 	if err != nil {

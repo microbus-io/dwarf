@@ -29,12 +29,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 // TestCrossReplica_LostTerminalWake_AwaiterPolls pins that when the replica that runs a flow's final step has
-// its terminal wake fully dropped (faultDropSignalStop drops both the local waiter wake AND the peer
+// its terminal wake fully dropped (FaultDropSignalStop drops both the local waiter wake AND the peer
 // statusChange broadcast), an Await on a *different* replica still returns - via its own periodic
 // re-snapshot, the only wake path left once the signal is gone. The cross-replica analog of
 // TestFault_DropSignalStop.
@@ -84,7 +85,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 
 	// Break the worker's terminal wake for the rest of the test: every signalStop on the worker (local notify
 	// + peer broadcast) delivers nothing, so the awaiter can learn the outcome only by re-snapshotting the DB.
-	worker.seams.InjectN(1<<20, faultDropSignalStop)
+	worker.seams.InjectN(1<<20, FaultDropSignalStop)
 
 	fk, err := awaiter.Create(ctx, "xrwake/g", nil, nil)
 	if !assert.NoError(err) {
@@ -92,7 +93,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	}
 
 	// The only path by which this Await can return is the awaiter's own poll backstop - no signal survives.
-	out, err := boundedAwait(t, awaiter, fk)
+	out, err := enginetest.BoundedAwait(t, awaiter, fk)
 	if assert.NoError(err) && assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -100,7 +101,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 }
 
 // TestCrossReplica_ClaimedStepRecoveredByPeer pins cross-replica lease recovery: replica A claims and runs a
-// step but its completion write is fenced out (faultLeaseStaleWrite - a zombie/late write), leaving the step
+// step but its completion write is fenced out (FaultLeaseStaleWrite - a zombie/late write), leaving the step
 // `running` under A's lease; A then "crashes" (Shutdown). Replica B's lease recovery resets the expired lease
 // and re-dispatches the step to a clean completion. The task body runs on both replicas (execution is
 // at-least-once), but the persisted outcome is state-correct and the invariant sweep is clean - the property
@@ -139,7 +140,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	repA.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 400ms
 	assert.NoError(repA.Startup(ctx))
 
-	repA.seams.Inject(faultLeaseStaleWrite, "A")
+	repA.seams.Inject(FaultLeaseStaleWrite, "A")
 	fk, err := repA.Create(ctx, "xrrec/g", nil, nil)
 	if !assert.NoError(err) {
 		repA.Shutdown(ctx)
@@ -177,10 +178,10 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	repB.pollPendingSteps(ctx) // B's lease-recovery backstop
 
-	out := awaitAndAssertComplete(t, repB, fk)
+	out := enginetest.AwaitAndAssertComplete(t, repB, fk)
 	if assert.NotNil(out) {
 		assert.Equal("yes", out.State["done"]) // state-correct despite the fenced first attempt
 	}
-	assert.Equal(int64(2), runs.Load()) // ran once on A (fenced) + once on B (recovery): at-least-once
-	assertInvariants(t, repB)           // the recovered world is structurally clean
+	assert.Equal(int64(2), runs.Load())  // ran once on A (fenced) + once on B (recovery): at-least-once
+	enginetest.AssertInvariants(t, repB) // the recovered world is structurally clean
 }

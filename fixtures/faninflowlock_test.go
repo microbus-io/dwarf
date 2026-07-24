@@ -14,13 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
 	"strconv"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -61,8 +62,8 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 	run := func(t *testing.T, width int) int {
 		assert := testarossa.For(t)
 
-		e := NewEngineUnderTest(t)
-		proxy := NewTestProxy()
+		e := engine.NewEngineUnderTest(t)
+		proxy := engine.NewTestProxy()
 		e.SetHost(proxy)
 		e.SetWorkers(1) // determinism: one worker, so no sibling races and no contention retries
 		assert.NoError(e.Startup(t.Context()))
@@ -97,7 +98,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 
 		_, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
-		return e.seams.Visits(checkpointFlowRowWrite, strconv.Itoa(flowID))
+		return e.Seams().Visits(engine.CheckpointFlowRowWrite, strconv.Itoa(flowID))
 	}
 
 	var narrow, wide int

@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -33,36 +34,10 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// waitUntil polls cond until it holds or the timeout elapses; returns cond's final value.
-func waitUntil(t *testing.T, timeout time.Duration, cond func() bool) bool {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return true
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	return cond()
-}
-
-// countRows runs a COUNT(*) query on the flow's shard and returns the count.
-func countRows(t *testing.T, e *Engine, shard int, query string, args ...any) int {
-	t.Helper()
-	assert := testarossa.For(t)
-	db, err := e.db.Shard(shard)
-	if !assert.NoError(err) {
-		return -1
-	}
-	var n int
-	assert.NoError(db.QueryRowContext(context.Background(), query, args...).Scan(&n))
-	return n
-}
-
 // orphanShapeCount counts flows in the "orphan" shape on a shard: running with zero non-terminal steps (all
 // steps terminal, no successor) - exactly what detectOrphanedFlows alarms on and assertInvariants forbids.
 func orphanShapeCount(t *testing.T, e *Engine, shard int) int {
-	return countRows(t, e, shard,
+	return enginetest.CountRows(t, e, shard,
 		"SELECT COUNT(*) FROM dwarf_flows f WHERE f.status='"+workflow.StatusRunning+"'"+
 			" AND NOT EXISTS (SELECT 1 FROM dwarf_steps s WHERE s.flow_id=f.flow_id AND s.status IN ('"+
 			workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))")
@@ -89,20 +64,20 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
-	// A completes (marked `completed`), the flow-completion tx fails (faultCompleteFlowCommit), then the
-	// recovery defer's reset also fails (faultRecoveryResetErr) - so A never returns to `pending` and the flow
+	// A completes (marked `completed`), the flow-completion tx fails (FaultCompleteFlowCommit), then the
+	// recovery defer's reset also fails (FaultRecoveryResetErr) - so A never returns to `pending` and the flow
 	// never completes. Both fire once.
-	e.seams.Inject(faultCompleteFlowCommit)
-	e.seams.Inject(faultRecoveryResetErr)
+	e.seams.Inject(FaultCompleteFlowCommit)
+	e.seams.Inject(FaultRecoveryResetErr)
 	fk, err := e.Create(ctx, "ftbreset/g", nil, nil)
 	assert.NoError(err)
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
 	// Wait for the strand to settle: A `completed`, the flow still `running`.
-	got := waitUntil(t, 5*time.Second, func() bool {
-		return countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusCompleted+"'", flowID) == 1 &&
-			countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusRunning+"'", flowID) == 1
+	got := enginetest.WaitUntil(t, 5*time.Second, func() bool {
+		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusCompleted+"'", flowID) == 1 &&
+			enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusRunning+"'", flowID) == 1
 	})
 	assert.True(got, "expected the flow to strand running with A completed")
 	assert.Equal(1, runs) // the reset failed, so no re-dispatch
@@ -140,14 +115,14 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 
 	// The caller parks, then createSubgraphFlow errors (no child inserted): failAndReturn must fail the caller
 	// step (un-parked) and the flow, not strand it parked.
-	e.seams.Inject(faultSubgraphSpawnErr, "ftbspawn/child")
+	e.seams.Inject(FaultSubgraphSpawnErr, "ftbspawn/child")
 	fk, out := batteryRun(t, e, "ftbspawn/parent")
 	assert.Equal(workflow.StatusFailed, out.Status)
 
 	shard, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	// No child flow was created (the spawn failed before insert), so no orphan lingers.
-	assert.Equal(0, countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id<>0"))
+	assert.Equal(0, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id<>0"))
 	assertFaultRecoveryClean(t, e, reader) // caller failed + un-parked; invariants clean
 }
 
@@ -202,14 +177,14 @@ func TestFaultSite_CancelCommit(t *testing.T) {
 	assert.NoError(err)
 
 	// The Cancel transaction fails once: Cancel errors and nothing changed (still interrupted).
-	e.seams.Inject(faultCancelCommit)
+	e.seams.Inject(FaultCancelCommit)
 	err = e.Cancel(ctx, fk, "boom")
 	assert.Error(err)
-	assert.Equal(1, countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
+	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
 
 	// Retry (fault consumed): Cancel succeeds.
 	assert.NoError(e.Cancel(ctx, fk, "boom"))
-	assert.Equal(1, countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusCancelled+"'", flowID))
+	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusCancelled+"'", flowID))
 	assertFaultRecoveryClean(t, e, reader)
 }
 
@@ -232,15 +207,15 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	assert.NoError(err)
 
 	// The Resume transaction fails once: Resume errors and the flow is still interrupted (leaf still parked).
-	e.seams.Inject(faultResumeCommit)
+	e.seams.Inject(FaultResumeCommit)
 	err = e.Resume(ctx, fk, nil)
 	assert.Error(err)
-	assert.Equal(1, countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
-	assert.Equal(1, countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
+	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
+	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
 
 	// Retry (fault consumed): Resume succeeds and the flow completes.
 	assert.NoError(e.Resume(ctx, fk, nil))
-	awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 	assertFaultRecoveryClean(t, e, reader)
 }
 
@@ -270,7 +245,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	forkStepKey := fmt.Sprintf("%d-%d-%s", shard, aStepID, aStepToken)
 
 	// The clone transaction fails once: Fork errors, the origin is byte-identical, and no clone rows exist.
-	e.seams.Inject(faultForkCommit)
+	e.seams.Inject(FaultForkCommit)
 	_, err = e.Fork(ctx, forkStepKey, nil)
 	assert.Error(err)
 	assert.Equal(originFS, readFinalState(t, e, originKey), "origin final_state mutated by a rolled-back Fork")
@@ -308,7 +283,7 @@ func TestFaultSite_SignalPeersPanic(t *testing.T) {
 
 	// Every statusChange broadcast panics inside the CatchPanic boundary; the local waiter wake (separate from
 	// the peer broadcast) still delivers, so Await returns the completed outcome.
-	e.seams.InjectN(1000, faultSignalPeersPanic, string(signalOpStatusChange))
+	e.seams.InjectN(1000, FaultSignalPeersPanic, string(signalOpStatusChange))
 	_, out := batteryRun(t, e, "ftbpanic/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assertFaultRecoveryClean(t, e, reader)
@@ -343,7 +318,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 
 	// The child fails, but its re-dispatch of the parked caller is lost: the caller wedges running+parkedSubgraph
 	// with a terminal (failed) child.
-	e.seams.Inject(faultDeliverFailureErr)
+	e.seams.Inject(FaultDeliverFailureErr)
 	fk, err := e.Create(ctx, "ftbdeliver/parent", nil, nil)
 	assert.NoError(err)
 	shard, _, _, err := keys.ParseFlowKey(fk)
@@ -352,20 +327,20 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 	assert.NoError(err)
 
 	// Wait for the wedge to form: the child flow gone terminal (failed), the parent still running.
-	got := waitUntil(t, 5*time.Second, func() bool {
-		return countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id<>0 AND status='"+workflow.StatusFailed+"'") == 1
+	got := enginetest.WaitUntil(t, 5*time.Second, func() bool {
+		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id<>0 AND status='"+workflow.StatusFailed+"'") == 1
 	})
 	assert.True(got, "expected the child to fail and the caller to wedge")
 
 	// The wedge sweep re-drives the lost delivery (minAge 0 bypasses the steady-state age guard); the parent
 	// then terminalizes failed.
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
-	awaitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
 
 	// Unlike the other faults in this file, this one drives a step into a genuinely-wedged state on purpose, so the
 	// always-on alarm SHOULD fire exactly once - proving the backstop engaged. The structural invariants must
 	// still be clean afterward.
-	assertInvariants(t, e)
+	enginetest.AssertInvariants(t, e)
 	var rm metricdata.ResourceMetrics
 	if assert.NoError(reader.Collect(ctx, &rm)) {
 		unwedged, ok := sumCounter(rm, "dwarf_steps_unwedged", "", "")
@@ -420,8 +395,8 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 
 	// Drop each level's FIRST failure-delivery independently (scoped by the parked caller's task name). Each
 	// caller's sweep-driven re-delivery (the second consult of its scope) succeeds, so the sweep can recover it.
-	e.seams.Inject(faultDeliverFailureErr, "Call2")
-	e.seams.Inject(faultDeliverFailureErr, "Call1")
+	e.seams.Inject(FaultDeliverFailureErr, "Call2")
+	e.seams.Inject(FaultDeliverFailureErr, "Call1")
 	fk, err := e.Create(ctx, "ftbdeep/root", nil, nil)
 	assert.NoError(err)
 	shard, rootFlowID, _, err := keys.ParseFlowKey(fk)
@@ -431,8 +406,8 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 
 	// First wedge forms during normal execution: the leaf child fails, but its delivery to Call2 is lost, so
 	// Call2 (in the mid child) is stuck running+parkedSubgraph with a terminal child.
-	got := waitUntil(t, 5*time.Second, func() bool {
-		return countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE workflow_url='ftbdeep/leaf' AND status='"+workflow.StatusFailed+"'") == 1
+	got := enginetest.WaitUntil(t, 5*time.Second, func() bool {
+		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE workflow_url='ftbdeep/leaf' AND status='"+workflow.StatusFailed+"'") == 1
 	})
 	assert.True(got, "expected the leaf child to fail and Call2 to wedge")
 
@@ -440,15 +415,15 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 	// mid child, whose delivery to Call1 is then lost (Call1 wedges); a later pass recovers Call1, which re-fails
 	// the root. Each pass re-queries the wedged set, so the newly-formed Call1 wedge needs its own pass - hence
 	// the driven loop rather than a single sweep call.
-	got = waitUntil(t, 15*time.Second, func() bool {
+	got = enginetest.WaitUntil(t, 15*time.Second, func() bool {
 		e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
-		return countRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusFailed+"'", rootFlowID) == 1
+		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusFailed+"'", rootFlowID) == 1
 	})
 	assert.True(got, "expected the sweep to propagate the failure up both levels to the root")
-	awaitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusFailed, 10*time.Second)
 
 	// The two wedges (Call2, Call1) were each unwedged exactly once, and the tree ends structurally clean.
-	assertInvariants(t, e)
+	enginetest.AssertInvariants(t, e)
 	var rm metricdata.ResourceMetrics
 	if assert.NoError(reader.Collect(ctx, &rm)) {
 		unwedged, ok := sumCounter(rm, "dwarf_steps_unwedged", "park_type", "subgraph")
@@ -458,7 +433,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 }
 
 // TestFaultSite_ReapSelectErr pins the reaper's resilience to a transient due-root SELECT failure (sibling to
-// faultReapMidTree, which covers the delete half): the pass logs and bails without deleting, and the NEXT
+// FaultReapMidTree, which covers the delete half): the pass logs and bails without deleting, and the NEXT
 // pass reaps cleanly.
 func TestFaultSite_ReapSelectErr(t *testing.T) {
 	t.Parallel()
@@ -478,13 +453,13 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 
 	fk, err := e.Create(ctx, "ftbreapsel/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
-	awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 5*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 5*time.Second)
 	shard, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	time.Sleep(5 * time.Millisecond) // let the 1ms window elapse
 
 	// The due-root SELECT errors: the pass bails without deleting, so the flow is still present.
-	e.seams.Inject(faultReapSelectErr)
+	e.seams.Inject(FaultReapSelectErr)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard)) // not deleted - the scan bailed
 

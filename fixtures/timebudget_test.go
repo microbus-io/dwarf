@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
@@ -22,18 +22,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
 
 // flowBudgetMs reads the frozen per-flow budget off the flow row.
-func flowBudgetMs(t *testing.T, e *Engine, flowKey string) int {
+func flowBudgetMs(t *testing.T, e *engine.Engine, flowKey string) int {
 	t.Helper()
 	assert := testarossa.For(t)
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	db, err := e.db.Shard(shardNum)
+	db, err := e.DB().Shard(shardNum)
 	assert.NoError(err)
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&ms)
@@ -42,12 +43,12 @@ func flowBudgetMs(t *testing.T, e *Engine, flowKey string) int {
 }
 
 // entryStepBudgetMs reads the entry step's denormalized budget.
-func entryStepBudgetMs(t *testing.T, e *Engine, flowKey string) int {
+func entryStepBudgetMs(t *testing.T, e *engine.Engine, flowKey string) int {
 	t.Helper()
 	assert := testarossa.For(t)
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	db, err := e.db.Shard(shardNum)
+	db, err := e.DB().Shard(shardNum)
 	assert.NoError(err)
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_steps WHERE flow_id=? ORDER BY step_id LIMIT_OFFSET(1, 0)", flowID).Scan(&ms)
@@ -63,14 +64,14 @@ func TestTimeBudget_FrozenAtCreate(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("Task", "timebudget/task")
 	g.AddTransition("Task", workflow.END)
 	proxy.HandleGraph("timebudget/graph", g)
 	proxy.HandleTask("timebudget/task", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
@@ -103,7 +104,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Blocker")
 	g.SetEndpoint("Task", "timebudget/blocker")
 	g.AddTransition("Task", workflow.END)
@@ -118,7 +119,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 	assert.NoError(e.SetTimeBudget(1 * time.Second)) // tiny default
@@ -131,7 +132,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shardNum)
+	db, err := e.DB().Shard(shardNum)
 	assert.NoError(err)
 	var leaseRemainingMs float64
 	var budgetMs int
@@ -157,7 +158,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("RunInner", "timebudget/run-inner")
 	parent.AddTransition("RunInner", workflow.END)
@@ -178,7 +179,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
@@ -190,7 +191,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	// The child flow (surgraph_flow_id > 0) carries the parent's 45s budget, not the 30s default.
 	shardNum, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shardNum)
+	db, err := e.DB().Shard(shardNum)
 	assert.NoError(err)
 	var childBudgetMs int
 	err = db.QueryRowContext(ctx, "SELECT time_budget_ms FROM dwarf_flows WHERE surgraph_flow_id > 0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)").Scan(&childBudgetMs)

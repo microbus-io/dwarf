@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -100,7 +101,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	// retries the transaction in place, so X's task runs only ONCE and the cohort arrival is still bumped
 	// exactly once by the successful commit. (It used to run twice - the recovery defer rewound and
 	// re-dispatched the branch, re-executing the task to recover from a database blip.)
-	e.seams.Inject(faultTransitionCommit, "X")
+	e.seams.Inject(FaultTransitionCommit, "X")
 	fk, out := batteryRun(t, e, "fcfan/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
@@ -158,7 +159,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 	// X's transition (X->Y) inside the child fails once after X was marked completed: persist retries the
 	// transaction in place, so the child proceeds to Y->END and completes without re-running X, and the parent
 	// revives. (X used to run twice, re-dispatched by the recovery defer.)
-	e.seams.Inject(faultTransitionCommit, "X")
+	e.seams.Inject(FaultTransitionCommit, "X")
 	_, out := batteryRun(t, e, "fcsub/parent")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
@@ -191,7 +192,7 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 	// identical final_state. (It used to run 4 times: each failure drove a recovery-defer reset + re-dispatch,
 	// re-executing the task once per database blip.)
 	*calls["a"], *calls["b"] = 0, 0
-	e.seams.InjectN(3, faultTransitionCommit, "A")
+	e.seams.InjectN(3, FaultTransitionCommit, "A")
 	fk, out := batteryRun(t, e, "fcrep/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal(baseFS, readFinalState(t, e, fk), "final_state diverged from the no-fault baseline")
@@ -221,8 +222,8 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// Drop the create-time doorbell AND the terminal signalStop: neither wake reaches its consumer.
-	e.seams.Inject(faultDropDoorbell)
-	e.seams.Inject(faultDropSignalStop)
+	e.seams.Inject(FaultDropDoorbell)
+	e.seams.Inject(FaultDropSignalStop)
 	fk, err := e.Create(ctx, "fcwake/g", nil, nil)
 	assert.NoError(err)
 
@@ -291,7 +292,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 
 	// The first completeSurgraphFlow to run is the deepest (l3 reviving l2's caller): drop that one revive so
 	// l2's caller wedges running+parkedSubgraph with a terminal child.
-	e.seams.Inject(faultSubgraphReviveLost)
+	e.seams.Inject(FaultSubgraphReviveLost)
 	fk, err := e.Create(ctx, "fcdeep/root", nil, nil)
 	assert.NoError(err)
 	shard, _, _, err := keys.ParseFlowKey(fk)
@@ -312,12 +313,12 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 
 	// One sweep re-drives the wedged l2 caller; the normal completion cascade then carries l2 -> l1 -> root.
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
-	awaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 	// The tree ends structurally clean. Unlike the other composition cases in this file, the wedge alarm is *expected* to have
 	// fired exactly once here - this test's whole point is that a genuinely-wedged caller was recovered by the
 	// sweep (not the normal revive path), so assert the counter is 1 rather than 0.
-	assertInvariants(t, e)
+	enginetest.AssertInvariants(t, e)
 	var rm metricdata.ResourceMetrics
 	assert.NoError(reader.Collect(ctx, &rm))
 	unwedged, ok := sumCounter(rm, "dwarf_steps_unwedged", "", "")

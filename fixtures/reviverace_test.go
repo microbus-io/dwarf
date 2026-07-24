@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -38,7 +40,7 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	ctx := context.Background()
 
 	var callRuns int
-	proxy := NewTestProxy()
+	proxy := engine.NewTestProxy()
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("Call", "rvc/call")
 	parent.AddTransition("Call", workflow.END)
@@ -59,27 +61,27 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	})
 	proxy.HandleTask("rvc/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze the worker at the caller revive, after the child completed (its completion transaction committed).
-	e.seams.Break(checkpointBeforeReviveWrite)
+	e.Seams().Break(engine.CheckpointBeforeReviveWrite)
 	fk, err := e.Create(ctx, "rvc/parent", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, checkpointBeforeReviveWrite), "engine never reached checkpoint checkpointBeforeReviveWrite")
+	assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeReviveWrite), "engine never reached checkpoint engine.CheckpointBeforeReviveWrite")
 
 	// Cancel wins: the parked caller step is flipped cancelled under the cancel transaction.
 	assert.NoError(e.Cancel(ctx, fk, "test"))
 
 	// Release the revive: its running+parkedSubgraph guard matches zero rows, so the cancelled caller is not
 	// resurrected to pending and not re-dispatched.
-	e.seams.Resume(checkpointBeforeReviveWrite)
-	awaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+	e.Seams().Resume(engine.CheckpointBeforeReviveWrite)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.db.Shard(shardNum)
+	db, err := e.DB().Shard(shardNum)
 	assert.NoError(err)
 	var callStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", flowID).Scan(&callStatus))
@@ -89,5 +91,5 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	// Give any (erroneous) re-dispatch a moment to have happened, then confirm it did not.
 	time.Sleep(200 * time.Millisecond)
 	assert.Equal(1, callRuns)
-	assertInvariants(t, e)
+	enginetest.AssertInvariants(t, e)
 }

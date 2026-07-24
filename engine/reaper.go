@@ -76,12 +76,12 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 					" AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=NOW_UTC() ORDER BY flow_id LIMIT_OFFSET(?, 0)",
 				reapBatch,
 			)
-			// faultReapSelectErr treats this due-root scan as errored (sibling to faultReapMidTree, which covers
+			// FaultReapSelectErr treats this due-root scan as errored (sibling to FaultReapMidTree, which covers
 			// the delete half), so the test proves the pass logs and bails without deleting and the NEXT pass
 			// reaps cleanly - the reaper's resilience to a transient SELECT blip.
-			if err == nil && e.seams.IsFault(faultReapSelectErr) {
+			if err == nil && e.seams.IsFault(FaultReapSelectErr) {
 				rows.Close()
-				err = errors.New("injected fault: " + faultReapSelectErr)
+				err = errors.New("injected fault: " + FaultReapSelectErr)
 			}
 			if err != nil {
 				e.logger.ErrorContext(ctx, "Reaper: selecting due flows", "shard", shard, "error", err)
@@ -116,11 +116,11 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 				); err != nil {
 					return errors.Trace(err)
 				}
-				// faultReapMidTree aborts after the steps delete but before the flows delete, so the whole
+				// FaultReapMidTree aborts after the steps delete but before the flows delete, so the whole
 				// tree-delete rolls back atomically. The test proves a mid-tree failure leaves the tree intact
 				// (not a half-deleted flow with no steps) and the next reap pass removes it cleanly.
-				if e.seams.IsFault(faultReapMidTree) {
-					return errors.New("injected fault: " + faultReapMidTree)
+				if e.seams.IsFault(FaultReapMidTree) {
+					return errors.New("injected fault: " + FaultReapMidTree)
 				}
 				if _, err := tx.ExecContext(ctx,
 					"DELETE FROM dwarf_flows WHERE root_flow_id IN ("+ids+")",

@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package enginetest
 
 // testTimeoutScale is 1 in normal (non-race) test runs; see the race-tagged variant for the rationale.
 const testTimeoutScale = 1

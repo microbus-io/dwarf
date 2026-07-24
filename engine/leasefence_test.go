@@ -18,15 +18,18 @@ package engine
 
 import (
 	"context"
+	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/keys"
+	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
+	"github.com/microbus-io/testarossa"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/microbus-io/dwarf/internal/keys"
-	"github.com/microbus-io/dwarf/workflow"
-	"github.com/microbus-io/errors"
-	"github.com/microbus-io/testarossa"
 )
 
 // TestLeaseFence_FailStep pins that failStep's post-execution write is fenced on the dispatch's lease
@@ -292,7 +295,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 
 // TestLeaseFence_RecoveryResetFenced pins the fence on the processStep recovery defer's own reset - the one
 // guarding the recovery machinery itself, previously reasoned-only (the leaseSeq>0 gate). Distinct from
-// faultRecoveryResetErr (which tests the reset *failing*): this proves a zombie's reset (completed->pending)
+// FaultRecoveryResetErr (which tests the reset *failing*): this proves a zombie's reset (completed->pending)
 // carrying a stale lease generation matches zero rows, so it cannot rewind a peer's freshly-claimed step.
 //
 // The completed->pending reset fires when a step is marked `completed` but its follow-up transition
@@ -333,14 +336,14 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	// database was busy would be exactly backwards - so it is what drives the completed->pending reset now.
 	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transaction gives up and
 	// hands a contention error to the defer; the fault is spent, and the peer's re-dispatch runs clean.
-	eng.seams.InjectN(8, faultContention, "A")
-	eng.seams.Break(checkpointBeforeRecoveryReset)
+	eng.seams.InjectN(8, FaultContention, "A")
+	eng.seams.Break(CheckpointBeforeRecoveryReset)
 
 	flowKey, err := eng.Create(ctx, "lfrr/g", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
-	assert.True(eng.seams.WaitTimeout(ctx, 15*time.Second, checkpointBeforeRecoveryReset), "engine never reached checkpoint checkpointBeforeRecoveryReset")
+	assert.True(eng.seams.WaitTimeout(ctx, 15*time.Second, CheckpointBeforeRecoveryReset), "engine never reached checkpoint CheckpointBeforeRecoveryReset")
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {
@@ -380,7 +383,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(beforeStatus))
 
 	// Release the zombie: its reset carries the stale generation N and must match zero rows.
-	eng.seams.Resume(checkpointBeforeRecoveryReset)
+	eng.seams.Resume(CheckpointBeforeRecoveryReset)
 
 	// A broken fence would rewind A completed->pending within milliseconds and re-dispatch it a third time
 	// after the flow already completed; the settle window makes the fence's zero-row match observable.
@@ -393,7 +396,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(afterStatus)) // peer's step untouched, not rewound
 	assert.Equal(beforeSeq, afterSeq)                                      // generation unchanged by the fenced reset
 	assert.Equal(int64(2), aCalls.Load())                                  // zombie + peer only, never a third dispatch
-	assertInvariants(t, eng)
+	enginetest.AssertInvariants(t, eng)
 }
 
 // TestLeaseFence_RetryRewindFenced pins the retry-rewind fence: a zombie whose task armed flow.Retry must not
@@ -464,7 +467,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStatus))
 	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(aStatus)) // still completed, not rewound to pending
 	assert.Equal(int64(3), aCalls.Load())                              // zombie + peer retry + peer completion; the fenced zombie did not re-dispatch a 4th
-	assertInvariants(t, eng)                                           // a broken fence would leave a completed flow with a pending step (check #1)
+	enginetest.AssertInvariants(t, eng)                                // a broken fence would leave a completed flow with a pending step (check #1)
 }
 
 // TestLeaseFence_SubgraphParkFenced pins the subgraph-park fence: a zombie whose task armed flow.Subgraph must not
@@ -545,5 +548,152 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStatus))
 	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(aStatus)) // caller still completed, not re-parked
 	assert.Equal(int64(1), cCalls.Load())                              // the child task ran exactly once
-	assertInvariants(t, eng)
+	enginetest.AssertInvariants(t, eng)
+}
+
+// TestLeaseRecovery_EndToEnd is the end-to-end proof of lease-based crash recovery:
+// a worker "crashes" mid-task (its first execution never returns), its lease expires, pollPendingSteps
+// resets the step, and a free worker re-executes it to completion. It asserts the whole path heals - the
+// flow completes on the second execution - and pins two properties: the dwarf_steps_recovered metric fires,
+// and lease recovery is NOT a retry (the step's attempt counter stays 0, unlike flow.Retry which bumps it).
+func TestLeaseRecovery_EndToEnd(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	var aCalls atomic.Int64
+	aStarted := make(chan struct{}, 1)
+	aRelease := make(chan struct{})
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("LR")
+	g.SetEndpoint("A", "lr/a")
+	g.AddTransition("A", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("lr/g", g)
+	proxy.HandleTask("lr/a", func(ctx context.Context, f *workflow.Flow) error {
+		if aCalls.Add(1) == 1 {
+			aStarted <- struct{}{}
+			<-aRelease // the crashed worker: its first execution is leaked, released only at teardown
+		}
+		f.SetString("ran", "yes")
+		return nil
+	})
+
+	eng := NewEngineUnderTest(t)
+	assert.NoError(eng.SetWorkers(3))
+	eng.SetHost(proxy)
+	eng.SetMeterProvider(mp)
+	assert.NoError(eng.Startup(t.Context()))
+	// Release the leaked "crashed" execution at teardown, BEFORE the engine's Shutdown cleanup drains workers (LIFO
+	// cleanup: this runs first), so the blocked worker returns and Shutdown does not wait out its lease.
+	t.Cleanup(func() { close(aRelease) })
+
+	flowKey, outcome := zombieDispatch(t, eng, "lr/g", "A", &aCalls, aStarted, aRelease)
+	if !assert.NotNil(outcome) {
+		return
+	}
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+	assert.Equal("yes", outcome.State["ran"]) // the recovery re-execution wrote the state
+
+	// The recovery metric fired: pollPendingSteps reset the lost-lease step to pending for re-execution.
+	var rm metricdata.ResourceMetrics
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+	recovered, ok := sumCounter(rm, "dwarf_steps_recovered", "", "")
+	assert.True(ok, "dwarf_steps_recovered should be present")
+	assert.True(recovered >= 1, "at least one step recovered by lease expiry, got %d", recovered)
+
+	// Lease recovery is NOT a retry: the re-executed step's attempt stays 0 (flow.Retry would have bumped it).
+	_, flowID, _, err := keys.ParseFlowKey(flowKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := eng.db.Shard(1)
+	if !assert.NoError(err) {
+		return
+	}
+	var attempt int
+	assert.NoError(db.QueryRowContext(ctx,
+		"SELECT attempt FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+workflow.StatusCompleted+"'",
+		flowID).Scan(&attempt))
+	assert.Equal(0, attempt)
+
+	// The task ran exactly twice: the crashed (leaked) attempt plus the recovery re-execution - never a third.
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(int64(2), aCalls.Load())
+}
+
+// TestFailStep_TerminalStatusGuard pins that failStep's fenced write now carries a status guard
+// (status IN ('running','completed')), so it fails only a step a worker legitimately holds, never a terminal
+// one. cancelSubtree terminalizes a step to `cancelled` WITHOUT bumping lease_seq, so the dispatching worker's
+// generation still matches; without the status guard, failStep rewrote that cancelled step to `failed` -
+// violating step immutability, miscounting dwarf_steps_executed, and (the one that bites) seeding a phantom
+// branch failure that a later Fork re-derives from step status. The guard still admits the `completed` case
+// failOnPersistError relies on (fail an already-completed step whose transition tx could not be persisted).
+func TestFailStep_TerminalStatusGuard(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// setup inserts one flow (flow_id=1) and its single trunk step (step_id=1, lineage_id=0) in the given
+	// statuses under lease generation 5, lease far future so the engine's own recovery poll leaves it alone.
+	setup := func(t *testing.T, flowStatus, stepStatus string) (*Engine, *sequel.DB) {
+		assert := testarossa.For(t)
+		e := NewEngineUnderTest(t)
+		e.SetHost(NewTestProxy())
+		assert.NoError(e.Startup(t.Context()))
+		db, err := e.db.Shard(1)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx,
+			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			"ftok", "u", "W", []byte("{}"), flowStatus, 1, 1, 1000,
+		)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, lineage_id, time_budget_ms, lease_seq, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 999000))",
+			1, 1, "stok", "T", "u", stepStatus, 0, 1000, 5,
+		)
+		assert.NoError(err)
+		return e, db
+	}
+	statuses := func(t *testing.T, db *sequel.DB) (flowStatus, stepStatus string) {
+		assert := testarossa.For(t)
+		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=1").Scan(&flowStatus))
+		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=1").Scan(&stepStatus))
+		return strings.TrimSpace(flowStatus), strings.TrimSpace(stepStatus)
+	}
+
+	// A step a racing Cancel already terminalized (cancelled, same generation) must NOT be re-failed: the write
+	// matches zero rows, failStep reports fenced, and both the step and its flow stay cancelled.
+	t.Run("cancelled_step_is_not_refailed", func(t *testing.T) {
+		assert := testarossa.For(t)
+		e, db := setup(t, workflow.StatusCancelled, workflow.StatusCancelled)
+
+		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("boom"), "T")
+		assert.NoError(err)
+		assert.True(fenced, "a cancelled step under our generation must fence, not be rewritten to failed")
+
+		flowStatus, stepStatus := statuses(t, db)
+		assert.Equal(workflow.StatusCancelled, stepStatus, "the cancelled step must stay cancelled (immutable)")
+		assert.Equal(workflow.StatusCancelled, flowStatus, "the cancelled flow must stay cancelled")
+	})
+
+	// Control: failOnPersistError's escape hatch - a `completed` step whose transition could not be persisted is
+	// still failed by the same call, so the guard must admit `completed`.
+	t.Run("completed_step_can_still_fail", func(t *testing.T) {
+		assert := testarossa.For(t)
+		e, db := setup(t, workflow.StatusRunning, workflow.StatusCompleted)
+
+		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("could not persist transition"), "T")
+		assert.NoError(err)
+		assert.False(fenced, "a completed step we own must still be failable (failOnPersistError's escape)")
+
+		flowStatus, stepStatus := statuses(t, db)
+		assert.Equal(workflow.StatusFailed, stepStatus)
+		assert.Equal(workflow.StatusFailed, flowStatus)
+	})
 }

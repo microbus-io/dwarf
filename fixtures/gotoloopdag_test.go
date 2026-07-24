@@ -14,13 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engine
+package fixtures
 
 import (
 	"context"
 	"sort"
 	"testing"
 
+	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -36,8 +37,8 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	proxy := NewTestProxy()
-	eng := NewEngineUnderTest(t)
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -83,7 +84,7 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	assert.Equal([]string{"a", "b"}, done)
 
 	shard, _ := parseFlowShard(flowKey)
-	db, err := eng.db.Shard(shard)
+	db, err := eng.DB().Shard(shard)
 	assert.NoError(err)
 	var joinStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE task_name='Join'").Scan(&joinStepID))
