@@ -48,9 +48,11 @@ func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
 	// a no-op so an accidental dispatch would not fail the fork step instead of surfacing the real defect.
 	proxy.HandleTask("sl/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk, _, err := e.Run(ctx, "sl/g", nil, nil)
 	if !assert.NoError(err) {

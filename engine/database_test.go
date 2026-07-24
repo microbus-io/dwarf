@@ -39,13 +39,15 @@ func (oneTaskHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph,
 func (oneTaskHost) ExecuteTask(ctx context.Context, name string, f *workflow.Flow) error { return nil }
 func (oneTaskHost) SignalPeers(context.Context, string, []byte)                          {}
 
-func TestDatabase_RunInTestCreatesSchema(t *testing.T) {
+func TestDatabase_TestModeCreatesSchema(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(noopHost{})
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Verify the schema was created by querying the flows table.
 	db, err := e.db.Shard(1)
@@ -80,11 +82,13 @@ func TestSetShard(t *testing.T) {
 	assert.Error(pre.SetShard(ShardSpec{Index: -1})) // negative index
 
 	// Sparse indices: 2 and 99 need not be contiguous.
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(oneTaskHost{})
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 99}))
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert.Equal(2, e.db.NumShards())
 	assert.Equal([]int{2, 99}, e.db.Indices())
 
@@ -116,9 +120,11 @@ func TestDatabase_ShardOutOfRange(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(noopHost{})
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := e.db.Shard(0)
 	assert.Error(err)
@@ -132,9 +138,11 @@ func TestDatabase_EachShardSingleShard(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(noopHost{})
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	var visited []int
 	err := e.db.OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {

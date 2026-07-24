@@ -71,9 +71,11 @@ func TestSwitchflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("amount_above_high_threshold_takes_high_branch", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -149,9 +151,11 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("no_match_completes_flow_without_branching", func(t *testing.T) {
 		assert := testarossa.For(t)

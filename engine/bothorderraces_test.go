@@ -63,9 +63,11 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		testarossa.For(t).NoError(g.Validate())
 		proxy.HandleGraph(prefix+"/g", g)
 		proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-		e := NewEngine()
+		e := NewEngineUnderTest(t)
 		e.SetHost(proxy)
-		e.RunInTest(t)
+		if err := e.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 		return e, prefix + "/g"
 	}
 
@@ -139,9 +141,11 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 			<-gateBlock // on resume, hold the flow running so Delete deterministically sees a running flow
 			return nil
 		})
-		e := NewEngine()
+		e := NewEngineUnderTest(t)
 		e.SetHost(proxy)
-		e.RunInTest(t)
+		if err := e.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 		t.Cleanup(func() { close(gateBlock) })
 		return e, gateBlock
 	}
@@ -283,9 +287,11 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	})
 	proxy.HandleTask("cip/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk, err := e.Create(ctx, "cip/parent", nil, nil)
 	assert.NoError(err)

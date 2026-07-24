@@ -123,12 +123,14 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	for i := 1; i <= numShards; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	return eng, proxy, visits
 }

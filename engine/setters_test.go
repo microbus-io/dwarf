@@ -35,9 +35,11 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(noopHost{})
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Construction-time-only: rejected after Startup.
 	assert.Error(e.SetShard(ShardSpec{Index: 2, DSN: "file:other.sqlite"})) // shard set is immutable after Startup
@@ -101,10 +103,12 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	proxy.HandleGraph("prio/g", g)
 	proxy.HandleTask("prio/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e2 := NewEngine()
+	e2 := NewEngineUnderTest(t)
 	assert.NoError(e2.SetHost(proxy))
 	assert.NoError(e2.SetDefaultPriority(7))
-	e2.RunInTest(t)
+	if err := e2.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

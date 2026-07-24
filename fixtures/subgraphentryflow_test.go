@@ -30,9 +30,11 @@ func TestSubgraphentryflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Outer graph: RunInner -> RunTail -> END
 	outer := workflow.NewGraph("Outer")

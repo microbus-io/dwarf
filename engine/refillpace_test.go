@@ -44,10 +44,12 @@ func TestRefillPace_LightLoadUnpaced(t *testing.T) {
 	proxy.HandleGraph("refillpace.verify:428/chain", g)
 	proxy.HandleTask("refillpace.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.refillPace = 2 * time.Second // before Startup; would dominate the runtime if the gate misfired
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	start := time.Now()
 	_, outcome, err := e.Run(ctx, "refillpace.verify:428/chain", nil, nil)
@@ -72,11 +74,13 @@ func TestRefillPace_DeepBacklogLiveness(t *testing.T) {
 	proxy.HandleGraph("refillpaceliveness.verify:428/one", g)
 	proxy.HandleTask("refillpaceliveness.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.SetWorkers(1)                      // capacity 2: a backlog of 10 keeps every refill full
 	e.refillPace = 50 * time.Millisecond // the over-pacing regime; must still drain, just slower
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	keys := make([]string, 10)
 	for i := range keys {

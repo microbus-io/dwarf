@@ -41,9 +41,11 @@ func TestSubgraphfailflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Inner: X -> boom (fails)
 	inner := workflow.NewGraph("Inner")

@@ -95,16 +95,15 @@ func TestFanInReplicaflow(t *testing.T) {
 	proxy1 := buildProxy()
 	proxy2 := buildProxy()
 
-	// Both engines share one isolated database via a common SetInTest key (t.Name()), so pointing
-	// SEQUEL_TESTING_DSN at a real server exercises this cross-replica cohort on that dialect's actual
-	// row-locking/MVCC; the default is a shared in-memory SQLite database.
-	eng1 := engine.NewEngine()
+	// Both engines share one isolated database via a common test-DB key (each built with
+	// NewEngineUnderTest(t), which keys by t.Name()), so pointing SEQUEL_TESTING_DSN at a real server
+	// exercises this cross-replica cohort on that dialect's actual row-locking/MVCC; the default is a
+	// shared in-memory SQLite database.
+	eng1 := engine.NewEngineUnderTest(t)
 	eng1.SetHost(proxy1)
-	testarossa.NoError(t, eng1.SetInTest(t.Name()))
 	testarossa.NoError(t, eng1.SetWorkers(4))
-	eng2 := engine.NewEngine()
+	eng2 := engine.NewEngineUnderTest(t)
 	eng2.SetHost(proxy2)
-	testarossa.NoError(t, eng2.SetInTest(t.Name()))
 	testarossa.NoError(t, eng2.SetWorkers(4))
 	proxy1.AddPeer(eng2)
 	proxy2.AddPeer(eng1)

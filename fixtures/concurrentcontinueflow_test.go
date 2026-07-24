@@ -73,9 +73,11 @@ func TestConcurrentContinueflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert := testarossa.For(t)
 
 	// Turn 1: run to completion (task not armed). counter 0 -> 1.

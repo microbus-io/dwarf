@@ -68,9 +68,11 @@ func TestTimeBudget_FrozenAtCreate(t *testing.T) {
 	proxy.HandleGraph("timebudget/graph", g)
 	proxy.HandleTask("timebudget/task", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 
 	// Explicit override: frozen on the flow row and seeded onto the entry step.
@@ -116,9 +118,11 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert.NoError(e.SetTimeBudget(1 * time.Second)) // tiny default
 
 	// Override well above the default; the lease must follow the override, not the 1s default.
@@ -176,9 +180,11 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 
 	fk, outcome, err := e.Run(ctx, "timebudget/parent", nil, &workflow.FlowOptions{TimeBudget: 45 * time.Second})

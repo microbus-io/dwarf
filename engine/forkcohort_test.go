@@ -66,9 +66,11 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	})
 	proxy.HandleTask("fkc/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	originKey, outcome, err := eng.Run(ctx, "fkc/g", map[string]any{"cells": []any{"a", "b", "c"}}, nil)
 	if !assert.NoError(err) {
@@ -159,9 +161,11 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	})
 	proxy.HandleTask("fkm/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	originKey, outcome, err := eng.Run(ctx, "fkm/g",
 		map[string]any{"cells": []any{"a", "b"}, "suffix": "!"}, nil)
@@ -266,9 +270,11 @@ func TestForkCohort_NestedRewindExcludesTheWholeOuterBranch(t *testing.T) {
 	proxy := NewTestProxy()
 	nestedForkGraph(t, proxy, "")
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	originKey, outcome, err := eng.Run(ctx, "nfk/g", map[string]any{"cells": []any{"a", "b", "c"}}, nil)
 	if !assert.NoError(err) {
@@ -318,9 +324,11 @@ func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
 	proxy := NewTestProxy()
 	nestedForkGraph(t, proxy, "b1") // a chunk of the "b" cell fails, with no onError
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	originKey, outcome, err := eng.Run(ctx, "nfk/g", map[string]any{"cells": []any{"a", "b", "c"}}, nil)
 	if !assert.NoError(err) {

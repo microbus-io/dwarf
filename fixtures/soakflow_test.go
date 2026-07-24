@@ -123,12 +123,14 @@ func TestSoakflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetShard(engine.ShardSpec{Index: 1})
 	eng.SetShard(engine.ShardSpec{Index: 2})
 	eng.SetWorkers(4)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("all_flows_terminate", func(t *testing.T) {
 		assert := testarossa.For(t)

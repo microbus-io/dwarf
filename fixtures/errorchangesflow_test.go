@@ -44,9 +44,11 @@ func TestErrorchangesflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Handled: Work errors after writing, and an onError handler runs next.
 	handled := workflow.NewGraph("HandledErrorChanges")

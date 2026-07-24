@@ -55,11 +55,13 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	// Read once when Await builds its ticker, so set it before Startup.
 	e.awaitPollInterval = 20 * time.Millisecond
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	flowKey, err := e.Create(ctx, "awaitpoll.verify:0/g", nil, nil)
 	if !assert.NoError(err) {
@@ -147,10 +149,12 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.awaitPollInterval = 20 * time.Millisecond
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	flowKey, err := e.Create(ctx, "polltest.verify:0/g", nil, nil)
 	if !assert.NoError(err) {

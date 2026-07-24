@@ -37,9 +37,11 @@ func TestPanicflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Graph 1: a bare panicking task with no onError -> the flow fails.
 	bare := workflow.NewGraph("Bare")

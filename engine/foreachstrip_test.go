@@ -38,10 +38,12 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	g := workflow.NewGraph("Collide")
 	g.SetEndpoint("Split", "c/split")
@@ -90,10 +92,12 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Split -forEach(pages, as=page)-> Page -forEach(chunks, as=chunk)-> Chunk -> JoinChunk -> JoinPage
 	g := workflow.NewGraph("Nested")
@@ -164,10 +168,12 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	g := workflow.NewGraph("FailFan")
 	g.SetEndpoint("Split", "ff/split")
@@ -215,10 +221,12 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Two-STEP branches: Cell writes, then Enrich writes. Cell's output survives only in Enrich's `state`.
 	g := workflow.NewGraph("MultiStepBranch")

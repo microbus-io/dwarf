@@ -54,7 +54,7 @@ matching one before working there:**
   (`flow.Retry`/`Sleep`/`Goto`/`Interrupt`/`Subgraph`), task self-identity, and the `FlowRenderer`.
 - **`internal/migrations/CLAUDE.md`** - schema: the `dwarf_flows`/`dwarf_steps` column catalog, indexing strategy, and the
   SQL-authoring gotchas.
-- **`fixtures/CLAUDE.md`** - the test harness: `RunInTest`/`SetInTest` test mode, the per-test-engine +
+- **`fixtures/CLAUDE.md`** - the test harness: `NewEngineUnderTest`/`SetTestName` test mode, the per-test-engine +
   no-`t.Parallel` connection-load rule, and `TestProxy` conventions.
 - **`internal/database/CLAUDE.md`** - the sharded SQL connections (`ShardSet`): SQL-dialect guidance, shard-count
   sizing + shard-per-server topology, the connection lifecycle, and the sharding *mechanics* (1-indexed routing,

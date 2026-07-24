@@ -90,11 +90,13 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	})
 	proxy.HandleTask("snapresume.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	// Several workers so B's gate-block doesn't starve A on a single worker.
 	testarossa.For(t).NoError(eng.SetWorkers(4))
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert := testarossa.For(t)
 
 	flowKey, err := eng.Create(ctx, "snapresume.verify:428/g", nil, nil)
@@ -193,10 +195,12 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	testarossa.For(t).NoError(eng.SetWorkers(4))
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert := testarossa.For(t)
 
 	flowKey, err := eng.Create(ctx, "psub.verify:428/parent", nil, nil)

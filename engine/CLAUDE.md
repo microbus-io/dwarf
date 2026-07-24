@@ -1969,8 +1969,8 @@ engine policy — below.
   those rows land so one read yields the converged count. It is orders of magnitude shorter than the old
   signal-convergence window because it is backed by a real registry read, not a guess about when replies arrived;
   it is skipped under a `SetMaxOpenConns` override (R does not size the pools then) and under test
-  (`!testing.Testing()`, so the suite does not pay it on every `RunInTest` - the peer tests drive R by writing the
-  registry directly). A single replica joining an established fleet needs no settle: the established rows are
+  (`!testing.Testing()`, so the suite does not pay it on every `NewEngineUnderTest` - the peer tests drive R by
+  writing the registry directly). A single replica joining an established fleet needs no settle: the established rows are
   already there, so its first read is exact.
 
   **`lastAppliedR` is seeded to 0 (`"nothing derived yet"`), and Startup sets it to the discovered R** after sizing
@@ -2078,7 +2078,7 @@ also **stamped on every flow/step INSERT** (creator) **and overwritten by the cl
 provenance there ("which replica created/ran this row"), deliberately unindexed.
 
 **A note on tests sharing the registry (`peers.go` / `poolsizing_test.go`).** Because the count is now DB-backed, two
-engines that share a test database (`RunInTest`/`SetInTest` keyed by the same name) share one `dwarf_peers` and count
+engines that share a test database (`NewEngineUnderTest` keyed by the same `t.Name()`, or `SetTestName` with a shared name) share one `dwarf_peers` and count
 each other - which is exactly right for a genuine multi-replica test (`fixtures/crossreplicaawait_test.go`), and
 exactly wrong for a single test that spins up several *independent* engines to assert their solo pool sizes. The
 latter (`TestPoolSizing_DerivedWorkers`) uses `startSolo`, a unique per-engine test-DB key, so each reads R=1. The
@@ -2270,7 +2270,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 The engine emits 19 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
-`initRuntime`, so both `Startup` and `RunInTest` get them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
+`initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
 scope distinguishes dwarf's metrics; **service identity lives in the provider's Resource, not in per-metric
 attributes** (no `service.name` on data points - cardinality explosion, off-spec). The only attributes attached are
 the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `task_url` (on

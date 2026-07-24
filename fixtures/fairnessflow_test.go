@@ -52,10 +52,12 @@ func TestFairnessflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetWorkers(1)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("weighted_share_and_liveness", func(t *testing.T) {
 		assert := testarossa.For(t)

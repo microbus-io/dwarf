@@ -61,10 +61,12 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	e.seams.InjectN(1, faultPersistErr, "A") // ONE failing attempt, then the database is fine again
 
 	_, outcome, err := e.Run(ctx, "p/transient/wf", nil, nil)
@@ -103,10 +105,12 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	e.seams.InjectN(1000, faultPersistErr, "A") // every attempt fails: the payload, not the database
 
 	_, outcome, err := e.Run(ctx, "p/permanent/wf", nil, nil)
@@ -152,10 +156,12 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 	// pending step needs both <= NOW) leaves it alone for the test.
 	setup := func(t *testing.T, status string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
-		e := NewEngine()
+		e := NewEngineUnderTest(t)
 		e.SetHost(NewTestProxy())
 		e.persistBackoff = shortPersistBackoff
-		e.RunInTest(t)
+		if err := e.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 		db, err := e.db.Shard(1)
 		assert.NoError(err)
 		_, err = db.ExecContext(ctx,
@@ -238,12 +244,11 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	// A long backoff, so the worker is provably ASLEEP in the retry loop when the drain lands. If it did not
 	// select on drainStop, Shutdown would block for this long.
 	e.persistBackoff = []time.Duration{30 * time.Second}
-	assert.NoError(e.SetInTest(t.Name()))
 	assert.NoError(e.Startup(ctx))
 	e.seams.InjectN(1000, faultPersistErr, "A")
 

@@ -68,11 +68,13 @@ func TestChaosSoak_Faults(t *testing.T) {
 	proxy := NewTestProxy()
 	registerChaosGraphs(t, proxy)
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(8))
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	shapes := []string{
 		"chaossoak.verify:428/linear",

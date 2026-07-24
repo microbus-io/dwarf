@@ -23,7 +23,8 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-// Test-mode connection budgeting. Under `RunInTest`/`SetInTest`, dozens of per-test engines can open pools
+// Test-mode connection budgeting. Under `NewEngineUnderTest`, dozens of
+// per-test engines can open pools
 // against ONE shared backend server concurrently (once fixtures run `t.Parallel()`), and that server's
 // `max_connections` is finite. Each ShardSet reserves its WHOLE pool budget from a per-driver global
 // semaphore at Open and releases it at Close, so the sum of live test pools never exceeds the cap.

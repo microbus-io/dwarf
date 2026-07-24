@@ -51,12 +51,14 @@ func TestListCursorflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	for i := 1; i <= 3; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i}) // test mode gives each shard its own in-memory database
 	}
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	const total = 25
 	created := make(map[string]bool, total)

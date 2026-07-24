@@ -73,10 +73,12 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.awaitPollInterval = 20 * time.Millisecond // the re-snapshot backstop must fire fast for the test
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Run the parent (root) in the background; Run blocks until the root flow stops.
 	rootDone := make(chan struct{})

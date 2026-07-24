@@ -43,9 +43,11 @@ func TestFailedforeachstateflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	graph := workflow.NewGraph("FailedForEachState")
 	graph.SetEndpoint("Seed", "failedforeachstateflow.verify:428/seed")

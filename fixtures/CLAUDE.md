@@ -5,12 +5,25 @@
 
 ### SQLite Testing Support
 
-`engine.RunInTest(t)` hashes `t.Name()` into the engine's `testHashedID`, then runs the normal `Startup`/`Shutdown`
-(via `t.Cleanup`) against per-test isolated databases. It is sugar over **`SetInTest(name)`** — the
-construction-time, `*testing.T`-free hook that does the hashing and flips on test mode — plus `Startup` and a
-`t.Cleanup` shutdown. A host with no `*testing.T` (e.g. one running under an external test harness) calls
-`SetInTest(key)` itself with a stable isolation key — one shared across its replicas so they resolve to the same
-isolated set. The `testHashedID` switches the open path into test mode: `openDatabaseShard`
+**`engine.NewEngineUnderTest(t testing.TB)`** is the sole test-mode entry point. It stashes `t` on the engine,
+hashes `t.Name()` into `testHashedID` (via `SetTestName`, which owns that hashing), and installs a logger
+default; then the test configures the engine (`SetHost`, `SetShard`, …) and calls `Startup` itself, which
+registers the `t.Cleanup` shutdown — so no explicit `defer Shutdown` is needed. It takes any `testing.TB`, so
+the same constructor serves `*testing.B` and `*testing.F`.
+
+- **Overriding the key: `SetTestName(name)`.** The default key is `t.Name()`. A test needing several engines in
+  **separate** isolated databases (independent deployments, not one shared fleet) gives each a distinct key
+  (`startSolo` uses `t.Name()+"#"+key`); a benchmark reused across warmup/measure passes gives each pass a fresh
+  key (`b.Name()+"-"+seq`). `SetTestName` is construction-time only and rejects an engine not built with
+  `NewEngineUnderTest` (`e.t == nil`). There is no `*testing.T`-free hook anymore — a host under an external
+  harness that needs shared isolation drives `NewEngineUnderTest` with its own `testing.TB`.
+- **Logger default.** A `*testing.T` logs to **stderr at Info** (CI clues: flow-status transitions and Error-level
+  wedge/poll/refill faults; stderr not `t.Log`, since a `go test` timeout panic drops buffered `t.Log` but not
+  stderr). A `*testing.B`/`*testing.F` defaults to **silent** (per-iteration logging would dominate the
+  measurement / flood the fuzz output). `DWARF_TEST_LOG_LEVEL` overrides the level; `silent`/`off` forces discard,
+  any explicit level un-silences a benchmark/fuzz. `SetLogger` before `Startup` takes over entirely.
+
+The `testHashedID` switches the open path into test mode: `openDatabaseShard`
 resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN` (the same variable
 sequel reads, so one knob redirects the whole suite at a real server); else the SQLite in-memory default
 **`file:dwarf_%d?mode=memory&cache=shared`** - substitutes `%d` with the shard index, then routes through
@@ -52,9 +65,9 @@ claim path, and Postgres's real MVCC lock ordering. Expect the run to be slower 
 
 #### Per-test engine + parallel execution (connection-budget control)
 
-**The suite runs `t.Parallel()`.** Each fixture stands up its own engine (`engine.NewEngine()` + `SetHost(proxy)`
-+ `RunInTest(t)`, a fresh `proxy := engine.NewTestProxy()` per test) against its own isolated database
-(`t.Name()`), and `RunInTest` registers a `t.Cleanup` shutdown - so nothing is shared across tests and the
+**The suite runs `t.Parallel()`.** Each fixture stands up its own engine (`engine.NewEngineUnderTest(t)` +
+`SetHost(proxy)` + `Startup`, a fresh `proxy := engine.NewTestProxy()` per test) against its own isolated database
+(`t.Name()`), and `Startup` registers a `t.Cleanup` shutdown - so nothing is shared across tests and the
 config that mattered (the timing knobs, the peer registry key) is per-engine. There is **no** shared/`TestMain`-built
 engine. The suite parallelizes cleanly because the isolation is per-test, not because the tests were written to
 cooperate.
@@ -109,4 +122,5 @@ convention. A fixture asserting over the **full** flow set (`List`/`Purge`/`Shar
 
 A fixture needing a **non-default topology** (multiple `SetShard`s, `SetTimeBudget`, a specific `SetWorkers` count) or
 **host singletons** (multi-replica `AddPeer`/peers, a custom host wrapping `TestProxy`) configures
-them on its own engine/proxy before `RunInTest` - the same per-test ownership, just with non-default knobs.
+them on its own engine/proxy between `NewEngineUnderTest` and `Startup` - the same per-test ownership, just with
+non-default knobs.

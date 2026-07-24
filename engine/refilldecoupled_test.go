@@ -193,10 +193,12 @@ func TestRefillOutcome_AboveBandVsNothingDue(t *testing.T) {
 	proxy.HandleGraph("aboveband/g", g)
 	proxy.HandleTask("aboveband/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetWorkers(0)) // nothing dispatches; refills are driven by hand
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Nothing due anywhere: refillIdle.
 	assert.Equal(refillIdle, e.runShardRefill(ctx, 1))
@@ -210,7 +212,7 @@ func TestRefillOutcome_AboveBandVsNothingDue(t *testing.T) {
 	// this shard's slice is empty by strict priority, the outcome is the back-off, and any cached
 	// candidates are cleared (their band is not live for this shard anymore).
 	//
-	// The cache assertions poll rather than read once: RunInTest leaves this shard's BACKGROUND
+	// The cache assertions poll rather than read once: Startup leaves this shard's BACKGROUND
 	// refiller running (SetWorkers(0) stops workers, not refillers), so a pass triggered by the Create
 	// doorbell can rewrite the partition around these explicit calls. It computes the same outcome
 	// from the same census, so the value converges - only the ordering is racy.
@@ -253,10 +255,12 @@ func TestRefillOutcome_StarvedNeverParksOnTheDoorbell(t *testing.T) {
 	proxy.HandleGraph("starved/g", g)
 	proxy.HandleTask("starved/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetWorkers(0)) // capacity 1: any competitor holding the key's oldest step takes the slot
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Real due work on this shard, at the default band.
 	_, err := e.Create(ctx, "starved/g", nil, &workflow.FlowOptions{FairnessKey: "t"})
@@ -291,11 +295,13 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 	proxy.HandleGraph("msd/g", g)
 	proxy.HandleTask("msd/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	keys := make([]string, 24)
 	for i := range keys {

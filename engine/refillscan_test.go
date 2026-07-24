@@ -50,10 +50,12 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 
 	// SetWorkers(0): nothing dispatches, so every created flow's entry step stays `pending` and the scan
 	// sees a real backlog.
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetWorkers(0))
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// A deep backlog on two tenants: 40 steps each, far past any per-key limit used below.
 	const perTenant = 40

@@ -39,9 +39,11 @@ func TestInterruptpayloadflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	graph := workflow.NewGraph("Interrupt")
 	graph.SetEndpoint("Setup", "interruptpayloadflow.verify:428/setup")

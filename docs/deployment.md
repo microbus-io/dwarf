@@ -65,7 +65,7 @@ MariaDB 10.5+ for `JSON`.
 ### SQLite — testing and single-instance dev only
 
 Single-writer, so deadlocks are structurally impossible but throughput tops out at one transaction at a
-time. Used automatically by `RunInTest`. Do not run SQLite in production.
+time. Used automatically by `NewEngineUnderTest`. Do not run SQLite in production.
 
 ## Disk throughput
 

@@ -37,9 +37,11 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	assert := testarossa.For(t)
 
 	proxy := NewTestProxy()
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	graph := workflow.NewGraph("GotoLoopDAG")
 	graph.SetEndpoint("Split", "gotoloopdag.verify:900/split")

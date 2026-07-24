@@ -46,11 +46,11 @@ func TestList_NewestFirstIsPerShardNotGlobal(t *testing.T) {
 	proxy.HandleGraph("listorder/g", g)
 	proxy.HandleTask("listorder/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
-	e.RunInTest(t)
+	assert.NoError(e.Startup(ctx))
 
 	// Enough flows that placement (a weighted-random pick) lands some on each shard with overwhelming odds.
 	for range 30 {

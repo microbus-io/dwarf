@@ -49,9 +49,11 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	// not_before/lease_expires are far future so the engine's own poll/recovery leave the rows alone.
 	setup := func(t *testing.T, leafStatus string) (*Engine, *sequel.DB) {
 		at := testarossa.For(t)
-		e := NewEngine()
+		e := NewEngineUnderTest(t)
 		e.SetHost(NewTestProxy())
-		e.RunInTest(t)
+		if err := e.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 		db, err := e.db.Shard(1)
 		at.NoError(err)
 

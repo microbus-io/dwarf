@@ -88,9 +88,11 @@ func TestReducerDeleteflow(t *testing.T) {
 	proxy.HandleGraph("reducerdelete.verify:428/delete-first", buildGraph("DeleteFirst", true))
 	proxy.HandleGraph("reducerdelete.verify:428/append-first", buildGraph("AppendFirst", false))
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// stringsOf extracts a []string from a JSON-round-tripped []any, or reports absence.
 	stringsOf := func(v any) ([]string, bool) {

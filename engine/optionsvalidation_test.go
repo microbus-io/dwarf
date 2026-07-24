@@ -42,9 +42,11 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 	proxy.HandleGraph("fopt/g", g)
 	proxy.HandleTask("fopt/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Negative priority -> 400, no flow created.
 	_, err := e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{Priority: -1})

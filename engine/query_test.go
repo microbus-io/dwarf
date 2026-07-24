@@ -47,9 +47,9 @@ func TestQuery_WorkflowName(t *testing.T) {
 	proxy.HandleTask("q.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
 	proxy.HandleTask("q.verify:0/b", func(context.Context, *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	assert.NoError(e.Startup(ctx))
 
 	const alphas, betas = 3, 2
 	var keys []string
@@ -113,9 +113,9 @@ func TestQuery_StatusFilter(t *testing.T) {
 	proxy.HandleGraph("qs.verify:0/g", g)
 	proxy.HandleTask("qs.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	assert.NoError(e.Startup(ctx))
 
 	const n = 3
 	for range n {
@@ -167,9 +167,9 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 	proxy.HandleTask("q.esc:0/a", func(context.Context, *workflow.Flow) error { return nil })
 	proxy.HandleTask("q.esc:0/b", func(context.Context, *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	assert.NoError(e.Startup(ctx))
 
 	var keys []string
 	for range 3 {

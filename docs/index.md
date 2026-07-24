@@ -30,7 +30,7 @@ Then dip into the topic guides as you need them:
 - **[Observability](observability.md)** — structured logs, OpenTelemetry metrics, and distributed tracing.
 - **[Deployment](deployment.md)** — choosing and tuning a database, sharding, connection pools, and
   running multiple replicas.
-- **[Testing](testing.md)** — `RunInTest` and `TestProxy` patterns.
+- **[Testing](testing.md)** — `NewEngineUnderTest` and `TestProxy` patterns.
 - **[Benchmarks](benchmark.md)** — in-repo throughput/latency benchmarks per SQL dialect.
 - **[Cloud benchmarks](benchmark-cloud.md)** — measured against managed cloud PostgreSQL across a real
   network hop: the sizing formula and the constants behind the engine's fact-derived tuning.

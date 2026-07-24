@@ -77,9 +77,11 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	})
 	proxy.HandleTask("nocohort/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	flowKey, err := e.Create(ctx, "nocohort/g", map[string]any{"items": []int{1}}, nil)
 	if !assert.NoError(err) {

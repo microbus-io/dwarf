@@ -38,9 +38,11 @@ func TestInterruptpersistflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	graph := workflow.NewGraph("InterruptPersist")
 	graph.SetEndpoint("ParkAfterWrite", "interruptpersistflow.verify:428/park-after-write")

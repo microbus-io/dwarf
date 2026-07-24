@@ -38,9 +38,11 @@ func TestAwaitShutdownflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	graph := workflow.NewGraph("AwaitShutdown")
 	graph.SetEndpoint("Gate", "awaitshutdownflow.verify:428/gate")

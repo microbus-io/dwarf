@@ -61,12 +61,14 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	eng.RunInTest(t)
-	// Release the leaked "crashed" execution at teardown, BEFORE RunInTest's Shutdown drains workers (LIFO
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	// Release the leaked "crashed" execution at teardown, BEFORE the engine's Shutdown cleanup drains workers (LIFO
 	// cleanup: this runs first), so the blocked worker returns and Shutdown does not wait out its lease.
 	t.Cleanup(func() { close(aRelease) })
 

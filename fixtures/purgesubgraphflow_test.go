@@ -36,9 +36,11 @@ func TestPurgeSubgraphflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("TaskA", "purgesub.verify:428/task-a")

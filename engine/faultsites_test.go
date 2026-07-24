@@ -85,9 +85,11 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	var runs int
 	proxy.HandleTask("ftbreset/a", func(ctx context.Context, f *workflow.Flow) error { runs++; return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// A completes (marked `completed`), the flow-completion tx fails (faultCompleteFlowCommit), then the
 	// recovery defer's reset also fails (faultRecoveryResetErr) - so A never returns to `pending` and the flow
@@ -133,10 +135,12 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	proxy.HandleTask("ftbspawn/call", subgraphTask("ftbspawn/child"))
 	proxy.HandleTask("ftbspawn/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// The caller parks, then createSubgraphFlow errors (no child inserted): failAndReturn must fail the caller
 	// step (un-parked) and the flow, not strand it parked.
@@ -192,10 +196,12 @@ func TestFaultSite_CancelCommit(t *testing.T) {
 	proxy := NewTestProxy()
 	registerGate(proxy, "ftbcancel")
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk := createInterruptedFlow(t, e, "ftbcancel/g")
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
@@ -222,10 +228,12 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	proxy := NewTestProxy()
 	registerGate(proxy, "ftbresume")
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk := createInterruptedFlow(t, e, "ftbresume/g")
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
@@ -301,10 +309,12 @@ func TestFaultSite_SignalPeersPanic(t *testing.T) {
 	proxy.HandleGraph("ftbpanic/g", g)
 	proxy.HandleTask("ftbpanic/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Every statusChange broadcast panics inside the CatchPanic boundary; the local waiter wake (separate from
 	// the peer broadcast) still delivers, so Await returns the completed outcome.
@@ -336,10 +346,12 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 		return errors.New("child boom")
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// The child fails, but its re-dispatch of the parked caller is lost: the caller wedges running+parkedSubgraph
 	// with a terminal (failed) child.
@@ -412,11 +424,13 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 		return errors.New("leaf boom")
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetWorkers(4))
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Drop each level's FIRST failure-delivery independently (scoped by the parked caller's task name). Each
 	// caller's sweep-driven re-delivery (the second consult of its scope) succeeds, so the sweep can recover it.
@@ -471,10 +485,12 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	proxy.HandleGraph("ftbreapsel/g", g)
 	proxy.HandleTask("ftbreapsel/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk, err := e.Create(ctx, "ftbreapsel/g", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)

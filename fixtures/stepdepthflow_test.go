@@ -78,9 +78,11 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 	proxy.HandleTask("depthsub.verify:428/inner", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("depthsub.verify:428/inner2", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert := testarossa.For(t)
 
 	flowKey, _, err := eng.Run(ctx, "depthsub.verify:428/parent", map[string]any{}, nil)
@@ -149,10 +151,12 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	proxy.HandleTask("depthfanin.verify:428/deep", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("depthfanin.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	testarossa.For(t).NoError(eng.SetWorkers(4)) // so the gated shallow branch doesn't starve the deep one
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert := testarossa.For(t)
 
 	flowKey, err := eng.Create(ctx, "depthfanin.verify:428/g", map[string]any{}, nil)

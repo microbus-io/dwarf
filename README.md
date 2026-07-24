@@ -30,9 +30,9 @@ proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.F
     return nil
 })
 
-eng := dwarf.NewEngine()
-eng.SetHost(proxy) // TestProxy implements the Host interface
-eng.RunInTest(t)   // SQLite in-memory, auto-cleanup
+eng := dwarf.NewEngineUnderTest(t) // SQLite in-memory, auto-cleanup
+eng.SetHost(proxy)                 // TestProxy implements the Host interface
+eng.Startup(ctx)
 
 _, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil) // Run returns (flowKey, outcome, err)
 fmt.Println(out.State["greeting"]) // hello ada
@@ -139,7 +139,7 @@ be called after `Startup` for hot reconfiguration; the rest are construction-tim
 | **PostgreSQL** 13+ | Recommended for production | MVCC, no gap locks; fan-out runs deadlock-free at any concurrency |
 | **SQL Server** | Production | Enable `READ_COMMITTED_SNAPSHOT` for non-blocking reads |
 | **MySQL / MariaDB** | Production, expect tuning | Prefer `READ-COMMITTED` isolation to drop gap locks |
-| **SQLite** | Testing & single-instance dev only | Used automatically by `RunInTest`; do not run in production |
+| **SQLite** | Testing & single-instance dev only | Used automatically by `NewEngineUnderTest`; do not run in production |
 
 See [docs/deployment.md](docs/deployment.md) for tuning, sharding, and connection-pool guidance.
 
@@ -158,7 +158,7 @@ Full guides live in [`docs/`](docs/):
 - [Observability](docs/observability.md) — logs, metrics, tracing
 - [Deployment](docs/deployment.md) — database choice, sharding, config, multi-replica
 - [Benchmarks](docs/benchmark.md) — throughput & latency per dialect and shard count, and how to run them
-- [Testing](docs/testing.md) — `RunInTest` and `TestProxy`
+- [Testing](docs/testing.md) — `NewEngineUnderTest` and `TestProxy`
 
 API reference: [pkg.go.dev/github.com/microbus-io/dwarf](https://pkg.go.dev/github.com/microbus-io/dwarf).
 

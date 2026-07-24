@@ -109,9 +109,11 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	flowKey, err := e.Create(ctx, parentURL, nil, nil)
 	if !assert.NoError(err) {

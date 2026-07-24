@@ -35,7 +35,7 @@ schema but does not `CREATE DATABASE`). MariaDB 10.5+ for `JSON`.
 near-zero deadlock risk. No other tuning mandatory.
 
 **SQLite - testing and single-instance dev only.** Single-writer means deadlocks are structurally impossible (writes
-serialize) but throughput tops out at one transaction at a time. Used automatically by `RunInTest` with an empty DSN.
+serialize) but throughput tops out at one transaction at a time. Used automatically by `NewEngineUnderTest` with an empty DSN.
 The injected `busy_timeout` keeps workers from immediately failing on `SQLITE_BUSY` during fan-out; do not remove it.
 Do not run SQLite in production.
 

@@ -51,7 +51,7 @@ import (
 )
 
 // benchSeq makes each benchEngine's isolation key unique. Go re-invokes a benchmark function several times
-// (warmup then measure) with the SAME b.Name(); reusing it as the SetInTest key would collide with
+// (warmup then measure) with the SAME b.Name(); reusing it as the SetTestName key would collide with
 // CreateTestingDatabase's create-once cache, whose entry points at a database the previous invocation's
 // Shutdown already dropped ("database does not exist"). A per-call suffix gives each invocation its own fresh
 // isolated database set.
@@ -78,7 +78,7 @@ const benchChainLen = 3
 
 // benchEngine stands up an engine with the given shard count against the ambient dialect (SEQUEL_TESTING_DSN,
 // or in-memory SQLite when unset), wired to a linear chain graph of benchChainLen trivial tasks. It uses the
-// default discard logger (NOT RunInTest, which forces stderr Info logging that would dominate the timing) and
+// default discard logger (NOT NewEngineUnderTest, which forces stderr Info logging that would dominate timing) and
 // registers cleanup via b.Cleanup. Returns the engine and the workflow URL to Run.
 // setShards registers numShards test-mode shards (empty DSNs resolve per shard at Startup).
 func setShards(eng *engine.Engine, numShards int) error {
@@ -111,7 +111,7 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 	g.AddTransition(prev, workflow.END)
 	proxy.HandleGraph(prefix+"/g", g)
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(b)
 	if err := eng.SetHost(proxy); err != nil {
 		b.Fatal(err)
 	}
@@ -124,16 +124,16 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 	if err := setShards(eng, numShards); err != nil {
 		b.Fatal(err)
 	}
-	// SetInTest (not RunInTest) so the engine keeps its silent discard logger and no *testing.T logging path.
-	// The key carries a per-invocation sequence (see benchSeq) so each measured pass gets its own isolated,
-	// auto-dropped database set rather than colliding with a prior (already-dropped) invocation's DB.
-	if err := eng.SetInTest(fmt.Sprintf("%s-%d", b.Name(), benchSeq.Add(1))); err != nil {
+	// A distinct test-DB key per invocation: the same b.Name() runs multiple passes (warmup + measure), so
+	// reusing b.Name() would collide with a prior (already-dropped) pass's DB. benchSeq gives each pass its
+	// own isolated, auto-dropped database set. (NewEngineUnderTest(b) keeps a *testing.B silent, so no
+	// per-step logging dominates the timing, and its Startup registers the b.Cleanup shutdown.)
+	if err := eng.SetTestName(fmt.Sprintf("%s-%d", b.Name(), benchSeq.Add(1))); err != nil {
 		b.Fatal(err)
 	}
 	if err := eng.Startup(context.Background()); err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { eng.Shutdown(context.Background()) })
 	return eng, prefix + "/g"
 }
 

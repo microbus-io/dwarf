@@ -5,11 +5,14 @@ interrupts, retries — with no database to set up and no transport to stand up.
 
 ## The two pieces
 
-- **`Engine.RunInTest(t)`** replaces `Startup`/`Shutdown`. It opens an isolated SQLite in-memory database
-  (per test, and per shard for multi-shard tests), runs migrations, and registers cleanup via `t.Cleanup`.
-  No DSN, no teardown code. It is sugar over `SetInTest(t.Name())` + `Startup`; a host with no `*testing.T`
-  (e.g. one embedded in an external test harness) calls `Engine.SetInTest(key)` itself with a stable
-  isolation key, then `Startup(ctx)` — engines sharing the same key resolve to the same isolated databases.
+- **`engine.NewEngineUnderTest(t)`** constructs an engine wired for testing: an isolated SQLite in-memory
+  database (per test, and per shard for multi-shard tests) keyed by `t.Name()`, with migrations run at
+  `Startup` and cleanup registered via `t.Cleanup` — no DSN, no teardown code. You still call `Startup(ctx)`
+  yourself (it registers the auto-shutdown), so any `Set*` configuration goes in between. It accepts any
+  `testing.TB`, so it also serves benchmarks (`*testing.B`) and fuzz targets (`*testing.F`) — those default
+  to a silent logger, while a `*testing.T` logs to stderr at Info for CI clues (`DWARF_TEST_LOG_LEVEL`
+  overrides; `silent`/`off` quiets it). `Engine.SetTestName(name)` overrides the `t.Name()` key — give
+  several engines the same name to share one database, or distinct names to isolate them.
 - **`engine.TestProxy`** is an in-memory implementation of the `Host` interface. Register graphs and task
   functions on it, then register it with `SetHost(proxy)` — its `LoadGraph`/`ExecuteTask` back the
   required methods, and its peer methods are no-ops.
@@ -35,9 +38,9 @@ func TestCheckout(t *testing.T) {
         return nil
     })
 
-    eng := dwarf.NewEngine()
+    eng := dwarf.NewEngineUnderTest(t)
     eng.SetHost(proxy)
-    eng.RunInTest(t)
+    eng.Startup(ctx)
 
     _, out, err := eng.Run(ctx, "checkout", map[string]any{"sku": "ABC"}, nil)
     testarossa.NoError(t, err)
@@ -52,16 +55,17 @@ you write in production.
 
 ## Configuring the test engine
 
-`RunInTest` honors any `Set*` settings you apply first — workers, shards, time budget, default priority:
+Apply any `Set*` settings between `NewEngineUnderTest` and `Startup` — workers, shards, time budget, default
+priority:
 
 ```go
-eng := dwarf.NewEngine()
+eng := dwarf.NewEngineUnderTest(t)
 eng.SetHost(proxy)
 eng.SetWorkers(1) // serialize dispatch to assert ordering
 for i := 1; i <= 4; i++ {
 	eng.SetShard(engine.ShardSpec{Index: i, DSN: ""}) // each shard gets its own in-memory database
 }
-eng.RunInTest(t)
+eng.Startup(ctx)
 ```
 
 `SetWorkers(1)` is a common trick for deterministically asserting dispatch order (e.g. fairness or
@@ -115,19 +119,20 @@ To test cross-replica behavior, give each engine its own `TestProxy` and registe
 ```go
 proxy1, proxy2 := engine.NewTestProxy(), engine.NewTestProxy()
 // register the same graphs/tasks on both...
-eng1 := engine.NewEngine()
+eng1 := engine.NewEngineUnderTest(t) // both keyed by t.Name() → one shared isolated database
 eng1.SetHost(proxy1)
-eng1.SetShard(engine.ShardSpec{Index: 1, DSN: sharedDSN})
-eng2 := engine.NewEngine()
+eng2 := engine.NewEngineUnderTest(t)
 eng2.SetHost(proxy2)
-eng2.SetShard(engine.ShardSpec{Index: 1, DSN: sharedDSN})
 proxy1.AddPeer(eng2)
 proxy2.AddPeer(eng1)
+eng1.Startup(ctx)
+eng2.Startup(ctx)
 ```
 
-Use a shared in-memory DSN (e.g. `"file:x%d?mode=memory&cache=shared"`) so both engines see the same
-databases. This is how the engine's own cross-replica `Await` and step-recovery tests are
-written — see the `fixtures` package in the repository for worked examples.
+Both engines share one isolated database because they key by the same `t.Name()` — no explicit DSN needed
+(use `SetTestName` if you want a specific shared key, or distinct keys to isolate them). This is how the
+engine's own cross-replica `Await` and step-recovery tests are written — see the `fixtures` package in the
+repository for worked examples.
 
 ## Where examples live
 

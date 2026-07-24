@@ -78,9 +78,11 @@ func TestForkOfForkflow(t *testing.T) {
 	})
 	proxy.HandleTask("forkoffork.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Initial run: both branches fail -> the flow fails.
 	originKey, out0, err := eng.Run(ctx, "forkoffork.verify:428/g", nil, nil)

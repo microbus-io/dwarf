@@ -185,11 +185,17 @@ type Engine struct {
 	// so parallel per-test engines against one server stay under its max_connections. Seeded from
 	// testConnCapDefault; 0 disables it. Only ever consulted when testHashedID != "".
 	testConnCap int
-	// testHashedID is the hashed test database id when the engine was started in test mode (RunInTest),
-	// empty in production. It becomes Config.TestID at Open, wrapping each shard in an isolated test
-	// database. Written once during single-threaded startup before started.Store(true), read only after
-	// started.Load()==true, so the atomic started flag is the happens-before barrier.
+	// testHashedID is the hashed test database id when the engine is in test mode (NewEngineUnderTest,
+	// keyed by t.Name() or a SetTestName override), empty in production. It becomes Config.TestID at Open,
+	// wrapping each shard in an isolated test database. Written once during single-threaded startup before
+	// started.Store(true), read only after started.Load()==true, so the atomic started flag is the
+	// happens-before barrier.
 	testHashedID string
+	// t is the testing.TB when the engine was built with NewEngineUnderTest, nil in production. When set,
+	// Startup registers a t.Cleanup that Shutdowns the engine at test end (so a test needs no explicit
+	// defer e.Shutdown), and SetTestName is permitted. Written once at construction, read once in Startup
+	// (single-threaded), so it needs no synchronization.
+	t testing.TB
 
 	// Candidate cache and worker pool. `workers` is the pool's MAXIMUM (the lease-margin ceiling, or an
 	// explicit SetWorkers); the pool is grow-on-demand: initRuntime spawns `workersResident` = the
@@ -724,6 +730,16 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.recomputeWorkerCeiling(ctx)
 
 	e.initRuntime()
+	// A NewEngineUnderTest engine tears itself down at test end: register the Shutdown as a t.Cleanup so a
+	// test needs no explicit defer e.Shutdown (an explicit one still works - Shutdown is idempotent). Use
+	// t.Context(), not the caller's ctx: it stays valid until just before cleanups run, whereas the
+	// caller's ctx may already be cancelled by then. Registered only on the success path, after
+	// initRuntime flips started, so a failed Startup schedules no teardown.
+	if e.t != nil {
+		e.t.Cleanup(func() {
+			e.Shutdown(e.t.Context())
+		})
+	}
 	return nil
 }
 
@@ -739,54 +755,79 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// SetInTest puts the engine into test mode keyed by name, so a subsequent Startup opens per-name isolated,
-// auto-dropped databases (via sequel.CreateTestingDatabase) instead of the configured ones. Construction-
-// time only. It is the *testing.T-free counterpart to RunInTest, for a host running under an external test
-// harness that has no *testing.T but a stable per-test isolation key: every engine sharing the
-// same name resolves to the same isolated databases, so the replicas of a multi-replica test app converge
-// on one set. RunInTest(t) is SetInTest(t.Name()) plus Startup and a t.Cleanup shutdown.
-func (e *Engine) SetInTest(name string) error {
+// NewEngineUnderTest constructs an engine wired for testing: per-test isolated, auto-dropped databases
+// (keyed by t.Name()) plus automatic teardown - the subsequent Startup registers a t.Cleanup that
+// Shutdowns the engine at test end, so a test needs no explicit defer e.Shutdown. It lets a test
+// configure the engine (SetHost, SetShard, ...) and drive Startup itself:
+//
+//	e := NewEngineUnderTest(t)
+//	e.SetHost(h)
+//	e.Startup(ctx)          // registers the cleanup; a later defer e.Shutdown(ctx) is optional
+//
+// It accepts any testing.TB, so it also serves *testing.B and *testing.F. When several engines must share
+// one isolated database (a multi-replica test), give each the same t (they all key by t.Name()); when a
+// test needs several engines in SEPARATE databases, or a benchmark reused across passes needs a distinct
+// key each time, override the key with SetTestName.
+//
+// Logging default: a *testing.T logs to stderr at Info so a CI failure has engine-level clues - flow-status
+// transitions show where a flow got stuck, and the Error logs surface wedge sweeps / poll / refill faults
+// (stderr, not t.Log, because a `go test` timeout panic drops buffered t.Log output but not stderr). A
+// benchmark or fuzz target (*testing.B / *testing.F) defaults to SILENT, since per-iteration logging would
+// dominate the measurement / flood the fuzz output. DWARF_TEST_LOG_LEVEL overrides the level (e.g. "error"
+// to quiet local runs, "debug" for the full play-by-play); "silent" or "off" forces the discard logger,
+// and any explicit level un-silences a benchmark/fuzz. SetLogger before Startup takes over entirely.
+func NewEngineUnderTest(t testing.TB) *Engine {
+	t.Helper()
+	e := NewEngine()
+	e.t = t
+	// Silent by default for the high-volume harnesses; a plain test gets Info-to-stderr. The env var wins
+	// either way, and "silent"/"off" forces discard.
+	silent := false
+	switch t.(type) {
+	case *testing.B, *testing.F:
+		silent = true
+	}
+	level := slog.LevelInfo
+	if s := os.Getenv("DWARF_TEST_LOG_LEVEL"); s != "" {
+		switch s {
+		case "silent", "off":
+			silent = true
+		default:
+			silent = false
+			_ = level.UnmarshalText([]byte(s))
+		}
+	}
+	if silent {
+		_ = e.SetLogger(slog.New(slog.DiscardHandler))
+	} else {
+		_ = e.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+	}
+	// SetTestName owns the key; e.t is set above so it cannot reject, and a fresh engine is never started.
+	if err := e.SetTestName(t.Name()); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// SetTestName sets the test-database key for an engine built with NewEngineUnderTest, overriding the
+// t.Name() default the constructor installs. Construction-time only (rejected once started), and rejected
+// on an engine not under test (e.t == nil). Use it to give several engines in one test SEPARATE isolated
+// databases (a distinct key each, so they are independent deployments rather than one shared fleet), or to
+// give a benchmark reused across passes a fresh key per pass.
+func (e *Engine) SetTestName(name string) error {
+	if e.t == nil {
+		return errors.New("SetTestName requires an engine created with NewEngineUnderTest")
+	}
 	if e.started.Load() {
-		return errSetAfterStartup("test mode")
+		return errSetAfterStartup("test name")
 	}
 	// Hash the name to a short, bounded id so the testing-database name sequel derives stays within the
 	// strictest SQL identifier limit (Postgres 63 / MySQL 64), whatever the name's length. A non-empty
-	// testHashedID becomes Config.TestID, which switches the ShardSet's open path onto the isolated-test
-	// path. It is set before initRuntime flips started, so it is in place before any shard opens.
+	// testHashedID becomes Config.TestID at Open, which switches the ShardSet's open path onto the
+	// isolated-test path; it is set before initRuntime flips started, so it is in place before any shard opens.
 	sum := sha256.Sum256([]byte(name))
 	e.testHashedID = hex.EncodeToString(sum[:])[:16]
 	return nil
-}
-
-// RunInTest initializes the engine for testing with per-test isolated databases (keyed by t.Name()) and
-// registers cleanup via t.Cleanup.
-//
-// Unless the caller wired its own logger, the engine logs to stderr at Info by default (rather than the
-// production discard default) so a CI failure has engine-level clues - flow-status transitions show where a
-// flow got stuck, and the Error logs surface wedge sweeps / poll / refill faults. stderr, not t.Log, because
-// a `go test` timeout panic drops the failing test's buffered t.Log output but not stderr. Override the level
-// with DWARF_TEST_LOG_LEVEL (e.g. "error" to quiet local runs, "debug" for the full play-by-play), or call
-// SetLogger/SetDebugLogger before RunInTest to take over entirely.
-func (e *Engine) RunInTest(t *testing.T) {
-	t.Helper()
-	if e.logger.Handler() == slog.DiscardHandler {
-		level := slog.LevelInfo
-		if s := os.Getenv("DWARF_TEST_LOG_LEVEL"); s != "" {
-			_ = level.UnmarshalText([]byte(s))
-		}
-		_ = e.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
-	}
-	err := e.SetInTest(t.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = e.Startup(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		e.Shutdown(t.Context())
-	})
 }
 
 // initRuntime starts all goroutines and initializes runtime state.

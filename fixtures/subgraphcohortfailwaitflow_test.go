@@ -40,9 +40,11 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	assert := testarossa.For(t)
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("RunInner", "subgraphcohortfailwait.verify:0/run-inner")

@@ -35,7 +35,7 @@ import (
 )
 
 // withManualReader wires a ManualReader meter provider onto e (so assertFaultRecoveryClean can read
-// dwarf_steps_unwedged) and returns it. Must be called after SetHost and before RunInTest.
+// dwarf_steps_unwedged) and returns it. Must be called after SetHost and before Startup.
 func withManualReader(e *Engine) sdkmetric.Reader {
 	reader := sdkmetric.NewManualReader()
 	e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
@@ -90,11 +90,13 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	})
 	proxy.HandleTask("fcfan/j", func(ctx context.Context, f *workflow.Flow) error { jCalls.Add(1); return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetWorkers(4))
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// X's transition transaction fails once after X was marked completed with a non-contention error: persist
 	// retries the transaction in place, so X's task runs only ONCE and the cohort arrival is still bumped
@@ -150,10 +152,12 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 	proxy.HandleTask("fcsub/x", func(ctx context.Context, f *workflow.Flow) error { xCalls.Add(1); return nil })
 	proxy.HandleTask("fcsub/y", func(ctx context.Context, f *workflow.Flow) error { yCalls.Add(1); return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// X's transition (X->Y) inside the child fails once after X was marked completed: persist retries the
 	// transaction in place, so the child proceeds to Y->END and completes without re-running X, and the parent
@@ -214,11 +218,13 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	proxy.HandleGraph("fcwake/g", g)
 	proxy.HandleTask("fcwake/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.awaitPollInterval = 20 * time.Millisecond // the re-snapshot backstop must fire fast for the test
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Drop the create-time doorbell AND the terminal signalStop: neither wake reaches its consumer.
 	e.seams.Inject(faultDropDoorbell)
@@ -283,10 +289,12 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	proxy.HandleTask("fcdeep/l3-leaf", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("fcdeep/root-call", subgraphTask("fcdeep/l1"))
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// The first completeSurgraphFlow to run is the deepest (l3 reviving l2's caller): drop that one revive so
 	// l2's caller wedges running+parkedSubgraph with a terminal child.

@@ -69,15 +69,14 @@ func TestTwoReplicaflow(t *testing.T) {
 	proxy1 := buildProxy()
 	proxy2 := buildProxy()
 
-	// Both replicas share one isolated database via a common SetInTest key (t.Name()), so the suite runs
-	// this contention on whatever dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default).
-	eng1 := engine.NewEngine()
+	// Both replicas share one isolated database via a common test-DB key (each built with
+	// NewEngineUnderTest(t), which keys by t.Name()), so the suite runs this contention on whatever
+	// dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default).
+	eng1 := engine.NewEngineUnderTest(t)
 	eng1.SetHost(proxy1)
-	testarossa.NoError(t, eng1.SetInTest(t.Name()))
 	testarossa.NoError(t, eng1.SetWorkers(4))
-	eng2 := engine.NewEngine()
+	eng2 := engine.NewEngineUnderTest(t)
 	eng2.SetHost(proxy2)
-	testarossa.NoError(t, eng2.SetInTest(t.Name()))
 	testarossa.NoError(t, eng2.SetWorkers(4))
 	proxy1.AddPeer(eng2)
 	proxy2.AddPeer(eng1)
@@ -149,14 +148,13 @@ func TestTwoReplicaflow(t *testing.T) {
 		})
 
 		// This pair shares its own isolated database, distinct from the outer pair's, via the subtest's
-		// t.Name() key - so it too runs on the SEQUEL_TESTING_DSN dialect, not SQLite only.
-		awaiter := engine.NewEngine()
+		// t.Name() key (NewEngineUnderTest keys by it) - so it too runs on the SEQUEL_TESTING_DSN dialect,
+		// not SQLite only.
+		awaiter := engine.NewEngineUnderTest(t)
 		awaiter.SetHost(pa)
-		assert.NoError(awaiter.SetInTest(t.Name()))
 		assert.NoError(awaiter.SetWorkers(0))
-		worker := engine.NewEngine()
+		worker := engine.NewEngineUnderTest(t)
 		worker.SetHost(pb)
-		assert.NoError(worker.SetInTest(t.Name()))
 		assert.NoError(worker.SetWorkers(2))
 		pa.AddPeer(worker)
 		pb.AddPeer(awaiter)

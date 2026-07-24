@@ -56,9 +56,11 @@ func TestGotoflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("loops_one_then_falls_through", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -98,9 +100,11 @@ func TestGotoflow_BadGoto(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("goto_to_unregistered_target_fails_flow", func(t *testing.T) {
 		assert := testarossa.For(t)

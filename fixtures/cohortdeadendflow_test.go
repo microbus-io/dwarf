@@ -43,9 +43,11 @@ func TestCohortDeadEndFlow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// A sibling that runs to completion while the dead-end branch is being disposed of. If the old bug were
 	// present, the dead end would complete the flow and Run would return before this fired.
@@ -114,9 +116,11 @@ func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	graph := workflow.NewGraph("CohortConverges")
 	graph.SetEndpoint("Spawn", "cohortdeadendflow.verify:664/c-spawn")

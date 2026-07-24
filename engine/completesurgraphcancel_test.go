@@ -81,9 +81,11 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		})
 		proxy.HandleTask(prefix+"/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-		e = NewEngine()
+		e = NewEngineUnderTest(t)
 		e.SetHost(proxy)
-		e.RunInTest(t)
+		if err := e.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 		t.Cleanup(func() { close(callBlock) })
 		return e, prefix + "/parent", callResumed, callBlock
 	}

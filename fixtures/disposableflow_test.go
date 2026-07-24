@@ -70,9 +70,11 @@ func TestDisposableflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Run a disposable flow. Its outcome is observable during the grace window - Run returns the completed
 	// outcome with the subgraph's result merged in, NOT a 404. This is how a caller learns the result.

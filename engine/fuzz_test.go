@@ -18,33 +18,8 @@ package engine
 
 import (
 	"context"
-	"sync"
 	"testing"
 )
-
-// fuzzEngine lazily starts one engine per fuzz worker process (fuzz workers are separate
-// processes, each getting its own in-memory SQLite test databases). It is never shut down; the
-// process exit reclaims it. Startup failure disables the target rather than failing it, so the
-// fuzz run degrades loudly but cleanly on an environment problem.
-var (
-	fuzzEngineOnce sync.Once
-	fuzzEngineInst *Engine
-)
-
-func fuzzEngine() *Engine {
-	fuzzEngineOnce.Do(func() {
-		e := NewEngine()
-		_ = e.SetHost(noopHost{})
-		if err := e.SetInTest("fuzzdeliversignal"); err != nil {
-			return
-		}
-		if err := e.Startup(context.Background()); err != nil {
-			return
-		}
-		fuzzEngineInst = e
-	})
-	return fuzzEngineInst
-}
 
 // FuzzDeliverSignal asserts the inbound peer entry point — the engine's only surface that accepts
 // raw bytes from the (host-authenticated, but still external) peer channel — is total: arbitrary
@@ -62,11 +37,17 @@ func FuzzDeliverSignal(f *testing.F) {
 	f.Add("statusChange", []byte(`[]`))
 	f.Add("unknownop", []byte(`{}`))
 	f.Add("", []byte(nil))
+
+	// One engine per fuzz worker process (workers are separate processes, each with its own in-memory
+	// SQLite test databases), built before f.Fuzz and shut down by NewEngineUnderTest's f.Cleanup at the
+	// end of the run. A *testing.F keeps the engine's logger silent. A Startup failure skips the target
+	// rather than failing it, so the run degrades cleanly on an environment problem.
+	e := NewEngineUnderTest(f)
+	_ = e.SetHost(noopHost{})
+	if err := e.Startup(context.Background()); err != nil {
+		f.Skip("fuzz engine failed to start: " + err.Error())
+	}
 	f.Fuzz(func(t *testing.T, op string, payload []byte) {
-		e := fuzzEngine()
-		if e == nil {
-			t.Skip("fuzz engine failed to start")
-		}
 		// Must not panic; errors are legitimate outcomes for malformed input.
 		_ = e.DeliverSignal(context.Background(), op, payload)
 	})

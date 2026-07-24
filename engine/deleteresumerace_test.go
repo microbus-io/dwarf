@@ -61,9 +61,11 @@ func TestDeleteResumeRace(t *testing.T) {
 	})
 	proxy.HandleTask("drr/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// assertNoOrphan proves the forbidden state is absent for one flow: if the flow row still exists and is
 	// non-terminal (`running`/`interrupted`), it must carry at least one step row.

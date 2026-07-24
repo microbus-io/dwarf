@@ -32,9 +32,11 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 	// Inner child: succeeds for most items, fails for the poisoned one.
 	newEngine := func(t *testing.T) (*engine.Engine, *engine.TestProxy) {
 		proxy := engine.NewTestProxy()
-		eng := engine.NewEngine()
+		eng := engine.NewEngineUnderTest(t)
 		eng.SetHost(proxy)
-		eng.RunInTest(t)
+		if err := eng.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 		return eng, proxy
 	}
 

@@ -42,9 +42,11 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 	// statuses under lease generation 5, lease far future so the engine's own recovery poll leaves it alone.
 	setup := func(t *testing.T, flowStatus, stepStatus string) (*Engine, *sequel.DB) {
 		at := testarossa.For(t)
-		e := NewEngine()
+		e := NewEngineUnderTest(t)
 		e.SetHost(NewTestProxy())
-		e.RunInTest(t)
+		if err := e.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 		db, err := e.db.Shard(1)
 		at.NoError(err)
 		_, err = db.ExecContext(ctx,

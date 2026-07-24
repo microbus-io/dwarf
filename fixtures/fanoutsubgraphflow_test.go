@@ -78,10 +78,12 @@ func TestFanoutSubgraphflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetWorkers(4)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("every_flow_terminates", func(t *testing.T) {
 		assert := testarossa.For(t)

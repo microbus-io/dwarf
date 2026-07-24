@@ -53,10 +53,12 @@ func TestPurgerunningflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetWorkers(2)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	flowKey, err := eng.Create(ctx, "purgerunningflow.verify:428/flow", nil, nil)
 	if !assert.NoError(err) {

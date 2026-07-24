@@ -95,9 +95,11 @@ func TestNestedfailfanoutflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	flowKey, err := eng.Create(ctx, "nestedfailfanoutflow.verify:428/nested", nil, nil)
 	if !testarossa.For(t).NoError(err) {

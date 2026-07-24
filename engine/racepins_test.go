@@ -60,9 +60,11 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create and wait for it to rest interrupted.
 	fk, err := e.Create(ctx, "rld/g", nil, nil)
@@ -154,9 +156,11 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Run parent to completion; the subgraph child completes too, giving a two-flow tree (root + child).
 	fk, out, err := e.Run(ctx, "rdd/parent", nil, nil)

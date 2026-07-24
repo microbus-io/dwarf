@@ -68,9 +68,11 @@ func TestFanInDirectCancel_NoExtendCancelledFlow(t *testing.T) {
 	proxy.HandleTask("fidc/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("fidc/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Empty forEach source: the spawn produces no branches, so processStep reaches the empty-cohort fan-in.
 	flowKey, err := e.Create(ctx, "fidc/g", map[string]any{"items": []string{}}, nil)

@@ -54,9 +54,11 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	const uniEscaped = `quote " backslash \ slash / ünïcödé`
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	graph := workflow.NewGraph("Ünicödé 日本語 Graph") // the graph itself is a stored payload (the `graph` column)
 	graph.SetEndpoint("Write", "unicoderoundtripflow.verify:428/write")

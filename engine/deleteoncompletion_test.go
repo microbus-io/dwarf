@@ -61,8 +61,8 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 	t.Fatalf("flow %s was not deleted within %s", flowKey, timeout)
 }
 
-// shortenDeletion overrides the engine's deletion grace / reaper cadence. Must be called after NewEngine
-// and before RunInTest (the reaper reads reapInterval at Startup; completeFlow reads deletionGrace at
+// shortenDeletion overrides the engine's deletion grace / reaper cadence. Must be called after
+// NewEngineUnderTest and before Startup (the reaper reads reapInterval at Startup; completeFlow reads deletionGrace at
 // completion). Per-engine fields, so there is nothing to restore.
 func shortenDeletion(e *Engine, grace, interval time.Duration) {
 	e.deletionGrace = grace
@@ -86,10 +86,12 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, 20*time.Millisecond)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk, err := e.Create(ctx, "doc/solo", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -115,10 +117,12 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due ~immediately, but only the manual reap fires
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk, err := e.Create(ctx, "doc/await", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -158,10 +162,12 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	_, out, err := e.Run(ctx, "doc/run", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -198,10 +204,12 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk, _, err := e.Run(ctx, "pr/parent", nil, nil)
 	assert.NoError(err)
@@ -234,9 +242,11 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 		return errors.New("boom")
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk, err := e.Create(ctx, "doc/failing", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -282,10 +292,12 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, 20*time.Millisecond)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	fk, err := e.Create(ctx, "doc/sg-parent", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
@@ -321,13 +333,15 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.SetWorkers(8)
 	// Keep grace at the production default and the reaper effectively off, so no flow is removed mid-test
 	// and a missing/errored outcome would signal a real defect.
 	shortenDeletion(e, time.Minute, time.Hour)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	const workers = 8
 	const perWorker = 25

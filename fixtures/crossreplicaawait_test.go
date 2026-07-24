@@ -59,16 +59,14 @@ func TestCrossReplicaAwait(t *testing.T) {
 		return nil
 	})
 
-	// Both replicas share one isolated database via a common SetInTest key (t.Name()), so the suite
-	// exercises this cross-replica wake on whatever dialect SEQUEL_TESTING_DSN names (in-memory SQLite
-	// by default), not SQLite only.
-	eng1 := engine.NewEngine()
+	// Both replicas share one isolated database via a common test-DB key (each built with
+	// NewEngineUnderTest(t), which keys by t.Name()), so the suite exercises this cross-replica wake on
+	// whatever dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default), not SQLite only.
+	eng1 := engine.NewEngineUnderTest(t)
 	eng1.SetHost(proxy1)
-	assert.NoError(eng1.SetInTest(t.Name()))
 	eng1.SetWorkers(0)
-	eng2 := engine.NewEngine()
+	eng2 := engine.NewEngineUnderTest(t)
 	eng2.SetHost(proxy2)
-	assert.NoError(eng2.SetInTest(t.Name()))
 	eng2.SetWorkers(2)
 	// Broadcast shape including the publisher (a bus that echoes to the sender): each engine also
 	// receives its own signals and must discard them by origin, exercising the echo suppression the

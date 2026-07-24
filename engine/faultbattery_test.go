@@ -102,13 +102,15 @@ func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Eng
 	proxy := NewTestProxy()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
 	stateLinear(proxy, prefix, calls)
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	e.SetMeterProvider(mp)
 	if cfg != nil {
 		cfg(e)
 	}
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	return e, reader, calls
 }
 

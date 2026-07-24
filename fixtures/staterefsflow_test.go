@@ -42,9 +42,11 @@ func TestStaterefsflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Big enough to be worth an anchor at any fan-out width, and distinctive enough that a truncated or
 	// mis-resolved carry is impossible to mistake for the real thing.
@@ -260,9 +262,11 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	const docLen = 40000
 	pdf := strings.Repeat("P", docLen)

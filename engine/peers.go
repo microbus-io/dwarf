@@ -466,7 +466,7 @@ func (e *Engine) discoverReplicasAtStartup(ctx context.Context, override int) in
 	}
 	e.signalPeersChanged(ctx)
 	// The settle covers the simultaneous cold start (let peers' rows land before reading). It is skipped
-	// under test so the suite does not pay it on every RunInTest; the peer tests drive R by writing the
+	// under test so the suite does not pay it on every engine startup; the peer tests drive R by writing the
 	// registry directly and reading it back, so they never need the wait.
 	if startupPeerSettle > 0 && !testing.Testing() {
 		select {

@@ -75,9 +75,11 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		proxy.HandleTask("unvalidated.verify:428/join", func(ctx context.Context, f *workflow.Flow) error { joinRuns.Add(1); return nil })
 		proxy.HandleTask("unvalidated.verify:428/after", func(ctx context.Context, f *workflow.Flow) error { afterRuns.Add(1); return nil })
 
-		eng := engine.NewEngine()
+		eng := engine.NewEngineUnderTest(t)
 		eng.SetHost(proxy)
-		eng.RunInTest(t)
+		if err := eng.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 
 		_, outcome, err := eng.Run(ctx, "unvalidated.verify:428/g", map[string]any{"items": []int{}}, nil)
 		if !assert.NoError(err) {
@@ -92,9 +94,11 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 	// A host returning (nil, nil) is a 404 at Create, not a panic in EntryPoint().
 	t.Run("nil_graph_is_404_not_panic", func(t *testing.T) {
 		assert := testarossa.For(t)
-		eng := engine.NewEngine()
+		eng := engine.NewEngineUnderTest(t)
 		eng.SetHost(nilGraphHost{engine.NewTestProxy()})
-		eng.RunInTest(t)
+		if err := eng.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 
 		_, err := eng.Create(ctx, "anything", nil, nil)
 		if !assert.Error(err) {
@@ -115,9 +119,11 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		proxy.HandleTask("invalid.verify:428/entry", func(ctx context.Context, f *workflow.Flow) error { return nil })
 		proxy.HandleTask("invalid.verify:428/orphan", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-		eng := engine.NewEngine()
+		eng := engine.NewEngineUnderTest(t)
 		eng.SetHost(proxy)
-		eng.RunInTest(t)
+		if err := eng.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 
 		_, err := eng.Create(ctx, "invalid.verify:428/g", nil, nil)
 		if !assert.Error(err) {

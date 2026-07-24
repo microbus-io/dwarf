@@ -132,14 +132,16 @@ func TestPartition_FreshestRosterWins(t *testing.T) {
 // from different places.
 func TestPartition_AppliedFromRegistry(t *testing.T) {
 	t.Parallel()
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	if err := e.SetHost(noopHost{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}); err != nil {
 		t.Fatal(err)
 	}
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Solo: registered, but nothing to divide.
 	_, _, ok := e.observedPartition()
@@ -174,14 +176,16 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 // noticed. Caught by fixtures/crossreplicaawait_test.go hanging; pinned here at the unit level.
 func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	t.Parallel()
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	if err := e.SetHost(noopHost{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}); err != nil {
 		t.Fatal(err)
 	}
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// A peer that holds connections but dispatches nothing.
 	addPeerRowWithDispatch(t, e, 4242, false)

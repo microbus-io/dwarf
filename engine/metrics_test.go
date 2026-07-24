@@ -113,9 +113,11 @@ func TestCountRunningByTask_ExcludesParked(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	eng.SetHost(noopHost{})
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	db, err := eng.db.Shard(1)
 	if !assert.NoError(err) {
@@ -162,10 +164,12 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	proxy.HandleTask("metricsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("metricsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	_, outcome, err := eng.Run(ctx, "metricsflow.verify:428/g", nil, nil)
 	if !assert.NoError(err) {
@@ -241,11 +245,13 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	proxy.HandleGraph("refillmetrics/g", g)
 	proxy.HandleTask("refillmetrics/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetMeterProvider(mp))
 	assert.NoError(e.SetWorkers(0)) // nothing dispatches: the backlog stays put
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	for range 8 {
 		_, err := e.Create(ctx, "refillmetrics/g", nil, &workflow.FlowOptions{FairnessKey: "tenant"})
@@ -308,10 +314,12 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 	proxy.HandleGraph("forkmetric.verify:428/g", g)
 	proxy.HandleTask("forkmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// One flow, run to completion: started=1, terminated=1.
 	flowKey, outcome, err := eng.Run(ctx, "forkmetric.verify:428/g", nil, nil)
@@ -370,10 +378,12 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	proxy.HandleGraph("orphanmetric.verify:428/g", g)
 	proxy.HandleTask("orphanmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngine()
+	eng := NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	key, err := eng.Create(ctx, "orphanmetric.verify:428/g", nil, nil)
 	if !assert.NoError(err) {

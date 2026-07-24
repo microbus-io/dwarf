@@ -30,7 +30,7 @@ import (
 type TaskHandler func(ctx context.Context, flow *workflow.Flow) error
 
 // TestProxy routes graph fetches and task dispatches to registered handlers. It implements the Host
-// interface for use with Engine.SetHost / Engine.RunInTest: LoadGraph and ExecuteTask dispatch to the
+// interface for use with Engine.SetHost: LoadGraph and ExecuteTask dispatch to the
 // registered handlers, and SignalPeers relays to the peer engines registered with AddPeer (none by
 // default, i.e. single-replica). For a multi-replica test, give each replica its own proxy and AddPeer
 // the other engines.
@@ -90,7 +90,7 @@ func (p *TestProxy) ExecuteTask(ctx context.Context, taskURL string, flow *workf
 // AddPeer registers a peer engine that SignalPeers relays to, standing in for the bus in a
 // single-process multi-replica test. Registering the proxy's own engine is allowed and mirrors a
 // broadcast bus that includes the publisher: the engine stamps every signal
-// with its instanceID and DeliverSignal discards its own echo. Call before Startup/RunInTest.
+// with its instanceID and DeliverSignal discards its own echo. Call before Startup.
 func (p *TestProxy) AddPeer(peer *Engine) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

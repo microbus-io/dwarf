@@ -41,9 +41,11 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	graph := workflow.NewGraph("FanOutOrdinal")
 	graph.SetEndpoint("Split", "fanoutordinalflow.verify:828/split")
@@ -99,9 +101,11 @@ func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	graph := workflow.NewGraph("NestedOrdinal")
 	graph.SetEndpoint("Seed", "fanoutordinalflow.verify:828/n-seed")

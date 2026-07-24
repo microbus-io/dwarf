@@ -41,9 +41,11 @@ func TestContinueflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("counter_persists_across_continue_turns", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -87,9 +89,11 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 	proxy.HandleGraph("continuepolicy.verify:428/g", g)
 	proxy.HandleTask("continuepolicy.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert := testarossa.For(t)
 
 	// Turn 1 with a distinctive priority (7, not the engine default of 100).
@@ -131,9 +135,11 @@ func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
 	proxy.HandleGraph("threadjoin.verify:428/g", g)
 	proxy.HandleTask("threadjoin.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	assert := testarossa.For(t)
 
 	// Flow A starts its own thread.

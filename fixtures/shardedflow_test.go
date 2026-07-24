@@ -55,13 +55,15 @@ func TestShardedflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
 	eng.SetWorkers(1)
 	for i := 1; i <= 8; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	t.Run("strict_priority_across_shards", func(t *testing.T) {
 		assert := testarossa.For(t)

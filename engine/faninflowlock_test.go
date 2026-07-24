@@ -60,11 +60,13 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 	run := func(t *testing.T, width int) int {
 		assert := testarossa.For(t)
 
-		e := NewEngine()
+		e := NewEngineUnderTest(t)
 		proxy := NewTestProxy()
 		e.SetHost(proxy)
 		e.SetWorkers(1) // determinism: one worker, so no sibling races and no contention retries
-		e.RunInTest(t)
+		if err := e.Startup(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 
 		g := workflow.NewGraph("Fan")
 		g.SetEndpoint("Split", "fl/split")

@@ -31,9 +31,11 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 	assert := testarossa.For(t)
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	eng.SetHost(proxy)
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Inner child: fan out over items; "wait" interrupts, "bad" fails, others complete.
 	inner := workflow.NewGraph("Inner")

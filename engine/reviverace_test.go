@@ -59,9 +59,11 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	})
 	proxy.HandleTask("rvc/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	// Freeze the worker at the caller revive, after the child completed (its completion transaction committed).
 	e.seams.Break(checkpointBeforeReviveWrite)

@@ -369,10 +369,12 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
@@ -422,10 +424,12 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	const doc = 20000
 	g := workflow.NewGraph("Refs")
@@ -504,10 +508,12 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	g := workflow.NewGraph("Reduced")
 	g.SetEndpoint("Seed", "red/seed")
@@ -564,10 +570,12 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	g := workflow.NewGraph("SpawnCombined")
 	g.SetEndpoint("Seed", "sc/seed")

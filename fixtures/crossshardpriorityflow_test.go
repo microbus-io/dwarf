@@ -70,7 +70,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngine()
+	eng := engine.NewEngineUnderTest(t)
 	assertSetup := testarossa.For(t)
 	assertSetup.NoError(eng.SetHost(proxy))
 	// Three shards, so placement spreads the flows and the global band must be merged from three
@@ -81,7 +81,9 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	// One worker: dispatch order is then observable directly as completion order, with no interleaving
 	// to reason around.
 	assertSetup.NoError(eng.SetWorkers(1))
-	eng.RunInTest(t)
+	if err := eng.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	assert := testarossa.For(t)
 

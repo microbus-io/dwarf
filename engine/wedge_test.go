@@ -99,9 +99,11 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	defer close(release)
 
 	flowKey, err := e.Create(ctx, "wedgesub.verify:0/parent", nil, nil)
@@ -198,9 +200,11 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	defer close(release)
 
 	flowKey, err := e.Create(ctx, "wedgenochild.verify:0/parent", nil, nil)
@@ -306,9 +310,11 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	defer close(release)
 
 	// Orphan: create, await the interrupt, then forge a Cancel that raced the spawn - the parent tree is
@@ -419,10 +425,12 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.SetLogger(slog.New(capture)))
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	defer close(release)
 
 	// A flow run to completion, then forged back to `running`: its step stays `completed`, so the flow is now
@@ -506,10 +514,12 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 	proxy.HandleGraph("orphanwin.verify:0/solo", solo)
 	proxy.HandleTask("orphanwin.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
 	assert.NoError(e.SetLogger(slog.New(capture)))
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	key, err := e.Create(ctx, "orphanwin.verify:0/solo", nil, nil)
 	if !assert.NoError(err) {

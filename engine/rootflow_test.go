@@ -69,9 +69,11 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	flowKey, out, err := e.Run(ctx, "rootid.verify:0/parent", nil, nil)
 	if !assert.NoError(err) {
@@ -117,9 +119,11 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 	proxy.HandleTask("rootidfork.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("rootidfork.verify:0/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	flowKey, out, err := e.Run(ctx, "rootidfork.verify:0/lin", nil, nil)
 	if !assert.NoError(err) {
@@ -165,9 +169,11 @@ func TestRootFlowID_ContinueStartsFreshRoot(t *testing.T) {
 	proxy.HandleGraph("rootidcont.verify:0/turn", g)
 	proxy.HandleTask("rootidcont.verify:0/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngine()
+	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.RunInTest(t)
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
 	firstKey, out, err := e.Run(ctx, "rootidcont.verify:0/turn", nil, nil)
 	if !assert.NoError(err) {

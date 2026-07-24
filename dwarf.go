@@ -43,9 +43,9 @@ limitations under the License.
 //		return nil
 //	})
 //
-//	eng := dwarf.NewEngine()
+//	eng := dwarf.NewEngineUnderTest(t) // SQLite in-memory, auto cleanup at test end
 //	eng.SetHost(proxy)
-//	eng.RunInTest(t) // SQLite in-memory, auto cleanup
+//	eng.Startup(ctx)
 //
 //	_, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil)
 //	fmt.Println(out.State["greeting"]) // hello ada
@@ -54,9 +54,20 @@ limitations under the License.
 // deployment.
 package dwarf
 
-import "github.com/microbus-io/dwarf/engine"
+import (
+	"testing"
+
+	"github.com/microbus-io/dwarf/engine"
+)
 
 // NewEngine creates a new workflow engine with default settings.
 func NewEngine() *engine.Engine {
 	return engine.NewEngine()
+}
+
+// NewEngineUnderTest creates a workflow engine wired for testing: per-test isolated, auto-dropped
+// databases and automatic teardown at test end (the subsequent Startup registers a t.Cleanup shutdown).
+// See engine.NewEngineUnderTest.
+func NewEngineUnderTest(t testing.TB) *engine.Engine {
+	return engine.NewEngineUnderTest(t)
 }
