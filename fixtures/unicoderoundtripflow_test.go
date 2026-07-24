@@ -48,6 +48,7 @@ const (
 
 func TestUnicoderoundtripflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	// Quotes and backslashes ride along so JSON escaping stays honest through the round trip.
@@ -64,7 +65,7 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	graph.SetEndpoint("Write", "unicoderoundtripflow.verify:428/write")
 	graph.SetEndpoint("Ask", "unicoderoundtripflow.verify:428/ask")
 	graph.AddTransitionChain("Write", "Ask", workflow.END)
-	testarossa.For(t).NoError(graph.Validate())
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("unicoderoundtripflow.verify:428/wf", graph)
 
 	// Writes into `changes`, which folds into the successor's `state` and then `final_state`.
@@ -90,8 +91,6 @@ func TestUnicoderoundtripflow(t *testing.T) {
 		f.SetString("answered", resumed.Reply)
 		return nil
 	})
-
-	assert := testarossa.For(t)
 
 	// The initial state is carried in the entry step's `state`; baggage rides the `baggage` column.
 	flowKey, err := eng.Create(ctx, "unicoderoundtripflow.verify:428/wf",

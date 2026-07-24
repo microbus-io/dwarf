@@ -56,11 +56,12 @@ func flowStatus(t *testing.T, e *Engine, flowKey string) string {
 func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 	t.Parallel()
 	newEngine := func(t *testing.T, prefix string) (*Engine, string) {
+		assert := testarossa.For(t)
 		proxy := NewTestProxy()
 		g := workflow.NewGraph("Solo")
 		g.SetEndpoint("A", prefix+"/a")
 		g.AddTransition("A", workflow.END)
-		testarossa.For(t).NoError(g.Validate())
+		assert.NoError(g.Validate())
 		proxy.HandleGraph(prefix+"/g", g)
 		proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 		e := NewEngineUnderTest(t)
@@ -126,12 +127,13 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 	// newGate builds an interrupted flow whose gate task, on resume, BLOCKS on gateBlock - so a resumed flow
 	// rests `running` (not racing to completion) while the test inspects the Delete outcome.
 	newGate := func(t *testing.T, prefix string) (*Engine, chan struct{}) {
+		assert := testarossa.For(t)
 		gateBlock := make(chan struct{})
 		proxy := NewTestProxy()
 		g := workflow.NewGraph("Gate")
 		g.SetEndpoint("Gate", prefix+"/gate")
 		g.AddTransition("Gate", workflow.END)
-		testarossa.For(t).NoError(g.Validate())
+		assert.NoError(g.Validate())
 		proxy.HandleGraph(prefix+"/g", g)
 		proxy.HandleTask(prefix+"/gate", func(ctx context.Context, f *workflow.Flow) error {
 			yield, err := f.Interrupt(nil, nil)

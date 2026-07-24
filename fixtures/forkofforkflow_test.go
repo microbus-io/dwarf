@@ -141,18 +141,20 @@ func TestForkOfForkflow(t *testing.T) {
 // historyJSON returns a flow's History serialized to JSON, for byte-for-byte stability comparison.
 func historyJSON(t *testing.T, eng *engine.Engine, flowKey string) string {
 	t.Helper()
+	assert := testarossa.For(t)
 	hist, err := eng.History(context.Background(), flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	b, err := json.Marshal(hist)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	return string(b)
 }
 
 // snapshotStatus returns a flow's current status.
 func snapshotStatus(t *testing.T, eng *engine.Engine, flowKey string) string {
 	t.Helper()
+	assert := testarossa.For(t)
 	out, err := eng.Snapshot(context.Background(), flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	if out == nil {
 		return ""
 	}

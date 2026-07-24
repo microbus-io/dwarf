@@ -37,6 +37,7 @@ import (
 // NOT t.Parallel: asserts an upper-bound reaction latency (cross-replica wake via peer signal < 2s), which CPU oversubscription
 // from co-running parallel tests can inflate past the bound.
 func TestTwoReplicaflow(t *testing.T) {
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	// Shared per-task execution counters, incremented by whichever replica runs the step.
@@ -55,7 +56,7 @@ func TestTwoReplicaflow(t *testing.T) {
 		g.AddTransition("A", "B")
 		g.AddTransition("B", "C")
 		g.AddTransition("C", workflow.END)
-		testarossa.NoError(t, g.Validate())
+		assert.NoError(g.Validate())
 		p.HandleGraph("tworeplica.verify:428/chain", g)
 		for task, url := range map[string]string{"A": "tworeplica.verify:428/a", "B": "tworeplica.verify:428/b", "C": "tworeplica.verify:428/c"} {
 			p.HandleTask(url, func(ctx context.Context, f *workflow.Flow) error {
@@ -74,14 +75,13 @@ func TestTwoReplicaflow(t *testing.T) {
 	// dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default).
 	eng1 := engine.NewEngineUnderTest(t)
 	eng1.SetHost(proxy1)
-	testarossa.NoError(t, eng1.SetWorkers(4))
+	assert.NoError(eng1.SetWorkers(4))
 	eng2 := engine.NewEngineUnderTest(t)
 	eng2.SetHost(proxy2)
-	testarossa.NoError(t, eng2.SetWorkers(4))
+	assert.NoError(eng2.SetWorkers(4))
 	proxy1.AddPeer(eng2)
 	proxy2.AddPeer(eng1)
 
-	assert := testarossa.For(t)
 	assert.NoError(eng1.Startup(ctx))
 	t.Cleanup(func() { eng1.Shutdown(ctx) })
 	assert.NoError(eng2.Startup(ctx))
@@ -134,7 +134,7 @@ func TestTwoReplicaflow(t *testing.T) {
 		wg := workflow.NewGraph("Wake")
 		wg.SetEndpoint("W", "tworeplicawake.verify:428/w")
 		wg.AddTransition("W", workflow.END)
-		testarossa.NoError(t, wg.Validate())
+		assert.NoError(wg.Validate())
 		pa.HandleGraph("tworeplicawake.verify:428/g", wg)
 		pb.HandleGraph("tworeplicawake.verify:428/g", wg)
 		pa.HandleTask("tworeplicawake.verify:428/w", func(ctx context.Context, f *workflow.Flow) error {

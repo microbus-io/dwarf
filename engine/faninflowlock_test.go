@@ -51,6 +51,7 @@ import (
 // re-count, so the exact-count form of this assertion requires a contention-free run.
 func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	// The flow-row writes the transition tx makes for a healthy fan-out flow, independent of cohort width:
@@ -103,18 +104,20 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 
 	var narrow, wide int
 	t.Run("width4", func(t *testing.T) {
+		assert := testarossa.For(t)
 		narrow = run(t, 4)
-		testarossa.For(t).Equal(expectedFlowRowWrites, narrow,
+		assert.Equal(expectedFlowRowWrites, narrow,
 			"a 4-wide cohort must write the flow row only at the fan-out source and the resolving arrival")
 	})
 	t.Run("width16", func(t *testing.T) {
+		assert := testarossa.For(t)
 		wide = run(t, 16)
-		testarossa.For(t).Equal(expectedFlowRowWrites, wide,
+		assert.Equal(expectedFlowRowWrites, wide,
 			"a 16-wide cohort must write the flow row only at the fan-out source and the resolving arrival")
 	})
 	// The load-bearing comparison: flow-row cost must not scale with cohort width. Stated separately so a
 	// future change to the constant above cannot hide a reintroduced per-arrival grab.
-	testarossa.For(t).Equal(narrow, wide,
+	assert.Equal(narrow, wide,
 		"flow-row writes must be independent of cohort width (%d at width 4 vs %d at width 16); "+
 			"a per-arrival flow-row write serializes the whole cohort on one row", narrow, wide)
 }

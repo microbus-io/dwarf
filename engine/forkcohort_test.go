@@ -226,6 +226,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 // never saw the rest of the branch.
 func nestedForkGraph(t *testing.T, proxy *TestProxy, brokenChunk string) *workflow.Graph {
 	t.Helper()
+	assert := testarossa.For(t)
 	g := workflow.NewGraph("NestedFork")
 	for _, n := range []string{"Seed", "Cell", "Chunk", "JoinChunk", "JoinCell"} {
 		g.SetEndpoint(n, "nfk/"+n)
@@ -237,7 +238,7 @@ func nestedForkGraph(t *testing.T, proxy *TestProxy, brokenChunk string) *workfl
 	g.AddTransitionForEach("Cell", "Chunk", "chunks", "chunk")
 	g.AddTransitionChain("Chunk", "JoinChunk")
 	g.AddTransitionChain("JoinChunk", "JoinCell", workflow.END)
-	testarossa.For(t).NoError(g.Validate())
+	assert.NoError(g.Validate())
 	proxy.HandleGraph("nfk/g", g)
 
 	proxy.HandleTask("nfk/Seed", func(ctx context.Context, f *workflow.Flow) error { return nil })

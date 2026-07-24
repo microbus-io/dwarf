@@ -118,8 +118,9 @@ func TestRetryCancelRaceflow(t *testing.T) {
 // stepRecordByTask returns the full history record of the first step whose task matches taskName.
 func stepRecordByTask(t *testing.T, eng *engine.Engine, flowKey, taskName string) workflow.FlowStep {
 	t.Helper()
+	assert := testarossa.For(t)
 	hist, err := eng.History(context.Background(), flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	for _, s := range hist {
 		if s.TaskName == taskName {
 			return s

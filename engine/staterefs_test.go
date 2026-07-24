@@ -36,13 +36,14 @@ func blob(n int) string {
 // materialized state).
 func stepRefsOf(t *testing.T, e *Engine, stepID int) (state workflow.State, refs stateRefs, stateBytes int) {
 	t.Helper()
+	assert := testarossa.For(t)
 	db, err := e.db.Shard(1)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	var stateJSON, refsJSON []byte
 	err = db.QueryRowContext(context.Background(),
 		"SELECT state, state_refs FROM dwarf_steps WHERE step_id=?", stepID,
 	).Scan(&stateJSON, &refsJSON)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	state, _ = workflow.NewState(stateJSON)
 	return state, parseStateRefs(refsJSON), len(stateJSON)
 }
@@ -50,16 +51,17 @@ func stepRefsOf(t *testing.T, e *Engine, stepID int) (state workflow.State, refs
 // stepIDsByTask maps each task name to its step ids, in step order.
 func stepIDsByTask(t *testing.T, e *Engine, taskName string) []int {
 	t.Helper()
+	assert := testarossa.For(t)
 	db, err := e.db.Shard(1)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	rows, err := db.QueryContext(context.Background(),
 		"SELECT step_id FROM dwarf_steps WHERE task_name=? ORDER BY step_id", taskName)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	defer rows.Close()
 	var ids []int
 	for rows.Next() {
 		var id int
-		testarossa.For(t).NoError(rows.Scan(&id))
+		assert.NoError(rows.Scan(&id))
 		ids = append(ids, id)
 	}
 	return ids
@@ -135,8 +137,9 @@ func TestStateRefs_MintTiers(t *testing.T) {
 
 	mint := func(t *testing.T, state map[string]any, changes map[string]any, inherited stateRefs, successors int) (workflow.State, stateRefs) {
 		t.Helper()
+		assert := testarossa.For(t)
 		stateJSON, refsJSON, err := mintStateRefs(state, changes, inherited, anchor, successors, nil, "sqlite")
-		testarossa.For(t).NoError(err)
+		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
 		return stored, parseStateRefs(refsJSON)
@@ -533,7 +536,7 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	})
 	proxy.HandleTask("red/join", func(ctx context.Context, f *workflow.Flow) error {
 		var log []string
-		testarossa.For(t).NoError(f.Get("log", &log))
+		assert.NoError(f.Get("log", &log))
 		f.SetInt("logLen", len(log))
 		return nil
 	})
@@ -598,7 +601,7 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 	proxy.HandleTask("sc/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("sc/join", func(ctx context.Context, f *workflow.Flow) error {
 		var log []string
-		testarossa.For(t).NoError(f.Get("log", &log))
+		assert.NoError(f.Get("log", &log))
 		f.SetInt("logLen", len(log))
 		return nil
 	})

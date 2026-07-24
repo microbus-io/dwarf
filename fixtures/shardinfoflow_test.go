@@ -33,6 +33,7 @@ import (
 
 func TestShardinfoflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -60,8 +61,8 @@ func TestShardinfoflow(t *testing.T) {
 	const total = 30
 	for range total {
 		_, outcome, err := eng.Run(ctx, "shardinfoflow.verify:428/flow", nil, nil)
-		testarossa.NoError(t, err)
-		testarossa.Equal(t, workflow.StatusCompleted, outcome.Status)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
 	}
 
 	t.Run("reports_every_shard_and_counts_sum", func(t *testing.T) {

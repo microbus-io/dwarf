@@ -32,8 +32,9 @@ import (
 // shardFlowCount returns the number of flows on a shard.
 func shardFlowCount(t *testing.T, e *Engine, shardNum int) int {
 	t.Helper()
+	assert := testarossa.For(t)
 	db, err := e.db.Shard(shardNum)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	var n int
 	db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_flows").Scan(&n)
 	return n
@@ -42,10 +43,11 @@ func shardFlowCount(t *testing.T, e *Engine, shardNum int) int {
 // waitFlowDeleted polls until the flow's row (and steps) are gone, failing the test on timeout.
 func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Duration) {
 	t.Helper()
+	assert := testarossa.For(t)
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		var n int
@@ -53,7 +55,7 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 		if n == 0 {
 			var steps int
 			db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=?", flowID).Scan(&steps)
-			testarossa.For(t).Equal(0, steps) // steps deleted with the flow
+			assert.Equal(0, steps) // steps deleted with the flow
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -321,6 +323,7 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 // mid-test, so a missing/errored outcome would signal a real defect (torn completion write, lost outcome).
 func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := NewTestProxy()
@@ -363,6 +366,6 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	testarossa.For(t).Equal(int64(0), bad.Load(),
+	assert.Equal(int64(0), bad.Load(),
 		"every disposable Await must return the completed outcome during the grace window")
 }

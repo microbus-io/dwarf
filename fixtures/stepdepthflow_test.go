@@ -111,6 +111,7 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 // branch regardless of completion order.
 func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -152,12 +153,11 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	proxy.HandleTask("depthfanin.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	eng := engine.NewEngineUnderTest(t)
-	testarossa.For(t).NoError(eng.SetWorkers(4)) // so the gated shallow branch doesn't starve the deep one
+	assert.NoError(eng.SetWorkers(4)) // so the gated shallow branch doesn't starve the deep one
 	eng.SetHost(proxy)
 	if err := eng.Startup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	assert := testarossa.For(t)
 
 	flowKey, err := eng.Create(ctx, "depthfanin.verify:428/g", map[string]any{}, nil)
 	assert.NoError(err)
@@ -195,7 +195,8 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 // mustHistory fetches History or fails the test.
 func mustHistory(t *testing.T, eng *engine.Engine, flowKey string) []workflow.FlowStep {
 	t.Helper()
+	assert := testarossa.For(t)
 	hist, err := eng.History(context.Background(), flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	return hist
 }

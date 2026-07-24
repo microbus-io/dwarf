@@ -86,12 +86,14 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	}
 
 	stepState := func(t *testing.T, db *sequel.DB, stepID int) (status string, parked int) {
-		testarossa.For(t).NoError(db.QueryRowContext(ctx, "SELECT status, parked FROM dwarf_steps WHERE step_id=?", stepID).Scan(&status, &parked))
+		assert := testarossa.For(t)
+		assert.NoError(db.QueryRowContext(ctx, "SELECT status, parked FROM dwarf_steps WHERE step_id=?", stepID).Scan(&status, &parked))
 		return strings.TrimSpace(status), parked
 	}
 	flowStatus := func(t *testing.T, db *sequel.DB, flowID int) string {
+		assert := testarossa.For(t)
 		var s string
-		testarossa.For(t).NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&s))
+		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&s))
 		return strings.TrimSpace(s)
 	}
 

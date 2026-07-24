@@ -32,6 +32,7 @@ import (
 
 func TestListflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -56,10 +57,10 @@ func TestListflow(t *testing.T) {
 	created := make(map[string]bool, total)
 	for range total {
 		flowKey, err := eng.Create(ctx, "listflow.verify:428/list", nil, nil)
-		testarossa.NoError(t, err)
+		assert.NoError(err)
 		outcome, err := eng.Await(ctx, flowKey)
-		testarossa.NoError(t, err)
-		testarossa.Equal(t, workflow.StatusCompleted, outcome.Status)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		created[flowKey] = true
 	}
 

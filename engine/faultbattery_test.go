@@ -117,10 +117,11 @@ func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Eng
 // batteryRun is Create+Await with a ceiling, returning the flow key (for readFinalState) and outcome.
 func batteryRun(t *testing.T, e *Engine, url string) (string, *workflow.FlowOutcome) {
 	t.Helper()
+	assert := testarossa.For(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	fk, out, err := e.Run(ctx, url, nil, nil)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	return fk, out
 }
 

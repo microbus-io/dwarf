@@ -50,6 +50,7 @@ import (
 // is an ordinary conditional fan-out whose width happens to be author-surprising.
 func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -73,7 +74,7 @@ func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 
 	// Validate has no duplicate-transition check, and it should not: two `when` edges to one target under
 	// DIFFERENT guards is a legitimate conditional fan-out, not an error.
-	testarossa.For(t).NoError(graph.Validate())
+	assert.NoError(graph.Validate())
 	proxy.HandleGraph("duplicateedgefaninflow.verify:701/when-fan-out", graph)
 
 	proxy.HandleTask("duplicateedgefaninflow.verify:701/split", func(ctx context.Context, f *workflow.Flow) error {
@@ -132,6 +133,7 @@ func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 // graph never runs.
 func TestDuplicateEdge_CohortMemberOneRejectedByValidate(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	graph := workflow.NewGraph("DupMemberOne")
 	graph.SetEndpoint("Split", "duplicateedgefaninflow.verify:701/m-split")
 	graph.SetEndpoint("WorkA", "duplicateedgefaninflow.verify:701/m-worka")
@@ -146,7 +148,7 @@ func TestDuplicateEdge_CohortMemberOneRejectedByValidate(t *testing.T) {
 
 	err := graph.Validate()
 	t.Logf("Validate() = %v", err)
-	testarossa.For(t).Error(err, "a cohort mixing a plain member with a fan-out-source member into one fan-in must not validate")
+	assert.Error(err, "a cohort mixing a plain member with a fan-out-source member into one fan-in must not validate")
 }
 
 // TestDuplicateEdge_CohortMemberAllRejectedByValidate is the sibling shape where EVERY member has two edges into
@@ -155,6 +157,7 @@ func TestDuplicateEdge_CohortMemberOneRejectedByValidate(t *testing.T) {
 // the member-double-count shape is unreachable regardless of whether one or all members carry the extra edge.
 func TestDuplicateEdge_CohortMemberAllRejectedByValidate(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	graph := workflow.NewGraph("DupMemberAll")
 	graph.SetEndpoint("Split", "duplicateedgefaninflow.verify:701/a-split")
 	graph.SetEndpoint("WorkA", "duplicateedgefaninflow.verify:701/a-worka")
@@ -170,7 +173,7 @@ func TestDuplicateEdge_CohortMemberAllRejectedByValidate(t *testing.T) {
 
 	err := graph.Validate()
 	t.Logf("Validate() = %v", err)
-	testarossa.For(t).Error(err, "a cohort whose every member is itself a fan-out source into the shared fan-in must not validate")
+	assert.Error(err, "a cohort whose every member is itself a fan-out source into the shared fan-in must not validate")
 }
 
 // TestDuplicateEdge_TrunkSourceIntoFanInIsDegenerate is the one member-shaped graph that DOES validate: a trunk

@@ -30,6 +30,7 @@ import (
 
 func TestNestedfailfanoutflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -102,7 +103,7 @@ func TestNestedfailfanoutflow(t *testing.T) {
 	}
 
 	flowKey, err := eng.Create(ctx, "nestedfailfanoutflow.verify:428/nested", nil, nil)
-	if !testarossa.For(t).NoError(err) {
+	if !assert.NoError(err) {
 		return
 	}
 

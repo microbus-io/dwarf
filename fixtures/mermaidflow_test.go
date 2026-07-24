@@ -33,6 +33,7 @@ import (
 // end-to-end and decomposes subgraphs/cohorts without pinning cosmetic formatting.
 func TestMermaidflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -98,8 +99,8 @@ func TestMermaidflow(t *testing.T) {
 
 	flowKey, outcome, err := eng.Run(ctx, "mermaidflow.verify:428/parent",
 		map[string]any{"items": []string{"x", "y", "z"}}, nil)
-	testarossa.NoError(t, err)
-	testarossa.Equal(t, workflow.StatusCompleted, outcome.Status)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
 	t.Run("history_mermaid_structure", func(t *testing.T) {
 		assert := testarossa.For(t)

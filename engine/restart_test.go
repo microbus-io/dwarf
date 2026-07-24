@@ -45,18 +45,20 @@ func TestRestartSurvival(t *testing.T) {
 	// with its own worker count. Not test mode: SetShard uses the DSN directly and migrations run at Startup
 	// (idempotent, so engine 2 re-opening the migrated DB is a no-op).
 	mkEngine := func(t *testing.T, proxy *TestProxy, dir string, workers int) *Engine {
+		assert := testarossa.For(t)
 		e := NewEngine()
 		e.SetHost(proxy)
-		testarossa.For(t).NoError(e.SetShard(ShardSpec{Index: 1, DSN: fmt.Sprintf("file:%s/db%%d.sqlite?_pragma=busy_timeout(5000)", dir)}))
-		testarossa.For(t).NoError(e.SetWorkers(workers))
+		assert.NoError(e.SetShard(ShardSpec{Index: 1, DSN: fmt.Sprintf("file:%s/db%%d.sqlite?_pragma=busy_timeout(5000)", dir)}))
+		assert.NoError(e.SetWorkers(workers))
 		return e
 	}
 
 	// waitFor polls a COUNT(*) query on e's shard 1 until it returns >0 or the deadline passes.
 	waitFor := func(t *testing.T, e *Engine, query string, args ...any) bool {
 		t.Helper()
+		assert := testarossa.For(t)
 		db, err := e.db.Shard(1)
-		if !testarossa.For(t).NoError(err) {
+		if !assert.NoError(err) {
 			return false
 		}
 		deadline := time.Now().Add(10 * time.Second)

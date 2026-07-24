@@ -30,8 +30,9 @@ import (
 // interruptedStepCount returns how many of a flow's steps are currently interrupted.
 func interruptedStepCount(t *testing.T, eng *engine.Engine, flowKey string) int {
 	t.Helper()
+	assert := testarossa.For(t)
 	hist, err := eng.History(context.Background(), flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	n := 0
 	for _, s := range hist {
 		if s.Status == workflow.StatusInterrupted {
@@ -47,6 +48,7 @@ func interruptedStepCount(t *testing.T, eng *engine.Engine, flowKey string) int 
 // removed `ORDER BY step_depth DESC, step_id DESC` selection would have reported B.
 func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -92,12 +94,11 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 
 	eng := engine.NewEngineUnderTest(t)
 	// Several workers so B's gate-block doesn't starve A on a single worker.
-	testarossa.For(t).NoError(eng.SetWorkers(4))
+	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(proxy)
 	if err := eng.Startup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	assert := testarossa.For(t)
 
 	flowKey, err := eng.Create(ctx, "snapresume.verify:428/g", nil, nil)
 	assert.NoError(err)
@@ -147,6 +148,7 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 // completes with both children's own results, proving no cross-delivery / double-resume.
 func TestInterruptParallelSubgraphResume(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -196,12 +198,11 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	})
 
 	eng := engine.NewEngineUnderTest(t)
-	testarossa.For(t).NoError(eng.SetWorkers(4))
+	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(proxy)
 	if err := eng.Startup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	assert := testarossa.For(t)
 
 	flowKey, err := eng.Create(ctx, "psub.verify:428/parent", nil, nil)
 	assert.NoError(err)

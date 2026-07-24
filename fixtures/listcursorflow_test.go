@@ -39,6 +39,7 @@ import (
 
 func TestListCursorflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -64,15 +65,16 @@ func TestListCursorflow(t *testing.T) {
 	created := make(map[string]bool, total)
 	for range total {
 		flowKey, _, err := eng.Run(ctx, "listcursorflow.verify:428/list", nil, nil)
-		testarossa.NoError(t, err)
+		assert.NoError(err)
 		created[flowKey] = true
 	}
 
 	// shardOf parses the leading segment of a flowKey ({shard}-{id}-{token}).
 	shardOf := func(t *testing.T, key string) int {
 		t.Helper()
+		assert := testarossa.For(t)
 		n, err := strconv.Atoi(strings.SplitN(key, "-", 2)[0])
-		testarossa.NoError(t, err)
+		assert.NoError(err)
 		return n
 	}
 

@@ -45,6 +45,7 @@ import (
 
 func TestReducerDeleteflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
@@ -81,7 +82,7 @@ func TestReducerDeleteflow(t *testing.T) {
 		g.AddTransition("Deleter", "Join")
 		g.AddTransition("Appender", "Join")
 		g.AddTransition("Join", workflow.END)
-		testarossa.NoError(t, g.Validate())
+		assert.NoError(g.Validate())
 		return g
 	}
 

@@ -30,26 +30,28 @@ import (
 // flowBudgetMs reads the frozen per-flow budget off the flow row.
 func flowBudgetMs(t *testing.T, e *Engine, flowKey string) int {
 	t.Helper()
+	assert := testarossa.For(t)
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&ms)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	return ms
 }
 
 // entryStepBudgetMs reads the entry step's denormalized budget.
 func entryStepBudgetMs(t *testing.T, e *Engine, flowKey string) int {
 	t.Helper()
+	assert := testarossa.For(t)
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_steps WHERE flow_id=? ORDER BY step_id LIMIT_OFFSET(1, 0)", flowID).Scan(&ms)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	return ms
 }
 

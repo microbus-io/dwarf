@@ -69,8 +69,9 @@ func TestRetryHorizonflow(t *testing.T) {
 
 	// flakyAttempts returns the attempt counter recorded on the Flaky step (0-indexed: 0 = ran once).
 	flakyAttempts := func(t *testing.T, flowKey string) int {
+		assert := testarossa.For(t)
 		steps, err := eng.History(ctx, flowKey)
-		testarossa.NoError(t, err)
+		assert.NoError(err)
 		for _, s := range steps {
 			if s.TaskName == "Flaky" {
 				return s.Attempt

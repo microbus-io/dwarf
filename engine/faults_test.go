@@ -34,10 +34,11 @@ import (
 // boundedRun is Create+Await with a ceiling, so a wedge fails the test instead of hanging.
 func boundedRun(t *testing.T, e *Engine, url string) *workflow.FlowOutcome {
 	t.Helper()
+	assert := testarossa.For(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second*testTimeoutScale)
 	defer cancel()
 	_, out, err := e.Run(ctx, url, nil, nil)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	return out
 }
 

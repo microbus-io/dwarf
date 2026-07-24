@@ -37,6 +37,7 @@ import (
 
 func TestFanInReplicaflow(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	const base = "faninreplica.verify:428"
@@ -61,7 +62,7 @@ func TestFanInReplicaflow(t *testing.T) {
 		g.AddTransition("B", "E")
 		g.AddTransition("C", "E")
 		g.AddTransitionChain("D", "E", workflow.END)
-		testarossa.NoError(t, g.Validate())
+		assert.NoError(g.Validate())
 		p.HandleGraph(base+"/graph", g)
 
 		p.HandleTask(base+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -101,14 +102,13 @@ func TestFanInReplicaflow(t *testing.T) {
 	// shared in-memory SQLite database.
 	eng1 := engine.NewEngineUnderTest(t)
 	eng1.SetHost(proxy1)
-	testarossa.NoError(t, eng1.SetWorkers(4))
+	assert.NoError(eng1.SetWorkers(4))
 	eng2 := engine.NewEngineUnderTest(t)
 	eng2.SetHost(proxy2)
-	testarossa.NoError(t, eng2.SetWorkers(4))
+	assert.NoError(eng2.SetWorkers(4))
 	proxy1.AddPeer(eng2)
 	proxy2.AddPeer(eng1)
 
-	assert := testarossa.For(t)
 	assert.NoError(eng1.Startup(ctx))
 	t.Cleanup(func() { eng1.Shutdown(ctx) })
 	assert.NoError(eng2.Startup(ctx))

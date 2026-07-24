@@ -109,9 +109,10 @@ func TestBudget_ReleaseIsIdempotent(t *testing.T) {
 // default (so the SQLite in-memory suite, and any unrecognized driver, never blocks).
 func TestBudget_DriverCaps(t *testing.T) {
 	t.Parallel()
-	testarossa.Equal(t, int64(80), driverConnCap("pgx"))
-	testarossa.Equal(t, int64(120), driverConnCap("mysql"))
-	testarossa.Equal(t, int64(4000), driverConnCap("mssql"))
-	testarossa.Equal(t, int64(1<<20), driverConnCap("sqlite"))
-	testarossa.Equal(t, int64(1<<20), driverConnCap("something-else"))
+	assert := testarossa.For(t)
+	assert.Equal(int64(80), driverConnCap("pgx"))
+	assert.Equal(int64(120), driverConnCap("mysql"))
+	assert.Equal(int64(4000), driverConnCap("mssql"))
+	assert.Equal(int64(1<<20), driverConnCap("sqlite"))
+	assert.Equal(int64(1<<20), driverConnCap("something-else"))
 }

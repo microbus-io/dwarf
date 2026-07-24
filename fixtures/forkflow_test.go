@@ -32,8 +32,9 @@ import (
 // stepKeyByTask returns the key of the first step whose task matches taskName.
 func stepKeyByTask(t *testing.T, eng *engine.Engine, flowKey, taskName string) string {
 	t.Helper()
+	assert := testarossa.For(t)
 	hist, err := eng.History(context.Background(), flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	for _, s := range hist {
 		if s.TaskName == taskName {
 			return s.StepKey
@@ -46,9 +47,10 @@ func stepKeyByTask(t *testing.T, eng *engine.Engine, flowKey, taskName string) s
 // state by the fan-out) equals idx. History omits per-step state, so each candidate is fetched via Step.
 func failedCellKeyByIndex(t *testing.T, eng *engine.Engine, flowKey string, idx int) string {
 	t.Helper()
+	assert := testarossa.For(t)
 	ctx := context.Background()
 	hist, err := eng.History(ctx, flowKey)
-	testarossa.For(t).NoError(err)
+	assert.NoError(err)
 	for _, s := range hist {
 		if s.Status != workflow.StatusFailed {
 			continue

@@ -178,8 +178,9 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 		return e, db
 	}
 	leaseMsOut := func(t *testing.T, db *sequel.DB) float64 {
+		assert := testarossa.For(t)
 		var ms float64
-		testarossa.For(t).NoError(db.QueryRowContext(ctx, "SELECT DATE_DIFF_MILLIS(lease_expires, NOW_UTC()) FROM dwarf_steps WHERE step_id=1").Scan(&ms))
+		assert.NoError(db.QueryRowContext(ctx, "SELECT DATE_DIFF_MILLIS(lease_expires, NOW_UTC()) FROM dwarf_steps WHERE step_id=1").Scan(&ms))
 		return ms
 	}
 

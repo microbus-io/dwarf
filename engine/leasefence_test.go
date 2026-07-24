@@ -40,26 +40,28 @@ func TestLeaseFence_FailStep(t *testing.T) {
 	// setup inserts one running root flow (flow_id=1) whose only step (step_id=1) is running under lease
 	// generation `ownerSeq` - simulating the worker that legitimately re-claimed after a lease loss.
 	setup := func(t *testing.T, e *Engine, ownerSeq int) {
+		assert := testarossa.For(t)
 		db, err := e.db.Shard(1)
-		testarossa.For(t).NoError(err)
+		assert.NoError(err)
 		// flow_id is auto-increment; the first insert on a fresh per-test DB is flow_id=1 on every driver.
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, status, root_flow_id, thread_id, time_budget_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			"ftok", "u", "W", []byte("{}"), workflow.StatusRunning, 1, 1, 1000,
 		)
-		testarossa.For(t).NoError(err)
+		assert.NoError(err)
 		// lease_expires is set well into the future so the test engine's own lease-recovery poll does not
 		// reset this deliberately-running step to pending mid-test.
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, lease_seq, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), 60000))",
 			1, 1, "stok", "T", "u", workflow.StatusRunning, 1000, ownerSeq,
 		)
-		testarossa.For(t).NoError(err)
+		assert.NoError(err)
 	}
 
 	statuses := func(t *testing.T, e *Engine) (flowStatus, stepStatus string) {
+		assert := testarossa.For(t)
 		db, err := e.db.Shard(1)
-		testarossa.For(t).NoError(err)
+		assert.NoError(err)
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=1").Scan(&flowStatus)
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=1").Scan(&stepStatus)
 		return strings.TrimSpace(flowStatus), strings.TrimSpace(stepStatus)

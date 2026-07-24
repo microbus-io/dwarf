@@ -38,65 +38,71 @@ func clockAt(base time.Time) (*Tracker, *atomic.Int64) {
 }
 
 func TestTryClaim_SecondCallerIsTurnedAway(t *testing.T) {
+	assert := testarossa.For(t)
 	tr := New()
-	testarossa.True(t, tr.TryClaim(1, 42), "first reservation must be granted")
-	testarossa.False(t, tr.TryClaim(1, 42), "a sibling must be turned away while it is held")
+	assert.True(tr.TryClaim(1, 42), "first reservation must be granted")
+	assert.False(tr.TryClaim(1, 42), "a sibling must be turned away while it is held")
 }
 
 func TestTryClaim_ShardIsPartOfTheKey(t *testing.T) {
+	assert := testarossa.For(t)
 	tr := New()
-	testarossa.True(t, tr.TryClaim(1, 42))
-	testarossa.True(t, tr.TryClaim(2, 42), "same step id on another shard is a different step")
-	testarossa.False(t, tr.TryClaim(2, 42))
+	assert.True(tr.TryClaim(1, 42))
+	assert.True(tr.TryClaim(2, 42), "same step id on another shard is a different step")
+	assert.False(tr.TryClaim(2, 42))
 }
 
 func TestRelinquish_FreesBothGenerations(t *testing.T) {
+	assert := testarossa.For(t)
 	tr, off := clockAt(time.Unix(1000, 0))
 
-	testarossa.True(t, tr.TryClaim(1, 7))
+	assert.True(tr.TryClaim(1, 7))
 	off.Store(int64(time.Second)) // roll once: the entry is now in prev
-	testarossa.False(t, tr.TryClaim(1, 7), "still held from the previous generation")
+	assert.False(tr.TryClaim(1, 7), "still held from the previous generation")
 
 	tr.RelinquishClaim(1, 7)
-	testarossa.True(t, tr.TryClaim(1, 7), "relinquish must clear it from prev too")
+	assert.True(tr.TryClaim(1, 7), "relinquish must clear it from prev too")
 }
 
 // TestRollWindow pins the lifetime: an entry survives exactly one roll (still seen after +1s) and is gone
 // after two (dropped at +2s). This is the whole safety argument - a reservation can only ever delay a
 // re-claim by a bounded window, never strand a step.
 func TestRollWindow(t *testing.T) {
+	assert := testarossa.For(t)
 	tr, off := clockAt(time.Unix(1000, 0))
-	testarossa.True(t, tr.TryClaim(1, 7))
+	assert.True(tr.TryClaim(1, 7))
 
 	off.Store(int64(time.Second))
-	testarossa.False(t, tr.TryClaim(1, 7), "still covered one second later (lives in prev)")
+	assert.False(tr.TryClaim(1, 7), "still covered one second later (lives in prev)")
 
 	off.Store(int64(2 * time.Second))
-	testarossa.True(t, tr.TryClaim(1, 8), "an unrelated claim rolls the maps again")
+	assert.True(tr.TryClaim(1, 8), "an unrelated claim rolls the maps again")
 	// 7 was inserted at t0; at t0+1 it moved to prev; the t0+2 roll dropped that prev.
-	testarossa.True(t, tr.TryClaim(1, 7), "gone two seconds later")
+	assert.True(tr.TryClaim(1, 7), "gone two seconds later")
 }
 
 func TestRoll_WithinSameSecondDoesNotExpire(t *testing.T) {
+	assert := testarossa.For(t)
 	tr, off := clockAt(time.Unix(1000, 0))
-	testarossa.True(t, tr.TryClaim(1, 7))
+	assert.True(tr.TryClaim(1, 7))
 	off.Store(int64(900 * time.Millisecond)) // same whole second
-	testarossa.False(t, tr.TryClaim(1, 7), "a sub-second advance must not expire the entry")
+	assert.False(tr.TryClaim(1, 7), "a sub-second advance must not expire the entry")
 }
 
 // TestRoll_LargeJumpClearsBoth covers a gap of more than one second and a backwards clock - both must
 // leave the maps clean rather than rotate a stale generation into coverage.
 func TestRoll_LargeJumpClearsBoth(t *testing.T) {
+	assert := testarossa.For(t)
 	tr, off := clockAt(time.Unix(1000, 0))
-	testarossa.True(t, tr.TryClaim(1, 7))
+	assert.True(tr.TryClaim(1, 7))
 
 	off.Store(int64(5 * time.Second))
-	testarossa.True(t, tr.TryClaim(1, 7), "a multi-second gap clears both generations")
+	assert.True(tr.TryClaim(1, 7), "a multi-second gap clears both generations")
 
 	// Backwards clock: also treated as stale, cleared, still functional.
-	testarossa.True(t, tr.TryClaim(1, 8))
+	assert.True(tr.TryClaim(1, 8))
 	off.Store(int64(-3 * time.Second))
-	testarossa.True(t, tr.TryClaim(1, 8), "a backwards clock clears rather than wedging")
+	assert.True(tr.TryClaim(1, 8), "a backwards clock clears rather than wedging")
 }
 
 // TestConcurrent is a race-detector exercise: many goroutines claim/relinquish overlapping keys while the

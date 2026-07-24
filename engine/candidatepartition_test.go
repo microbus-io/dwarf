@@ -31,14 +31,15 @@ import (
 // colliding) or leave one owned by nobody (stranded work).
 func TestPartition_OrdinalFromSortedRoster(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	roster := []int64{11, 22, 33, 44}
 	for want, id := range roster {
-		testarossa.Equal(t, want, rosterOrdinal(roster, id), "engine %d should be ordinal %d", id, want)
+		assert.Equal(want, rosterOrdinal(roster, id), "engine %d should be ordinal %d", id, want)
 	}
 	// Absent from the roster is -1, NOT 0: 0 is a legitimate ordinal, so collapsing the two would make an
 	// unregistered replica silently claim the first residue class.
-	testarossa.Equal(t, -1, rosterOrdinal(roster, 99))
-	testarossa.Equal(t, -1, rosterOrdinal(nil, 11))
+	assert.Equal(-1, rosterOrdinal(roster, 99))
+	assert.Equal(-1, rosterOrdinal(nil, 11))
 }
 
 // TestPartition_DisabledUnlessSafe pins the fail-open direction. Partitioning EXCLUDES rows, so a wrong
@@ -46,39 +47,40 @@ func TestPartition_OrdinalFromSortedRoster(t *testing.T) {
 // overlapping selection, which is slower but complete. Every uncertain case must therefore fail open.
 func TestPartition_DisabledUnlessSafe(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	e := NewEngine()
 
 	// Solo replica: nothing to divide.
 	e.observedDispatchers.Store(1)
 	e.observedOrdinal.Store(0)
 	_, _, ok := e.observedPartition()
-	testarossa.False(t, ok, "R=1 must not partition")
+	assert.False(ok, "R=1 must not partition")
 	sql, args := e.partitionPredicate()
-	testarossa.Equal(t, "", sql, "R=1 must add no predicate")
-	testarossa.Len(t, args, 0)
+	assert.Equal("", sql, "R=1 must add no predicate")
+	assert.Len(args, 0)
 
 	// Unknown ordinal (self absent from the roster) - the case that would otherwise guess.
 	e.observedDispatchers.Store(4)
 	e.observedOrdinal.Store(-1)
 	_, _, ok = e.observedPartition()
-	testarossa.False(t, ok, "unknown ordinal must not partition")
+	assert.False(ok, "unknown ordinal must not partition")
 
 	// Ordinal out of range for R - a stale-high ordinal against a freshly-lowered R.
 	e.observedDispatchers.Store(2)
 	e.observedOrdinal.Store(3)
 	_, _, ok = e.observedPartition()
-	testarossa.False(t, ok, "out-of-range ordinal must not partition")
+	assert.False(ok, "out-of-range ordinal must not partition")
 
 	// The one case that DOES partition.
 	e.observedDispatchers.Store(4)
 	e.observedOrdinal.Store(2)
 	replicas, ordinal, ok := e.observedPartition()
-	testarossa.True(t, ok)
-	testarossa.Equal(t, 4, replicas)
-	testarossa.Equal(t, 2, ordinal)
+	assert.True(ok)
+	assert.Equal(4, replicas)
+	assert.Equal(2, ordinal)
 	sql, args = e.partitionPredicate()
-	testarossa.Equal(t, " AND step_id % ? = ?", sql)
-	testarossa.Equal(t, []any{4, 2}, args)
+	assert.Equal(" AND step_id % ? = ?", sql)
+	assert.Equal([]any{4, 2}, args)
 }
 
 // TestPartition_ResidueClassesCoverEveryStepExactlyOnce is the completeness proof: across a fleet of R,
@@ -86,6 +88,7 @@ func TestPartition_DisabledUnlessSafe(t *testing.T) {
 // collision this exists to remove.
 func TestPartition_ResidueClassesCoverEveryStepExactlyOnce(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	for _, r := range []int{2, 3, 4, 8} {
 		owners := make([]int, 64)
 		for ordinal := range r {
@@ -96,7 +99,7 @@ func TestPartition_ResidueClassesCoverEveryStepExactlyOnce(t *testing.T) {
 			}
 		}
 		for stepID, n := range owners {
-			testarossa.Equal(t, 1, n, "R=%d step %d owned by %d replicas, want exactly 1", r, stepID, n)
+			assert.Equal(1, n, "R=%d step %d owned by %d replicas, want exactly 1", r, stepID, n)
 		}
 	}
 }
@@ -106,25 +109,26 @@ func TestPartition_ResidueClassesCoverEveryStepExactlyOnce(t *testing.T) {
 // replicas on one ordinal.
 func TestPartition_FreshestRosterWins(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	// The freshest shard wins even though it is not the longest: a longer-but-staler roster is a view of
 	// the fleet as it was, and its extra entry is exactly the dead peer that has not aged out yet.
 	got := freshestRoster([]shardRoster{
 		{ids: []int64{1, 2, 3}, dispatchers: []int64{1, 2, 3}, freshest: 9000},
 		{ids: []int64{1, 2}, dispatchers: []int64{1, 2}, freshest: 100},
 	})
-	testarossa.Equal(t, []int64{1, 2}, got.ids)
+	assert.Equal([]int64{1, 2}, got.ids)
 
 	// A shard that reported no peers is skipped rather than winning with a MaxInt64 age.
 	got = freshestRoster([]shardRoster{
 		{freshest: math.MaxFloat64},
 		{ids: []int64{7}, dispatchers: []int64{7}, freshest: 5000},
 	})
-	testarossa.Equal(t, []int64{7}, got.ids)
+	assert.Equal([]int64{7}, got.ids)
 
 	// Every shard silent - "unknown", which applyReplicaCount treats as "keep the last good pair" rather
 	// than collapsing R to 1 and re-expanding the pools on a blip.
-	testarossa.Len(t, freshestRoster([]shardRoster{{freshest: math.MaxFloat64}}).ids, 0)
-	testarossa.Len(t, freshestRoster(nil).ids, 0)
+	assert.Len(freshestRoster([]shardRoster{{freshest: math.MaxFloat64}}).ids, 0)
+	assert.Len(freshestRoster(nil).ids, 0)
 }
 
 // TestPartition_AppliedFromRegistry drives the real path end to end: peer rows in the shared registry ->
@@ -132,6 +136,7 @@ func TestPartition_FreshestRosterWins(t *testing.T) {
 // from different places.
 func TestPartition_AppliedFromRegistry(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t)
 	if err := e.SetHost(noopHost{}); err != nil {
 		t.Fatal(err)
@@ -145,28 +150,28 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 
 	// Solo: registered, but nothing to divide.
 	_, _, ok := e.observedPartition()
-	testarossa.False(t, ok, "a solo replica must not partition")
+	assert.False(ok, "a solo replica must not partition")
 
 	// Two peers join with ids straddling this engine's own, so the ordinal is a real position rather
 	// than an artifact of always sorting first or last.
 	addPeerRow(t, e, 1)
 	addPeerRow(t, e, math.MaxInt64)
 	replicas, ordinal, ok := e.observedPartition()
-	testarossa.True(t, ok, "R=3 must partition")
-	testarossa.Equal(t, 3, replicas)
-	testarossa.Equal(t, 1, ordinal, "own id sorts between 1 and MaxInt64, so ordinal 1")
+	assert.True(ok, "R=3 must partition")
+	assert.Equal(3, replicas)
+	assert.Equal(1, ordinal, "own id sorts between 1 and MaxInt64, so ordinal 1")
 
 	// A peer leaves: R drops and the ordinal re-seats, both off the same re-read roster.
 	delPeerRow(t, e, 1)
 	replicas, ordinal, ok = e.observedPartition()
-	testarossa.True(t, ok)
-	testarossa.Equal(t, 2, replicas)
-	testarossa.Equal(t, 0, ordinal, "with the lower id gone, this engine is now first")
+	assert.True(ok)
+	assert.Equal(2, replicas)
+	assert.Equal(0, ordinal, "with the lower id gone, this engine is now first")
 
 	// Back to solo - partitioning switches off rather than leaving a stale residue class.
 	delPeerRow(t, e, math.MaxInt64)
 	_, _, ok = e.observedPartition()
-	testarossa.False(t, ok, "returning to solo must disable partitioning")
+	assert.False(ok, "returning to solo must disable partitioning")
 }
 
 // TestPartition_AwaitOnlyPeerOwnsNoSlice is the regression test for the flaw that shipped in the first
@@ -176,6 +181,7 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 // noticed. Caught by fixtures/crossreplicaawait_test.go hanging; pinned here at the unit level.
 func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	t.Parallel()
+	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t)
 	if err := e.SetHost(noopHost{}); err != nil {
 		t.Fatal(err)
@@ -189,17 +195,17 @@ func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 
 	// A peer that holds connections but dispatches nothing.
 	addPeerRowWithDispatch(t, e, 4242, false)
-	testarossa.Equal(t, 2, e.observedReplicas(), "an await-only peer still divides the connection pools")
+	assert.Equal(2, e.observedReplicas(), "an await-only peer still divides the connection pools")
 	_, _, ok := e.observedPartition()
-	testarossa.False(t, ok, "one dispatcher means nothing to partition, whatever R says")
+	assert.False(ok, "one dispatcher means nothing to partition, whatever R says")
 
 	// A second DISPATCHING peer does open partitioning - proving the exclusion is about dispatch, not
 	// about peer count.
 	addPeerRowWithDispatch(t, e, 4243, true)
-	testarossa.Equal(t, 3, e.observedReplicas(), "R counts all three")
+	assert.Equal(3, e.observedReplicas(), "R counts all three")
 	dispatchers, _, ok := e.observedPartition()
-	testarossa.True(t, ok)
-	testarossa.Equal(t, 2, dispatchers, "only the two dispatchers divide the candidates")
+	assert.True(ok)
+	assert.Equal(2, dispatchers, "only the two dispatchers divide the candidates")
 }
 
 // addPeerRowWithDispatch inserts a fake peer that either does or does not claim work, then forces a
