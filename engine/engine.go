@@ -104,11 +104,11 @@ type Engine struct {
 
 	// engineID is a random positive identifier minted per engine instance (fresh on every restart).
 	// It is stamped on every flow/step INSERT (creator) and overwritten by the claim CAS (claimer) -
-	// forensic provenance, deliberately unindexed. instanceID is its base-36 string form, the origin
+	// forensic provenance, deliberately unindexed. engineIDBase36 is its base-36 string form, the origin
 	// on every outbound peer signal: DeliverSignal discards the engine's own signals when the host's
 	// SignalPeers echoes the broadcast back, and the peer-discovery map is keyed by it.
-	engineID   int64
-	instanceID string
+	engineID       int64
+	engineIDBase36 string
 
 	// flowsStartedCount / flowsTerminatedCount are cheap in-memory lifecycle counts, incremented
 	// alongside the dwarf_flows_started / dwarf_flows_terminated OTEL counters but WITHOUT needing a
@@ -329,8 +329,7 @@ func NewEngine() *Engine {
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
 	e.defaultPriority.Store(100)
-	e.engineID = int64(rand.Uint64() >> 1) // positive, 63 bits of entropy
-	e.instanceID = strconv.FormatInt(e.engineID, 36)
+	e.SetEngineID(int64(rand.Uint64() >> 1)) // positive, 63 bits of entropy
 	// 0, not 1: "nothing derived yet." Startup reads R from the registry, sizes the pools directly, and
 	// sets lastAppliedR=R; the heartbeat's recompute then dedupes against that. shardPool clamps
 	// replicas=max(1,...), so the 0 sentinel never reaches the arithmetic.
@@ -467,7 +466,7 @@ func (e *Engine) SetEngineID(id int64) error {
 		return errors.New("engine id must be positive", http.StatusBadRequest)
 	}
 	e.engineID = id
-	e.instanceID = strconv.FormatInt(id, 36)
+	e.engineIDBase36 = strconv.FormatInt(id, 36)
 	return nil
 }
 

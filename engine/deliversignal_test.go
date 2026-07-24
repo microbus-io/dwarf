@@ -194,7 +194,7 @@ func TestDeliverSignal_OfflineEngineIgnoresSignals(t *testing.T) {
 
 // TestDeliverSignal_IgnoresOwnEcho pins the echo-suppression contract: SignalPeers asks the host to
 // deliver only to OTHER replicas, but a broadcast transport may echo the signal back to the sender, so
-// every outbound payload carries the engine's random instanceID as Origin and DeliverSignal silently
+// every outbound payload carries the engine's random engineIDBase36 as Origin and DeliverSignal silently
 // discards a payload whose Origin is its own. A payload with a foreign or absent Origin (an older
 // build's signal) is processed normally.
 func TestDeliverSignal_IgnoresOwnEcho(t *testing.T) {
@@ -227,7 +227,7 @@ func TestDeliverSignal_IgnoresOwnEcho(t *testing.T) {
 	}
 
 	key := "1-424242-deadbeefdeadbeef"
-	assert.False(woke(statusChangePayload{Origin: eng.instanceID, FlowKey: key, Status: workflow.StatusCompleted}),
+	assert.False(woke(statusChangePayload{Origin: eng.engineIDBase36, FlowKey: key, Status: workflow.StatusCompleted}),
 		"the engine's own echoed signal must be discarded")
 	assert.True(woke(statusChangePayload{Origin: "some-peer", FlowKey: key, Status: workflow.StatusCompleted}),
 		"a peer's signal must be processed")

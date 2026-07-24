@@ -45,9 +45,9 @@ const (
 )
 
 // Per-op payload bodies. The engine marshals these in emitSignal and unmarshals the received bytes in
-// DeliverSignal. Origin carries the sending engine's random instanceID: SignalPeers' contract asks the
+// DeliverSignal. Origin carries the sending engine's random engineIDBase36: SignalPeers' contract asks the
 // host to deliver only to OTHER replicas, but a broadcast transport may echo the signal back to the
-// sender - DeliverSignal discards a payload whose Origin matches its own instanceID rather than rely
+// sender - DeliverSignal discards a payload whose Origin matches its own engineIDBase36 rather than rely
 // on the host. (An empty Origin - e.g. a signal from an older build - is never discarded.)
 type (
 	enqueuePayload struct {
@@ -86,17 +86,17 @@ func (e *Engine) emitSignal(ctx context.Context, op signalOp, payload any) {
 }
 
 func (e *Engine) signalEnqueue(ctx context.Context, shard, stepID int) {
-	e.emitSignal(ctx, signalOpEnqueue, enqueuePayload{Origin: e.instanceID, Shard: shard, StepID: stepID})
+	e.emitSignal(ctx, signalOpEnqueue, enqueuePayload{Origin: e.engineIDBase36, Shard: shard, StepID: stepID})
 }
 
 func (e *Engine) signalStatusChange(ctx context.Context, flowKey, status string) {
-	e.emitSignal(ctx, signalOpStatusChange, statusChangePayload{Origin: e.instanceID, FlowKey: flowKey, Status: status})
+	e.emitSignal(ctx, signalOpStatusChange, statusChangePayload{Origin: e.engineIDBase36, FlowKey: flowKey, Status: status})
 }
 
 // signalPeersChanged tells peers the fleet changed so they re-read the registry (join at Startup, leave
 // at Shutdown). Fire-and-forget: a lost nudge only delays a peer's recount to its next heartbeat.
 func (e *Engine) signalPeersChanged(ctx context.Context) {
-	e.emitSignal(ctx, signalOpPeersChanged, peerPayload{Origin: e.instanceID})
+	e.emitSignal(ctx, signalOpPeersChanged, peerPayload{Origin: e.engineIDBase36})
 }
 
 // DeliverSignal processes an inbound peer signal. The host calls it with the op routing key and the
@@ -122,7 +122,7 @@ func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) e
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if p.Origin == e.instanceID {
+		if p.Origin == e.engineIDBase36 {
 			return nil // the host echoed this engine's own broadcast back; nothing new to learn
 		}
 		e.handleEnqueue(ctx, p.Shard, p.StepID)
@@ -132,7 +132,7 @@ func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) e
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if p.Origin == e.instanceID {
+		if p.Origin == e.engineIDBase36 {
 			return nil
 		}
 		e.notifyStatusChange(p.FlowKey, p.Status)
@@ -142,7 +142,7 @@ func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) e
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if p.Origin == e.instanceID {
+		if p.Origin == e.engineIDBase36 {
 			return nil // own echo: a recount would just re-read our own row, nothing to learn
 		}
 		e.refreshReplicaCount(ctx)

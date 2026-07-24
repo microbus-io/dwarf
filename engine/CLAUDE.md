@@ -28,7 +28,7 @@ observability providers below are injected separately. A host must implement `Lo
   adding a new kind needs no host change; the host never branches on `op` or inspects `payload`. A single-replica host
   does nothing here and none of this runs. The contract asks the host to deliver to OTHER replicas only (the engine
   applies each signal locally before publishing), but the engine does not rely on it: every payload carries the
-  sending engine's random `instanceID` as `Origin`, and `DeliverSignal` silently discards its own echo (a
+  sending engine's random `engineIDBase36` as `Origin`, and `DeliverSignal` silently discards its own echo (a
   broadcast transport that includes the publisher is then correct, just wasteful). An empty `Origin` (an older
   build's signal) is never discarded - process it normally.
 - **`*slog.Logger`** - structured logging sink (`SetLogger`); defaults to a **discard** logger (the engine and
@@ -2073,7 +2073,7 @@ applies last, or the recompute early-returns because the override is now set). L
 `TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride` (both drive the interleaving with the
 `slowPoolPush` seam rather than racing for it - setting `observedR` directly so the two recomputes read the two
 counts the race needs; without the lock they measure 24 instead of 16, and a pinned 7 turning into 24).
-`engine_id`/`instanceID` (random per process, fresh on restart) is the id a replica writes into `dwarf_peers`; it is
+`engine_id`/`engineIDBase36` (random per process, fresh on restart) is the id a replica writes into `dwarf_peers`; it is
 also **stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - forensic
 provenance there ("which replica created/ran this row"), deliberately unindexed.
 
