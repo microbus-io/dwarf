@@ -18,7 +18,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -209,8 +208,11 @@ func TestChaosSoak(t *testing.T) {
 	}
 }
 
-// chaosEnqueue delivers a duplicate/possibly-stale enqueue doorbell for one of the flow's steps, exercising
-// the documented idempotency of DeliverSignal under spoofed/duplicate signals.
+// chaosEnqueue rings a duplicate/possibly-stale LOCAL work doorbell for one of the flow's steps,
+// exercising the documented idempotency of a candidate hint: the cache holds hints, never ownership, so
+// re-offering a step that is already running, completed or gone must be absorbed by the claim CAS. It
+// used to drive this through DeliverSignal's `enqueue` op; that per-step peer broadcast was removed, so
+// the chaos now targets the local primitive the broadcast used to feed.
 func chaosEnqueue(ctx context.Context, eng *Engine, flowKey string) {
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -224,11 +226,7 @@ func chaosEnqueue(ctx context.Context, eng *Engine, flowKey string) {
 	if err := db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=? ORDER BY step_id LIMIT_OFFSET(1, 0)", flowID).Scan(&stepID); err != nil {
 		return
 	}
-	payload, err := json.Marshal(enqueuePayload{Shard: shardNum, StepID: stepID})
-	if err != nil {
-		return
-	}
-	_ = eng.DeliverSignal(ctx, string(signalOpEnqueue), payload)
+	eng.enqueueStep(ctx, shardNum, stepID)
 }
 
 // registerChaosGraphs registers the three workload shapes and their tasks on the proxy.

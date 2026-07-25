@@ -116,11 +116,12 @@ const (
 	// It must never park on the doorbell, and that is the whole reason this outcome exists. Every
 	// trigger-arming site is shard-LOCAL (a pop, a completed step, a doorbell for a step on this
 	// shard), so a starved shard with an empty partition and nothing in flight arms nothing and
-	// generates nothing: it would sleep until pollPendingSteps' fleet-wide backstop, up to
-	// backlogPollInterval (1 MINUTE), while its due work sat there - and once the competitors drained,
-	// every worker would block in Pop with due steps present. Its census entry would also age past
-	// the TTL meanwhile, making its keys invisible to peers' plans, so it could not win slots even in
-	// principle. The retry keeps both the dispatch latency and the entry fresh.
+	// generates nothing: it would sleep out the whole refillIdleInterval tick (and, before that tick
+	// existed, until pollPendingSteps' fleet-wide backstop MINUTES later) while its due work sat there -
+	// and once the competitors drained, every worker would block in Pop with due steps present. Its
+	// census entry would also age past the TTL meanwhile, making its keys invisible to peers' plans, so
+	// it could not win slots even in principle. The retry keeps both the dispatch latency and the entry
+	// fresh; the idle tick is the outer bound, an order of magnitude too coarse to serve as this retry.
 	refillStarved
 )
 
@@ -142,54 +143,82 @@ const (
 //     (<= capacity/pace pops per second): over-pacing was measured to invert the gain. At the default
 //     pace a full cache outlives the pause by a wide margin, and the armed trigger means the next scan
 //     starts the moment the pause ends - a drained-early partition waits at most the remainder.
+//
+// The park on the trigger is CAPPED at refillIdleInterval (1s), and that cap - not the doorbell - is now
+// the ONLY sub-maxPollInterval bound on cross-replica dispatch latency. Every trigger-arming site is
+// shard-LOCAL (a pop, a completed step, a doorbell naming a step on this shard), so a shard with an empty
+// partition and nothing in flight arms nothing and generates nothing: parked without the tick it sleeps
+// until pollPendingSteps' fleet-wide backstop, and since that poll no longer carries a due-backlog
+// existence probe, its resting cadence is maxPollInterval - MINUTES - with due work sitting there. That
+// is exactly the trap refillStarved and refillAboveBand were given their own timed back-offs to escape,
+// and the cap generalizes the escape to EVERY way a pass can come back empty - including the two that
+// still route through refillIdle and arm nothing (a due-but-unplanned band whose census aged out, and a
+// batch that came up empty because every chosen key's steps were claimed between phases). Because the cap
+// covers any early return, the standing rule "answer what will ring this shard's trigger before parking"
+// now has a structural answer: the tick will, within refillIdleInterval. Do not lengthen it materially,
+// and do not gate it on an outcome - it is load-bearing for liveness, not an optimization.
+//
+// It is a CAP, not a cadence: the scan floor still bounds the pass rate from below, so an idle shard
+// scans once per (floor + idle) and a busy one is unaffected (its trigger is always armed and the tick
+// never fires). The cost is one band scan per idle shard per second - an index probe returning no rows -
+// which is what buys sub-second wake with no cross-replica message at all.
 func (e *Engine) refillerLoop(ctx context.Context, shard int) {
 	trigger := e.refillTriggers[shard]
 	for {
+		// A nil channel blocks forever, so a non-positive interval restores the pure park-on-trigger
+		// behavior (what a test pins when it wants no timed rescan) rather than spinning on an
+		// already-fired timer.
+		var idleTick <-chan time.Time
+		if e.refillIdleInterval > 0 {
+			idleTick = time.After(e.refillIdleInterval)
+		}
 		select {
 		case <-e.refillStop:
 			return
 		case <-trigger:
-			passStart := time.Now()
-			var outcome refillOutcome
-			err := errors.CatchPanic(func() error {
-				outcome = e.runShardRefill(ctx, shard)
-				return nil
-			})
-			if err != nil {
-				e.logger.ErrorContext(ctx, "Refilling candidate cache", "shard", shard, "error", err)
+		case <-idleTick:
+		}
+
+		passStart := time.Now()
+		var outcome refillOutcome
+		err := errors.CatchPanic(func() error {
+			outcome = e.runShardRefill(ctx, shard)
+			return nil
+		})
+		if err != nil {
+			e.logger.ErrorContext(ctx, "Refilling candidate cache", "shard", shard, "error", err)
+		}
+		// Hold off until the scan floor has elapsed, measured from the pass START so a slow pass
+		// pays for itself rather than stacking its duration on top of the floor. An URGENT nudge
+		// (empty partition, or a better band head-inserted) cuts the wait short - which is what
+		// makes this a debounce rather than a timer that has to be short enough to cover an event.
+		if wait := e.refillState[shard].wait(passStart); wait > 0 {
+			select {
+			case <-e.refillStop:
+				return
+			case <-e.refillDemand[shard]:
+			case <-time.After(wait):
 			}
-			// Hold off until the scan floor has elapsed, measured from the pass START so a slow pass
-			// pays for itself rather than stacking its duration on top of the floor. An URGENT nudge
-			// (empty partition, or a better band head-inserted) cuts the wait short - which is what
-			// makes this a debounce rather than a timer that has to be short enough to cover an event.
-			if wait := e.refillState[shard].wait(passStart); wait > 0 {
+		}
+		switch outcome {
+		case refillFull:
+			if e.refillPace > 0 {
 				select {
 				case <-e.refillStop:
 					return
-				case <-e.refillDemand[shard]:
-				case <-time.After(wait):
+				case <-time.After(e.refillPace):
 				}
 			}
-			switch outcome {
-			case refillFull:
-				if e.refillPace > 0 {
-					select {
-					case <-e.refillStop:
-						return
-					case <-time.After(e.refillPace):
-					}
-				}
-			case refillAboveBand:
-				if !e.awaitBandRelease(shard, trigger) {
-					return
-				}
-				e.requestRefill(shard)
-			case refillStarved:
-				if !e.awaitStarvedRetry(trigger) {
-					return
-				}
-				e.requestRefill(shard)
+		case refillAboveBand:
+			if !e.awaitBandRelease(shard, trigger) {
+				return
 			}
+			e.requestRefill(shard)
+		case refillStarved:
+			if !e.awaitStarvedRetry(trigger) {
+				return
+			}
+			e.requestRefill(shard)
 		}
 	}
 }
@@ -299,18 +328,12 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 			shardNearestDelay = time.Duration(nearestMs.Float64 * float64(time.Millisecond))
 		}
 
-		// Existence probe: is any due pending step waiting? The ORDER BY is not for ordering (any match
-		// suffices) - it is REQUIRED because LIMIT_OFFSET compiles to OFFSET/FETCH on SQL Server, a
-		// syntax error without an ORDER BY. Do not remove it to "optimize" the existence check.
-		var dueExists sql.NullInt64
-		err = db.QueryRowContext(ctx,
-			"SELECT 1 FROM dwarf_steps WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC() ORDER BY step_id LIMIT_OFFSET(1, 0)",
-		).Scan(&dueExists)
-		if err != nil && err != sql.ErrNoRows {
-			shardErr = true
-		} else if err == nil && (shardNearestDelay < 0 || shardNearestDelay > backlogPollInterval) {
-			shardNearestDelay = backlogPollInterval
-		}
+		// There is deliberately NO due-backlog existence probe here. It used to cap nextPoll at
+		// backlogPollInterval (1 minute) so an idle replica that missed a doorbell still re-scanned, and
+		// it cost a whole round-trip per shard per poll to set that one cap. The refiller's own idle tick
+		// (refillIdleInterval, ~1s - see refillerLoop) now covers the same case per shard, sooner, with
+		// one band scan instead of this probe plus the poll's other three statements. Do not reintroduce
+		// it: this poll is nudged sub-second under load, so anything added here is paid on every nudge.
 
 		// Wake at the soonest future lease expiry of a running step so crash-recovery
 		// of a worker that died holding the lease happens promptly, rather than waiting

@@ -235,10 +235,10 @@ func TestRefillOutcome_AboveBandVsNothingDue(t *testing.T) {
 // arm.
 //
 // The bug this pins: a starved shard has an empty partition and nothing in flight, so it produces no
-// pops, no completed steps and no doorbells - it arms nothing. Parked, it would sleep until
-// pollPendingSteps' fleet-wide backstop, up to backlogPollInterval (1 MINUTE), with its due work
-// sitting there; once the competitors drained, every worker would block in Pop while those steps
-// waited. Worse, a parked shard stops refreshing its census entry, so past the TTL its keys vanish
+// pops, no completed steps and no doorbells - it arms nothing. Parked, it would sleep out the whole
+// refillIdleInterval tick (and, before that tick existed, until pollPendingSteps' fleet-wide backstop
+// MINUTES later) with its due work sitting there; once the competitors drained, every worker would
+// block in Pop while those steps waited. The tick is the outer bound, far too coarse to be this retry. Worse, a parked shard stops refreshing its census entry, so past the TTL its keys vanish
 // from peers' plans and it cannot win slots even in principle - the starvation becomes self-sustaining.
 func TestRefillOutcome_StarvedNeverParksOnTheDoorbell(t *testing.T) {
 	t.Parallel()
@@ -693,4 +693,84 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 			assert.Equal(oldest, one[key][0].stepID, "the single fetched row for %q is its oldest step", key)
 		}
 	}
+}
+
+// TestRefillIdleTick_ScansWithNoTrigger pins the refiller's capped park: a shard whose trigger is
+// never armed keeps rescanning on refillIdleInterval instead of parking indefinitely.
+//
+// This is the property that lets the cross-replica enqueue doorbell be dropped. Every trigger-arming
+// site is shard-LOCAL (a pop, a completed step, a doorbell naming a step on this shard), so an idle
+// replica holding a step no peer announced to it arms nothing and generates nothing: parked, it would
+// sleep until pollPendingSteps' fleet-wide backstop, whose resting cadence is maxPollInterval (5 MINUTES)
+// now that the due-backlog existence probe and its 1-minute cap are gone.
+//
+// It counts PASSES on a fully idle engine rather than timing an undoorbelled flow's completion, because
+// that end-to-end shape is not sensitive: Startup arms every trigger twice (once directly, once from the
+// timer's first poll), so the residual pending trigger dispatches the step one scan floor later and the
+// test passes with the tick disabled. Pass count separates the two cleanly - unbounded with the tick,
+// zero-or-one without - and needs no flow at all.
+func TestRefillIdleTick_ScansWithNoTrigger(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	// Two independent solo engines (separate test databases so they do not count each other as peers):
+	// one with the tick, one with it disabled, so the assertion below is sensitive to the mechanism and
+	// not to whatever else happens to touch the trigger.
+	ticking := NewEngineUnderTest(t)
+	assert.NoError(ticking.SetHost(NewTestProxy()))
+	ticking.refillIdleInterval = 50 * time.Millisecond
+	startSolo(t, ticking, "ticking")
+
+	parked := NewEngineUnderTest(t)
+	assert.NoError(parked.SetHost(NewTestProxy()))
+	parked.refillIdleInterval = 0 // the pre-change behavior: park on the trigger, forever
+	startSolo(t, parked, "parked")
+
+	// Let Startup's own trigger arms (requestRefillAll, plus the timer's first poll) work through before
+	// counting, so what is measured is the steady state rather than startup residue.
+	settle := 4 * refillScanFloorCap
+	time.Sleep(settle)
+
+	const window = time.Second
+	var ticked, stalled int
+	done := make(chan struct{})
+	go func() {
+		stalled = countRefillPasses(parked, 1, window)
+		close(done)
+	}()
+	ticked = countRefillPasses(ticking, 1, window)
+	<-done
+
+	// With a 50ms tick against a ~67ms scan floor the pass rate is floor-bound, so ~8/s is the ceiling;
+	// assert well under it so a loaded CI machine cannot flake.
+	assert.True(ticked >= 3, "an idle refiller must keep rescanning on its idle tick, got %d passes in %v", ticked, window)
+	// Parked, the only passes possible are leftover startup arms the settle above should already have
+	// absorbed. Allow one for slack; the point is that it does not scale with the window.
+	assert.True(stalled <= 1, "with the idle tick disabled an idle refiller must park, got %d passes in %v", stalled, window)
+	assert.True(ticked > stalled, "the idle tick must be what drives the rescans (%d vs %d)", ticked, stalled)
+}
+
+// countRefillPasses reports how many phase-1 scans a shard's refiller completes within the window, by
+// sampling the census entry it republishes on every pass. It is the cheapest in-process observation of
+// "the refiller ran", needing no metric reader and no flow.
+func countRefillPasses(e *Engine, shard int, window time.Duration) int {
+	at := func() time.Time {
+		e.censusLock.Lock()
+		defer e.censusLock.Unlock()
+		if sc := e.census[shard]; sc != nil {
+			return sc.at
+		}
+		return time.Time{}
+	}
+	last := at()
+	passes := 0
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+		if cur := at(); cur.After(last) {
+			passes++
+			last = cur
+		}
+	}
+	return passes
 }

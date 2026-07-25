@@ -174,7 +174,7 @@ const (
 	FaultInterruptStaleWrite = "interruptStaleWrite" // handleInterrupt's in-tx leaf lease_seq read is forced to mismatch (zombie)
 	FaultInterruptChainWrite = "interruptChainWrite" // handleInterrupt's combined chain UPDATE fails and applies nothing (deadlock victim)
 	FaultDropSignalStop      = "dropSignalStop"      // signalStop delivers nothing (lost terminal wake)
-	FaultDropDoorbell        = "dropDoorbell"        // the enqueue doorbell is dropped (lost wake)
+	FaultDropDoorbell        = "dropDoorbell"        // the local work doorbell is dropped (the step waits for a refiller scan)
 	FaultRecoveryResetErr    = "recoveryResetErr"    // the processStep recovery defer's own reset UPDATE errors
 	FaultReapMidTree         = "reapMidTree"         // the reaper errors after deleting steps, before flows
 	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors

@@ -54,8 +54,12 @@ type ShardSummary struct {
 }
 
 const (
-	maxPollInterval     = 5 * time.Minute
-	backlogPollInterval = 1 * time.Minute
+	// maxPollInterval is the timer's resting cadence: the nextPoll default when nothing is pending, the
+	// cap on a single timer sleep, and the horizon bound on pollPendingSteps' two MIN(...) sizing queries.
+	// There is deliberately no shorter "a backlog exists" cadence beside it - the former
+	// backlogPollInterval (1m) and the existence probe that set it were removed once the refiller's idle
+	// tick covered the same case per shard within ~1s (see refillerLoop and pollPendingSteps).
+	maxPollInterval = 5 * time.Minute
 
 	// pollErrorRetryInterval caps the wake delay after a sizing query in pollPendingSteps fails, so a
 	// transient DB error (e.g. a momentary connection-limit rejection) triggers a prompt re-poll instead
@@ -244,7 +248,7 @@ type Engine struct {
 	// collection time. lastRefillBand < 0 means no refill has selected a band yet.
 	lastRefillLock sync.Mutex
 	lastRefillBand int
-	// lastGlobalBand mirrors lastRefillBand for the hot doorbell path (enqueueStepDue/handleEnqueue),
+	// lastGlobalBand mirrors lastRefillBand for the hot doorbell path (enqueueStepDue/enqueueStep),
 	// which reads it lock-free to decide whether an arrival at an EMPTY partition is a genuine priority
 	// escalation (priority strictly better than the current global band -> bypass the scan floor so the
 	// new band publishes fast enough for strict cross-shard priority) or ordinary backlog (>= the band
@@ -294,6 +298,7 @@ type Engine struct {
 	awaitPollInterval   time.Duration // Await lost-wake re-snapshot cadence (5s)
 	pingInterval        time.Duration // peer-registry heartbeat cadence; a peer is counted <4x, pruned >8x (30s)
 	refillPace          time.Duration // pause after a refill that filled the cache (deep backlog); see refillerLoop (20ms)
+	refillIdleInterval  time.Duration // ceiling on how long a refiller parks on its trigger; see refillerLoop (1s)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
 	orphanFlowThreshold time.Duration // min age before a stepless running flow is reported orphaned (5m)
@@ -340,6 +345,7 @@ func NewEngine() *Engine {
 	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	e.pingInterval = 10 * time.Second
 	e.refillPace = 20 * time.Millisecond
+	e.refillIdleInterval = 1 * time.Second
 	e.wedgeSweepInterval = 5 * time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute
 	e.orphanFlowThreshold = 5 * time.Minute

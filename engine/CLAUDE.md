@@ -23,8 +23,11 @@ observability providers below are injected separately. A host must implement `Lo
 - **`SignalPeers(ctx, op string, payload []byte)`** - delivers one cross-replica coordination signal to the
   other replicas, all fire-and-forget. `op` is an opaque routing key (usable as a topic); `payload` is opaque bytes
   the engine already serialized. The host ships `(op, payload)` to peers and, on the receiving side, hands them back
-  via `Engine.DeliverSignal(ctx, op, payload)`, which parses `op` and applies the effect: a work doorbell (`enqueue`)
-  or a cross-replica `Await`/status-change wake (`statusChange`). All signal kinds funnel through this one method, so
+  via `Engine.DeliverSignal(ctx, op, payload)`, which parses `op` and applies the effect: a cross-replica
+  `Await`/status-change wake (`statusChange`) or a fleet-membership nudge (`peersChanged`). **Signal volume is
+  bounded by FLOW and DEPLOYMENT events, never by step throughput** - work discovery is pull-based, so nothing
+  is emitted per step (the former per-step `enqueue` doorbell was removed; see "The work doorbell is purely
+  local"). All signal kinds funnel through this one method, so
   adding a new kind needs no host change; the host never branches on `op` or inspects `payload`. A single-replica host
   does nothing here and none of this runs. The contract asks the host to deliver to OTHER replicas only (the engine
   applies each signal locally before publishing), but the engine does not rely on it: every payload carries the
@@ -412,12 +415,12 @@ ran *and* the intent to cancel a healthy durable flow was itself wrong.)
 
 **The inbound peer entry point `DeliverSignal(ctx, op, payload)`** is the receiving side of cross-replica
 coordination: the host adapter calls it with the `(op, payload)` it received from a peer, and the engine parses `op`
-and applies the effect. The outbound side is the host's `SignalPeers`. The **enqueue doorbell** (op `enqueue`) is the
-most frequent: it signals that a step is pending. The receiving replica does one PK lookup for the announced step's
-`priority` and `not_before`.
-If `not_before` is in the future the doorbell defers to the poll timer (`shortenNextPoll(not_before)`); if due, the
-priority drives the cache offer (refill or head-insert; see "Execution Model"). It does not enqueue a specific step
-into a queue. Fire-and-forget - a missed doorbell is recovered by `pollPendingSteps`.
+and applies the effect. The outbound side is the host's `SignalPeers`. Two ops remain - `statusChange` (a
+cross-replica `Await` wake) and `peersChanged` (a fleet-membership nudge) - and **neither scales with step
+throughput**. There is deliberately no work-doorbell op: the per-step `enqueue` signal was removed (see "The
+work doorbell is purely local"), so an inbound `enqueue` from an older peer is now an unknown op and errors
+cleanly. Fire-and-forget: a missed `statusChange` is recovered by the `Await` re-snapshot, a missed
+`peersChanged` by the next heartbeat's registry read.
 
 ### Subgraph keys are read-only
 
@@ -552,14 +555,42 @@ the very next plan reflects - `awaitBandRelease`'s census watch would release in
 **Every trigger-arming site is shard-LOCAL** - a pop names the popped job's shard, the post-`processStep`
 nudge names the processed step's shard, the doorbells name the announced step's shard - so a shard with an
 empty partition and nothing in flight **arms nothing and generates nothing**. Parked, it would sleep until
-`pollPendingSteps`' fleet-wide backstop, **up to `backlogPollInterval` (1 minute)**, with its due work
-sitting there; once the competitors drained, every worker would block in `Pop` while those steps waited.
+`pollPendingSteps`' fleet-wide backstop - whose resting cadence is now `maxPollInterval` (MINUTES), since the
+due-backlog probe and its 1-minute cap were removed - with its due work sitting there; once the competitors
+drained, every worker would block in `Pop` while those steps waited.
 It is also self-sustaining: a parked shard stops refreshing its census entry, so past the TTL its keys
 vanish from peers' plans and it cannot win slots even in principle. The retry adds no load that the old
 design did not already carry - a starved shard then scans at the cadence a busy one does, which is exactly
 what the *merged* pass did for every shard on every cycle. Pinned by
-`TestRefillOutcome_StarvedNeverParksOnTheDoorbell`. **Any new early return from `runShardRefill` must
-answer "what will ring this shard's trigger?" before it parks.**
+`TestRefillOutcome_StarvedNeverParksOnTheDoorbell`.
+
+**The park on the trigger is CAPPED at `refillIdleInterval` (1s), which generalizes those two escapes to
+every early return.** `refillerLoop`'s top `select` carries an idle-tick case, so no refiller ever parks
+longer than the interval, and the standing rule - *any new early return from `runShardRefill` must answer
+"what will ring this shard's trigger?" before it parks* - now has a structural answer: the tick will,
+within `refillIdleInterval`. Two `refillIdle` returns needed it and had nothing arming them, both with
+due work present: a plan that comes back empty at a legitimate band (the census aged out from under it),
+and a batch that assembles empty because every chosen key's steps were claimed between phases. It is a
+**cap, not a cadence** - the scan floor still bounds the pass rate from below, so an idle shard scans once
+per `floor + interval` and a busy one never sees the tick (its trigger is always armed).
+
+*Its real purpose was to make the cross-replica enqueue doorbell removable, which it now has been.* Every
+trigger-arming site is shard-**local**, so a replica holding a step no peer announced to it arms nothing; the
+cap turns that from "wait for `pollPendingSteps`' fleet-wide backstop, MINUTES away" into "at most 1s", for
+one index probe per idle shard per second. **This is now load-bearing for liveness across the fleet, not an
+optimization** - with no peer doorbell there is nothing else between a peer's pending step and this replica's
+next scan. Do not lengthen it materially and do not gate it on an outcome. `shortenNextPoll`'s precise `not_before` wake still stands
+alongside it - the tick is a floor under that, not a replacement - so a sleeping step is not woken 1s late,
+and the cost is ~one empty scan per second while it sleeps.
+
+*Pinned by `TestRefillIdleTick_ScansWithNoTrigger`, and how it is pinned is itself the finding.* It counts
+**passes on a fully idle engine** rather than timing an undoorbelled flow to completion, because the
+end-to-end shape is **not sensitive**: `Startup` arms every trigger *twice* (`requestRefillAll` directly,
+then again from `timerLoop`'s first `pollPendingSteps`, which runs on a goroutine and races the test's
+`Create`), so the residual pending trigger dispatches the step one scan floor later and such a test passes
+with the tick disabled - it was written that way first and measured green against the unmodified engine.
+Pass count separates the two cleanly (unbounded with the tick, zero without) and needs no flow at all. Any
+future test that needs this replica's triggers to stay unarmed faces the same startup residue.
 
 **A dead shard's census entry is TTL'd, or it wedges the fleet.** The census introduced a failure the barrier
 made impossible: shard A's last entry says band 1, A dies, every other shard computes globalBand=1, finds
@@ -663,17 +694,39 @@ unconditional UNION is a 121s footgun on the fragmented regime and on SQLite tes
 Reproduce/measure any of the above with `engine/refillfetchscaling_test.go` (opt-in: `DWARF_BENCH_ROWS`;
 targets a real DB via `SEQUEL_TESTING_DSN`; `DWARF_BENCH_EXPLAIN=1` prints the plans).
 
-**Queue-as-cache, doorbell, per-shard single-slot triggers.** The enqueue signal carries no step to a queue; it is a **doorbell**
-(`candidatecache.Cache.Offer`). The generic path (`handleEnqueue`) resolves the announced step's priority *and*
+**The work doorbell is PURELY LOCAL - it reaches this replica's candidate cache and nothing else.** It used to
+also broadcast to peers (op `enqueue`, one message per step per peer, plus a `{0,0}`-sentinel one on every
+flow completion). That broadcast was **removed**, and the reasoning is worth keeping because the idea
+re-suggests itself:
+
+- **It bought no latency where it cost the most.** Under load every peer's refiller is already scanning at
+  its derived scan floor (~67ms), so the doorbell only ever beat a scan that was about to happen anyway.
+- **It cost a round-trip on every receiver.** The inbound path had to resolve the announced step's `priority`
+  and `not_before` with a PK lookup - the exact round-trip `enqueueStepDue` exists to avoid locally - R-1
+  times per step.
+- **It head-inserted UNPARTITIONED**, so a peer could offer a step outside its residue class and race the
+  owner to the claim CAS (measurable as `dwarf_steps_claim_lost` scaling with R).
+
+What replaced it is the refiller's **idle tick** (`refillIdleInterval`, see "An empty slice has TWO causes"):
+a peer discovers work by scanning, bounded, with no message at all. The consequence to hold in mind when
+reading the origination sites: a step created here is offered to **this replica's cache only**, so if this
+replica cannot serve it (its partition is non-empty, and the step falls in a peer's residue class) the step
+waits for that peer's next scan. If a per-step peer signal is ever revived it must be coalesced and
+payload-free ("shard S has work", rate-limited), never per-step.
+
+Pinned by `TestSignals_VolumeDoesNotScaleWithSteps`, which asserts on the emitted **op names** rather than a
+count: a per-step broadcast reintroduced under any new op name fails it.
+
+**Queue-as-cache, per-shard single-slot triggers.** The doorbell carries no step to a queue; it is an
+`Offer` into `candidatecache.Cache`. The generic path (`enqueueStep`) resolves the step's priority *and*
 `not_before` in one PK lookup (off the selection path) - but the **hot-path origination sites skip the lookup**
 (`enqueueStepDue`): the completing worker/creator just bound the step's priority into its INSERT/reset and its own
 sleep branch already diverged, so it offers the step directly with the values in hand - one round-trip per completed
-step that re-read a row this replica just wrote. The lookup path remains for the inbound peer doorbell (the signal
-payload stays shard+stepID; a peer resolves due-ness against its own clock) and the cold origination sites
-(surgraph revive, wedge sweep) where the priority is not in hand. If `not_before` is in the future the doorbell short-circuits into `shortenNextPoll(not_before)` -
+step that re-read a row this replica just wrote. The lookup path remains for the cold origination sites
+(surgraph revive, resume, `Fork`'s leaf, `Continue`, the wedge sweep) where the priority is not in hand. If
+`not_before` is in the future the doorbell short-circuits into `shortenNextPoll(not_before)` -
 the work is not due, nothing to preempt, the cache stays untouched; the local poll timer wakes at the right moment.
-This is also how cross-replica delayed-start propagates: every replica receiving the doorbell pulls its poll timer
-forward, with no separate "wake at T" message. Otherwise the priority drives one of three cache paths, each against the step's own shard's PARTITION (an
+Otherwise the priority drives one of three cache paths, each against the step's own shard's PARTITION (an
 `Offer` routes by `Job.Shard` and is admitted against that partition's floor). (1) Empty partition: request a
 refill of that shard so its refiller selects the strictly-best step. It deliberately does
 **not** head-insert the first arrival, because an arbitrary-priority step jumping the queue on an idle replica can
@@ -693,7 +746,7 @@ per shard** (`refillTriggers`) is the selection gate: concurrent requests for a 
 pending scan of it, and the send can never panic, even during shutdown drain. **Every "refill now" origination
 site names a shard** (`requestRefill(shard)`): a worker's low-water pop names the popped partition's shard; the
 post-`processStep` nudge names the processed step's shard (the freed slot and any successor it inserted live
-there - same-flow shard affinity); the doorbells (`enqueueStepDue`/`handleEnqueue`) name the announced step's
+there - same-flow shard affinity); the doorbells (`enqueueStepDue`/`enqueueStep`) name the announced step's
 shard. Only `pollPendingSteps` and startup ring **all** shards (`requestRefillAll`) - the backstop cannot know
 which shard's backlog it observed.
 
@@ -853,10 +906,22 @@ count; low-water is per partition, half its last-refill depth.
 `pollPendingSteps` does not enumerate the backlog onto a queue. It recovers expired-lease steps, sizes the wake
 timer to the nearest future `not_before`, and rings the local doorbell each cycle. (Orphan-flow and parked-step
 wedge detection are *not* here - their heavy `NOT EXISTS` scans run on the separate latency-tolerant `recoveryLoop`;
-see "Background Recovery".) If a
-due-pending backlog exists it caps `nextPoll` at `backlogPollInterval` (1 minute) so an idle replica that got no
-doorbell still re-scans. This is a coarse safety net, not the primary wake path: due work is normally picked up
-immediately by the completion doorbell, and `nextPoll` is shortened to anything sooner.
+see "Background Recovery".)
+
+**There is no "a backlog exists" cadence any more, and the probe that set one is GONE.** The poll used to run
+a fourth statement per shard - an existence probe (`SELECT 1 FROM dwarf_steps … LIMIT_OFFSET(1,0)`) - whose
+*only* purpose was to cap `nextPoll` at `backlogPollInterval` (1 minute) so an idle replica that missed a
+doorbell still re-scanned. The refiller's `refillIdleInterval` tick now covers that case per shard, within
+~1s, with one band scan instead of the probe plus the poll's other three statements - so the chain was
+strictly dominated (the 1m cap existed to reach `requestRefillAll`, which the refillers no longer need). Both
+the constant and the probe were removed. **Do not reintroduce anything here that fires on a backlog
+existing:** this poll is nudged sub-second under load, so a statement added to it is paid on every nudge,
+and the per-shard refiller is the right place for any work-discovery cadence.
+
+`maxPollInterval` keeps all three of its meanings: the `nextPoll` default when nothing is pending, the cap on
+one timer sleep, and the horizon bound on the two `MIN(...)` sizing queries. Lease recovery never depended on
+the 1m cap - the `MIN(lease_expires)` query already schedules `nextPoll` at the soonest future expiry, and
+re-evaluates each `maxPollInterval` sweep for expiries beyond the horizon.
 
 **Sizing-error clamp.** A sizing SELECT in `pollPendingSteps` can *fail* (a transient DB error - most commonly a
 momentary connection-limit rejection under load; see "Per-test engine + sequential execution" in `fixtures/CLAUDE.md`). The error must not be swallowed into
@@ -869,8 +934,8 @@ just refuses to convert an unknown backlog into a long sleep.
 
 **The refillers apply the same clamp.** `runShardRefill`'s `scanShardBandKeys` (or the phase-3
 `fetchShardBandSteps`) can fail on the same transient DB error, and swallowing it is the mirror wedge: the shard's
-partition refills **empty**, its workers block in `Pop`, and nothing retries until the next doorbell or the backlog
-backstop (up to 1m). So `runShardRefill` logs the scan error and `shortenNextPoll(now + pollErrorRetryInterval)`
+partition refills **empty**, its workers block in `Pop`, and nothing retries until the next doorbell or the shard's
+own idle tick. So `runShardRefill` logs the scan error and `shortenNextPoll(now + pollErrorRetryInterval)`
 (1s) - the doorbell fires again promptly (`pollPendingSteps` rings every shard) and the refiller re-scans once the
 blip clears, rather than idling the shard on a momentary blip. The shard's census entry is not republished on the
 error, so a persistently failing shard ages out of its peers' snapshots (TTL) instead of pinning the global band.
@@ -1183,12 +1248,15 @@ selection - slower but complete. R and the ordinal therefore come from **one sha
 comparable across shards and a clock-fast shard would always look freshest; `NOW_UTC() - seen_at` puts both
 terms on one clock and the offset cancels - the same cancellation the refiller's per-shard age relies on.
 
-**The doorbell is deliberately NOT partitioned, and needs no fix.** `Offer` inserts a specific step only on
-the strictly-better-band path (`priority < floor`); an empty partition requests a *partitioned* refill and an
-equal band is a no-op. So a uniform-priority workload never head-inserts at all, and a mixed one inserts at
-most one pioneer per band-opening. Partitioning it would be actively wrong - the head-insert exists to give
-an urgent step immediate dispatch, and skipping it because a peer owns that residue class would delay
-exactly what it is for. The CAS still arbitrates, so the worst case is one lost claim.
+**The doorbell is deliberately NOT partitioned, and the case for that got simpler.** `Offer` inserts a
+specific step only on the strictly-better-band path (`priority < floor`); an empty partition requests a
+*partitioned* refill and an equal band is a no-op. So a uniform-priority workload never head-inserts at all,
+and a mixed one inserts at most one pioneer per band-opening. Partitioning it would be actively wrong - the
+head-insert exists to give an urgent step immediate dispatch, and skipping it because a peer owns that
+residue class would delay exactly what it is for. The CAS still arbitrates, so the worst case is one lost
+claim. Note this now concerns **only this replica's own** origination sites: with the peer `enqueue`
+broadcast removed, no unpartitioned offer can arrive from a peer at all, which closes the one case where an
+unpartitioned head-insert genuinely raced the residue class's owner.
 
 **Known residual: replica death strands a slice for up to `peerFreshWindow` (40s).** A dead replica's
 residue class is owned by nobody until its row ages out of the count and ordinals re-seat. Self-healing,

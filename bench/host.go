@@ -58,8 +58,10 @@ type benchHost struct {
 	//
 	// signalJitter delays every delivery by a uniform random [0, jitter) - network latency. signalDrop
 	// drops each per-peer delivery independently with this probability - random loss. dropOps drops
-	// EVERY delivery of the named ops (e.g. "enqueue" for the D3 poll-fallback A/B) while leaving the
-	// others - including peer discovery - intact. muted silences ALL outbound signals from this replica,
+	// EVERY delivery of the named ops (e.g. "statusChange" to force Await onto its poll backstop) while
+	// leaving the others - including peer discovery - intact. The per-step "enqueue" doorbell this flag
+	// was first built to A/B no longer exists; work discovery is pull-based (the refiller's idle tick).
+	// muted silences ALL outbound signals from this replica,
 	// simulating a crashed peer to the rest of the fleet (its pings stop; peers evict it after
 	// ~3x pingInterval) while the process itself keeps running.
 	signalJitter time.Duration

@@ -575,46 +575,33 @@ func (e *Engine) notifyStatusChange(flowKey string, status string) {
 	}
 }
 
-// enqueueStep rings the work doorbell on this replica AND wakes peer replicas. Use it at every
-// step-origination site (start, restart, resume, retry, fan-out, fan-in, surgraph re-dispatch), so a
-// replica without spare capacity does not strand a freshly-pending step until a peer's backstop poll
-// (up to maxPollInterval away). A single logical doorbell must reach both the local replica and its
-// peers. SignalPeers is self-excluded (see its contract), so
-// the local ring is done directly here. Do NOT call this from DeliverSignal's enqueue path (the
-// inbound peer signal): re-broadcasting an inbound doorbell would echo back to the sender and storm.
-// That path uses the local-only handleEnqueue primitive.
+// The work doorbell is PURELY LOCAL - it reaches this replica's candidate cache and nothing else.
+//
+// It used to also broadcast to peers (op `enqueue`, one message per step per peer). That broadcast was
+// removed: under load every peer's refiller is already scanning at its derived scan floor, so the
+// doorbell bought no dispatch latency the next scan would not have covered, while costing R-1 messages
+// per step AND a PK lookup on every receiver (the inbound path had to resolve the announced step's
+// priority and due-ness against its own clock, which is exactly the round-trip enqueueStepDue exists to
+// avoid locally). It also head-inserted UNPARTITIONED on the receiver, so a peer could race the residue
+// class's owner to the claim CAS. What replaced it is the refiller's idle tick (refillIdleInterval, ~1s -
+// see refillerLoop): a peer discovers work by scanning, on a cadence bounded with no message at all.
+//
+// Consequence to keep in mind when reading the origination sites: a step created here is offered to THIS
+// replica's cache only. If this replica cannot serve it (its partition is non-empty so the Offer no-ops,
+// and the step falls in a peer's residue class), the step waits for that peer's next scan - bounded by
+// the idle tick, not by a message. Do not reintroduce a per-step peer broadcast to shave that; see
+// _NO_SIGNALS.md's coalescing note for the shape any revival would have to take.
+
+// enqueueStep rings the local work doorbell for a step whose priority the caller does NOT hold, resolving
+// it (and the step's due-ness) with one PK lookup. Use it at the cold step-origination sites - surgraph
+// revive, resume, fork's leaf, the wedge sweep - where that value is not in hand; the hot paths use
+// enqueueStepDue instead and skip the lookup.
 func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	// FaultDropDoorbell simulates a lost work doorbell so a test can prove the pending step is still picked
-	// up by the pollPendingSteps backstop rather than stranding.
+	// up by a later refiller scan rather than stranding.
 	if e.seams.IsFault(FaultDropDoorbell) {
 		return
 	}
-	e.handleEnqueue(ctx, shard, stepID)
-	e.signalEnqueue(ctx, shard, stepID)
-}
-
-// enqueueStepDue is the fast-path doorbell for a step the caller just created or reset for immediate
-// dispatch and whose priority it already holds: it offers the step to the local cache directly, skipping
-// handleEnqueue's PK lookup - one round-trip per completed step on the hot path, re-reading a row this
-// replica just wrote. Use it only where due-ness is certain (the caller's own sleep/not_before branch
-// already diverged) and the priority is the value just bound into the INSERT/reset. The peer broadcast is
-// unchanged: a receiving replica still resolves the step itself in handleEnqueue - the signal payload
-// stays shard+stepID, and a peer shouldn't trust this replica's snapshot of due-ness anyway.
-func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int) {
-	// FaultDropDoorbell: see enqueueStep.
-	if e.seams.IsFault(FaultDropDoorbell) {
-		return
-	}
-	ring, urgent := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
-	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "ring", ring, "urgent", urgent)
-	if ring {
-		e.routeRefill(shard, priority, urgent)
-	}
-	e.signalEnqueue(ctx, shard, stepID)
-}
-
-// handleEnqueue processes a doorbell signal on the local replica only.
-func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 	priority := math.MaxInt
 	var notBeforeDelayMs sql.NullFloat64
 	db, err := e.db.Shard(shard)
@@ -625,6 +612,8 @@ func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 		).Scan(&priority, &notBeforeDelayMs)
 	}
 	if notBeforeDelayMs.Valid && notBeforeDelayMs.Float64 > 0 {
+		// Not due yet: nothing to preempt, so leave the cache untouched and let the poll timer wake at the
+		// right moment instead.
 		wakeAt := time.Now().Add(time.Duration(notBeforeDelayMs.Float64 * float64(time.Millisecond)))
 		e.shortenNextPoll(wakeAt)
 		e.logger.DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
@@ -632,6 +621,23 @@ func (e *Engine) handleEnqueue(ctx context.Context, shard, stepID int) {
 	}
 	ring, urgent := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
 	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "ring", ring, "urgent", urgent)
+	if ring {
+		e.routeRefill(shard, priority, urgent)
+	}
+}
+
+// enqueueStepDue is the fast-path doorbell for a step the caller just created or reset for immediate
+// dispatch and whose priority it already holds: it offers the step to the local cache directly, skipping
+// enqueueStep's PK lookup - one round-trip per completed step on the hot path, re-reading a row this
+// replica just wrote. Use it only where due-ness is certain (the caller's own sleep/not_before branch
+// already diverged) and the priority is the value just bound into the INSERT/reset.
+func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int) {
+	// FaultDropDoorbell: see enqueueStep.
+	if e.seams.IsFault(FaultDropDoorbell) {
+		return
+	}
+	ring, urgent := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "ring", ring, "urgent", urgent)
 	if ring {
 		e.routeRefill(shard, priority, urgent)
 	}

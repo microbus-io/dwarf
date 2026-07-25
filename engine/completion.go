@@ -551,7 +551,6 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted, awaited)
-	e.signalEnqueue(ctx, 0, 0) // Wake peers
 
 	if surgraphFlowID != 0 {
 		err := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepID, finalStateJSON)

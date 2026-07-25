@@ -33,8 +33,12 @@ import (
 // passed across the host boundary as a plain string.
 type signalOp string
 
+// There is deliberately NO work-doorbell op. An `enqueue` signal existed and was removed: its volume
+// scaled with steps/s (R-1 messages per step) while buying no dispatch latency the receiver's own
+// refiller scan would not have covered, and it cost every receiver a PK lookup plus an unpartitioned
+// head-insert that raced the residue class's owner for the claim CAS. Work discovery is now entirely
+// pull-based (each shard's refiller, bounded by refillIdleInterval). Do not re-add a per-step op here.
 const (
-	signalOpEnqueue      signalOp = "enqueue"
 	signalOpStatusChange signalOp = "statusChange"
 	// signalOpPeersChanged is a best-effort nudge that the fleet changed (a replica joined or left):
 	// receivers re-read the shared dwarf_peers registry and resize their pools. The registry is the
@@ -50,10 +54,6 @@ const (
 // sender - DeliverSignal discards a payload whose Origin matches its own engineIDBase36 rather than rely
 // on the host. (An empty Origin - e.g. a signal from an older build - is never discarded.)
 type (
-	enqueuePayload struct {
-		Origin        string
-		Shard, StepID int
-	}
 	statusChangePayload struct {
 		Origin          string
 		FlowKey, Status string
@@ -73,7 +73,7 @@ func (e *Engine) emitSignal(ctx context.Context, op signalOp, payload any) {
 	err = errors.CatchPanic(func() error {
 		// FaultSignalPeersPanic simulates the host's SignalPeers panicking, so the test can prove the
 		// boundary CatchPanic swallows it (logged below) and flow completion / Await are unaffected. Scoped
-		// by op so a test targets the terminal statusChange wake without also tripping enqueue doorbells.
+		// by op so a test targets one signal kind without tripping the others.
 		if e.seams.IsFault(FaultSignalPeersPanic, string(op)) {
 			panic("injected fault: " + FaultSignalPeersPanic + " " + string(op))
 		}
@@ -83,10 +83,6 @@ func (e *Engine) emitSignal(ctx context.Context, op signalOp, payload any) {
 	if err != nil {
 		e.logger.ErrorContext(ctx, "SignalPeers callback panicked", "op", string(op), "error", err)
 	}
-}
-
-func (e *Engine) signalEnqueue(ctx context.Context, shard, stepID int) {
-	e.emitSignal(ctx, signalOpEnqueue, enqueuePayload{Origin: e.engineIDBase36, Shard: shard, StepID: stepID})
 }
 
 func (e *Engine) signalStatusChange(ctx context.Context, flowKey, status string) {
@@ -109,23 +105,13 @@ func (e *Engine) signalPeersChanged(ctx context.Context) {
 // An engine that is not running (never started, or already shut down) discards every signal: there is
 // no cache to ring a doorbell into, no waiter to wake, and no pool to resize. Returns nil, not an
 // error: peer signals are fire-and-forget hints, and a dropped one is always recoverable by the
-// receiver's own backstop (the poll for doorbells, the Await re-snapshot for status changes, the next
-// heartbeat's registry re-read for the replica count).
+// receiver's own backstop (the Await re-snapshot for status changes, the next heartbeat's registry
+// re-read for the replica count).
 func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) error {
 	if !e.started.Load() {
 		return nil
 	}
 	switch signalOp(op) {
-	case signalOpEnqueue:
-		var p enqueuePayload
-		err := json.Unmarshal(payload, &p)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if p.Origin == e.engineIDBase36 {
-			return nil // the host echoed this engine's own broadcast back; nothing new to learn
-		}
-		e.handleEnqueue(ctx, p.Shard, p.StepID)
 	case signalOpStatusChange:
 		var p statusChangePayload
 		err := json.Unmarshal(payload, &p)
