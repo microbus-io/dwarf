@@ -14,31 +14,35 @@
 
 -- DRIVER: mysql
 CREATE TABLE IF NOT EXISTS dwarf_peers (
-    engine_id  BIGINT      NOT NULL,
-    seen_at    DATETIME(3) NOT NULL DEFAULT NOW_UTC(),
-    dispatches TINYINT     NOT NULL DEFAULT 1,
+    engine_id     BIGINT      NOT NULL,
+    seen_at       DATETIME(3) NOT NULL DEFAULT NOW_UTC(),
+    dispatched_at DATETIME(3) NOT NULL DEFAULT '2000-01-01 00:00:00',
+    dispatches    TINYINT     NOT NULL DEFAULT 1,
     PRIMARY KEY (engine_id)
 );
 
 -- DRIVER: pgx
 CREATE TABLE IF NOT EXISTS dwarf_peers (
-    engine_id  BIGINT      NOT NULL,
-    seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW_UTC(),
-    dispatches SMALLINT    NOT NULL DEFAULT 1,
+    engine_id     BIGINT      NOT NULL,
+    seen_at       TIMESTAMPTZ NOT NULL DEFAULT NOW_UTC(),
+    dispatched_at TIMESTAMPTZ NOT NULL DEFAULT '2000-01-01 00:00:00',
+    dispatches    SMALLINT    NOT NULL DEFAULT 1,
     PRIMARY KEY (engine_id)
 );
 
 -- DRIVER: mssql
 CREATE TABLE dwarf_peers (
-    engine_id  BIGINT       NOT NULL,
-    seen_at    DATETIME2(3) NOT NULL DEFAULT NOW_UTC(),
-    dispatches TINYINT      NOT NULL DEFAULT 1,
+    engine_id     BIGINT       NOT NULL,
+    seen_at       DATETIME2(3) NOT NULL DEFAULT NOW_UTC(),
+    dispatched_at DATETIME2(3) NOT NULL DEFAULT '2000-01-01 00:00:00',
+    dispatches    TINYINT      NOT NULL DEFAULT 1,
     PRIMARY KEY (engine_id)
 );
 
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_peers (
-    engine_id  INTEGER  NOT NULL PRIMARY KEY,
-    seen_at    DATETIME NOT NULL DEFAULT NOW_UTC(),
-    dispatches INTEGER  NOT NULL DEFAULT 1
+    engine_id     INTEGER  NOT NULL PRIMARY KEY,
+    seen_at       DATETIME NOT NULL DEFAULT NOW_UTC(),
+    dispatched_at DATETIME NOT NULL DEFAULT '2000-01-01 00:00:00',
+    dispatches    INTEGER  NOT NULL DEFAULT 1
 );

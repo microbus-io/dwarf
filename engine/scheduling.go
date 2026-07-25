@@ -1089,7 +1089,12 @@ func deriveScanFloor(bufferShare, virtualCPUs, poolConns, replicas int) time.Dur
 // and the candidate cache already obey, since this floor is measured against the cache's capacity.
 func (e *Engine) recomputeScanFloors() {
 	n := max(1, e.db.NumShards())
-	share := e.cache.Capacity() / n
+	// max(1, ...): a cache SMALLER than the shard count integer-divides to zero, and zero reaches
+	// deriveScanFloor's degenerate guard, which answers with the 1s cap - the slowest floor there is.
+	// That is exactly backwards. A tiny cache drains in an instant and wants frequent scans; the case is
+	// a small cache, not an unknown one. Left at zero it strands a small-cache configuration on
+	// second-long scan intervals, which reads as a wedged fleet rather than a mis-tuned one.
+	share := max(1, e.cache.Capacity()/n)
 	replicas := max(1, int(e.observedR.Load()))
 	override := time.Duration(e.refillScanFloorOverride.Load())
 	pinned := int(e.maxOpenConns.Load()) // >0 when SetMaxOpenConns pins every shard's pool

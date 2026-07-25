@@ -870,9 +870,14 @@ window a peer computes a stale global minimum, finds itself holding it, and legi
 worse-band work. That is an inversion of the observable dispatch ORDER, not merely of latency - do not
 repeat the old claim that "the floor can only delay dispatch, never invert order." It was true of a pass
 planning from a *current* census and false across the publish gap, which is exactly the case that matters.
-Pinned by `fixtures/shardedflow_test.go`, which pins a realistic floor precisely because the guarantee is
-floor-relative; left derived, its 8-shards/1-worker topology hits the degenerate `bufferShare 0` -> 1s cap
-and the inversion reproduces deterministically.
+Pinned by `fixtures/shardedflow_test.go` and, on the latency axis, `fixtures/crossshardpriorityflow_test.go`.
+**Both are floor-relative, so both are sensitive to the floor being derived sanely** - which is how the
+`bufferShare` zero-division bug was found. A cache smaller than the shard count integer-divided to zero and
+took `deriveScanFloor`'s degenerate branch, answering with the 1s CAP: the slowest floor there is, for the
+case that wants the fastest. Every `SetWorkers(1)` multi-shard fixture silently ran at second-long scan
+intervals, which is why the fix took ~13s off the whole fixtures suite. `recomputeScanFloors` now clamps
+`share` at 1. If either of those fixtures starts failing on timing again, suspect the derived floor before
+suspecting the test.
 
 What is NOT weakened: the arriving step itself is never delayed (`Offer` head-inserts a strictly-better
 band, so it is popped next), ordering among work already in the census is strict, and nothing is preemptive.
