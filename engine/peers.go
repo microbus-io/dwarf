@@ -33,13 +33,20 @@ import (
 // passed across the host boundary as a plain string.
 type signalOp string
 
-// There is deliberately NO work-doorbell op. An `enqueue` signal existed and was removed: its volume
-// scaled with steps/s (R-1 messages per step) while buying no dispatch latency the receiver's own
-// refiller scan would not have covered, and it cost every receiver a PK lookup plus an unpartitioned
-// head-insert that raced the residue class's owner for the claim CAS. Work discovery is now entirely
-// pull-based (each shard's refiller, bounded by refillIdleInterval). Do not re-add a per-step op here.
+// There is exactly ONE op, and the rule that holds it to one: a signal may only ACCELERATE a convergence
+// the database already guarantees. It must never carry information only the sender holds, because then
+// delivery becomes a correctness dependency on a transport the host is entitled to no-op.
+//
+// Two shapes fail that rule and must not be added:
+//
+//   - A PER-STEP work doorbell. Its volume scales with throughput (R-1 messages per step), each receiver
+//     pays a PK lookup to resolve what was announced, and an unpartitioned offer races the residue
+//     class's owner for the claim CAS - while buying no latency, since every piston cycles
+//     unconditionally and would have scanned anyway. Work discovery is pull-based.
+//   - A PER-FLOW stop broadcast. The Await latch's detector reads the shared flow rows on its own
+//     cadence, so it sees a peer's stop whether or not anything was sent. A broadcast buys tens of
+//     milliseconds on the wake and costs a delivery path that correctness would then rest on.
 const (
-	signalOpStatusChange signalOp = "statusChange"
 	// signalOpPeersChanged is a best-effort nudge that the fleet changed (a replica joined or left):
 	// receivers re-read the shared dwarf_peers registry and resize their pools. The registry is the
 	// source of truth for the replica count R; this signal only accelerates convergence from the
@@ -53,15 +60,9 @@ const (
 // host to deliver only to OTHER replicas, but a broadcast transport may echo the signal back to the
 // sender - DeliverSignal discards a payload whose Origin matches its own engineIDBase36 rather than rely
 // on the host. (An empty Origin - e.g. a signal from an older build - is never discarded.)
-type (
-	statusChangePayload struct {
-		Origin          string
-		FlowKey, Status string
-	}
-	peerPayload struct {
-		Origin string
-	}
-)
+type peerPayload struct {
+	Origin string
+}
 
 // emitSignal serializes a signal body and hands (op, bytes) to the host for delivery to OTHER replicas.
 func (e *Engine) emitSignal(ctx context.Context, op signalOp, payload any) {
@@ -85,10 +86,6 @@ func (e *Engine) emitSignal(ctx context.Context, op signalOp, payload any) {
 	}
 }
 
-func (e *Engine) signalStatusChange(ctx context.Context, flowKey, status string) {
-	e.emitSignal(ctx, signalOpStatusChange, statusChangePayload{Origin: e.engineIDBase36, FlowKey: flowKey, Status: status})
-}
-
 // signalPeersChanged tells peers the fleet changed so they re-read the registry (join at Startup, leave
 // at Shutdown). Fire-and-forget: a lost nudge only delays a peer's recount to its next heartbeat.
 func (e *Engine) signalPeersChanged(ctx context.Context) {
@@ -103,25 +100,17 @@ func (e *Engine) signalPeersChanged(ctx context.Context) {
 // Trust boundary: the host MUST authenticate the peer channel; a signal admitted here is trusted.
 //
 // An engine that is not running (never started, or already shut down) discards every signal: there is
-// no cache to ring a doorbell into, no waiter to wake, and no pool to resize. Returns nil, not an
-// error: peer signals are fire-and-forget hints, and a dropped one is always recoverable by the
-// receiver's own backstop (the Await re-snapshot for status changes, the next heartbeat's registry
-// re-read for the replica count).
+// no pool to resize and nothing else a signal can reach. Returns nil, not an error: peer signals are
+// fire-and-forget hints, and a dropped one is always recoverable by the receiver's own backstop - here,
+// the next heartbeat's registry re-read.
+//
+// An op this engine does not implement is an ERROR, never silently absorbed - so a peer on a different
+// build broadcasting something else is reported rather than quietly ignored.
 func (e *Engine) DeliverSignal(ctx context.Context, op string, payload []byte) error {
 	if !e.started.Load() {
 		return nil
 	}
 	switch signalOp(op) {
-	case signalOpStatusChange:
-		var p statusChangePayload
-		err := json.Unmarshal(payload, &p)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if p.Origin == e.engineIDBase36 {
-			return nil
-		}
-		e.notifyStatusChange(p.FlowKey, p.Status)
 	case signalOpPeersChanged:
 		var p peerPayload
 		err := json.Unmarshal(payload, &p)

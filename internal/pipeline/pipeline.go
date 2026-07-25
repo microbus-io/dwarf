@@ -34,14 +34,13 @@ limitations under the License.
 //	    observe(p.Cycle(ctx))
 //	}
 //
-// Front-loading the sleep is what makes the pacing self-correcting: the wait is computed from elapsed
-// time rather than from the previous cycle's duration, so any delay the caller introduces between calls
-// is absorbed instead of added.
+// Any delay the caller adds between calls is therefore absorbed rather than added to the period.
 //
-// Cycle NEVER returns an error, only a Result carrying one. Every failure it can hit is already handled
-// here - a failed scan clears this shard from planning, a failed fetch leaves everything untouched, and
-// either way the next cycle retries. Returning an error would invite the caller's `if err != nil { return }`
-// reflex, which would take a shard out of the fleet permanently over a transient database blip.
+// Cycle NEVER returns an error, only a Result carrying one: every failure it can hit is already dealt
+// with here, and the next cycle retries. A caller reads the Result for its log line and carries on.
+//
+// SetInterval and SetMinGap are live and safe to call from anywhere; Cycle itself is not safe for
+// concurrent use - one Pipeline per shard, driven by one goroutine.
 package pipeline
 
 import (

@@ -27,12 +27,16 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestAwait_PollFallbackWhenSignalLost pins that Await returns even when the in-memory signalStop wake is
-// never delivered - a worker crash between the terminal commit and the signal, a dropped peer broadcast, or
-// a no-op SignalPeers on a multi-replica host. The test blocks a flow so Await parks in its select on a
-// running flow, then forges the terminal commit directly in the DB (bypassing signalStop entirely), and
-// asserts Await still wakes via its periodic re-snapshot rather than hanging until ctx (here, forever).
-func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
+// TestAwait_WakesWhenNoSignalIsDelivered pins that Await returns even when the in-memory signalStop wake
+// is never delivered - a worker crash between the terminal commit and the signal, or a no-op SignalPeers
+// on a multi-replica host. The test blocks a flow so Await parks on the latch against a running flow,
+// then forges the terminal commit directly in the DB (bypassing signalStop entirely), and asserts Await
+// still wakes rather than hanging until ctx (here, forever).
+//
+// This is the shape of EVERY cross-replica stop, not only a lost signal: a flow finished by a peer
+// commits in the shared database with nothing to announce it locally. So what this really pins is the
+// latch detector - the sweep is the only thing that can see a stop this replica did not make.
+func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
@@ -57,8 +61,8 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	// Read once when Await builds its ticker, so set it before Startup.
-	e.awaitPollInterval = 20 * time.Millisecond
+	// Left at its default so the DETECTOR is what wakes this Await. Shortening awaitPollInterval here
+	// would let the last-resort re-snapshot answer instead, and the test would pass with a dead sweeper.
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "awaitpoll.verify:0/g", nil, nil)
@@ -84,13 +88,11 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 		done <- result{out, aerr}
 	}()
 
-	// Wait until Await has registered its waiter (so its first snapshot has run against the running flow and
-	// it is now parked in the select). Only after this can a terminal commit exercise the poll fallback
-	// rather than being caught by the first snapshot.
+	// Wait until Await has parked on the latch (so its first snapshot has already run against the running
+	// flow). Only after this can a terminal commit exercise a wake path rather than being caught by that
+	// first snapshot.
 	waiterReady := func() bool {
-		e.waitersLock.Lock()
-		defer e.waitersLock.Unlock()
-		return len(e.waiters[flowKey]) > 0
+		return e.latches.Waiting(flowKey) > 0
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) && !waiterReady() {
@@ -116,7 +118,7 @@ func TestAwait_PollFallbackWhenSignalLost(t *testing.T) {
 			assert.True(ok, "final_state should surface through the poll-fallback wake")
 		}
 	case <-time.After(3 * time.Second):
-		assert.True(false, "Await hung past the lost signal; the poll fallback did not fire")
+		assert.True(false, "Await hung past a stop nothing announced; the latch detector did not notice it")
 		return
 	}
 	rel()

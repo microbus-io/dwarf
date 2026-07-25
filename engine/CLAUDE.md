@@ -23,11 +23,10 @@ observability providers below are injected separately. A host must implement `Lo
 - **`SignalPeers(ctx, op string, payload []byte)`** - delivers one cross-replica coordination signal to the
   other replicas, all fire-and-forget. `op` is an opaque routing key (usable as a topic); `payload` is opaque bytes
   the engine already serialized. The host ships `(op, payload)` to peers and, on the receiving side, hands them back
-  via `Engine.DeliverSignal(ctx, op, payload)`, which parses `op` and applies the effect: a cross-replica
-  `Await`/status-change wake (`statusChange`) or a fleet-membership nudge (`peersChanged`). **Signal volume is
-  bounded by FLOW and DEPLOYMENT events, never by step throughput** - work discovery is pull-based, so nothing
-  is emitted per step (the former per-step `enqueue` doorbell was removed; see "The work doorbell is purely
-  local"). All signal kinds funnel through this one method, so
+  via `Engine.DeliverSignal(ctx, op, payload)`, which parses `op` and applies the effect. **Exactly one op
+  exists - `peersChanged`, a fleet-membership nudge - so signal volume is bounded by DEPLOYMENT events and by
+  nothing else.** Neither work discovery nor `Await` emits anything: both are pull-based (see "The work doorbell
+  is purely local" and "Await"). All signal kinds funnel through this one method, so
   adding a new kind needs no host change; the host never branches on `op` or inspects `payload`. A single-replica host
   does nothing here and none of this runs. The contract asks the host to deliver to OTHER replicas only (the engine
   applies each signal locally before publishing), but the engine does not rely on it: every payload carries the
@@ -415,12 +414,11 @@ ran *and* the intent to cancel a healthy durable flow was itself wrong.)
 
 **The inbound peer entry point `DeliverSignal(ctx, op, payload)`** is the receiving side of cross-replica
 coordination: the host adapter calls it with the `(op, payload)` it received from a peer, and the engine parses `op`
-and applies the effect. The outbound side is the host's `SignalPeers`. Two ops remain - `statusChange` (a
-cross-replica `Await` wake) and `peersChanged` (a fleet-membership nudge) - and **neither scales with step
-throughput**. There is deliberately no work-doorbell op: the per-step `enqueue` signal was removed (see "The
-work doorbell is purely local"), so an inbound `enqueue` from an older peer is now an unknown op and errors
-cleanly. Fire-and-forget: a missed `statusChange` is recovered by the `Await` re-snapshot, a missed
-`peersChanged` by the next heartbeat's registry read.
+and applies the effect. The outbound side is the host's `SignalPeers`. **One op exists** - `peersChanged`, a
+fleet-membership nudge - and it scales with deployment events. Fire-and-forget: a missed one is recovered by the
+next heartbeat's registry read. Any other op is an ERROR rather than a silent absorption, so a peer on a
+different build broadcasting something this engine does not implement is reported; `peers.go` records the two
+shapes that must never be added back.
 
 ### Subgraph keys are read-only
 
@@ -1909,50 +1907,64 @@ correlation-id→key lookup (see "Tracing"); subgraph-child keys are read-only f
 ### Await
 
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
-`cancelled`/`interrupted`. It registers a buffered channel in the `waiters` map, then loops: check state, return if
-stopped, otherwise `select` on the channel, a periodic `awaitPollInterval` (5s) ticker, or context cancellation.
-Non-terminal notifications (e.g. `running` from `Create`) re-check state rather than returning early. The ticker is a
-**safety net, not the primary wake path**: `signalStop` is a post-commit, in-memory, fire-and-forget wake that can be
-*lost* - a worker crash between committing the terminal status and signaling, a dropped peer broadcast, or a no-op
-`SignalPeers` on a multi-replica host - which would otherwise block the waiter until its ctx deadline (forever on a
-deadline-less ctx) while the flow already sits stopped in the DB. The periodic re-snapshot bounds that worst-case
-hang to one interval. It is deliberately coarse (5s) because the signal is the fast path and the poll only backstops
-the rare lost wake, so its steady-state cost is one PK snapshot per interval per blocked `Await`. (`awaitPollInterval`
-is a `var`, not a `const`, only so a test can shorten it.)
+`cancelled`/`interrupted`. It loops: snapshot, return if stopped, otherwise park on the **latch board**
+(`internal/latch`, held as `e.latches`) until something reports the flow done. A wake only ever means *look
+again* - the outcome is always built by the snapshot at the top of the loop - which is why a non-terminal
+notification (e.g. `running` from `Create`) costs nothing but a re-read.
 
-**Shutdown wakes waiters with a sentinel, not an empty string.** `drainRuntime` (after draining workers/timer/
-refiller, so no goroutine will ever signal again) fans a single `awaitShutdownSignal` sentinel out to every
-registered waiter channel. `await` returns a "shutting down" error (503) on receiving it. The sentinel matters
-because the loop distinguishes real stop statuses via `stopped()`: an empty-string wake (the pre-fix value) reads
-as "re-snapshot," so a waiter on a *still-running* flow re-snapshots (a `running` read on the not-yet-closed DB),
-re-blocks on a channel nobody will signal again, and escapes only when its own ctx expires - or, incidentally, up
-to a full `awaitPollInterval` later, when a ticker re-snapshot happens to hit the now-closed DB. The sentinel send
-is non-blocking (`select … default`): a real stop status already buffered on the channel wins, and the waiter
-returns that outcome instead (the snapshot at the loop top catches it). Shutdown drains waiters *before*
-`e.db.Close()`, so the sentinel path never touches a closed DB. Pinned by `fixtures/awaitshutdownflow_test.go`.
+**It reads BEFORE it parks, and that ordering is safe only because the latch is polled.** An event-based wake
+must be armed before the event fires, so the pre-latch `await` had to register its channel *first* and snapshot
+second. The detector asks for the current status of every parked key instead, so a stop committing between the
+snapshot and the park is reported by the next sweep rather than being an event the caller arrived too late to
+hear. Registration order is now a latency question, not a correctness one - do not "restore" the arm-then-read
+ordering.
 
-**Cross-replica `Await`.** A flow created on one replica but completed on another wakes a local `Await` only via the
-`SignalPeers` broadcast (op `statusChange`). Every flow-stop site calls an internal `signalStop` helper that does the
-local waiter wake *and* the peer broadcast; the receiving replica's `DeliverSignal` routes it to `notifyStatusChange`, which wakes
-its local waiters. Without this wiring, an `Await` on the replica that did not run the final step would rely solely
-on the `awaitPollInterval` re-snapshot (above) to notice the DB-committed stop - the broadcast is the *fast* path
-that avoids that up-to-5s wait, while the poll is the backstop when a broadcast is dropped (or a host leaves
-`SignalPeers` a no-op). Non-terminal (`running`) transitions are notified locally only, matching the
-broadcast-only-on-terminal-stops policy.
+**Three things can end a park, and they are not interchangeable:**
 
-**The stop broadcast is gated on the `awaited` flag - a never-awaited flow stops silently.** The `statusChange`
-broadcast exists *only* to wake remote awaiters, so `await` (serving `Await`/`Poll`/`Run`) stamps
-`dwarf_flows.awaited=1` (write-once, `WHERE awaited=0`) before its first snapshot, and `signalStop` takes an
-`awaited` bool and skips `signalStatusChange` when it is false - the local in-memory wake and the flowStopped
-checkpoint run either way (they are free). Each stop site sources the flag with no extra round-trip where a
-flow-row read already exists (`completeFlow` under its write lock; `failStep` via `dynamicSubgraphParent`; the
-cohort-fail path in its in-tx `surgraph_step_id` read), and via one batched `awaitedFlows` `IN`-scan on the
-multi-flow paths (`Cancel`, interrupt propagation, the orphan-subtree sweep). The gate is advisory, never
-load-bearing: an `Await` whose stamp lands after a stop's flag read misses the broadcast but is caught by its own
-`awaitPollInterval` re-snapshot (the same backstop as any lost wake), and an unreadable flag is treated as
-awaited (`awaitedFlows` returns nil on error → broadcast; skipping is only the optimization). The flag is never
-reset and never inherited - `Fork`/`Continue`/subgraph children insert with the default `0`, since their
-awaiters are their own. Pinned by `TestAwaited_GatesStatusChangeBroadcast` (engine package).
+- **`notifyStatusChange` → `Board.Release`** - instant, in-memory, for a status THIS replica just committed.
+- **The detector** (`latchLoop` → `Board.Sweep` → `resolveStoppedFlows`, `latchSweepInterval` **50ms**) - one
+  indexed `IN` lookup per shard holding a parked key, and *nothing at all* when nobody is awaiting. This is the
+  only path that can see a stop made by a **peer**, so it is the primary wake for the cross-replica case, not a
+  backstop. Its cost scales with concurrent **awaiters**, never with step throughput, which is what lets the
+  cadence stay tight without watching how fast the engine is running.
+- **`awaitPollInterval` (60s)** - the last-resort re-snapshot, sitting behind *both* of the above. It bounds the
+  park rather than driving a ticker, so it fires only if the local release and the detector have both failed to
+  notice a stop - i.e. only for a bug. Costing one snapshot per blocked caller per minute, it is cheap enough to
+  keep and too coarse to rely on.
+
+**Shutdown closes the board**, which wakes every parked caller with `latch.ErrClosed` and `await` turns into a
+503. `drainRuntime` stops the detector *before* closing the board (a `Sweep` in flight is not interrupted by
+`Close`) and closes it before `e.db.Close()`, so no wake path touches a closing database. A caller already
+holding a released status keeps it - the closure travels the same one-slot channel as a status and cannot
+displace one - so a flow that stopped microseconds before shutdown still returns its outcome. Pinned by
+`fixtures/awaitshutdownflow_test.go`.
+
+**`resolveStoppedFlows` is the board's status resolver, and three of its shapes are load-bearing** (`latch.go`):
+
+- **One query per SHARD, not per key.** Keys carry their shard, so they are grouped and each shard is asked once;
+  a pass costs O(shards), not O(awaiters).
+- **The token is compared against the row.** A flow key is a capability, so resolving on `flow_id` alone would
+  answer a caller holding a forged or stale token. Pinned by `TestLatchResolve_ReportsStoppedFlowsOnly`.
+- **A shard error is not a failed pass.** Whatever the other shards resolved is returned *alongside* the error
+  (`OnEach` is all-or-nothing, so its callback never propagates one), and the unresolved keys are simply asked
+  about again next tick.
+
+Two smaller rules at the same site: the `IN` list is **chunked at 512** (SQL Server's 2,100-parameter ceiling is
+the tightest bound) and **padded up to one of ten bucket arities** by repeating an id, because arity is part of
+the statement text and an unbucketed list mints a distinct prepared statement per awaiter count. The status
+filter is applied **in Go**, not in the `WHERE` clause - the rows are already in hand, and binding a status is
+the filtered-index landmine.
+
+**Cross-replica `Await`.** A flow created on one replica but completed on another is found by the
+**detector**, and only by it: the stop is committed in the shared database, nothing is sent, and the sweep is
+what reads it. `signalStop` reaches this replica's own board and stops there. Non-terminal (`running`)
+transitions take the same local-only path.
+
+**Nothing marks a flow as awaited, and nothing may start.** `Await` is a pure reader: it writes no row, sets
+no flag, and is invisible to every stop site - so `Await`/`Poll`/`Run` put no write on their synchronous
+request path at all. A flag telling the stop sites whether anyone is waiting only makes sense as a gate on
+sending something, and nothing is sent; adding one back would buy a stop site the right to skip a wake that
+is already local and free, at the price of a write per await.
 
 ### Write-ordering & lock contention
 

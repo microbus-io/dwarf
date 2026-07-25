@@ -36,6 +36,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/candidatecache"
 	"github.com/microbus-io/dwarf/internal/claimstracker"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
@@ -67,12 +68,6 @@ const (
 // after NewEngine - but a white-box test in this package shortens one directly (e.g. e.reapInterval = 20ms,
 // before Startup for the two read once at Startup) to exercise a recovery/await/reap path without waiting
 // minutes. The rationale for what each bounds stays at its field declaration and consult site.
-
-// awaitShutdownSignal is the sentinel drainRuntime sends on each Await waiter channel so a blocked await
-// returns a shutdown error instead of re-snapshotting and re-blocking on a channel that will never be
-// signaled again. The null-byte prefix guarantees it can never collide with a real flow status (the set
-// await distinguishes via stopped()).
-const awaitShutdownSignal = "\x00shutdown"
 
 // Engine is the standalone workflow orchestration engine.
 type Engine struct {
@@ -233,9 +228,12 @@ type Engine struct {
 	reaperStop   chan struct{}
 	reaperWorker sync.WaitGroup
 
-	// Wait registry for Await
-	waitersLock sync.Mutex
-	waiters     map[string][]chan string
+	// Await latch: the board callers park on, and the detector goroutine that asks the shards which of
+	// those flows have stopped. A stop this replica commits reaches the board instantly through
+	// notifyStatusChange; the detector is what makes a PEER's stop observable.
+	latches     *latch.Board
+	latchStop   chan struct{}
+	latchWorker sync.WaitGroup
 
 	// Per-flow parsed-graph cache. The graph JSON is frozen at flow creation, so processStep reuses
 	// the parsed *workflow.Graph across the flow's steps instead of re-unmarshalling it each step.
@@ -255,7 +253,8 @@ type Engine struct {
 	// read-only); a white-box test shortens one directly, before Startup for the two read once at Startup
 	// (reapInterval, wedgeSweepInterval), so an otherwise minutes-long path is observable.
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
-	awaitPollInterval   time.Duration // Await lost-wake re-snapshot cadence (5s)
+	latchSweepInterval  time.Duration // Await latch detector cadence - the bound on cross-replica wake (50ms)
+	awaitPollInterval   time.Duration // Await last-resort re-snapshot, behind both wake paths (60s)
 	pingInterval        time.Duration // peer-registry heartbeat cadence; a peer is counted <4x, pruned >8x (30s)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
@@ -297,7 +296,14 @@ func NewEngine() *Engine {
 	// replicas=max(1,...), so the 0 sentinel never reaches the arithmetic.
 	e.lastAppliedR.Store(0)
 	e.leaseMargin = 30 * time.Second
-	e.awaitPollInterval = 5 * time.Second
+	// The detector's cost scales with concurrent AWAITERS, not with step throughput - one small indexed
+	// IN-lookup per shard holding one, and nothing at all when nobody is waiting - so the cadence is picked
+	// from what a synchronous caller wants rather than from what the engine can afford. 50ms puts a
+	// cross-replica Run at +25ms on average, which is under the noise of the work it is waiting for.
+	e.latchSweepInterval = 50 * time.Millisecond
+	// Behind BOTH wake paths (the local release and the detector), so it is a guard against a bug in them
+	// rather than a mechanism anything relies on. One snapshot per blocked caller per minute.
+	e.awaitPollInterval = 60 * time.Second
 	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	e.pingInterval = 10 * time.Second
 	e.wedgeSweepInterval = 5 * time.Minute
@@ -751,7 +757,10 @@ func (e *Engine) initRuntime() error {
 	e.reaperStop = make(chan struct{})
 	e.graphCache = lru.New[graphCacheKey, *cachedGraph](4096, 15*time.Minute)
 	e.stateRefCache = lru.New[string, json.RawMessage](4096, 15*time.Minute)
-	e.waiters = nil
+	// A fresh board per run: the previous one was closed at drain, and a closed board turns every Await
+	// away. resolveStoppedFlows is non-nil, so New cannot fail.
+	e.latches, _ = latch.New(e.resolveStoppedFlows)
+	e.latchStop = make(chan struct{})
 	e.started.Store(true)
 
 	// Create the dwarf_* instruments and register the observable-gauge callback before workers start
@@ -845,6 +854,9 @@ func (e *Engine) initRuntime() error {
 	e.reaperWorker.Go(func() {
 		e.reaperLoop(e.lifetimeCtx)
 	})
+	e.latchWorker.Go(func() {
+		e.latchLoop(e.lifetimeCtx)
+	})
 	// Peer discovery: start the heartbeat. This replica already registered itself and read R during
 	// Startup (discoverReplicasAtStartup), and the pools are already sized for that R; the loop keeps the
 	// registry row fresh and re-reads R every pingInterval so a fleet change resizes the pools.
@@ -894,6 +906,11 @@ func (e *Engine) drainRuntime() {
 		close(e.reaperStop)
 	}
 	e.reaperWorker.Wait()
+	// The detector stops before the board closes, since Close does not interrupt a sweep in flight.
+	if e.latchStop != nil {
+		close(e.latchStop)
+	}
+	e.latchWorker.Wait()
 	// The pistons last: their cycles are pure reads, so cancelling mid-flight strands nothing, and their
 	// heartbeat must keep this replica in the registry for as long as it is still executing steps - the
 	// workers above were draining against pools every peer sized for a fleet that still included us.
@@ -908,20 +925,12 @@ func (e *Engine) drainRuntime() {
 		e.logger.Error("Deregistering peer at shutdown", "error", err)
 	}
 	e.signalPeersChanged(context.Background())
-	// Wake every blocked Await with the shutdown sentinel so it returns an error rather than re-snapshotting
-	// and re-blocking on a channel no goroutine will ever signal again (workers/timer/refiller are already
-	// drained above). A non-blocking send: if a real stop status is already buffered, that wins (the awaiter
-	// re-snapshots and returns the outcome) and the sentinel is simply dropped.
-	e.waitersLock.Lock()
-	for _, chans := range e.waiters {
-		for _, ch := range chans {
-			select {
-			case ch <- awaitShutdownSignal:
-			default:
-			}
-		}
+	// Wake every blocked Await so it returns a shutdown error rather than waiting out its own context on a
+	// board nothing will ever release again - every goroutine that could have is drained above. A caller
+	// already holding a stop status keeps it and returns that outcome instead.
+	if e.latches != nil {
+		e.latches.Close()
 	}
-	e.waitersLock.Unlock()
 	if e.lifetimeCancel != nil {
 		e.lifetimeCancel()
 	}

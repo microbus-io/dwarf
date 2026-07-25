@@ -821,7 +821,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 	// call rather than notified directly (see failStep). Captured in the transaction, acted on after it.
 	flowFailedParentStepID := 0
 	flowFailedReDispatchParent := false
-	flowFailedAwaited := false
 
 	// Test checkpoint: a breakpoint here freezes the worker after the step is marked completed but before
 	// the transition transaction, so a test can Cancel the flow in exactly the window the transition's
@@ -863,7 +862,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 			flowFailed = false
 			txBytes = stateByteCount{}
 			flowFailedParentStepID, flowFailedReDispatchParent = 0, false
-			flowFailedAwaited = false
 
 			// FaultContention returns a retryable lock-contention error (consumed on the first attempt), so the
 			// test proves Transact rolls back and re-runs the closure to a clean commit. FaultTransitionCommit
@@ -1103,7 +1101,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 						// settled - nothing is stranded. If this flow is a subgraph child, deliver the failure
 						// to the parked parent caller step rather than notifying directly.
 						var parentStepID int
-						tx.QueryRowContext(ctx, "SELECT surgraph_step_id, awaited FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID, &flowFailedAwaited)
+						tx.QueryRowContext(ctx, "SELECT surgraph_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID)
 						if parentStepID != 0 {
 							rd, derr := e.deliverFlowFailureToParent(ctx, tx, parentStepID, sampleErr)
 							if derr != nil {
@@ -1161,14 +1159,14 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 			// still stopped, so wake any Await on the child key (legal read-only introspection), mirroring
 			// failStep's subgraph-child branch. Without this, an Await(childKey) on a child failed by its
 			// completing last arriver (this path) would idle until the lost-wake poll backstop.
-			e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken), workflow.StatusFailed, flowFailedAwaited)
+			e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken), workflow.StatusFailed)
 			if flowFailedReDispatchParent {
 				e.enqueueStep(ctx, shardNum, flowFailedParentStepID)
 			}
 			return nil
 		}
 		compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
-		e.signalStop(ctx, compositeID, workflow.StatusFailed, flowFailedAwaited)
+		e.signalStop(ctx, compositeID, workflow.StatusFailed)
 		return nil
 	}
 
@@ -1311,9 +1309,8 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 
 	e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
 	e.metricStateWriteBytes(ctx, workflowURL, "interrupt_payload", payloadLen)
-	awaitedSet := e.awaitedFlows(ctx, shardNum, chainFlowIDs)
-	for i, compositeID := range chainCompositeIDs {
-		e.signalStop(ctx, compositeID, workflow.StatusInterrupted, awaitedSet == nil || awaitedSet[chainFlowIDs[i].(int)])
+	for _, compositeID := range chainCompositeIDs {
+		e.signalStop(ctx, compositeID, workflow.StatusInterrupted)
 	}
 	return nil
 }

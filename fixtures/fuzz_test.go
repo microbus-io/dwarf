@@ -29,16 +29,16 @@ import (
 // ops must return an error; structurally-valid-but-bogus signals (nonexistent shards/steps/keys)
 // must be absorbed harmlessly, per the documented small-blast-radius contract.
 func FuzzDeliverSignal(f *testing.F) {
-	f.Add("statusChange", []byte(`{"FlowKey":"1-1-deadbeef","Status":"completed"}`))
-	f.Add("statusChange", []byte(`{"FlowKey":"","Status":""}`))
-	f.Add("statusChange", []byte(`{"Origin":"peer-x","FlowKey":"9-9-zz","Status":"bogus"}`))
-	f.Add("statusChange", []byte(`not json`))
-	f.Add("statusChange", []byte(`[]`))
+	// The one live op, well-formed and not.
 	f.Add("peersChanged", []byte(`{"Origin":"peer-x"}`))
+	f.Add("peersChanged", []byte(`{"Origin":""}`))
 	f.Add("peersChanged", []byte(`{`))
-	// The retired per-step work doorbell: an older peer may still send it, so the entry point must reject
-	// it cleanly rather than panic. Kept as a seed precisely because it is no longer a live op.
+	f.Add("peersChanged", []byte(`[]`))
+	// Ops the engine does not implement, seeded precisely BECAUSE they are not live paths: a peer on a
+	// different build can send them, and the entry point must reject each cleanly rather than panic.
 	f.Add("enqueue", []byte(`{"Shard":1,"StepID":1}`))
+	f.Add("statusChange", []byte(`{"FlowKey":"1-1-deadbeef","Status":"completed"}`))
+	f.Add("statusChange", []byte(`not json`))
 	f.Add("unknownop", []byte(`{}`))
 	f.Add("", []byte(nil))
 

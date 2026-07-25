@@ -28,6 +28,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/candidatecache"
 	"github.com/microbus-io/dwarf/internal/keys"
+	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -410,87 +411,43 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 // await blocks until a flow stops. A DeleteOnCompletion flow stays `completed` (outcome observable) for the
 // deletion grace window, then the reaper removes it and await 404s.
 func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
-	stopped := func(s string) bool {
-		return s != "" && s != workflow.StatusCreated && s != workflow.StatusPending && s != workflow.StatusRunning
-	}
-
-	// Stamp the flow as awaited so its stop sites broadcast the terminal status to peer replicas
-	// (signalStop skips the SignalPeers statusChange for a never-awaited flow - the broadcast's only
-	// purpose is to wake remote awaiters). Stamped before the first snapshot below, so a stop that
-	// commits after the snapshot observes the flag. A stop transaction that read awaited=0 concurrently
-	// with this write may still skip the broadcast; the awaitPollInterval re-snapshot bounds that miss,
-	// exactly as it bounds any other lost wake. Write-once: the awaited=0 guard keeps repeated
-	// Await/Poll calls from re-locking the row.
-	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	db, err := e.db.Shard(shardNum)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_flows SET awaited=1, touch=1-touch WHERE flow_id=? AND flow_token=? AND awaited=0",
-		flowID, flowToken,
-	)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	ch := make(chan string, 1)
-	e.waitersLock.Lock()
-	if e.waiters == nil {
-		e.waiters = make(map[string][]chan string)
-	}
-	e.waiters[flowKey] = append(e.waiters[flowKey], ch)
-	e.waitersLock.Unlock()
-
-	defer func() {
-		e.waitersLock.Lock()
-		chans := e.waiters[flowKey]
-		for i, c := range chans {
-			if c == ch {
-				e.waiters[flowKey] = append(chans[:i], chans[i+1:]...)
-				break
-			}
-		}
-		if len(e.waiters[flowKey]) == 0 {
-			delete(e.waiters, flowKey)
-		}
-		e.waitersLock.Unlock()
-	}()
-
-	// signalStop is a post-commit, in-memory, fire-and-forget wake, so it can be lost: a worker crash
-	// between committing the terminal status and signaling, a dropped peer broadcast, or a no-op
-	// SignalPeers on a multi-replica host. Any of those would leave this waiter blocked until its ctx
-	// deadline (forever on a deadline-less ctx) while the flow already sits stopped in the DB. The ticker
-	// is the safety net: re-snapshot every awaitPollInterval even absent a notification, so the worst-case
-	// hang past the actual stop is bounded by that interval rather than unbounded.
-	ticker := time.NewTicker(e.awaitPollInterval)
-	defer ticker.Stop()
-
 	for {
+		// Read first, park second. Registering AFTER the read is safe - and is what lets an
+		// already-stopped flow answer with no waiting at all - because the latch is POLLED rather than
+		// signalled: a stop committing in the gap is reported by the detector's next sweep instead of
+		// being an event this caller arrived too late to hear.
 		outcome, err := e.snapshot(ctx, flowKey)
 		if err != nil {
+			// A read that failed because the CALLER's ctx ended is the deadline this call is allowed to
+			// hit, not an infrastructure failure - so it degrades to the same not-stopped answer the park
+			// below gives, and `Poll` keeps its contract of returning a re-pollable outcome rather than a
+			// timeout error. The window is small and entirely latency-dependent (the read has to straddle
+			// the deadline), which is why it shows up against a real server and not against local SQLite.
+			if ctx.Err() != nil {
+				return &workflow.FlowOutcome{Status: workflow.StatusRunning}, nil
+			}
 			return nil, errors.Trace(err)
 		}
-		if outcome != nil && stopped(outcome.Status) {
+		if outcome != nil && isStoppedStatus(outcome.Status) {
 			return outcome, nil
 		}
-		select {
-		case s := <-ch:
-			// drainRuntime sends this sentinel at Shutdown so a waiter on a still-running flow returns
-			// instead of spinning on the ticker until the caller's ctx expires. A real stop status buffered
-			// ahead of it was already caught by the snapshot at the top of this loop, so reaching here on the
-			// sentinel means the flow has not stopped and never will under this engine.
-			if s == awaitShutdownSignal {
-				return nil, errors.New("engine is shutting down", http.StatusServiceUnavailable)
-			}
-		case <-ticker.C:
-		case <-ctx.Done():
-			// The ctx ended before the flow stopped. Return the current non-terminal outcome (Stopped() is
-			// false) rather than an error; the public Await turns a not-stopped result into a timeout error,
-			// while Poll returns it as-is so a caller can re-poll.
+
+		// awaitPollInterval bounds the park rather than gating a ticker: it is the last-resort re-read
+		// behind BOTH wake paths, so it fires only if the local release and the detector have both failed
+		// to notice a flow that stopped. The loop then re-snapshots and re-parks.
+		waitCtx, cancelWait := context.WithTimeout(ctx, e.awaitPollInterval)
+		_, waitErr := e.latches.Latch(waitCtx, flowKey)
+		cancelWait()
+		switch {
+		case waitErr == nil:
+			// Released with a status. Loop rather than trusting it: the outcome the caller gets is always
+			// built by the snapshot above, so a release only ever means "look again now".
+		case errors.Is(waitErr, latch.ErrClosed):
+			return nil, errors.New("engine is shutting down", http.StatusServiceUnavailable)
+		case ctx.Err() != nil:
+			// The caller's ctx ended before the flow stopped. Return the current non-terminal outcome
+			// (Stopped() is false) rather than an error; the public Await turns a not-stopped result into a
+			// timeout error, while Poll returns it as-is so a caller can re-poll.
 			if outcome != nil {
 				return outcome, nil
 			}
@@ -499,15 +456,14 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 	}
 }
 
-// signalStop wakes local Await callers waiting on the given flow and broadcasts the stopped status to
-// peer replicas so their Await callers wake too. Use it at every flow-stop site (completed, failed,
-// cancelled, interrupted); non-terminal transitions (running) need only the local notifyStatusChange.
-// awaited is the flow row's awaited flag (set by Await/Poll): when false, the peer broadcast is skipped -
-// its only purpose is to wake remote awaiters, and a never-awaited flow has none. The local wake and the
-// stop checkpoint still run either way (they are free), and a waiter that raced the stop's awaited read
-// is caught by its own periodic re-snapshot. When the flag is unknown (a read failed), pass true -
-// broadcasting is always safe; skipping is only the optimization.
-func (e *Engine) signalStop(ctx context.Context, flowKey string, status string, awaited bool) {
+// signalStop wakes local Await callers waiting on the given flow. Use it at every flow-stop site
+// (completed, failed, cancelled, interrupted); non-terminal transitions (running) need only the plain
+// notifyStatusChange, which is the same wake without the stop checkpoint or the drop fault.
+//
+// It reaches THIS replica only, and nothing here needs to reach further: a peer's awaiters find the stop
+// by reading the flow row on the latch detector's own cadence, so the wake is an accelerator for the
+// local case rather than the mechanism awaiting rests on.
+func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) {
 	// Test rendezvous: a flow just reached a committed stop (this runs post-commit). Fired both unscoped and
 	// scoped to this flow+status, so a test can wait for "any stop" or for one specific flow to reach one
 	// specific status. Placed before the drop-fault below so both fire even when the wake itself is dropped - a
@@ -515,66 +471,24 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string, 
 	// Inert in production: the Enabled gate short-circuits before the scoped name is built.
 	e.seams.Checkpoint(ctx, CheckpointFlowStopped)
 	e.seams.Checkpoint(ctx, CheckpointFlowStopped, flowKey, status)
-	// FaultDropSignalStop simulates a lost terminal wake (worker crash between commit and signal, dropped
-	// broadcast, no-op SignalPeers) so a test can prove Await still returns via its periodic re-snapshot.
+	// FaultDropSignalStop simulates a lost terminal wake - a worker crash between the commit and the
+	// signal - so a test can prove Await still returns without one, via the latch detector reading the
+	// committed row.
 	if e.seams.IsFault(FaultDropSignalStop) {
 		return
 	}
 	e.notifyStatusChange(flowKey, status)
-	if awaited {
-		e.signalStatusChange(ctx, flowKey, status)
-	}
 }
 
-// awaitedFlows returns the subset of the given flow ids whose awaited flag is set, for gating the
-// signalStop peer broadcast on the multi-flow stop paths (Cancel, interrupt propagation, orphan
-// recovery) with one batched read. On any read error it returns nil, which callers treat as
-// "all awaited" (broadcast; see signalStop).
-func (e *Engine) awaitedFlows(ctx context.Context, shardNum int, flowIDs []any) map[int]bool {
-	if len(flowIDs) == 0 {
-		return map[int]bool{}
-	}
-	db, err := e.db.Shard(shardNum)
-	if err != nil {
-		return nil
-	}
-	placeholders := strings.Repeat("?,", len(flowIDs)-1) + "?"
-	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+placeholders+") AND awaited=1",
-		flowIDs...,
-	)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	awaited := map[int]bool{}
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil
-		}
-		awaited[id] = true
-	}
-	if rows.Err() != nil {
-		return nil
-	}
-	return awaited
-}
-
-// notifyStatusChange wakes up all Await callers waiting on the given flow.
+// notifyStatusChange wakes up all Await callers waiting on the given flow. It is the instant path, for a
+// status this replica just committed; a peer's is found by the latch detector's next sweep instead. Both
+// only ever mean "look again" - the waiter re-reads the flow to build its outcome - so passing a
+// non-terminal status here is harmless and is what the running-transition sites do.
 func (e *Engine) notifyStatusChange(flowKey string, status string) {
-	e.waitersLock.Lock()
-	chans := e.waiters[flowKey]
-	waiting := make([]chan string, len(chans))
-	copy(waiting, chans)
-	e.waitersLock.Unlock()
-
-	for _, ch := range waiting {
-		select {
-		case ch <- status:
-		default:
-		}
+	if e.latches == nil {
+		return // not started: nobody can be awaiting
 	}
+	e.latches.Release(flowKey, status)
 }
 
 // The work doorbell is PURELY LOCAL - it reaches this replica's candidate cache and nothing else.

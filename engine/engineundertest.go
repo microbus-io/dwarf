@@ -168,7 +168,7 @@ const (
 	// Process-wide, consumed per attempt (InjectN sets how many attempts fail):
 	FaultCompleteSurgraphErr = "completeSurgraphErr" // completeSurgraphFlow returns a non-contention database error
 
-	// Scoped by signal op (enqueue / statusChange):
+	// Scoped by signal op:
 	FaultSignalPeersPanic = "signalPeersPanic" // the host SignalPeers call panics (host-call panic isolation)
 
 	// Process-wide (no scope):

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -59,14 +60,13 @@ func (r *signalRecorder) ops() []string {
 }
 
 // TestDeliverSignal_IdempotentAndSpoofSafe pins the documented trust-boundary claim (see
-// DeliverSignal's godoc): duplicate and spoofed peer signals are harmless. Replaying a statusChange for
-// an unknown key, and hammering the entry point with malformed and unknown-op input, must not re-execute
-// any task nor panic. DeliverSignal returns an error only for genuinely malformed input (bad JSON,
-// unknown op), and the engine keeps processing new work afterward.
+// DeliverSignal's godoc): duplicate and spoofed peer signals are harmless. Replaying the live op, and
+// hammering the entry point with malformed and unimplemented-op input, must not re-execute any task nor
+// panic. DeliverSignal errors only for genuinely malformed input (bad JSON, an op it does not
+// implement), and the engine keeps processing new work afterward.
 //
-// It also pins that `enqueue` is now an UNKNOWN op: the per-step work doorbell was removed, so a peer
-// running an older build that still broadcasts one gets a clean error rather than silent acceptance, and
-// no code path re-admits it.
+// The two unimplemented ops it names are the shapes peers.go forbids - a per-step work doorbell and a
+// per-flow stop broadcast - so nothing can quietly re-admit either by accepting its op name.
 func TestDeliverSignal_IdempotentAndSpoofSafe(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -105,20 +105,21 @@ func TestDeliverSignal_IdempotentAndSpoofSafe(t *testing.T) {
 	callsBefore := calls
 	callsMu.Unlock()
 
-	// 1. statusChange for an unknown key, 100x - only wakes local Await waiters (there are none).
-	sc, _ := json.Marshal(statusChangePayload{FlowKey: "1-424242-deadbeefdeadbeef", Status: workflow.StatusCompleted})
-	for range 100 {
-		assert.NoError(eng.DeliverSignal(ctx, string(signalOpStatusChange), sc))
-	}
-	// 2. A peersChanged nudge is a pure registry re-read; spoofing it cannot dispatch work.
+	// 1. A peersChanged nudge, 100x - a pure registry re-read; spoofing it cannot dispatch work.
 	pc, _ := json.Marshal(peerPayload{Origin: "some-peer"})
-	assert.NoError(eng.DeliverSignal(ctx, string(signalOpPeersChanged), pc))
-	// 3. Malformed input errors: garbage JSON, an unknown op, and - now - the RETIRED enqueue op, whose
-	//    removal must be a clean rejection rather than a silently-ignored payload.
-	assert.Error(eng.DeliverSignal(ctx, string(signalOpStatusChange), []byte("{not json")))
+	for range 100 {
+		assert.NoError(eng.DeliverSignal(ctx, string(signalOpPeersChanged), pc))
+	}
+	// 2. Malformed input errors: garbage JSON and an unknown op.
+	assert.Error(eng.DeliverSignal(ctx, string(signalOpPeersChanged), []byte("{not json")))
 	assert.Error(eng.DeliverSignal(ctx, "bogusOp", []byte("{}")))
+	// 3. An op this engine does not implement is rejected rather than silently absorbed. The two named
+	//    here are the ones a peer on an older build can actually send, so they are the concrete cases:
+	//    a per-step work doorbell and a per-flow stop broadcast (see peers.go for why neither exists).
 	assert.Error(eng.DeliverSignal(ctx, "enqueue", []byte(`{"Shard":1,"StepID":1}`)),
-		"the retired per-step work doorbell must be an unknown op, not a live path")
+		"a per-step work doorbell is not a live path")
+	assert.Error(eng.DeliverSignal(ctx, "statusChange", []byte(`{"FlowKey":"1-424242-deadbeefdeadbeef","Status":"completed"}`)),
+		"a per-flow stop broadcast is not a live path")
 
 	// No signal re-executed the already-completed step.
 	time.Sleep(300 * time.Millisecond)
@@ -158,13 +159,13 @@ func TestDeliverSignal_OfflineEngineIgnoresSignals(t *testing.T) {
 	emittedByShutdown := rec.count() // the shutdown deregister nudge is legitimate; anything after it is not
 
 	pc, _ := json.Marshal(peerPayload{Origin: "peer-x"})
-	sc, _ := json.Marshal(statusChangePayload{Origin: "peer-x", FlowKey: "1-1-aaaaaaaaaaaaaaaa", Status: workflow.StatusCompleted})
 
-	// Every live op is accepted (fire-and-forget hints never error) and every one is a no-op. The offline
-	// check runs BEFORE the op switch, so even a retired op is absorbed rather than reported unknown.
+	// The live op is accepted (fire-and-forget hints never error) and is a no-op. Offline is checked
+	// BEFORE the op is looked at, so an op this engine does not implement is absorbed here rather than
+	// reported unknown - a dead replica has nothing to say about what it would have done.
 	assert.NoError(eng.DeliverSignal(ctx, string(signalOpPeersChanged), pc))
-	assert.NoError(eng.DeliverSignal(ctx, string(signalOpStatusChange), sc))
 	assert.NoError(eng.DeliverSignal(ctx, "enqueue", []byte(`{"Shard":1,"StepID":1}`)))
+	assert.NoError(eng.DeliverSignal(ctx, "statusChange", []byte(`{"FlowKey":"1-1-aaaaaaaaaaaaaaaa"}`)))
 
 	// The peersChanged nudge triggered no registry re-read (which would fail on closed shards) and no
 	// broadcast, and the offline engine emitted nothing beyond its own shutdown deregister nudge.
@@ -185,33 +186,36 @@ func TestDeliverSignal_IgnoresOwnEcho(t *testing.T) {
 	assert.NoError(eng.SetHost(noopHost{}))
 	assert.NoError(eng.Startup(t.Context()))
 
-	// A statusChange echo observability hook: register a waiter and see whether a signal wakes it.
-	// The waiters map is created lazily by the first Await, so initialize it here.
-	woke := func(payload statusChangePayload) bool {
-		ch := make(chan string, 1)
-		eng.waitersLock.Lock()
-		if eng.waiters == nil {
-			eng.waiters = make(map[string][]chan string)
-		}
-		eng.waiters[payload.FlowKey] = append(eng.waiters[payload.FlowKey], ch)
-		eng.waitersLock.Unlock()
-		b, _ := json.Marshal(payload)
-		assert.NoError(eng.DeliverSignal(ctx, string(signalOpStatusChange), b))
-		select {
-		case <-ch:
-			return true
-		case <-time.After(200 * time.Millisecond):
-			return false
+	// peersChanged is the observable op: it re-reads the registry, so planting peer rows WITHOUT forcing a
+	// recount leaves the engine's count stale until a signal is actually acted on. R is therefore the
+	// readout for "was this signal processed or discarded".
+	plantPeers := func(ids ...int64) {
+		for _, id := range ids {
+			err := eng.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+				_, err := db.ExecContext(ctx,
+					"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at) VALUES (?, NOW_UTC(), NOW_UTC())", id)
+				return err
+			})
+			assert.NoError(err)
 		}
 	}
+	deliver := func(origin string) {
+		b, _ := json.Marshal(peerPayload{Origin: origin})
+		assert.NoError(eng.DeliverSignal(ctx, string(signalOpPeersChanged), b))
+	}
 
-	key := "1-424242-deadbeefdeadbeef"
-	assert.False(woke(statusChangePayload{Origin: eng.engineIDBase36, FlowKey: key, Status: workflow.StatusCompleted}),
-		"the engine's own echoed signal must be discarded")
-	assert.True(woke(statusChangePayload{Origin: "some-peer", FlowKey: key, Status: workflow.StatusCompleted}),
-		"a peer's signal must be processed")
-	assert.True(woke(statusChangePayload{FlowKey: key, Status: workflow.StatusCompleted}),
-		"an origin-less signal (older build) must be processed")
+	assert.Equal(1, eng.observedReplicas(), "solo to start with")
+	plantPeers(918001, 918002)
+
+	deliver(eng.engineIDBase36)
+	assert.Equal(1, eng.observedReplicas(), "the engine's own echoed signal must be discarded, so no recount")
+
+	deliver("some-peer")
+	assert.Equal(3, eng.observedReplicas(), "a peer's signal must be processed")
+
+	plantPeers(918003)
+	deliver("") // an older build's signal carries no Origin
+	assert.Equal(4, eng.observedReplicas(), "an origin-less signal (older build) must be processed")
 }
 
 // TestSignals_VolumeDoesNotScaleWithSteps pins the property that removing the per-step work doorbell
@@ -260,14 +264,13 @@ func TestSignals_VolumeDoesNotScaleWithSteps(t *testing.T) {
 
 	var perStep []string
 	for _, op := range rec.ops()[baseline:] {
-		// statusChange is per-FLOW (one terminal stop, gated on the awaited flag) - Run awaits, so exactly
-		// one is expected here. peersChanged is per-deployment-event. Anything else is per-step by
-		// elimination, since a step transition is the only other thing that happened.
-		if signalOp(op) != signalOpStatusChange && signalOp(op) != signalOpPeersChanged {
+		// peersChanged is per-deployment-event and is the only surviving op. Anything else is per-step or
+		// per-flow by elimination, since running this graph is the only thing that happened.
+		if signalOp(op) != signalOpPeersChanged {
 			perStep = append(perStep, op)
 		}
 	}
-	assert.Zero(len(perStep), "no per-step op may be broadcast; got %v", perStep)
+	assert.Zero(len(perStep), "no per-step or per-flow op may be broadcast; got %v", perStep)
 	// And the total stays in flow-scale territory rather than step-scale: 6 tasks ran, so a per-step
 	// broadcast would put this at >= 6 regardless of which op carried it.
 	assert.True(rec.count()-baseline < len(names),

@@ -75,11 +75,10 @@ outcome, err := eng.Await(ctx, flowKey)
 ```
 
 Blocks until the flow stops — `completed`, `failed`, `cancelled`, or `interrupted` — and returns the
-outcome. It wakes on a status-change notification or context cancellation, and also re-checks on an internal
-ticker: the notification is a fire-and-forget in-memory wake that can be lost, so the ticker is a load-bearing
-safety net that bounds the wait to one interval — not a redundant polling layer to build atop, nor one to
-optimize away. Across replicas, `Await` relies on the host's `SignalPeers` broadcast (see
-[Deployment](deployment.md)).
+outcome, or returns without it when the caller's context ends first. The wait is bounded by a short internal
+cadence rather than by anything the caller or the host has to arrange: a flow that stops on another replica
+wakes its waiters just as one that stops locally does, and a host that implements `SignalPeers` as a no-op
+changes nothing here.
 
 If the ctx deadline fires first, `Await` returns the error and the flow **keeps running** — it is durable and
 not bound to your call. You still hold the key, so you can `Await` again.

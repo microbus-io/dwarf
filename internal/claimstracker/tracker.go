@@ -15,29 +15,21 @@ limitations under the License.
 */
 
 // Package claimstracker records which steps a replica has a claim CAS in flight on, so a sibling worker
-// that pops the same candidate can skip it instead of paying a round trip to lose the CAS. It exists
-// because the selection predicate filters COMMITTED state: an issued-but-uncommitted claim still reads
-// `pending`, so the refiller's next pass legitimately re-selects a step this replica is mid-claim on.
-// Only the process knows; no SQL filter can see the uncommitted write.
+// that pops the same candidate can skip it instead of paying a round trip to lose the CAS.
 //
-// It is strictly ADVISORY - the claim CAS remains the only thing that grants a step. A missed entry
-// costs one wasted round trip (the behaviour that predates this), a stale one costs a skipped candidate
-// the next pass re-selects. Neither is a correctness question.
+//	if !tracker.TryClaim(shard, stepID) {
+//		continue // a sibling worker in this replica is already claiming it
+//	}
 //
-// # Two-generation rolling window
+// It is strictly ADVISORY: the claim CAS remains the only thing that grants a step, so a missed or stale
+// entry costs a wasted round trip or a deferred dispatch, never correctness. It is safe for concurrent
+// use.
 //
-// Entries must expire on their own, so an entry outliving its worker only ever DELAYS a re-claim, never
-// prevents one - the horizon has to sit well under the lease margin so it can never be why a
-// lease-recovered step fails to re-dispatch. The naive shape is one map plus a per-entry timestamp and a
-// sweep, but under a pinned worker pool at high throughput the live population outgrows any size gate and
-// the sweep walks the whole map on every claim, under one lock.
-//
-// This keeps that bound with NO per-entry work. Two maps hold the current whole-second bucket and the
-// previous one; a lookup checks both. Once per second the maps ROLL - current becomes previous, previous
-// is dropped, a fresh current is allocated - which is O(1) (three pointer assignments), not O(n). An
-// entry therefore lives between one and two seconds depending on where in the second it landed, and the
-// only cost paid at expiry is the garbage collection of a map reference. There is no timestamp per entry
-// and no scan.
+// A reservation EXPIRES ON ITS OWN, between one and two seconds after it was taken - long enough to
+// outlast the interval between candidate scans, far short of the lease margin. Nothing has to release
+// one, and RelinquishClaim exists only for a caller that knows a step is settled sooner than that and
+// wants the entry gone now. Any path that re-offers a step to THIS replica must call it, or the replica
+// skips its own re-dispatch until the entry ages out.
 package claimstracker
 
 import (

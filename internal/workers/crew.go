@@ -18,18 +18,30 @@ limitations under the License.
 // the cache and hand each to one callback. The supply side - selecting which candidates are there to be
 // popped - is elsewhere.
 //
-// It is a Crew rather than a "pool" deliberately: in this codebase pool already means the database
-// connection pool, which is precisely the resource these goroutines contend for, so a type named Pool
-// beside it would be ambiguous at every call site - especially in a growth rule that turns on whether a
-// worker is holding a connection.
-//
-// The crew knows nothing about steps, flows, or databases. It owns exactly three things: how many
+// The crew knows nothing about steps, flows, or databases. It owns three things and no more: how many
 // goroutines exist, when one more is worth spawning, and how they shut down without racing each other.
 // What "processing a candidate" means is the caller's, passed in as a func.
 //
-// It is GROW-ON-DEMAND. Start spawns a resident set and the crew adds one more only when every goroutine
-// it has is off doing work that does not compete for the caller's scarce resource - see Offsite, which is
-// the whole reason this is a crew rather than a fixed set of goroutines.
+//	crew, err := workers.New(cache, process)
+//	crew.SetMax(ceiling)
+//	crew.Start(ctx, resident)
+//	...
+//	cache.Close() // releases the goroutines parked in Pop
+//	crew.Drain()
+//
+// It is GROW-ON-DEMAND: Start spawns a resident set, and the crew adds one more only when every
+// goroutine it has is OFFSITE - away in work that does not compete for whatever resource bounds the
+// crew. A goroutine reports that itself:
+//
+//	onsite := crew.Offsite()
+//	... the off-resource call ...
+//	onsite()
+//
+// THAT SCOPE MUST BE THE OFF-RESOURCE CALL AND NOTHING ELSE, and the release is deliberately not
+// deferred - see Offsite.
+//
+// The cache, not ctx, is the stop signal: close it, then Drain. Every Set* is safe to call from anywhere
+// at any time; Start and Drain are the caller's lifecycle and must not overlap.
 package workers
 
 import (

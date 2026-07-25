@@ -14,35 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package piston drives one shard: it is the engine's per-shard cylinder, firing the same supply cycle
-// over and over against its own database, on its own clock, with no barrier against its peers. A fleet
-// of shards is a fleet of pistons.
+// Package piston supplies step candidates from one shard. One piston works one shard, firing the same
+// cycle over and over against its own database on its own clock, with no barrier against its peers; an
+// engine with N shards runs N of them.
 //
-// It is a CONSUMER of its database, never the owner. The handle is passed in already open and is closed
-// by whoever opened it, so a piston has no Open, no Close, and no say over pool sizes. That is also why
-// it is not called a shard: the shard is the database partition, and this is the thing that works it.
+// A piston is a CONSUMER of its database, never the owner: the handle is passed in already open and is
+// closed by whoever opened it, so there is no Open, no Close, and no say over pool sizes. It owns the
+// supply cycle, the two queries behind it, its instruments, and this replica's heartbeat into the shard's
+// peer registry; it borrows the planner and the candidate cache, both shared with every other piston on
+// the replica.
 //
-// What it owns is the supply cycle - the pipeline, the two queries behind it, its own instruments - plus
-// this replica's heartbeat into the shard's peer registry. The heartbeat REFRESHES that row and never
-// creates it: the owner registers once at startup and deletes once at shutdown, so a beat can never
-// resurrect a row the owner just removed. What it borrows is the planner and the candidate cache, both
-// shared with every other piston on this replica.
-//
-// Run blocks and drives two independent loops - the supply cycle, and this replica's heartbeat on its own
-// fixed cadence:
+// Run blocks and drives two independent loops until its context ends:
 //
 //	cycle (paced by the pipeline) -> record -> repeat
 //	beat -> sleep -> repeat
 //
-// They are separate goroutines because a beat behind a cycle is a beat gated on that cycle RETURNING, and
-// a deep-backlog scan can run for tens of seconds on a dialect without the early-stop - long enough to
-// drop a healthy replica out of the fleet's roster.
+// The heartbeat only REFRESHES this replica's registry row - the owner must register it once at startup
+// and delete it once at shutdown.
 //
-// An IDLE piston skips the cycle entirely and only heartbeats. That is the await-only replica: it holds
-// connections, so it must stay in the registry and keep dividing the pools, but it claims no work, so it
-// must not be counted among the dispatchers - a replica handed a residue class of candidates it never
-// selects strands them. Going idle also withdraws the shard from the shared planner and empties its cache
-// partition, since a piston that has stopped reporting must not leave a stale band claim behind.
+// SetIdle(true) skips the cycle entirely and leaves only the heartbeat, which is the await-only replica:
+// it keeps holding connections and counting toward the fleet, but claims no work. Going idle withdraws
+// the shard from the shared planner and empties its cache partition, so nothing is left claiming a band
+// this piston no longer reports on.
+//
+// Every Set* is live: the owner may re-derive any of them while Run is in flight.
 package piston
 
 import (

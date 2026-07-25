@@ -18,8 +18,8 @@ limitations under the License.
 Two-replica contention. Two engines share one database (a shared in-memory
 SQLite DSN), each with its own TestProxy and workers, wired as peers both ways. This pins the
 claim-CAS exactly-once guarantee under real cross-replica contention: every step of every flow runs
-exactly once no matter which replica claims it. A second subtest proves the cross-replica Await wake
-fires via the peer statusChange signal (fast), not the 5s backstop poll.
+exactly once no matter which replica claims it. A second subtest proves the cross-replica Await wake is
+prompt - the latch detector's cadence - rather than falling through to the last-resort re-snapshot.
 */
 package fixtures
 
@@ -122,13 +122,14 @@ func TestTwoReplicaflow(t *testing.T) {
 		}
 	})
 
-	t.Run("cross_replica_await_wakes_via_signal_not_poll", func(t *testing.T) {
+	t.Run("cross_replica_await_wakes_promptly", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		// A dedicated pair on their own shared DB: `awaiter` has ZERO workers (so it can never claim the
-		// step - forcing the cross-replica path), `worker` executes it. Awaiting on `awaiter` can only
-		// return via `worker`'s peer statusChange signal; the backstop poll is 5s, so a sub-2s return proves
-		// the signal (not the poll) woke the waiter. (Mirrors subgrapherrorwaitflow_test.go's timing pin.)
+		// step - forcing the cross-replica path), `worker` executes it. Nothing crosses between the two, so
+		// `awaiter` can only learn of the stop by reading the flow row; its last-resort re-snapshot is a
+		// minute away, so a sub-2s return proves the detector found it. (Mirrors
+		// subgrapherrorwaitflow_test.go's timing pin.)
 		pa := engine.NewTestProxy() // pure awaiter
 		pb := engine.NewTestProxy() // executor
 		wg := workflow.NewGraph("Wake")

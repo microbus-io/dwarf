@@ -14,15 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package faninmap derives the fan-out -> fan-in convergence map of a workflow graph. It is an engine-side
-// optimization view computed from a graph's public definition, not part of the graph itself: workflow.Graph
-// carries only the author's definition (nodes, transitions, fan-in flags), and the engine builds this lookup
-// from it when it needs to route an empty fan-out cohort to its convergence node.
+// Package faninmap derives the fan-out -> fan-in convergence map of a workflow graph: which node a given
+// fan-out source's branches converge on.
 //
-// The map is a pure, deterministic function of the graph structure, so it is never persisted - the engine
-// computes it once per flow at dispatch (caching it beside the parsed graph) rather than freezing it into the
-// stored graph JSON. The traversal assumes an already-validated graph (workflow.Graph.Validate rejects the
-// malformed shapes this analysis would otherwise have to guard against), so it only builds the mapping.
+//	fanIn := faninmap.New(graph)
+//	target := fanIn.For(sourceTask) // "" when the source converges nowhere
+//
+// It answers the one question an EMPTY fan-out cohort raises - a cohort with no branches has nobody to
+// arrive at the fan-in, so the engine routes it there directly. A populated cohort converges through
+// ordinary arrival accounting and never asks.
+//
+// The map is a pure function of the graph's structure, so it is derived rather than stored: build it once
+// per parsed graph and keep it beside that parse. It expects a graph that has already passed
+// workflow.Graph.Validate and guards none of the shapes Validate rejects. A Map is read-only once built
+// and safe for concurrent use.
 package faninmap
 
 import "github.com/microbus-io/dwarf/workflow"

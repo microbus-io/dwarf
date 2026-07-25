@@ -35,14 +35,15 @@ import (
 // (op, payload) to OTHER replicas, EXCLUDING the calling replica, and on the receiving side hands them
 // back via Engine.DeliverSignal(ctx, op, payload) - it is a pure pipe that never inspects either. The
 // engine always applies a signal's effect locally before calling SignalPeers, so an implementation that
-// echoes the signal back to the sender would cause it to be processed twice on the originating replica (a
-// doubled status-change wake); if the transport delivers published messages to the publisher, the
-// implementation must filter out self-delivery. Because the host never branches on op or inspects
-// payload, adding a new engine signal kind requires no host change.
+// echoes the signal back to the sender would cause it to be processed twice on the originating replica; if
+// the transport delivers published messages to the publisher, the implementation must filter out
+// self-delivery. Because the host never branches on op or inspects payload, adding a new engine signal
+// kind requires no host change.
 //
-// Signal volume is bounded by FLOW and DEPLOYMENT events, never by step throughput: the engine discovers
-// pending work by polling its own databases, so no signal is emitted per step. A host may size its
-// transport accordingly, and an implementation that is expensive per call is not on the hot path.
+// Signal volume is bounded by DEPLOYMENT events, never by flow or step throughput: the engine discovers
+// both pending work and flow outcomes by reading its own databases, so nothing is emitted per step or per
+// flow. A host may size its transport accordingly, and an implementation that is expensive per call is not
+// on the hot path.
 type Host interface {
 	// LoadGraph fetches a workflow graph definition by its URL (the addressable resolve key passed to
 	// Create). The flow's opaque baggage rides on ctx; read it with workflow.BaggageFrom(ctx) if loading

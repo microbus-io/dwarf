@@ -34,11 +34,10 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestCrossReplica_LostTerminalWake_AwaiterPolls pins that when the replica that runs a flow's final step has
-// its terminal wake fully dropped (FaultDropSignalStop drops both the local waiter wake AND the peer
-// statusChange broadcast), an Await on a *different* replica still returns - via its own periodic
-// re-snapshot, the only wake path left once the signal is gone. The cross-replica analog of
-// TestFault_DropSignalStop.
+// TestCrossReplica_LostTerminalWake_AwaiterPolls pins that when the replica running a flow's final step
+// has its terminal wake dropped entirely (FaultDropSignalStop), an Await on a *different* replica still
+// returns. Nothing crosses between the two replicas here, so the awaiter can only learn of the stop by
+// reading the committed flow row. The cross-replica analog of TestFault_DropSignalStop.
 func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

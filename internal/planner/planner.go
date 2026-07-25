@@ -16,25 +16,21 @@ limitations under the License.
 
 // Package planner decides which work a shard may dispatch, given what every shard last reported.
 //
-// It exists because two scheduling rules are global while the thing that enforces them is per-shard.
-// Strict priority says no worse band is served while a better one has due work anywhere; weighted
-// fairness says the distinct keys at that band split the batch by weight. Neither can be evaluated
-// from one shard's view. So each shard tallies what it sees, and plans against the merged picture.
+// Two scheduling rules are global while the thing that enforces them is per-shard: strict priority says
+// no worse band is served while a better one has due work anywhere, and weighted fairness says the
+// distinct keys at that band split the batch by weight. So each shard reports what it sees and plans
+// against the merged picture, on its own clock - no shard ever waits for another.
 //
-// The tally map is what a cross-shard barrier used to be. A barrier made every shard wait for the
-// slowest before anyone could plan, which on the dispatch path is the throughput ceiling. Retaining
-// each shard's last tally costs one struct and zero extra work, and lets every shard plan on its own
-// clock. The trade is that a shard sees its peers up to one of their cycles stale - which fairness
-// (slowly varying) absorbs, and which dispatch (this shard's own tally is always fresh) never sees.
+//	plan := p.Plan(shard, capacity) // after this shard's own Tally or Clear
 //
-// A shard's participation is DECLARED, never inferred. Each cycle a shard either Tally's what it saw or
-// Clear's because it could not look; there is no timeout, and no shard is ever dropped for being quiet.
-// The reports come from the caller's own per-shard workers over a fixed shard set, so their state is a
-// fact the caller holds rather than something to reconstruct from silence and a clock - and a clock
-// cannot tell a dead shard from a slow one anyway, which is the failure any timeout here would ship.
+// A shard's participation is DECLARED, never inferred. Every cycle a shard either Tally's what it saw or
+// Clear's because it could not look; there is no timeout, and a merely slow shard keeps its last tally
+// and stays counted. A shard that fails to scan MUST Clear, or the band it last claimed goes on
+// outranking every peer that could actually serve work.
 //
 // The planner holds no steps, touches no database, and does no I/O. It deals in fairness keys and
-// counts; resolving a key to actual steps is the caller's job.
+// counts; resolving a key to actual steps is the caller's job. Every method is safe for concurrent use -
+// one planner is shared by every shard on a replica.
 package planner
 
 import (

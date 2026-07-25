@@ -263,9 +263,9 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	assertFaultRecoveryClean(t, e, reader)
 }
 
-// TestFaultSite_SignalPeersPanic pins host-call panic isolation for SignalPeers: when the host's SignalPeers
-// panics on the terminal statusChange broadcast, the boundary CatchPanic swallows it and flow completion /
-// the local Await are unaffected (distinct from dropSignalStop, which returns cleanly).
+// TestFaultSite_SignalPeersPanic pins host-call panic isolation for SignalPeers: when the host's
+// SignalPeers panics, the boundary CatchPanic swallows it and flow completion / Await are unaffected
+// (distinct from dropSignalStop, which returns cleanly).
 func TestFaultSite_SignalPeersPanic(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -281,9 +281,9 @@ func TestFaultSite_SignalPeersPanic(t *testing.T) {
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
-	// Every statusChange broadcast panics inside the CatchPanic boundary; the local waiter wake (separate from
-	// the peer broadcast) still delivers, so Await returns the completed outcome.
-	e.seams.InjectN(1000, FaultSignalPeersPanic, string(signalOpStatusChange))
+	// Every peersChanged broadcast panics inside the CatchPanic boundary. Nothing a flow does depends on
+	// that signal reaching anyone, so the flow still runs and Await returns the completed outcome.
+	e.seams.InjectN(1000, FaultSignalPeersPanic, string(signalOpPeersChanged))
 	_, out := batteryRun(t, e, "ftbpanic/g")
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assertFaultRecoveryClean(t, e, reader)

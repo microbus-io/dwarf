@@ -32,6 +32,21 @@ or their types like `sub.TimeBudget` or a "plane"). Use **"host"** for the upstr
   private/unexported code comments**. These *may* freely reference internals - private identifiers, file names,
   internal packages, the schema - and are where design rationale and pitfall warnings belong.
 
+**The same split applies WITHIN `internal/`, one level down.** An internal package has its own two readers, and
+they divide exactly as above:
+
+- Its **godoc** - the package comment and every exported symbol - is written for the **package's consumer**
+  (the engine, or a sibling internal package): what the type is for, how to drive it, what the callbacks
+  must hold, what is safe to call concurrently. A short usage sketch belongs here. Rationale does not.
+- Its **`CLAUDE.md`** is written for an agent working **on that package**: why the mechanism is shaped this
+  way, which alternatives were built and lost, which invariants are load-bearing, and which tests pin them.
+
+So **every internal package with non-obvious mechanics carries a `CLAUDE.md`**, and design rationale that
+drifted into a package comment moves there rather than being duplicated. (A package whose mechanics are
+genuinely textbook - `internal/lru` - needs none.) The pull to explain *why* in the package doc is strong
+and constant, because the author has just finished deciding it; resist it, or the rationale ends up in two
+places and one of them goes stale.
+
 Both audiences share one rule from above: **stay host-agnostic** (say "host", never name the upstream framework),
 in public and internal prose alike.
 
@@ -95,6 +110,13 @@ matching one before working there:**
   cache; a failed fetch touches neither; an empty plan clears the partition).
 - **`internal/piston/CLAUDE.md`** - the per-shard cylinder that drives that cycle: the two SQL queries, the
   heartbeat on its own goroutine, idle mode, and the replica-partition predicate.
+- **`internal/claimstracker/CLAUDE.md`** - the intra-replica in-flight claim set: why the window is bounded
+  (1-2s) rather than tied to a step, and the two-generation roll that costs no per-entry work.
+- **`internal/faninmap/CLAUDE.md`** - the per-flow fan-out-to-fan-in routing map: why it is derived at dispatch
+  rather than persisted or stored on the graph, and why an unreachable fan-out routes nowhere.
+- **`internal/latch/CLAUDE.md`** - parking callers on a key until it settles: why polling makes registration
+  order irrelevant, why the board holds no notion of what a status means, and why closing travels the same
+  one-slot channel as a status.
 
 **Landmines that radiate into engine code - obey these even though the full detail now lives in a package doc:**
 
