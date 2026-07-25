@@ -279,6 +279,29 @@ func TestCandidateCache_OfferDeclinesWhenFull(t *testing.T) {
 	assert.Expect(c.Len(), 3)
 }
 
+// TestCandidateCache_OfferSteadyStateStaysFIFO pins why the head-insert is gated on STRICTLY better, not
+// on `priority <= floor`. A uniform-priority workload has every doorbell equal to the floor, so admitting
+// those at the head would turn the partition into a stack - newest-first within a band, inverting the
+// oldest-first ordering the whole selection design rests on. They must land at the tail.
+func TestCandidateCache_OfferSteadyStateStaysFIFO(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(8) // size 16
+	c.Refill(1, []Job{{StepID: 1, Shard: 1}}, 100)
+	for i := range 4 {
+		assert.True(c.Offer(Job{StepID: 50 + i, Shard: 1}, 100))
+	}
+
+	want := []int{1, 50, 51, 52, 53}
+	for _, id := range want {
+		j, ok, _ := c.Pop()
+		if assert.True(ok) {
+			assert.Expect(j.StepID, id)
+		}
+	}
+}
+
 func TestCandidateCache_OfferPriorityJumpNoFlush(t *testing.T) {
 	assert := testarossa.For(t)
 
