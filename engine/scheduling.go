@@ -22,124 +22,47 @@ import (
 	"github.com/microbus-io/dwarf/internal/pipeline"
 )
 
-// Refill SCAN RATE. This is the supply control for every shard's piston: the period of its cycle, start
-// of scan to start of scan. It is derived from static configuration and then FIXED - deliberately not
-// adaptive. Two adaptive designs were built and measured on a 6-shard rig, and both are recorded here
-// because both keep re-suggesting themselves:
-//
-//   - An adaptive fetch DEPTH (size the batch from observed demand) was INERT: swept across margins
-//     of 1.25/1.5/2 the batch moved 179 -> 173 -> 190, because the batch is set by the available
-//     backlog and this shard's slice of the plan, never by a target.
-//   - A DERIVED interval (T = (capacity/N)/c / 2, from the measured drain rate c) was actively
-//     HARMFUL: same scan count and same batch size as a fixed 150ms, but ~1,000x the discard (38-63k
-//     vs 47-468) and a 2.4x worse p99. It OSCILLATES, and unavoidably so: supply is set from measured
-//     consumption, but consumption is min(demand, supply), so the actuation contaminates its own
-//     measurement. Over-supply -> discard -> consumed reads low -> interval grows -> buffer runs dry
-//     -> consumed reads high -> interval shrinks. High discard AND high p99 together is the signature.
-//
-// So the rate is a constant, and the derivation below is how an OPERATOR picks it, not something the
-// engine recomputes at runtime.
-//
-// WHY A RATE LIMIT AT ALL. A piston cycles unconditionally, so without a period it runs at a 100% duty
-// cycle - measured, back when a trigger re-armed by every completed step produced exactly that: every
-// refiller scanning back to back for a whole 60s window. The merged pass was accidentally self-limiting
-// because its straggler wait made it slow; deleting the barrier made each pass fast and the loop hot,
-// raising phase-1 scan load 3.4x. Phase 1 costs per DUE ROW regardless of how many rows the cycle then
-// fetches, which is why sizing the batch can never substitute for scanning less often.
-//
-// HOW TO PICK IT. Workers drain a partition at c candidates/sec and a pass hands it at most its share
-// of the cache, capacity/N, so covering the gap between passes requires
-//
-//	T <= (capacity/N) / c
-//
-// Half that leaves 2x supply headroom. On the measured rig (capacity 4608, 6 shards, ~17k steps/s)
-// the ceiling is ~271ms and half of it ~136ms; 150ms measured +18% throughput AND a 10% BETTER tail
-// than the barriered build, both resolved. 300ms starved exactly as the bound predicts (supply B/T
-// matched its degraded throughput to within 1%), and 0ms - unlimited - cost 8% candidate churn and a
-// 77% worse p99 while buying no throughput.
-//
-// WHAT THE VALUE DOES **NOT** HAVE TO COVER: a drained buffer on a chain's next step. The doorbell's
-// Offer admits into an empty partition, so a sequential hop dispatches without waiting for a cycle at
-// all - which is what lets this be a steady period rather than a latency budget.
+// The piston cycle period - the supply control for every shard, measured start of scan to start of scan.
+// Derived per shard at Startup and fixed thereafter: nothing here reads an observed rate, because supply
+// set from measured consumption oscillates (consumption is min(demand, supply), so the actuation
+// contaminates its own measurement).
 const (
-	// refillSupplyHeadroom is the supply margin over the sustained drain, chosen for MAXIMUM THROUGHPUT.
-	// 2.0 is the measured optimum: on a database whose disk is not the bottleneck, throughput peaks at a
-	// derived floor of ~140ms (this headroom) and falls off ~15% by ~260ms (headroom 1.1) - because near
-	// the supply ceiling ordinary drain-rate jitter briefly empties the buffer and stalls workers, and a
-	// ~2x buffer absorbs that jitter where a ~1.1x one does not.
+	// refillSupplyHeadroom is the margin the buffer carries over the sustained drain. 2.0 is the measured
+	// throughput optimum: at a tighter margin ordinary drain-rate jitter briefly empties the buffer and
+	// stalls workers.
 	//
-	// Do NOT re-derive this from "waste" (discarded/selected). Waste looked like the tuning lever on an
-	// IOPS-throttled disk, where slow dispatch piled up a deep pending backlog and the refiller
-	// over-supplied it (waste ran 25-50%, and it seemed to trade against throughput). That was a disk
-	// artifact: on a healthy disk steps dispatch fast, the pending backlog stays shallow, the refiller
-	// supplies close to consumption, and waste is ~2% across the whole good interval range - so waste is
-	// nearly flat and does not distinguish the optimum. Throughput does. (Confirmed after a 1TB / 16-vCPU
-	// single-shard sweep showed throughput bimodality collapse from ~2x to ~4%, making the peak
-	// resolvable at ~110-150ms with ~2% waste.)
+	// Do NOT re-derive it from waste (discarded/selected). Waste runs ~2% and nearly flat across the whole
+	// good interval range, so it cannot distinguish the optimum; throughput can.
 	refillSupplyHeadroom = 2.0
-	// sustainedDrainPerVCPU is the MEASURED sustained per-shard drain in steps/s/vCPU: the per-connection
-	// rate x connsPerVCPU. The measured per-connection rate is ~120 steps/s, roughly constant across
-	// connection counts, instance sizes, and backlog volumes - which is what lets one constant stand in for
-	// it - so 120 x connsPerVCPU(6) = 720. With headroom 2.0 this derives a 96/(2*720) ~= 67ms interval (see
-	// deriveRefillInterval). NOT capacityWeight's 450, the PEAK placement ceiling: placement wants the peak,
-	// the cycle period wants the SUSTAINED rate, and conflating them undershoots the drain and overshoots
-	// the period (the earlier 340 - ~57/conn - put it at 141ms, a starved regime giving ~half the throughput
-	// of the good band at high connection counts).
+	// sustainedDrainPerVCPU is the measured sustained per-shard drain in steps/s/vCPU: ~120 steps/s per
+	// connection x connsPerVCPU. NOT capacityWeight's 450, which is the PEAK placement ceiling - the period
+	// wants the SUSTAINED rate, and conflating the two undershoots the drain and overshoots the period into
+	// a starved regime.
 	sustainedDrainPerVCPU = 720
-	// refillIntervalCap bounds priority latency - it is the only thing that does, so it is load-bearing.
-	//
-	// The arriving high-priority step itself does not wait: Offer HEAD-INSERTS a strictly-better band, so
-	// it is popped next. What waits out the interval is (a) the rest of an arriving burst, since only one
-	// pioneer is admitted per band-opening, and (b) the cross-shard publish - this shard must rescan before
-	// its new band reaches the planner, and peers plan on their own next cycle, so a peer can serve
-	// worse-band work for up to two intervals. Both are bounded by this cap and are ~67ms in the derived
-	// path. Priority ORDER is never inverted regardless: a cycle always plans the global minimum band, so
-	// however slowly a shard scans, better work is still selected first.
+	// refillIntervalCap bounds priority latency, and is the only thing that does. A better band arriving
+	// here does not preempt - Offer appends it at the tail - so it becomes servable when a cycle plans it,
+	// and peers plan it a cycle after that. Priority ORDER is never inverted regardless, since every cycle
+	// plans the global minimum band; what this bounds is when better work starts, not whether it wins.
 	refillIntervalCap = 1 * time.Second
 )
 
-// There is deliberately NO minimum here, and there used to be (refillScanFloorMin, 20ms). The fuse it
-// provided - never scan one shard twice in quick succession, however the formula's inputs degenerate -
-// now belongs to the pipeline's MinGap, which enforces the same 20ms as a gap between the END of one
-// cycle and the START of the next. That is the stronger form: a floor measured start-to-start cannot
-// bound a cycle that outruns it, which is exactly the deep-backlog case the fuse exists for.
-
-// deriveRefillInterval computes ONE shard's cycle period from static configuration - capacity, that shard's
-// pool and declared vCPUs, and the observed replica count. It is arithmetic over values known at
-// Startup, NOT a controller: nothing here reads an observed rate, which is the distinction that matters,
-// because the version that DID (interval set from measured consumption) oscillated badly and was removed.
+// deriveRefillInterval computes ONE shard's cycle period:
 //
-//	bufferShare = capacity/N        the most one pass can hand this partition
-//	drain       = sustainedDrainPerVCPU * min(poolConns/connsPerVCPU, vCPUs/R)   this replica's drain
+//	bufferShare = capacity/N        the most one cycle can hand this partition
+//	drain       = sustainedDrainPerVCPU * min(poolConns/connsPerVCPU, vCPUs/R)
 //	T           = bufferShare / (headroom * drain)
 //
-// The drain is bounded by the TIGHTER of two channels, because sustained throughput cannot exceed
-// either: the connection pool (this replica can only push poolConns/connsPerVCPU vCPUs of work through
-// its pool) or the database CPU (the shard's vCPUs, split across the fleet). In the DERIVED path the two
-// are equal by construction (pool = connsPerVCPU*vCPUs/R, so poolConns/connsPerVCPU == vCPUs/R) and the
-// min is a no-op - it bites only when an operator pins the pool with SetMaxOpenConns *independently* of
-// the declared vCPUs, which is exactly the footgun it protects against:
-//   - a large pinned pool with vCPUs left undeclared no longer derives its drain from the default 2
-//     vCPUs (which made the buffer/drain terms disagree and overshot the period to the 1s cap, starving
-//     the refiller - the rig's 20-80s fan-out latency);
-//   - a small pooler-capped pool (many vCPUs, few connections) no longer over-scans on a drain the pool
-//     cannot actually sustain.
+// The drain takes the TIGHTER of two channels, since sustained throughput cannot exceed either: this
+// replica's connection pool, or the shard's database CPU split across the fleet. They are equal by
+// construction in the derived path, so the min bites only when SetMaxOpenConns pins a pool independently
+// of the declared vCPUs - without it, a large pinned pool with vCPUs undeclared derives its drain from the
+// default 2 and overshoots to the cap (a starved refiller), and a small pooler-capped pool over-scans on a
+// drain it cannot sustain. vCPUs <= 0 is undeclared: the CPU ceiling is unknown, so the drain falls to the
+// connection channel alone.
 //
-// vCPUs <= 0 means undeclared: the CPU ceiling is unknown, so the drain falls to the connection channel
-// alone (the best estimate available, erring toward over-scan rather than starvation).
-//
-// Substituting the engine's own constants makes the configuration terms CANCEL in the derived path -
-// bufferShare is 2*8*6*vCPUs/R = 96*vCPUs/R and drain is 720*vCPUs/R, so T = 96/(2*720) ~= 67ms at any
-// vCPU count or replica count. So it evaluates to a CONSTANT (~67ms) there; the reason to keep it a
-// formula rather than hardcode 67ms is that bufferShare tracks the cache-sizing constants (connsPerVCPU,
-// workersPerConnBudget, the 2x cache), so a change to worker/cache sizing rescales the period
-// automatically. (Nearly shipped: campaign 11 found workersPerConnBudget overshoots ~4x. Had it been
-// "corrected", capacity would have fallen 4x and a hardcoded period would have exceeded what the buffer
-// could cover - the measured i300 starvation mode. The overshoot was kept as throughput-neutral, but
-// the near-miss is the argument for computing this rather than pinning a number.)
-//
-// The cap governs where the cancellation breaks - workersDispatch's max(64, ...) floor at small or
-// high-R configurations - and is a lost-signal backstop (see the constant).
+// It stays a formula rather than the ~67ms it evaluates to at the reference config, because bufferShare
+// tracks the cache-sizing constants: a change to worker or cache sizing rescales the period with it,
+// instead of leaving a pinned number that exceeds what the buffer can cover.
 func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas int) time.Duration {
 	drain := float64(sustainedDrainPerVCPU) * float64(poolConns) / float64(connsPerVCPU) // connection channel
 	if virtualCPUs > 0 {                                                                 // cap by the CPU ceiling, when it is known
@@ -158,11 +81,9 @@ func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas int) tim
 // cache's capacity. Pushing is live: a piston reads its interval once per cycle rather than capturing it.
 func (e *Engine) recomputeRefillIntervals() {
 	n := max(1, e.db.NumShards())
-	// max(1, ...): a cache SMALLER than the shard count integer-divides to zero, and zero reaches
-	// deriveRefillInterval's degenerate guard, which answers with the 1s cap - the slowest period there
-	// is. That is exactly backwards. A tiny cache drains in an instant and wants frequent scans; the case
-	// is a small cache, not an unknown one. Left at zero it strands a small-cache configuration on
-	// second-long scan intervals, which reads as a wedged fleet rather than a mis-tuned one.
+	// max(1, ...) because a cache smaller than the shard count divides to zero, which reaches the degenerate
+	// guard and answers with the 1s cap - backwards for a tiny cache, which drains instantly and wants
+	// frequent scans. The case is a small cache, not an unknown one.
 	share := max(1, e.cache.Capacity()/n)
 	replicas := max(1, int(e.observedR.Load()))
 	override := time.Duration(e.refillIntervalOverride.Load())

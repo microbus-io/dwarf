@@ -54,7 +54,12 @@ Further guidance within each:
   The test is whether a reader who had never seen the old code could **act** on the sentence. If they could not,
   it is history, and it belongs in the commit message. Keep the number, the measurement, or the failure mode that
   makes the constraint checkable - that is the part with value, and it survives the code being rewritten again.
-- **No prose refers to ephemeral working documents** - e.g. "finding A2" or "_PLAN.md".
+- **No prose refers to anything not checked in.** Working documents ("finding A2", "_PLAN.md"), review
+  threads, and **numbered benchmark campaigns** ("campaign 11", "run 14") are all invisible to every future
+  reader, so a citation of one is a dead end that also implies the claim cannot be checked. Cite the
+  measurement itself - the number, the configuration, the failure mode - or a checked-in doc such as
+  `docs/benchmark-cloud.md`. "Measured at ~120 steps/s per connection" travels; "campaign 11 measured it"
+  does not.
 - **Code comments do not refer to `CLAUDE.md`.** The agent reads `CLAUDE.md` implicitly.
 
 ## Where the design docs live

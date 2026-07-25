@@ -765,8 +765,8 @@ Confirmed after the IOPS diagnostic (below) made throughput resolvable.
 
 **THE FLOOR DEPENDS ON `workersPerConnBudget` (8) THROUGH THE CACHE - which is why it is derived rather
 than hardcoded.** `capacity = 2 x workersDispatch = 2 x 8 x conns`, so anything changing the 8 rescales the
-buffer this floor is measured against, proportionally. That nearly happened: campaign 11 found the 8 assumes
-`T/db≈8` while 5ms tasks measure ~1.5-2, so the resident worker count overshoots ~4x. The overshoot was
+buffer this floor is measured against, proportionally. That nearly happened: the 8 assumes `T/db≈8` while
+5ms tasks measure ~1.5-2, so the resident worker count overshoots ~4x. The overshoot was
 deliberately KEPT (it is throughput-neutral - surplus workers queue for a connection and connections are
 never idle), but had it been "corrected" with a hardcoded floor, capacity would have fallen ~4x, the
 per-partition share 768 -> 192 and the supply ceiling proportionally, leaving the floor **longer than the
@@ -775,7 +775,7 @@ construction. **A change to worker or cache sizing now rescales the floor automa
 a constant here.**
 
 **Why scanning less often helps more than the scan count alone suggests:** the band scan's apparent "fixed
-~46ms" is largely **connection-pool wait** (campaign 11), so refiller scans queue against worker traffic on
+~46ms" is largely **connection-pool wait**, so refiller scans queue against worker traffic on
 the same pool. Scanning 3.4x more often therefore also made each scan slower, and the effect compounds.
 Measured across the floor sweep: phase 1 fell from ~36ms at the unlimited and 150ms arms to **15.6ms at the
 300ms arm**. It is also what makes per-shard pass durations diverge (28ms vs 125ms) on hardware whose RTT
@@ -794,8 +794,9 @@ constant now encodes, since it held across the widest range - and a validation s
 141ms by ~50% at M=8 and M=64.) headroom stays **2.0**: the decline past the peak is drain-rate jitter
 stalling workers at a tight buffer, which a ~2x buffer absorbs.
 
-**Three adaptive alternatives were built and all lost** - see the `deriveRefillInterval` comment in
-`scheduling.go`. Do not re-propose any without new evidence: an adaptive fetch DEPTH was *inert* (batch
+**Three adaptive alternatives were built and all lost.** This is the only record of them - `scheduling.go`
+carries the formula and its local traps, not the campaign. Do not re-propose any without new evidence: an
+adaptive fetch DEPTH was *inert* (batch
 moved 179→173→190 across a 60% margin change, because the batch is set by the backlog and the plan slice,
 never by a target); a DERIVED interval (set from observed consumption) was *actively harmful* (~1,000x
 the discard, 2.4x the p99) because consumption is `min(demand, supply)`, so the actuation contaminates its
