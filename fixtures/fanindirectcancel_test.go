@@ -18,7 +18,6 @@ package fixtures
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -116,7 +115,7 @@ func TestFanInDirectCancel_NoExtendCancelledFlow(t *testing.T) {
 	for {
 		var st string
 		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Spawn'", flowID).Scan(&st))
-		if strings.TrimSpace(st) == workflow.StatusCompleted {
+		if st == workflow.StatusCompleted {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -139,5 +138,5 @@ func TestFanInDirectCancel_NoExtendCancelledFlow(t *testing.T) {
 	// The flow stays cancelled (terminal, immutable); the completed spawn step is a harmless tail on it.
 	var flowStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&flowStatus))
-	assert.Equal(workflow.StatusCancelled, strings.TrimSpace(flowStatus))
+	assert.Equal(workflow.StatusCancelled, flowStatus)
 }

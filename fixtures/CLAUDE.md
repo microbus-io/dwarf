@@ -85,11 +85,19 @@ cooperate.
   `cap × shards` from a process-wide weighted semaphore keyed on the driver (`db.DriverName()`), and releases at
   `Close`. The reservation is one atomic acquire per engine (never per connection or per shard - a per-connection
   limiter deadlocks the moment one engine's multi-shard `OnEach` needs several connections while the count is
-  exhausted by peers each holding one). Budgets: **pgx 80** (Postgres default 100), mysql 120, mssql 4000,
+  exhausted by peers each holding one). Budgets: **pgx 80** (Postgres default 100), mysql 120, **mssql 120**,
   **sqlite effectively unbounded** (no server cap). So on the default in-memory SQLite suite the budget never
   blocks and every test runs concurrently on its own database; against a real `SEQUEL_TESTING_DSN` server the
   budget throttles concurrency to stay under the cap (~80/4 ≈ 20 live engines on Postgres), `Acquire` blocking the
   21st engine until one finishes rather than letting it open a connection the server would reject.
+
+  **SQL Server's suite runtime is NOT concurrency-bound, so do not reach for this budget to fix it.**
+  `fixtures` costs **~25x SQLite against SQL Server (160-280s vs 8s)** where Postgres and MySQL cost ~3-9x,
+  and the suite lands in that same band whether the mssql budget is 120 or effectively unbounded (**231s at
+  120, against 4000**). The cost is therefore per test rather than between tests, and the candidate is that
+  every test CREATEs and DROPs its own database, which SQL Server does far more expensively than the other
+  engines. 120 is there for consistency with the other servers, which is worth having on its own; the runtime
+  is open.
 
 **Two DISTINCT opt-outs, for two distinct reasons - do not conflate them:**
 
@@ -108,10 +116,10 @@ cooperate.
 
   **Dropping `t.Parallel()` buys CPU, not database latency - so a reaction-latency window must still exclude the
   engine's own round trips.** Measure from the last moment before the reaction, never across an engine operation
-  that talks to the database: `awaitshutdownflow` timed its "< 2s" from *before* `Shutdown`, so it was really
-  measuring drain-plus-release and tripped at 3.09s against a loaded SQL Server, where the drain alone is
-  unbounded. Timing from where `Shutdown` RETURNS pins the same property (the waiter is not still blocked once
-  the board is closed) with nothing else folded in.
+  that talks to the database: a "prompt wake < 2s" measured across `Shutdown` is really measuring
+  drain-plus-release, and the drain alone reaches **3.09s** against a loaded SQL Server. `awaitshutdownflow`
+  therefore times from where `Shutdown` RETURNS, which pins the same property - the waiter is not still blocked
+  once the board is closed - with nothing else folded in.
 
 **Under `-race`, the engine's shared wait helpers stretch their "don't hang" ceilings.** `-race` slows execution
 ~10x, and with the whole suite parallel that compounds with CPU oversubscription, so a recovery that finishes in

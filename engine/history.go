@@ -134,8 +134,7 @@ func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int,
 		}
 		step.StepID = stepID
 		step.Parked = parked != 0
-		step.StepKey = fmt.Sprintf("%d-%d-%s", shardNum, stepID, strings.TrimSpace(stepToken))
-		step.Status = strings.TrimSpace(step.Status)
+		step.StepKey = fmt.Sprintf("%d-%d-%s", shardNum, stepID, stepToken)
 		step.Error = strings.TrimSpace(errMsg)
 		stepsByFlow[stepFlowID] = append(stepsByFlow[stepFlowID], step)
 	}
@@ -194,7 +193,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		Attempt:       attempt,
 		PredecessorID: predID,
 		SuccessorID:   succID,
-		Status:        strings.TrimSpace(statusStr),
+		Status:        statusStr,
 		Error:         strings.TrimSpace(errMsg),
 		CreatedAt:     createdAt,
 		UpdatedAt:     updatedAt,
@@ -326,7 +325,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			key := fmt.Sprintf("%d-%d-%s", shardNum, nid, strings.TrimSpace(ntoken))
+			key := fmt.Sprintf("%d-%d-%s", shardNum, nid, ntoken)
 			if nid == effectivePredID {
 				fs.PrevKey = key
 			}
@@ -427,7 +426,6 @@ func (e *Engine) fingerprint(ctx context.Context, flowKey string) (string, strin
 	if err != nil {
 		return "", "", errors.Trace(err)
 	}
-	status = strings.TrimSpace(status)
 
 	flowIDs := []any{flowID}
 	descendants, err := e.allDescendantSubgraphFlows(ctx, db, flowID)
@@ -533,9 +531,8 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			}
 			lr.summary.Subgraph = surgraphFlowID != 0
 			lr.summary.TraceID = traceIDFromParent(traceParent)
-			lr.summary.FlowKey = fmt.Sprintf("%d-%d-%s", shardIdx, lr.flowID, strings.TrimSpace(flowToken))
-			lr.summary.ThreadKey = fmt.Sprintf("%d-%d-%s", shardIdx, threadID, strings.TrimSpace(threadToken))
-			lr.summary.Status = strings.TrimSpace(lr.summary.Status)
+			lr.summary.FlowKey = fmt.Sprintf("%d-%d-%s", shardIdx, lr.flowID, flowToken)
+			lr.summary.ThreadKey = fmt.Sprintf("%d-%d-%s", shardIdx, threadID, threadToken)
 			lr.summary.TaskName = taskName.String
 			lr.summary.Error = strings.TrimSpace(flowError)
 			lr.summary.CancelReason = strings.TrimSpace(cancelReason)
@@ -876,7 +873,6 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	if surgraphFlowID != 0 {
 		return "", errors.New("cannot continue a subgraph child; use a root flow key", http.StatusBadRequest)
 	}
-	threadToken = strings.TrimSpace(threadToken)
 
 	// Create the new turn atomically with a re-check of the thread's latest turn, all under a write-first
 	// lock on the thread anchor row (flow_id == threadID). Without the lock, two concurrent Continues on
@@ -916,8 +912,8 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if strings.TrimSpace(flowStatus) != workflow.StatusCompleted {
-			return errors.New("latest flow in thread is not completed (status: %s)", strings.TrimSpace(flowStatus), http.StatusConflict)
+		if flowStatus != workflow.StatusCompleted {
+			return errors.New("latest flow in thread is not completed (status: %s)", flowStatus, http.StatusConflict)
 		}
 
 		finalState, err := workflow.NewState(finalStateJSON)

@@ -178,7 +178,6 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		case err != nil:
 			e.logger.ErrorContext(ctx, "Wedge sweep: reading child flow", "shard", shard, "step", w.stepID, "error", err)
 		default:
-			childStatus = strings.TrimSpace(childStatus)
 			e.logger.ErrorContext(ctx, "Wedge sweep: reviving wedged subgraph caller",
 				"shard", shard, "step", w.stepID, "childFlow", keys.CorrelationID(shard, childFlowID), "childStatus", childStatus)
 			var rerr error

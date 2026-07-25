@@ -18,7 +18,6 @@ package enginetest
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -64,7 +63,7 @@ func FlowStatus(t *testing.T, e Engine, flowKey string) string {
 	assert.NoError(err)
 	var status string
 	assert.NoError(db.QueryRowContext(context.Background(), "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status))
-	return strings.TrimSpace(status)
+	return status
 }
 
 // CountRows runs a COUNT(*)-style query on the given shard and returns the scalar count (-1 on a shard error).

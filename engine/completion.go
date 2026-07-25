@@ -296,7 +296,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		}
 		// Only completed members contribute, matching insertFanInStep: a failed or cancelled branch's partial
 		// output is not a fact the flow can build on (an error voids the task's changes).
-		if strings.TrimSpace(status) != workflow.StatusCompleted {
+		if status != workflow.StatusCompleted {
 			continue
 		}
 		changes, _ := workflow.NewState(changesJSON)
@@ -338,7 +338,7 @@ func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowTo
 	}
 	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
 	allCompositeIDs := append(
-		[]string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))},
+		[]string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)},
 		descendantCompositeIDs...,
 	)
 
@@ -537,7 +537,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// complete, makes this a harmless no-op). signalStop/metrics are deliberately NOT repeated - they fired
 		// on the attempt that transitioned the flow. A failed/cancelled flow (status != completed) gets no revive
 		// here; its parent is handled by failure delivery / the Cancel cascade.
-		if strings.TrimSpace(currentStatus) == workflow.StatusCompleted && surgraphFlowID != 0 {
+		if currentStatus == workflow.StatusCompleted && surgraphFlowID != 0 {
 			if rerr := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepID, finalStateJSON); rerr != nil {
 				return false, errors.Trace(rerr)
 			}
@@ -773,7 +773,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// exactly as the top-level path below does. Without this signalStop, Await(childKey) blocks until its
 	// context deadline despite the child being terminal.
 	if isSubgraphChild {
-		e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken)), workflow.StatusFailed)
+		e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken), workflow.StatusFailed)
 		if reDispatchParent {
 			e.enqueueStep(ctx, shardNum, parentStepID)
 		}
@@ -781,7 +781,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusFailed)
-	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, strings.TrimSpace(flowToken))
+	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 	e.signalStop(ctx, compositeID, workflow.StatusFailed)
 	return false, nil
 }
@@ -979,9 +979,8 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 			rows.Close()
 			return nil, nil, errors.Trace(err)
 		}
-		status = strings.TrimSpace(status)
 		term := status == workflow.StatusCompleted || status == workflow.StatusFailed || status == workflow.StatusCancelled
-		byID[id] = node{token: strings.TrimSpace(token), terminal: term}
+		byID[id] = node{token: token, terminal: term}
 		if parent != 0 {
 			childrenByParent[parent] = append(childrenByParent[parent], id)
 		}
@@ -1039,8 +1038,8 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 			frows.Close()
 			return nil, nil, nil, errors.Trace(err)
 		}
-		tokenByID[id] = strings.TrimSpace(token)
-		if ssid != 0 && strings.TrimSpace(status) == workflow.StatusInterrupted {
+		tokenByID[id] = token
+		if ssid != 0 && status == workflow.StatusInterrupted {
 			childByCallerStep[ssid] = id
 		}
 	}
@@ -1125,7 +1124,6 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	if surgraphFlowID != 0 {
 		return errors.New("cannot resume a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	flowStatus = strings.TrimSpace(flowStatus)
 	if flowStatus != workflow.StatusInterrupted {
 		return errors.New("flow is not interrupted (status: %s)", flowStatus, http.StatusConflict)
 	}
@@ -1269,7 +1267,7 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 			rows.Close()
 			return nil, nil, nil, errors.Trace(err)
 		}
-		byID[id] = fnode{token: strings.TrimSpace(token), surgFlowID: sfid, surgStepID: ssid}
+		byID[id] = fnode{token: token, surgFlowID: sfid, surgStepID: ssid}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {

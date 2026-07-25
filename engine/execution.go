@@ -247,8 +247,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 	e.metricStateReadBytes(ctx, workflowURL, "resume_data", len(resumeDataJSON))
 	e.metricStateReadBytes(ctx, workflowURL, "subgraph_result", len(subgraphResultJSON))
 
-	flowStatus = strings.TrimSpace(flowStatus)
-	flowToken = strings.TrimSpace(flowToken)
 	if flowStatus == workflow.StatusCancelled || flowStatus == workflow.StatusFailed || flowStatus == workflow.StatusCompleted {
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
@@ -1256,7 +1254,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 		if e.seams.IsFault(FaultInterruptStaleWrite) {
 			curLeaseSeq = leaseSeq + 1
 		}
-		if curLeaseSeq != leaseSeq || strings.TrimSpace(curStatus) != workflow.StatusInterrupted {
+		if curLeaseSeq != leaseSeq || curStatus != workflow.StatusInterrupted {
 			fenced = true
 			return errLeaseFenced
 		}
@@ -1494,7 +1492,6 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 		if exitTaskSet[strings.TrimSpace(memberTaskName)] && memberSuccessorID == 0 {
 			exitStepIDs = append(exitStepIDs, memberStepID)
 		}
-		status = strings.TrimSpace(status)
 		if status != workflow.StatusCompleted {
 			continue
 		}

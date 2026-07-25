@@ -142,7 +142,7 @@ func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum,
 	if surgraphFlowID != 0 {
 		return 0, 0, "", errors.New("thread key is a subgraph flow; address the root flow", http.StatusBadRequest)
 	}
-	return shardNum, threadID, strings.TrimSpace(threadToken), nil
+	return shardNum, threadID, threadToken, nil
 }
 
 // flowSeed carries the precomputed, retry-stable values for inserting one new flow plus its entry step.
@@ -354,7 +354,6 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	flowStatus = strings.TrimSpace(flowStatus)
 	flowErrorMsg = strings.TrimSpace(flowErrorMsg)
 	flowCancelReason = strings.TrimSpace(flowCancelReason)
 
@@ -615,7 +614,6 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if surgraphFlowID != 0 {
 		return errors.New("cannot cancel a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	flowStatus = strings.TrimSpace(flowStatus)
 	if flowStatus == workflow.StatusCompleted || flowStatus == workflow.StatusFailed || flowStatus == workflow.StatusCancelled {
 		return errors.New("flow is already in terminal status", http.StatusConflict)
 	}
@@ -668,7 +666,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		// only running descendant a terminal-rooted tree can hold is a live orphan (Cancel-vs-spawn residue) the
 		// wedge sweep would cancel anyway, and a worker mid-dispatch on it no-ops via the lease fence. This is a
 		// deliberate change from the old inline delete, which 409'd on any running descendant (see reapDueFlows).
-		if strings.TrimSpace(flowStatus) == workflow.StatusRunning {
+		if flowStatus == workflow.StatusRunning {
 			return errors.New("cannot delete a running flow; cancel it first", http.StatusConflict)
 		}
 		if deleteAfterMs > 0 {

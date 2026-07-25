@@ -22,7 +22,6 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -161,13 +160,13 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	stepState := func(t *testing.T, db *sequel.DB, stepID int) (status string, parked int) {
 		assert := testarossa.For(t)
 		assert.NoError(db.QueryRowContext(ctx, "SELECT status, parked FROM dwarf_steps WHERE step_id=?", stepID).Scan(&status, &parked))
-		return strings.TrimSpace(status), parked
+		return status, parked
 	}
 	flowStatus := func(t *testing.T, db *sequel.DB, flowID int) string {
 		assert := testarossa.For(t)
 		var s string
 		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&s))
-		return strings.TrimSpace(s)
+		return s
 	}
 
 	// The leaf recovery reset to `pending` is no longer ours: the combined UPDATE matches it zero rows, so the

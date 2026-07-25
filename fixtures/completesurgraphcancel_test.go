@@ -18,7 +18,6 @@ package fixtures
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -100,7 +99,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		assert.NoError(err)
 		var s string
 		assert.NoError(db.QueryRowContext(context.Background(), "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", flowID).Scan(&s))
-		return strings.TrimSpace(s)
+		return s
 	}
 
 	t.Run("completion_first", func(t *testing.T) {

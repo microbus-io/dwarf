@@ -156,7 +156,7 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 					complete = false
 					break
 				}
-				found[flowID] = row{token: strings.TrimSpace(flowToken), status: strings.TrimSpace(status)}
+				found[flowID] = row{token: flowToken, status: status}
 			}
 			if err := rows.Err(); err != nil {
 				fail(err)

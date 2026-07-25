@@ -26,7 +26,6 @@ import (
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,7 +66,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 		assert.NoError(err)
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=1").Scan(&flowStatus)
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=1").Scan(&stepStatus)
-		return strings.TrimSpace(flowStatus), strings.TrimSpace(stepStatus)
+		return flowStatus, stepStatus
 	}
 
 	t.Run("stale_lease_is_noop", func(t *testing.T) {
@@ -380,7 +379,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	var beforeSeq int
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT status, lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&beforeStatus, &beforeSeq))
-	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(beforeStatus))
+	assert.Equal(workflow.StatusCompleted, beforeStatus)
 
 	// Release the zombie: its reset carries the stale generation N and must match zero rows.
 	eng.seams.Resume(CheckpointBeforeRecoveryReset)
@@ -393,9 +392,9 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	var afterSeq int
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT status, lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&afterStatus, &afterSeq))
-	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(afterStatus)) // peer's step untouched, not rewound
-	assert.Equal(beforeSeq, afterSeq)                                      // generation unchanged by the fenced reset
-	assert.Equal(int64(2), aCalls.Load())                                  // zombie + peer only, never a third dispatch
+	assert.Equal(workflow.StatusCompleted, afterStatus) // peer's step untouched, not rewound
+	assert.Equal(beforeSeq, afterSeq)                   // generation unchanged by the fenced reset
+	assert.Equal(int64(2), aCalls.Load())               // zombie + peer only, never a third dispatch
 	enginetest.AssertInvariants(t, eng)
 }
 
@@ -465,9 +464,9 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 	time.Sleep(1 * time.Second)
 	var aStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStatus))
-	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(aStatus)) // still completed, not rewound to pending
-	assert.Equal(int64(3), aCalls.Load())                              // zombie + peer retry + peer completion; the fenced zombie did not re-dispatch a 4th
-	enginetest.AssertInvariants(t, eng)                                // a broken fence would leave a completed flow with a pending step (check #1)
+	assert.Equal(workflow.StatusCompleted, aStatus) // still completed, not rewound to pending
+	assert.Equal(int64(3), aCalls.Load())           // zombie + peer retry + peer completion; the fenced zombie did not re-dispatch a 4th
+	enginetest.AssertInvariants(t, eng)             // a broken fence would leave a completed flow with a pending step (check #1)
 }
 
 // TestLeaseFence_SubgraphParkFenced pins the subgraph-park fence: a zombie whose task armed flow.Subgraph must not
@@ -546,8 +545,8 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	assert.Equal(1, children) // exactly one subgraph child, not a zombie-spawned duplicate
 	var aStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStatus))
-	assert.Equal(workflow.StatusCompleted, strings.TrimSpace(aStatus)) // caller still completed, not re-parked
-	assert.Equal(int64(1), cCalls.Load())                              // the child task ran exactly once
+	assert.Equal(workflow.StatusCompleted, aStatus) // caller still completed, not re-parked
+	assert.Equal(int64(1), cCalls.Load())           // the child task ran exactly once
 	enginetest.AssertInvariants(t, eng)
 }
 
@@ -664,7 +663,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		assert := testarossa.For(t)
 		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=1").Scan(&flowStatus))
 		assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE step_id=1").Scan(&stepStatus))
-		return strings.TrimSpace(flowStatus), strings.TrimSpace(stepStatus)
+		return flowStatus, stepStatus
 	}
 
 	// A step a racing Cancel already terminalized (cancelled, same generation) must NOT be re-failed: the write

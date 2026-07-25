@@ -19,7 +19,6 @@ package fixtures
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
@@ -98,6 +97,6 @@ func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
 	var bStatus string
 	err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='B'", forkFlowID).Scan(&bStatus)
 	if assert.NoError(err) {
-		assert.Equal(workflow.StatusCancelled, strings.TrimSpace(bStatus))
+		assert.Equal(workflow.StatusCancelled, bStatus)
 	}
 }

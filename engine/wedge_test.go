@@ -375,7 +375,7 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 	var childStatus, childReason string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, cancel_reason FROM dwarf_flows WHERE flow_id=?", childFlowID).
 		Scan(&childStatus, &childReason))
-	assert.Equal(workflow.StatusCancelled, strings.TrimSpace(childStatus))
+	assert.Equal(workflow.StatusCancelled, childStatus)
 	assert.Equal("parent flow terminated (orphan recovery)", strings.TrimSpace(childReason))
 	var liveChildSteps int
 	assert.NoError(db.QueryRowContext(ctx,

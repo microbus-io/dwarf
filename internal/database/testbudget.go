@@ -47,7 +47,16 @@ func driverConnCap(driver string) int64 {
 	case "mysql":
 		return 120 // MySQL / MariaDB default 151
 	case "mssql":
-		return 4000 // SQL Server default ~32767
+		// Sized for CONSISTENCY with the other servers rather than from SQL Server's ~32767
+		// max_connections, which would bound nothing in practice.
+		//
+		// It is not a runtime lever, and the measurement is what makes that checkable: the fixtures package
+		// costs ~25x SQLite against SQL Server (160-280s vs 8s) where Postgres and MySQL cost ~3-9x, and the
+		// suite lands in that same band whether this is 120 or effectively unbounded (231s at 120, against
+		// 4000). The cost is therefore per test - each CREATEs and DROPs its own database, which SQL Server
+		// does far more expensively than the other engines - not contention between concurrent tests, so
+		// lowering this further buys nothing. The runtime is open; do not reach for the budget to fix it.
+		return 120
 	default:
 		return 1 << 20 // sqlite (no server cap) and unknown drivers: effectively unbounded
 	}

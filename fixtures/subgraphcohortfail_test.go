@@ -154,7 +154,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	err = db.QueryRowContext(ctx, "SELECT flow_id, status FROM dwarf_flows WHERE workflow_url=?", childURL).
 		Scan(&childFlowID, &childStatus)
 	assert.NoError(err)
-	assert.Equal(workflow.StatusRunning, strings.TrimSpace(childStatus),
+	assert.Equal(workflow.StatusRunning, childStatus,
 		"child must stay running until its cohort resolves, not fail on the first branch error")
 
 	// Release the grandchild: Slow arrives, the cohort resolves with a failure, the child fails, and the
@@ -180,7 +180,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	for rows.Next() {
 		var url, status string
 		rows.Scan(&url, &status)
-		switch strings.TrimSpace(status) {
+		switch status {
 		case workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled:
 		default:
 			nonTerminal++

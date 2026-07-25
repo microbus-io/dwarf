@@ -65,7 +65,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 
 	// Walk up to the root, recording each flow's rewind step: the leaf fork step in its own flow, and the
 	// caller step that spawned the lower flow in each ancestor.
-	chainFlowIDs, chainStepIDs, _, err := e.surgraphChain(ctx, shardNum, leafFlowID, strings.TrimSpace(leafFlowToken))
+	chainFlowIDs, chainStepIDs, _, err := e.surgraphChain(ctx, shardNum, leafFlowID, leafFlowToken)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -87,7 +87,6 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	rootStatus = strings.TrimSpace(rootStatus)
 	if rootStatus != workflow.StatusCompleted && rootStatus != workflow.StatusFailed && rootStatus != workflow.StatusCancelled {
 		return "", errors.New("can only fork a terminal flow (status: %s)", rootStatus, http.StatusConflict)
 	}
@@ -119,7 +118,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		rootFlowToken:   keys.RandomIdentifier(16),
 		rootTraceParent: e.mintWorkflowSpan(ctx, rootWorkflowURL, ""), // detached, like Continue
 		threadID:        rootThreadID,
-		threadToken:     strings.TrimSpace(rootThreadToken),
+		threadToken:     rootThreadToken,
 		priority:        rootPriority,
 		fairnessKey:     rootFairnessKey,
 		fairnessWeight:  rootFairnessWeight,
@@ -247,7 +246,6 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
-	status = strings.TrimSpace(status)
 
 	newStatus := status
 	if isRoot || rewind != 0 { // on the rewind chain
@@ -328,7 +326,6 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if pruned[s.oldID] {
 			continue
 		}
-		s.status = strings.TrimSpace(s.status)
 		s.refs = parseStateRefs(refsJSON)
 		keep = append(keep, s)
 	}
@@ -643,7 +640,7 @@ func (e *Engine) collectDAGSubtree(ctx context.Context, db sequel.Executor, flow
 				continue
 			}
 			visited[sid] = true
-			collected = append(collected, sweptMember{stepID: sid, lineageID: lid, status: strings.TrimSpace(status)})
+			collected = append(collected, sweptMember{stepID: sid, lineageID: lid, status: status})
 			nextFrontier = append(nextFrontier, sid)
 		}
 		rows.Close()

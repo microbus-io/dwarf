@@ -30,7 +30,6 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
-	"strings"
 	"testing"
 	"time"
 )
@@ -106,7 +105,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 	var status string
 	var deleteAfterMs int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, delete_after_ms FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status, &deleteAfterMs))
-	assert.Equal(workflow.StatusCancelled, strings.TrimSpace(status))
+	assert.Equal(workflow.StatusCancelled, status)
 	assert.True(deleteAfterMs > 0)
 
 	// Resume's step writes rolled back: no step was flipped to `pending`, and the leaf is still `interrupted`
@@ -323,12 +322,12 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", childFlowID).Scan(&childStatus)
-		if strings.TrimSpace(childStatus) == workflow.StatusCancelled {
+		if childStatus == workflow.StatusCancelled {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	assert.Equal(workflow.StatusCancelled, strings.TrimSpace(childStatus)) // orphan shares the parent's terminal fate
+	assert.Equal(workflow.StatusCancelled, childStatus) // orphan shares the parent's terminal fate
 	enginetest.AssertInvariants(t, e)
 }
 
@@ -378,8 +377,8 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 	var stepStatus string
 	var attempt int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, attempt FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&stepStatus, &attempt))
-	assert.Equal(workflow.StatusCancelled, strings.TrimSpace(stepStatus)) // not revived to pending
-	assert.Equal(0, attempt)                                              // rewind did not bump the attempt
-	assert.Equal(1, aRuns)                                                // no re-dispatch
+	assert.Equal(workflow.StatusCancelled, stepStatus) // not revived to pending
+	assert.Equal(0, attempt)                           // rewind did not bump the attempt
+	assert.Equal(1, aRuns)                             // no re-dispatch
 	enginetest.AssertInvariants(t, e)
 }

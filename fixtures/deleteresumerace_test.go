@@ -19,7 +19,6 @@ package fixtures
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -87,7 +86,6 @@ func TestDeleteResumeRace(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		status = strings.TrimSpace(status)
 		if status != workflow.StatusRunning && status != workflow.StatusInterrupted {
 			return // terminal - fine
 		}
@@ -126,7 +124,7 @@ func TestDeleteResumeRace(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		assert.NotEqual(workflow.StatusCancelled, strings.TrimSpace(status))
+		assert.NotEqual(workflow.StatusCancelled, status)
 	}
 
 	// createInterrupted creates a flow and blocks until it rests `interrupted`.

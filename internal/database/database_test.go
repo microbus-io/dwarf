@@ -57,6 +57,11 @@ func TestResolveShardDSN_ProductionDSNIsVerbatim(t *testing.T) {
 func TestResolveShardDSN_TestModeSubstitutesShardIndex(t *testing.T) {
 	assert := testarossa.For(t)
 
+	// Hermetic against the env: the empty-DSN case below falls back to SEQUEL_TESTING_DSN before the SQLite
+	// default, so without this the test fails whenever the suite is pointed at a real server - which is the
+	// documented way to run it. Not t.Parallel, which t.Setenv forbids.
+	t.Setenv("SEQUEL_TESTING_DSN", "")
+
 	test := Config{TestID: "abc123"}
 
 	assert.Equal("file:dwarf_2?mode=memory&cache=shared", resolveShardDSN(test, 2, ""))

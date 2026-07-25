@@ -18,7 +18,6 @@ package fixtures
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +84,7 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	assert.NoError(err)
 	var callStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", flowID).Scan(&callStatus))
-	assert.Equal(workflow.StatusCancelled, strings.TrimSpace(callStatus)) // not revived to pending
+	assert.Equal(workflow.StatusCancelled, callStatus) // not revived to pending
 
 	// callRuns == 1: the caller ran once (its park), the revive was fenced, so no re-dispatch.
 	// Give any (erroneous) re-dispatch a moment to have happened, then confirm it did not.
