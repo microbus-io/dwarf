@@ -40,6 +40,23 @@ and handing out runs would reintroduce depth-proportionality through the back do
 **Every caller rolls its own plan independently.** The rolls are uncoordinated, which changes nothing in
 expectation and needs no cross-shard agreement.
 
+**`pick` is O(capacity x distinct keys), and it is the one cost in the whole design that scales with key
+CARDINALITY.** The three-phase split bounds wire cost and (on Postgres) server scan cost against cardinality;
+this is not covered by either. The inner loop calls `randFloat` and `math.Pow` once per key per slot, so at
+the reference capacity of 768 against a few thousand keys at the band it is millions of `Pow` calls, per
+shard, per cycle.
+
+There is a known faster shape with **identical semantics**: an Efraimidis-Spirakis top-1 draw with exponent
+`1/w` selects key *i* with probability `w_i / Σw`, so each slot is just a weighted draw, and the loop as a
+whole is weighted sampling with replacement plus exhaustion. A Fenwick tree over the weights gives
+O(K + C·log K).
+
+**It is deliberately NOT built yet, because it cannot honestly be justified until it is measured** - the same
+bar every other refiller tuning change in this codebase was held to, and the one three adaptive designs
+failed. What was missing was the measurement itself: `Result.Planning` was computed by the pipeline and then
+dropped, so planning cost was observable only as `cycleDuration` minus the two query phases. The piston now
+records it (`phase="planning"`). Get a real cardinality profile off that before touching the lottery.
+
 **`slice` must be deterministic, and this is the subtle one.** Each shard runs it independently and they
 must agree on who owns which slot *without exchanging a word*. Same plan + same snapshot must produce the
 same assignment on every caller, so nothing here may depend on map iteration order — hence shard-ordinal
@@ -113,10 +130,14 @@ information its peers need: it may raise the global band and release them. A sha
 clears. Silence means "my previous tally still stands," which is only true while the shard is genuinely
 mid-cycle — a caller that goes quiet on failure instead of clearing is what wedges the fleet.
 
-**The `tallies` slice is retained, not copied.** Entries are *replaced*, never mutated, which is what lets
-`snapshot` hand out pointers and hold the lock for the map copy only — never across the planning itself,
-which would re-couple the very cycles this design decouples. A caller that mutates a slice it already
-handed over breaks that.
+**The `tallies` slice is HANDED OVER — retained *and* normalized in place.** Entries are *replaced*, never
+mutated, which is what lets `snapshot` hand out pointers and hold the lock for the map copy only — never
+across the planning itself, which would re-couple the very cycles this design decouples. So a caller must
+neither mutate nor reuse a slice it has passed. The sharp case is passing the **same backing array twice**:
+the second call's weight normalization writes into an array the first call's snapshot may still be handing
+to an unlocked `Plan`. Latent today — every producer allocates fresh per cycle — but it is the contract, not
+a coincidence, and the godoc says so rather than only forbidding caller-side mutation (which read as though
+the planner did none of its own).
 
 ## What this package deliberately does not do
 

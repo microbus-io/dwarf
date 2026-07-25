@@ -26,22 +26,28 @@ limitations under the License.
 // this replica's heartbeat into the shard's peer registry. What it borrows is the planner and the
 // candidate cache, both shared with every other piston on this replica.
 //
-// Run blocks and does the whole job:
+// Run blocks and drives two independent loops - the supply cycle, and this replica's heartbeat on its own
+// fixed cadence:
 //
-//	cycle (paced by the pipeline) -> record -> heartbeat if due -> repeat
+//	cycle (paced by the pipeline) -> record -> repeat
+//	beat -> sleep -> repeat
+//
+// They are separate goroutines because a beat behind a cycle is a beat gated on that cycle RETURNING, and
+// a deep-backlog scan can run for tens of seconds on a dialect without the early-stop - long enough to
+// drop a healthy replica out of the fleet's roster.
 //
 // An IDLE piston skips the cycle entirely and only heartbeats. That is the await-only replica: it holds
 // connections, so it must stay in the registry and keep dividing the pools, but it claims no work, so it
 // must not be counted among the dispatchers - a replica handed a residue class of candidates it never
-// selects strands them. One setter drives both halves so the two can never disagree.
+// selects strands them. Going idle also withdraws the shard from the shared planner and empties its cache
+// partition, since a piston that has stopped reporting must not leave a stale band claim behind.
 package piston
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
-	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -117,12 +123,12 @@ type Piston struct {
 	inst      atomic.Pointer[instruments]
 	seams     atomic.Pointer[seamster.Seamster]
 
-	// Beat state, touched only by Run. dispatchedSinceBeat is sticky: any successful cycle sets it and the
-	// beat that publishes it clears it. Sticky rather than "did the last cycle succeed" because beats are
-	// ~20x rarer than cycles, so sampling the single cycle that happens to precede one would let a healthy
-	// piston look stalled whenever a transient error landed in that gap.
-	lastBeat            time.Time
-	dispatchedSinceBeat bool
+	// dispatchedSinceBeat is sticky: any successful cycle sets it and the beat that publishes it clears it.
+	// Sticky rather than "did the last cycle succeed" because beats are ~20x rarer than cycles, so sampling
+	// the single cycle that happens to precede one would let a healthy piston look stalled whenever a
+	// transient error landed in that gap. Atomic because the cycle loop sets it and the beat loop - a
+	// separate goroutine, see Run - consumes it.
+	dispatchedSinceBeat atomic.Bool
 }
 
 // New returns a piston for one shard over an already-open database handle. The planner and cache are
@@ -132,6 +138,12 @@ type Piston struct {
 // an unset one is not a harmless default - every unconfigured replica in the fleet would collide on id 0
 // and fight over a single row. A setter would make that state reachable; a constructor argument does not.
 func New(engineID int64, shard int, db *sequel.DB, plan *planner.Planner, cache *candidatecache.Cache) (*Piston, error) {
+	// Rejected rather than defaulted, for the reason the argument exists at all: engine_id is the registry's
+	// PRIMARY KEY, so zero is not a harmless placeholder but a value every unconfigured replica in the fleet
+	// would collide on, fighting over one row.
+	if engineID <= 0 {
+		return nil, errors.New("engine id must be positive, got %d", engineID)
+	}
 	if shard < 1 {
 		return nil, errors.New("shard must be positive, got %d", shard)
 	}
@@ -171,7 +183,23 @@ func (p *Piston) Shard() int { return p.shard }
 //
 // "Idle" here is a configured MODE, distinct from the refill sense of the word (nothing is due), which
 // is a circumstance a dispatching piston meets all the time.
-func (p *Piston) SetIdle(idle bool) { p.idle.Store(idle) }
+//
+// GOING IDLE WITHDRAWS THIS SHARD, and it must: the planner's contract is that every shard either tallies
+// or clears each cycle, and an idle piston does neither, so its last tally would stand forever. The
+// planner is shared with this replica's other pistons, so that stale claim on the best band is the
+// documented wedge - every live piston finds none of its own keys at that band and dispatches nothing,
+// indefinitely. Benign only if every piston is idle, and this setter is per-piston, so the API permits the
+// bad case. The cache partition goes for the same reason an empty plan clears it: nothing here is
+// dispatchable, so every cached candidate is a dead hint a worker would pop and burn a claim round-trip on.
+//
+// Both are the same positive statement an empty plan makes, so both use the same two calls.
+func (p *Piston) SetIdle(idle bool) {
+	p.idle.Store(idle)
+	if idle {
+		p.planner.Clear(p.shard)
+		p.cache.Refill(p.shard, nil, pipeline.NoBand)
+	}
+}
 
 // Idle reports whether the piston is idling.
 func (p *Piston) Idle() bool { return p.idle.Load() }
@@ -278,20 +306,32 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 // Run drives the piston until ctx is cancelled. It blocks; a caller runs it in a goroutine and waits on
 // its own WaitGroup.
 //
-// The heartbeat is deliberately NOT gated on the cycle succeeding. A shard whose scans are failing is
-// still a live replica holding connections, and dropping out of its registry over a database blip would
-// have peers recount R, resize pools, and reshuffle ordinals for no reason. "This piston stopped
-// beating" should mean the process is stuck, nothing less.
+// The heartbeat runs on its OWN goroutine, and that is a correctness requirement rather than tidiness.
+// Beating from the cycle loop gates the beat not merely on the cycle *succeeding* - which it must not be,
+// see beat - but on the cycle *returning*, so an expensive scan postpones this replica's liveness signal
+// by its whole duration. That is not hypothetical here: phase one's `rn <= capacity` cut early-stops only
+// on Postgres 15+, so on MySQL/SQL Server/SQLite a deep backlog is still O(backlog), measured in the tens
+// of seconds at a few million due rows. A scan that outruns the peer freshness window would drop a
+// perfectly healthy replica out of R - shrinking the divisor fleet-wide - and out of the roster, which
+// reshuffles every peer's ordinal and hands the residue classes around. Exactly the outcome that should
+// mean "the process is stuck, nothing less."
+//
+// The two loops share only dispatchedSinceBeat, which is atomic, so nothing else needs synchronizing.
 func (p *Piston) Run(ctx context.Context) {
+	var beats sync.WaitGroup
+	beats.Go(func() {
+		p.beatLoop(ctx)
+	})
+	defer beats.Wait()
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		if p.idle.Load() {
-			// Nothing to pace against, so the heartbeat sets the cadence itself. An idle piston runs no
-			// cycle, so it never advances dispatched_at - which is precisely how a reader tells the two
-			// populations apart without trusting anything the replica claims about itself.
-			p.beat(ctx)
+			// An idle piston runs no cycle, so it never advances dispatched_at - which is precisely how a
+			// reader tells the two populations apart without trusting anything the replica claims about
+			// itself. The beat loop keeps its registry row alive meanwhile. Re-checked on the beat cadence
+			// so a live SetIdle(false) resumes dispatching within one interval.
 			if !p.sleep(ctx, heartbeatInterval) {
 				return
 			}
@@ -305,10 +345,18 @@ func (p *Piston) Run(ctx context.Context) {
 		// A cycle that found nothing due still counts: it proves this piston looked and could have served.
 		// Gating on candidates instead would make a quiet fleet look like it had no dispatchers at all.
 		if r.Err == nil {
-			p.dispatchedSinceBeat = true
+			p.dispatchedSinceBeat.Store(true)
 		}
-		if time.Since(p.lastBeat) >= heartbeatInterval {
-			p.beat(ctx)
+	}
+}
+
+// beatLoop refreshes this replica's registry row on a fixed cadence, independent of whatever the cycle
+// loop is doing. It beats immediately on entry so a starting piston registers without waiting an interval.
+func (p *Piston) beatLoop(ctx context.Context) {
+	for {
+		p.beat(ctx)
+		if !p.sleep(ctx, heartbeatInterval) {
+			return
 		}
 	}
 }
@@ -325,6 +373,20 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 	if r.Fetching > 0 {
 		in.queryDuration.Record(ctx, r.Fetching.Seconds(),
 			metric.WithAttributes(shardAttr, attribute.String("phase", "fetch_steps")))
+	}
+	// The two non-query phases are recorded on the same histogram. The instrument's name says "query" for
+	// historical reasons - it predates them - and renaming it would break the dashboards it is a public
+	// surface for, so the phase label carries the distinction instead. Recording them matters because
+	// planning is the one cost in the design that scales with fairness-key CARDINALITY (the lottery re-rolls
+	// per slot over every key), and left unrecorded it was visible only as cycleDuration minus the two query
+	// phases - which is to say, not measurable at all.
+	if r.Planning > 0 {
+		in.queryDuration.Record(ctx, r.Planning.Seconds(),
+			metric.WithAttributes(shardAttr, attribute.String("phase", "planning")))
+	}
+	if r.Pushing > 0 {
+		in.queryDuration.Record(ctx, r.Pushing.Seconds(),
+			metric.WithAttributes(shardAttr, attribute.String("phase", "pushing")))
 	}
 	if r.Selected > 0 {
 		in.selected.Add(ctx, int64(r.Selected), metric.WithAttributes(shardAttr))
@@ -348,13 +410,11 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 // while its seen_at keeps it in R where it belongs. dispatches carries the same fact as a flag for the
 // benefit of readers that have not moved to the timestamp yet.
 //
-// lastBeat advances even on failure. Retrying a broken registry write every cycle would turn a database
-// blip into a write storm, and the next beat is a second away regardless.
+// A failed write is not retried. Retrying a broken registry write would turn a database blip into a write
+// storm, and the next beat is a second away regardless.
 func (p *Piston) beat(ctx context.Context) {
-	p.lastBeat = time.Now()
 	idle := p.idle.Load()
-	dispatched := p.dispatchedSinceBeat && !idle
-	p.dispatchedSinceBeat = false
+	dispatched := p.dispatchedSinceBeat.Swap(false) && !idle
 	dispatches := 1
 	if idle {
 		dispatches = 0
@@ -396,13 +456,20 @@ func (p *Piston) beat(ctx context.Context) {
 // collisions, not scan cost. That is the intended trade - the scan was never the contended resource. And
 // the class is a RESIDENCY, not a lock: the claim CAS remains the only thing that grants a step, so a
 // stale pair costs a lost claim, never correctness.
+// The pair is VALIDATED, not trusted, because both bad shapes are worse than not partitioning. replicas=0
+// emits `step_id % 0`, which errors on every query - so the scan fails, the pipeline clears this shard, and
+// it stays out of planning for as long as the func keeps saying so. An ordinal at or past replicas is
+// quieter and worse: the predicate matches nothing, so the piston reports NoBand while genuinely holding
+// work, with no error anywhere to notice. replicas=1 is a solo replica, where the predicate matches
+// everything and is pure overhead. Today's caller happens to guard all three, but the fail-open posture is
+// this package's promise, so it is enforced here.
 func (p *Piston) partitionPredicate() (string, []any) {
 	fn := p.partition.Load()
 	if fn == nil {
 		return "", nil
 	}
 	replicas, ordinal, ok := (*fn)()
-	if !ok {
+	if !ok || replicas < 2 || ordinal < 0 || ordinal >= replicas {
 		return "", nil
 	}
 	return " AND step_id % ? = ?", []any{replicas, ordinal}
@@ -499,54 +566,40 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	args = append(args, partArgs...)
 	args = append(args, perKey)
 	placeholders := strings.Repeat("?,", len(keys)-1) + "?"
+	// rn IS the oldest-first ordinal - the window already ranks each key by (created_at, step_id) - so
+	// ordering by it makes the result exactly right BY CONSTRUCTION. This used to select
+	// DATE_DIFF_MILLIS(NOW_UTC(), created_at) instead and re-sort each key in Go by age descending with a
+	// step_id tiebreak, which agrees only incidentally: age is the same ordering read backwards through
+	// millisecond-truncated arithmetic, so it lands on the step_id tiebreak for anything created inside one
+	// millisecond. Ordering on rn drops the per-row date arithmetic, the nullable scan, the intermediate
+	// struct and the sort. The age was a leftover from the engine's version, where it fed a cross-shard
+	// merge that does not exist here - the planner has already assigned the slots.
 	rows, err := p.db.QueryContext(ctx,
-		"SELECT step_id, fairness_key, age_ms FROM ("+
+		"SELECT step_id, fairness_key FROM ("+
 			"SELECT step_id, fairness_key,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms,"+
 			" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
 			" FROM dwarf_steps"+
 			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
 			" AND priority=? AND fairness_key IN ("+placeholders+")"+
 			part+
-			") t WHERE rn<=? ORDER BY step_id",
+			") t WHERE rn<=? ORDER BY fairness_key, rn",
 		args...,
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
-	type fetched struct {
-		stepID int
-		ageMs  float64
-	}
-	byKey := map[string][]fetched{}
+	out := map[string][]int{}
 	for rows.Next() {
-		var f fetched
+		var stepID int
 		var key string
-		var age sql.NullFloat64
-		if err := rows.Scan(&f.stepID, &key, &age); err != nil {
+		if err := rows.Scan(&stepID, &key); err != nil {
 			return nil, errors.Trace(err)
 		}
-		f.ageMs = age.Float64
-		byKey[key] = append(byKey[key], f)
+		out[key] = append(out[key], stepID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, errors.Trace(err)
-	}
-	out := make(map[string][]int, len(byKey))
-	for key, list := range byKey {
-		// Oldest first: age desc, then step_id so equal ages order deterministically.
-		sort.Slice(list, func(a, b int) bool {
-			if list[a].ageMs != list[b].ageMs {
-				return list[a].ageMs > list[b].ageMs
-			}
-			return list[a].stepID < list[b].stepID
-		})
-		ids := make([]int, 0, len(list))
-		for _, f := range list {
-			ids = append(ids, f.stepID)
-		}
-		out[key] = ids
 	}
 	return out, nil
 }

@@ -142,7 +142,11 @@ func (p *Planner) Reset() {
 // know a shard's state outright instead of inferring it from silence. Staying quiet is not an option a
 // caller has: the previous tally stands until something replaces or clears it.
 //
-// The tallies slice is retained, not copied: the caller must not mutate it afterwards.
+// The tallies slice is HANDED OVER, not copied: it is retained, and normalized in place (a non-positive
+// weight is rewritten to 1 - see below). So a caller must neither mutate nor reuse a slice it has passed,
+// and in particular must not pass the same backing array twice: the second call's normalization would
+// write into an array a snapshot of the first is still handing out to an unlocked Plan. Every producer
+// today allocates a fresh slice per cycle, which is what the contract asks for.
 func (p *Planner) Tally(shard, band int, tallies []Tally) {
 	st := &shardTally{band: band, tallies: tallies}
 	if len(tallies) > 0 {

@@ -386,7 +386,7 @@ func TestPiston_DispatchedAtNeedsEvidence(t *testing.T) {
 	// A completed cycle is the evidence; the next beat publishes it.
 	res := r.p.pipe.Cycle(ctx)
 	assert.NoError(res.Err)
-	r.p.dispatchedSinceBeat = res.Err == nil
+	r.p.dispatchedSinceBeat.Store(res.Err == nil)
 	time.Sleep(2 * time.Millisecond)
 	r.p.beat(ctx)
 	row = r.peerRows(t)[0]
@@ -457,11 +457,19 @@ func TestPiston_IdlePublishesDispatchesZero(t *testing.T) {
 
 // TestPiston_RunDispatchesAndBeats drives the whole loop end to end: real steps in, candidates in the
 // cache, and a registry row written.
+// NOT parallel: it shortens the package-level heartbeatInterval, which every other test reads.
 func TestPiston_RunDispatchesAndBeats(t *testing.T) {
-	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t)
 	r.p.SetInterval(5 * time.Millisecond)
+
+	// The beat runs on its OWN loop now, so the evidence of dispatch is published by whichever beat follows
+	// the first successful cycle - not by the cycle itself. The very first beat fires before any cycle has
+	// run and correctly reports no dispatch, so the interval has to be short enough for a second one to land
+	// inside the test.
+	restore := heartbeatInterval
+	heartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { heartbeatInterval = restore })
 
 	want := []int{
 		r.insertStep(t, 1, 5, "k", 1),
@@ -472,12 +480,15 @@ func TestPiston_RunDispatchesAndBeats(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); r.p.Run(ctx) }()
 
-	// Wait for BOTH effects before cancelling. The beat follows the push within a cycle, so cancelling the
-	// moment the cache fills can catch the loop in between - and a beat on a cancelled context is dropped,
-	// by design (it is best-effort, and the row ages out).
+	// Wait for the real end state - candidates pushed AND the dispatch evidence published - rather than for
+	// a peer row merely existing, which the pre-cycle beat satisfies on its own.
 	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && (r.cache.Len() < len(want) || len(r.peerRows(t)) == 0) {
-		time.Sleep(5 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		rows := r.peerRows(t)
+		if r.cache.Len() >= len(want) && len(rows) > 0 && rows[0].DispatchedAgeMs < staleDispatch {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 	cancel()
 	<-done
@@ -606,6 +617,69 @@ func TestPiston_SeamsDefaultInert(t *testing.T) {
 	assert.NoError(err, "nil restores the inert default")
 }
 
+// TestPiston_IdleWithdrawsTheShard pins that going idle makes the same positive statement an empty plan
+// does. The planner's contract is that every shard tallies or clears each cycle, and an idle piston runs no
+// cycle - so without this its last tally stands forever. The planner is SHARED across a replica's pistons,
+// so a stale claim on the best band makes every live piston find none of its own keys there and dispatch
+// nothing, indefinitely. The cache partition goes for the reason an empty plan clears it: dead hints cost a
+// worker a claim round-trip each.
+func TestPiston_IdleWithdrawsTheShard(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	r.insertStep(t, 1, 5, "alpha", 1)
+
+	assert.NoError(r.p.pipe.Cycle(ctx).Err)
+	assert.True(r.cache.Len() > 0, "the cycle populated the partition")
+	band, _ := r.planner.LastBand()
+	assert.Equal(5, band, "and claimed its band in the shared planner")
+
+	r.p.SetIdle(true)
+	assert.Equal(0, r.cache.Len(), "idling empties the partition rather than leaving dead hints")
+
+	// The withdrawal is visible to a PEER planning off the same shared planner: with shard 1 cleared, a
+	// peer holding only band 9 is now the best band in the fleet and dispatches, instead of deferring
+	// forever to a band nobody is serving.
+	r.planner.Tally(2, 9, []planner.Tally{{Key: "beta", Weight: 1, Count: 1}})
+	plan := r.planner.Plan(2, 8)
+	assert.Equal(9, plan.GlobalBand, "the idle shard's stale band claim is gone")
+	assert.True(len(plan.Slots) > 0, "so the live shard is released to dispatch")
+}
+
+// TestPiston_PartitionPairIsValidated pins the fail-open posture against a bad (replicas, ordinal) pair.
+// replicas=0 would emit `step_id % 0` and error every query; an ordinal at or past replicas matches nothing
+// and reports NoBand while genuinely holding work - silent, and the worse of the two.
+func TestPiston_PartitionPairIsValidated(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	for i := 1; i <= 6; i++ {
+		r.insertStep(t, i, 5, "k", 1)
+	}
+
+	for _, tc := range []struct {
+		name              string
+		replicas, ordinal int
+		ok                bool
+	}{
+		{"zero replicas", 0, 0, true},
+		{"ordinal past replicas", 2, 2, true},
+		{"negative ordinal", 2, -1, true},
+		{"solo replica", 1, 0, true},
+		{"not ok", 4, 1, false},
+	} {
+		r.p.SetPartitionFunc(func() (int, int, bool) { return tc.replicas, tc.ordinal, tc.ok })
+		band, tallies, err := r.p.ScanBand(ctx, 1)
+		assert.NoError(err, "%s must not error the scan", tc.name)
+		if assert.Equal(1, len(tallies), "%s must select everything, not nothing", tc.name) {
+			assert.Equal(6, tallies[0].Count, "%s: no rows excluded", tc.name)
+		}
+		assert.Equal(5, band, "%s reports the real band", tc.name)
+	}
+}
+
 func TestPiston_NewValidates(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -618,7 +692,11 @@ func TestPiston_NewValidates(t *testing.T) {
 		return p.Interval()
 	}(), "a fresh piston inherits the pipeline's paced default")
 
-	_, err := New(7, 0, r.db, r.planner, r.cache)
+	_, err := New(0, 1, r.db, r.planner, r.cache)
+	assert.Error(err, "engine id 0 is the registry's colliding primary key, not a default")
+	_, err = New(-1, 1, r.db, r.planner, r.cache)
+	assert.Error(err, "engine id must be positive")
+	_, err = New(7, 0, r.db, r.planner, r.cache)
 	assert.Error(err, "shard must be positive")
 	_, err = New(7, 1, nil, r.planner, r.cache)
 	assert.Error(err, "db is required")

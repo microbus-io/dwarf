@@ -19,27 +19,51 @@ every call site.
 It **owns** the pipeline, the two queries behind it, its instruments, and this replica's heartbeat. It
 **borrows** the planner and the candidate cache, both shared with every other piston on the replica.
 
-## `Run`
+## `Run` — two loops, not one
 
 ```
-cycle (paced by the pipeline) -> record -> heartbeat if due -> repeat
+cycle (paced by the pipeline) -> record -> repeat
+beat -> sleep(heartbeatInterval) -> repeat
 ```
 
 `Run` blocks; the caller puts it in a goroutine and waits on its own WaitGroup. There is no `Stop` — a
-cancelled context ends it, and that is safe with no second signal because **both queries are read-only**:
-nothing to commit, nothing to strand, so abandoning mid-flight is free. Cadence lives entirely in the
-pipeline, so the loop body here holds no timing policy of its own.
+cancelled context ends both loops, and that is safe with no second signal because **both queries are
+read-only**: nothing to commit, nothing to strand, so abandoning mid-flight is free. Cadence lives entirely
+in the pipeline, so the cycle loop holds no timing policy of its own.
 
-**`Run` is single-goroutine; every `Set*` is safe from anywhere.** The live configuration is four atomics
-(`idle`, `partition`, `logger`, `inst`) rather than a mutex, and there is deliberately no grouped
-snapshot: nothing here is coupled, so reading `idle` and the partition a microsecond apart cannot produce
-an inconsistent pair. The four instruments are swapped as **one** atomic pointer, though, so a recording
-cycle never sees half of one meter and half of another.
+**THE BEAT MUST NOT SHARE THE CYCLE'S GOROUTINE, and this was a real bug.** Beating from the cycle loop
+gates the beat not merely on the cycle *succeeding* — which it must not be, see below — but on the cycle
+*returning*. Phase one's `rn <= capacity` cut early-stops only on **Postgres 15+**; on MySQL, SQL Server and
+SQLite a deep backlog is still O(backlog), measured in the **tens of seconds** at a few million due rows.
+Against a 40s peer-freshness window, one such scan drops a **healthy** replica out of `R` (every peer
+regrows its pools) and out of the roster (every peer's ordinal reshuffles, handing residue classes around) —
+exactly the outcome the registry is supposed to reserve for "the process is stuck, nothing less." A
+separate loop makes the beat's cadence independent of how expensive the scan happens to be.
+
+The two loops share exactly one field, `dispatchedSinceBeat`, which is atomic; nothing else needs
+synchronizing. A consequence worth knowing when reading tests: the **first** beat fires before any cycle has
+completed, so it correctly publishes *no* dispatch evidence, and the evidence appears on the next beat.
+
+**Every `Set*` is safe from anywhere.** The live configuration is five atomics (`idle`, `partition`,
+`logger`, `inst`, `seams`) rather than a mutex, and there is deliberately no grouped snapshot: nothing here
+is coupled, so reading `idle` and the partition a microsecond apart cannot produce an inconsistent pair. The
+four instruments are swapped as **one** atomic pointer, though, so a recording cycle never sees half of one
+meter and half of another.
 
 ## Idle
 
 An idle piston **still turns over** — it heartbeats, so the replica keeps its registry row and goes on
 dividing the connection pools — but it runs no cycle and claims no work. That is the await-only replica.
+
+**Going idle WITHDRAWS the shard, and skipping that wedges the replica.** The planner's contract is that
+every shard either tallies or clears each cycle; an idle piston runs no cycle, so it does neither, and its
+last tally would stand forever. The planner is **shared** across the replica's pistons, so that stale claim
+on the best band is the documented wedge — every live piston finds none of *its* keys at that band and
+dispatches nothing, indefinitely. It is benign only when every piston is idle, and `SetIdle` is per-piston,
+so the API permits the bad case. `SetIdle(true)` therefore does the same two things an empty plan does:
+`planner.Clear(shard)` and `cache.Refill(shard, nil, NoBand)` — the partition for the same reason, since a
+dead hint costs a worker a claim round-trip. Pinned by `TestPiston_IdleWithdrawsTheShard`, which asserts the
+release from a *peer's* point of view rather than just the local state.
 
 The default is *not* idle, deliberately: a fresh piston dispatches, which is the common case, and a zero
 value that silently did nothing would be the worse default.
@@ -109,6 +133,22 @@ The residue class is a **residency, not a lock**: the claim CAS remains the only
 so a stale `(replicas, ordinal)` pair costs a lost claim, never correctness. `step_id % R` is not sargable,
 so this reduces claim collisions rather than scan cost — the intended trade, since the scan was never the
 contended resource.
+
+**The pair is VALIDATED, not trusted** (`replicas > 1 && 0 <= ordinal < replicas`, else select everything).
+Both bad shapes are strictly worse than not partitioning: `replicas == 0` emits `step_id % 0`, which errors
+every query — so the scan fails, the pipeline clears this shard, and it stays out of planning for as long as
+the func keeps saying so. An ordinal at or past `replicas` is quieter and worse: the predicate matches
+nothing, so the piston reports `NoBand` while genuinely holding work, with no error anywhere. Today's
+intended caller guards all of this itself, but fail-open is *this package's* advertised posture, so it is
+enforced here rather than assumed of the caller. Pinned by `TestPiston_PartitionPairIsValidated`.
+
+**`FetchSteps` orders on `rn`, not on a recomputed age.** The window already ranks each key by
+`(created_at, step_id)`, so `ORDER BY fairness_key, rn` is oldest-first *by construction*. An earlier cut
+selected `DATE_DIFF_MILLIS(NOW_UTC(), created_at)` and re-sorted each key in Go by age descending — the same
+ordering read backwards through millisecond-truncated arithmetic, agreeing only incidentally (anything
+created inside one millisecond fell through to the `step_id` tiebreak, which is also what its test
+exercised). The age was a leftover from the engine's version, where it fed a cross-shard merge that does not
+exist here: the planner has already assigned the slots.
 
 ## Metrics take a `Meter`, not a `MeterProvider`
 
