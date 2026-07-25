@@ -602,6 +602,15 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	if e.seams.IsFault(FaultDropDoorbell) {
 		return
 	}
+	// Every caller of this cold path is RE-offering a step this replica already dispatched once - a revived
+	// surgraph caller, a resumed interrupt leaf, an unwedged park - so the step still carries the claim
+	// reservation its earlier dispatch took, and those dispatches finish far inside the ~1-2s window. Left
+	// in place it makes this replica skip its own re-dispatch: every worker that pops the step is turned
+	// away by TryClaim, and the refiller keeps re-selecting it, until the reservation ages out. Same reason
+	// and same treatment as the recovery-defer reset and the flow.Retry rewind (execution.go), which is the
+	// company this site belongs in. A no-op for the callers that offer a genuinely new step id (Fork's leaf,
+	// Continue), which have no reservation to drop.
+	e.claims.RelinquishClaim(shard, stepID)
 	priority := math.MaxInt
 	var notBeforeDelayMs sql.NullFloat64
 	db, err := e.db.Shard(shard)
@@ -619,11 +628,15 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 		e.logger.DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
 		return
 	}
-	ring := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
-	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "ring", ring)
-	if ring {
-		e.requestRefill(shard)
-	}
+	admitted := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "admitted", admitted)
+	// Unconditional, NOT gated on admission. An empty partition used to decline every offer, which made it
+	// a standing refill request: each doorbell rang the trigger for as long as the partition stayed empty.
+	// Now the first offer fills it, so gating here would silence every later doorbell on a shard whose
+	// partition holds one item while a busy peer shard owns the rest of the (global) bound - measured as
+	// 189 of 500 flows stranded on shard 2 in fixtures/completionraceflow_test.go. It costs nothing:
+	// workerLoop already rings this shard's trigger after every processStep, and the trigger coalesces.
+	e.requestRefill(shard)
 }
 
 // enqueueStepDue is the fast-path doorbell for a step the caller just created or reset for immediate
@@ -636,11 +649,9 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 	if e.seams.IsFault(FaultDropDoorbell) {
 		return
 	}
-	ring := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
-	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "ring", ring)
-	if ring {
-		e.requestRefill(shard)
-	}
+	admitted := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "admitted", admitted)
+	e.requestRefill(shard) // unconditional - see enqueueStep
 }
 
 // cancel aborts a flow and its whole subgraph subtree. Root-only: a subgraph child is not an independently

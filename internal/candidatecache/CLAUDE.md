@@ -48,6 +48,22 @@ does not trim: each refiller slices its batch from its own independent roll of t
 of slices can transiently overshoot and simply drains within a cycle. `Capacity()` is also what the
 refillers draw their global plan at.
 
+**`Offer` admits into an EMPTY partition, and that is load-bearing rather than incidental.** It once
+declined, on the reasoning that an arbitrary-priority step must not jump an idle replica's queue — sound
+only while a separate trigger let the refiller answer the decline within a fraction of a cycle. Under a
+fixed cadence there is no trigger: a sequential chain holds exactly one pending step at a time, so its
+partition is empty at *every* hop, and declining costs each hop a uniformly-random fraction of the cycle
+interval (half of it on average, all of it at worst). Nothing special-cases the empty partition — its
+derived floor is `math.MaxInt`, so any priority is strictly better and takes the ordinary head-insert
+path.
+
+There are consequently three outcomes, not two: strictly better than the floor **head-inserts**; no better
+but under the bound **appends at the tail** (best-first at the head is what the derived floor rests on, so
+a worse candidate may only ever go *behind* one); full **declines**. The tail entries are unplanned — they
+sit outside the weighted fairness pick — but only until the next `Refill` wipes them wholesale, and under
+real load the partitions sit at capacity so that path is never taken. Pinned by
+`TestCandidateCache_OfferAdmissionCases` and `TestCandidateCache_OfferDeclinesWhenFull`.
+
 **`Refill` returns the number of candidates it discarded un-popped**, which the engine feeds to
 `dwarf_refill_candidates_discarded`. Discarded steps stay `pending` and are re-selected, so this is cost,
 never loss — but the ratio against the batch size is the only visibility into how much of the refillers'

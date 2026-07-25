@@ -728,15 +728,15 @@ step that re-read a row this replica just wrote. The lookup path remains for the
 `not_before` is in the future the doorbell short-circuits into `shortenNextPoll(not_before)` -
 the work is not due, nothing to preempt, the cache stays untouched; the local poll timer wakes at the right moment.
 Otherwise the priority drives one of three cache paths, each against the step's own shard's PARTITION (an
-`Offer` routes by `Job.Shard` and is admitted against that partition's floor). (1) Empty partition: request a
-refill of that shard so its refiller selects the strictly-best step. It deliberately does
-**not** head-insert the first arrival, because an arbitrary-priority step jumping the queue on an idle replica can
-run before a more important one (this exact inversion was observed; the cost is one refiller scan of idle-wake
-latency). (2) Non-empty and not strictly more important than the partition's band (priority >= floor): no-op - a
-steady same-or-lower-priority stream is pure cache hits. (3) Non-empty and strictly more important (priority <
-floor): **head-insert that exact step** so the next pop runs it without a refiller scan, lower the floor (derived
-from the head - see `internal/candidatecache/CLAUDE.md`), wake one waiter, and request a refill of that shard to
-top up the band. Case 3 - an urgent arrival preempting cached lower-priority work -
+`Offer` routes by `Job.Shard` and is admitted against that partition's floor). (1) Strictly more important
+than the partition's band (priority < floor): **head-insert that exact step** so the next pop runs it without
+a refiller scan, lower the floor (derived from the head - see `internal/candidatecache/CLAUDE.md`), wake one
+waiter, and request a refill of that shard to top up the band. **An EMPTY partition takes this path** - its
+derived floor is `math.MaxInt`, so anything is strictly better. (2) Not strictly more important (priority >=
+floor) but the cache is under its bound: **append at the tail**, behind every better candidate, so the derived
+floor is untouched. (3) Not strictly more important and the cache is full: no-op - a steady
+same-or-lower-priority stream against a full cache is pure cache hits. Case 1 - an urgent arrival preempting
+cached lower-priority work -
 deliberately does **not** flush the existing candidates: a guiding principle is that high throughput trumps exact
 priority ordering. Flushing would idle every worker through the refill scan to guarantee zero lower-priority
 executions after a higher-priority arrival; instead the workers keep draining and the refiller's wholesale replace
@@ -751,9 +751,21 @@ there - same-flow shard affinity); the doorbells (`enqueueStepDue`/`enqueueStep`
 shard. Only `pollPendingSteps` and startup ring **all** shards (`requestRefillAll`) - the backstop cannot know
 which shard's backlog it observed.
 
+**An EMPTY partition ADMITS the arrival, and reversing that is what makes a fixed-cadence refiller viable.**
+It used to decline (request a scan, cache nothing), on the reasoning that an arbitrary-priority step must not
+jump an idle replica's queue - an inversion that was genuinely observed. That reasoning held only while the
+single-slot trigger let the refiller answer the decline within a fraction of a cycle. It does not survive the
+trigger's removal: a sequential chain holds exactly one pending step at a time, so its partition is empty at
+*every* hop, and declining costs each hop a uniformly-random fraction of the cycle interval - half on
+average, all of it at worst (~330ms over a 10-step flow at the derived ~67ms). What is given up is that this
+one step bypasses the cross-shard band plan, which is the same "strict within one or two intervals" softness
+stated below and accepted throughout. The tail-append (case 2) has the same character and a shorter life: its
+entries are unplanned, but the next wholesale `Refill` wipes them, and under load the partitions sit at
+capacity so the path is never taken.
+
 **One pioneer is sufficient; the head-insert is a bridge, not a per-job fast path.** A head-insert is accepted at
 most once per band-opening: it lowers `floor` to the pioneer's priority, so every subsequent arrival at that band
-hits `priority >= floor` and is rejected (case 2). Deliberate, not starvation. The pioneer bridges the single
+hits `priority >= floor` and lands at the tail (case 2) or is dropped (case 3). Deliberate, not starvation. The pioneer bridges the single
 refiller-cycle gap so the *first* urgent step does not eat a refiller scan of latency. Its `requestRefill` makes the
 refiller scan band MIN and `refill()` **wholesale-replace** the cache with the strict, weighted batch of that band,
 *evicting* the cached lower-priority candidates (they stay `pending`, re-selected when the band drops back). After
@@ -1235,7 +1247,7 @@ on every claim under one lock; the rolling window has no scan at all. An entry l
 in the second to the drop two rolls later), which is the whole safety argument - a reservation can only
 ever DELAY this replica's dispatch of a step by a bounded window, never prevent it. See the package doc.
 
-**Two implementation load-bearers:**
+**Three implementation load-bearers:**
 
 - **Key on `(shard, stepID)`.** `step_id` is a per-shard auto-increment, so every shard has a step 42; a
   step-id-only key would turn away live candidates on every shard but the one holding the reservation.
@@ -1244,6 +1256,21 @@ ever DELAY this replica's dispatch of a step by a bounded window, never prevent 
   claims are bounded by the workers currently in the claim window, against a cache of 2x the worker count.
   Do **not** `requestRefill` on the skip path - it was tried, and at a 0ms floor it feeds an already-
   spinning refiller (throughput 1,632 -> 941).
+- **EVERY path that re-offers a step to THIS replica must `RelinquishClaim` first.** The window is sized to
+  outlive a *scan*, so it necessarily outlives a step's own dispatch - which means a step re-armed and
+  re-offered here still carries the reservation its previous dispatch took. Left in place it makes the
+  replica skip its own re-dispatch: every worker that pops the step is turned away by `TryClaim` and the
+  refiller keeps re-selecting it, for up to the full ~2s. Three paths do this and all three relinquish -
+  the recovery-defer reset and the `flow.Retry` rewind (both `execution.go`), and **`enqueueStep`**
+  (`operations.go`), which covers the cold re-offer sites: the surgraph revive (three call sites), the
+  resume leaf, and the wedge sweep. The `enqueueStep` one was **missing**, and it is a *latent* bug that
+  the empty-partition `Offer` merely exposed: the reservation held either way, but declining the offer hid
+  it behind the refiller's cadence. With the offer admitted, the revived caller is popped at once, skipped,
+  and re-skipped until the window ages out - measured at `fixtures/completionraceflow_test.go` as 189 of
+  500 flows failing to drain in 30s. Adding it took that fixture to **2.2s, below its 5.9s pre-change
+  baseline**, because a revive no longer waits out a stale reservation at all. A relinquish for a step id
+  this replica never reserved (Fork's leaf, `Continue`) is a harmless no-op, which is why the guard belongs
+  at the shared entry point rather than at each caller.
 
 **The partition divides DISPATCHERS, not R** - see `dwarf_peers.dispatches`. An await-only replica
 (`SetWorkers(0)`) holds connections, so it counts toward R and divides the pools, but it claims nothing:

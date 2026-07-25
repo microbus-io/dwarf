@@ -265,32 +265,61 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	return discarded
 }
 
-// Offer front-loads a single higher-priority candidate onto its shard's partition (routing is j.Shard).
+// Offer admits a single candidate onto its shard's partition (routing is j.Shard), reporting whether it
+// was taken. There are three ways in, tried in this order:
 //
-// It reports needRefill: this partition needs the refiller. True when it is empty (a scan must supply
-// it) or when a head-insert happened (only one pioneer is admitted per band-opening, so a scan must top
-// up the rest of the band). A candidate whose priority is no better than the partition's floor is
-// dropped and needs nothing.
+//   - The partition is EMPTY - admit unconditionally, ignoring the global bound (see below).
+//   - STRICTLY BETTER than the partition's floor - head-insert, so the next Pop runs it, trimming the
+//     tail if that pushed the cache past its bound.
+//   - NO BETTER, but the cache is under its bound - append at the TAIL. Best-first at the head is what
+//     the derived floor rests on, so a worse candidate may only ever go behind a better one.
 //
-// A head-insert serves the offered step itself immediately - it is popped next - so the refill it asks
-// for is for the step's SIBLINGS, and can wait out the caller's scan floor like any other nudge.
-func (c *Cache) Offer(j Job, priority int) (needRefill bool) {
+// Otherwise it declines: the cache is already holding every candidate it is sized to hold, and the
+// refiller's next wholesale replace is what re-establishes strict band order across the partition.
+//
+// ADMITTING INTO AN EMPTY PARTITION IS LOAD-BEARING, and it used to be declined on the grounds that "an
+// arbitrary-priority step must not jump an idle replica's queue." That reasoning held only while a
+// separate trigger let the refiller answer the decline within a fraction of its cycle. Under a fixed
+// cadence there is no such trigger: a sequential chain holds exactly one pending step at a time, so its
+// partition is empty at EVERY hop, and declining makes every hop wait a uniformly-random fraction of the
+// cycle interval - half of it on average, the whole of it at worst. The exposure admitting accepts is
+// that this one step bypasses the cross-shard band plan, which is the same "strict within one or two
+// intervals" softness the design already accepts everywhere else.
+//
+// THE GLOBAL BOUND MUST NOT GATE THAT FIRST CASE, and gating it strands work. The bound is a sum over
+// ALL partitions, so a busy shard filling the cache would make an offer to an IDLE shard's empty
+// partition decline - and since the caller reads the return as "this partition needs nothing", that
+// shard's step waits for a scan nobody asked for. Measured as 159 of 500 flows stranded in
+// fixtures/completionraceflow_test.go, which runs two shards against a cache of 8. The overshoot is at
+// most one candidate per shard, which is why the bound can afford to yield here.
+//
+// The tail append has a shorter life than either: the entries it adds are unplanned, so they sit outside
+// the weighted fairness pick - but only until the next cycle, since Refill is a wholesale replace that
+// wipes them. Under real load the partitions sit at capacity and the path is never taken at all.
+func (c *Cache) Offer(j Job, priority int) (admitted bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return false
 	}
 	p := c.parts[j.Shard]
-	if p == nil || len(p.items) == 0 {
-		return true
-	}
-	if priority >= p.floor() {
-		return false
+	if p == nil {
+		p = &partition{}
+		c.parts[j.Shard] = p
 	}
 	j.Priority = priority
-	p.items = append([]Job{j}, p.items...)
-	if c.totalLen() > c.size {
-		p.items = p.items[:len(p.items)-1]
+	switch {
+	case len(p.items) == 0:
+		p.items = []Job{j}
+	case priority < p.floor():
+		p.items = append([]Job{j}, p.items...)
+		if c.totalLen() > c.size {
+			p.items = p.items[:len(p.items)-1]
+		}
+	case c.totalLen() < c.size:
+		p.items = append(p.items, j)
+	default:
+		return false
 	}
 	c.cond.Signal()
 	return true

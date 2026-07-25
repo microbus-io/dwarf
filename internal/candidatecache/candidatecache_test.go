@@ -227,52 +227,78 @@ func TestCandidateCache_DerivedFloorAfterOfferPop(t *testing.T) {
 	assert.Expect(j.Shard, 1)
 }
 
-// TestCandidateCache_OfferNeedRefillCases pins when an Offer asks for a scan. An EMPTY partition does
-// (only a scan can supply it) and deliberately does NOT admit the arrival: an arbitrary-priority step
-// must not jump an idle replica's queue. A HEAD-INSERT does too, because only one pioneer is admitted
-// per band-opening and the rest of the band needs the wholesale replace. An offer no better than the
-// partition's floor is dropped and asks for nothing.
-func TestCandidateCache_OfferNeedRefillCases(t *testing.T) {
+// TestCandidateCache_OfferAdmissionCases pins the three ways an Offer resolves. An EMPTY partition
+// ADMITS - its derived floor is math.MaxInt, so anything head-inserts - which is what lets a sequential
+// chain's next step dispatch immediately instead of waiting out a cycle interval for a scan that would
+// find it anyway. A strictly-better band head-inserts. Anything no better goes to the TAIL while the
+// cache is under its bound, never in front of a better candidate.
+func TestCandidateCache_OfferAdmissionCases(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var c Cache
-	c.Init(4)
-	assert.True(c.Offer(Job{StepID: 7, Shard: 1}, 5), "an empty partition needs a refill")
-	// ...and does not admit the arrival itself: an arbitrary-priority step must not jump an idle queue.
-	assert.Expect(c.Len(), 0)
-
-	// An empty PARTITION behaves the same way even when another partition holds work.
-	c.Refill(2, []Job{{StepID: 21, Shard: 2}}, 3)
-	assert.True(c.Offer(Job{StepID: 8, Shard: 1}, 5))
+	c.Init(4) // size 8
+	assert.True(c.Offer(Job{StepID: 7, Shard: 1}, 5), "an empty partition admits")
 	assert.Expect(c.Len(), 1)
 
-	// A head-insert of a strictly-better band needs the rest of that band fetched.
+	// A strictly-better band head-inserts, taking over the derived floor.
 	c.Refill(1, []Job{{StepID: 30, Shard: 1}}, 5)
-	assert.True(c.Offer(Job{StepID: 31, Shard: 1}, 2), "a head-insert needs the band topped up")
+	assert.True(c.Offer(Job{StepID: 31, Shard: 1}, 2), "a strictly-better band head-inserts")
+	assert.Expect(c.parts[1].floor(), 2)
 
-	// A no-better offer is dropped and needs nothing.
-	assert.False(c.Offer(Job{StepID: 32, Shard: 1}, 9))
+	// No better than the floor, but there is room: appended at the tail, so the head - and with it the
+	// derived floor - still carries the best item present.
+	assert.True(c.Offer(Job{StepID: 32, Shard: 1}, 9), "room to spare admits at the tail")
+	assert.Expect(c.parts[1].floor(), 2)
+	assert.Expect(len(c.parts[1].items), 3)
+	assert.Expect(c.parts[1].items[2].StepID, 32)
+}
+
+// TestCandidateCache_OfferDeclinesWhenFull pins the one case that is still turned away. A full cache is
+// already holding every candidate it is sized to hold, so a no-better arrival has nothing to add; the
+// refiller's next wholesale replace is what re-establishes strict band order. A strictly-better arrival
+// still gets in, because the bound is enforced by trimming the tail rather than by declining the head.
+func TestCandidateCache_OfferDeclinesWhenFull(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(1) // size 2
+	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 5)
+
+	assert.False(c.Offer(Job{StepID: 99, Shard: 1}, 9), "no better and no room")
+	assert.Expect(c.Len(), 2)
+
+	assert.True(c.Offer(Job{StepID: 98, Shard: 1}, 1), "strictly better still head-inserts")
+	assert.Expect(c.Len(), 2)
+	assert.Expect(c.parts[1].floor(), 1)
+
+	// An EMPTY partition admits even though the cache is at its bound. The bound is a sum over all
+	// partitions, so letting it gate this would make one busy shard silence an idle one's doorbell -
+	// the step then waits for a scan its caller was told to skip. The overshoot is one per shard.
+	assert.True(c.Offer(Job{StepID: 21, Shard: 2}, 9), "an empty partition ignores the global bound")
+	assert.Expect(len(c.parts[2].items), 1)
+	assert.Expect(c.Len(), 3)
 }
 
 func TestCandidateCache_OfferPriorityJumpNoFlush(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var c Cache
-	c.Init(4)
+	c.Init(4) // size 8
 	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 5)
 
-	nr := c.Offer(Job{StepID: 8, Shard: 1}, 7)
-	assert.False(nr)
-	nr = c.Offer(Job{StepID: 9, Shard: 1}, 5)
-	assert.False(nr)
-	assert.Expect(c.Len(), 2)
+	// Neither is better than the floor, so both land behind the body rather than in front of it.
+	assert.True(c.Offer(Job{StepID: 8, Shard: 1}, 7))
+	assert.True(c.Offer(Job{StepID: 9, Shard: 1}, 5))
+	assert.Expect(c.Len(), 4)
+	assert.Expect(c.parts[1].floor(), 5)
 
-	nr = c.Offer(Job{StepID: 99, Shard: 1}, 3)
-	assert.True(nr)
-	assert.Expect(c.Len(), 3)
+	// The strictly-better arrival preempts by head-inserting, and does NOT flush the body.
+	assert.True(c.Offer(Job{StepID: 99, Shard: 1}, 3))
+	assert.Expect(c.Len(), 5)
 	assert.Expect(c.parts[1].floor(), 3)
 	j, _, _ := c.Pop()
 	assert.Expect(j, Job{StepID: 99, Shard: 1, Priority: 3})
+	assert.Expect(c.Len(), 4)
 }
 
 // TestCandidateCache_OfferRoutesByShard pins that an Offer lands on ITS OWN shard's partition: the
@@ -338,12 +364,12 @@ func TestCandidateCache_RefillEmptyIsWholesale(t *testing.T) {
 	assert.Expect(c.parts[1].floor(), math.MaxInt)
 	assert.Expect(c.parts[2].floor(), 5)
 
-	// An arrival on the emptied partition asks for a refill rather than head-inserting (the refiller
-	// picks the strictly-best step); the point here is that it is not weighed against a floor the
-	// partition no longer has.
-	nr := c.Offer(Job{StepID: 9, Shard: 1}, 7)
-	assert.True(nr)
-	assert.Expect(len(c.parts[1].items), 0)
+	// An arrival on the emptied partition is admitted on the strength of the emptying: the partition's
+	// floor reverted to math.MaxInt with its last item, so it is not weighed against a band the
+	// partition no longer holds.
+	assert.True(c.Offer(Job{StepID: 9, Shard: 1}, 7))
+	assert.Expect(len(c.parts[1].items), 1)
+	assert.Expect(c.parts[1].floor(), 7)
 }
 
 // TestCandidateCache_RefillReportsDiscarded pins the count Refill returns: the candidates the
