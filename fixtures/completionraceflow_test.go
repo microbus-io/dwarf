@@ -34,9 +34,11 @@ import (
 // completed, the lease recovery (which only resets running rows) cannot re-dispatch it, and the flow is
 // stranded forever 'running' with every step terminal - an orphan flow. The make-completeFlow-write-first fix
 // removes the deadlock. Each flow is a subgraph caller with a trivial child purely to double the completion
-// rate (caller flow plus child flow both finish in the burst); the bug is not subgraph-specific. The short
-// drain bound (far below any lease) makes a stranded flow fail rather than eventually self-heal. Without the
-// fix this strands a flow on roughly one run in five; with it, all drain in well under a second.
+// rate (caller flow plus child flow both finish in the burst); the bug is not subgraph-specific. The drain
+// bound is on PROGRESS, not wall clock (see it below), which is what makes a stranded flow fail while
+// letting a slow build take as long as it needs. Without the fix this strands a flow on roughly one run in
+// five; with it, all drain in well under a second (~20s under -race, which is why the bound cannot be a
+// wall clock).
 func TestCompletionRaceflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -87,11 +89,24 @@ func TestCompletionRaceflow(t *testing.T) {
 			keys = append(keys, k)
 		}
 
-		// Drain with a bound far below the worker lease: a stranded caller never reaches a terminal status,
-		// so it survives the bound. With the fix every caller completes in well under a second.
+		// Drain until every flow completes, bounded on PROGRESS rather than on wall clock. The distinction
+		// is the whole point: the wedge this test guards is PERMANENT - a stranded caller never reaches a
+		// terminal status and never will - so "nothing has completed for a while" is the precise symptom,
+		// while "the whole drain took a while" is not a symptom at all.
+		//
+		// It used to be an absolute 30s deadline, which conflated the two and failed under -race. A race
+		// build drains this burst CORRECTLY in ~20s of that 30s budget with the package to itself, so any
+		// real load pushed it over - and the flows it then named as stranded read `completed` in the dump
+		// moments later, because the deadline had simply expired mid-drain. Progress makes a slow machine
+		// free while keeping the strand detectable within noProgressBound of the last completion.
+		const (
+			noProgressBound = 15 * time.Second // a strand completes NOTHING further, ever; 15s of that is unambiguous
+			absoluteCap     = 2 * time.Minute  // so a pathological hang still fails with the dump below, not a suite timeout
+		)
 		stuck := keys
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
+		lastProgress := time.Now()
+		capAt := time.Now().Add(absoluteCap)
+		for len(stuck) > 0 && time.Now().Before(capAt) {
 			var remaining []string
 			for _, k := range stuck {
 				o, _ := eng.Snapshot(ctx, k)
@@ -100,12 +115,30 @@ func TestCompletionRaceflow(t *testing.T) {
 				}
 				remaining = append(remaining, k)
 			}
+			if len(remaining) < len(stuck) {
+				lastProgress = time.Now()
+			}
 			stuck = remaining
-			if len(stuck) == 0 {
+			if len(stuck) == 0 || time.Since(lastProgress) >= noProgressBound {
 				break
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
+
+		// One authoritative re-read before reporting. The loop above can stop on its bound while the last
+		// few flows are mid-completion, and a flow that finished between its last poll and now is not
+		// stranded - reporting it as such is what made the old failures unreadable (every "stranded" flow
+		// in the dump read `completed`). A genuine strand is unaffected: it never completes, so it survives
+		// this pass exactly as it survived the loop.
+		var final []string
+		for _, k := range stuck {
+			o, _ := eng.Snapshot(ctx, k)
+			if o != nil && o.Status == workflow.StatusCompleted {
+				continue
+			}
+			final = append(final, k)
+		}
+		stuck = final
 
 		if !assert.Equal(0, len(stuck), "stranded flows: %d of %d", len(stuck), n) {
 			for i, k := range stuck {
