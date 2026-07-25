@@ -220,19 +220,17 @@ func TestRefillOutcome_AboveBandVsNothingDue(t *testing.T) {
 	assert.True(eventuallyCacheLen(e, 0), "an above-band shard's partition holds no dead hints (got %d)", e.cache.Len())
 
 	// The peer's band-1 claim expires (TTL) or drains: the next pass serves this shard's own band.
-	// (SetWorkers(0) makes the cache capacity 1, so the one-step plan is capacity-bound: refillFull.)
 	e.censusLock.Lock()
 	e.census[99].at = time.Now().Add(-6 * time.Second)
 	e.censusLock.Unlock()
-	assert.Equal(refillFull, e.runShardRefill(ctx, 1))
+	assert.Equal(refillIdle, e.runShardRefill(ctx, 1))
 	assert.True(eventuallyCacheLen(e, 1), "released from the band, the shard's work is selected again (got %d)", e.cache.Len())
 }
 
 // TestRefillOutcome_StarvedNeverParksOnTheDoorbell pins the outcome for a shard that is AT the global
 // band with due work but wins no slots, because a capacity-bound plan gave them all to shards holding
 // more (or older) of the planned keys. It must report refillStarved - which routes to a short timed
-// retry - and never refillIdle/refillFull, which park on a trigger only this shard's own activity can
-// arm.
+// retry - and never refillIdle, which parks on a trigger only this shard's own activity can arm.
 //
 // The bug this pins: a starved shard has an empty partition and nothing in flight, so it produces no
 // pops, no completed steps and no doorbells - it arms nothing. Parked, it would sleep out the whole
@@ -268,7 +266,7 @@ func TestRefillOutcome_StarvedNeverParksOnTheDoorbell(t *testing.T) {
 	assert.Equal(refillStarved, e.runShardRefill(ctx, 1),
 		"an at-band shard that wins no slots must retry, not park on a doorbell nothing will ring")
 
-	// And the retry releases promptly - bounded by the pace, not by the 1-minute poll backstop.
+	// And the retry releases promptly - bounded by refillBackoffTick, not by the 1-minute poll backstop.
 	start := time.Now()
 	assert.True(e.awaitStarvedRetry(e.refillTriggers[1]), "the retry must release, not report shutdown")
 	assert.True(time.Since(start) < 5*time.Second, "the starved retry must be short (took %v)", time.Since(start))
@@ -534,62 +532,31 @@ func TestRefillScanFloor_DerivedFromStaticConfig(t *testing.T) {
 	assert.True(deriveScanFloor(1, 64, 384, 1) >= refillScanFloorMin)
 }
 
-// TestRefillPace_LightLoadUnpaced pins the pacing gate's light-load-inert property: pacing applies only
-// after a refill that filled the cache to capacity, so a sequential flow - whose refill batches are far
-// below capacity - never waits out a pace interval between steps. The pace is set absurdly high (2s);
-// if the gate ever paced a partial batch, a 5-step flow would take >10s and blow the deadline.
-func TestRefillPace_LightLoadUnpaced(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-
-	proxy := NewTestProxy()
-	g := workflow.NewGraph("Chain")
-	names := []string{"A", "B", "C", "D", "E", workflow.END}
-	for _, n := range names[:5] {
-		g.SetEndpoint(n, "refillpace.verify:428/nop")
-	}
-	g.AddTransitionChain(names...)
-	proxy.HandleGraph("refillpace.verify:428/chain", g)
-	proxy.HandleTask("refillpace.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
-
-	e := NewEngineUnderTest(t)
-	e.SetHost(proxy)
-	e.refillPace = 2 * time.Second // before Startup; would dominate the runtime if the gate misfired
-	assert.NoError(e.Startup(t.Context()))
-
-	start := time.Now()
-	_, outcome, err := e.Run(ctx, "refillpace.verify:428/chain", nil, nil)
-	assert.NoError(err)
-	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.True(time.Since(start) < 2*time.Second, "light-load flow must not absorb a pace interval (took %v)", time.Since(start))
-}
-
-// TestRefillPace_DeepBacklogLiveness pins that pacing cannot wedge a deep backlog: with a single worker
-// (cache capacity 2, so every refill is full and every cycle is paced) and a backlog of flows several
-// times the capacity, everything still completes - the armed trigger resumes the refiller after each
-// pause, and the pause only bounds scan frequency, never delivery.
-func TestRefillPace_DeepBacklogLiveness(t *testing.T) {
+// TestRefillFloor_DeepBacklogLiveness pins that rate-limiting the scan cannot wedge a deep backlog:
+// with a single worker (cache capacity 2) and a backlog of flows several times the capacity, everything
+// still completes under a floor set well into the over-limiting regime - the armed trigger resumes the
+// refiller the moment the floor elapses, and the floor only bounds scan frequency, never delivery.
+func TestRefillFloor_DeepBacklogLiveness(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("One")
-	g.SetEndpoint("Do", "refillpaceliveness.verify:428/nop")
+	g.SetEndpoint("Do", "refillfloorliveness.verify:428/nop")
 	g.AddTransition("Do", workflow.END)
-	proxy.HandleGraph("refillpaceliveness.verify:428/one", g)
-	proxy.HandleTask("refillpaceliveness.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	proxy.HandleGraph("refillfloorliveness.verify:428/one", g)
+	proxy.HandleTask("refillfloorliveness.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.SetWorkers(1)                      // capacity 2: a backlog of 10 keeps every refill full
-	e.refillPace = 50 * time.Millisecond // the over-pacing regime; must still drain, just slower
+	e.SetWorkers(1)                                             // capacity 2, against a backlog of 10
+	assert.NoError(e.SetRefillScanFloor(50 * time.Millisecond)) // the over-limiting regime; must still drain, just slower
 	assert.NoError(e.Startup(t.Context()))
 
 	keys := make([]string, 10)
 	for i := range keys {
-		k, err := e.Create(ctx, "refillpaceliveness.verify:428/one", nil, nil)
+		k, err := e.Create(ctx, "refillfloorliveness.verify:428/one", nil, nil)
 		assert.NoError(err)
 		keys[i] = k
 	}
@@ -608,7 +575,7 @@ func TestRefillPace_DeepBacklogLiveness(t *testing.T) {
 // then reads only the selected steps - at most perKey OLDEST per chosen key. The old single-query scan
 // cut each key at the cache capacity and streamed up to capacity rows PER KEY across the wire, only to
 // discard all but `capacity` of them total - so under a deep backlog with high key cardinality it
-// materialized hundreds of thousands of rows every refillPace (20ms).
+// materialized hundreds of thousands of rows on every pass.
 //
 // The fetch keeps every key oldest-first because the picker dispatches oldest-first within a key; a bound
 // that kept the newest would starve the head of every queue. This test checks all of it: one aggregate

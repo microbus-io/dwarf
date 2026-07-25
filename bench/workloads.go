@@ -47,7 +47,7 @@ const (
 // backlog from the submitter concurrency: a linear flow holds exactly one pending-or-running step at a
 // time, so a closed-loop generator's backlog can never exceed its concurrency, whereas a fan-out puts
 // `width` steps pending the instant its spawn completes. That is what lets a closed-loop harness reach
-// the deep-backlog regime the refiller's cache bound and pacing were designed for.
+// the deep-backlog regime the refiller's cache bound and scan floor were designed for.
 func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth int) map[string]*workload {
 	nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
 	h.tasks["bench/nop"] = nop

@@ -297,7 +297,6 @@ type Engine struct {
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	awaitPollInterval   time.Duration // Await lost-wake re-snapshot cadence (5s)
 	pingInterval        time.Duration // peer-registry heartbeat cadence; a peer is counted <4x, pruned >8x (30s)
-	refillPace          time.Duration // pause after a refill that filled the cache (deep backlog); see refillerLoop (20ms)
 	refillIdleInterval  time.Duration // ceiling on how long a refiller parks on its trigger; see refillerLoop (1s)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
@@ -344,7 +343,6 @@ func NewEngine() *Engine {
 	e.awaitPollInterval = 5 * time.Second
 	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	e.pingInterval = 10 * time.Second
-	e.refillPace = 20 * time.Millisecond
 	e.refillIdleInterval = 1 * time.Second
 	e.wedgeSweepInterval = 5 * time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute

@@ -89,18 +89,13 @@ func (e *Engine) timerLoop(ctx context.Context) {
 }
 
 // refillOutcome is what one shard's refill pass reports back to its refillerLoop, which turns it
-// into pacing, a band back-off, or nothing.
+// into a band back-off or nothing.
 type refillOutcome int
 
 const (
-	// refillIdle: nothing due on this shard, a partial plan (light load), or an error path - consume
-	// the next trigger immediately.
+	// refillIdle: this shard refilled normally, or has nothing due, or hit an error path - consume the
+	// next trigger, subject only to the scan floor.
 	refillIdle refillOutcome = iota
-	// refillFull: the GLOBAL plan reached capacity - the deep-backlog signal - so the loop pauses
-	// refillPace before the next pass. The signal is deliberately the plan, never "my slice was big":
-	// a partial plan means the whole backlog fits in the cache, where pacing adds dispatch latency
-	// for nothing.
-	refillFull
 	// refillAboveBand: this shard HAS due work, but above the global-minimum band, so its slice of
 	// the plan is empty by strict priority. Distinct from refillIdle ("nothing due") because parking
 	// on the doorbell would spin hot: the always-armed trigger re-runs the scan immediately, at full
@@ -130,19 +125,11 @@ const (
 // decoupling: a merged pass returned when the slowest shard did, an order-statistics tax measured at
 // 2.02x by 6 shards, on the path that is the engine's throughput ceiling).
 //
-// After a pass whose global plan reached capacity - the deep-backlog regime - it pauses refillPace
-// before consuming the next trigger. Unpaced, the always-armed trigger (workers re-arm it after every
-// step on this shard) makes the refiller run back-to-back full-backlog scans, and each wholesale
-// partition replace re-delivers steps whose claim CAS is still in flight on another worker. The gate
-// and the bound are both load-bearing:
-//   - Paced ONLY on a full plan: a partial plan means the backlog fits in the cache (light load),
-//     where pacing would add dispatch latency for nothing - a sequential flow's next step must not
-//     wait out a pace interval. Light-load refills stay immediate.
-//   - refillPace must stay well under the cache's drain time (capacity = 2x workers, each candidate
-//     occupying a worker for a full step), or the refillers become the throughput ceiling
-//     (<= capacity/pace pops per second): over-pacing was measured to invert the gain. At the default
-//     pace a full cache outlives the pause by a wide margin, and the armed trigger means the next scan
-//     starts the moment the pause ends - a drained-early partition waits at most the remainder.
+// The scan floor is the ONLY standing rate limit: the always-armed trigger (workers re-arm it after
+// every step on this shard) would otherwise make the refiller run back-to-back full-backlog scans, and
+// each wholesale partition replace re-delivers steps whose claim CAS is still in flight on another
+// worker. The floor is measured from the pass START and interruptible by an urgent nudge, so it costs
+// light load nothing - when passes are rare the gap already exceeds it and the next scan runs at once.
 //
 // The park on the trigger is CAPPED at refillIdleInterval (1s), and that cap - not the doorbell - is now
 // the ONLY sub-maxPollInterval bound on cross-replica dispatch latency. Every trigger-arming site is
@@ -201,14 +188,6 @@ func (e *Engine) refillerLoop(ctx context.Context, shard int) {
 			}
 		}
 		switch outcome {
-		case refillFull:
-			if e.refillPace > 0 {
-				select {
-				case <-e.refillStop:
-					return
-				case <-time.After(e.refillPace):
-				}
-			}
 		case refillAboveBand:
 			if !e.awaitBandRelease(shard, trigger) {
 				return
@@ -230,21 +209,16 @@ func (e *Engine) refillerLoop(ctx context.Context, shard int) {
 // drained and published); or this shard's own census entry aging past censusRefreshInterval, which
 // forces a real rescan so the entry stays fresh for the fleet (a stale entry would otherwise age out
 // of peers' snapshots and take this shard's band claim with it). The ticks between checks are
-// in-memory only - no query - so the "spins hot" failure (a full-rate scan producing nothing, with
-// the pace gate never engaging because the batch is never full) cannot occur; the database is
-// touched at most once per censusRefreshInterval while parked.
+// in-memory only - no query - so the "spins hot" failure (a full-rate scan producing nothing) cannot
+// occur; the database is touched at most once per censusRefreshInterval while parked.
 func (e *Engine) awaitBandRelease(shard int, trigger chan struct{}) bool {
-	tick := e.refillPace
-	if tick <= 0 {
-		tick = 20 * time.Millisecond
-	}
 	for {
 		select {
 		case <-e.refillStop:
 			return false
 		case <-trigger:
 			return true
-		case <-time.After(tick):
+		case <-time.After(refillBackoffTick):
 			e.censusLock.Lock()
 			own := e.census[shard]
 			e.censusLock.Unlock()
@@ -265,27 +239,23 @@ func (e *Engine) awaitBandRelease(shard int, trigger chan struct{}) bool {
 	}
 }
 
-// awaitStarvedRetry backs a starved (at-band, zero-slot) refiller off for one pace interval, then
+// awaitStarvedRetry backs a starved (at-band, zero-slot) refiller off for one back-off tick, then
 // reports true so it rescans (false means the engine is stopping); its own trigger releases it early.
 //
 // One short tick, no state, no condition to get wrong - what this shard is waiting for is simply the
-// competitors draining, which the very next plan will reflect. The interval is the pace, so a starved
-// shard scans at the same cadence a busy one does: that is not extra load but a RESTORATION of the
+// competitors draining, which the very next plan will reflect. The tick is short enough that a starved
+// shard scans at roughly the cadence a busy one does: that is not extra load but a RESTORATION of the
 // pre-decoupling baseline, where the merged pass scanned every shard on every cycle regardless of
 // who won the slots. Keeping it scanning is also what keeps its census entry inside the TTL, and
 // therefore its keys inside its peers' plans - a shard that stops scanning stops being planned for,
 // which is the trap the doorbell park fell into.
 func (e *Engine) awaitStarvedRetry(trigger chan struct{}) bool {
-	tick := e.refillPace
-	if tick <= 0 {
-		tick = 20 * time.Millisecond
-	}
 	select {
 	case <-e.refillStop:
 		return false
 	case <-trigger:
 		return true
-	case <-time.After(tick):
+	case <-time.After(refillBackoffTick):
 		return true
 	}
 }
@@ -887,7 +857,7 @@ func (e *Engine) fetchShardBandSteps(ctx context.Context, shard int, band int, c
 // phases: scanShardBandKeys (this shard's per-key aggregates, published to the census), a GLOBAL
 // planBatch over the census merge (the same weighted pick the barriered pass ran - see "The census"
 // above), and fetchShardBandSteps (fetch only this shard's slice of the plan). It reports the outcome
-// the refillerLoop paces or backs off on.
+// the refillerLoop backs off on.
 func (e *Engine) runShardRefill(ctx context.Context, shard int) refillOutcome {
 	capacity := e.cache.Capacity()
 	started := time.Now()
@@ -946,14 +916,13 @@ func (e *Engine) runShardRefill(ctx context.Context, shard int) refillOutcome {
 		e.metricRefillPass(ctx, shard, time.Since(started), 0, e.cache.Refill(shard, nil, math.MaxInt))
 		return refillIdle
 	}
-	full := len(plan) == capacity
 
 	// The slice rule: which of the plan's slots land on this shard.
 	myQuota, maxNeeded, assign := sliceDemand(plan, entries, globalBand, shard)
 	if len(myQuota) == 0 {
 		// At the band, but a capacity-bound plan gave every slot to shards holding more (or older) of
 		// the planned keys - so this shard dispatches nothing this cycle. The partition holds hints the
-		// plan no longer backs; clear it. Report STARVED, never idle/full: those park on a trigger that
+		// plan no longer backs; clear it. Report STARVED, never idle: idle parks on a trigger that
 		// only this shard's own activity can arm, and it has none (see refillStarved).
 		e.metricRefillPass(ctx, shard, time.Since(started), 0, e.cache.Refill(shard, nil, math.MaxInt))
 		return refillStarved
@@ -1001,9 +970,6 @@ func (e *Engine) runShardRefill(ctx context.Context, shard int) refillOutcome {
 	dur := time.Since(started)
 	e.metricRefillPass(ctx, shard, dur, len(batch), discarded)
 	e.notePassDuration(dur)
-	if full {
-		return refillFull
-	}
 	return refillIdle
 }
 
@@ -1075,7 +1041,16 @@ const (
 	// arrives), so the floor never has to be short enough to cover a priority event, and the cap only
 	// bounds how long a genuinely-lost doorbell can delay a scan.
 	refillScanFloorCap = 1 * time.Second
-	refillScanFloorMin = 5 * time.Millisecond // degenerate-configuration guard only
+	// refillScanFloorMin is the fuse, not a tuning knob: never scan one shard twice inside it, however the
+	// formula's inputs degenerate. bufferShare is capacity/N, so a small cache over many shards derives a
+	// sub-millisecond floor (SetWorkers(1) -> capacity 2 -> share 2 -> ~2ms), at which point the floor
+	// limits nothing and the always-armed trigger restores the 100%-duty-cycle scan loop. Inert in the
+	// derived path (~67ms), so a healthy configuration never pays for it.
+	refillScanFloorMin = 20 * time.Millisecond
+	// refillBackoffTick paces the two empty-slice back-offs (awaitBandRelease's in-memory census checks,
+	// awaitStarvedRetry's single retry). Not a scan floor: those loops re-scan through the floor like any
+	// other pass, so this only bounds how often they re-EVALUATE.
+	refillBackoffTick = 20 * time.Millisecond
 )
 
 // deriveScanFloor computes ONE shard's scan floor from static configuration - capacity, that shard's

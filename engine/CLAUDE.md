@@ -540,16 +540,16 @@ the scan-dispersion note below.
 **Strict priority across shards: no spill, an explicit back-off.** A shard whose own minimum band sits above
 the global minimum plans an **empty slice** and fetches nothing (its partition is also cleared - hints at a
 band it no longer holds due work at are dead). That outcome (`refillAboveBand`) is *distinct from "nothing
-due"*: parking on the doorbell would spin the scan at full rate producing nothing (the pace gate never
-engages on an empty batch), so the refiller backs off in `awaitBandRelease` - in-memory census checks on a
-`refillPace` tick, a real rescan at most every `censusRefreshInterval` (1s, keeping its census entry live for
+due"*: parking on the doorbell would re-run the scan at the floor rate producing nothing, pass after pass,
+so the refiller backs off in `awaitBandRelease` - in-memory census checks on a
+`refillBackoffTick`, a real rescan at most every `censusRefreshInterval` (1s, keeping its census entry live for
 the fleet) - until the global band rises to its own band, a doorbell arrives, or the engine stops. When the
 band moves up, workers may idle for one back-off plus one cycle - the analog of the old single merged-refill
 window. A shard with *nothing* due parks on the doorbell as always (`refillIdle`).
 
 **An empty slice has TWO causes, and neither may park on the doorbell.** Besides the above-band case, a
 shard **at** the global band wins zero slots when a capacity-bound plan gives them all to shards holding
-more (or older) of the planned keys - `refillStarved`, which retries after one pace interval
+more (or older) of the planned keys - `refillStarved`, which retries after one `refillBackoffTick`
 (`awaitStarvedRetry`; the band is already right, so what must change is the competitors *draining*, which
 the very next plan reflects - `awaitBandRelease`'s census watch would release instantly here and spin).
 **Every trigger-arming site is shard-LOCAL** - a pop names the popped job's shard, the post-`processStep`
@@ -620,7 +620,7 @@ three-phase split exists to keep that promise. Its history is three stages:
 
 - **Unbounded scan** (the original): the band query returned every due row of every key, each allocated as a
   a Go struct, only to be discarded down to `capacity` by the pick. Cost grew with the **backlog**, so under a
-  deep one - the case the refiller exists for - it re-read hundreds of thousands of rows every `refillPace` (20ms).
+  deep one - the case the refiller exists for - it re-read hundreds of thousands of rows on every pass.
 - **Per-key cut** (the intermediate fix): a `ROW_NUMBER() OVER (PARTITION BY fairness_key ...)` cut at `capacity`
   bounded it to `capacity` rows *per key*. That killed the backlog-depth dependence but not the **cardinality** one:
   with thousands of tenants at the band it still returned up to `capacity * keys` rows (e.g. 768 x thousands) to pick
@@ -868,32 +868,24 @@ minimum band, so however slowly it scans, urgent work is still selected first; i
 ordering-only test passes that build silently, which is why `fixtures/crossshardpriorityflow_test.go` asserts
 urgent-burst LATENCY as its sensitive axis and keeps ordering only as the semantic contract.)
 
-**Deep-backlog pacing.** After a pass whose **global plan reached capacity** (the deep-backlog signal), the
-shard's refiller pauses `refillPace` (20ms) before consuming its next trigger. The gate is deliberately the
-*plan*, never "my slice was big": each refiller computes the global plan, so the signal is locally known, and
-a partial plan means the whole backlog fits in the cache - light load, where pacing adds dispatch latency for
-nothing. Unpaced, the always-armed trigger makes a refiller run back-to-back full-backlog scans, and each
-wholesale partition replace re-delivers steps whose claim CAS is still in flight on another worker - measured
-at high backlog (pre-decoupling): ~half of all pops (and their claim round-trips) stale, the entire due
-backlog streamed every few ms. The gate and the bound are both load-bearing: pacing **only on a full plan**
-keeps light load at zero added dispatch latency - a sequential flow's next step never waits out a pace; and
-the pace must stay well under the cache drain time (capacity = 2x workers x one step each), or the refillers
-become the throughput ceiling (<= capacity/pace pops/s) - over-pacing measurably inverts the gain. The pace
-bound is unchanged by partitioning (`(capacity/N)/pace x N = capacity/pace` - the N cancels), but 20ms was
-tuned against a ~100ms merged cycle and is a proportionally larger share of an independent one - re-measure
-against the `discarded` ratio if it is revisited. Liveness is unchanged: the trigger
-stays armed through the pause, so a drained-early partition waits at most the remainder.
+**The floor is the ONLY standing rate limit, and `refillScanFloorMin` (20ms) is its unconditional guarantee.**
+The derived formula can bottom out: `share` is `capacity/N`, so a small cache over many shards produces a
+sub-millisecond floor - e.g. `SetWorkers(1)` gives capacity 2, `share` 2, and ~2ms before clamping. At those
+values the floor stops limiting anything and the always-armed trigger (workers re-arm it after every step on
+the shard) restores the 100%-duty-cycle scan loop, whose cost is measured and severe: at high backlog
+(pre-decoupling) ~half of all pops and their claim round-trips were stale, with the entire due backlog
+streamed every few ms. The minimum is the fuse - never scan the same shard twice inside 20ms, however the
+inputs degenerate - not a tuning knob. It is **inert in the derived path** (~67ms in production, 66.67ms in
+test mode), so it costs a healthy configuration nothing, and the `SetRefillScanFloor` override deliberately
+bypasses it so bench sweeps can still measure below it.
 
-**`refillPace` is now largely subsumed by the scan floor, and that is an OPEN item.** The floor (~67ms,
-unconditional) is both larger and broader than the pace (20ms, full-plan only), so a full-plan pass currently
-waits *both* - ~87ms - and every other pass waits only the floor. In the measured linear workload the plan is
-almost never capacity-bound (batch ~437 against a ~4,608 capacity), so `refillFull` rarely fires and the pace
-is near-dead in practice. It is deliberately **kept for now** rather than deleted, because the arms that
-validated the floor (`i150`) ran *with* it, so removing it would ship a configuration nothing has measured -
-and a deep-backlog fan-out shape, where the plan CAN be capacity-bound, is exactly where it would come alive.
-Resolve it after the fan-out campaign: either delete it as redundant, or document what it adds on top of the
-floor. Pinned by `engine/refillpace_test.go` (light-load-inert at an absurd 2s pace; deep-backlog drain at an over-pace with a
-single worker).
+Liveness is unaffected: the trigger stays armed through the wait, so a drained-early partition waits at most
+the remainder. Pinned by `TestRefillFloor_DeepBacklogLiveness` (a deep backlog still drains under a floor
+pinned into the over-limiting regime, with a single worker).
+
+`refillBackoffTick` (20ms) is a separate constant with a separate job - it paces the two empty-slice
+back-offs (`awaitBandRelease`'s in-memory census checks, `awaitStarvedRetry`'s single retry), bounding how
+often those loops re-*evaluate*, not how often they scan. Do not collapse it into the floor.
 
 **Liveness guarantee.** A worker requests a refill *after* `processStep` returns - i.e. after the step left `pending`
 (acquired or completed) - not at pop time, targeting the processed step's shard. Load-bearing: requesting before the
@@ -2369,13 +2361,13 @@ identical from outside (the rules below record how each resolved):
   and was then *removed* by the per-shard refiller decoupling, which dissolved the instrument's original
   discriminator: `refill_duration` was the merged pass, and its gap over the per-shard query max was the
   straggler tax; with no barrier there is no merged pass, and `refill_duration{shard}` is now simply each
-  shard's own cycle time (which sets its partition's supply rate, `capacity_slice/(cycle+pace)`).
+  shard's own cycle time (which sets its partition's supply rate, `capacity_slice/max(cycle, floor)`).
 - **The refiller oversupplies** - `discarded/selected` approaches 1. Every pass wholesale-replaces its
   shard's partition while being triggered after every `processStep` on that shard, so whenever it turns
   faster than the workers drain it throws away a batch it just paid to fetch. `Cache.Refill` returns the
   discarded count for this. (Measured 0-10% pre-decoupling: dead then. The instrument stays because it is
-  the cheap readout that would catch the regime changing - and it is the gauge for re-tuning `refillPace`
-  against the shorter independent cycle if that is revisited.)
+  the cheap readout that would catch the regime changing - and it is the gauge to re-tune the scan floor
+  against if the supply rate is revisited.)
 
 The `phase` label (`band_keys` / `fetch_steps`) separates phase 1 from phase 3, which matters for a reason
 found while writing the degradation harness: the band scan's plan flips between an index scan and a
@@ -2407,11 +2399,11 @@ worklist. These are the parts that would make a future change WRONG if unknown:
   configuration), so no query-shaped change — index, rewrite, fetch cap — can touch it; that is WHY
   none ever moved it. Confirmed twice over by two independent removals — a reserved refill connection,
   and cutting N 4x — each collapsing the client-observed scan to server time while server time held.
-- **Pool wait is silently PACING the refiller, and anything that reduces pool contention un-paces it.**
-  Measured on both removals above: refill passes ~3-4x, discards 0.7% -> 43-45%. This is a property of
-  the contention, not of either mechanism, so it applies equally to a reserved connection, a smaller N,
-  a larger M, or a faster database. Any such change must arrive with explicit pacing, or the refiller
-  spends server work and cache churn producing candidates nobody consumes.
+- **Pool wait is silently RATE-LIMITING the refiller, and anything that reduces pool contention removes
+  that limit.** Measured on both removals above: refill passes ~3-4x, discards 0.7% -> 43-45%. This is a
+  property of the contention, not of either mechanism, so it applies equally to a reserved connection, a
+  smaller N, a larger M, or a faster database. Any such change must arrive with the scan floor re-derived
+  against it, or the refiller spends server work and cache churn producing candidates nobody consumes.
 - **Neither removal bought throughput, and neither improved latency.** Throughput was null in every
   regime (at deep backlog the scan is server-execution-bound; at shallow the refiller was not the
   constraint), and flow p99 did not move — the queue is deep because the DB is the constraint, and
@@ -2747,7 +2739,7 @@ can be staged. `timerStop` is closed before `refillStop` because `timerLoop`'s f
 stopping the refillers first would lose that work or race the triggers. The per-shard `refillTriggers`, like
 `wakeTimer`, are never closed and only sent to non-blockingly, so a late `requestRefill` from the timer's final poll
 is a harmless no-op rather than a `send on closed channel` panic; the refillers are stopped via the shared
-`refillStop` (which also aborts a pace pause and the above-band back-off). A `cache.Refill` into an already-closed
+`refillStop` (which also aborts a scan-floor wait and the above-band back-off). A `cache.Refill` into an already-closed
 cache is a no-op. Never-closed nudge channels plus dedicated `timerStop`/`refillStop` signals
 remove the ordering hazard an earlier design carried (closing `wakeTimer` before draining the workers let a worker
 mid-`processStep` race the close and panic).
