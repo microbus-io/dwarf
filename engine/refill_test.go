@@ -229,15 +229,16 @@ func TestRefillOutcome_AboveBandVsNothingDue(t *testing.T) {
 
 // TestRefillOutcome_StarvedNeverParksOnTheDoorbell pins the outcome for a shard that is AT the global
 // band with due work but wins no slots, because a capacity-bound plan gave them all to shards holding
-// more (or older) of the planned keys. It must report refillStarved - which routes to a short timed
-// retry - and never refillIdle, which parks on a trigger only this shard's own activity can arm.
+// more (or older) of the planned keys. It must report refillStarved - which routes to a self-arm of
+// this shard's own trigger - and never refillIdle, which parks on a trigger nothing will ring.
 //
 // The bug this pins: a starved shard has an empty partition and nothing in flight, so it produces no
 // pops, no completed steps and no doorbells - it arms nothing. Parked, it would sleep out the whole
 // refillIdleInterval tick (and, before that tick existed, until pollPendingSteps' fleet-wide backstop
 // MINUTES later) with its due work sitting there; once the competitors drained, every worker would
-// block in Pop while those steps waited. The tick is the outer bound, far too coarse to be this retry. Worse, a parked shard stops refreshing its census entry, so past the TTL its keys vanish
-// from peers' plans and it cannot win slots even in principle - the starvation becomes self-sustaining.
+// block in Pop while those steps waited. The tick is the outer bound, far too coarse to serve here.
+// Worse, a parked shard stops refreshing its census entry, so past the TTL its keys vanish from peers'
+// plans and it cannot win slots even in principle - the starvation becomes self-sustaining.
 func TestRefillOutcome_StarvedNeverParksOnTheDoorbell(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -265,11 +266,6 @@ func TestRefillOutcome_StarvedNeverParksOnTheDoorbell(t *testing.T) {
 
 	assert.Equal(refillStarved, e.runShardRefill(ctx, 1),
 		"an at-band shard that wins no slots must retry, not park on a doorbell nothing will ring")
-
-	// And the retry releases promptly - bounded by refillBackoffTick, not by the 1-minute poll backstop.
-	start := time.Now()
-	assert.True(e.awaitStarvedRetry(e.refillTriggers[1]), "the retry must release, not report shutdown")
-	assert.True(time.Since(start) < 5*time.Second, "the starved retry must be short (took %v)", time.Since(start))
 }
 
 // TestRefillDecoupled_MultiShardDrains is the end-to-end sanity of the decoupled shape: two shards,
@@ -313,59 +309,7 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 	assert.Equal(2, len(shardsSeen), "placement should have used both shards (key prefix is the shard)")
 }
 
-// TestRouteRefill_EscalationBypassesFloorSameBandDoesNot pins the doorbell routing that reconciles two
-// requirements the empty-partition case put in tension: strict CROSS-SHARD priority needs a
-// genuinely-higher-priority arrival to publish its new band fast (bypass the floor), while a deep
-// backlog needs same-band successors NOT to bypass (or a drained partition re-scans every completion and
-// the floor is defeated). The rule is priority STRICTLY BETTER than the current global band = escalation
-// = bypass; at or below = ordinary backlog = floor-gated.
-//
-// The regression this guards: with a blanket empty-partition bypass, TestShardedflow's priority-1 holder
-// arrived at an empty partition but its band-1 was not published before peer shards planned, so they
-// dispatched lower-priority work first ([p2 holder ...] instead of [holder p2 ...]). With no bypass at
-// all, the holder was never escalated and the same break occurred. Only the band-aware rule fixes both.
-func TestRouteRefill_EscalationBypassesFloorSameBandDoesNot(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-
-	e := NewEngine()
-	e.refillTriggers = map[int]chan struct{}{1: make(chan struct{}, 1)}
-	e.refillDemand = map[int]chan struct{}{1: make(chan struct{}, 1)}
-	drainDemand := func() bool {
-		select {
-		case <-e.refillDemand[1]:
-			return true
-		default:
-			return false
-		}
-	}
-
-	// Global band is 5 (something at priority 5 is due cluster-wide).
-	e.lastGlobalBand.Store(5)
-
-	// A step STRICTLY better than the band (priority 2 < 5) is an escalation: bypass the floor.
-	e.routeRefill(1, 2, false)
-	assert.True(drainDemand(), "priority 2 beats global band 5: a genuine escalation must bypass the floor")
-
-	// A step AT the band (priority 5) is ordinary backlog: floor-gated, no bypass.
-	e.routeRefill(1, 5, false)
-	assert.False(drainDemand(), "priority 5 == global band: same-band backlog must respect the floor (no hot loop)")
-
-	// A step BELOW the band (priority 9 > 5) is likewise floor-gated.
-	e.routeRefill(1, 9, false)
-	assert.False(drainDemand(), "priority 9 below the band must respect the floor")
-
-	// urgent (a head-insert into a non-empty partition) always bypasses, regardless of the global band.
-	e.routeRefill(1, 9, true)
-	assert.True(drainDemand(), "an urgent head-insert always bypasses (local preemption)")
-
-	// Nothing due (band MaxInt): the first arrival at any priority is an escalation from nothing.
-	e.lastGlobalBand.Store(int64(math.MaxInt))
-	e.routeRefill(1, 100, false)
-	assert.True(drainDemand(), "into an idle cluster, any due step is an escalation and bypasses")
-}
-
-// TestRefillScanFloor_OverridePinsAndRestores// TestRefillScanFloor_OverridePinsAndRestores pins the benchmarking override (SetRefillScanFloor): a
+// TestRefillScanFloor_OverridePinsAndRestores pins the benchmarking override (SetRefillScanFloor): a
 // positive value pins every shard's floor, and <=0 restores derivation. It exists so a scan-rate sweep
 // can hold the floor at a series of fixed values; the derived value is otherwise not externally settable.
 func TestRefillScanFloor_OverridePinsAndRestores(t *testing.T) {
@@ -395,74 +339,45 @@ func TestRefillScanFloor_OverridePinsAndRestores(t *testing.T) {
 	assert.Equal(derived.Round(time.Millisecond), e.refillState[1].wait(time.Now()).Round(time.Millisecond))
 }
 
-// TestRefillScanFloor_UrgentNudgesBypassRoutineOnesDoNot pins the split that lets the scan floor be a
-// debounce instead of a policy timer.
+// TestRefillScanFloor_TriggerCoalescesAndMeasuresFromPassStart pins the two mechanics that make the
+// scan floor a debounce rather than a policy timer: the trigger coalesces, and the wait is measured
+// from the pass START so a slow pass pays for itself instead of stacking its duration on top.
 //
 // The floor exists because the trigger is re-armed by every completed step, which ran the refillers at
-// a 100% duty cycle and cost 8% candidate churn plus a 77% worse p99 while buying no throughput. But a
-// floor that ALSO delays urgent work would have to be short enough to cover priority latency, which is
-// what forces it back down toward the hot loop. So the two nudge classes are separated:
-//
-//   - Urgent (Offer head-inserted a strictly-better band - genuinely higher-priority work): rings the
-//     trigger AND the demand channel, which cuts the floor short.
-//   - Routine (post-processStep, low-water, AND an empty partition): rings the trigger only, and waits
-//     out the floor. An empty partition is deliberately routine, not urgent: it is the ordinary
-//     deep-backlog drain signal (enqueueStepDue hits it on every completed step once the partition
-//     drains), so bypassing the floor on it re-creates the exact 100%-duty-cycle hot loop - measured,
-//     it defeated the floor entirely (a pinned 110ms floor ran at ~19ms effective). The floor adds no
-//     latency in light load regardless, since it is measured from the last pass.
-//
-// A derived/adaptive floor was tried instead and measured WORSE than a fixed one (same scan count and
-// batch size, ~1,000x the discard, 2.4x the p99): setting supply from observed consumption oscillates,
-// because consumption is min(demand, supply) and the actuation contaminates its own measurement.
-func TestRefillScanFloor_UrgentNudgesBypassRoutineOnesDoNot(t *testing.T) {
+// a 100% duty cycle and cost 8% candidate churn plus a 77% worse p99 while buying no throughput. Every
+// nudge is floor-gated - there is no bypass class, so nothing can drive the loop back toward that hot
+// regime. A derived/adaptive floor was tried instead and measured WORSE than a fixed one (same scan
+// count and batch size, ~1,000x the discard, 2.4x the p99): setting supply from observed consumption
+// oscillates, because consumption is min(demand, supply) and the actuation contaminates its own
+// measurement.
+func TestRefillScanFloor_TriggerCoalescesAndMeasuresFromPassStart(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
 	e := NewEngine()
 	e.refillTriggers = map[int]chan struct{}{1: make(chan struct{}, 1)}
-	e.refillDemand = map[int]chan struct{}{1: make(chan struct{}, 1)}
 
-	drain := func() (trigger, demand bool) {
+	drain := func() bool {
 		select {
 		case <-e.refillTriggers[1]:
-			trigger = true
+			return true
 		default:
+			return false
 		}
-		select {
-		case <-e.refillDemand[1]:
-			demand = true
-		default:
-		}
-		return
 	}
 
-	// Routine: the refiller is asked to scan, but not before its floor elapses.
 	e.requestRefill(1)
-	tr, dm := drain()
-	assert.True(tr, "a routine nudge must still arm the scan")
-	assert.False(dm, "a routine nudge must NOT cut the floor short - that is the hot loop")
+	assert.True(drain(), "a nudge must arm the scan")
 
-	// Urgent: both, so a refiller parked on the floor wakes immediately.
-	e.requestRefillDemand(1)
-	tr, dm = drain()
-	assert.True(tr)
-	assert.True(dm, "an empty partition or a better band must wake the refiller now")
-
-	// Both are non-blocking and coalescing: a burst cannot wedge a caller or queue up scans.
+	// Non-blocking and coalescing: a burst cannot wedge a caller or queue up scans.
 	for range 100 {
-		e.requestRefillDemand(1)
+		e.requestRefill(1)
 	}
-	tr, dm = drain()
-	assert.True(tr)
-	assert.True(dm)
-	tr, dm = drain()
-	assert.False(tr, "single-slot: 100 nudges coalesce into one pending scan")
-	assert.False(dm)
+	assert.True(drain())
+	assert.False(drain(), "single-slot: 100 nudges coalesce into one pending scan")
 
 	// An unknown shard (a peer signal naming a shard this replica does not have) is a silent no-op.
 	e.requestRefill(99)
-	e.requestRefillDemand(99)
 
 	// The floor itself: measured from the pass start, so a slow pass pays for itself rather than
 	// stacking its own duration on top.

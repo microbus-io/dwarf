@@ -619,10 +619,10 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 		e.logger.DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
 		return
 	}
-	ring, urgent := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
-	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "ring", ring, "urgent", urgent)
+	ring := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "ring", ring)
 	if ring {
-		e.routeRefill(shard, priority, urgent)
+		e.requestRefill(shard)
 	}
 }
 
@@ -636,10 +636,10 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 	if e.seams.IsFault(FaultDropDoorbell) {
 		return
 	}
-	ring, urgent := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
-	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "ring", ring, "urgent", urgent)
+	ring := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "ring", ring)
 	if ring {
-		e.routeRefill(shard, priority, urgent)
+		e.requestRefill(shard)
 	}
 }
 

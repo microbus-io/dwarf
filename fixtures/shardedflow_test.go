@@ -62,6 +62,13 @@ func TestShardedflow(t *testing.T) {
 	for i := 1; i <= 8; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
 	}
+	// Pin a realistic scan floor. Cross-shard priority is strict only once the arriving band has been
+	// published to the census, which takes this shard one scan and its peers one more - so the guarantee
+	// is "strict within one or two floors", and a test asserting strict ORDER must run at a floor short
+	// enough for that window to close inside its own timings. Left derived, this topology lands in the
+	// degenerate regime (capacity 2 over 8 shards -> bufferShare 0 -> the 1s cap), where two floors exceed
+	// the 100ms gap below and a peer legitimately dispatches worse-band work first.
+	assert.NoError(eng.SetRefillScanFloor(20 * time.Millisecond))
 	assert.NoError(eng.Startup(t.Context()))
 
 	t.Run("strict_priority_across_shards", func(t *testing.T) {

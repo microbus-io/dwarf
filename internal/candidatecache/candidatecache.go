@@ -265,30 +265,27 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	return discarded
 }
 
-// Offer front-loads a single higher-priority candidate onto its shard's partition (routing is
-// j.Shard). It reports two things the caller routes differently:
+// Offer front-loads a single higher-priority candidate onto its shard's partition (routing is j.Shard).
 //
-//   - needRefill: this partition needs the refiller. True when it is empty (a scan must supply it) or
-//     when a head-insert happened (top up the band). A candidate whose priority is no better than the
-//     partition's floor is dropped and needs nothing.
-//   - urgent: the offer HEAD-INSERTED a strictly-better band, i.e. genuinely higher-priority work just
-//     arrived. ONLY this justifies bypassing the refiller's scan floor. An EMPTY partition is *not*
-//     urgent: it is the ordinary deep-backlog drain signal, and bypassing the floor on it would let a
-//     drained partition re-scan on every step completion - exactly the 100%-duty-cycle hot loop the
-//     floor exists to stop. (The floor adds no latency in light load anyway: it is measured from the
-//     last pass, and when passes are rare that gap already exceeds it, so the next scan runs at once.)
-func (c *Cache) Offer(j Job, priority int) (needRefill, urgent bool) {
+// It reports needRefill: this partition needs the refiller. True when it is empty (a scan must supply
+// it) or when a head-insert happened (only one pioneer is admitted per band-opening, so a scan must top
+// up the rest of the band). A candidate whose priority is no better than the partition's floor is
+// dropped and needs nothing.
+//
+// A head-insert serves the offered step itself immediately - it is popped next - so the refill it asks
+// for is for the step's SIBLINGS, and can wait out the caller's scan floor like any other nudge.
+func (c *Cache) Offer(j Job, priority int) (needRefill bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return false, false
+		return false
 	}
 	p := c.parts[j.Shard]
 	if p == nil || len(p.items) == 0 {
-		return true, false
+		return true
 	}
 	if priority >= p.floor() {
-		return false, false
+		return false
 	}
 	j.Priority = priority
 	p.items = append([]Job{j}, p.items...)
@@ -296,7 +293,7 @@ func (c *Cache) Offer(j Job, priority int) (needRefill, urgent bool) {
 		p.items = p.items[:len(p.items)-1]
 	}
 	c.cond.Signal()
-	return true, true
+	return true
 }
 
 // Len returns the number of buffered candidates across all partitions.

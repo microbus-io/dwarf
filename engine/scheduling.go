@@ -105,8 +105,8 @@ const (
 	// refillStarved: this shard is AT the global band with due work, but a capacity-bound plan gave
 	// every slot to shards holding more (or older) of the planned keys. Like refillAboveBand this is
 	// an empty slice, but the release condition is different - the band is already right, what must
-	// change is the competitors DRAINING - so it gets its own short timed retry (awaitStarvedRetry)
-	// rather than the census watch.
+	// change is the competitors DRAINING, which the very next plan reflects - so it simply re-arms its
+	// own trigger and rescans at the scan floor, rather than watching the census.
 	//
 	// It must never park on the doorbell, and that is the whole reason this outcome exists. Every
 	// trigger-arming site is shard-LOCAL (a pop, a completed step, a doorbell for a step on this
@@ -115,8 +115,8 @@ const (
 	// existed, until pollPendingSteps' fleet-wide backstop MINUTES later) while its due work sat there -
 	// and once the competitors drained, every worker would block in Pop with due steps present. Its
 	// census entry would also age past the TTL meanwhile, making its keys invisible to peers' plans, so
-	// it could not win slots even in principle. The retry keeps both the dispatch latency and the entry
-	// fresh; the idle tick is the outer bound, an order of magnitude too coarse to serve as this retry.
+	// it could not win slots even in principle. The self-arm keeps both the dispatch latency and the
+	// entry fresh; the idle tick is the outer bound, an order of magnitude too coarse to serve as this.
 	refillStarved
 )
 
@@ -128,8 +128,8 @@ const (
 // The scan floor is the ONLY standing rate limit: the always-armed trigger (workers re-arm it after
 // every step on this shard) would otherwise make the refiller run back-to-back full-backlog scans, and
 // each wholesale partition replace re-delivers steps whose claim CAS is still in flight on another
-// worker. The floor is measured from the pass START and interruptible by an urgent nudge, so it costs
-// light load nothing - when passes are rare the gap already exceeds it and the next scan runs at once.
+// worker. The floor is measured from the pass START, so it costs light load nothing - when passes are
+// rare the gap already exceeds it and the next scan runs at once.
 //
 // The park on the trigger is CAPPED at refillIdleInterval (1s), and that cap - not the doorbell - is now
 // the ONLY sub-maxPollInterval bound on cross-replica dispatch latency. Every trigger-arming site is
@@ -176,14 +176,11 @@ func (e *Engine) refillerLoop(ctx context.Context, shard int) {
 			e.logger.ErrorContext(ctx, "Refilling candidate cache", "shard", shard, "error", err)
 		}
 		// Hold off until the scan floor has elapsed, measured from the pass START so a slow pass
-		// pays for itself rather than stacking its duration on top of the floor. An URGENT nudge
-		// (empty partition, or a better band head-inserted) cuts the wait short - which is what
-		// makes this a debounce rather than a timer that has to be short enough to cover an event.
+		// pays for itself rather than stacking its duration on top of the floor.
 		if wait := e.refillState[shard].wait(passStart); wait > 0 {
 			select {
 			case <-e.refillStop:
 				return
-			case <-e.refillDemand[shard]:
 			case <-time.After(wait):
 			}
 		}
@@ -194,9 +191,10 @@ func (e *Engine) refillerLoop(ctx context.Context, shard int) {
 			}
 			e.requestRefill(shard)
 		case refillStarved:
-			if !e.awaitStarvedRetry(trigger) {
-				return
-			}
+			// Re-arm this shard's own trigger, which nothing else will: the next pass then runs as soon
+			// as the scan floor (already waited above) allows, so a starved shard rescans at the same
+			// cadence a busy one does. No extra back-off - what it waits for is the competitors draining,
+			// which the very next plan reflects, and the floor already spaces the retry.
 			e.requestRefill(shard)
 		}
 	}
@@ -218,7 +216,7 @@ func (e *Engine) awaitBandRelease(shard int, trigger chan struct{}) bool {
 			return false
 		case <-trigger:
 			return true
-		case <-time.After(refillBackoffTick):
+		case <-time.After(refillBandWatchTick):
 			e.censusLock.Lock()
 			own := e.census[shard]
 			e.censusLock.Unlock()
@@ -236,27 +234,6 @@ func (e *Engine) awaitBandRelease(shard int, trigger chan struct{}) bool {
 				return true
 			}
 		}
-	}
-}
-
-// awaitStarvedRetry backs a starved (at-band, zero-slot) refiller off for one back-off tick, then
-// reports true so it rescans (false means the engine is stopping); its own trigger releases it early.
-//
-// One short tick, no state, no condition to get wrong - what this shard is waiting for is simply the
-// competitors draining, which the very next plan will reflect. The tick is short enough that a starved
-// shard scans at roughly the cadence a busy one does: that is not extra load but a RESTORATION of the
-// pre-decoupling baseline, where the merged pass scanned every shard on every cycle regardless of
-// who won the slots. Keeping it scanning is also what keeps its census entry inside the TTL, and
-// therefore its keys inside its peers' plans - a shard that stops scanning stops being planned for,
-// which is the trap the doorbell park fell into.
-func (e *Engine) awaitStarvedRetry(trigger chan struct{}) bool {
-	select {
-	case <-e.refillStop:
-		return false
-	case <-trigger:
-		return true
-	case <-time.After(refillBackoffTick):
-		return true
 	}
 }
 
@@ -893,7 +870,6 @@ func (e *Engine) runShardRefill(ctx context.Context, shard int) refillOutcome {
 	e.lastRefillBand = globalBand
 	e.lastRefillKeys = len(keys)
 	e.lastRefillLock.Unlock()
-	e.lastGlobalBand.Store(int64(globalBand))
 
 	if band == math.MaxInt {
 		// Nothing due on this shard at all: wholesale-replace the partition with an empty batch,
@@ -1036,10 +1012,16 @@ const (
 	// floor (the earlier 340 - ~57/conn - put it at 141ms, a starved regime giving ~half the throughput of
 	// the good band at high connection counts).
 	sustainedDrainPerVCPU = 720
-	// refillScanFloorCap is a lost-signal backstop, NOT a priority timer. Priority latency is handled by
-	// the escalation bypass (routeRefill wakes the refiller the instant a strictly-higher-priority step
-	// arrives), so the floor never has to be short enough to cover a priority event, and the cap only
-	// bounds how long a genuinely-lost doorbell can delay a scan.
+	// refillScanFloorCap bounds a lost doorbell AND, since the escalation bypass was removed, priority
+	// latency - it is now the only thing that does, so it is load-bearing in a way it was not before.
+	//
+	// The arriving high-priority step itself does not wait: Offer HEAD-INSERTS a strictly-better band, so
+	// it is popped next. What waits out the floor is (a) the rest of an arriving burst, since only one
+	// pioneer is admitted per band-opening, and (b) the cross-shard publish - this shard must rescan
+	// before its new band enters the census, and peers see it on their own next pass, so a peer can serve
+	// worse-band work for up to two floors. Both are bounded by this cap and are ~67ms in the derived
+	// path. Priority ORDER is never inverted regardless: a pass always plans the global minimum band, so
+	// however slowly a shard scans, better work is still selected first.
 	refillScanFloorCap = 1 * time.Second
 	// refillScanFloorMin is the fuse, not a tuning knob: never scan one shard twice inside it, however the
 	// formula's inputs degenerate. bufferShare is capacity/N, so a small cache over many shards derives a
@@ -1047,10 +1029,11 @@ const (
 	// limits nothing and the always-armed trigger restores the 100%-duty-cycle scan loop. Inert in the
 	// derived path (~67ms), so a healthy configuration never pays for it.
 	refillScanFloorMin = 20 * time.Millisecond
-	// refillBackoffTick paces the two empty-slice back-offs (awaitBandRelease's in-memory census checks,
-	// awaitStarvedRetry's single retry). Not a scan floor: those loops re-scan through the floor like any
-	// other pass, so this only bounds how often they re-EVALUATE.
-	refillBackoffTick = 20 * time.Millisecond
+	// refillBandWatchTick is the poll interval of awaitBandRelease's in-memory census watch. Not a scan
+	// floor and not a back-off: an above-band shard is parked because it may not dispatch at all, and this
+	// only bounds how often it re-EVALUATES that (a map read, no query). When it does release, the rescan
+	// goes through the scan floor like any other pass.
+	refillBandWatchTick = 20 * time.Millisecond
 )
 
 // deriveScanFloor computes ONE shard's scan floor from static configuration - capacity, that shard's

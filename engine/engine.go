@@ -232,11 +232,8 @@ type Engine struct {
 	// entries (see "The census" in scheduling.go). maxRefillPassNs scales the census TTL to the
 	// slowest observed pass, so a slow shard is not mistaken for a dead one.
 	refillTriggers map[int]chan struct{}
-	// refillDemand carries the URGENT subset of refill nudges - the ones that must not wait out the
-	// scan floor. See requestRefillDemand.
-	refillDemand map[int]chan struct{}
-	refillStop   chan struct{}
-	refiller     sync.WaitGroup
+	refillStop     chan struct{}
+	refiller       sync.WaitGroup
 	// refillState holds each refiller's adaptive fetch depth. Entries are created before the refillers
 	// start and each is touched only by its own refiller goroutine, so they carry no lock.
 	refillState     map[int]*shardRefillState
@@ -248,13 +245,6 @@ type Engine struct {
 	// collection time. lastRefillBand < 0 means no refill has selected a band yet.
 	lastRefillLock sync.Mutex
 	lastRefillBand int
-	// lastGlobalBand mirrors lastRefillBand for the hot doorbell path (enqueueStepDue/enqueueStep),
-	// which reads it lock-free to decide whether an arrival at an EMPTY partition is a genuine priority
-	// escalation (priority strictly better than the current global band -> bypass the scan floor so the
-	// new band publishes fast enough for strict cross-shard priority) or ordinary backlog (>= the band
-	// -> respect the floor, so a drained deep backlog does not re-scan on every completion). MaxInt when
-	// nothing is due.
-	lastGlobalBand atomic.Int64
 	lastRefillKeys int
 
 	// Timer goroutine
@@ -338,7 +328,6 @@ func NewEngine() *Engine {
 	// sets lastAppliedR=R; the heartbeat's recompute then dedupes against that. shardPool clamps
 	// replicas=max(1,...), so the 0 sentinel never reaches the arithmetic.
 	e.lastAppliedR.Store(0)
-	e.lastGlobalBand.Store(int64(math.MaxInt))
 	e.leaseMargin = 30 * time.Second
 	e.awaitPollInterval = 5 * time.Second
 	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
@@ -778,11 +767,9 @@ func (e *Engine) initRuntime() {
 	e.cache.Init(min(resident, e.workersDispatch))
 	e.drainStop = make(chan struct{})
 	e.refillTriggers = make(map[int]chan struct{})
-	e.refillDemand = make(map[int]chan struct{})
 	e.refillState = make(map[int]*shardRefillState)
 	for _, idx := range e.db.Indices() {
 		e.refillTriggers[idx] = make(chan struct{}, 1)
-		e.refillDemand[idx] = make(chan struct{}, 1)
 		e.refillState[idx] = &shardRefillState{}
 	}
 	e.refillStop = make(chan struct{})
@@ -959,55 +946,6 @@ func (e *Engine) drainRuntime() {
 // replica does not have) is a silent no-op.
 func (e *Engine) requestRefill(shard int) {
 	ch, ok := e.refillTriggers[shard]
-	if !ok {
-		return
-	}
-	select {
-	case ch <- struct{}{}:
-	default:
-	}
-}
-
-// routeRefill dispatches a doorbell after an Offer that returned needRefill, choosing between the
-// floor-bypassing demand nudge and the floor-respecting one. Bypass when EITHER:
-//   - urgent: Offer head-inserted a strictly-better band into a NON-empty partition (local preemption); or
-//   - the step's priority is strictly better than the current GLOBAL band: a genuine cross-shard
-//     escalation whose new band must publish fast, or strict priority breaks - a peer shard, not seeing
-//     the new lower band yet (this shard is floor-gated and has not re-scanned to publish it), plans and
-//     dispatches its own lower-priority work first. This is exactly the empty-partition case a completing
-//     high-priority arrival hits.
-//
-// Otherwise floor-gate. Crucially a step at or below the current band (in priority-number terms, >=
-// globalBand) is ordinary backlog - a deep backlog's completing steps create successors at the SAME band -
-// so it must NOT bypass, or a drained partition re-scans on every completion and the floor is defeated
-// (measured: a pinned 110ms floor ran at ~19ms effective). Strict `<` is what separates a real escalation
-// from same-band churn.
-func (e *Engine) routeRefill(shard, priority int, urgent bool) {
-	if urgent || int64(priority) < e.lastGlobalBand.Load() {
-		e.requestRefillDemand(shard)
-		return
-	}
-	e.requestRefill(shard)
-}
-
-// requestRefillDemand rings a shard's refiller AND breaks it out of the scan floor, for the two
-// nudges that mean "serving is blocked right now" rather than "there may be more work":
-//
-//   - Offer found the partition EMPTY. It deliberately declines to head-insert the first arrival (an
-//     arbitrary-priority step must not jump an idle replica's queue), so the only way that step gets
-//     served is a scan - waiting out the floor would idle workers with due work in hand.
-//   - Offer HEAD-INSERTED a better band. Only one pioneer is accepted per band-opening, so the REST of
-//     an arriving high-priority burst is served by the wholesale replace on the next scan. Pulling
-//     that scan forward is what bounds priority latency by signal delivery instead of by scan rate.
-//
-// This is what lets the floor be a debounce rather than a policy timer: it never has to be short
-// enough to cover an urgent event, because urgent events wake it directly. The routine nudges
-// (post-processStep, low-water) deliberately do NOT come here - they fire on every completed step and
-// every half-drained partition, and letting them bypass the floor is precisely the 100%-duty-cycle
-// hot loop the floor exists to stop.
-func (e *Engine) requestRefillDemand(shard int) {
-	e.requestRefill(shard)
-	ch, ok := e.refillDemand[shard]
 	if !ok {
 		return
 	}

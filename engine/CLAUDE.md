@@ -542,16 +542,17 @@ the global minimum plans an **empty slice** and fetches nothing (its partition i
 band it no longer holds due work at are dead). That outcome (`refillAboveBand`) is *distinct from "nothing
 due"*: parking on the doorbell would re-run the scan at the floor rate producing nothing, pass after pass,
 so the refiller backs off in `awaitBandRelease` - in-memory census checks on a
-`refillBackoffTick`, a real rescan at most every `censusRefreshInterval` (1s, keeping its census entry live for
+`refillBandWatchTick`, a real rescan at most every `censusRefreshInterval` (1s, keeping its census entry live for
 the fleet) - until the global band rises to its own band, a doorbell arrives, or the engine stops. When the
 band moves up, workers may idle for one back-off plus one cycle - the analog of the old single merged-refill
 window. A shard with *nothing* due parks on the doorbell as always (`refillIdle`).
 
 **An empty slice has TWO causes, and neither may park on the doorbell.** Besides the above-band case, a
 shard **at** the global band wins zero slots when a capacity-bound plan gives them all to shards holding
-more (or older) of the planned keys - `refillStarved`, which retries after one `refillBackoffTick`
-(`awaitStarvedRetry`; the band is already right, so what must change is the competitors *draining*, which
-the very next plan reflects - `awaitBandRelease`'s census watch would release instantly here and spin).
+more (or older) of the planned keys - `refillStarved`, which re-arms its own trigger and rescans at the scan
+floor. No extra wait: the band is already right, so what must change is the competitors *draining*, which the
+very next plan reflects, and the floor (already waited before the outcome switch) spaces the retry on its own.
+`awaitBandRelease`'s census watch would be wrong here - it would release instantly and spin.
 **Every trigger-arming site is shard-LOCAL** - a pop names the popped job's shard, the post-`processStep`
 nudge names the processed step's shard, the doorbells name the announced step's shard - so a shard with an
 empty partition and nothing in flight **arms nothing and generates nothing**. Parked, it would sleep until
@@ -856,17 +857,30 @@ DB-independent phase metric, over throughput). A 16-vCPU/1TB shard (30k IOPS) co
 confirming it. Operator guidance (size disk throughput to the workload's `dwarf_state_write_bytes` rate) is
 in `docs/deployment.md`.
 
-**Urgent nudges bypass the floor; routine ones do not (`requestRefillDemand`).** This split is what lets the
-floor be a debounce rather than a policy timer - it never has to be short enough to cover an event, because
-events wake it directly. Urgent = `Offer` found the partition **empty** (it declines to head-insert a first
-arrival, so only a scan can serve that step) or **head-inserted a better band** (only one pioneer is accepted
-per band-opening, so the *rest* of an arriving high-priority burst needs the scan). Routine =
-post-`processStep` and low-water, which fire on every step and every half-drained partition; letting those
-bypass is precisely the hot loop. **The floor cannot invert priority ORDER** - a pass always plans the global
-minimum band, so however slowly it scans, urgent work is still selected first; it can only delay dispatch.
-(Verified: a 5s floor with the bypass removed produced *correct ordering* and took 22x as long. An
-ordering-only test passes that build silently, which is why `fixtures/crossshardpriorityflow_test.go` asserts
-urgent-burst LATENCY as its sensitive axis and keeps ordering only as the semantic contract.)
+**EVERY nudge is floor-gated - there is no bypass class, and cross-shard priority is therefore strict only
+WITHIN ONE OR TWO FLOORS.** There used to be a second, floor-cutting nudge channel (`requestRefillDemand` /
+`routeRefill`, fed by an `urgent` flag out of `Offer`) whose whole job was to close the publish gap below.
+It is gone; this section is the guarantee that replaced it, and it is weaker in a way that must be stated
+rather than assumed.
+
+The gap: a shard learns of an arriving better band from its doorbell, but peers learn of it only from the
+**census**, which this shard populates by *scanning*. So the band becomes globally visible one floor later
+(this shard rescans and publishes) plus up to one more (a peer plans on its own next pass). Inside that
+window a peer computes a stale global minimum, finds itself holding it, and legitimately dispatches
+worse-band work. That is an inversion of the observable dispatch ORDER, not merely of latency - do not
+repeat the old claim that "the floor can only delay dispatch, never invert order." It was true of a pass
+planning from a *current* census and false across the publish gap, which is exactly the case that matters.
+Pinned by `fixtures/shardedflow_test.go`, which pins a realistic floor precisely because the guarantee is
+floor-relative; left derived, its 8-shards/1-worker topology hits the degenerate `bufferShare 0` -> 1s cap
+and the inversion reproduces deterministically.
+
+What is NOT weakened: the arriving step itself is never delayed (`Offer` head-inserts a strictly-better
+band, so it is popped next), ordering among work already in the census is strict, and nothing is preemptive.
+The public statement of all this is in `docs/scheduling-and-reliability.md` - keep the two in step.
+
+`fixtures/crossshardpriorityflow_test.go` still asserts urgent-burst LATENCY as its sensitive axis (an
+ordering-only test passes a starved build silently - verified: a 5s floor produced correct ordering and took
+22x as long), and that axis is now bounded by the floor rather than by signal delivery.
 
 **The floor is the ONLY standing rate limit, and `refillScanFloorMin` (20ms) is its unconditional guarantee.**
 The derived formula can bottom out: `share` is `capacity/N`, so a small cache over many shards produces a
@@ -883,9 +897,11 @@ Liveness is unaffected: the trigger stays armed through the wait, so a drained-e
 the remainder. Pinned by `TestRefillFloor_DeepBacklogLiveness` (a deep backlog still drains under a floor
 pinned into the over-limiting regime, with a single worker).
 
-`refillBackoffTick` (20ms) is a separate constant with a separate job - it paces the two empty-slice
-back-offs (`awaitBandRelease`'s in-memory census checks, `awaitStarvedRetry`'s single retry), bounding how
-often those loops re-*evaluate*, not how often they scan. Do not collapse it into the floor.
+`refillBandWatchTick` (20ms) is a separate constant with a separate job - it is the poll interval of
+`awaitBandRelease`'s in-memory census watch, bounding how often an above-band shard re-*evaluates* whether it
+may dispatch at all (a map read, no query), not how often anything scans. Do not collapse it into the floor.
+It has exactly one caller by design: the *starved* case needs no such wait, because the floor already spaces
+its retry - the same redundancy that removed the deep-backlog pace.
 
 **Liveness guarantee.** A worker requests a refill *after* `processStep` returns - i.e. after the step left `pending`
 (acquired or completed) - not at pop time, targeting the processed step's shard. Load-bearing: requesting before the

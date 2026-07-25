@@ -14,9 +14,14 @@ eng.Create(ctx, "report", state, &workflow.FlowOptions{Priority: 5})
 
 Lower numbers run first. An unset priority (0) uses the engine default (`SetDefaultPriority`, 100 by
 default). Priority is **strict and cluster-wide**: once the engine observes due priority-5 work, no
-priority-10 work is selected until it drains. The guarantee is over *observed* work — the scheduler works
-from periodic snapshots of what is due, so priority-10 work already picked up may briefly continue for one
-selection cycle after priority-5 work arrives elsewhere in the cluster; priority is never preemptive.
+priority-10 work is selected until it drains.
+
+The guarantee is over *observed* work, and observation is not instantaneous — the scheduler works from
+periodic snapshots of what is due. When priority-5 work arrives, it takes a snapshot cycle or two before
+every part of a sharded cluster has observed it, and a small amount of priority-10 work may start in that
+window. Priority is also never preemptive, so anything already running continues to completion. Both
+effects are bounded by the snapshot cycle, not by the size of the backlog: strict ordering is what you get
+between arrivals separated by more than a cycle or two, which is the normal case.
 There is no aging — a steady stream of high-priority flows will starve lower bands by design, so reserve
 the top bands for genuinely urgent work.
 
