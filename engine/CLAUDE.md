@@ -1730,7 +1730,7 @@ task inside a subgraph child errors with no `onError`, the child's failure is su
 `flow.Subgraph` call as the `err` return (carried in `subgraph_error`, re-dispatching the parked caller step -
 `deliverFlowFailureToParent`). The child still `signalStop`s its own failure
 (a subgraph-child key is a legal read-only `Await`/`Snapshot` target), so a blocked `Await(childKey)` wakes on
-the signal instead of idling to the lost-wake poll backstop - **both** child-settle paths signal: `failStep`'s
+the signal rather than waiting for the detector to read the row - **both** child-settle paths signal: `failStep`'s
 subgraph-child branch (a failing last-arriver) and the transition path's cohort-fail branch in `processStep` (a
 completing last-arriver resolving a cohort with failures), each exactly as the top-level path does. The load-bearing
 rule is *when*: the child flow fails only **when it actually fails as a flow** - which, for a child with an
@@ -1907,30 +1907,54 @@ correlation-id→key lookup (see "Tracing"); subgraph-child keys are read-only f
 ### Await
 
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
-`cancelled`/`interrupted`. It loops: snapshot, return if stopped, otherwise park on the **latch board**
-(`internal/latch`, held as `e.latches`) until something reports the flow done. A wake only ever means *look
-again* - the outcome is always built by the snapshot at the top of the loop - which is why a non-terminal
-notification (e.g. `running` from `Create`) costs nothing but a re-read.
+`cancelled`/`interrupted`. Its shape is **read, park, read - at most twice, and never in a loop**: snapshot and
+return if the flow has already stopped; otherwise park on the **latch board** (`internal/latch`, held as
+`e.latches`) until it settles, then snapshot once more to build the outcome.
 
-**It reads BEFORE it parks, and that ordering is safe only because the latch is polled.** An event-based wake
-must be armed before the event fires, so the pre-latch `await` had to register its channel *first* and snapshot
-second. The detector asks for the current status of every parked key instead, so a stop committing between the
-snapshot and the park is reported by the next sweep rather than being an event the caller arrived too late to
-hear. Registration order is now a latency question, not a correctness one - do not "restore" the arm-then-read
-ordering.
+**Each of those two reads earns its place, and the second is not a re-check.**
 
-**Three things can end a park, and they are not interchangeable:**
+- **The first** is what lets an already-settled flow answer AT ONCE. Parking instead would be *correct* - the
+  detector reports the current state of every parked key, so a stop that landed before the caller arrived is
+  found anyway - but it would be found on the sweep's cadence, turning every `Await` on a finished flow into a
+  wait of up to one full `latchSweepInterval`. Measured: removing this read **doubled** the `engine` package's
+  test time (≈8-11s → ≈17-20s), while `Run` was unaffected (a `Run` caller parks long before its flow stops).
+  Keep it.
+- **The second** runs only after a release, and a release is a promise that the row has **settled** - reached a
+  stop, or stopped resolving. That invariant is what removed the loop this once needed, and `signalStop`
+  **enforces** it by dropping any non-stopped status rather than delivering it. Do not wake a caller for a
+  status a flow is merely passing through: with no loop, the caller would hand a running flow back as an
+  outcome. (Nothing needs such a wake anyway - nobody is parked on an `interrupted` flow, since that is a stop,
+  and nobody can be parked on a key `Fork` has not returned yet.)
 
-- **`notifyStatusChange` → `Board.Release`** - instant, in-memory, for a status THIS replica just committed.
+**Registering AFTER the first read is safe only because the board is polled.** An event-based wake must be
+armed before the event fires, so an event-based `await` would have to register *first* and read second. The
+detector asks for the current state of every parked key instead, so a stop committing between the read and the
+park is reported by the next sweep. Registration order is a latency question, not a correctness one - do not
+"restore" an arm-then-read ordering.
+
+**Two things can end a park, and they are not interchangeable:**
+
+- **`signalStop` → `Board.Release`** - instant, in-memory, for a stop THIS replica just committed.
 - **The detector** (`latchLoop` → `Board.Sweep` → `resolveStoppedFlows`, `latchSweepInterval` **50ms**) - one
   indexed `IN` lookup per shard holding a parked key, and *nothing at all* when nobody is awaiting. This is the
   only path that can see a stop made by a **peer**, so it is the primary wake for the cross-replica case, not a
   backstop. Its cost scales with concurrent **awaiters**, never with step throughput, which is what lets the
   cadence stay tight without watching how fast the engine is running.
-- **`awaitPollInterval` (60s)** - the last-resort re-snapshot, sitting behind *both* of the above. It bounds the
-  park rather than driving a ticker, so it fires only if the local release and the detector have both failed to
-  notice a stop - i.e. only for a bug. Costing one snapshot per blocked caller per minute, it is cheap enough to
-  keep and too coarse to rely on.
+
+**A parked caller runs no query of its own, and that is a property to protect.** `await` parks for the whole
+remaining budget in ONE `Latch` call; the detector's per-shard lookup is the only read on its behalf. Do not
+re-introduce a per-caller re-read on a timer "as a backstop": it would make the engine's query rate grow with
+the number of blocked callers, and it can only find what the sweep - reading the same rows on a far tighter
+cadence - has already found. The thing such a timer would guard is a bug in `internal/latch`'s in-memory
+bookkeeping, which is unit-tested directly and cheaper to keep correct than to poll around.
+
+**A ctx with no deadline gets `awaitDefaultBudget` (15m), and nothing narrower.** The engine has to bound an
+unbounded wait somehow - a flow that never stops otherwise blocks its caller for the life of the process - but
+the budget applies *only* where the caller expressed nothing; an explicit deadline is honored as given, however
+long. It is set high on purpose: a parked caller is free (previous paragraph), so a shorter budget would buy
+nothing and would cut short waits callers legitimately asked for. Note the consequence at the `Await` boundary:
+when the budget (rather than the caller's ctx) expires, **`ctx.Err()` is nil**, so `Await` must name the timeout
+itself instead of tracing that nil - tracing it returns a nil error alongside a non-stopped outcome.
 
 **Shutdown closes the board**, which wakes every parked caller with `latch.ErrClosed` and `await` turns into a
 503. `drainRuntime` stops the detector *before* closing the board (a `Sweep` in flight is not interrupted by
@@ -1939,12 +1963,17 @@ holding a released status keeps it - the closure travels the same one-slot chann
 displace one - so a flow that stopped microseconds before shutdown still returns its outcome. Pinned by
 `fixtures/awaitshutdownflow_test.go`.
 
-**`resolveStoppedFlows` is the board's status resolver, and three of its shapes are load-bearing** (`latch.go`):
+**`resolveStoppedFlows` is the board's status resolver, and four of its shapes are load-bearing** (`latch.go`):
 
 - **One query per SHARD, not per key.** Keys carry their shard, so they are grouped and each shard is asked once;
   a pass costs O(shards), not O(awaiters).
 - **The token is compared against the row.** A flow key is a capability, so resolving on `flow_id` alone would
   answer a caller holding a forged or stale token. Pinned by `TestLatchResolve_ReportsStoppedFlowsOnly`.
+- **A key that names NO row settles too**, as `flowUnresolved` - the woken caller's own read turns that into
+  the not-found. A row that does not exist can never change status, so without this a parked caller would wait
+  out its entire budget for an answer that was already decided. Absence may only be inferred from a chunk whose
+  query **fully succeeded**: on a failed chunk every row is missing, and calling those keys unresolved would
+  404 live flows on a transient blip.
 - **A shard error is not a failed pass.** Whatever the other shards resolved is returned *alongside* the error
   (`OnEach` is all-or-nothing, so its callback never propagates one), and the unresolved keys are simply asked
   about again next tick.
@@ -2555,7 +2584,7 @@ data - so stamping the key onto every span would hand a write capability for eve
 trace reader. The correlation id uniquely identifies the flow ({shard} disambiguates the per-shard
 sequential id) for grouping/pivoting/log-join, but grants nothing. The same rule governs logs and metric
 labels: the token appears only on the task carrier (`flow.SetFlowKey`, trusted task code) and as an
-in-memory waiter-match key (`signalStop`/`notifyStatusChange`, never leaves the process). No log line emits a
+in-memory waiter-match key (`signalStop`, never leaves the process). No log line emits a
 flow key at all. Any new span/log/metric that names a flow must use `keys.CorrelationID`, never the raw key.
 
 **`List` surfaces the flow's trace id.** `FlowSummary.TraceID` is the 32-hex W3C trace-id parsed from the

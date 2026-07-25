@@ -113,8 +113,11 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	close(release) // the child now fails via failStep's subgraph-child path, which must signalStop the child
 
-	// The wake bound is deliberately well below awaitPollInterval (5s): signalStop returns in ms, so this proves
-	// the *signal* woke Await, not the 5s lost-wake poll backstop that would mask a missing signalStop.
+	// What this bound pins is that failStep's subgraph-child path RESOLVES the child key at all - a failure that
+	// never wrote the child's stop leaves this Await hanging to its ctx. It does not isolate which wake path
+	// returned it: the latch detector reads the committed stop within its own cadence, far inside this bound,
+	// so no timing here can tell a delivered signalStop from a missing one. TestFault_DropSignalStop covers the
+	// detector-only case directly instead.
 	select {
 	case aw := <-awaitCh:
 		assert.NoError(aw.err, "Await(childKey) must be woken by the failure's signalStop, not time out")

@@ -158,7 +158,6 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	// panel (started - terminated) drifts negative by one per fork. Create and Continue count their starts
 	// at the same point; Fork's own INSERT...SELECT clone path simply never did.
 	e.metricFlowStarted(ctx, cc.rootWorkflowURL)
-	e.notifyStatusChange(newFlowKey, workflow.StatusRunning)
 	e.enqueueStep(ctx, shardNum, cc.newLeafStepID)
 	return newFlowKey, nil
 }

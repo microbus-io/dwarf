@@ -61,8 +61,6 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	// Left at its default so the DETECTOR is what wakes this Await. Shortening awaitPollInterval here
-	// would let the last-resort re-snapshot answer instead, and the test would pass with a dead sweeper.
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "awaitpoll.verify:0/g", nil, nil)
@@ -152,7 +150,6 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.awaitPollInterval = 20 * time.Millisecond
 	assert.NoError(e.Startup(t.Context()))
 
 	flowKey, err := e.Create(ctx, "polltest.verify:0/g", nil, nil)
@@ -182,5 +179,91 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 	if assert.True(out != nil, "Poll returned a nil outcome after completion") {
 		assert.True(out.Stopped())
 		assert.Equal(workflow.StatusCompleted, out.Status)
+	}
+}
+
+// TestAwait_IgnoresANonSettledWake pins the invariant the loop-free await rests on: a release means the flow
+// has SETTLED, so the caller reads the row once and returns what it finds without re-checking. Wake it for a
+// status the flow is merely passing through and that read lands on a still-running flow, which Await would
+// then hand back as the outcome - a completed-looking answer for work that has not happened.
+//
+// signalStop is what guards this, by dropping a non-stopped status instead of delivering it. The assertion is
+// therefore that a `running` wake changes NOTHING: the caller stays parked, and only the real stop returns it.
+func TestAwait_IgnoresANonSettledWake(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	proxy := NewTestProxy()
+	release := make(chan struct{})
+	var once sync.Once
+	rel := func() { once.Do(func() { close(release) }) }
+	defer rel()
+
+	g := workflow.NewGraph("NonSettled")
+	g.SetEndpoint("Block", "nonsettled.verify:0/block")
+	g.AddTransition("Block", workflow.END)
+	proxy.HandleGraph("nonsettled.verify:0/g", g)
+	proxy.HandleTask("nonsettled.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+
+	e := NewEngineUnderTest(t)
+	e.SetHost(proxy)
+	assert.NoError(e.Startup(t.Context()))
+
+	flowKey, err := e.Create(ctx, "nonsettled.verify:0/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+
+	type result struct {
+		out *workflow.FlowOutcome
+		err error
+	}
+	done := make(chan result, 1)
+	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	go func() {
+		out, aerr := e.await(awaitCtx, flowKey)
+		done <- result{out, aerr}
+	}()
+
+	// Park first - before that, there is no waiter for a wake to displace and the test would prove nothing.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && e.latches.Waiting(flowKey) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !assert.True(e.latches.Waiting(flowKey) > 0, "Await never parked") {
+		return
+	}
+
+	// The wake under test. The flow really is running, so this is exactly the status a mid-flight transition
+	// site would pass - and it must not reach the board.
+	e.signalStop(ctx, flowKey, workflow.StatusRunning)
+
+	select {
+	case r := <-done:
+		assert.True(false, "a running wake returned Await early with %v (outcome %+v)", r.err, r.out)
+		return
+	case <-time.After(500 * time.Millisecond):
+		// Still parked, which is the point. The window comfortably spans several detector sweeps, so this
+		// also pins that the sweep does not release a running flow either.
+	}
+
+	// The real stop must still return it, or the guard would be indistinguishable from a broken wake path.
+	rel()
+	select {
+	case r := <-done:
+		assert.NoError(r.err)
+		if assert.NotNil(r.out) {
+			assert.Equal(workflow.StatusCompleted, r.out.Status)
+		}
+	case <-time.After(10 * time.Second):
+		assert.True(false, "Await never returned after the flow actually stopped")
 	}
 }

@@ -29,6 +29,9 @@ It wakes promptly whichever replica ran the flow's last step, with no configurat
 - The caller must **stay alive and connected**. If its context deadline fires before the flow stops, `Await`
   returns without the outcome — the flow keeps running, and the caller must `Await` again (it still holds the
   key). Long-running or human-in-the-loop flows routinely outlive a request context.
+- **Give the ctx a deadline.** It is the only bound on the wait: a flow runs for as long as its work takes, and
+  there is nothing else for the engine to time out on. A ctx without a deadline is honored for a long fixed
+  budget and then times out — a guard against blocking forever, not a wait to design around.
 - It does **not** survive the caller process restarting — there is no durable "call me back."
 - It is a poor fit for **fire-and-forget** submissions, where nobody waits.
 

@@ -329,11 +329,10 @@ func TestFault_DropSignalStop(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.awaitPollInterval = 20 * time.Millisecond // the backstop must fire fast for the test
 	assert.NoError(e.Startup(t.Context()))
 
-	// The terminal wake is dropped, so Await cannot rely on the signal; it must return via its periodic
-	// re-snapshot of the DB-committed stop.
+	// The terminal wake is dropped, so Await cannot rely on the signal; it must return via the latch
+	// detector reading the DB-committed stop.
 	e.seams.Inject(FaultDropSignalStop)
 	if out := enginetest.BoundedRun(t, e, "fsig/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)

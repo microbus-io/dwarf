@@ -26,12 +26,13 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestAwaitShutdownflow pins the shutdown sentinel for Await. A waiter blocked on a flow that is
-// still running when the engine shuts down must be released with an error, not left spinning: drainRuntime
-// wakes each waiter once, and before the fix it sent an empty string that Await treats as "re-snapshot", so a
-// non-stopped flow's waiter re-blocked on a channel no goroutine would ever signal again and only escaped when
-// its own ctx expired (or, up to a full poll interval later, when a ticker re-snapshot happened to hit the
-// now-closed database). The sentinel makes Await return promptly with a shutting-down error instead.
+// TestAwaitShutdownflow pins closure of the latch board for Await. A waiter blocked on a flow that is still
+// running when the engine shuts down must be released with a shutting-down error, and promptly.
+//
+// A wake that merely means "look again" is NOT enough here, and that is what this pins: the flow is still
+// running, so a re-read finds it running and the waiter parks again - on a board nothing will ever release,
+// against a database that is closing under it. Only a wake that says CLOSED ends the wait. Without it the
+// caller escapes solely on its own ctx, which is the hang this test exists to catch.
 // NOT t.Parallel: asserts an upper-bound reaction latency (Await returns < 2s after Shutdown), which CPU oversubscription
 // from co-running parallel tests can inflate past the bound.
 func TestAwaitShutdownflow(t *testing.T) {
@@ -65,9 +66,8 @@ func TestAwaitShutdownflow(t *testing.T) {
 		return
 	}
 
-	// Block an Await on the still-running flow. The ctx is deliberately generous (well past the 5s poll
-	// interval) so that a prompt return proves the sentinel released the waiter, not the ctx deadline and not
-	// a ticker re-snapshot stumbling onto the closed database.
+	// Block an Await on the still-running flow. The ctx is deliberately generous so that a prompt return
+	// proves the board's closure released the waiter, rather than the ctx deadline expiring.
 	type awaitResult struct {
 		out *workflow.FlowOutcome
 		err error
@@ -92,9 +92,8 @@ func TestAwaitShutdownflow(t *testing.T) {
 	select {
 	case res := <-done:
 		// The waiter must be released with an error (not a nil-error stopped outcome), and specifically the
-		// shutdown-sentinel error - the reliable discriminator. Without the fix the ignored empty wake makes
-		// Await re-snapshot and either re-block until the 5s ticker or stumble onto the closing database,
-		// surfacing a ctx-timeout or DB-closed error rather than this message.
+		// shutting-down one - the reliable discriminator. A wake carrying only a status would send Await back
+		// to re-read a still-running flow and re-park, surfacing a ctx-timeout or a DB-closed error instead.
 		assert.Nil(res.out)
 		if assert.Error(res.err) {
 			assert.Contains(res.err.Error(), "shutting down")

@@ -411,54 +411,73 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 // await blocks until a flow stops. A DeleteOnCompletion flow stays `completed` (outcome observable) for the
 // deletion grace window, then the reaper removes it and await 404s.
 func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
-	for {
-		// Read first, park second. Registering AFTER the read is safe - and is what lets an
-		// already-stopped flow answer with no waiting at all - because the latch is POLLED rather than
-		// signalled: a stop committing in the gap is reported by the detector's next sweep instead of
-		// being an event this caller arrived too late to hear.
-		outcome, err := e.snapshot(ctx, flowKey)
-		if err != nil {
-			// A read that failed because the CALLER's ctx ended is the deadline this call is allowed to
-			// hit, not an infrastructure failure - so it degrades to the same not-stopped answer the park
-			// below gives, and `Poll` keeps its contract of returning a re-pollable outcome rather than a
-			// timeout error. The window is small and entirely latency-dependent (the read has to straddle
-			// the deadline), which is why it shows up against a real server and not against local SQLite.
-			if ctx.Err() != nil {
-				return &workflow.FlowOutcome{Status: workflow.StatusRunning}, nil
-			}
-			return nil, errors.Trace(err)
-		}
-		if outcome != nil && isStoppedStatus(outcome.Status) {
-			return outcome, nil
-		}
-
-		// awaitPollInterval bounds the park rather than gating a ticker: it is the last-resort re-read
-		// behind BOTH wake paths, so it fires only if the local release and the detector have both failed
-		// to notice a flow that stopped. The loop then re-snapshots and re-parks.
-		waitCtx, cancelWait := context.WithTimeout(ctx, e.awaitPollInterval)
-		_, waitErr := e.latches.Latch(waitCtx, flowKey)
-		cancelWait()
-		switch {
-		case waitErr == nil:
-			// Released with a status. Loop rather than trusting it: the outcome the caller gets is always
-			// built by the snapshot above, so a release only ever means "look again now".
-		case errors.Is(waitErr, latch.ErrClosed):
-			return nil, errors.New("engine is shutting down", http.StatusServiceUnavailable)
-		case ctx.Err() != nil:
-			// The caller's ctx ended before the flow stopped. Return the current non-terminal outcome
-			// (Stopped() is false) rather than an error; the public Await turns a not-stopped result into a
-			// timeout error, while Poll returns it as-is so a caller can re-poll.
-			if outcome != nil {
-				return outcome, nil
-			}
+	// A caller that named no deadline is given one. Nothing else bounds the park: a waiter is released only
+	// by a status the board reports, so a flow that never stops would block its caller for the life of the
+	// process, and the engine keeps no timer of its own behind the board - a periodic re-read would be a
+	// query rate that grows with blocked callers while buying nothing the sweep does not already cover.
+	//
+	// The budget is deliberately far longer than any wait a synchronous caller should be making. It is a
+	// stop against blocking forever, not an opinion on how long awaiting is reasonable, and it applies ONLY
+	// where the caller expressed nothing - an explicit deadline is honored exactly as given, however long.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.awaitDefaultBudget)
+		defer cancel()
+	}
+	// READ, PARK, READ - at most twice, never in a loop. The two reads answer different questions and both
+	// have to be here:
+	//
+	// The FIRST read is what makes an already-settled flow answer AT ONCE. Parking instead would be
+	// correct - the detector reports the current state of every parked key, so a stop that happened before
+	// this caller arrived is still found - but it would be found on the sweep's cadence, turning every
+	// `Await` on a finished flow into a wait of up to one full sweep. Measured: dropping this read doubled
+	// the engine package's test time. It costs one indexed lookup, and only on calls that are about to
+	// block anyway.
+	//
+	// The SECOND read builds the outcome once the board says the flow has SETTLED. It is not a re-check:
+	// every release means the row reached a stop (or stopped resolving), never merely "look again", which
+	// is what removes the loop this used to need. Do not release on a non-settled status - a caller would
+	// take a running flow for a finished one. `signalStop` guards that.
+	//
+	// Registering AFTER the first read is safe for the same reason parking at all is: the board is POLLED,
+	// so a stop landing in the gap is reported by the next sweep rather than being an event the caller
+	// arrived too late to hear. A signal-driven board would have to arm first and read second.
+	outcome, err := e.snapshot(ctx, flowKey)
+	if err != nil {
+		// A read that failed because the CALLER's ctx ended is the deadline this call is allowed to hit,
+		// not an infrastructure failure - so it degrades to the same not-stopped answer the park below
+		// gives, and `Poll` keeps its contract of returning a re-pollable outcome rather than a timeout
+		// error. The window is small and entirely latency-dependent (the read has to straddle the
+		// deadline), which is why it shows up against a real server and not against local SQLite.
+		if ctx.Err() != nil {
 			return &workflow.FlowOutcome{Status: workflow.StatusRunning}, nil
 		}
+		return nil, errors.Trace(err)
 	}
+	if isStoppedStatus(outcome.Status) {
+		return outcome, nil
+	}
+
+	// Park for the WHOLE remaining budget, in one call. Waiting costs no query of its own - the detector
+	// already asks about every parked key on its own cadence - so waking a caller early to re-read a row
+	// the sweep is polling anyway would add a per-caller query rate for nothing.
+	_, waitErr := e.latches.Latch(ctx, flowKey)
+	switch {
+	case errors.Is(waitErr, latch.ErrClosed):
+		return nil, errors.New("engine is shutting down", http.StatusServiceUnavailable)
+	case waitErr != nil:
+		// The wait ran out before the flow settled. Hand back the non-terminal outcome already in hand
+		// rather than reading again on a spent ctx: `Await` turns a not-stopped result into a timeout
+		// error, while `Poll` returns it as-is so the caller can re-poll.
+		return outcome, nil
+	}
+	return e.snapshot(ctx, flowKey)
 }
 
 // signalStop wakes local Await callers waiting on the given flow. Use it at every flow-stop site
-// (completed, failed, cancelled, interrupted); non-terminal transitions (running) need only the plain
-// notifyStatusChange, which is the same wake without the stop checkpoint or the drop fault.
+// (completed, failed, cancelled, interrupted) and NOWHERE ELSE: a woken caller reads the flow once and
+// returns what it finds, so waking it for a status the flow is merely passing through would hand a running
+// flow back as an outcome. A non-terminal transition needs no wake at all - nobody is parked on it.
 //
 // It reaches THIS replica only, and nothing here needs to reach further: a peer's awaiters find the stop
 // by reading the flow row on the latch detector's own cadence, so the wake is an accelerator for the
@@ -477,14 +496,12 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 	if e.seams.IsFault(FaultDropSignalStop) {
 		return
 	}
-	e.notifyStatusChange(flowKey, status)
-}
-
-// notifyStatusChange wakes up all Await callers waiting on the given flow. It is the instant path, for a
-// status this replica just committed; a peer's is found by the latch detector's next sweep instead. Both
-// only ever mean "look again" - the waiter re-reads the flow to build its outcome - so passing a
-// non-terminal status here is harmless and is what the running-transition sites do.
-func (e *Engine) notifyStatusChange(flowKey string, status string) {
+	// Guarded, not merely documented: a release is a promise that the flow has settled, and the caller acts
+	// on it without re-checking. A non-stopped status here would be a wrong answer to a caller, so it is
+	// dropped rather than delivered - the flow's real stop will wake them later.
+	if !isStoppedStatus(status) {
+		return
+	}
 	if e.latches == nil {
 		return // not started: nobody can be awaiting
 	}

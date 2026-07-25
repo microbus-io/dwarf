@@ -225,11 +225,12 @@ Two delivery rules:
   filter out self-delivery. As a backstop the engine also stamps each signal with its own instance id
   and silently discards an echo of its own broadcast — but that discard still costs your transport a
   round-trip per signal, so filtering at the transport remains the right design.
-- **The flow-stop signal is what wakes a cross-replica `Await`.** A flow created on replica A but completed
-  on replica B wakes A's `Await` only via this broadcast — without it, A blocks until its context deadline.
+- **Nothing here carries a flow's outcome.** A cross-replica `Await` does not depend on this transport: a flow
+  created on replica A and completed on replica B is found by A reading the shared database, so `Await` returns
+  promptly whether or not a signal is delivered. Signals are convergence nudges — losing one costs latency in
+  the fleet's own bookkeeping, never a missed outcome.
 
-In a single-replica deployment, leave `SignalPeers` a no-op; none of this runs, and the
-background poll is the only (and sufficient) recovery path.
+In a single-replica deployment, leave `SignalPeers` a no-op; none of this runs.
 
 ## Shutting down
 

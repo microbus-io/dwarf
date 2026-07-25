@@ -176,7 +176,7 @@ const startupBootstrapConns = 4
 // the old signal-convergence window because it is backed by a real registry read, not a guess about
 // when replies have arrived.
 //
-// A `var` so a test can disable it (0 = read R immediately), the same reason awaitPollInterval and
+// A `var` so a test can disable it (0 = read R immediately), the same reason reapInterval and
 // persistBackoff are.
 var startupPeerSettle = 250 * time.Millisecond
 

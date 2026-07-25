@@ -53,7 +53,7 @@ type benchHost struct {
 	peers []*engine.Engine
 
 	// Signal-fault injection, simulating an imperfect peer transport. The engine must tolerate all of
-	// it: flow doorbells/wakes recover via the poll backstop, and peer discovery must hold R stable
+	// it: flow doorbells/wakes recover by reading the database, and peer discovery must hold R stable
 	// under occasional loss (a ping is re-sent every pingInterval; eviction takes 3 misses).
 	//
 	// signalJitter delays every delivery by a uniform random [0, jitter) - network latency. signalDrop

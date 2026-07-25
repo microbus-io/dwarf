@@ -202,8 +202,8 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 }
 
 // TestFaultComposition_CompoundWakeLoss pins that when BOTH the dispatch wake (doorbell) and the terminal wake
-// (signalStop) are lost, the two independent backstops still cover the flow: recoverExpiredLeases dispatches the
-// stranded pending step, and Await's periodic re-snapshot returns the DB-committed completion.
+// (signalStop) are lost, two independent database-reading recoveries still cover the flow: recoverExpiredLeases
+// dispatches the stranded pending step, and the latch detector returns the DB-committed completion.
 func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -217,7 +217,6 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.awaitPollInterval = 20 * time.Millisecond // the re-snapshot backstop must fire fast for the test
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -227,8 +226,8 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	fk, err := e.Create(ctx, "fcwake/g", nil, nil)
 	assert.NoError(err)
 
-	// Await is registered first, so its return can only come from the periodic re-snapshot (the terminal signal
-	// is dropped), never the fast wake.
+	// Await is registered first, so its return can only come from the latch detector (the terminal signal is
+	// dropped), never the fast wake.
 	outCh := make(chan *workflow.FlowOutcome, 1)
 	go func() {
 		awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

@@ -1158,7 +1158,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 			// Subgraph child: the failure is delivered to the parent's flow.Subgraph call - but the child has
 			// still stopped, so wake any Await on the child key (legal read-only introspection), mirroring
 			// failStep's subgraph-child branch. Without this, an Await(childKey) on a child failed by its
-			// completing last arriver (this path) would idle until the lost-wake poll backstop.
+			// completing last arriver (this path) would wait on the latch detector to read the stop instead.
 			e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken), workflow.StatusFailed)
 			if flowFailedReDispatchParent {
 				e.enqueueStep(ctx, shardNum, flowFailedParentStepID)

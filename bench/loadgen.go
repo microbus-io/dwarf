@@ -190,8 +190,9 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 // separates two latencies the closed loop conflates: admission (the Create call) and end-to-end.
 //
 // Outstanding is bounded to maxOutstanding (created - Sum(FlowsTerminated) across engines, a cheap
-// atomic read - no per-flow Await, which under a deep backlog would make every flow's Await re-snapshot
-// the DB every 5s and swamp the workload). Completion latency is SAMPLED by a small bounded pool of
+// atomic read - no per-flow Await, which under a deep backlog would park tens of thousands of callers and
+// put every one of their flow ids in the latch detector's per-shard lookup). Completion latency is SAMPLED
+// by a small bounded pool of
 // Await goroutines, not one per flow. arrivalPerSec>0 rate-limits creation (fixed offered load); 0 runs
 // flat-out to saturation (find max throughput vs the scan interval).
 func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler,

@@ -17,7 +17,7 @@ limitations under the License.
 // Cross-replica fault tests: fault injection is per-engine, which is exactly what's needed to test hand-off
 // between replicas. Two engines share one database; a fault deliberately breaks a path on one replica and the
 // test proves the other replica's backstop covers it.
-//   - a lost terminal wake on the executing replica is backstopped by a remote awaiter's poll;
+//   - a lost terminal wake on the executing replica is covered by a remote awaiter's latch detector;
 //   - a step a replica claimed but never completed (a fenced/zombie write, then the replica "crashes") is
 //     recovered and re-dispatched to a clean completion by a peer replica's lease recovery.
 package engine
@@ -67,7 +67,6 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	awaiter.SetHost(proxyAwaiter)
 	assert.NoError(awaiter.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(awaiter.SetWorkers(0))
-	awaiter.awaitPollInterval = 100 * time.Millisecond // the backstop must be prompt for the test
 
 	worker := NewEngine()
 	worker.SetHost(proxyWorker)
@@ -83,7 +82,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	t.Cleanup(func() { worker.Shutdown(ctx) })
 
 	// Break the worker's terminal wake for the rest of the test: every signalStop on the worker (local notify
-	// + peer broadcast) delivers nothing, so the awaiter can learn the outcome only by re-snapshotting the DB.
+	// + peer broadcast) delivers nothing, so the awaiter can learn the outcome only by reading the flow row.
 	worker.seams.InjectN(1<<20, FaultDropSignalStop)
 
 	fk, err := awaiter.Create(ctx, "xrwake/g", nil, nil)
@@ -91,7 +90,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 		return
 	}
 
-	// The only path by which this Await can return is the awaiter's own poll backstop - no signal survives.
+	// The only path by which this Await can return is the awaiter's own latch detector - no signal survives.
 	out, err := enginetest.BoundedAwait(t, awaiter, fk)
 	if assert.NoError(err) && assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)

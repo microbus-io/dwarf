@@ -179,7 +179,7 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		})
 	}
 
-	// leaseStaleWrite recovers via lease expiry + the poll backstop (not an in-band re-dispatch), so it is
+	// leaseStaleWrite recovers via lease expiry + lease recovery (not an in-band re-dispatch), so it is
 	// driven explicitly with a shortened lease.
 	t.Run("leaseStaleWrite", func(t *testing.T) {
 		assert := testarossa.For(t)

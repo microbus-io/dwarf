@@ -19,7 +19,7 @@ Two-replica contention. Two engines share one database (a shared in-memory
 SQLite DSN), each with its own TestProxy and workers, wired as peers both ways. This pins the
 claim-CAS exactly-once guarantee under real cross-replica contention: every step of every flow runs
 exactly once no matter which replica claims it. A second subtest proves the cross-replica Await wake is
-prompt - the latch detector's cadence - rather than falling through to the last-resort re-snapshot.
+prompt - within the latch detector's cadence - rather than dragging out to the caller's own deadline.
 */
 package fixtures
 
@@ -127,9 +127,9 @@ func TestTwoReplicaflow(t *testing.T) {
 
 		// A dedicated pair on their own shared DB: `awaiter` has ZERO workers (so it can never claim the
 		// step - forcing the cross-replica path), `worker` executes it. Nothing crosses between the two, so
-		// `awaiter` can only learn of the stop by reading the flow row; its last-resort re-snapshot is a
-		// minute away, so a sub-2s return proves the detector found it. (Mirrors
-		// subgrapherrorwaitflow_test.go's timing pin.)
+		// `awaiter` can only learn of the stop by reading the flow row - and the detector is the only thing
+		// that reads it on the awaiter's behalf, so a sub-2s return is a direct measurement of the detector
+		// working. Nothing else could return this Await short of its own 30s deadline.
 		pa := engine.NewTestProxy() // pure awaiter
 		pb := engine.NewTestProxy() // executor
 		wg := workflow.NewGraph("Wake")

@@ -37,13 +37,17 @@ const (
 	// latchStatusQuery is completed by the padded placeholder list. It is deliberately UNFILTERED on status
 	// - see resolveStoppedFlows for why the filter is applied in Go.
 	latchStatusQuery = "SELECT flow_id, flow_token, status FROM dwarf_flows WHERE flow_id IN ("
+	// flowUnresolved releases a caller parked on a key that names no row. It is NOT a flow status and never
+	// reaches one: the woken caller reads the flow and reports the not-found it finds. It only has to be a
+	// value no real status collides with, since a release is what carries meaning here, not its content.
+	flowUnresolved = "unresolved"
 )
 
-// latchLoop drives the Await latch's detector. One pass asks the shards which parked flows have stopped;
+// latchLoop drives the Await latch's detector. One pass asks the shards which parked flows have settled;
 // with nobody awaiting it asks nothing, so an engine whose host never calls Await pays only the ticker.
 //
 // The sweep is what makes a CROSS-REPLICA stop observable: this replica's own stops reach a waiter through
-// notifyStatusChange the instant they commit, but a flow finished by a peer is visible only in the shared
+// signalStop the instant they commit, but a flow finished by a peer is visible only in the shared
 // database. Its cost scales with concurrent AWAITERS, not with step throughput - which is what lets the
 // cadence stay tight without tracking how fast the engine is running.
 func (e *Engine) latchLoop(ctx context.Context) {
@@ -64,8 +68,16 @@ func (e *Engine) latchLoop(ctx context.Context) {
 }
 
 // resolveStoppedFlows is the latch board's status resolver: given the flow keys callers are parked on, it
-// reports the ones that have stopped. A key it omits stays parked, so every case it cannot answer for -
-// a shard that failed, a malformed key, a flow still running - is silently left for the next pass.
+// reports the ones that have SETTLED. A key it omits stays parked, so a shard that failed to answer and a
+// flow that is still running are both simply left for the next pass.
+//
+// Settled covers two outcomes, and reporting both is what lets a caller park without reading first:
+//
+//   - The flow reached a stopped status; the key resolves to it.
+//   - The key resolves to NO row (deleted, or a wrong/forged id or token). It is reported as
+//     flowUnresolved, and the woken caller's own read turns that into the not-found it deserves. Without
+//     this, a key that names nothing would hold its caller until the caller's deadline, since a row that
+//     does not exist can never change status.
 //
 // Three shapes matter here:
 //
@@ -74,7 +86,9 @@ func (e *Engine) latchLoop(ctx context.Context) {
 //   - The status filter is applied IN GO, not in the WHERE clause. Binding a status defeats the filtered
 //     index on the other dialects, and the rows are already in hand.
 //   - A SHARD ERROR IS NOT A FAILED PASS. Whatever the other shards resolved is returned alongside the
-//     error, so one sick shard cannot hold up awaiters whose flows live elsewhere.
+//     error, so one sick shard cannot hold up awaiters whose flows live elsewhere. This is also why
+//     "no row came back" may be read as absence only for a chunk that FULLY succeeded - on a failed
+//     chunk every row is missing, and calling those keys unresolved would 404 live flows on a blip.
 func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (map[string]string, error) {
 	// A parked key, indexed by the shard and row it names. Several keys can name one flow_id (a caller
 	// holding a stale or forged token), so the token is carried through and compared against the row -
@@ -83,12 +97,14 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 		key   string
 		token string
 	}
+	var lock sync.Mutex
+	settled := map[string]string{}
 	byShard := map[int]map[int][]parked{}
 	for _, flowKey := range flowKeys {
 		shard, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 		if err != nil {
-			// Unparseable, so it names no row and no sweep can ever resolve it. The caller's own ctx ends
-			// its wait; nothing here can.
+			// Names no row in any shard, so no query can settle it and no waiting can improve it.
+			settled[flowKey] = flowUnresolved
 			continue
 		}
 		rows := byShard[shard]
@@ -99,8 +115,6 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 		rows[flowID] = append(rows[flowID], parked{key: flowKey, token: flowToken})
 	}
 
-	var lock sync.Mutex
-	stopped := map[string]string{}
 	var failures []error
 	// OnEach visits every open shard; the ones holding none of these keys return immediately.
 	_ = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
@@ -114,51 +128,63 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 		}
 		slices.Sort(ids) // stable chunk boundaries across passes, for the same reason the board sorts
 		for chunk := range slices.Chunk(ids, latchResolveChunk) {
-			binds := latchPadBinds(chunk)
-			rows, err := db.QueryContext(ctx, latchStatusQuery+strings.Repeat("?,", len(binds)-1)+"?)", binds...)
-			if err != nil {
+			type row struct {
+				token  string
+				status string
+			}
+			found := make(map[int]row, len(chunk))
+			fail := func(err error) {
 				lock.Lock()
 				failures = append(failures, errors.New("shard %d: %w", shard, err))
 				lock.Unlock()
+			}
+			binds := latchPadBinds(chunk)
+			rows, err := db.QueryContext(ctx, latchStatusQuery+strings.Repeat("?,", len(binds)-1)+"?)", binds...)
+			if err != nil {
+				fail(err)
 				continue
 			}
+			complete := true
 			for rows.Next() {
 				var flowID int
 				var flowToken, status string
 				// TRIM BOTH. status and flow_token are CHAR(16), which Postgres blank-pads on read, so an
 				// untrimmed status matches none of the non-stopped constants and every running flow reads as
-				// done - releasing its waiter on every sweep, to re-park on the re-read that does trim.
+				// done - releasing its waiter on every sweep, on a row that has not settled at all.
 				if err := rows.Scan(&flowID, &flowToken, &status); err != nil {
-					lock.Lock()
-					failures = append(failures, errors.New("shard %d: %w", shard, err))
-					lock.Unlock()
+					fail(err)
+					complete = false
 					break
 				}
-				status = strings.TrimSpace(status)
-				flowToken = strings.TrimSpace(flowToken)
-				if !isStoppedStatus(status) {
-					continue
-				}
-				lock.Lock()
-				for _, p := range wanted[flowID] {
-					if p.token == flowToken {
-						stopped[p.key] = status
-					}
-				}
-				lock.Unlock()
+				found[flowID] = row{token: strings.TrimSpace(flowToken), status: strings.TrimSpace(status)}
 			}
 			if err := rows.Err(); err != nil {
-				lock.Lock()
-				failures = append(failures, errors.New("shard %d: %w", shard, err))
-				lock.Unlock()
+				fail(err)
+				complete = false
 			}
 			rows.Close()
+			if !complete {
+				continue // a partial result set says nothing about which rows are absent
+			}
+			lock.Lock()
+			for _, flowID := range chunk {
+				r, ok := found[flowID]
+				for _, p := range wanted[flowID] {
+					switch {
+					case !ok || r.token != p.token:
+						settled[p.key] = flowUnresolved
+					case isStoppedStatus(r.status):
+						settled[p.key] = r.status
+					}
+				}
+			}
+			lock.Unlock()
 		}
 		// Never propagated: OnEach is all-or-nothing, and one shard's blip must not discard what its peers
 		// resolved. The failures slice carries it out instead.
 		return nil
 	})
-	return stopped, errors.Join(failures...)
+	return settled, errors.Join(failures...)
 }
 
 // latchPadBinds turns one chunk of flow ids into bind arguments, padded up to the next bucket size by

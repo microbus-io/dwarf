@@ -31,11 +31,11 @@ import (
 
 // TestSubgraphChildStopSignal_DroppedThenBackstopped is the dropped-wake variant of
 // TestSubgraphErrorWaitflow. That fixture proves a failing subgraph child's signalStop wakes an Await blocked
-// on its (read-only) child key promptly, well under awaitPollInterval. Here we arm FaultDropSignalStop so the
-// child's terminal wake is LOST (the first signalStop consult is the child's failure; the fault fires once and
-// is consumed there, so the root's later wake is delivered normally). The child-key Await must STILL return -
-// via the periodic re-snapshot backstop - bounding the hang to one awaitPollInterval rather than the caller's
-// ctx deadline. This proves the child-key introspection contract survives a lost wake, not just a delivered one.
+// on its (read-only) child key promptly. Here we arm FaultDropSignalStop so the child's terminal wake is LOST
+// (the first signalStop consult is the child's failure; the fault fires once and is consumed there, so the
+// root's later wake is delivered normally). The child-key Await must STILL return - via the latch detector,
+// which reads the child's committed stop out of the flow row - rather than hanging to the caller's ctx
+// deadline. This proves the child-key introspection contract survives a lost wake, not just a delivered one.
 func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -76,7 +76,6 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 
 	e := NewEngineUnderTest(t)
 	e.SetHost(proxy)
-	e.awaitPollInterval = 20 * time.Millisecond // the re-snapshot backstop must fire fast for the test
 	assert.NoError(e.Startup(t.Context()))
 
 	// Run the parent (root) in the background; Run blocks until the root flow stops.
@@ -120,18 +119,18 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	e.seams.Inject(FaultDropSignalStop)
 	close(release) // the child now fails via failStep's subgraph-child path, whose signalStop is dropped
 
-	// Despite the lost signal, Await(childKey) must still return - the only remaining wake path is the periodic
-	// re-snapshot backstop. A generous bound (far above awaitPollInterval, well below the 30s Await ctx) proves
-	// it was the backstop, not a ctx-deadline timeout, that unblocked it.
+	// Despite the lost signal, Await(childKey) must still return - the only remaining wake path is the latch
+	// detector. A generous bound (far above the detector's cadence, well below the 30s Await ctx) proves it was
+	// the detector, not a ctx-deadline timeout, that unblocked it.
 	select {
 	case aw := <-awaitCh:
-		assert.NoError(aw.err, "Await(childKey) must be recovered by the re-snapshot backstop, not time out")
+		assert.NoError(aw.err, "Await(childKey) must be recovered by the latch detector, not time out")
 		if assert.NotNil(aw.out) {
 			assert.Equal(workflow.StatusFailed, aw.out.Status)
 			assert.Equal("child boom", aw.out.Error)
 		}
 	case <-time.After(10 * time.Second):
-		assert.True(false, "Await(childKey) not woken after a dropped signalStop — the re-snapshot backstop did not recover it")
+		assert.True(false, "Await(childKey) not woken after a dropped signalStop — the latch detector did not recover it")
 		return
 	}
 

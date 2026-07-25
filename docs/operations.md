@@ -83,6 +83,10 @@ changes nothing here.
 If the ctx deadline fires first, `Await` returns the error and the flow **keeps running** — it is durable and
 not bound to your call. You still hold the key, so you can `Await` again.
 
+**Give the ctx a deadline.** It is the only bound on the wait — a flow runs for as long as its work takes.
+Without one, `Await` blocks on a long fixed budget and then times out; that budget is a guard against blocking
+forever, not a wait to build on.
+
 ### Poll
 
 ```go

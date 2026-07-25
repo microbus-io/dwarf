@@ -55,10 +55,12 @@ func TestLatchPadBinds_RoundsUpToABucket(t *testing.T) {
 	assert.Equal([]int{1, 2, 4, 8, 16, 32, 64, 128, 256, latchResolveChunk}, slices.Sorted(maps.Keys(sizes)))
 }
 
-// TestLatchResolve_ReportsStoppedFlowsOnly drives the resolver directly: it must report a stopped flow,
-// stay silent about a running one, and - the load-bearing case - refuse a key whose token does not match
-// the row, since a flow key is a capability and resolving on flow_id alone would answer a caller that
-// never held it.
+// TestLatchResolve_ReportsStoppedFlowsOnly drives the resolver directly across the four cases it has to
+// tell apart: a stopped flow resolves to its status, a running one stays silent (its caller keeps waiting),
+// and a key naming no row settles as unresolved rather than waiting out a row that will never change. The
+// load-bearing case is the fourth - a key whose token does not match the row must land in the LAST group,
+// never the first, since a flow key is a capability and resolving on flow_id alone would hand a caller an
+// outcome it never held the key for.
 func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -112,11 +114,12 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, resolved[stoppedKey])
 	_, running := resolved[runningKey]
-	assert.False(running, "a running flow is not done waiting")
-	_, forged := resolved[forgedKey]
-	assert.False(forged, "the token is the capability: a wrong one must resolve nothing")
-	_, garbage := resolved["not-a-key"]
-	assert.False(garbage, "an unparseable key names no row")
+	assert.False(running, "a running flow has not settled; its caller stays parked")
+	// A key that names no row settles as flowUnresolved - the caller is woken to read the flow and get the
+	// not-found. What must NEVER happen is the forged key resolving to the real flow's status: the token is
+	// the capability, and answering on flow_id alone would hand the outcome to a caller who never held it.
+	assert.Equal(flowUnresolved, resolved[forgedKey], "a wrong token must not resolve to the real status")
+	assert.Equal(flowUnresolved, resolved["not-a-key"], "an unparseable key names no row")
 }
 
 // TestLatchResolve_ChunksWithoutDroppingKeys pins that a key set well past latchResolveChunk still
@@ -160,6 +163,14 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 
 	resolved, err := e.resolveStoppedFlows(ctx, askFor)
 	assert.NoError(err)
-	assert.Equal(1, len(resolved), "only the one real, stopped flow resolves")
 	assert.Equal(workflow.StatusCompleted, resolved[stoppedKey])
+	// Every key is settled - the real one by its status, the synthetic ones as naming no row - and that
+	// total is what catches a chunking bug: a dropped chunk leaves its keys absent from the map entirely,
+	// which a check on the real key alone would miss whenever the real key landed in a surviving chunk.
+	assert.Equal(len(askFor), len(resolved), "every key asked about must be settled")
+	for _, k := range askFor {
+		if k != stoppedKey {
+			assert.Equal(flowUnresolved, resolved[k], "synthetic key %s names no row", k)
+		}
+	}
 }

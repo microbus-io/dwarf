@@ -1233,9 +1233,9 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		return errors.Trace(err)
 	}
 
-	for _, compositeID := range chainCompositeIDs {
-		e.notifyStatusChange(compositeID, workflow.StatusRunning)
-	}
+	// No wake for the interrupted -> running transition, on this flow or its surgraph chain. An Await
+	// returns on `interrupted` (it is a stop), so nobody is parked here to wake - and a caller who parked
+	// while the flow was running is waiting for it to SETTLE, which resuming is the opposite of.
 	e.enqueueStep(ctx, shardNum, leafStepID.(int))
 	return nil
 }

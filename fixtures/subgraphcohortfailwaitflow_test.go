@@ -32,8 +32,8 @@ import (
 // TestSubgraphCohortFailWaitflow is the completing-last-arriver companion of TestSubgraphErrorWaitflow: a
 // subgraph child with an internal fan-out where one branch fails first and the OTHER branch's completion
 // resolves the cohort (cohort_failures > 0), failing the child via the transition path rather than failStep.
-// That path too must signalStop the child key, so an Await already blocked on the (read-only) child key is
-// woken by the signal - not left to the awaitPollInterval lost-wake backstop.
+// That path too must reach the child key, so an Await already blocked on the (read-only) child key returns
+// with the child's failure rather than hanging.
 func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -144,8 +144,11 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	close(release) // Slow completes last; the cohort resolves with failures via the transition path
 
-	// The wake bound is deliberately well below awaitPollInterval (5s): signalStop returns in ms, so this
-	// proves the *signal* woke Await, not the 5s lost-wake poll backstop that would mask a missing signalStop.
+	// What this bound pins is that the transition path RESOLVES the child key at all - a cohort failure that
+	// never wrote the child's stop leaves this Await hanging to its ctx. It does not isolate which wake path
+	// returned it: the latch detector reads the committed stop within its own cadence, far inside this bound,
+	// so no timing here can tell a delivered signalStop from a missing one. TestFault_DropSignalStop covers
+	// the detector-only case directly instead.
 	select {
 	case aw := <-awaitCh:
 		assert.NoError(aw.err, "Await(childKey) must be woken by the cohort failure's signalStop")

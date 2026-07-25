@@ -63,7 +63,7 @@ const (
 )
 
 // The recovery/await/reap timing knobs (leaseMargin, wedgeSweepInterval, parkWedgeThreshold,
-// orphanFlowThreshold, deletionGrace, reapInterval, awaitPollInterval) are per-engine fields on Engine
+// orphanFlowThreshold, deletionGrace, reapInterval, awaitDefaultBudget) are per-engine fields on Engine
 // (defaulted in NewEngine), not package globals. They are effectively constants in production - read-only
 // after NewEngine - but a white-box test in this package shortens one directly (e.g. e.reapInterval = 20ms,
 // before Startup for the two read once at Startup) to exercise a recovery/await/reap path without waiting
@@ -229,8 +229,8 @@ type Engine struct {
 	reaperWorker sync.WaitGroup
 
 	// Await latch: the board callers park on, and the detector goroutine that asks the shards which of
-	// those flows have stopped. A stop this replica commits reaches the board instantly through
-	// notifyStatusChange; the detector is what makes a PEER's stop observable.
+	// those flows have settled. A stop this replica commits reaches the board instantly through
+	// signalStop; the detector is what makes a PEER's stop observable.
 	latches     *latch.Board
 	latchStop   chan struct{}
 	latchWorker sync.WaitGroup
@@ -254,7 +254,7 @@ type Engine struct {
 	// (reapInterval, wedgeSweepInterval), so an otherwise minutes-long path is observable.
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	latchSweepInterval  time.Duration // Await latch detector cadence - the bound on cross-replica wake (50ms)
-	awaitPollInterval   time.Duration // Await last-resort re-snapshot, behind both wake paths (60s)
+	awaitDefaultBudget  time.Duration // how long Await blocks when the caller's ctx carries no deadline (15m)
 	pingInterval        time.Duration // peer-registry heartbeat cadence; a peer is counted <4x, pruned >8x (30s)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
@@ -301,9 +301,10 @@ func NewEngine() *Engine {
 	// from what a synchronous caller wants rather than from what the engine can afford. 50ms puts a
 	// cross-replica Run at +25ms on average, which is under the noise of the work it is waiting for.
 	e.latchSweepInterval = 50 * time.Millisecond
-	// Behind BOTH wake paths (the local release and the detector), so it is a guard against a bug in them
-	// rather than a mechanism anything relies on. One snapshot per blocked caller per minute.
-	e.awaitPollInterval = 60 * time.Second
+	// Applied only when the caller names no deadline of its own. Long by design: a parked caller costs no
+	// query (it rides the detector's existing per-shard lookup), so the only thing a short budget would buy
+	// is cutting short a wait somebody legitimately asked for.
+	e.awaitDefaultBudget = 15 * time.Minute
 	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	e.pingInterval = 10 * time.Second
 	e.wedgeSweepInterval = 5 * time.Minute
@@ -1120,7 +1121,13 @@ func (e *Engine) ShardInfo(ctx context.Context) ([]ShardSummary, error) {
 	return e.shardInfo(ctx)
 }
 
-// Await blocks until a flow stops, or until the ctx expires (which returns an error).
+// Await blocks until a flow stops, then returns its outcome. Running out of time is an error; the flow is
+// unaffected and keeps running, and the caller still holds the key to Await/Snapshot/Cancel it later.
+//
+// Pass a ctx with a deadline. It is the only bound on the wait - a flow can run for as long as its work
+// takes, and there is no notification the engine could time out on instead. A ctx without one is honored
+// for a long fixed budget and then times out, which is a guard against blocking forever, not a wait to
+// design around. A caller whose own deadline is shorter than the flow wants Poll, not Await.
 func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
@@ -1130,8 +1137,13 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 		return nil, err
 	}
 	if !outcome.Stopped() {
-		// await returned a non-terminal outcome only because the ctx ended before the flow stopped.
-		return nil, errors.Trace(ctx.Err(), http.StatusRequestTimeout)
+		// await returned a non-terminal outcome only because the wait ran out. Usually that is the caller's
+		// own ctx, but a caller that named no deadline runs out on the engine's budget instead - and then
+		// there is no ctx error to carry, so this must name the timeout itself rather than trace a nil.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, errors.Trace(ctxErr, http.StatusRequestTimeout)
+		}
+		return nil, errors.New("timed out awaiting flow", http.StatusRequestTimeout)
 	}
 	return outcome, nil
 }
@@ -1140,6 +1152,9 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 // timeout is not an error: it returns the current non-terminal outcome, whose Stopped() reports false, so a
 // caller bridging an open-ended flow to a bounded request (e.g. an HTTP poll) can answer within its budget and
 // re-poll. A real failure still returns an error.
+//
+// The ctx deadline IS the budget, so pass one; without it Poll blocks on the same long fallback budget as
+// Await before answering, which is rarely what a polling caller wants.
 func (e *Engine) Poll(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
