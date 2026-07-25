@@ -37,6 +37,8 @@ import (
 	"github.com/microbus-io/dwarf/internal/claimstracker"
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/lru"
+	"github.com/microbus-io/dwarf/internal/piston"
+	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
@@ -57,8 +59,8 @@ const (
 	// maxPollInterval is the timer's resting cadence: the nextPoll default when nothing is pending, the
 	// cap on a single timer sleep, and the horizon bound on pollPendingSteps' two MIN(...) sizing queries.
 	// There is deliberately no shorter "a backlog exists" cadence beside it - the former
-	// backlogPollInterval (1m) and the existence probe that set it were removed once the refiller's idle
-	// tick covered the same case per shard within ~1s (see refillerLoop and pollPendingSteps).
+	// backlogPollInterval (1m) and the existence probe that set it were removed once each shard's piston
+	// began cycling unconditionally on its own period, which covers the same case per shard far sooner.
 	maxPollInterval = 5 * time.Minute
 
 	// pollErrorRetryInterval caps the wake delay after a sizing query in pollPendingSteps fails, so a
@@ -86,10 +88,13 @@ const awaitShutdownSignal = "\x00shutdown"
 // Engine is the standalone workflow orchestration engine.
 type Engine struct {
 	// Dependencies (set before Startup)
-	host           Host
-	logger         *slog.Logger
-	meterProvider  metric.MeterProvider
-	metrics        *engineMetrics
+	host          Host
+	logger        *slog.Logger
+	meterProvider metric.MeterProvider
+	metrics       *engineMetrics
+	// meter is the resolved instrumentation scope, held so every module this engine assembles (the
+	// pistons) records into one scope rather than deriving its own from the provider.
+	meter          metric.Meter
 	tracerProvider trace.TracerProvider
 	tracer         trace.Tracer
 
@@ -99,12 +104,12 @@ type Engine struct {
 	shardSpecs map[int]ShardSpec
 
 	// Configuration (atomically updated, safe to change after Startup)
-	workers                 atomic.Int32
-	workersSet              atomic.Bool // SetWorkers was called: skip the derived default
-	timeBudgetMs            atomic.Int64
-	defaultPriority         atomic.Int32
-	maxOpenConns            atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
-	refillScanFloorOverride atomic.Int64 // expert override (nanoseconds): pins the refill scan floor; <=0 = derive
+	workers                atomic.Int32
+	workersSet             atomic.Bool // SetWorkers was called: skip the derived default
+	timeBudgetMs           atomic.Int64
+	defaultPriority        atomic.Int32
+	maxOpenConns           atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
+	refillIntervalOverride atomic.Int64 // expert override (nanoseconds): pins every piston's cycle period; <=0 = derive
 
 	// engineID is a random positive identifier minted per engine instance (fresh on every restart).
 	// It is stamped on every flow/step INSERT (creator) and overwritten by the claim CAS (claimer) -
@@ -224,28 +229,18 @@ type Engine struct {
 	workersDispatch int
 	shardRTTMs      map[int]float64
 
-	// Per-shard refillers: one goroutine per shard, each with its own single-slot trigger (the same
-	// buffered(1) non-blocking-send coalescing the old single trigger used), sharing one stop channel
-	// and one WaitGroup. The map is created in initRuntime before started flips true and is read-only
-	// thereafter. The census is the shared map the removed cross-shard barrier used to be: each
-	// refiller publishes its shard's phase-1 result and plans globally over a snapshot of all live
-	// entries (see "The census" in scheduling.go). maxRefillPassNs scales the census TTL to the
-	// slowest observed pass, so a slow shard is not mistaken for a dead one.
-	refillTriggers map[int]chan struct{}
-	refillStop     chan struct{}
-	refiller       sync.WaitGroup
-	// refillState holds each refiller's adaptive fetch depth. Entries are created before the refillers
-	// start and each is touched only by its own refiller goroutine, so they carry no lock.
-	refillState     map[int]*shardRefillState
-	censusLock      sync.Mutex
-	census          map[int]*shardCensus
-	maxRefillPassNs atomic.Int64
-	// Most recent refill's global band and its distinct-fairness-key count, observed by the
-	// dwarf_steps_fairness_keys gauge. Written by whichever refiller passed last, read at metric
-	// collection time. lastRefillBand < 0 means no refill has selected a band yet.
-	lastRefillLock sync.Mutex
-	lastRefillBand int
-	lastRefillKeys int
+	// Candidate supply: one piston per shard, each cycling its own database on its own clock with no
+	// barrier against its peers. They share the planner (which is what a cross-shard barrier used to be -
+	// each shard's tally retained, so every shard plans against the merged picture without waiting for
+	// the slowest) and the candidate cache. The maps are built in initRuntime before started flips true
+	// and are read-only thereafter.
+	//
+	// pistonCancel stops them: piston.Run ends on ctx alone, and the lifetime ctx is deliberately not
+	// cancelled until every other goroutine has drained, so the pistons need a cancellable child of it.
+	planner      *planner.Planner
+	pistons      map[int]*piston.Piston
+	pistonCancel context.CancelFunc
+	pistonPool   sync.WaitGroup
 
 	// Timer goroutine
 	nextPoll     time.Time
@@ -287,7 +282,6 @@ type Engine struct {
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	awaitPollInterval   time.Duration // Await lost-wake re-snapshot cadence (5s)
 	pingInterval        time.Duration // peer-registry heartbeat cadence; a peer is counted <4x, pruned >8x (30s)
-	refillIdleInterval  time.Duration // ceiling on how long a refiller parks on its trigger; see refillerLoop (1s)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
 	orphanFlowThreshold time.Duration // min age before a stepless running flow is reported orphaned (5m)
@@ -315,10 +309,9 @@ const defaultTestConnCap = 4
 // NewEngine creates a new workflow engine.
 func NewEngine() *Engine {
 	e := &Engine{
-		logger:         slog.New(slog.DiscardHandler),
-		lastRefillBand: -1,
-		claims:         claimstracker.New(),
-		testConnCap:    defaultTestConnCap,
+		logger:      slog.New(slog.DiscardHandler),
+		claims:      claimstracker.New(),
+		testConnCap: defaultTestConnCap,
 	}
 	e.workers.Store(64)
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
@@ -332,7 +325,6 @@ func NewEngine() *Engine {
 	e.awaitPollInterval = 5 * time.Second
 	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 	e.pingInterval = 10 * time.Second
-	e.refillIdleInterval = 1 * time.Second
 	e.wedgeSweepInterval = 5 * time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute
 	e.orphanFlowThreshold = 5 * time.Minute
@@ -528,16 +520,17 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	return nil
 }
 
-// SetRefillScanFloor is an expert override that PINS every shard's refill scan floor to d, replacing the
-// value the engine derives from capacity/vCPUs/R (deriveScanFloor). d <= 0 restores derivation. Operators
-// normally never call this - the derived floor tracks the cache sizing it depends on automatically. The
-// override exists for benchmarking (scan-rate sweeps): the floor is measured, not tuned, so finding its
-// optimum needs to hold it at a series of fixed values. Live: re-derivation (or re-pinning) applies on the
-// next recomputeScanFloors, and this triggers one immediately on a running engine.
-func (e *Engine) SetRefillScanFloor(d time.Duration) error {
-	e.refillScanFloorOverride.Store(int64(d))
+// SetRefillInterval is an expert override that PINS every piston's cycle period to d, replacing the value
+// the engine derives from capacity/vCPUs/R (deriveRefillInterval). d <= 0 restores derivation. Operators
+// normally never call this - the derived period tracks the cache sizing it depends on automatically. The
+// override exists for benchmarking (scan-rate sweeps): the period is measured, not tuned, so finding its
+// optimum needs to hold it at a series of fixed values. It bypasses the derivation only; the pipeline's
+// own minimum gap between cycles still applies. Live: applies on the next recomputeRefillIntervals, and
+// this triggers one immediately on a running engine.
+func (e *Engine) SetRefillInterval(d time.Duration) error {
+	e.refillIntervalOverride.Store(int64(d))
 	if e.started.Load() {
-		e.recomputeScanFloors()
+		e.recomputeRefillIntervals()
 	}
 	return nil
 }
@@ -766,15 +759,10 @@ func (e *Engine) initRuntime() {
 	// unresolved-dispatch case to fall back from.
 	e.cache.Init(min(resident, e.workersDispatch))
 	e.drainStop = make(chan struct{})
-	e.refillTriggers = make(map[int]chan struct{})
-	e.refillState = make(map[int]*shardRefillState)
-	for _, idx := range e.db.Indices() {
-		e.refillTriggers[idx] = make(chan struct{}, 1)
-		e.refillState[idx] = &shardRefillState{}
-	}
-	e.refillStop = make(chan struct{})
-	e.census = make(map[int]*shardCensus)
-	e.maxRefillPassNs.Store(0)
+	// One planner for the whole replica, one piston per shard. Reset rather than reused across a
+	// Shutdown/Startup cycle: a tally left from the previous run would claim a band nobody is serving.
+	e.planner = planner.New()
+	e.pistons = make(map[int]*piston.Piston)
 	e.wakeTimer = make(chan struct{}, 1)
 	e.timerStop = make(chan struct{})
 	e.recoveryStop = make(chan struct{})
@@ -795,9 +783,40 @@ func (e *Engine) initRuntime() {
 	// Resolve the tracer (no-op unless a TracerProvider was injected or the global SDK is configured).
 	e.initTracer()
 
-	// Derive each shard's refill scan floor now that the cache is sized and R is known. recomputePools
+	// Build the pistons now that the cache is sized: each takes its own shard's handle, the shared planner
+	// and the shared cache, plus this replica's identity for the peer registry. An await-only replica
+	// (SetWorkers(0)) idles them - they keep heartbeating, so the replica stays in R and goes on dividing
+	// the pools, but they claim no work and are excluded from the candidate partition.
+	idle := int(e.workers.Load()) == 0
+	for _, idx := range e.db.Indices() {
+		db, dbErr := e.db.Shard(idx)
+		if dbErr != nil {
+			e.logger.ErrorContext(e.lifetimeCtx, "Resolving shard for piston", "shard", idx, "error", dbErr)
+			continue
+		}
+		p, perr := piston.New(e.engineID, idx, db, e.planner, &e.cache)
+		if perr != nil {
+			e.logger.ErrorContext(e.lifetimeCtx, "Building piston", "shard", idx, "error", perr)
+			continue
+		}
+		p.SetLogger(e.logger)
+		p.SetSeams(e.seams)
+		// The pistons refresh this replica's registry row, but the window READERS judge it by is derived
+		// from pingInterval - two different places, so tie them together here rather than leaving a healthy
+		// replica able to age out of its own fleet. A quarter of the read cadence leaves ample margin, and
+		// the 1s cap keeps a long pingInterval from making the beat needlessly rare.
+		p.SetHeartbeatInterval(min(time.Second, max(10*time.Millisecond, e.pingInterval/4)))
+		p.SetPartitionFunc(e.observedPartition)
+		if merr := p.SetMeter(e.meter); merr != nil {
+			e.logger.ErrorContext(e.lifetimeCtx, "Building piston instruments", "shard", idx, "error", merr)
+		}
+		p.SetIdle(idle)
+		e.pistons[idx] = p
+	}
+
+	// Derive each piston's cycle period now that the cache is sized and R is known. recomputePools
 	// re-derives it on every later fleet change.
-	e.recomputeScanFloors()
+	e.recomputeRefillIntervals()
 
 	// Spawn the resident set eagerly; the rest of the ceiling is spawned on demand by a worker that finds
 	// every peer parked inside ExecuteTask (see maybeSpawnWorker) - the long-task case, where the resident
@@ -813,9 +832,15 @@ func (e *Engine) initRuntime() {
 	e.timerWorker.Go(func() {
 		e.timerLoop(e.lifetimeCtx)
 	})
-	for idx := range e.refillTriggers {
-		e.refiller.Go(func() {
-			e.refillerLoop(e.lifetimeCtx, idx)
+	// The pistons run on a CHILD of the lifetime ctx, because they must stop before it does: the lifetime
+	// ctx is deliberately left live until every other goroutine has drained (so in-flight database work
+	// always commits), while piston.Run ends on ctx alone and has no second signal - both of its queries
+	// are read-only, so abandoning one mid-flight strands nothing.
+	pistonCtx, pistonCancel := context.WithCancel(e.lifetimeCtx)
+	e.pistonCancel = pistonCancel
+	for _, p := range e.pistons {
+		e.pistonPool.Go(func() {
+			p.Run(pistonCtx)
 		})
 	}
 	e.recoveryWorker.Go(func() {
@@ -831,7 +856,6 @@ func (e *Engine) initRuntime() {
 	e.peersLoop.Go(func() {
 		e.runPeersLoop()
 	})
-	e.requestRefillAll()
 }
 
 // spawnWorker adds one worker goroutine to the pool, unless the pool is draining (spawnClosed) or the
@@ -884,18 +908,12 @@ func (e *Engine) drainRuntime() {
 	e.spawnLock.Lock()
 	e.spawnClosed = true
 	e.spawnLock.Unlock()
-	// Stop the heartbeat, then deregister: delete this replica's registry row and nudge peers to recount,
-	// so they regrow their pool shares immediately rather than waiting out the peerStragglerAge. Order
-	// matters - stop the loop first so it cannot re-insert the row after the delete. Both are best-effort
-	// (a still-open shard set): a missed delete just ages out of peers' counts on its own.
+	// Stop the peer READ loop. The registry row is deleted further down, after the pistons stop - they own
+	// the write now, so deleting here would just be undone by the next beat.
 	if e.peersStop != nil {
 		close(e.peersStop)
 	}
 	e.peersLoop.Wait()
-	if err := e.deregisterPeer(context.Background()); err != nil {
-		e.logger.Error("Deregistering peer at shutdown", "error", err)
-	}
-	e.signalPeersChanged(context.Background())
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()
@@ -905,22 +923,28 @@ func (e *Engine) drainRuntime() {
 		close(e.timerStop)
 	}
 	e.timerWorker.Wait()
-	// The recovery loop can requestRefill (a wedge sweep that unparks a stuck subgraph caller re-offers it),
-	// so drain it before the refiller, mirroring the timer.
 	if e.recoveryStop != nil {
 		close(e.recoveryStop)
 	}
 	e.recoveryWorker.Wait()
-	// The reaper only deletes rows (never requestRefill), so its drain order relative to the refiller does
-	// not matter; stop it here and let an in-progress pass finish its current tree-delete and exit.
 	if e.reaperStop != nil {
 		close(e.reaperStop)
 	}
 	e.reaperWorker.Wait()
-	if e.refillStop != nil {
-		close(e.refillStop)
+	// The pistons last: their cycles are pure reads, so cancelling mid-flight strands nothing, and their
+	// heartbeat must keep this replica in the registry for as long as it is still executing steps - the
+	// workers above were draining against pools every peer sized for a fleet that still included us.
+	if e.pistonCancel != nil {
+		e.pistonCancel()
 	}
-	e.refiller.Wait()
+	e.pistonPool.Wait()
+	// Only now is the last possible beat behind us, so the row can be deleted and peers nudged to recount -
+	// they regrow their pool shares immediately rather than waiting out peerStragglerAge. Best-effort on a
+	// still-open shard set: a missed delete just ages out of peers' counts on its own.
+	if err := e.deregisterPeer(context.Background()); err != nil {
+		e.logger.Error("Deregistering peer at shutdown", "error", err)
+	}
+	e.signalPeersChanged(context.Background())
 	// Wake every blocked Await with the shutdown sentinel so it returns an error rather than re-snapshotting
 	// and re-blocking on a channel no goroutine will ever signal again (workers/timer/refiller are already
 	// drained above). A non-blocking send: if a real stop status is already buffered, that wins (the awaiter
@@ -937,32 +961,6 @@ func (e *Engine) drainRuntime() {
 	e.waitersLock.Unlock()
 	if e.lifetimeCancel != nil {
 		e.lifetimeCancel()
-	}
-}
-
-// requestRefill asks ONE shard's refiller to run a selection scan. Every origination site names the
-// shard it observed: a worker's low-water pop and post-processStep nudge name the popped step's shard,
-// the doorbells name the announced step's shard. An unknown shard (a peer signal naming a shard this
-// replica does not have) is a silent no-op.
-func (e *Engine) requestRefill(shard int) {
-	ch, ok := e.refillTriggers[shard]
-	if !ok {
-		return
-	}
-	select {
-	case ch <- struct{}{}:
-	default:
-	}
-}
-
-// requestRefillAll rings every shard's refiller - reserved for the sites that cannot know which
-// shard's backlog they observed (the backstop poll, startup).
-func (e *Engine) requestRefillAll() {
-	for _, ch := range e.refillTriggers {
-		select {
-		case ch <- struct{}{}:
-		default:
-		}
 	}
 }
 

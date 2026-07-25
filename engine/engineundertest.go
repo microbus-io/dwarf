@@ -19,6 +19,7 @@ package engine
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/microbus-io/dwarf/internal/piston"
 	"log/slog"
 	"os"
 	"testing"
@@ -178,7 +179,7 @@ const (
 	FaultRecoveryResetErr    = "recoveryResetErr"    // the processStep recovery defer's own reset UPDATE errors
 	FaultReapMidTree         = "reapMidTree"         // the reaper errors after deleting steps, before flows
 	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
-	FaultRefillScanErr       = "refillScanErr"       // the refiller's priority-band scan errors
+	FaultRefillScanErr       = piston.FaultScanErr   // the piston's priority-band scan errors (its name, so there is one catalogue)
 	FaultSlowPoolPush        = "slowPoolPush"        // recomputePools stalls between reading R and pushing the derived sizes
 	FaultPollSizingErr       = "pollSizingErr"       // the poll's pending-sizing query is treated as errored
 	FaultDeliverFailureErr   = "deliverFailureErr"   // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery); unscoped, or scoped by the parked caller's task name for per-level control

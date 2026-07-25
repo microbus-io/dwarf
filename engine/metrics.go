@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"strconv"
-	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -50,25 +49,10 @@ type engineMetrics struct {
 	flowsOrphaned       metric.Int64Counter
 	stateWriteBytes     metric.Int64Counter
 	stateReadBytes      metric.Int64Counter
-	refillSelected      metric.Int64Counter
-	refillDiscarded     metric.Int64Counter
 	stepsClaimLost      metric.Int64Counter
 	stepsClaimPreempted metric.Int64Counter
 
-	refillDuration      metric.Float64Histogram
-	refillQueryDuration metric.Float64Histogram
-
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
-}
-
-// refillBuckets are the explicit bucket boundaries for the refill histograms, in SECONDS. The OTEL default
-// boundaries are tuned for millisecond-valued instruments and would put every one of these samples in the
-// first bucket. The span that matters runs from a warm same-zone index scan (~0.3ms) to a band scan whose
-// plan flipped to a sequential scan (~100ms measured on identical data minutes apart, as statistics went
-// stale) - so the boundaries must resolve both ends, and the tail must stay open past 1s to catch a shard
-// that is genuinely sick rather than merely slow.
-var refillBuckets = []float64{
-	0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 }
 
 // initMetrics creates the engine's instruments from the resolved MeterProvider and registers the
@@ -82,6 +66,9 @@ func (e *Engine) initMetrics() error {
 		mp = otel.GetMeterProvider()
 	}
 	meter := mp.Meter(metricScope)
+	// Held so the pistons resolve their own instruments from the SAME meter, keeping one instrumentation
+	// scope per engine however many modules record into it.
+	e.meter = meter
 	m := &engineMetrics{}
 
 	var errs []error
@@ -115,26 +102,13 @@ func (e *Engine) initMetrics() error {
 	m.stateWriteBytes = bytesCtr("dwarf_state_write_bytes", "Counts payload bytes written to step rows on the execution path, labelled by workflow and by column (state, changes, interrupt_payload).")
 	m.stateReadBytes = bytesCtr("dwarf_state_read_bytes", "Counts payload bytes read from step rows on the execution path, labelled by workflow and by column (state, changes, resume_data, subgraph_result).")
 
-	// Refiller instruments. The refiller is triggered after every processStep and fans its two scan phases
-	// across all shards with OnEach, which returns only when the SLOWEST shard does - so a single slow shard
-	// gates dispatch for the whole replica. These four make that visible: the per-shard query histogram
-	// isolates the straggler (and the index-scan/seq-scan plan flip), the whole-pass histogram against the
-	// per-shard max prices the straggler wait, and selected-vs-discarded prices the oversupply.
-	m.refillSelected = ctr("dwarf_refill_candidates_selected", "Counts step candidates the refiller selected into the cache. Compare against dwarf_refill_candidates_discarded for the refiller's oversupply ratio.")
-	m.refillDiscarded = ctr("dwarf_refill_candidates_discarded", "Counts cached step candidates thrown away un-popped by a wholesale refill - the refiller's waste signal. The steps stay pending and are re-selected, so this is cost, not loss; a ratio near 1 against dwarf_refill_candidates_selected means the refiller is turning far faster than the workers drain.")
+	// The four dwarf_refill_* instruments are NOT built here. They belong to the pistons, which own the
+	// cycle they measure, and are resolved from the meter this engine hands each of them (initRuntime) -
+	// one instrumentation scope for the whole engine, whoever records into it. Building them here as well
+	// would register each name twice on one meter, with descriptions and bucket boundaries that had already
+	// drifted apart.
 	m.stepsClaimPreempted = ctr("dwarf_steps_claim_preempted", "Counts popped candidates skipped without a claim attempt because a sibling worker in this replica already had one in flight for that step - round trips SAVED, the counterpart to dwarf_steps_claim_lost. The refiller re-selects a step whose claim is uncommitted (the selection predicate reads committed state), so this rises with the scan rate rather than with the replica count. Compare the two: a healthy engine converts what would have been lost claims into skips.")
 	m.stepsClaimLost = ctr("dwarf_steps_claim_lost", "Counts claim attempts whose CAS matched no row - the step was already claimed by a peer, or left the claimable state (cancelled, resumed, parked) between selection and claim. The lease-contention signal: measured against dwarf_steps_executed it is the share of dispatch round trips that produced no work, and it rises with the replica count when replicas select overlapping candidates. Not an error - the step is simply someone else's - but a high ratio means the fleet is paying for round trips it cannot use.")
-
-	secHist := func(name, desc string) metric.Float64Histogram {
-		h, err := meter.Float64Histogram(name, metric.WithDescription(desc), metric.WithUnit("s"),
-			metric.WithExplicitBucketBoundaries(refillBuckets...))
-		if err != nil {
-			errs = append(errs, errors.Trace(err))
-		}
-		return h
-	}
-	m.refillDuration = secHist("dwarf_refill_duration_seconds", "Wall-clock duration of a complete refiller pass, both scan phases across every shard. Exceeds the per-shard max of dwarf_refill_query_duration_seconds by the cross-shard straggler wait.")
-	m.refillQueryDuration = secHist("dwarf_refill_query_duration_seconds", "Duration of one shard's refiller scan query, labelled by shard and by phase (band_keys, fetch_steps).")
 
 	gauge := func(name, desc, unit string) metric.Int64ObservableGauge {
 		g, err := meter.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit(unit))
@@ -201,10 +175,10 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	// Local in-memory gauges - no DB.
 	o.ObserveInt64(g.queueDepth, int64(e.cache.Len()))
 
-	// Fairness keys: the most recent refill's distinct-key count for the band it selected.
-	e.lastRefillLock.Lock()
-	band, keys := e.lastRefillBand, e.lastRefillKeys
-	e.lastRefillLock.Unlock()
+	// Fairness keys: the most recent plan's distinct-key count for the band it selected. LastBand reports a
+	// NEGATIVE band for "nothing to report" - no plan yet, or an idle fleet - and the guard is what keeps an
+	// idle engine from labelling a series with a priority no caller can ever set.
+	band, keys := e.planner.LastBand()
 	if band >= 0 {
 		o.ObserveInt64(g.fairnessKeys, int64(keys), metric.WithAttributes(attribute.String("priority", strconv.Itoa(band))))
 	}
@@ -381,45 +355,6 @@ func (e *Engine) metricStateReadBytes(ctx context.Context, workflowURL, column s
 	}
 	e.metrics.stateReadBytes.Add(ctx, int64(n), metric.WithAttributes(
 		attribute.String("workflow", workflowURL), attribute.String("column", column)))
-}
-
-// metricRefillPass records one complete refill pass of ONE shard's refiller: its wall clock, the batch
-// it selected, and the candidates that batch discarded. Called once per pass, off the per-step hot
-// path. All three instruments carry the shard attribute - the refillers are per-shard now, so a pass IS
-// a shard's pass. (The old barrier made this instrument a merged-pass duration, and its divergence from
-// the per-shard query maximum measured the fan-out straggler tax; that discriminator dissolved with the
-// barrier.)
-//
-// A pass that returns early on a scan/fetch error is deliberately NOT recorded here, while the per-shard
-// query histogram DOES record it (its defer fires whatever the closure returns). The asymmetry is the
-// point: a failed pass has no meaningful end-to-end duration - it is a truncated pass, and folding one
-// into the distribution would drag the percentiles toward an error path that is already logged and
-// counted elsewhere. The query instrument still shows which shard was slow on the way to failing,
-// which is the part worth keeping.
-func (e *Engine) metricRefillPass(ctx context.Context, shardNum int, d time.Duration, selected, discarded int) {
-	if e.metrics == nil {
-		return
-	}
-	attrs := metric.WithAttributes(attribute.Int("shard", shardNum))
-	e.metrics.refillDuration.Record(ctx, d.Seconds(), attrs)
-	if selected > 0 {
-		e.metrics.refillSelected.Add(ctx, int64(selected), attrs)
-	}
-	if discarded > 0 {
-		e.metrics.refillDiscarded.Add(ctx, int64(discarded), attrs)
-	}
-}
-
-// metricRefillQuery records one shard's scan query duration, split by phase (band_keys / fetch_steps).
-// The phase split is what makes the band scan's backlog dependence visible - phase 1 is where the
-// measured cost concentrates, and its plan can flip between an index scan and a sequential scan on
-// statistics freshness, which is indistinguishable from a slow shard without the split.
-func (e *Engine) metricRefillQuery(ctx context.Context, shardNum int, phase string, d time.Duration) {
-	if e.metrics == nil {
-		return
-	}
-	e.metrics.refillQueryDuration.Record(ctx, d.Seconds(), metric.WithAttributes(
-		attribute.Int("shard", shardNum), attribute.String("phase", phase)))
 }
 
 func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string) {

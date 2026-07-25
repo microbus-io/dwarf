@@ -19,37 +19,31 @@ package engine
 import (
 	"context"
 	"database/sql"
-	"math"
-	"math/rand/v2"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 )
 
-// workerLoop pops candidates from the cache and executes them. Refill nudges are shard-targeted: the
-// low-water signal names the partition that drained (the popped job's shard), and the post-processStep
-// nudge names the shard holding the freed slot and any successor the step just inserted (same-flow
-// shard affinity) - preserving the liveness guarantee's "post-completion scan sees the freed slot"
-// property per shard.
+// workerLoop pops candidates from the cache and executes them.
+//
+// It no longer nudges a refiller. Each shard's piston cycles on a fixed cadence of its own, so there is
+// nothing to ring: the low-water signal Pop still returns has no consumer here, and the post-processStep
+// nudge is covered by the next cycle. What replaced the nudge's liveness role - "the scan after a
+// completion sees the freed slot" - is that the cycle is unconditional, plus the doorbell's Offer, which
+// now admits into an empty partition so a chain's next step dispatches without waiting for a cycle at all.
 func (e *Engine) workerLoop(ctx context.Context) {
 	for {
-		j, ok, needRefill := e.cache.Pop()
-		if needRefill {
-			e.requestRefill(j.Shard)
-		}
+		j, ok, _ := e.cache.Pop()
 		if !ok {
 			return
 		}
-		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.StepID, "shard", j.Shard, "needRefill", needRefill)
+		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.StepID, "shard", j.Shard)
 		// A sibling worker in this process reserved this step within the last ~second - its claim CAS may
 		// still be in flight, or may have committed already (the reservation deliberately outlives the CAS
-		// to span selection -> pop; see internal/claimstracker). Either way the refiller re-selected it
+		// to span selection -> pop; see internal/claimstracker). Either way the piston re-selected it
 		// because an uncommitted claim reads `pending`, so issuing our own claim would cost a round trip to
 		// be told we lost. Popping the next candidate costs nothing. Checked HERE rather than inside
 		// processStep so a skip does not pay for its setup, and the cache has already removed the entry.
@@ -63,7 +57,6 @@ func (e *Engine) workerLoop(ctx context.Context) {
 		if err != nil {
 			e.logger.ErrorContext(ctx, "Failed to process step", "stepID", j.StepID, "error", err)
 		}
-		e.requestRefill(j.Shard)
 	}
 }
 
@@ -88,156 +81,7 @@ func (e *Engine) timerLoop(ctx context.Context) {
 	}
 }
 
-// refillOutcome is what one shard's refill pass reports back to its refillerLoop, which turns it
-// into a band back-off or nothing.
-type refillOutcome int
-
-const (
-	// refillIdle: this shard refilled normally, or has nothing due, or hit an error path - consume the
-	// next trigger, subject only to the scan floor.
-	refillIdle refillOutcome = iota
-	// refillAboveBand: this shard HAS due work, but above the global-minimum band, so its slice of
-	// the plan is empty by strict priority. Distinct from refillIdle ("nothing due") because parking
-	// on the doorbell would spin hot: the always-armed trigger re-runs the scan immediately, at full
-	// rate, producing nothing - what releases this shard is the global band rising, which is observed
-	// only through the census. The loop backs off and watches for that (awaitBandRelease).
-	refillAboveBand
-	// refillStarved: this shard is AT the global band with due work, but a capacity-bound plan gave
-	// every slot to shards holding more (or older) of the planned keys. Like refillAboveBand this is
-	// an empty slice, but the release condition is different - the band is already right, what must
-	// change is the competitors DRAINING, which the very next plan reflects - so it simply re-arms its
-	// own trigger and rescans at the scan floor, rather than watching the census.
-	//
-	// It must never park on the doorbell, and that is the whole reason this outcome exists. Every
-	// trigger-arming site is shard-LOCAL (a pop, a completed step, a doorbell for a step on this
-	// shard), so a starved shard with an empty partition and nothing in flight arms nothing and
-	// generates nothing: it would sleep out the whole refillIdleInterval tick (and, before that tick
-	// existed, until pollPendingSteps' fleet-wide backstop MINUTES later) while its due work sat there -
-	// and once the competitors drained, every worker would block in Pop with due steps present. Its
-	// census entry would also age past the TTL meanwhile, making its keys invisible to peers' plans, so
-	// it could not win slots even in principle. The self-arm keeps both the dispatch latency and the
-	// entry fresh; the idle tick is the outer bound, an order of magnitude too coarse to serve as this.
-	refillStarved
-)
-
-// refillerLoop runs one SHARD's selection scans, one per trigger - there is one such loop per shard,
-// each with its own single-slot trigger, and no barrier anywhere between them (the point of the
-// decoupling: a merged pass returned when the slowest shard did, an order-statistics tax measured at
-// 2.02x by 6 shards, on the path that is the engine's throughput ceiling).
-//
-// The scan floor is the ONLY standing rate limit: the always-armed trigger (workers re-arm it after
-// every step on this shard) would otherwise make the refiller run back-to-back full-backlog scans, and
-// each wholesale partition replace re-delivers steps whose claim CAS is still in flight on another
-// worker. The floor is measured from the pass START, so it costs light load nothing - when passes are
-// rare the gap already exceeds it and the next scan runs at once.
-//
-// The park on the trigger is CAPPED at refillIdleInterval (1s), and that cap - not the doorbell - is now
-// the ONLY sub-maxPollInterval bound on cross-replica dispatch latency. Every trigger-arming site is
-// shard-LOCAL (a pop, a completed step, a doorbell naming a step on this shard), so a shard with an empty
-// partition and nothing in flight arms nothing and generates nothing: parked without the tick it sleeps
-// until pollPendingSteps' fleet-wide backstop, and since that poll no longer carries a due-backlog
-// existence probe, its resting cadence is maxPollInterval - MINUTES - with due work sitting there. That
-// is exactly the trap refillStarved and refillAboveBand were given their own timed back-offs to escape,
-// and the cap generalizes the escape to EVERY way a pass can come back empty - including the two that
-// still route through refillIdle and arm nothing (a due-but-unplanned band whose census aged out, and a
-// batch that came up empty because every chosen key's steps were claimed between phases). Because the cap
-// covers any early return, the standing rule "answer what will ring this shard's trigger before parking"
-// now has a structural answer: the tick will, within refillIdleInterval. Do not lengthen it materially,
-// and do not gate it on an outcome - it is load-bearing for liveness, not an optimization.
-//
-// It is a CAP, not a cadence: the scan floor still bounds the pass rate from below, so an idle shard
-// scans once per (floor + idle) and a busy one is unaffected (its trigger is always armed and the tick
-// never fires). The cost is one band scan per idle shard per second - an index probe returning no rows -
-// which is what buys sub-second wake with no cross-replica message at all.
-func (e *Engine) refillerLoop(ctx context.Context, shard int) {
-	trigger := e.refillTriggers[shard]
-	for {
-		// A nil channel blocks forever, so a non-positive interval restores the pure park-on-trigger
-		// behavior (what a test pins when it wants no timed rescan) rather than spinning on an
-		// already-fired timer.
-		var idleTick <-chan time.Time
-		if e.refillIdleInterval > 0 {
-			idleTick = time.After(e.refillIdleInterval)
-		}
-		select {
-		case <-e.refillStop:
-			return
-		case <-trigger:
-		case <-idleTick:
-		}
-
-		passStart := time.Now()
-		var outcome refillOutcome
-		err := errors.CatchPanic(func() error {
-			outcome = e.runShardRefill(ctx, shard)
-			return nil
-		})
-		if err != nil {
-			e.logger.ErrorContext(ctx, "Refilling candidate cache", "shard", shard, "error", err)
-		}
-		// Hold off until the scan floor has elapsed, measured from the pass START so a slow pass
-		// pays for itself rather than stacking its duration on top of the floor.
-		if wait := e.refillState[shard].wait(passStart); wait > 0 {
-			select {
-			case <-e.refillStop:
-				return
-			case <-time.After(wait):
-			}
-		}
-		switch outcome {
-		case refillAboveBand:
-			if !e.awaitBandRelease(shard, trigger) {
-				return
-			}
-			e.requestRefill(shard)
-		case refillStarved:
-			// Re-arm this shard's own trigger, which nothing else will: the next pass then runs as soon
-			// as the scan floor (already waited above) allows, so a starved shard rescans at the same
-			// cadence a busy one does. No extra back-off - what it waits for is the competitors draining,
-			// which the very next plan reflects, and the floor already spaces the retry.
-			e.requestRefill(shard)
-		}
-	}
-}
-
-// awaitBandRelease parks an above-band refiller until something suggests its shard can dispatch
-// again, then reports true (false means the engine is stopping). The release signals, in order of
-// arrival: the shard's own trigger (a doorbell - new local work may have opened a better band); the
-// in-memory census showing the global band risen to this shard's own band (the band-holding shard
-// drained and published); or this shard's own census entry aging past censusRefreshInterval, which
-// forces a real rescan so the entry stays fresh for the fleet (a stale entry would otherwise age out
-// of peers' snapshots and take this shard's band claim with it). The ticks between checks are
-// in-memory only - no query - so the "spins hot" failure (a full-rate scan producing nothing) cannot
-// occur; the database is touched at most once per censusRefreshInterval while parked.
-func (e *Engine) awaitBandRelease(shard int, trigger chan struct{}) bool {
-	for {
-		select {
-		case <-e.refillStop:
-			return false
-		case <-trigger:
-			return true
-		case <-time.After(refillBandWatchTick):
-			e.censusLock.Lock()
-			own := e.census[shard]
-			e.censusLock.Unlock()
-			if own == nil || time.Since(own.at) >= censusRefreshInterval {
-				return true
-			}
-			entries := e.censusSnapshot()
-			globalBand := math.MaxInt
-			for _, ce := range entries {
-				if len(ce.census.rows) > 0 && ce.census.band < globalBand {
-					globalBand = ce.census.band
-				}
-			}
-			if globalBand >= own.band {
-				return true
-			}
-		}
-	}
-}
-
-// pollPendingSteps recovers expired-lease steps, sizes the wake timer, and rings the doorbell.
+// pollPendingSteps recovers expired-lease steps and sizes the wake timer.
 func (e *Engine) pollPendingSteps(ctx context.Context) {
 	var mu sync.Mutex
 	var nearestDelay time.Duration = -1
@@ -277,10 +121,10 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 
 		// There is deliberately NO due-backlog existence probe here. It used to cap nextPoll at
 		// backlogPollInterval (1 minute) so an idle replica that missed a doorbell still re-scanned, and
-		// it cost a whole round-trip per shard per poll to set that one cap. The refiller's own idle tick
-		// (refillIdleInterval, ~1s - see refillerLoop) now covers the same case per shard, sooner, with
-		// one band scan instead of this probe plus the poll's other three statements. Do not reintroduce
-		// it: this poll is nudged sub-second under load, so anything added here is paid on every nudge.
+		// it cost a whole round-trip per shard per poll to set that one cap. Each shard's piston now scans
+		// unconditionally on its own cadence, which covers the same case per shard far sooner and with one
+		// band scan instead of this probe plus the poll's other three statements. Do not reintroduce it:
+		// this poll is nudged sub-second under load, so anything added here is paid on every nudge.
 
 		// Wake at the soonest future lease expiry of a running step so crash-recovery
 		// of a worker that died holding the lease happens promptly, rather than waiting
@@ -333,625 +177,12 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 		e.nextPoll = proposed
 	}
 	e.nextPollLock.Unlock()
-
-	// The backstop cannot know which shard's backlog it observed, so it is the one nudge that rings
-	// every shard's refiller.
-	e.requestRefillAll()
 }
 
-// --- The census: each shard's phase-1 result, shared across the per-shard refillers ---
-
-// The census is the shared map the barrier used to be: phase 1's per-shard query output already IS
-// the per-key census, and retaining it costs one struct and zero extra queries. Each refiller
-// publishes its own shard's entry after every scan and plans phase 2 GLOBALLY over a snapshot of all
-// live entries - the exact same cross-shard merge + weighted pick the merged pass ran - then fetches
-// only its own shard's slice of the plan (phase 3). Fairness semantics are exactly the barrier's; the
-// only degradation is that each refiller sees the OTHER shards up to one of their passes stale, which
-// fairness (slowly-varying) tolerates and dispatch (per-shard, always fresh) never sees.
-
-// censusTTLFloor is the minimum age at which a shard's census entry is dropped from snapshots. A dead
-// shard's stale entry would otherwise poison the global band forever: its last entry says band 1, so
-// every other shard computes globalBand=1, finds nothing there, and plans nothing - the fleet wedges
-// on a shard that is not there. The TTL scales with the slowest observed pass (a deep backlog scan
-// can legitimately take seconds) so a slow shard is not mistaken for a dead one.
-const (
-	censusTTLFloor        = 5 * time.Second
-	censusTTLPassMultiple = 8
-	censusRefreshInterval = time.Second // an above-band shard rescans at least this often to keep its entry live
-)
-
-// shardCensus is one shard's published phase-1 result: its minimum due band and one row per fairness
-// key at that band. Entries are immutable once published - a refiller REPLACES its shard's entry,
-// never mutates it - so snapshot readers need no copy.
-type shardCensus struct {
-	band  int            // the shard's minimum due band; math.MaxInt when nothing is due
-	rows  []censusRow    // one row per fairness key at band, in scan order (stable for planBatch)
-	byKey map[string]int // index into rows, for the slice rule's per-key lookups
-	at    time.Time      // publish time; entries past the TTL are dropped from snapshots
-}
-
-// censusRow is one fairness key's aggregate on one shard: its count of due steps, and the age and
-// fairness weight of its OLDEST due step.
-type censusRow struct {
-	key    string
-	weight float64
-	ageMs  float64
-	count  int
-}
-
-// censusShard pairs a census entry with its shard for snapshot iteration in shard-ordinal order
-// (map iteration is not stable, and planBatch relies on a stable key order).
-type censusShard struct {
-	shard  int
-	census *shardCensus
-}
-
-// publishCensus replaces this shard's census entry with a fresh, timestamped one.
-func (e *Engine) publishCensus(shard int, band int, rows []censusRow) {
-	sc := &shardCensus{band: band, rows: rows, at: time.Now()}
-	if len(rows) > 0 {
-		sc.byKey = make(map[string]int, len(rows))
-		for i, r := range rows {
-			sc.byKey[r.key] = i
-		}
-	}
-	e.censusLock.Lock()
-	e.census[shard] = sc
-	e.censusLock.Unlock()
-}
-
-// censusTTL is the age past which an entry is considered dead (see censusTTLFloor).
-func (e *Engine) censusTTL() time.Duration {
-	ttl := censusTTLPassMultiple * time.Duration(e.maxRefillPassNs.Load())
-	if ttl < censusTTLFloor {
-		ttl = censusTTLFloor
-	}
-	return ttl
-}
-
-// censusSnapshot returns the live (non-TTL'd) census entries sorted by shard ordinal. The lock is
-// held for the map copy only - never across a query or a plan computation, which would re-couple the
-// refill cycles and hand the decoupling win straight back.
-func (e *Engine) censusSnapshot() []censusShard {
-	ttl := e.censusTTL()
-	now := time.Now()
-	e.censusLock.Lock()
-	entries := make([]censusShard, 0, len(e.census))
-	for s, sc := range e.census {
-		if now.Sub(sc.at) > ttl {
-			continue
-		}
-		entries = append(entries, censusShard{shard: s, census: sc})
-	}
-	e.censusLock.Unlock()
-	sort.Slice(entries, func(a, b int) bool { return entries[a].shard < entries[b].shard })
-	return entries
-}
-
-// mergeCensus computes the globally-minimum due band and the merged per-key aggregates at that band -
-// the same merge the barriered scanBandKeys ran, over the census instead of a synchronized fan-out. A
-// tenant's steps can span shards; sum the counts, and keep the globally-oldest step's weight (max age
-// wins). Shards at a worse band contribute nothing (lower bands materialize only once the higher
-// drains). Shard-ordinal iteration + insertion order preserves a stable key order for planBatch's
-// deterministic iteration.
-func mergeCensus(entries []censusShard) (band int, keys []bandKeyAgg) {
-	band = math.MaxInt
-	for _, ce := range entries {
-		if len(ce.census.rows) > 0 && ce.census.band < band {
-			band = ce.census.band
-		}
-	}
-	if band == math.MaxInt {
-		return band, nil
-	}
-	byKey := map[string]*bandKeyAgg{}
-	var order []string
-	for _, ce := range entries {
-		if ce.census.band != band {
-			continue
-		}
-		for _, r := range ce.census.rows {
-			agg := byKey[r.key]
-			if agg == nil {
-				byKey[r.key] = &bandKeyAgg{key: r.key, weight: r.weight, ageMs: r.ageMs, count: r.count}
-				order = append(order, r.key)
-				continue
-			}
-			agg.count += r.count
-			if r.ageMs > agg.ageMs {
-				agg.ageMs = r.ageMs
-				agg.weight = r.weight
-			}
-		}
-	}
-	keys = make([]bandKeyAgg, 0, len(order))
-	for _, k := range order {
-		keys = append(keys, *byKey[k])
-	}
-	return band, keys
-}
-
-// bandKeyAgg is one fairness key's cross-shard aggregate at the global band: its count of due steps,
-// and the age and fairness weight of its OLDEST due step. The picker keys a tenant's weight off its
-// oldest step (so a tenant cannot self-promote by queueing newer high-weight tasks), and the age both
-// fixes that weight during the census merge (the globally-oldest step wins) and steers the slice
-// rule's first slot; the actual oldest-first ordering happens on the fetched steps in
-// fetchShardBandSteps.
-type bandKeyAgg struct {
-	key    string
-	weight float64
-	ageMs  float64
-	count  int
-}
-
-// scanShardBandKeys returns ONE shard's minimum due priority band and, for every fairness key at that
-// band, a single aggregate row (count + oldest step's age/weight). This is phase 1 of a three-phase
-// refill; it returns O(distinct keys) rows, NOT O(backlog). Phase 2 (planBatch over the census merge)
-// decides per-key demand from these aggregates and phase 3 (fetchShardBandSteps) fetches only the
-// selected steps.
-//
-// The per-key count is CAPPED at the cache capacity (min(count, capacity)) rather than exact: it is
-// computed as MAX(rn) under a `rn <= capacity` cut, not COUNT(*) OVER. The cap is lossless - planBatch
-// can never assign one key more than the whole batch (capacity), so a count above capacity is
-// indistinguishable from capacity - and it is what lets the scan stop touching a key's rows past
-// capacity instead of scanning the whole partition to count it (the O(backlog) cost that made a
-// single-key flood scan millions of rows every pass). See engine/CLAUDE.md "The scan is capped, not
-// exact" for the cross-dialect rationale (why COUNT(*) OVER was O(backlog), why rn<=cap is the fix, and
-// why the sibling phase-3 window was left alone).
-// partitionPredicate restricts a selection scan to this replica's residue class of step_id, so R
-// replicas sharing a database select DISJOINT candidates instead of racing for the same rows. It
-// returns ("", nil) - selecting everything, exactly as before replicas were partitioned - whenever
-// partitioning must not apply (a solo replica, or an ordinal this replica cannot determine).
-//
-// WHY IT IS NEEDED AT ALL. planBatch's key pick is independently random per replica, but within a key
-// the fetch is deterministic (`ORDER BY created_at, step_id`), so every replica that picks a key
-// fetches the SAME oldest rows and all but one lose the claim CAS. Measured: claim miss rose 25% -> 63%
-// from R=1 to R=8 while throughput FELL 42%, because a lost claim is a full round trip that produces no
-// work. Sizing the candidate cache down by R (poolsize.go) bounds how many candidates a replica holds
-// but not WHICH, so it does not help; disjoint selection does.
-//
-// `step_id % R` is not sargable - the scan still walks the band and filters - so this reduces claims,
-// not scan cost. That is the intended trade: the scan was never the contended resource.
-//
-// The residue class is a RESIDENCY, not a lock: the claim CAS remains the only thing that grants a
-// step, so a stale or overlapping (R, ordinal) costs a lost claim, never correctness.
-func (e *Engine) partitionPredicate() (string, []any) {
-	replicas, ordinal, ok := e.observedPartition()
-	if !ok {
-		return "", nil
-	}
-	return " AND step_id % ? = ?", []any{replicas, ordinal}
-}
-
-func (e *Engine) scanShardBandKeys(ctx context.Context, shard int) (band int, rows []censusRow, err error) {
-	// FaultRefillScanErr simulates the band scan failing so the test proves runShardRefill logs and
-	// shortens the next poll (re-scan soon) instead of refilling empty and idling the shard's workers.
-	if e.seams.IsFault(FaultRefillScanErr) {
-		return math.MaxInt, nil, errors.New("injected fault: " + FaultRefillScanErr)
-	}
-	db, err := e.db.Shard(shard)
-	if err != nil {
-		return 0, nil, errors.Trace(err)
-	}
-	started := time.Now()
-	defer func() { e.metricRefillQuery(ctx, shard, refillPhaseBandKeys, time.Since(started)) }()
-	// One row per fairness key at this shard's minimum due band. rn numbers a key's due steps oldest-first;
-	// MAX(rn) under the rn<=capacity cut is the capped count; the rn=1 row carries the oldest step's
-	// age/weight (the weight the picker must use). All inner rows are filtered to the min band, so
-	// MAX(priority) is that band. On Postgres the rn<=? cut becomes a run-condition early-stop; on the
-	// other dialects it still avoids the extra COUNT(*) OVER aggregation pass (see engine/CLAUDE.md).
-	// The partition filters the ROWS this replica censuses, but deliberately NOT the MIN(priority)
-	// subquery: the band is a cluster-wide fact (strict priority is global), so mining it from one
-	// replica's slice would let replicas disagree on which band is open. A replica holding nothing at
-	// the global band therefore censuses zero rows and parks - correct, since its own work is at a worse
-	// band that must not be served until the better one drains.
-	part, partArgs := e.partitionPredicate()
-	scanArgs := make([]any, 0, len(partArgs)+1)
-	scanArgs = append(scanArgs, partArgs...)
-	scanArgs = append(scanArgs, e.cache.Capacity())
-	qrows, err := db.QueryContext(ctx,
-		"SELECT fairness_key, MAX(rn) AS cnt,"+
-			" MAX(CASE WHEN rn=1 THEN age_ms ELSE NULL END) AS age_ms,"+
-			" MAX(CASE WHEN rn=1 THEN weight ELSE NULL END) AS weight,"+
-			" MAX(priority) AS priority FROM ("+
-			"SELECT fairness_key, priority,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms,"+
-			" fairness_weight AS weight,"+
-			" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
-			" FROM dwarf_steps"+
-			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
-			part+
-			" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
-			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC())"+
-			") t WHERE rn<=? GROUP BY fairness_key",
-		scanArgs...,
-	)
-	if err != nil {
-		return 0, nil, errors.Trace(err)
-	}
-	defer qrows.Close()
-	band = math.MaxInt
-	for qrows.Next() {
-		var r censusRow
-		var prio int
-		if err := qrows.Scan(&r.key, &r.count, &r.ageMs, &r.weight, &prio); err != nil {
-			return 0, nil, errors.Trace(err)
-		}
-		if r.weight <= 0 {
-			r.weight = 1
-		}
-		band = prio
-		rows = append(rows, r)
-	}
-	if err := qrows.Err(); err != nil {
-		return 0, nil, errors.Trace(err)
-	}
-	return band, rows, nil
-}
-
-// planBatch runs the weighted fairness pick over the band's per-key aggregates and returns the ordered
-// sequence of keys to dispatch - one entry per selected step, at most capacity. Each round weighted-
-// randomly picks a key (Efraimidis-Spirakis over the *keys*, re-rolled per step so a key's expected
-// share is proportional to its weight and independent of backlog depth) and consumes one of its due
-// steps, capped at the key's count. Every refiller rolls its OWN plan from its own census snapshot and
-// executes only its shard's slice - the rolls are independent, which changes nothing in expectation
-// and requires no cross-refiller coordination.
-func planBatch(keys []bandKeyAgg, capacity int) []string {
-	remaining := make([]int, len(keys))
-	for i := range keys {
-		remaining[i] = keys[i].count
-	}
-	plan := make([]string, 0, capacity)
-	for len(plan) < capacity {
-		best, bestScore := -1, -1.0
-		for i := range keys {
-			if remaining[i] <= 0 {
-				continue
-			}
-			score := math.Pow(rand.Float64(), 1/keys[i].weight)
-			if score > bestScore {
-				bestScore = score
-				best = i
-			}
-		}
-		if best < 0 {
-			break
-		}
-		plan = append(plan, keys[best].key)
-		remaining[best]--
-	}
-	return plan
-}
-
-// sliceDemand applies the slice rule: it splits each planned key's demand across the shards whose
-// census entries hold it, and returns this shard's per-key quota plus the full per-occurrence
-// assignment (so the batch replay preserves the plan's fairness interleave).
-//
-// The split, per key: the FIRST slot goes to the shard whose entry holds the key's oldest age - that
-// shard's fetch is oldest-first, so it leads with the globally-oldest step, preserving the
-// oldest-first property the merged fetch gave and preventing unbounded intra-tenant starvation (a key
-// with one old step on a quiet shard and a constantly-replenished backlog on a busy one would see a
-// purely proportional split round the quiet shard to zero, pass after pass). The REMAINING slots
-// split proportional to per-shard counts, largest-remainder rounding, shard-ordinal order on ties -
-// deterministic, so two refillers replaying the same plan against the same snapshot agree on every
-// assignment.
-//
-// Deliberately NOT: per-shard lotteries, weights scaled by shard presence, or capacity allocated by
-// shard counts - the global plan already priced every key's share; this function only routes it.
-func sliceDemand(plan []string, entries []censusShard, band int, shard int) (myQuota map[string]int, maxNeeded int, assign map[string][]int) {
-	needed := map[string]int{}
-	for _, k := range plan {
-		needed[k]++
-	}
-	assign = make(map[string][]int, len(needed))
-	myQuota = map[string]int{}
-	for k, n := range needed {
-		type holder struct {
-			shard int
-			count int
-			age   float64
-		}
-		var holders []holder
-		for _, ce := range entries {
-			if ce.census.band != band {
-				continue
-			}
-			if i, ok := ce.census.byKey[k]; ok {
-				r := ce.census.rows[i]
-				holders = append(holders, holder{shard: ce.shard, count: r.count, age: r.ageMs})
-			}
-		}
-		if len(holders) == 0 {
-			continue
-		}
-		// First slot: the oldest holder (entries arrive in shard-ordinal order, so a strict > keeps
-		// the lower shard on age ties).
-		oldest := 0
-		for i := 1; i < len(holders); i++ {
-			if holders[i].age > holders[oldest].age {
-				oldest = i
-			}
-		}
-		quota := make([]int, len(holders))
-		quota[oldest] = 1
-		avail := make([]int, len(holders))
-		totalAvail := 0
-		for i := range holders {
-			avail[i] = max(0, holders[i].count-quota[i])
-			totalAvail += avail[i]
-		}
-		rem := min(n-1, totalAvail) // counts can be stale; a shortfall self-corrects next pass
-		if rem > 0 {
-			assigned := 0
-			base := make([]int, len(holders))
-			for i := range holders {
-				base[i] = rem * avail[i] / totalAvail
-				assigned += base[i]
-			}
-			order := make([]int, len(holders))
-			for i := range order {
-				order[i] = i
-			}
-			sort.SliceStable(order, func(a, b int) bool {
-				ra := rem * avail[order[a]] % totalAvail
-				rb := rem * avail[order[b]] % totalAvail
-				if ra != rb {
-					return ra > rb
-				}
-				return order[a] < order[b]
-			})
-			for _, i := range order {
-				if assigned >= rem {
-					break
-				}
-				if base[i] < avail[i] {
-					base[i]++
-					assigned++
-				}
-			}
-			for i := range holders {
-				quota[i] += base[i]
-			}
-		}
-		// The per-occurrence assignment: oldest holder first, then holders in ordinal order. The
-		// interleave below the head is approximate by design - per-shard fetch keeps oldest-first
-		// WITHIN each shard, and the head slot carries the globally-oldest.
-		seq := make([]int, 0, n)
-		seq = append(seq, holders[oldest].shard)
-		for i := range holders {
-			extra := quota[i]
-			if i == oldest {
-				extra--
-			}
-			for range extra {
-				seq = append(seq, holders[i].shard)
-			}
-		}
-		assign[k] = seq
-		mine := 0
-		for _, s := range seq {
-			if s == shard {
-				mine++
-			}
-		}
-		if mine > 0 {
-			myQuota[k] = mine
-			if mine > maxNeeded {
-				maxNeeded = mine
-			}
-		}
-	}
-	return myQuota, maxNeeded, assign
-}
-
-// fetchStep is a fetched candidate carrying the age used to order a key's steps oldest-first.
-type fetchStep struct {
-	stepID int
-	shard  int
-	ageMs  float64
-}
-
-// fetchShardBandSteps loads, per chosen fairness key, up to perKey of this ONE shard's oldest due
-// steps at the given band, keyed and sorted oldest-first (the order the plan replay consumes). This
-// is phase 3.
-//
-// perKey is a UNIFORM cap - the max per-key demand across this shard's slice, not each key's exact
-// demand. That keeps the fetch a single IN-list query (an exact per-key cap would need a per-key
-// VALUES/LATERAL join, non-trivial across the four SQL dialects). The cost is at most
-// len(chosen)*perKey rows, and crucially BOTH factors are bounded by the cache capacity (at most
-// capacity distinct keys can be chosen, since each contributes >=1 step; perKey <= capacity) - so the
-// fetch is bounded by capacity^2 regardless of how many fairness keys exist. That independence from
-// key cardinality is the whole point: at high cardinality perKey is ~1, so the fetch is ~capacity.
-func (e *Engine) fetchShardBandSteps(ctx context.Context, shard int, band int, chosen []string, perKey int) (map[string][]fetchStep, error) {
-	if len(chosen) == 0 || perKey <= 0 {
-		return nil, nil
-	}
-	db, err := e.db.Shard(shard)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	started := time.Now()
-	defer func() { e.metricRefillQuery(ctx, shard, refillPhaseFetchSteps, time.Since(started)) }()
-	placeholders := strings.Repeat("?,", len(chosen)-1) + "?"
-	// The SAME partition the census used. Phase 1 alone would not do: it only shapes the per-key counts,
-	// while THIS query returns the step ids the workers claim - unfiltered, every replica would fetch the
-	// same globally-oldest rows per key and collide exactly as before.
-	part, partArgs := e.partitionPredicate()
-	args := make([]any, 0, len(chosen)+len(partArgs)+2)
-	args = append(args, band)
-	for _, k := range chosen {
-		args = append(args, k)
-	}
-	args = append(args, partArgs...)
-	args = append(args, perKey)
-	// Band is bound (priority=?), not the min-subquery: the plan committed to this band, and re-mining
-	// here could pick a lower band that arrived between phases and mismatch the chosen keys. A binding
-	// priority does not defeat the selection index (only a bound status would - status stays inlined).
-	rows, err := db.QueryContext(ctx,
-		"SELECT step_id, fairness_key, age_ms FROM ("+
-			"SELECT step_id, fairness_key,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), created_at) AS age_ms,"+
-			" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
-			" FROM dwarf_steps"+
-			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
-			" AND priority=? AND fairness_key IN ("+placeholders+")"+
-			part+
-			") t WHERE rn<=? ORDER BY step_id",
-		args...,
-	)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	defer rows.Close()
-	byKey := map[string][]fetchStep{}
-	for rows.Next() {
-		var fs fetchStep
-		var key string
-		if err := rows.Scan(&fs.stepID, &key, &fs.ageMs); err != nil {
-			return nil, errors.Trace(err)
-		}
-		fs.shard = shard
-		byKey[key] = append(byKey[key], fs)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, errors.Trace(err)
-	}
-	// Sort each key oldest-first: age desc, then step_id for determinism.
-	for k := range byKey {
-		list := byKey[k]
-		sort.Slice(list, func(a, b int) bool {
-			x, y := list[a], list[b]
-			if x.ageMs != y.ageMs {
-				return x.ageMs > y.ageMs
-			}
-			return x.stepID < y.stepID
-		})
-	}
-	return byKey, nil
-}
-
-// runShardRefill replaces ONE shard's cache partition with a fresh priority+fairness batch, in three
-// phases: scanShardBandKeys (this shard's per-key aggregates, published to the census), a GLOBAL
-// planBatch over the census merge (the same weighted pick the barriered pass ran - see "The census"
-// above), and fetchShardBandSteps (fetch only this shard's slice of the plan). It reports the outcome
-// the refillerLoop backs off on.
-func (e *Engine) runShardRefill(ctx context.Context, shard int) refillOutcome {
-	capacity := e.cache.Capacity()
-	started := time.Now()
-
-	// Phase 1: one aggregate row per fairness key at this shard's minimum due band (or MaxInt band
-	// when nothing is due here), published to the census either way - "nothing due" is information
-	// the other refillers need (it may raise the global band).
-	band, rows, err := e.scanShardBandKeys(ctx, shard)
-	if err != nil {
-		// The scan failed (typically a transient DB error). Log it and re-poll soon - the same
-		// pollErrorRetryInterval (1s) policy pollPendingSteps applies to its own sizing-query failures -
-		// so the doorbell fires again and the refiller retries once the blip clears. Return WITHOUT
-		// refilling: a failed scan means "unknown", not "nothing is due", and Refill is a wholesale
-		// partition replace that honors an empty batch, so falling through would hand a healthy
-		// partition's candidates to the garbage collector because the database blipped, idling workers
-		// in Pop until the 1s re-poll. Keeping the existing hints costs nothing - a worker popping a
-		// stale one just loses its claim CAS. The shard's census entry is NOT republished, so a
-		// persistently failing shard ages out of its peers' snapshots (TTL) and stalls only its own
-		// partition.
-		e.logger.ErrorContext(ctx, "Scanning priority band for refill", "shard", shard, "error", err)
-		e.shortenNextPoll(time.Now().Add(pollErrorRetryInterval))
-		return refillIdle
-	}
-	e.publishCensus(shard, band, rows)
-
-	// Phase 2: merge the live census and run the global weighted pick.
-	entries := e.censusSnapshot()
-	globalBand, keys := mergeCensus(entries)
-
-	// Record the global band and its distinct-fairness-key count for the dwarf_steps_fairness_keys
-	// observable gauge (read at metric-collection time).
-	e.lastRefillLock.Lock()
-	e.lastRefillBand = globalBand
-	e.lastRefillKeys = len(keys)
-	e.lastRefillLock.Unlock()
-
-	if band == math.MaxInt {
-		// Nothing due on this shard at all: wholesale-replace the partition with an empty batch,
-		// exactly as draining it dry does - a still-cached candidate would be a dead hint - and park
-		// on the doorbell (NOT the band back-off: there is nothing here to dispatch at any band).
-		e.metricRefillPass(ctx, shard, time.Since(started), 0, e.cache.Refill(shard, nil, math.MaxInt))
-		return refillIdle
-	}
-	if band > globalBand {
-		// Due work here, but above the global band: strict priority says this shard dispatches
-		// nothing until the band-holding shards drain. The partition's old hints are for a band this
-		// shard no longer holds due work at, so clear them; then back off (refillAboveBand) rather
-		// than re-scanning at full rate.
-		e.metricRefillPass(ctx, shard, time.Since(started), 0, e.cache.Refill(shard, nil, math.MaxInt))
-		return refillAboveBand
-	}
-
-	plan := planBatch(keys, capacity)
-	if len(plan) == 0 {
-		e.metricRefillPass(ctx, shard, time.Since(started), 0, e.cache.Refill(shard, nil, math.MaxInt))
-		return refillIdle
-	}
-
-	// The slice rule: which of the plan's slots land on this shard.
-	myQuota, maxNeeded, assign := sliceDemand(plan, entries, globalBand, shard)
-	if len(myQuota) == 0 {
-		// At the band, but a capacity-bound plan gave every slot to shards holding more (or older) of
-		// the planned keys - so this shard dispatches nothing this cycle. The partition holds hints the
-		// plan no longer backs; clear it. Report STARVED, never idle: idle parks on a trigger that
-		// only this shard's own activity can arm, and it has none (see refillStarved).
-		e.metricRefillPass(ctx, shard, time.Since(started), 0, e.cache.Refill(shard, nil, math.MaxInt))
-		return refillStarved
-	}
-	chosen := make([]string, 0, len(myQuota))
-	for k := range myQuota {
-		chosen = append(chosen, k)
-	}
-
-	// Phase 3: fetch only this shard's selected steps (up to maxNeeded oldest per chosen key).
-	stepsByKey, err := e.fetchShardBandSteps(ctx, shard, globalBand, chosen, maxNeeded)
-	if err != nil {
-		e.logger.ErrorContext(ctx, "Fetching band steps for refill", "shard", shard, "error", err)
-		e.shortenNextPoll(time.Now().Add(pollErrorRetryInterval))
-		return refillIdle
-	}
-
-	// Assemble the batch by replaying the plan: each occurrence assigned to this shard pops its key's
-	// oldest remaining fetched step, preserving the plan's fairness interleave within the slice. A key
-	// that came up short (a step got claimed/completed between phases) just skips - the batch runs a
-	// touch short, self-corrected on the next refill.
-	batch := make([]candidatecache.Job, 0, len(plan))
-	occ := map[string]int{}
-	idx := map[string]int{}
-	for _, k := range plan {
-		seq := assign[k]
-		o := occ[k]
-		occ[k]++
-		if o >= len(seq) || seq[o] != shard {
-			continue
-		}
-		list := stepsByKey[k]
-		i := idx[k]
-		if i >= len(list) {
-			continue
-		}
-		batch = append(batch, candidatecache.Job{StepID: list[i].stepID, Shard: shard})
-		idx[k]++
-	}
-
-	e.logger.DebugContext(ctx, "Refill batch", "shard", shard, "band", globalBand, "distinctKeys", len(keys), "size", len(batch))
-	// The floor is the batch's actual band so the doorbell's priority-preemption decision
-	// (head-insert when a strictly more important step arrives) is made against the right threshold.
-	discarded := e.cache.Refill(shard, batch, globalBand)
-	dur := time.Since(started)
-	e.metricRefillPass(ctx, shard, dur, len(batch), discarded)
-	e.notePassDuration(dur)
-	return refillIdle
-}
-
-// Refill SCAN RATE. This is the refiller's supply control, and it is a FIXED floor on how often a
-// shard may scan - deliberately not a derived or adaptive one. Two adaptive designs were built and
-// measured on a 6-shard rig, and both are recorded here because both keep re-suggesting themselves:
+// Refill SCAN RATE. This is the supply control for every shard's piston: the period of its cycle, start
+// of scan to start of scan. It is derived from static configuration and then FIXED - deliberately not
+// adaptive. Two adaptive designs were built and measured on a 6-shard rig, and both are recorded here
+// because both keep re-suggesting themselves:
 //
 //   - An adaptive fetch DEPTH (size the batch from observed demand) was INERT: swept across margins
 //     of 1.25/1.5/2 the batch moved 179 -> 173 -> 190, because the batch is set by the available
@@ -966,11 +197,11 @@ func (e *Engine) runShardRefill(ctx context.Context, shard int) refillOutcome {
 // So the rate is a constant, and the derivation below is how an OPERATOR picks it, not something the
 // engine recomputes at runtime.
 //
-// WHY A RATE LIMIT AT ALL. The trigger is re-armed by every step this shard completes, so an
-// unlimited refiller runs at a 100% duty cycle - measured, in BOTH builds: every refiller scanning
-// back to back for a whole 60s window. The merged pass was accidentally self-limiting because its
-// straggler wait made it slow; deleting the barrier made each pass fast and the loop hot, raising
-// phase-1 scan load 3.4x. Phase 1 costs per DUE ROW regardless of how many rows the pass then
+// WHY A RATE LIMIT AT ALL. A piston cycles unconditionally, so without a period it runs at a 100% duty
+// cycle - measured, back when a trigger re-armed by every completed step produced exactly that: every
+// refiller scanning back to back for a whole 60s window. The merged pass was accidentally self-limiting
+// because its straggler wait made it slow; deleting the barrier made each pass fast and the loop hot,
+// raising phase-1 scan load 3.4x. Phase 1 costs per DUE ROW regardless of how many rows the cycle then
 // fetches, which is why sizing the batch can never substitute for scanning less often.
 //
 // HOW TO PICK IT. Workers drain a partition at c candidates/sec and a pass hands it at most its share
@@ -984,9 +215,9 @@ func (e *Engine) runShardRefill(ctx context.Context, shard int) refillOutcome {
 // matched its degraded throughput to within 1%), and 0ms - unlimited - cost 8% candidate churn and a
 // 77% worse p99 while buying no throughput.
 //
-// WHAT THE VALUE DOES **NOT** HAVE TO COVER: priority latency or a drained buffer. Those are events,
-// and events are handled by waking on them (see the demand-nudge interrupt in refillerLoop), not by
-// standing scan frequency. That is what keeps this a debounce floor rather than a policy timer.
+// WHAT THE VALUE DOES **NOT** HAVE TO COVER: a drained buffer on a chain's next step. The doorbell's
+// Offer admits into an empty partition, so a sequential hop dispatches without waiting for a cycle at
+// all - which is what lets this be a steady period rather than a latency budget.
 const (
 	// refillSupplyHeadroom is the supply margin over the sustained drain, chosen for MAXIMUM THROUGHPUT.
 	// 2.0 is the measured optimum: on a database whose disk is not the bottleneck, throughput peaks at a
@@ -1006,37 +237,31 @@ const (
 	// sustainedDrainPerVCPU is the MEASURED sustained per-shard drain in steps/s/vCPU: the per-connection
 	// rate x connsPerVCPU. The measured per-connection rate is ~120 steps/s, roughly constant across
 	// connection counts, instance sizes, and backlog volumes - which is what lets one constant stand in for
-	// it - so 120 x connsPerVCPU(6) = 720. With headroom 2.0 this derives a 96/(2*720) ~= 67ms floor (see
-	// deriveScanFloor). NOT capacityWeight's 450, the PEAK placement ceiling: placement wants the peak, the
-	// scan floor wants the SUSTAINED rate, and conflating them undershoots the drain and overshoots the
-	// floor (the earlier 340 - ~57/conn - put it at 141ms, a starved regime giving ~half the throughput of
-	// the good band at high connection counts).
+	// it - so 120 x connsPerVCPU(6) = 720. With headroom 2.0 this derives a 96/(2*720) ~= 67ms interval (see
+	// deriveRefillInterval). NOT capacityWeight's 450, the PEAK placement ceiling: placement wants the peak,
+	// the cycle period wants the SUSTAINED rate, and conflating them undershoots the drain and overshoots
+	// the period (the earlier 340 - ~57/conn - put it at 141ms, a starved regime giving ~half the throughput
+	// of the good band at high connection counts).
 	sustainedDrainPerVCPU = 720
-	// refillScanFloorCap bounds a lost doorbell AND, since the escalation bypass was removed, priority
-	// latency - it is now the only thing that does, so it is load-bearing in a way it was not before.
+	// refillIntervalCap bounds priority latency - it is the only thing that does, so it is load-bearing.
 	//
 	// The arriving high-priority step itself does not wait: Offer HEAD-INSERTS a strictly-better band, so
-	// it is popped next. What waits out the floor is (a) the rest of an arriving burst, since only one
-	// pioneer is admitted per band-opening, and (b) the cross-shard publish - this shard must rescan
-	// before its new band enters the census, and peers see it on their own next pass, so a peer can serve
-	// worse-band work for up to two floors. Both are bounded by this cap and are ~67ms in the derived
-	// path. Priority ORDER is never inverted regardless: a pass always plans the global minimum band, so
+	// it is popped next. What waits out the interval is (a) the rest of an arriving burst, since only one
+	// pioneer is admitted per band-opening, and (b) the cross-shard publish - this shard must rescan before
+	// its new band reaches the planner, and peers plan on their own next cycle, so a peer can serve
+	// worse-band work for up to two intervals. Both are bounded by this cap and are ~67ms in the derived
+	// path. Priority ORDER is never inverted regardless: a cycle always plans the global minimum band, so
 	// however slowly a shard scans, better work is still selected first.
-	refillScanFloorCap = 1 * time.Second
-	// refillScanFloorMin is the fuse, not a tuning knob: never scan one shard twice inside it, however the
-	// formula's inputs degenerate. bufferShare is capacity/N, so a small cache over many shards derives a
-	// sub-millisecond floor (SetWorkers(1) -> capacity 2 -> share 2 -> ~2ms), at which point the floor
-	// limits nothing and the always-armed trigger restores the 100%-duty-cycle scan loop. Inert in the
-	// derived path (~67ms), so a healthy configuration never pays for it.
-	refillScanFloorMin = 20 * time.Millisecond
-	// refillBandWatchTick is the poll interval of awaitBandRelease's in-memory census watch. Not a scan
-	// floor and not a back-off: an above-band shard is parked because it may not dispatch at all, and this
-	// only bounds how often it re-EVALUATES that (a map read, no query). When it does release, the rescan
-	// goes through the scan floor like any other pass.
-	refillBandWatchTick = 20 * time.Millisecond
+	refillIntervalCap = 1 * time.Second
 )
 
-// deriveScanFloor computes ONE shard's scan floor from static configuration - capacity, that shard's
+// There is deliberately NO minimum here, and there used to be (refillScanFloorMin, 20ms). The fuse it
+// provided - never scan one shard twice in quick succession, however the formula's inputs degenerate -
+// now belongs to the pipeline's MinGap, which enforces the same 20ms as a gap between the END of one
+// cycle and the START of the next. That is the stronger form: a floor measured start-to-start cannot
+// bound a cycle that outruns it, which is exactly the deep-backlog case the fuse exists for.
+
+// deriveRefillInterval computes ONE shard's cycle period from static configuration - capacity, that shard's
 // pool and declared vCPUs, and the observed replica count. It is arithmetic over values known at
 // Startup, NOT a controller: nothing here reads an observed rate, which is the distinction that matters,
 // because the version that DID (interval set from measured consumption) oscillated badly and was removed.
@@ -1052,7 +277,7 @@ const (
 // min is a no-op - it bites only when an operator pins the pool with SetMaxOpenConns *independently* of
 // the declared vCPUs, which is exactly the footgun it protects against:
 //   - a large pinned pool with vCPUs left undeclared no longer derives its drain from the default 2
-//     vCPUs (which made the buffer/drain terms disagree and overshot the floor to the 1s cap, starving
+//     vCPUs (which made the buffer/drain terms disagree and overshot the period to the 1s cap, starving
 //     the refiller - the rig's 20-80s fan-out latency);
 //   - a small pooler-capped pool (many vCPUs, few connections) no longer over-scans on a drain the pool
 //     cannot actually sustain.
@@ -1064,39 +289,40 @@ const (
 // bufferShare is 2*8*6*vCPUs/R = 96*vCPUs/R and drain is 720*vCPUs/R, so T = 96/(2*720) ~= 67ms at any
 // vCPU count or replica count. So it evaluates to a CONSTANT (~67ms) there; the reason to keep it a
 // formula rather than hardcode 67ms is that bufferShare tracks the cache-sizing constants (connsPerVCPU,
-// workersPerConnBudget, the 2x cache), so a change to worker/cache sizing rescales the floor
+// workersPerConnBudget, the 2x cache), so a change to worker/cache sizing rescales the period
 // automatically. (Nearly shipped: campaign 11 found workersPerConnBudget overshoots ~4x. Had it been
-// "corrected", capacity would have fallen 4x and a hardcoded floor would have exceeded what the buffer
+// "corrected", capacity would have fallen 4x and a hardcoded period would have exceeded what the buffer
 // could cover - the measured i300 starvation mode. The overshoot was kept as throughput-neutral, but
 // the near-miss is the argument for computing this rather than pinning a number.)
 //
 // The cap governs where the cancellation breaks - workersDispatch's max(64, ...) floor at small or
 // high-R configurations - and is a lost-signal backstop (see the constant).
-func deriveScanFloor(bufferShare, virtualCPUs, poolConns, replicas int) time.Duration {
+func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas int) time.Duration {
 	drain := float64(sustainedDrainPerVCPU) * float64(poolConns) / float64(connsPerVCPU) // connection channel
 	if virtualCPUs > 0 {                                                                 // cap by the CPU ceiling, when it is known
 		drain = min(drain, float64(sustainedDrainPerVCPU)*float64(virtualCPUs)/float64(max(1, replicas)))
 	}
 	if bufferShare <= 0 || drain <= 0 {
-		return refillScanFloorCap
+		return refillIntervalCap
 	}
 	t := float64(bufferShare) / (refillSupplyHeadroom * drain) // seconds: buffer covers headroom x the drain
-	return min(max(time.Duration(t*float64(time.Second)), refillScanFloorMin), refillScanFloorCap)
+	return min(time.Duration(t*float64(time.Second)), refillIntervalCap)
 }
 
-// recomputeScanFloors re-derives every shard's scan floor. Called at Startup and from recomputePools -
-// the same "every path that changes a pool must re-derive what depends on it" rule the worker ceiling
-// and the candidate cache already obey, since this floor is measured against the cache's capacity.
-func (e *Engine) recomputeScanFloors() {
+// recomputeRefillIntervals re-derives every piston's cycle period and pushes it. Called at Startup and
+// from recomputePools - the same "every path that changes a pool must re-derive what depends on it" rule
+// the worker ceiling and the candidate cache already obey, since the period is measured against the
+// cache's capacity. Pushing is live: a piston reads its interval once per cycle rather than capturing it.
+func (e *Engine) recomputeRefillIntervals() {
 	n := max(1, e.db.NumShards())
 	// max(1, ...): a cache SMALLER than the shard count integer-divides to zero, and zero reaches
-	// deriveScanFloor's degenerate guard, which answers with the 1s cap - the slowest floor there is.
-	// That is exactly backwards. A tiny cache drains in an instant and wants frequent scans; the case is
-	// a small cache, not an unknown one. Left at zero it strands a small-cache configuration on
+	// deriveRefillInterval's degenerate guard, which answers with the 1s cap - the slowest period there
+	// is. That is exactly backwards. A tiny cache drains in an instant and wants frequent scans; the case
+	// is a small cache, not an unknown one. Left at zero it strands a small-cache configuration on
 	// second-long scan intervals, which reads as a wedged fleet rather than a mis-tuned one.
 	share := max(1, e.cache.Capacity()/n)
 	replicas := max(1, int(e.observedR.Load()))
-	override := time.Duration(e.refillScanFloorOverride.Load())
+	override := time.Duration(e.refillIntervalOverride.Load())
 	pinned := int(e.maxOpenConns.Load()) // >0 when SetMaxOpenConns pins every shard's pool
 	e.shardsLock.Lock()
 	specs := make(map[int]ShardSpec, len(e.shardSpecs))
@@ -1104,9 +330,9 @@ func (e *Engine) recomputeScanFloors() {
 		specs[idx] = spec
 	}
 	e.shardsLock.Unlock()
-	for idx, st := range e.refillState {
+	for idx, p := range e.pistons {
 		if override > 0 {
-			st.setFloor(override)
+			p.SetInterval(override)
 			continue
 		}
 		// Pass the shard's ACTUAL pool (shardPool resolves the SetMaxOpenConns pin) and its RAW declared
@@ -1114,57 +340,6 @@ func (e *Engine) recomputeScanFloors() {
 		// not a defaulted vCPU count. An unconfigured shard's zero-value spec falls to the conn channel.
 		spec := specs[idx]
 		_, pool := shardPool(spec, pinned, replicas)
-		st.setFloor(deriveScanFloor(share, spec.VirtualCPUs, pool, replicas))
+		p.SetInterval(deriveRefillInterval(share, spec.VirtualCPUs, pool, replicas))
 	}
 }
-
-// shardRefillState is one shard's rate state, created before the refillers start.
-//
-// It IS locked, despite each entry having exactly one writer in production (its own refiller
-// goroutine). A white-box test driving runShardRefill directly - which several do - is a second
-// caller, and an unsynchronized read/write pair there is a genuine race the detector rightly fails.
-type shardRefillState struct {
-	mu    sync.Mutex
-	floor time.Duration // derived scan floor for this shard (see deriveScanFloor)
-}
-
-// setFloor publishes a newly-derived floor.
-func (s *shardRefillState) setFloor(d time.Duration) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	s.floor = d
-	s.mu.Unlock()
-}
-
-// wait returns how long this refiller should hold off before its next scan, measured from the pass
-// start so a slow pass pays for itself rather than stacking its duration on top of the floor.
-func (s *shardRefillState) wait(passStart time.Time) time.Duration {
-	if s == nil {
-		return 0
-	}
-	s.mu.Lock()
-	floor := s.floor
-	s.mu.Unlock()
-	if floor <= 0 {
-		return 0
-	}
-	return floor - time.Since(passStart)
-}
-
-// notePassDuration tracks the slowest observed refill pass, which scales the census TTL.
-func (e *Engine) notePassDuration(d time.Duration) {
-	for {
-		cur := e.maxRefillPassNs.Load()
-		if int64(d) <= cur || e.maxRefillPassNs.CompareAndSwap(cur, int64(d)) {
-			return
-		}
-	}
-}
-
-// Refiller scan phases, the `phase` attribute on dwarf_refill_query_duration_seconds.
-const (
-	refillPhaseBandKeys   = "band_keys"   // phase 1: one aggregate row per fairness key at the min due band
-	refillPhaseFetchSteps = "fetch_steps" // phase 3: the selected steps for the chosen keys
-)

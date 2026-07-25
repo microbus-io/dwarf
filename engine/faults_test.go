@@ -471,11 +471,12 @@ func TestFault_RefillScanErr(t *testing.T) {
 	}
 }
 
-// TestFault_RefillScanErrPreservesCache pins the other half of the scan-error policy. Refill is a wholesale
-// partition replace that HONORS an empty batch (an empty scan means nothing is due, so the cached hints are
-// dead), so runShardRefill must not route a FAILED scan into it: an error means "unknown", not "nothing is
-// due", and replacing a healthy partition with nothing on a transient DB blip would idle its workers in Pop
-// until the 1s re-poll. The hints cost nothing to keep - a worker popping a stale one just loses its claim CAS.
+// TestFault_RefillScanErrPreservesCache pins the scan-error policy THROUGH THE ENGINE'S WIRING: the fault
+// is armed on the engine's seams, which must have reached the piston for this to fire at all. Refill is a
+// wholesale partition replace that HONORS an empty batch (an empty scan means nothing is due, so the
+// cached hints are dead), so a FAILED scan must not be routed into it: an error means "unknown", not
+// "nothing is due", and replacing a healthy partition with nothing on a transient DB blip would idle its
+// workers in Pop. The hints cost nothing to keep - a worker popping a stale one just loses its claim CAS.
 func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -486,14 +487,15 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 	assert.NoError(e.SetWorkers(0)) // no workers, so nothing drains the cache underneath the assertion
 	assert.NoError(e.Startup(t.Context()))
 
-	// Seed the cache as a healthy refill would have, then make every scan fail (sticky, so the background
-	// refiller cannot slip a legitimate empty refill in and wipe the cache on its own).
+	// Seed the cache as a healthy cycle would have, then make every scan fail (sticky, so a background
+	// cycle cannot slip a legitimate empty refill in and wipe the cache on its own).
 	e.cache.Refill(1, []candidatecache.Job{{StepID: 101, Shard: 1}, {StepID: 102, Shard: 1}}, 5)
 	assert.Equal(2, e.cache.Len())
 	e.seams.InjectN(1<<20, FaultRefillScanErr)
 
-	assert.Equal(refillIdle, e.runShardRefill(ctx, 1)) // a failed scan is never a full batch
-	assert.Equal(2, e.cache.Len())                     // ... and it did not discard the healthy candidates
+	_, _, err := e.pistons[1].ScanBand(ctx, 1)
+	assert.Error(err, "the engine's seams must reach its pistons")
+	assert.Equal(2, e.cache.Len(), "a failed scan does not discard the healthy candidates")
 }
 
 func TestFault_PollSizingErr(t *testing.T) {

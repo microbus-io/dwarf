@@ -86,19 +86,19 @@ func run() error {
 		vcpus   = flag.Int("vcpus", 0, "ShardSpec.VirtualCPUs for every shard (0 = undeclared; the engine assumes 2)")
 		// SetMaxOpenConns is the expert override: it pins every shard's pool to exactly this size, which
 		// is what a pool-size sweep needs.
-		maxOpenConns   = flag.Int("max-open-conns", 0, "engine per-shard pool size (0 = derived from -vcpus; else pinned exactly)")
-		refillFloorMs  = flag.Int("refill-scan-floor-ms", 0, "pin the refiller's per-shard scan floor in ms (0 = derived from capacity/vcpus/replicas); the scan-rate sweep knob")
-		openLoop       = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
-		maxOutstanding = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus terminated) flows, the backpressure bound that keeps the backlog from OOMing the DB")
-		arrivalRate    = flag.Int("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec (0 = flat-out to saturation)")
-		concurrency    = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
-		window         = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
-		warmup         = flag.Duration("warmup", 15*time.Second, "warmup before each measurement window (discarded)")
-		label          = flag.String("label", "", "free-form run label recorded in the artifact")
-		out            = flag.String("out", "", "artifact path (default bench/results/run-<timestamp>.json)")
-		soak           = flag.Duration("soak", 0, "soak mode: run a mixed create/interrupt/continue workload under create-purge churn for this long, sampling drift, instead of the concurrency sweep (uses the first -concurrency value as the submitter count)")
-		soakSample     = flag.Duration("soak-sample", 30*time.Second, "soak drift sampling interval")
-		replicas       = flag.Int("replicas", 1, "number of in-process engine replicas sharing the database(s), peered for signal relay (1 = single engine)")
+		maxOpenConns     = flag.Int("max-open-conns", 0, "engine per-shard pool size (0 = derived from -vcpus; else pinned exactly)")
+		refillIntervalMs = flag.Int("refill-interval-ms", 0, "pin each shard's refill cycle period in ms (0 = derived from capacity/vcpus/replicas); the scan-rate sweep knob")
+		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
+		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus terminated) flows, the backpressure bound that keeps the backlog from OOMing the DB")
+		arrivalRate      = flag.Int("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec (0 = flat-out to saturation)")
+		concurrency      = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
+		window           = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
+		warmup           = flag.Duration("warmup", 15*time.Second, "warmup before each measurement window (discarded)")
+		label            = flag.String("label", "", "free-form run label recorded in the artifact")
+		out              = flag.String("out", "", "artifact path (default bench/results/run-<timestamp>.json)")
+		soak             = flag.Duration("soak", 0, "soak mode: run a mixed create/interrupt/continue workload under create-purge churn for this long, sampling drift, instead of the concurrency sweep (uses the first -concurrency value as the submitter count)")
+		soakSample       = flag.Duration("soak-sample", 30*time.Second, "soak drift sampling interval")
+		replicas         = flag.Int("replicas", 1, "number of in-process engine replicas sharing the database(s), peered for signal relay (1 = single engine)")
 		// Signal-fault injection on the peer transport (see benchHost). Jitter/drop simulate an imperfect
 		// network; -drop-ops kills specific signal kinds outright (e.g. 'enqueue' for the poll-fallback
 		// A/B); the mute pair simulates one replica crashing (its outbound signals stop) and recovering.
@@ -221,8 +221,8 @@ func run() error {
 		if *maxOpenConns > 0 {
 			setters = append(setters, eng.SetMaxOpenConns(*maxOpenConns))
 		}
-		if *refillFloorMs > 0 {
-			setters = append(setters, eng.SetRefillScanFloor(time.Duration(*refillFloorMs)*time.Millisecond))
+		if *refillIntervalMs > 0 {
+			setters = append(setters, eng.SetRefillInterval(time.Duration(*refillIntervalMs)*time.Millisecond))
 		}
 		for _, setter := range setters {
 			if setter != nil {

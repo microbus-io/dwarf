@@ -252,26 +252,31 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 		assert.NoError(err)
 	}
 
-	// Two passes over the same stable backlog. The first fills the cache; the second replaces it, so
-	// everything the first selected is discarded un-popped.
+	// Two cycles over the same stable backlog. The first fills the cache; the second replaces it, so
+	// everything the first selected is discarded un-popped. Driven by hand through the engine's own piston,
+	// which is also what proves the engine handed it the meter: the instruments are the PISTON's, resolved
+	// from the scope the engine resolved once (initRuntime), not built a second time here.
 	assert.True(e.cache.Capacity() > 0)
-	e.runShardRefill(ctx, 1)
-	e.runShardRefill(ctx, 1)
+	e.pistons[1].SetIdle(false) // SetWorkers(0) idled it; this test drives the cycles itself
+	e.pistons[1].SetInterval(0)
+	e.pistons[1].SetMinGap(0)
+	e.pistons[1].Cycle(ctx)
+	e.pistons[1].Cycle(ctx)
 
 	var rm metricdata.ResourceMetrics
 	if !assert.NoError(reader.Collect(ctx, &rm)) {
 		return
 	}
 
-	// The whole-pass histogram records every pass, including the ones that select nothing.
+	// The whole-cycle histogram records every cycle, including the ones that select nothing.
 	passes, ok := histCount(rm, "dwarf_refill_duration_seconds", nil)
 	assert.True(ok, "dwarf_refill_duration_seconds should be present")
-	assert.True(passes >= 2, "expected at least the 2 forced passes, got %d", passes)
+	assert.True(passes >= 2, "expected at least the 2 forced cycles, got %d", passes)
 
 	// The per-shard query histogram is the one that isolates a straggler, so BOTH scan phases must be
 	// labelled and attributed to a shard - a pass that timed only the aggregate would be unable to tell a
 	// slow band scan (the plan-instability case) from a slow targeted fetch.
-	for _, phase := range []string{refillPhaseBandKeys, refillPhaseFetchSteps} {
+	for _, phase := range []string{"band_keys", "fetch_steps"} {
 		n, ok := histCount(rm, "dwarf_refill_query_duration_seconds", map[string]string{"phase": phase, "shard": "1"})
 		assert.True(ok, "dwarf_refill_query_duration_seconds{phase=%s,shard=1} should be present", phase)
 		assert.True(n > 0, "phase %s recorded no samples", phase)

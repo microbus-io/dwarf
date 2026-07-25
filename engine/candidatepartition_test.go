@@ -20,6 +20,7 @@ import (
 	"context"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
@@ -55,9 +56,6 @@ func TestPartition_DisabledUnlessSafe(t *testing.T) {
 	e.observedOrdinal.Store(0)
 	_, _, ok := e.observedPartition()
 	assert.False(ok, "R=1 must not partition")
-	sql, args := e.partitionPredicate()
-	assert.Equal("", sql, "R=1 must add no predicate")
-	assert.Len(args, 0)
 
 	// Unknown ordinal (self absent from the roster) - the case that would otherwise guess.
 	e.observedDispatchers.Store(4)
@@ -78,10 +76,11 @@ func TestPartition_DisabledUnlessSafe(t *testing.T) {
 	assert.True(ok)
 	assert.Equal(4, replicas)
 	assert.Equal(2, ordinal)
-	sql, args = e.partitionPredicate()
-	assert.Equal(" AND step_id % ? = ?", sql)
-	assert.Equal([]any{4, 2}, args)
 }
+
+// The predicate this pair drives now lives in internal/piston (partitionPredicate), which validates it a
+// second time - see TestPiston_PartitionPairIsValidated. Both guards are deliberate: this one is the
+// engine's knowledge of its own fleet, that one is the package's advertised fail-open posture.
 
 // TestPartition_ResidueClassesCoverEveryStepExactlyOnce is the completeness proof: across a fleet of R,
 // every step id is selected by exactly ONE replica. Under-coverage strands work; over-coverage is the
@@ -142,6 +141,8 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
 
+	awaitSelfDispatching(t, e)
+
 	// Solo: registered, but nothing to divide.
 	_, _, ok := e.observedPartition()
 	assert.False(ok, "a solo replica must not partition")
@@ -181,6 +182,8 @@ func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
 
+	awaitSelfDispatching(t, e)
+
 	// A peer that holds connections but dispatches nothing.
 	addPeerRowWithDispatch(t, e, 4242, false)
 	assert.Equal(2, e.observedReplicas(), "an await-only peer still divides the connection pools")
@@ -207,8 +210,14 @@ func addPeerRowWithDispatch(t *testing.T, e *Engine, id int64, dispatches bool) 
 		flag = 1
 	}
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// A non-dispatching peer leaves dispatched_at at its far-past default, which is exactly how an
+		// await-only replica presents itself: alive in seen_at, never advancing the evidence column.
+		cols, vals := "engine_id, seen_at, dispatches", "?, NOW_UTC(), ?"
+		if dispatches {
+			cols, vals = cols+", dispatched_at", vals+", NOW_UTC()"
+		}
 		_, err := db.ExecContext(ctx,
-			"INSERT INTO dwarf_peers (engine_id, seen_at, dispatches) VALUES (?, NOW_UTC(), ?)", id, flag)
+			"INSERT INTO dwarf_peers ("+cols+") VALUES ("+vals+")", id, flag)
 		return err
 	})
 	if err != nil {
@@ -221,3 +230,21 @@ func addPeerRowWithDispatch(t *testing.T, e *Engine, id int64, dispatches bool) 
 // relinquish, shard-keying, and concurrency under -race). The engine-level guard that its window can never
 // break single-replica lease recovery - a worker whose step's lease expires mid-execution must still be
 // re-claimable by a sibling - is the integration test TestLeaseFence_CompletionNoDuplicateSuccessor.
+
+// awaitSelfDispatching waits until this engine's own piston has published dispatch evidence and a recount
+// has picked it up. dispatched_at is EARNED by a completed cycle rather than stamped at registration - it
+// is evidence, not intent - so a test asserting on the dispatcher roster straight after Startup would
+// otherwise race that first cycle. The wait is milliseconds: the piston beats as soon as the cycle lands.
+func awaitSelfDispatching(t *testing.T, e *Engine) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		e.refreshReplicaCount(ctx)
+		if e.observedOrdinal.Load() >= 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("engine never published dispatch evidence")
+}

@@ -59,7 +59,11 @@ func addPeerRow(t *testing.T, e *Engine, id int64) {
 	t.Helper()
 	ctx := context.Background()
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		_, err := db.ExecContext(ctx, "INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (?, NOW_UTC())", id)
+		// dispatched_at as well as seen_at: the roster counts DISPATCHERS by that column's freshness now
+		// (evidence a piston actually turned), so a fake peer that only stamps seen_at is a live replica
+		// that never dispatches - which is a real state, but not the one these fixtures mean.
+		_, err := db.ExecContext(ctx,
+			"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at) VALUES (?, NOW_UTC(), NOW_UTC())", id)
 		return err
 	})
 	if err != nil {

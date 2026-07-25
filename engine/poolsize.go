@@ -244,7 +244,7 @@ func (e *Engine) recomputePools() {
 	e.cache.Resize(min(dispatch, int(e.workers.Load())))
 	// The refill scan floor is measured against the cache's capacity, so it follows the same split -
 	// the same rule the dispatch count and worker ceiling obey just above.
-	e.recomputeScanFloors()
+	e.recomputeRefillIntervals()
 	e.logger.Info("Derived pools recomputed", "replicas", replicas, "dispatch", dispatch)
 	e.recomputeWorkerCeiling(e.lifetimeCtx)
 }

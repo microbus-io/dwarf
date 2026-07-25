@@ -168,12 +168,18 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	assert.Equal(highCount, strings.Count(strings.Join(got, ","), "high"))
 
 	// The ordering claim, kept as the semantic contract even though it is the LESS sensitive of the two
-	// (see above): once the band-1 work was observable it went ahead of the great majority of the
-	// still-pending band-100 backlog, across all three shards. Half the backlog is a wide margin
-	// against dispatch jitter - a worker mid-step finishes it, priority is not preemptive, and each
-	// partition may pioneer one candidate - while still failing if a shard's census entry stopped
-	// contributing to the global band at all.
-	assert.True(lowsAfterHigh >= lowCount/2,
+	// (see above): once the band-1 work was observable it went ahead of the bulk of the still-pending
+	// band-100 backlog, across all three shards.
+	//
+	// The margin covers FOUR legitimate sources of interleave, and the fourth is why it is a third of the
+	// backlog rather than half. A worker mid-step finishes it (priority is not preemptive); each partition
+	// may pioneer one candidate; dispatch jitter; and - since the per-shard refill trigger was removed -
+	// everything PAST those pioneers waits for the next cycle boundary rather than for a nudge, up to a
+	// full interval (~67ms). Three shards draining 20ms tasks get through roughly ten more low steps in
+	// that window, which is precisely the "strict within one or two intervals" property the design states
+	// rather than a regression. The latency assertion above is the sharp guard - it was verified to catch a
+	// starved build at 22x - so this one only has to fail if the urgent band waits out the whole backlog.
+	assert.True(lowsAfterHigh >= lowCount/3,
 		"expected the urgent band to preempt most of the %d-step low backlog, but only %d low steps ran after the last high step (order: %v)",
 		lowCount, lowsAfterHigh, got)
 }

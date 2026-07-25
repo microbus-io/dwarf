@@ -201,22 +201,47 @@ func rosterOrdinal(ids []int64, engineID int64) int {
 func (e *Engine) peerFreshWindow() time.Duration  { return 4 * e.pingInterval }
 func (e *Engine) peerStragglerAge() time.Duration { return 8 * e.pingInterval }
 
-// upsertSelf writes this engine's heartbeat row (seen_at=NOW_UTC()) to one shard: an UPDATE by
-// engine_id, falling back to an INSERT when no row exists yet (the first beat, or after the row was
-// pruned). Two statements rather than a per-dialect upsert, so it stays dialect-agnostic. Timestamps
-// come from the database clock (NOW_UTC()), never a bound Go time, so every shard's freshness compare
-// runs on one clock.
+// peerDispatchWindow is how recently a replica must have advanced dispatched_at to be counted among the
+// DISPATCHERS - the divisor the candidate partition splits across, distinct from R.
+//
+// It is deliberately far tighter than peerFreshWindow, because the two errors are asymmetric in OPPOSITE
+// directions. Over-counting R over-sizes pools and can collapse a database, so R is generous. Over-counting
+// dispatchers hands a residue class of step ids to a replica that never selects them, and work in that
+// class is then run by nobody - while UNDER-counting only makes replicas select overlapping candidates,
+// which the claim CAS arbitrates at the cost of a lost round trip. So this one errs toward dropping a
+// replica, where R errs toward keeping one.
+//
+// Five seconds is five of the piston's one-second beats. That margin is only safe because dispatched_at
+// also advances while a cycle is IN FLIGHT (see piston.beat): without it, a deep-backlog scan - still
+// O(backlog) on any dialect without the run-condition early-stop, and measured in the tens of seconds -
+// would let every healthy replica in a loaded fleet fall out of the divisor at once, disabling
+// partitioning precisely when overlapping selection is most expensive.
+const peerDispatchWindow = 5 * time.Second
+
+// upsertSelf CREATES this engine's registry row on one shard: an UPDATE by engine_id, falling back to an
+// INSERT when no row exists yet. Two statements rather than a per-dialect upsert, so it stays
+// dialect-agnostic. Timestamps come from the database clock (NOW_UTC()), never a bound Go time, so every
+// shard's freshness compare runs on one clock.
+//
+// This runs ONCE, from registerSelf at Startup - before any piston exists. The ongoing refresh is the
+// pistons' (piston.beat), which only ever UPDATEs, so the row's lifetime is exactly "created here, deleted
+// by deregisterPeer" with in-place refreshes in between.
+//
+// It deliberately does NOT stamp dispatched_at. That column is EVIDENCE that a piston turned, never a
+// statement of intent, and registration is pure intent - so a replica leaves it at its far-past default
+// and earns it on its first cycle instead. The cost is a brief window where the replica is not counted
+// among the dispatchers, which is the fail-open direction (it partitions nothing and selects everything,
+// overlapping peers at the price of a lost claim); the piston beats as soon as that first cycle lands, so
+// the window is milliseconds rather than a heartbeat interval.
 func (e *Engine) upsertSelf(ctx context.Context, db *sequel.DB) error {
-	// dispatches rides every heartbeat rather than only the INSERT, so a replica that changes its worker
-	// count (SetWorkers on a live engine, or the derived ceiling landing after Startup) republishes it
-	// without waiting for its row to be pruned and re-inserted.
+	dispatches := e.dispatchesFlag()
 	res, err := db.ExecContext(ctx,
-		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), dispatches=? WHERE engine_id=?", e.dispatchesFlag(), e.engineID)
+		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), dispatches=? WHERE engine_id=?", dispatches, e.engineID)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	// RowsAffected is 0 only when no row matched (seen_at=NOW_UTC() always changes across the >=1
-	// heartbeat interval between writes, so a matched row never reports "unchanged" on MySQL).
+	// RowsAffected is 0 only when no row matched: seen_at=NOW_UTC() always changes between two calls of
+	// this (they are a whole engine lifetime apart), so a matched row never reports "unchanged" on MySQL.
 	n, err := res.RowsAffected()
 	if err != nil {
 		return errors.Trace(err)
@@ -225,7 +250,7 @@ func (e *Engine) upsertSelf(ctx context.Context, db *sequel.DB) error {
 		return nil
 	}
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_peers (engine_id, seen_at, dispatches) VALUES (?, NOW_UTC(), ?)", e.engineID, e.dispatchesFlag())
+		"INSERT INTO dwarf_peers (engine_id, seen_at, dispatches) VALUES (?, NOW_UTC(), ?)", e.engineID, dispatches)
 	return errors.Trace(err)
 }
 
@@ -295,23 +320,29 @@ func (e *Engine) dispatchesFlag() int {
 // from the same list with no coordination.
 func (e *Engine) scanFreshPeers(ctx context.Context, db *sequel.DB, freshMs int64) (shardRoster, error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT engine_id, dispatches, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS age_ms FROM dwarf_peers"+
+		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS age_ms,"+
+			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms FROM dwarf_peers"+
 			" WHERE seen_at > DATE_ADD_MILLIS(NOW_UTC(), ?) ORDER BY engine_id", -freshMs,
 	)
 	if err != nil {
 		return shardRoster{}, errors.Trace(err)
 	}
 	defer rows.Close()
+	dispatchMs := float64(peerDispatchWindow / time.Millisecond)
 	roster := shardRoster{freshest: math.MaxFloat64}
 	for rows.Next() {
 		var id int64
-		var dispatches int
-		var ageMs float64
-		if err := rows.Scan(&id, &dispatches, &ageMs); err != nil {
+		var ageMs, dispatchAgeMs float64
+		if err := rows.Scan(&id, &ageMs, &dispatchAgeMs); err != nil {
 			return shardRoster{}, errors.Trace(err)
 		}
 		roster.ids = append(roster.ids, id)
-		if dispatches > 0 {
+		// EVIDENCE, not a claim: dispatched_at is advanced only by a replica whose piston actually turned,
+		// so a wedged one drops out of the partition divisor on its own while its seen_at keeps it in R.
+		// The `dispatches` flag carries the same fact but is a claim, and a replica that publishes "I
+		// dispatch" and then wedges keeps its residue class forever - and a class nobody selects is work
+		// nobody runs.
+		if dispatchAgeMs <= dispatchMs {
 			roster.dispatchers = append(roster.dispatchers, id)
 		}
 		roster.freshest = min(roster.freshest, ageMs)
@@ -344,8 +375,9 @@ func (e *Engine) readReplicaCount(ctx context.Context) (shardRoster, error) {
 	return freshestRoster(rosters), nil
 }
 
-// heartbeatPeers is the heartbeat's single per-shard pass: upsert self, read the fresh roster AND the
-// stale count, and conditionally prune - then return the freshest shard's roster. The prune runs only
+// heartbeatPeers is the heartbeat's single per-shard pass: read the fresh roster AND the stale count, and
+// conditionally prune - then return the freshest shard's roster. It no longer writes this replica's own
+// row; the pistons do that. The prune runs only
 // when a shard has stale rows (`stale > 0`) AND this replica wins a 1/R dice roll, so:
 //   - steady state issues ZERO range-DELETEs (only conflict-free per-PK upserts touch the table), which
 //     removes the one op with any lock-contention potential (the MySQL gap-lock on `seen_at <`) from the
@@ -363,9 +395,12 @@ func (e *Engine) heartbeatPeers(ctx context.Context) (shardRoster, error) {
 	indices, pos := e.shardOrdinals()
 	rosters := make([]shardRoster, len(indices))
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		if err := e.upsertSelf(ctx, db); err != nil {
-			return errors.Trace(err)
-		}
+		// No upsert here: the PISTONS own the heartbeat write now, one per shard on their own cadence, and
+		// two writers racing the same row would break the UPDATE-then-INSERT fallback's premise (MySQL
+		// counts CHANGED rows, so two writes inside one NOW_UTC() millisecond report zero matched and fire a
+		// spurious INSERT onto an existing primary key). This pass is a pure reader plus the prune.
+		// registerSelf still writes once at Startup, before any piston exists.
+		//
 		// The roster replaces the fresh COUNT: it carries the same number (its length) plus the identities
 		// the ordinal needs, so this still costs one scan. The stale count keeps its own aggregate, which
 		// cannot ride the roster query - stale rows are excluded from it by construction.
@@ -486,7 +521,7 @@ func (e *Engine) runPeersLoop() {
 			return
 		case <-ticker.C:
 		}
-		// One pass: upsert + read R + conditional prune. Apply the fresh count directly (no separate read).
+		// One pass: read R + conditional prune (the pistons write our own row). Apply the count directly.
 		roster, err := e.heartbeatPeers(e.lifetimeCtx)
 		if err != nil {
 			e.logger.ErrorContext(e.lifetimeCtx, "Peer heartbeat", "error", err)

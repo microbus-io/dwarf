@@ -23,8 +23,10 @@ limitations under the License.
 // it is not called a shard: the shard is the database partition, and this is the thing that works it.
 //
 // What it owns is the supply cycle - the pipeline, the two queries behind it, its own instruments - plus
-// this replica's heartbeat into the shard's peer registry. What it borrows is the planner and the
-// candidate cache, both shared with every other piston on this replica.
+// this replica's heartbeat into the shard's peer registry. The heartbeat REFRESHES that row and never
+// creates it: the owner registers once at startup and deletes once at shutdown, so a beat can never
+// resurrect a row the owner just removed. What it borrows is the planner and the candidate cache, both
+// shared with every other piston on this replica.
 //
 // Run blocks and drives two independent loops - the supply cycle, and this replica's heartbeat on its own
 // fixed cadence:
@@ -63,14 +65,15 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 )
 
-// heartbeatInterval is how often a piston refreshes this replica's row in its shard's peer registry. A
-// var rather than a const only so a test can shorten it.
+// heartbeatInterval is the DEFAULT cadence at which a piston refreshes this replica's row in its shard's
+// peer registry; SetHeartbeatInterval overrides it per piston. A var rather than a const only so a test
+// can shorten the default.
 //
-// One second is not merely cheaper than beating every cycle - it keeps the write inside the premise its
-// UPDATE-then-INSERT fallback rests on. The fallback reads RowsAffected to decide whether a row existed,
-// and MySQL counts CHANGED rows rather than matched ones, so two beats landing inside the same
-// NOW_UTC() tick (millisecond precision) would report zero and fire a spurious INSERT. At a second's
-// spacing that cannot happen; at a per-cycle cadence the margin is one millisecond.
+// One second is simply cheap enough against a freshness window measured in tens of seconds. It used to be
+// load-bearing for a second reason - the beat was an UPDATE with an INSERT fallback, which read
+// RowsAffected to decide whether a row existed, and MySQL counts CHANGED rather than matched rows, so two
+// beats inside one NOW_UTC() millisecond would report zero and fire a spurious INSERT. The beat no longer
+// inserts (see beat), so that constraint is gone and this is a cost knob again.
 var heartbeatInterval = time.Second
 
 // refillBuckets are the explicit bucket boundaries for both histograms, in SECONDS. The OTEL defaults are
@@ -118,6 +121,7 @@ type Piston struct {
 	// Live configuration, each independently atomic. There is no grouped snapshot because nothing here is
 	// coupled - reading idle and the partition a microsecond apart cannot produce an inconsistent pair.
 	idle      atomic.Bool
+	beatEvery atomic.Int64 // nanoseconds; see SetHeartbeatInterval
 	partition atomic.Pointer[PartitionFunc]
 	logger    atomic.Pointer[slog.Logger]
 	inst      atomic.Pointer[instruments]
@@ -129,6 +133,12 @@ type Piston struct {
 	// transient error landed in that gap. Atomic because the cycle loop sets it and the beat loop - a
 	// separate goroutine, see Run - consumes it.
 	dispatchedSinceBeat atomic.Bool
+	// cycleInFlight is true while the cycle loop is inside pipe.Cycle. A cycle that has not RETURNED yet is
+	// still evidence this piston is serving - and on a dialect without the run-condition early-stop a deep
+	// backlog scan can run for tens of seconds, far longer than a reader's dispatch window. Without this a
+	// loaded fleet's healthy replicas would all stop advancing dispatched_at at once and fall out of the
+	// partition divisor exactly when overlapping selection costs the most.
+	cycleInFlight atomic.Bool
 }
 
 // New returns a piston for one shard over an already-open database handle. The planner and cache are
@@ -157,6 +167,7 @@ func New(engineID int64, shard int, db *sequel.DB, plan *planner.Planner, cache 
 		return nil, errors.New("cache is required")
 	}
 	p := &Piston{engineID: engineID, shard: shard, db: db, planner: plan, cache: cache}
+	p.beatEvery.Store(int64(heartbeatInterval))
 	pipe, err := pipeline.New(shard, p, plan, cache)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -203,6 +214,24 @@ func (p *Piston) SetIdle(idle bool) {
 
 // Idle reports whether the piston is idling.
 func (p *Piston) Idle() bool { return p.idle.Load() }
+
+// SetHeartbeatInterval sets how often this piston refreshes the registry row. Zero or negative restores
+// the default.
+//
+// THE OWNER MUST KEEP THIS WELL UNDER THE FRESHNESS WINDOW ITS READERS APPLY, and the two are set in
+// different places, so the coupling is easy to break silently: readers decide a peer is gone when its
+// seen_at ages past their window, and the only thing refreshing that column is this beat. Beat slower than
+// the window and a perfectly healthy replica ages out of its own fleet - including out of R, which
+// re-expands every peer's connection pools.
+func (p *Piston) SetHeartbeatInterval(d time.Duration) {
+	if d <= 0 {
+		d = heartbeatInterval
+	}
+	p.beatEvery.Store(int64(d))
+}
+
+// HeartbeatInterval is the current registry-refresh cadence.
+func (p *Piston) HeartbeatInterval() time.Duration { return time.Duration(p.beatEvery.Load()) }
 
 // SetInterval sets the cycle period, start of one cycle's scan to the next. See pipeline.SetInterval.
 func (p *Piston) SetInterval(d time.Duration) { p.pipe.SetInterval(d) }
@@ -323,6 +352,13 @@ func (p *Piston) Run(ctx context.Context) {
 		p.beatLoop(ctx)
 	})
 	defer beats.Wait()
+	// published tracks whether any beat has carried dispatch evidence yet. The beat loop fires once on
+	// entry, BEFORE the first cycle can have completed, so that beat correctly reports none - leaving the
+	// replica out of its own fleet's dispatcher count until the next one. Beating again the instant the
+	// first cycle lands closes that to milliseconds instead of a whole heartbeat interval, which matters
+	// because a replica absent from the divisor partitions nothing and selects everything, overlapping
+	// every peer. Only the FIRST one is special-cased; after that the loop's cadence is the whole policy.
+	published := false
 	for {
 		if ctx.Err() != nil {
 			return
@@ -332,22 +368,39 @@ func (p *Piston) Run(ctx context.Context) {
 			// reader tells the two populations apart without trusting anything the replica claims about
 			// itself. The beat loop keeps its registry row alive meanwhile. Re-checked on the beat cadence
 			// so a live SetIdle(false) resumes dispatching within one interval.
-			if !p.sleep(ctx, heartbeatInterval) {
+			if !p.sleep(ctx, p.HeartbeatInterval()) {
 				return
 			}
 			continue
 		}
-		r := p.pipe.Cycle(ctx)
-		p.record(ctx, r)
+		r := p.Cycle(ctx)
 		if r.Err != nil && ctx.Err() == nil {
 			p.logger.Load().ErrorContext(ctx, "Refill cycle", "shard", p.shard, "error", r.Err)
 		}
-		// A cycle that found nothing due still counts: it proves this piston looked and could have served.
-		// Gating on candidates instead would make a quiet fleet look like it had no dispatchers at all.
-		if r.Err == nil {
-			p.dispatchedSinceBeat.Store(true)
+		if !published && r.Err == nil {
+			published = true
+			p.beat(ctx)
 		}
 	}
+}
+
+// Cycle runs exactly ONE supply cycle - paced as always - records it, and returns what happened. Run is
+// this in a loop; a caller drives it directly when it wants a cycle at a moment of its own choosing rather
+// than on the piston's cadence.
+//
+// NOT safe to call concurrently with Run, or with itself: the pipeline's cadence timestamps are
+// single-goroutine state. A caller that drives cycles by hand should idle the piston first.
+func (p *Piston) Cycle(ctx context.Context) pipeline.Result {
+	p.cycleInFlight.Store(true)
+	r := p.pipe.Cycle(ctx)
+	p.cycleInFlight.Store(false)
+	p.record(ctx, r)
+	// A cycle that found nothing due still counts: it proves this piston looked and could have served.
+	// Gating on candidates instead would make a quiet fleet look like it had no dispatchers at all.
+	if r.Err == nil {
+		p.dispatchedSinceBeat.Store(true)
+	}
+	return r
 }
 
 // beatLoop refreshes this replica's registry row on a fixed cadence, independent of whatever the cycle
@@ -355,7 +408,7 @@ func (p *Piston) Run(ctx context.Context) {
 func (p *Piston) beatLoop(ctx context.Context) {
 	for {
 		p.beat(ctx)
-		if !p.sleep(ctx, heartbeatInterval) {
+		if !p.sleep(ctx, p.HeartbeatInterval()) {
 			return
 		}
 	}
@@ -396,10 +449,18 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 	}
 }
 
-// beat refreshes this replica's row in the shard's peer registry: an UPDATE by engine_id, falling back
-// to an INSERT when no row matched (the first beat, or after the row was pruned). Two statements rather
-// than a per-dialect upsert, so it stays dialect-agnostic. Timestamps come from the database clock
-// (NOW_UTC()), never a bound Go time, so every freshness comparison on this shard runs on one clock.
+// beat refreshes this replica's row in the shard's peer registry. It is an UPDATE by engine_id and
+// NOTHING ELSE - it never creates the row. Timestamps come from the database clock (NOW_UTC()), never a
+// bound Go time, so every freshness comparison on this shard runs on one clock.
+//
+// UPDATE-ONLY is what makes the row's lifetime belong to the process rather than to this loop: the owner
+// creates it once at startup and deletes it once at shutdown, and every beat in between is an in-place
+// refresh. An INSERT fallback here (what this used to do) makes a beat able to RESURRECT a row the owner
+// has just deleted on its way down, so the shutdown delete only sticks if every piston is guaranteed to
+// have stopped first - an ordering constraint spanning two packages, to handle a case that means the
+// replica was already unreachable for longer than the fleet's staleness window. It also dragged in a
+// RowsAffected read and, with it, the MySQL changed-rows premise. A row that is somehow missing now
+// simply matches nothing, which is the same no-op a beat after shutdown should be.
 //
 // TWO timestamps, and the distinction is the point. seen_at moves on every beat and means "this replica
 // is alive and holding connections" - what the pool divisor R counts. dispatched_at moves only when a
@@ -412,9 +473,15 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 //
 // A failed write is not retried. Retrying a broken registry write would turn a database blip into a write
 // storm, and the next beat is a second away regardless.
+//
+// Safe to call from either loop: everything it reads is atomic, and the write is an idempotent UPDATE, so
+// two beats racing can only produce the same row twice. Run uses that to publish its first evidence early.
 func (p *Piston) beat(ctx context.Context) {
 	idle := p.idle.Load()
-	dispatched := p.dispatchedSinceBeat.Swap(false) && !idle
+	// Either a cycle COMPLETED since the last beat, or one is running right now. Both are evidence; only a
+	// piston that is neither finishing nor attempting cycles stops advancing dispatched_at, which is the
+	// wedged case the column exists to catch.
+	dispatched := (p.dispatchedSinceBeat.Swap(false) || p.cycleInFlight.Load()) && !idle
 	dispatches := 1
 	if idle {
 		dispatches = 0
@@ -426,24 +493,8 @@ func (p *Piston) beat(ctx context.Context) {
 	if dispatched {
 		set += ", dispatched_at=NOW_UTC()"
 	}
-	res, err := p.db.ExecContext(ctx,
+	_, err := p.db.ExecContext(ctx,
 		"UPDATE dwarf_peers SET "+set+" WHERE engine_id=?", dispatches, p.engineID)
-	if err == nil {
-		var n int64
-		if n, err = res.RowsAffected(); err == nil {
-			if n > 0 {
-				return
-			}
-			// On the insert path dispatched_at is left to its default - a timestamp far enough in the past
-			// that a brand-new row reads as "never dispatched" until it earns otherwise.
-			cols, vals := "engine_id, seen_at, dispatches", "?, NOW_UTC(), ?"
-			if dispatched {
-				cols, vals = cols+", dispatched_at", vals+", NOW_UTC()"
-			}
-			_, err = p.db.ExecContext(ctx,
-				"INSERT INTO dwarf_peers ("+cols+") VALUES ("+vals+")", p.engineID, dispatches)
-		}
-	}
 	if err != nil && ctx.Err() == nil {
 		p.logger.Load().ErrorContext(ctx, "Peer heartbeat", "shard", p.shard, "error", err)
 	}

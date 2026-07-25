@@ -76,7 +76,21 @@ func newRig(t *testing.T) *rig {
 	}
 	p.SetInterval(0)
 	p.SetMinGap(0)
-	return &rig{p: p, db: db, planner: pl, cache: cache}
+	r := &rig{p: p, db: db, planner: pl, cache: cache}
+	r.register(t)
+	return r
+}
+
+// register creates this replica's registry row, which in production the OWNER does once at startup
+// (before any piston runs). The beat only ever refreshes it, so without this every beat is a no-op.
+func (r *rig) register(t *testing.T) {
+	t.Helper()
+	_, err := r.db.ExecContext(context.Background(),
+		"INSERT INTO dwarf_peers (engine_id, seen_at, dispatches) VALUES (?, NOW_UTC(), 1)",
+		defaultTestEngineID)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // insertStep adds one due pending step and returns its id. Steps are inserted oldest-first by call
@@ -348,7 +362,7 @@ func TestPiston_PartitionDoesNotNarrowTheBand(t *testing.T) {
 
 // TestPiston_HeartbeatInsertsThenUpdates pins the dialect-agnostic upsert: the first beat INSERTs, later
 // beats UPDATE the same row rather than accumulating duplicates.
-func TestPiston_HeartbeatInsertsThenUpdates(t *testing.T) {
+func TestPiston_HeartbeatUpdatesInPlace(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -362,7 +376,17 @@ func TestPiston_HeartbeatInsertsThenUpdates(t *testing.T) {
 
 	time.Sleep(2 * time.Millisecond) // NOW_UTC() is millisecond-precision; ensure seen_at changes
 	r.p.beat(ctx)
-	assert.Equal(1, len(r.peerRows(t)), "the second beat updates, it does not insert again")
+	assert.Equal(1, len(r.peerRows(t)), "the second beat updates in place")
+
+	// A beat with no row to update is a NO-OP, never an insert. That is what lets the owner delete the row
+	// at shutdown without having to prove every piston stopped beating first - a straggler beat simply
+	// matches nothing instead of resurrecting the replica in a registry it has just left.
+	_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", defaultTestEngineID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.p.beat(ctx)
+	assert.Equal(0, len(r.peerRows(t)), "a beat must never re-create a deleted row")
 }
 
 // TestPiston_DispatchedAtNeedsEvidence pins the distinction between the two timestamps. seen_at says the
@@ -384,9 +408,9 @@ func TestPiston_DispatchedAtNeedsEvidence(t *testing.T) {
 		"dispatched_at keeps its never-dispatched default (age %.0fms)", row.DispatchedAgeMs)
 
 	// A completed cycle is the evidence; the next beat publishes it.
-	res := r.p.pipe.Cycle(ctx)
+	res := r.p.Cycle(ctx)
 	assert.NoError(res.Err)
-	r.p.dispatchedSinceBeat.Store(res.Err == nil)
+
 	time.Sleep(2 * time.Millisecond)
 	r.p.beat(ctx)
 	row = r.peerRows(t)[0]
@@ -574,7 +598,7 @@ func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
 	r.insertStep(t, 1, 5, "alpha", 1)
 
 	// A healthy cycle first, so there is a tally to clear and a partition to preserve.
-	assert.NoError(r.p.pipe.Cycle(ctx).Err)
+	assert.NoError(r.p.Cycle(ctx).Err)
 	band, keys := r.planner.LastBand()
 	assert.Equal(5, band)
 	assert.Equal(1, keys)
@@ -591,7 +615,7 @@ func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
 
 	// And through a whole cycle: the shard clears itself from planning, but its candidates survive.
 	seams.Inject(FaultScanErr)
-	res := r.p.pipe.Cycle(ctx)
+	res := r.p.Cycle(ctx)
 	assert.Error(res.Err, "the cycle reports the failure rather than returning it")
 	assert.Equal(held, r.cache.Len(), "a FAILED scan must not wholesale-replace a healthy partition")
 	assert.Equal(pipeline.NoBand, res.GlobalBand, "the cleared shard no longer claims a band")
@@ -630,7 +654,7 @@ func TestPiston_IdleWithdrawsTheShard(t *testing.T) {
 	r := newRig(t)
 	r.insertStep(t, 1, 5, "alpha", 1)
 
-	assert.NoError(r.p.pipe.Cycle(ctx).Err)
+	assert.NoError(r.p.Cycle(ctx).Err)
 	assert.True(r.cache.Len() > 0, "the cycle populated the partition")
 	band, _ := r.planner.LastBand()
 	assert.Equal(5, band, "and claimed its band in the shared planner")
@@ -721,7 +745,7 @@ func TestPiston_RecordsItsInstruments(t *testing.T) {
 	r.cache.Refill(1, []candidatecache.Job{{StepID: 9999, Shard: 1}}, 100)
 	r.insertStep(t, 1, 5, "k", 1)
 
-	res := r.p.pipe.Cycle(ctx)
+	res := r.p.Cycle(ctx)
 	assert.NoError(res.Err)
 	r.p.record(ctx, res)
 

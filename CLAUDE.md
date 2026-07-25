@@ -64,6 +64,14 @@ matching one before working there:**
   and the token-free `CorrelationID` derivation. (The engine-side enforcement/posture stays in `engine/CLAUDE.md`.)
 - **`internal/candidatecache/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL - godoc only, no design doc.)
+- **`internal/planner/CLAUDE.md`** - the cross-shard band + fairness decision: why per-shard tallies replaced a
+  barrier, why participation is *declared* (`Clear`) rather than inferred from silence, and the slice rule's
+  determinism.
+- **`internal/pipeline/CLAUDE.md`** - one shard's supply cycle (`sleep -> tallying -> planning -> fetching ->
+  pushing`): its self-pacing, and the asymmetric error policy (a failed scan clears the shard but spares the
+  cache; a failed fetch touches neither; an empty plan clears the partition).
+- **`internal/piston/CLAUDE.md`** - the per-shard cylinder that drives that cycle: the two SQL queries, the
+  heartbeat on its own goroutine, idle mode, and the replica-partition predicate.
 
 **Landmines that radiate into engine code - obey these even though the full detail now lives in a package doc:**
 

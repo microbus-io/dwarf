@@ -504,104 +504,65 @@ the next. The cache holds hints, never ownership; only the CAS grants a step. **
 `parked=parkedNone`**: a step that was offered to the cache and then parked (waiting on a subgraph) is rejected at
 claim time rather than dispatched, so a parked step in a stale cache entry never runs.
 
-**Selection (two-level priority + fairness), in three phases, decoupled per shard.** The refillers, not the
-workers, decide *what* runs. Each shard's refiller runs three phases against its own shard only
-(`scanShardBandKeys` -> `planBatch` over the census merge -> `fetchShardBandSteps`, driven by
-`runShardRefill`), with **no barrier anywhere** between shards. (1) **Aggregate scan** (`scanShardBandKeys`):
-the shard returns *one row per fairness key* at its strict-minimum `priority` band - the key's due
-**count CAPPED at cache capacity** (`MAX(rn)` under a `rn <= capacity` cut, not `COUNT(*) OVER`; see "The
-scan count is CAPPED, not exact" below) plus the age and `fairness_weight` of its *oldest* due step
-(`ROW_NUMBER()=1`). The band is a `priority=(SELECT MIN(priority) ... due)` subquery, so band and
-aggregates are self-consistent within the statement. The result is **published to the census** - a shared
-`map[shard]*shardCensus` of immutable, timestamped entries - which is what replaced the barrier: phase 1's
-output already *is* the per-key census, so retaining it costs one struct and zero extra queries. (2) **Global
-merge + weighted pick** (`mergeCensus` + `planBatch`): the refiller snapshots the live census (entries past
-the TTL are dropped - see the dead-shard paragraph below) and runs the *same* cross-shard merge the barriered
-pass ran: global minimum band (strict priority is cluster-wide; worse-band shards contribute nothing - lower
-bands are never materialized until the higher drains, by design), counts summed per key, the globally-oldest
-step's weight winning. Then repeatedly weighted-random pick a key (Efraimidis-Spirakis over the *keys*, not
-the rows), consuming one of its due steps (capped at the key's count), until the plan reaches `capacity` -
-FIFO within a `fairness_key`. **The plan is global; only the fetch is per-shard**, so fairness semantics are
-exactly the barrier's - never re-derive this as per-shard lotteries, presence-scaled (`1/d`) weights, or
-capacity allocated by shard counts (count-proportional capacity makes backlog drive share, repealing the
-"count does not drive share" property that makes the design fair). Each refiller rolls its own plan from its
-own snapshot - independent rolls change nothing in expectation and need no coordination; the staleness is
-that a refiller sees the *other* shards up to one of their passes old, which fairness (slowly-varying)
-tolerates and dispatch (own-shard scan, always fresh) never sees. (3) **Sliced fetch** (`sliceDemand` +
-`fetchShardBandSteps`): the plan's per-key demand is split across the shards holding the key - **first slot
+**Selection (two-level priority + fairness), in three phases, one PISTON per shard.** The pistons, not
+the workers, decide *what* runs. Each shard's piston cycles against its own database on its own clock,
+with **no barrier anywhere** between shards (a merged pass returned when the slowest shard did - an
+order-statistics tax measured at 2.02x by 6 shards, on the path that is the engine's throughput ceiling).
+One cycle is `sleep -> tallying -> planning -> fetching -> pushing` (`internal/pipeline`). (1) **Aggregate
+scan** (`piston.ScanBand`): the shard returns *one row per fairness key* at its strict-minimum `priority`
+band - the key's due **count CAPPED at cache capacity** (`MAX(rn)` under a `rn <= capacity` cut, not
+`COUNT(*) OVER`; see "The phase-1 scan count is CAPPED, not exact" below) plus the age and
+`fairness_weight` of its *oldest* due step (`ROW_NUMBER()=1`). The band is a
+`priority=(SELECT MIN(priority) ... due)` subquery, so band and aggregates are self-consistent within the
+statement. (2) **Global merge + weighted pick** (`internal/planner`): the shard's tally is recorded in the
+planner - a shared map holding each shard's LAST report, which is what replaced the barrier - and the plan
+is computed over all of them: global minimum band (strict priority is cluster-wide; worse-band shards
+contribute nothing), counts summed per key, the globally-oldest step's weight winning, then repeatedly
+weighted-random pick a key (Efraimidis-Spirakis over the *keys*, not the rows) until the plan reaches
+`capacity`. **The plan is global; only the fetch is per-shard**, so fairness semantics are exactly the
+barrier's - never re-derive this as per-shard lotteries, presence-scaled (`1/d`) weights, or capacity
+allocated by shard counts (count-proportional capacity makes backlog drive share, repealing the "count
+does not drive share" property that makes the design fair). Each piston rolls its own plan from its own
+snapshot - independent rolls change nothing in expectation and need no coordination; the staleness is that
+a piston sees the *other* shards up to one of their cycles old, which fairness (slowly-varying) tolerates
+and dispatch (own-shard scan, always fresh) never sees. (3) **Sliced fetch** (`planner`'s slice rule +
+`piston.FetchSteps`): the plan's per-key demand is split across the shards holding the key - **first slot
 to the shard with the key's oldest step** (preserves globally-oldest-first dispatch and prevents a purely
 proportional split from rounding a quiet shard's lone old step to zero forever), remainder proportional to
-per-shard counts, largest-remainder rounding, deterministic - and the refiller fetches only its own slice
+per-shard counts, largest-remainder rounding, deterministic - and the piston fetches only its own slice
 (at most its slice's max per-key demand, oldest first per key), replaying the plan's interleave for its
-occurrences. Intra-key ordering across shards is approximate below the head (per-shard fetch is oldest-first
-within the shard; the head slot carries the globally-oldest) - the same self-correcting softness class as
-the scan-dispersion note below.
+occurrences. Intra-key ordering across shards is approximate below the head.
 
-**Strict priority across shards: no spill, an explicit back-off.** A shard whose own minimum band sits above
-the global minimum plans an **empty slice** and fetches nothing (its partition is also cleared - hints at a
-band it no longer holds due work at are dead). That outcome (`refillAboveBand`) is *distinct from "nothing
-due"*: parking on the doorbell would re-run the scan at the floor rate producing nothing, pass after pass,
-so the refiller backs off in `awaitBandRelease` - in-memory census checks on a
-`refillBandWatchTick`, a real rescan at most every `censusRefreshInterval` (1s, keeping its census entry live for
-the fleet) - until the global band rises to its own band, a doorbell arrives, or the engine stops. When the
-band moves up, workers may idle for one back-off plus one cycle - the analog of the old single merged-refill
-window. A shard with *nothing* due parks on the doorbell as always (`refillIdle`).
+**A cycle is UNCONDITIONAL, and that is what removed an entire class of liveness machinery.** There is no
+trigger, no nudge, and no wake channel: a piston scans on its period whether or not anything happened.
+Four mechanisms existed only to decide *when* to scan, and all four are gone with the trigger - the
+per-shard single-slot `refillTriggers`, the `refillAboveBand` census watch (`awaitBandRelease`), the
+`refillStarved` self-re-arm, and the `refillIdleInterval` cap on parking. Each existed because a parked
+refiller could only be woken by shard-LOCAL activity, so a shard holding work nothing local had announced
+would sleep; a cycle that always runs cannot be in that state. **Do not reintroduce a trigger to shave
+latency** - what it would shave is bounded by one interval, and the doorbell already covers the case that
+matters (see below).
 
-**An empty slice has TWO causes, and neither may park on the doorbell.** Besides the above-band case, a
-shard **at** the global band wins zero slots when a capacity-bound plan gives them all to shards holding
-more (or older) of the planned keys - `refillStarved`, which re-arms its own trigger and rescans at the scan
-floor. No extra wait: the band is already right, so what must change is the competitors *draining*, which the
-very next plan reflects, and the floor (already waited before the outcome switch) spaces the retry on its own.
-`awaitBandRelease`'s census watch would be wrong here - it would release instantly and spin.
-**Every trigger-arming site is shard-LOCAL** - a pop names the popped job's shard, the post-`processStep`
-nudge names the processed step's shard, the doorbells name the announced step's shard - so a shard with an
-empty partition and nothing in flight **arms nothing and generates nothing**. Parked, it would sleep until
-`pollPendingSteps`' fleet-wide backstop - whose resting cadence is now `maxPollInterval` (MINUTES), since the
-due-backlog probe and its 1-minute cap were removed - with its due work sitting there; once the competitors
-drained, every worker would block in `Pop` while those steps waited.
-It is also self-sustaining: a parked shard stops refreshing its census entry, so past the TTL its keys
-vanish from peers' plans and it cannot win slots even in principle. The retry adds no load that the old
-design did not already carry - a starved shard then scans at the cadence a busy one does, which is exactly
-what the *merged* pass did for every shard on every cycle. Pinned by
-`TestRefillOutcome_StarvedNeverParksOnTheDoorbell`.
+**Strict priority across shards: no spill, no back-off needed.** A shard whose own minimum band sits above
+the global minimum plans an **empty slice** and fetches nothing; its partition is cleared, because hints at
+a band it no longer holds due work at are dead. Under the old trigger design this needed its own outcome
+and a census watch to avoid spinning; now it is simply a cycle that fetched nothing, and the next one
+re-evaluates on its own. The same is true of a shard AT the global band that wins zero slots because a
+capacity-bound plan gave them all to shards holding more (or older) of the planned keys. `planner.Plan`
+deliberately does not say WHICH of those happened - every case takes the same action, hold no candidates.
 
-**The park on the trigger is CAPPED at `refillIdleInterval` (1s), which generalizes those two escapes to
-every early return.** `refillerLoop`'s top `select` carries an idle-tick case, so no refiller ever parks
-longer than the interval, and the standing rule - *any new early return from `runShardRefill` must answer
-"what will ring this shard's trigger?" before it parks* - now has a structural answer: the tick will,
-within `refillIdleInterval`. Two `refillIdle` returns needed it and had nothing arming them, both with
-due work present: a plan that comes back empty at a legitimate band (the census aged out from under it),
-and a batch that assembles empty because every chosen key's steps were claimed between phases. It is a
-**cap, not a cadence** - the scan floor still bounds the pass rate from below, so an idle shard scans once
-per `floor + interval` and a busy one never sees the tick (its trigger is always armed).
+**A shard that could not LOOK must clear itself, and this is the one thing a cycle must never skip.**
+A failed scan leaves the planner holding that shard's last tally, which may claim the best band; every
+peer then computes the same global minimum, finds none of its own keys there, and dispatches nothing -
+forever, waiting on a shard that will never report again. So the pipeline calls `planner.Clear` on a scan
+error. Participation is **declared, never inferred**: there is no TTL and no timeout, because the reports
+come from this replica's own per-shard workers over a fixed shard set - the caller *knows* its scan
+failed, and a clock cannot tell a dead shard from a slow one anyway. (The old census carried a
+`censusTTL()` scaled to the slowest observed pass precisely to guess at that; declaring it retires the
+guess.) A merely SLOW shard says nothing, keeps its tally, and stays counted - correct, since it is alive
+and its last report is still the best information anyone has.
 
-*Its real purpose was to make the cross-replica enqueue doorbell removable, which it now has been.* Every
-trigger-arming site is shard-**local**, so a replica holding a step no peer announced to it arms nothing; the
-cap turns that from "wait for `pollPendingSteps`' fleet-wide backstop, MINUTES away" into "at most 1s", for
-one index probe per idle shard per second. **This is now load-bearing for liveness across the fleet, not an
-optimization** - with no peer doorbell there is nothing else between a peer's pending step and this replica's
-next scan. Do not lengthen it materially and do not gate it on an outcome. `shortenNextPoll`'s precise `not_before` wake still stands
-alongside it - the tick is a floor under that, not a replacement - so a sleeping step is not woken 1s late,
-and the cost is ~one empty scan per second while it sleeps.
-
-*Pinned by `TestRefillIdleTick_ScansWithNoTrigger`, and how it is pinned is itself the finding.* It counts
-**passes on a fully idle engine** rather than timing an undoorbelled flow to completion, because the
-end-to-end shape is **not sensitive**: `Startup` arms every trigger *twice* (`requestRefillAll` directly,
-then again from `timerLoop`'s first `pollPendingSteps`, which runs on a goroutine and races the test's
-`Create`), so the residual pending trigger dispatches the step one scan floor later and such a test passes
-with the tick disabled - it was written that way first and measured green against the unmodified engine.
-Pass count separates the two cleanly (unbounded with the tick, zero without) and needs no flow at all. Any
-future test that needs this replica's triggers to stay unarmed faces the same startup residue.
-
-**A dead shard's census entry is TTL'd, or it wedges the fleet.** The census introduced a failure the barrier
-made impossible: shard A's last entry says band 1, A dies, every other shard computes globalBand=1, finds
-nothing there, and plans nothing forever. Entries are therefore timestamped and dropped from snapshots past
-`censusTTL()` - `max(5s, 8x the slowest observed pass)` (`maxRefillPassNs`), scaled so a deep-backlog scan
-that legitimately takes seconds is not mistaken for a dead shard. A failing shard's entry is *not*
-republished on scan error, so it ages out and stalls only its own partition - per-shard refill is otherwise
-MORE fault-tolerant than the barrier, which aborted the whole pass on any shard's error. The census lock is
-held for the map copy only, never across a query or plan computation - anything that re-couples the cycles
-(a shared lock across phase 2, sharing one computed plan) hands the decoupling win straight back. `created_at` (read as an age, comparable across shards) does two things per
+`created_at` (read as an age, comparable across shards) does two things per
 key: fixes the key's `fairness_weight` from the key's oldest step (so a tenant cannot self-promote with newer
 high-weight tasks) and orders dispatch oldest-first within the key. It is the only ordering signal comparable across
 shards: `step_id` is a per-shard auto-increment, so a `(shard, step_id)` order would let a brand-new task on a low
@@ -609,7 +570,7 @@ shard jump an old task on a high shard for the *same* tenant (unbounded intra-te
 `DATE_DIFF_MILLIS(NOW_UTC(), created_at)` per shard, and `created_at` defaults to that shard's `NOW_UTC()` at insert
 - both terms on one shard clock, so per-shard clock offset *cancels exactly*; no inter-shard clock-skew term in
 `ageMs`. The only residual is the dispersion in *when* each shard runs its age query (the per-shard refillers scan
-on independent cadences, so a census entry's ages can lag another's by up to one pass), a soft, self-correcting
+on independent cadences, so one shard's tally ages can lag another's by up to one cycle), a soft, self-correcting
 reordering of one tenant's own queue - not a fairness violation (the weighted *key* pick governs cross-tenant
 fairness) and not a correctness issue (the CAS arbitrates).
 Same-age ties break by `(shard, step_id)` for determinism. The pick is re-rolled per step so expected dispatch share
@@ -649,10 +610,10 @@ row of a key to count it. That is invisible on a fragmented backlog (many tiny k
 fan-out is *one* key with 3M due steps, counted in full **every refiller pass**. Measured (`engine/refillfetchscaling_test.go`):
 ~15-23s per pass at 3M on Postgres (→ the ~99s seen on a loaded rig), which stalls dispatch fleet-wide.
 
-The fix: the census `count` is now `min(count, capacity)` - computed as `MAX(rn)` under a `rn <= capacity`
-cut (`scanShardBandKeys`), never `COUNT(*) OVER`. **The cap is LOSSLESS, and this is the whole point:**
-`planBatch` builds a plan of at most `capacity` entries, so a single key can be picked at most `capacity`
-times (`remaining[i]` values above `capacity` are unreachable), and `maxNeeded`/`sliceDemand` are `<= capacity`
+The fix: the tally `Count` is now `min(count, capacity)` - computed as `MAX(rn)` under a `rn <= capacity`
+cut (`piston.ScanBand`), never `COUNT(*) OVER`. **The cap is LOSSLESS, and this is the whole point:**
+the planner builds a plan of at most `capacity` slots, so a single key can be picked at most `capacity`
+times, and the per-key fetch cap is `<= capacity`
 too. So a count above `capacity` is indistinguishable from `capacity` for every downstream consumer. **This is
 NOT the forbidden "approximate count"** (below): an approximation is wrong in *either* direction and distorts
 fairness; a cap is *exact* where it matters (`count < capacity`) and *saturated-correct* above it. The oldest
@@ -680,7 +641,7 @@ and whether the run condition survives its distributed planner is unknown. **Do 
 actual target.** Where the run condition is absent, a single-key flood is O(backlog) per pass (the constant is
 one scan, not the old two), which is why the cap is still the right change even there.
 
-**Why the sibling phase-3 window (`fetchShardBandSteps`) was deliberately LEFT ALONE.** Phase 3's
+**Why the sibling phase-3 window (`piston.FetchSteps`) was deliberately LEFT ALONE.** Phase 3's
 `ROW_NUMBER() OVER (PARTITION BY key) WHERE rn<=perKey` has the *same* run-condition dependency. On Postgres 15+
 it already early-stops (measured 2ms on a 3M flood), so a per-key `ORDER BY ... LIMIT` rewrite is **no faster**
 - and it would replace one query with a **UNION-ALL branch per chosen key**, which hits SQLite's
@@ -701,15 +662,15 @@ flow completion). That broadcast was **removed**, and the reasoning is worth kee
 re-suggests itself:
 
 - **It bought no latency where it cost the most.** Under load every peer's refiller is already scanning at
-  its derived scan floor (~67ms), so the doorbell only ever beat a scan that was about to happen anyway.
+  its derived cycle interval (~67ms), so the doorbell only ever beat a scan that was about to happen anyway.
 - **It cost a round-trip on every receiver.** The inbound path had to resolve the announced step's `priority`
   and `not_before` with a PK lookup - the exact round-trip `enqueueStepDue` exists to avoid locally - R-1
   times per step.
 - **It head-inserted UNPARTITIONED**, so a peer could offer a step outside its residue class and race the
   owner to the claim CAS (measurable as `dwarf_steps_claim_lost` scaling with R).
 
-What replaced it is the refiller's **idle tick** (`refillIdleInterval`, see "An empty slice has TWO causes"):
-a peer discovers work by scanning, bounded, with no message at all. The consequence to hold in mind when
+What replaced it is that every piston cycles **unconditionally** on its own period: a peer discovers work
+by scanning, bounded, with no message at all. The consequence to hold in mind when
 reading the origination sites: a step created here is offered to **this replica's cache only**, so if this
 replica cannot serve it (its partition is non-empty, and the step falls in a peer's residue class) the step
 waits for that peer's next scan. If a per-step peer signal is ever revived it must be coalesced and
@@ -742,14 +703,11 @@ priority ordering. Flushing would idle every worker through the refill scan to g
 executions after a higher-priority arrival; instead the workers keep draining and the refiller's wholesale replace
 re-establishes strict band order within one cycle. Exact ordering is soft anyway - with N replicas draining
 independently there is no global order to preserve. The cache is bound to `size` by trimming the tail on insert; a
-trimmed step stays `pending` and is re-selected. **One buffered(1), never-closed, non-blockingly-sent trigger
-per shard** (`refillTriggers`) is the selection gate: concurrent requests for a shard coalesce into at most one
-pending scan of it, and the send can never panic, even during shutdown drain. **Every "refill now" origination
-site names a shard** (`requestRefill(shard)`): a worker's low-water pop names the popped partition's shard; the
-post-`processStep` nudge names the processed step's shard (the freed slot and any successor it inserted live
-there - same-flow shard affinity); the doorbells (`enqueueStepDue`/`enqueueStep`) name the announced step's
-shard. Only `pollPendingSteps` and startup ring **all** shards (`requestRefillAll`) - the backstop cannot know
-which shard's backlog it observed.
+trimmed step stays `pending` and is re-selected. **There is no trigger and no selection gate.** Each shard's piston cycles on its own period, so the
+doorbell's only job is the cache: it never asks anyone to scan. The former `refillTriggers` (one
+buffered(1) channel per shard) and every `requestRefill` origination site - a worker's low-water pop, the
+post-`processStep` nudge, the doorbells themselves, and `pollPendingSteps`' fleet-wide `requestRefillAll` -
+are gone. `Pop` still reports `needRefill`; nothing consumes it.
 
 **An EMPTY partition ADMITS the arrival, and reversing that is what makes a fixed-cadence refiller viable.**
 It used to decline (request a scan, cache nothing), on the reasoning that an arbitrary-priority step must not
@@ -766,10 +724,17 @@ capacity so the path is never taken.
 **One pioneer is sufficient; the head-insert is a bridge, not a per-job fast path.** A head-insert is accepted at
 most once per band-opening: it lowers `floor` to the pioneer's priority, so every subsequent arrival at that band
 hits `priority >= floor` and lands at the tail (case 2) or is dropped (case 3). Deliberate, not starvation. The pioneer bridges the single
-refiller-cycle gap so the *first* urgent step does not eat a refiller scan of latency. Its `requestRefill` makes the
-refiller scan band MIN and `refill()` **wholesale-replace** the cache with the strict, weighted batch of that band,
-*evicting* the cached lower-priority candidates (they stay `pending`, re-selected when the band drops back). After
-that cycle the refiller serves the whole band correctly and fast - no further head-inserts. A non-pioneer
+cycle gap so the *first* urgent step does not eat a full interval of latency. The next cycle then plans band
+MIN and **wholesale-replaces** the partition with the strict, weighted batch of that band, *evicting* the cached
+lower-priority candidates (they stay `pending`, re-selected when the band drops back), after which the whole band
+is served correctly - no further head-inserts.
+
+**NOTE the premise that changed.** This paragraph's original argument was that the pioneer bridges the gap
+until the `requestRefill` it fired brought the refiller along. There is no such nudge now, so the rest of an
+arriving burst waits for the next cycle boundary - up to one interval rather than one floor remainder. Bounded
+and within the "strict within one or two intervals" statement below, but it is a real latency shift, and it is
+why `fixtures/crossshardpriorityflow_test.go` measures its ordering margin against a third of the backlog
+rather than half. A non-pioneer
 high-priority step that misses the head-insert (stale `floor`) is **not** stuck behind the backlog: the refiller
 selects band MIN, so it is picked up after at most ~`lowWater` lower-priority pops plus one scan - a bounded
 fast-path *miss*, never priority starvation.
@@ -784,10 +749,10 @@ batch). Both costs are smaller than the cross-replica fairness softness the desi
 these by flushing, per-item priority tracking, or re-floor-on-pop: each trades the latency win the head-insert
 exists for and only shaves an already-bounded refiller cycle off a path the refiller already backstops.
 
-**The scan floor is the refiller's supply control, DERIVED per shard (`deriveScanFloor` /
-`recomputeScanFloors`, ~67ms at the reference config) - NOT a fixed constant.** Each shard's refiller waits
-out the floor after every pass, measured from the pass *start* so a slow pass pays for itself. It exists
-because the trigger is re-armed by every completed step, which ran the refillers at a **100% duty cycle** -
+**The cycle period is the supply control, DERIVED per shard (`deriveRefillInterval` /
+`recomputeRefillIntervals`, ~67ms at the reference config) - NOT a fixed constant.** The pipeline paces each
+cycle from the *start* of the previous scan, so a slow cycle pays for itself rather than stacking. It exists
+because an unpaced piston runs at a **100% duty cycle** -
 measured, in *both* the merged and decoupled builds: every refiller scanning back to back for a whole 60s
 window. The merged pass was accidentally self-limiting (its straggler wait made it slow); deleting the
 barrier made each pass fast and the loop hot, raising phase-1 scan load **3.4x**. **Phase 1 costs per DUE
@@ -850,7 +815,7 @@ constant now encodes, since it held across the widest range - and a validation s
 141ms by ~50% at M=8 and M=64.) headroom stays **2.0**: the decline past the peak is drain-rate jitter
 stalling workers at a tight buffer, which a ~2x buffer absorbs.
 
-**Three adaptive alternatives were built and all lost** - see the `deriveScanFloor` comment in
+**Three adaptive alternatives were built and all lost** - see the `deriveRefillInterval` comment in
 `scheduling.go`. Do not re-propose any without new evidence: an adaptive fetch DEPTH was *inert* (batch
 moved 179→173→190 across a 60% margin change, because the batch is set by the backlog and the plan slice,
 never by a target); a DERIVED interval (set from observed consumption) was *actively harmful* (~1,000x
@@ -869,64 +834,61 @@ DB-independent phase metric, over throughput). A 16-vCPU/1TB shard (30k IOPS) co
 confirming it. Operator guidance (size disk throughput to the workload's `dwarf_state_write_bytes` rate) is
 in `docs/deployment.md`.
 
-**EVERY nudge is floor-gated - there is no bypass class, and cross-shard priority is therefore strict only
-WITHIN ONE OR TWO FLOORS.** There used to be a second, floor-cutting nudge channel (`requestRefillDemand` /
-`routeRefill`, fed by an `urgent` flag out of `Offer`) whose whole job was to close the publish gap below.
-It is gone; this section is the guarantee that replaced it, and it is weaker in a way that must be stated
-rather than assumed.
+**CROSS-SHARD PRIORITY IS STRICT ONLY WITHIN ONE OR TWO CYCLE INTERVALS**, and this must be stated rather
+than assumed. There used to be a floor-cutting nudge channel (`requestRefillDemand` / `routeRefill`, fed by
+an `urgent` flag out of `Offer`) whose whole job was to close the publish gap below; it is gone, and so is
+the ordinary trigger that replaced it.
 
-The gap: a shard learns of an arriving better band from its doorbell, but peers learn of it only from the
-**census**, which this shard populates by *scanning*. So the band becomes globally visible one floor later
-(this shard rescans and publishes) plus up to one more (a peer plans on its own next pass). Inside that
+The gap: a shard learns of an arriving better band from its doorbell, but peers learn of it only from that
+shard's next **tally**, which it publishes by *scanning*. So the band becomes globally visible one interval
+later (this shard cycles and tallies) plus up to one more (a peer plans on its own next cycle). Inside that
 window a peer computes a stale global minimum, finds itself holding it, and legitimately dispatches
 worse-band work. That is an inversion of the observable dispatch ORDER, not merely of latency - do not
-repeat the old claim that "the floor can only delay dispatch, never invert order." It was true of a pass
-planning from a *current* census and false across the publish gap, which is exactly the case that matters.
-Pinned by `fixtures/shardedflow_test.go` and, on the latency axis, `fixtures/crossshardpriorityflow_test.go`.
-**Both are floor-relative, so both are sensitive to the floor being derived sanely** - which is how the
-`bufferShare` zero-division bug was found. A cache smaller than the shard count integer-divided to zero and
-took `deriveScanFloor`'s degenerate branch, answering with the 1s CAP: the slowest floor there is, for the
-case that wants the fastest. Every `SetWorkers(1)` multi-shard fixture silently ran at second-long scan
-intervals, which is why the fix took ~13s off the whole fixtures suite. `recomputeScanFloors` now clamps
-`share` at 1. If either of those fixtures starts failing on timing again, suspect the derived floor before
-suspecting the test.
+repeat the old claim that "the rate limit can only delay dispatch, never invert order." It was true of a
+cycle planning from a *current* picture and false across the publish gap, which is exactly the case that
+matters.
+
+Pinned by `fixtures/shardedflow_test.go` and, on the latency axis,
+`fixtures/crossshardpriorityflow_test.go`. **Both are interval-relative, so both are sensitive to the period
+being derived sanely** - which is how the `bufferShare` zero-division bug was found. A cache smaller than
+the shard count integer-divided to zero and took the derivation's degenerate branch, answering with the 1s
+CAP: the slowest period there is, for the case that wants the fastest. Every `SetWorkers(1)` multi-shard
+fixture silently ran at second-long scan intervals, which is why the fix took ~13s off the whole fixtures
+suite. `recomputeRefillIntervals` clamps `share` at 1. If either fixture starts failing on timing again,
+suspect the derived period before suspecting the test.
 
 What is NOT weakened: the arriving step itself is never delayed (`Offer` head-inserts a strictly-better
-band, so it is popped next), ordering among work already in the census is strict, and nothing is preemptive.
-The public statement of all this is in `docs/scheduling-and-reliability.md` - keep the two in step.
+band, so it is popped next), ordering among work already tallied is strict, and nothing is preemptive. The
+public statement of all this is in `docs/scheduling-and-reliability.md` - keep the two in step.
 
 `fixtures/crossshardpriorityflow_test.go` still asserts urgent-burst LATENCY as its sensitive axis (an
-ordering-only test passes a starved build silently - verified: a 5s floor produced correct ordering and took
-22x as long), and that axis is now bounded by the floor rather than by signal delivery.
+ordering-only test passes a starved build silently - verified: a 5s period produced correct ordering and
+took 22x as long).
 
-**The floor is the ONLY standing rate limit, and `refillScanFloorMin` (20ms) is its unconditional guarantee.**
-The derived formula can bottom out: `share` is `capacity/N`, so a small cache over many shards produces a
-sub-millisecond floor - e.g. `SetWorkers(1)` gives capacity 2, `share` 2, and ~2ms before clamping. At those
-values the floor stops limiting anything and the always-armed trigger (workers re-arm it after every step on
-the shard) restores the 100%-duty-cycle scan loop, whose cost is measured and severe: at high backlog
-(pre-decoupling) ~half of all pops and their claim round-trips were stale, with the entire due backlog
-streamed every few ms. The minimum is the fuse - never scan the same shard twice inside 20ms, however the
-inputs degenerate - not a tuning knob. It is **inert in the derived path** (~67ms in production, 66.67ms in
-test mode), so it costs a healthy configuration nothing, and the `SetRefillScanFloor` override deliberately
-bypasses it so bench sweeps can still measure below it.
+**The period is the only standing rate limit, and its fuse is the pipeline's `MinGap` (20ms) - NOT a
+minimum on the period itself.** The derived formula can bottom out: `share` is `capacity/N`, so a small
+cache over many shards produces a sub-millisecond period - `SetWorkers(1)` gives capacity 2, `share` 2, and
+~2ms. At those values the period limits nothing and an unpaced piston restores the 100%-duty-cycle scan
+loop, whose cost is measured and severe: at high backlog ~half of all pops and their claim round-trips were
+stale, with the entire due backlog streamed every few ms.
 
-Liveness is unaffected: the trigger stays armed through the wait, so a drained-early partition waits at most
-the remainder. Pinned by `TestRefillFloor_DeepBacklogLiveness` (a deep backlog still drains under a floor
+The fuse used to be `refillScanFloorMin`, a 20ms clamp inside the derivation. It moved to `MinGap`, which
+bounds the quiet time between the END of one cycle and the START of the next, and that is the STRONGER
+form: a start-to-start minimum cannot bound a cycle that outruns it, which is exactly the deep-backlog case
+the fuse exists for. Inert in the derived path (~67ms), so a healthy configuration pays nothing, and
+`SetRefillInterval` bypasses the derivation (not the gap) so bench sweeps can still measure below it.
+
+Liveness is unaffected: a cycle always runs, so a drained-early partition waits at most the remainder of the
+period. Pinned by `TestRefillInterval_DeepBacklogLiveness` (a deep backlog still drains under a period
 pinned into the over-limiting regime, with a single worker).
 
-`refillBandWatchTick` (20ms) is a separate constant with a separate job - it is the poll interval of
-`awaitBandRelease`'s in-memory census watch, bounding how often an above-band shard re-*evaluates* whether it
-may dispatch at all (a map read, no query), not how often anything scans. Do not collapse it into the floor.
-It has exactly one caller by design: the *starved* case needs no such wait, because the floor already spaces
-its retry - the same redundancy that removed the deep-backlog pace.
-
-**Liveness guarantee.** A worker requests a refill *after* `processStep` returns - i.e. after the step left `pending`
-(acquired or completed) - not at pop time, targeting the processed step's shard. Load-bearing: requesting before the
-CAS let the refiller re-select the in-flight step and, under single-slot coalescing, never scan post-completion
-state, wedging a single-worker replica with a backlog. Post-completion the next scan of that shard always reflects
-every freed slot (a step's successors share its shard - same-flow affinity - so the shard-targeted nudge covers
-them). The worker also requests at the low-water mark so draining overlaps refilling. The cache holds 2x the worker
-count; low-water is per partition, half its last-refill depth.
+**Liveness guarantee.** It is now structural rather than protocol: every piston cycles unconditionally, so
+the scan after a completion always sees the freed slot without anything having to ask for it. This retires a
+rule that was genuinely subtle - a worker had to request its refill *after* `processStep` returned, never at
+pop time, because requesting before the CAS let the refiller re-select the in-flight step and, under
+single-slot coalescing, never scan post-completion state, wedging a single-worker replica with a backlog.
+The other half of liveness is the doorbell: `Offer` admits into an EMPTY partition, so a sequential chain's
+next hop dispatches immediately rather than waiting out a cycle. The cache holds 2x the worker count.
 
 `pollPendingSteps` does not enumerate the backlog onto a queue. It recovers expired-lease steps, sizes the wake
 timer to the nearest future `not_before`, and rings the local doorbell each cycle. (Orphan-flow and parked-step
@@ -936,9 +898,10 @@ see "Background Recovery".)
 **There is no "a backlog exists" cadence any more, and the probe that set one is GONE.** The poll used to run
 a fourth statement per shard - an existence probe (`SELECT 1 FROM dwarf_steps … LIMIT_OFFSET(1,0)`) - whose
 *only* purpose was to cap `nextPoll` at `backlogPollInterval` (1 minute) so an idle replica that missed a
-doorbell still re-scanned. The refiller's `refillIdleInterval` tick now covers that case per shard, within
-~1s, with one band scan instead of the probe plus the poll's other three statements - so the chain was
-strictly dominated (the 1m cap existed to reach `requestRefillAll`, which the refillers no longer need). Both
+doorbell still re-scanned. Each shard's piston now cycles unconditionally on its own period, covering that
+case per shard far sooner, with one band scan instead of the probe plus the poll's other three statements -
+so the chain was strictly dominated (the 1m cap existed only to reach a fleet-wide nudge that no longer
+exists). Both
 the constant and the probe were removed. **Do not reintroduce anything here that fires on a backlog
 existing:** this poll is nudged sub-second under load, so a statement added to it is paid on every nudge,
 and the per-shard refiller is the right place for any work-discovery cadence.
@@ -957,14 +920,15 @@ again, and let the step dispatch once the blip clears. The clamp is the engine's
 errors; it never *retries the connection* (that is left to the layer holding the resource - the task or host), it
 just refuses to convert an unknown backlog into a long sleep.
 
-**The refillers apply the same clamp.** `runShardRefill`'s `scanShardBandKeys` (or the phase-3
-`fetchShardBandSteps`) can fail on the same transient DB error, and swallowing it is the mirror wedge: the shard's
-partition refills **empty**, its workers block in `Pop`, and nothing retries until the next doorbell or the shard's
-own idle tick. So `runShardRefill` logs the scan error and `shortenNextPoll(now + pollErrorRetryInterval)`
-(1s) - the doorbell fires again promptly (`pollPendingSteps` rings every shard) and the refiller re-scans once the
-blip clears, rather than idling the shard on a momentary blip. The shard's census entry is not republished on the
-error, so a persistently failing shard ages out of its peers' snapshots (TTL) instead of pinning the global band.
-Same policy, same 1s interval as the poll clamp above.
+**The pistons do NOT apply that clamp, and no longer need to.** A scan or fetch can fail on the same
+transient DB error, and swallowing it would be the mirror wedge: the shard's partition refills **empty**,
+its workers block in `Pop`, and nothing retries. Under the trigger design that needed an explicit
+`shortenNextPoll(now + pollErrorRetryInterval)` to get the refiller re-run. Now the next cycle is at most
+one interval away unconditionally, so the retry is the cadence itself. What the cycle DOES do on a scan
+error is `planner.Clear` (this shard stops claiming a band it cannot serve) while leaving the cache
+partition intact - an error means "unknown", not "nothing is due", so wholesale-replacing a healthy
+partition would idle its workers for no reason. A fetch error clears neither: the tally already succeeded
+and is still true. Same policy, same 1s interval as the poll clamp above.
 
 The timer waits on the `nextPoll` deadline, shortened to the nearest future `not_before` (`flow.Sleep` / retry
 backoff) so a due step wakes the replica even when no doorbell arrives. The timer loop (`timerLoop`) runs
@@ -1189,10 +1153,10 @@ A candidate the refiller selects can be one another worker is already claiming, 
 costs a **full dispatch round trip to be told it lost the CAS**. There are two distinct sources, they need
 two distinct mechanisms, and each is useless against the other's case:
 
-- **Cross-peer.** `planBatch`'s key pick is independently random per replica, but *within* a key the fetch
+- **Cross-peer.** The planner's key pick is independently random per replica, but *within* a key the fetch
   is deterministic (`ORDER BY created_at, step_id`), so every replica that picks a key fetches the SAME
   oldest rows. Handled by `partitionPredicate` - `AND step_id % R = ordinal` in **both** phase 1 (so the
-  census reflects the owned slice) and phase 3 (so the fetched ids actually are owned). Phase 1 alone is
+  tally reflects the owned slice) and phase 3 (so the fetched ids actually are owned). Phase 1 alone is
   not enough: it only shapes per-key counts, while phase 3 returns the ids workers claim.
 - **Intra-peer.** The selection predicate filters **committed** state, and a claim that has been issued
   but not committed still reads `pending` with a free lease. So *this* replica's own next pass legitimately
@@ -1215,7 +1179,7 @@ what would have been *lost* into *preempted*; comparing the two is how you tell 
 than over-suppressing.
 
 **Measured (local Postgres, `linear`, 256 keys).** Cross-peer: claim miss at R=2 fell **41.3% -> 11.6%**,
-and with re-delivery suppressed (a 250ms scan floor, where the R=1 baseline is 0%) R=2 measures **0.12%** -
+and with re-delivery suppressed (a 250ms cycle interval, where the R=1 baseline is 0%) R=2 measures **0.12%** -
 peer contention eliminated, and R=2 throughput goes **flat** against R=1 (×1.04), which is the correct
 outcome for replicas sharing one database's fixed capacity. Intra-peer: at a 0ms floor (scanning flat out)
 claim miss fell **7.3% -> 0.1%** at unchanged throughput.
@@ -1226,7 +1190,7 @@ established by breaking them:**
 - **Too short - releasing when the CAS returns** was built and measured and barely worked (7.3% -> 5.7%).
   The gap to span runs from SELECTION to POP, not the round trip between them: the refiller selects a step
   whose claim is uncommitted, the entry sits in the cache, and by pop time a CAS-scoped reservation is long
-  gone. The window must outlast the max scan floor between refill passes (~1s) so a step is never
+  gone. The window must outlast the max interval between cycles (~1s) so a step is never
   re-selected while its own claim is still in flight.
 - **Too long - holding for the whole STEP** was tried next and is worse. A worker parked in a long
   `ExecuteTask` keeps its reservation for the entire task, so if that step's lease expires meanwhile (an
@@ -1235,7 +1199,7 @@ established by breaking them:**
   exactly that shape. Step-scoped only appeared to work because steps in that benchmark take ~15ms; it is
   workload-dependent and unbounded above.
 
-The window is a fixed 1-2s (`internal/claimstracker`), well over the scan floor and **far below
+The window is a fixed 1-2s (`internal/claimstracker`), well over the cycle interval and **far below
 `leaseMargin` (30s)** so it can never be the reason a lease-recovered step fails to re-dispatch - the
 integration guard is `TestLeaseFence_CompletionNoDuplicateSuccessor`. The tracker gets both bounds and
 expiry from a **two-generation rolling window** rather than a per-entry TTL + sweep: two maps hold the
@@ -1254,8 +1218,8 @@ ever DELAY this replica's dispatch of a step by a bounded window, never prevent 
 - **Check in the worker loop, not inside `processStep`.** A skip then costs nothing but the next `Pop`
   (which blocks when the cache is empty, so there is no busy-spin), and skips are self-limiting: in-flight
   claims are bounded by the workers currently in the claim window, against a cache of 2x the worker count.
-  Do **not** `requestRefill` on the skip path - it was tried, and at a 0ms floor it feeds an already-
-  spinning refiller (throughput 1,632 -> 941).
+  Do **not** ask for an extra scan on the skip path - it was tried (as a `requestRefill`, back when a
+  trigger existed), and at a 0ms interval it fed an already-spinning refiller (throughput 1,632 -> 941).
 - **EVERY path that re-offers a step to THIS replica must `RelinquishClaim` first.** The window is sized to
   outlive a *scan*, so it necessarily outlives a step's own dispatch - which means a step re-armed and
   re-offered here still carries the reservation its previous dispatch took. Left in place it makes the
@@ -1272,7 +1236,17 @@ ever DELAY this replica's dispatch of a step by a bounded window, never prevent 
   this replica never reserved (Fork's leaf, `Continue`) is a harmless no-op, which is why the guard belongs
   at the shared entry point rather than at each caller.
 
-**The partition divides DISPATCHERS, not R** - see `dwarf_peers.dispatches`. An await-only replica
+**The partition divides DISPATCHERS, not R** - counted from `dwarf_peers.dispatched_at` freshness (see
+`peerDispatchWindow`, 5s), not the `dispatches` flag. The column is EVIDENCE that a piston turned rather
+than a claim about intent: a replica that publishes "I dispatch" and then wedges keeps its residue class
+forever, and a class nobody selects is work nobody runs, whereas a stale timestamp drops it from the
+divisor on its own while `seen_at` keeps it in R. The two windows are asymmetric in OPPOSITE directions
+and deliberately so - over-counting R over-sizes pools and can collapse a database, while over-counting
+DISPATCHERS strands work, so R errs toward keeping a replica and this errs toward dropping one.
+`dispatched_at` also advances while a cycle is IN FLIGHT, without which a deep-backlog scan (still
+O(backlog) on any dialect lacking the run-condition early-stop) would drop every healthy replica in a
+loaded fleet out of the divisor at once. Registration does NOT stamp it - intent is not evidence - so a
+replica earns it on its first cycle, and the piston beats immediately when that lands. An await-only replica
 (`SetWorkers(0)`) holds connections, so it counts toward R and divides the pools, but it claims nothing:
 giving it a residue class means *nothing ever selects those steps*. This shipped broken in the first cut
 and hung `fixtures/crossreplicaawait_test.go`, which uses exactly that configuration; `observedDispatchers`
@@ -2098,9 +2072,10 @@ engine policy — below.
   exact number and is never divided.
 
 **Peer discovery (observed replica count, `peers.go`).** The engine reads how many replicas share its shards' databases
-from the shared **`dwarf_peers`** registry, NOT from the host transport. Each replica heartbeats its own row
-`(engine_id, seen_at, dispatches)` into **every** shard via `OnEach` every `pingInterval` (10s) and reads the
-engine_id-sorted **roster** of rows fresh within `4x pingInterval` on each shard, taking the **freshest shard's
+from the shared **`dwarf_peers`** registry, NOT from the host transport. Each replica's **pistons** heartbeat its own row into their own shard (one per shard, on the piston's own
+cadence - `SetHeartbeatInterval`, pushed by the engine as `min(1s, pingInterval/4)`), while the engine's
+peers loop is a pure READER that re-reads the engine_id-sorted **roster** of rows fresh within
+`4x pingInterval` on each shard every `pingInterval` (10s), taking the **freshest shard's
 roster whole** (freshest by heartbeat age, not raw `seen_at` - each shard stamps its own `NOW_UTC()`, so ages are
 comparable across shards where timestamps are not). One roster, not a per-shard `MAX(COUNT)`, because it carries two
 coupled values that must agree: **R** = its length (the pool divisor - every peer holds connections) and this
@@ -2394,10 +2369,16 @@ flow-level sibling of `dwarf_steps_unwedged`, counted at the same site as its er
 and the two persist alarms `dwarf_steps_write_retried` / `dwarf_steps_write_failed` (detailed under "Persisting
 a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Startup).
 
-**2 refiller counters + 2 refiller histograms** (`dwarf_refill_candidates_selected` /
-`_discarded`, `dwarf_refill_duration_seconds` - all three now carrying `{shard}`, since the refillers are
-per-shard and a pass IS a shard's pass - and `dwarf_refill_query_duration_seconds{shard,phase}`). These
-exist because **the refiller was the one hot-path subsystem with no timing instrument at all**, so the
+**2 refiller counters + 2 refiller histograms**, built by the PISTONS (`internal/piston`) from the meter
+this engine resolves once and hands each of them - one instrumentation scope per engine, whoever records
+into it. `initMetrics` deliberately does NOT build them: registering the same four names twice on one meter
+is a duplicate-instrument conflict, and the two copies had already drifted in description and bucket
+boundaries. They are `dwarf_refill_candidates_selected` / `_discarded`, `dwarf_refill_duration_seconds`
+(one shard's cycle, excluding the pace it slept beforehand) and `dwarf_refill_query_duration_seconds`
+{shard,phase}, where `phase` is now four values - `band_keys`, `fetch_steps`, and the two non-query phases
+`planning` and `pushing`. Recording planning matters because it is the one cost that scales with fairness-key
+CARDINALITY (the lottery re-rolls per slot over every key), and it was previously computed and dropped.
+These exist because **the refiller was the one hot-path subsystem with no timing instrument at all**, so the
 question "what binds at the ceiling" could not be asked of it - and `docs/benchmark-cloud.md`'s
 straggler-wait explanation for the flat 3-shard arm was inference, never a measurement (it has since been
 retracted; the arm was load-generator-bound). They were placed to discriminate three hypotheses that look
@@ -2414,7 +2395,7 @@ identical from outside (the rules below record how each resolved):
   shard's partition while being triggered after every `processStep` on that shard, so whenever it turns
   faster than the workers drain it throws away a batch it just paid to fetch. `Cache.Refill` returns the
   discarded count for this. (Measured 0-10% pre-decoupling: dead then. The instrument stays because it is
-  the cheap readout that would catch the regime changing - and it is the gauge to re-tune the scan floor
+  the cheap readout that would catch the regime changing - and it is the gauge to re-tune the cycle interval
   against if the supply rate is revisited.)
 
 The `phase` label (`band_keys` / `fetch_steps`) separates phase 1 from phase 3, which matters for a reason
@@ -2423,9 +2404,11 @@ found while writing the degradation harness: the band scan's plan flips between 
 That is indistinguishable from a slow shard without the phase split, and phase 1 is where the measured cost
 concentrates, so the split is what makes the band scan's backlog dependence visible at all.
 
-Explicit second-valued bucket boundaries (`refillBuckets`) are mandatory: the OTEL defaults are tuned for
-millisecond-valued instruments and would file every sample in bucket 0. Both helpers no-op on
-`e.metrics == nil` before building attributes, so an unconfigured engine allocates nothing per pass.
+Explicit second-valued bucket boundaries (`refillBuckets`, now in `internal/piston`) are mandatory: the
+OTEL defaults are tuned for millisecond-valued instruments and would file every sample in bucket 0. **The
+LOW end is load-bearing** - a warm band scan is ~0.29ms and the same query is ~100ms once its statistics go
+stale, which is the flip the `phase` label exists to expose, so boundaries starting at 0.0005 hide the
+healthy case in bucket 0.
 
 **What the instruments measured, as rules.** The campaign detail (rigs, dates, artifacts, per-arm
 numbers) is deliberately not here - it is measurement, it expires, and it lives with the benchmark
@@ -2450,7 +2433,7 @@ worklist. These are the parts that would make a future change WRONG if unknown:
 - **Pool wait is silently RATE-LIMITING the refiller, and anything that reduces pool contention removes
   that limit.** Measured on both removals above: refill passes ~3-4x, discards 0.7% -> 43-45%. This is a
   property of the contention, not of either mechanism, so it applies equally to a reserved connection, a
-  smaller N, a larger M, or a faster database. Any such change must arrive with the scan floor re-derived
+  smaller N, a larger M, or a faster database. Any such change must arrive with the cycle interval re-derived
   against it, or the refiller spends server work and cache churn producing candidates nobody consumes.
 - **Neither removal bought throughput, and neither improved latency.** Throughput was null in every
   regime (at deep backlog the scan is server-execution-bound; at shallow the refiller was not the
@@ -2473,13 +2456,13 @@ worklist. These are the parts that would make a future change WRONG if unknown:
   phase-3 latency win, and do not add further caps chasing one.)
 
 - **CAP the count, do NOT APPROXIMATE it - they are different, and only one is safe.** `count` becomes
-  `remaining[i]` in `planBatch` (how many batch slots a key wins) AND sets `maxNeeded` (phase 3's
+  the planner's per-key remaining count (how many batch slots a key wins) AND sets the per-key fetch cap (phase 3's
   `rn <= ?`). A genuine *approximation* is wrong in either direction: over-estimating lets a key
   out-compete its peers *and* inflates phase 3's fetch; under-estimating caps a key below its weighted
   share. So an approximate count (e.g. a loose index scan enumerating distinct keys in O(keys x log n))
   is forbidden - the fairness allocation built on it breaks. A **cap** (`min(count, capacity)`, the
   current `MAX(rn) ... rn<=capacity`) is *not* an approximation: it is exact for `count < capacity` and
-  saturated-correct above it, and lossless because `planBatch` can never consume more than `capacity`
+  saturated-correct above it, and lossless because the planner can never consume more than `capacity`
   from one key. The cap does not enable the loose-index-scan shortcut (it still visits every due row
   server-side off-Postgres, and up to `capacity` rows per key on PG); reviving a truly sub-linear phase 1
   still needs distinct-key enumeration (skip-scan) AND a proof the fairness contract survives.
@@ -2521,8 +2504,9 @@ references them as `dwarf_flows_started_total`. Do not bake `_total` into a coun
 
 **5 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
 time and reads engine state: in-memory for
-`dwarf_steps_queue_depth` (cache length) and `dwarf_steps_fairness_keys` (the last refill's selected band +
-distinct-key count, stashed under `lastRefillLock` by the refiller); shard queries for `dwarf_steps_pending`
+`dwarf_steps_queue_depth` (cache length) and `dwarf_steps_fairness_keys` (read from `planner.LastBand()`,
+which reports a NEGATIVE band for "nothing to report" - no plan yet, or an idle fleet - so an idle engine
+never labels a series with a priority no caller can set); shard queries for `dwarf_steps_pending`
 and `dwarf_steps_oldest_pending_age_seconds` (per priority band) and `dwarf_task_concurrency_running` (running
 steps per task).
 
@@ -2763,34 +2747,44 @@ cancelled only after `Shutdown` drains all three. So by the time the lifetime ct
 has committed - in-flight writes are never interrupted by ctx cancellation. The only *cancellable*, time-bounded ctx
 is the `ExecuteTask` call: `executeTask` derives it from the lifetime ctx with the step's `time_budget_ms`.
 
-### Shutdown ordering: drain workers, then timer, then refiller
+### Shutdown ordering: workers, then timer, then recovery/reaper, then the pistons
 
 `nudgeTimer` (the sender behind `shortenNextPoll`) nudges the timer via
 `select { case wakeTimer <- struct{}{}: default: }`. The `default` only guards a *full* channel - a send on a
 *closed* channel still panics, even inside a `select`. The senders are worker goroutines (`processStep` and
-its retry/sleep/recovery paths), so there is no drain point after which a `wakeTimer` send is
-guaranteed impossible. `wakeTimer` is therefore **never closed** (the same rationale as the per-shard `refillTriggers`); `timerLoop`
-is terminated by a dedicated `timerStop` channel it selects on. So Shutdown drains the worker pool, then stops the
-timer, then the refiller:
+its retry/sleep/recovery paths), so there is no drain point after which a `wakeTimer` send is guaranteed
+impossible. `wakeTimer` is therefore **never closed**; `timerLoop` is terminated by a dedicated `timerStop`
+channel it selects on.
 
 ```
-cache.close()        // unblocks blocked candidate pops independently of any channel
-workers.Wait()       // no shortenNextPoll / requestRefill worker caller remains
-close(timerStop)     // timerLoop's termination signal (wakeTimer is never closed)
-timerWorker.Wait()   // timerLoop fully exited (last requestRefill caller gone)
-close(refillStop)    // every per-shard refiller's shared termination signal
-refiller.Wait()      // all refillers fully exited; their DB ops complete
+close(peersStop); peersLoop.Wait()   // stop the registry READ loop (pistons still own the write)
+closeMetrics()                       // the gauge callback must not query a closing database
+cache.close()                        // unblocks blocked candidate pops independently of any channel
+workers.Wait()
+close(timerStop);    timerWorker.Wait()
+close(recoveryStop); recoveryWorker.Wait()
+close(reaperStop);   reaperWorker.Wait()
+pistonCancel();      pistonPool.Wait()   // ctx is the pistons' only stop signal
+deregisterPeer()                         // only now is the last possible beat behind us
 ```
 
-The timer and refillers each have their own WaitGroup, separate from the worker pool, so the close-then-wait order
-can be staged. `timerStop` is closed before `refillStop` because `timerLoop`'s final poll can still request refills;
-stopping the refillers first would lose that work or race the triggers. The per-shard `refillTriggers`, like
-`wakeTimer`, are never closed and only sent to non-blockingly, so a late `requestRefill` from the timer's final poll
-is a harmless no-op rather than a `send on closed channel` panic; the refillers are stopped via the shared
-`refillStop` (which also aborts a scan-floor wait and the above-band back-off). A `cache.Refill` into an already-closed
-cache is a no-op. Never-closed nudge channels plus dedicated `timerStop`/`refillStop` signals
-remove the ordering hazard an earlier design carried (closing `wakeTimer` before draining the workers let a worker
-mid-`processStep` race the close and panic).
+**The pistons drain LAST, and both halves of that matter.** Their cycles are pure reads, so cancelling one
+mid-flight commits nothing and strands nothing - which is why they need no second signal and no stop channel,
+unlike every loop above them. And their heartbeat must keep this replica in the registry while its workers
+are still executing steps, because every peer sized its pools for a fleet that includes us.
+
+They run on a **child** of the lifetime ctx (`pistonCancel`), not the lifetime ctx itself: that one is
+deliberately left live until every goroutine has drained, so in-flight database work always commits, and
+`piston.Run` ends on ctx alone.
+
+`deregisterPeer` is placed after the piston drain for a reason that used to be an ordering constraint and is
+now belt-and-braces: the beat is UPDATE-only and never inserts, so a straggler beat after the delete matches
+nothing instead of resurrecting the row. Deleting while a piston could still beat would otherwise leave the
+replica registered after it had gone.
+
+A `cache.Refill` into an already-closed cache is a no-op. Never-closed nudge channels plus dedicated stop
+signals remove the ordering hazard an earlier design carried (closing `wakeTimer` before draining the workers
+let a worker mid-`processStep` race the close and panic).
 
 ### An unchecked `tx.ExecContext` inside `Transact` is SAFE - do not "fix" it
 
@@ -2917,7 +2911,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
    on a plain `wedgeSweepInterval` (5m) ticker - kept *off* `pollPendingSteps` because that poll is nudged sub-second
    under load while the sweep's `NOT EXISTS`/`GROUP BY` scans are heavy and the wedge it guards against is
    latency-tolerant; the recovery loop is drained before the refiller in `drainRuntime` since a recovered park can
-   `requestRefill`. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a
+   re-offer a step. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a
    false positive (the guard sits comfortably beyond normal subgraph-completion latency). Unlike orphan-flow detection
    this **does** auto-recover, because each recovery re-invokes a *normal, status-guarded* mechanism (the
    `parkedSubgraph` revive CAS, or a subtree `Cancel` guarded by `status NOT IN (terminal)`) rather than duplicating

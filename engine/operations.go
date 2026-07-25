@@ -578,19 +578,22 @@ func (e *Engine) notifyStatusChange(flowKey string, status string) {
 // The work doorbell is PURELY LOCAL - it reaches this replica's candidate cache and nothing else.
 //
 // It used to also broadcast to peers (op `enqueue`, one message per step per peer). That broadcast was
-// removed: under load every peer's refiller is already scanning at its derived scan floor, so the
-// doorbell bought no dispatch latency the next scan would not have covered, while costing R-1 messages
-// per step AND a PK lookup on every receiver (the inbound path had to resolve the announced step's
-// priority and due-ness against its own clock, which is exactly the round-trip enqueueStepDue exists to
-// avoid locally). It also head-inserted UNPARTITIONED on the receiver, so a peer could race the residue
-// class's owner to the claim CAS. What replaced it is the refiller's idle tick (refillIdleInterval, ~1s -
-// see refillerLoop): a peer discovers work by scanning, on a cadence bounded with no message at all.
+// removed: under load every peer's piston is already cycling at its derived interval, so the doorbell
+// bought no dispatch latency the next cycle would not have covered, while costing R-1 messages per step
+// AND a PK lookup on every receiver (the inbound path had to resolve the announced step's priority and
+// due-ness against its own clock, which is exactly the round-trip enqueueStepDue exists to avoid
+// locally). It also head-inserted UNPARTITIONED on the receiver, so a peer could race the residue class's
+// owner to the claim CAS. What replaced it is that every piston cycles unconditionally: a peer discovers
+// work by scanning, on a bounded cadence, with no message at all.
+//
+// The doorbell no longer rings a refiller either - there is no trigger to ring, because a piston's cycle
+// is not on-demand. What it still does, and what makes that affordable, is Offer: an empty partition
+// ADMITS the step, so a sequential chain's next hop dispatches immediately instead of waiting out a cycle.
 //
 // Consequence to keep in mind when reading the origination sites: a step created here is offered to THIS
-// replica's cache only. If this replica cannot serve it (its partition is non-empty so the Offer no-ops,
-// and the step falls in a peer's residue class), the step waits for that peer's next scan - bounded by
-// the idle tick, not by a message. Do not reintroduce a per-step peer broadcast to shave that; see
-// _NO_SIGNALS.md's coalescing note for the shape any revival would have to take.
+// replica's cache only. If this replica cannot serve it (the step falls in a peer's residue class), the
+// step waits for that peer's next cycle - bounded by the interval, not by a message. Do not reintroduce a
+// per-step peer broadcast to shave that.
 
 // enqueueStep rings the local work doorbell for a step whose priority the caller does NOT hold, resolving
 // it (and the step's due-ness) with one PK lookup. Use it at the cold step-origination sites - surgraph
@@ -630,13 +633,6 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	}
 	admitted := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
 	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "admitted", admitted)
-	// Unconditional, NOT gated on admission. An empty partition used to decline every offer, which made it
-	// a standing refill request: each doorbell rang the trigger for as long as the partition stayed empty.
-	// Now the first offer fills it, so gating here would silence every later doorbell on a shard whose
-	// partition holds one item while a busy peer shard owns the rest of the (global) bound - measured as
-	// 189 of 500 flows stranded on shard 2 in fixtures/completionraceflow_test.go. It costs nothing:
-	// workerLoop already rings this shard's trigger after every processStep, and the trigger coalesces.
-	e.requestRefill(shard)
 }
 
 // enqueueStepDue is the fast-path doorbell for a step the caller just created or reset for immediate
@@ -651,7 +647,6 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 	}
 	admitted := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
 	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "admitted", admitted)
-	e.requestRefill(shard) // unconditional - see enqueueStep
 }
 
 // cancel aborts a flow and its whole subgraph subtree. Root-only: a subgraph child is not an independently
