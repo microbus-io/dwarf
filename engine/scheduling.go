@@ -41,7 +41,7 @@ func (e *Engine) workerLoop(ctx context.Context) {
 		if !ok {
 			return
 		}
-		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.StepID, "shard", j.Shard)
+		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.StepID, "shard", j.Shard, "priority", j.Priority)
 		// A sibling worker in this process reserved this step within the last ~second - its claim CAS may
 		// still be in flight, or may have committed already (the reservation deliberately outlives the CAS
 		// to span selection -> pop; see internal/claimstracker). Either way the piston re-selected it

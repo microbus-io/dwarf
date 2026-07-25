@@ -51,6 +51,7 @@ type engineMetrics struct {
 	stateReadBytes      metric.Int64Counter
 	stepsClaimLost      metric.Int64Counter
 	stepsClaimPreempted metric.Int64Counter
+	stepsOffered        metric.Int64Counter
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
 }
@@ -107,6 +108,7 @@ func (e *Engine) initMetrics() error {
 	// one instrumentation scope for the whole engine, whoever records into it. Building them here as well
 	// would register each name twice on one meter, with descriptions and bucket boundaries that had already
 	// drifted apart.
+	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a cycle supplies only ~1.05-1.5x ahead of consumption, so partitions drain to empty between cycles) and is what keeps a sequential chain from paying a cycle per hop.")
 	m.stepsClaimPreempted = ctr("dwarf_steps_claim_preempted", "Counts popped candidates skipped without a claim attempt because a sibling worker in this replica already had one in flight for that step - round trips SAVED, the counterpart to dwarf_steps_claim_lost. The refiller re-selects a step whose claim is uncommitted (the selection predicate reads committed state), so this rises with the scan rate rather than with the replica count. Compare the two: a healthy engine converts what would have been lost claims into skips.")
 	m.stepsClaimLost = ctr("dwarf_steps_claim_lost", "Counts claim attempts whose CAS matched no row - the step was already claimed by a peer, or left the claimable state (cancelled, resumed, parked) between selection and claim. The lease-contention signal: measured against dwarf_steps_executed it is the share of dispatch round trips that produced no work, and it rises with the replica count when replicas select overlapping candidates. Not an error - the step is simply someone else's - but a high ratio means the fleet is paying for round trips it cannot use.")
 
@@ -355,6 +357,14 @@ func (e *Engine) metricStateReadBytes(ctx context.Context, workflowURL, column s
 	}
 	e.metrics.stateReadBytes.Add(ctx, int64(n), metric.WithAttributes(
 		attribute.String("workflow", workflowURL), attribute.String("column", column)))
+}
+
+// metricStepOffered counts a candidate the doorbell admitted to the local cache.
+func (e *Engine) metricStepOffered(ctx context.Context) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.stepsOffered.Add(ctx, 1)
 }
 
 func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string) {

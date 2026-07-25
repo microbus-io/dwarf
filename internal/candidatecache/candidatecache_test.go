@@ -196,167 +196,117 @@ func TestCandidateCache_PopPicksLowestFloorPartition(t *testing.T) {
 	assert.Expect(j.Shard, 2)
 }
 
-// TestCandidateCache_DerivedFloorAfterOfferPop pins the floor-is-derived fix. With a stored floor, an
-// Offer head-insert of one band-1 item over a band-5 body left the partition advertising floor=1 after
-// the band-1 item popped - so lowest-floor partition selection preferred it and drained its entire
-// band-5 body ahead of another partition's band-3 body: up to a full partition of inversion, for up to
-// a full cycle. Deriving the floor from the head item retires that: the moment the pioneer pops, the
-// partition's floor reverts to its body's real band.
-func TestCandidateCache_DerivedFloorAfterOfferPop(t *testing.T) {
+// TestCandidateCache_OfferTakesAVacatedSlot pins Offer's rule. A plan grants a fairness key a share of the
+// batch for the CYCLE, so a successor taking the slot its predecessor vacated is spending what its key
+// already won - which is why the bound is "a slot has been freed" (totalLen < size) rather than anything
+// about the plan. It appends at the TAIL, so it never reorders what the plan chose.
+func TestCandidateCache_OfferTakesAVacatedSlot(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var c Cache
-	c.Init(8)
-	c.Refill(1, []Job{{StepID: 11, Shard: 1}, {StepID: 12, Shard: 1}}, 5)
-	c.Refill(2, []Job{{StepID: 21, Shard: 2}, {StepID: 22, Shard: 2}}, 3)
+	c.Init(2) // size 4
+	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 100)
 
-	// A band-1 pioneer head-inserts onto shard 1, making it the best partition.
-	nr := c.Offer(Job{StepID: 99, Shard: 1}, 1)
-	assert.True(nr)
-	j, _, _ := c.Pop()
-	assert.Expect(j, Job{StepID: 99, Shard: 1, Priority: 1})
+	// Two slots free, so two successors are admitted - behind the planned batch, in arrival order.
+	assert.True(c.Offer(Job{StepID: 50, Shard: 1}, 100))
+	assert.True(c.Offer(Job{StepID: 51, Shard: 1}, 100))
+	assert.Expect(c.Len(), 4)
+	// Full now: no slot has been vacated, so nothing more is admitted.
+	assert.False(c.Offer(Job{StepID: 52, Shard: 1}, 100))
 
-	// The pioneer is gone: shard 1's floor must read 5 again (derived from its head), so shard 2's
-	// band-3 body drains BEFORE shard 1's band-5 body.
-	assert.Expect(c.parts[1].floor(), 5)
-	j, _, _ = c.Pop()
-	assert.Expect(j.Shard, 2)
-	j, _, _ = c.Pop()
-	assert.Expect(j.Shard, 2)
-	j, _, _ = c.Pop()
-	assert.Expect(j.Shard, 1)
-}
-
-// TestCandidateCache_OfferAdmissionCases pins the three ways an Offer resolves. An EMPTY partition
-// ADMITS - its derived floor is math.MaxInt, so anything head-inserts - which is what lets a sequential
-// chain's next step dispatch immediately instead of waiting out a cycle interval for a scan that would
-// find it anyway. A strictly-better band head-inserts. Anything no better goes to the TAIL while the
-// cache is under its bound, never in front of a better candidate.
-func TestCandidateCache_OfferAdmissionCases(t *testing.T) {
-	assert := testarossa.For(t)
-
-	var c Cache
-	c.Init(4) // size 8
-	assert.True(c.Offer(Job{StepID: 7, Shard: 1}, 5), "an empty partition admits")
-	assert.Expect(c.Len(), 1)
-
-	// A strictly-better band head-inserts, taking over the derived floor.
-	c.Refill(1, []Job{{StepID: 30, Shard: 1}}, 5)
-	assert.True(c.Offer(Job{StepID: 31, Shard: 1}, 2), "a strictly-better band head-inserts")
-	assert.Expect(c.parts[1].floor(), 2)
-
-	// No better than the floor, but there is room: appended at the tail, so the head - and with it the
-	// derived floor - still carries the best item present.
-	assert.True(c.Offer(Job{StepID: 32, Shard: 1}, 9), "room to spare admits at the tail")
-	assert.Expect(c.parts[1].floor(), 2)
-	assert.Expect(len(c.parts[1].items), 3)
-	assert.Expect(c.parts[1].items[2].StepID, 32)
-}
-
-// TestCandidateCache_OfferDeclinesWhenFull pins the one case that is still turned away. A full cache is
-// already holding every candidate it is sized to hold, so a no-better arrival has nothing to add; the
-// refiller's next wholesale replace is what re-establishes strict band order. A strictly-better arrival
-// still gets in, because the bound is enforced by trimming the tail rather than by declining the head.
-func TestCandidateCache_OfferDeclinesWhenFull(t *testing.T) {
-	assert := testarossa.For(t)
-
-	var c Cache
-	c.Init(1) // size 2
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 5)
-
-	assert.False(c.Offer(Job{StepID: 99, Shard: 1}, 9), "no better and no room")
-	assert.Expect(c.Len(), 2)
-
-	assert.True(c.Offer(Job{StepID: 98, Shard: 1}, 1), "strictly better still head-inserts")
-	assert.Expect(c.Len(), 2)
-	assert.Expect(c.parts[1].floor(), 1)
-
-	// An EMPTY partition admits even though the cache is at its bound. The bound is a sum over all
-	// partitions, so letting it gate this would make one busy shard silence an idle one's doorbell -
-	// the step then waits for a scan its caller was told to skip. The overshoot is one per shard.
-	assert.True(c.Offer(Job{StepID: 21, Shard: 2}, 9), "an empty partition ignores the global bound")
-	assert.Expect(len(c.parts[2].items), 1)
-	assert.Expect(c.Len(), 3)
-}
-
-// TestCandidateCache_OfferSteadyStateStaysFIFO pins why the head-insert is gated on STRICTLY better, not
-// on `priority <= floor`. A uniform-priority workload has every doorbell equal to the floor, so admitting
-// those at the head would turn the partition into a stack - newest-first within a band, inverting the
-// oldest-first ordering the whole selection design rests on. They must land at the tail.
-func TestCandidateCache_OfferSteadyStateStaysFIFO(t *testing.T) {
-	assert := testarossa.For(t)
-
-	var c Cache
-	c.Init(8) // size 16
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}}, 100)
-	for i := range 4 {
-		assert.True(c.Offer(Job{StepID: 50 + i, Shard: 1}, 100))
-	}
-
-	want := []int{1, 50, 51, 52, 53}
+	want := []int{1, 2, 50, 51}
 	for _, id := range want {
 		j, ok, _ := c.Pop()
 		if assert.True(ok) {
 			assert.Expect(j.StepID, id)
 		}
 	}
+	// Drained, so the partition re-opens - the sequential-chain case, one step in flight at a time.
+	assert.True(c.Offer(Job{StepID: 60, Shard: 1}, 100))
 }
 
-func TestCandidateCache_OfferPriorityJumpNoFlush(t *testing.T) {
+// TestCandidateCache_OfferDeclinesAWorseBand pins the one priority test, which points the opposite way from
+// the obvious guess. A BETTER band appends - it is at least as important as everything the partition was
+// planned to run, so it violates nothing and merely dispatches in arrival order. A WORSE one is declined:
+// admitting it would have a worker run band-900 work while band-100 work sits cached right there, a strict
+// priority inversion rather than the soft cross-shard staleness the design accepts. The head is left as the
+// plan set it either way, so the floor stays the band this partition was PLANNED at.
+func TestCandidateCache_OfferDeclinesAWorseBand(t *testing.T) {
+	assert := testarossa.For(t)
+
+	var c Cache
+	c.Init(8) // size 16: room to spare, so the bound declines nothing here
+	c.Refill(1, []Job{{StepID: 1, Shard: 1}}, 100)
+
+	assert.True(c.Offer(Job{StepID: 98, Shard: 1}, 1), "a better band is admitted")
+	assert.True(c.Offer(Job{StepID: 99, Shard: 1}, 100), "so is the planned band")
+	assert.False(c.Offer(Job{StepID: 97, Shard: 1}, 900), "a worse band would invert strict priority")
+
+	// The floor is FROZEN at the band the partition was planned to serve, so it does not dip as the
+	// better-banded arrival reaches the head and rise again once it pops. A head-derived floor would
+	// advertise 100,1,100 while draining this partition - oscillating Pop's choice, and swinging Offer's
+	// own admission bar with it, so an offered band-100 step would be taken or refused on pop timing.
+	for _, id := range []int{1, 98, 99} {
+		assert.Expect(c.parts[1].floor(), 100)
+		j, ok, _ := c.Pop()
+		if assert.True(ok) {
+			assert.Expect(j.StepID, id)
+		}
+	}
+	// Drained, so it advertises nothing at all rather than a band it can no longer serve.
+	assert.Expect(c.parts[1].floor(), math.MaxInt)
+
+	// An EMPTY partition has nothing planned to be worse than, so any band is admitted - which is what
+	// keeps a worse-band sequential chain running once the better band has drained. That arrival also sets
+	// the band the partition serves from here on.
+	assert.True(c.Offer(Job{StepID: 96, Shard: 1}, 900))
+	assert.Expect(c.parts[1].floor(), 900)
+	assert.True(c.Offer(Job{StepID: 95, Shard: 1}, 900))
+	assert.False(c.Offer(Job{StepID: 94, Shard: 1}, 901), "still worse than the band now being served")
+}
+
+// TestCandidateCache_OfferedAreNotChargedAsRefillerWaste pins the discard accounting. Refill's return value
+// is the REFILLER's oversupply signal, so candidates the doorbell admitted must not be counted against it -
+// they were never the refiller's choice, and charging them would make the ratio read worst exactly when the
+// doorbell is working best.
+func TestCandidateCache_OfferedAreNotChargedAsRefillerWaste(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var c Cache
 	c.Init(4) // size 8
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 5)
+	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 100)
+	assert.True(c.Offer(Job{StepID: 50, Shard: 1}, 100))
+	assert.True(c.Offer(Job{StepID: 51, Shard: 1}, 100))
 
-	// Neither is better than the floor, so both land behind the body rather than in front of it.
-	assert.True(c.Offer(Job{StepID: 8, Shard: 1}, 7))
-	assert.True(c.Offer(Job{StepID: 9, Shard: 1}, 5))
-	assert.Expect(c.Len(), 4)
-	assert.Expect(c.parts[1].floor(), 5)
+	// Four resident, two of them offered: the replace discards all four but charges the refiller for two.
+	assert.Expect(c.Refill(1, []Job{{StepID: 9, Shard: 1}}, 100), 2)
 
-	// The strictly-better arrival preempts by head-inserting, and does NOT flush the body.
-	assert.True(c.Offer(Job{StepID: 99, Shard: 1}, 3))
-	assert.Expect(c.Len(), 5)
-	assert.Expect(c.parts[1].floor(), 3)
-	j, _, _ := c.Pop()
-	assert.Expect(j, Job{StepID: 99, Shard: 1, Priority: 3})
-	assert.Expect(c.Len(), 4)
+	// Popping an offered candidate retires it from the count, so a later replace does not over-credit.
+	c.Refill(1, []Job{{StepID: 3, Shard: 1}}, 100)
+	assert.True(c.Offer(Job{StepID: 52, Shard: 1}, 100))
+	j, _, _ := c.Pop() // the planned one
+	assert.Expect(j.StepID, 3)
+	j, _, _ = c.Pop() // the offered one
+	assert.Expect(j.StepID, 52)
+	assert.Expect(c.parts[1].offered, 0)
 }
 
-// TestCandidateCache_OfferRoutesByShard pins that an Offer lands on ITS OWN shard's partition: the
-// admission check runs against that partition's floor, not another's, so a doorbell for shard 2
-// neither preempts nor pollutes shard 1's slice.
-func TestCandidateCache_OfferRoutesByShard(t *testing.T) {
+// TestCandidateCache_OfferIsPerPartition pins that the empty check is against the job's OWN shard, so a
+// busy shard neither blocks nor pollutes an idle one - and that the global bound does not gate it, since
+// that bound is a sum over all partitions and would let one busy shard silence every other shard's
+// doorbell.
+func TestCandidateCache_OfferIsPerPartition(t *testing.T) {
 	assert := testarossa.For(t)
 
 	var c Cache
-	c.Init(8)
-	c.Refill(1, []Job{{StepID: 11, Shard: 1}}, 2)
-	c.Refill(2, []Job{{StepID: 21, Shard: 2}}, 5)
+	c.Init(1) // size 2: shard 1 alone fills the whole cache
+	c.Refill(1, []Job{{StepID: 11, Shard: 1}, {StepID: 12, Shard: 1}}, 2)
 
-	// Priority 3 is worse than shard 1's floor (2) but better than shard 2's (5): routed to shard 2,
-	// it inserts there.
-	nr := c.Offer(Job{StepID: 99, Shard: 2}, 3)
-	assert.True(nr)
-	assert.Expect(len(c.parts[2].items), 2)
-	assert.Expect(len(c.parts[1].items), 1)
-	assert.Expect(c.parts[2].floor(), 3)
-}
-
-func TestCandidateCache_OfferBoundsToSize(t *testing.T) {
-	assert := testarossa.For(t)
-
-	var c Cache
-	c.Init(1) // size 2
-	c.Refill(1, []Job{{StepID: 1, Shard: 1}, {StepID: 2, Shard: 1}}, 5)
-	nr := c.Offer(Job{StepID: 99, Shard: 1}, 1)
-	assert.True(nr)
-	assert.Expect(c.Len(), 2)
-	j, _, _ := c.Pop()
-	assert.Expect(j, Job{StepID: 99, Shard: 1, Priority: 1})
-	j, _, _ = c.Pop()
-	assert.Expect(j, Job{StepID: 1, Shard: 1, Priority: 5})
+	assert.False(c.Offer(Job{StepID: 13, Shard: 1}, 1), "shard 1 is full: no slot has been vacated")
+	assert.True(c.Offer(Job{StepID: 21, Shard: 2}, 9), "shard 2's is, bound or no bound")
+	assert.Expect(len(c.parts[2].items), 1)
+	// The overshoot is at most one per shard.
+	assert.Expect(c.Len(), 3)
 }
 
 func TestCandidateCache_OfferClosedIsNoop(t *testing.T) {
@@ -365,8 +315,7 @@ func TestCandidateCache_OfferClosedIsNoop(t *testing.T) {
 	var c Cache
 	c.Init(2)
 	c.Close()
-	nr := c.Offer(Job{StepID: 1, Shard: 1}, 0)
-	assert.False(nr)
+	assert.False(c.Offer(Job{StepID: 1, Shard: 1}, 0))
 }
 
 // TestCandidateCache_RefillEmptyIsWholesale pins that an EMPTY batch is a real refill, not a no-op: it
@@ -387,9 +336,7 @@ func TestCandidateCache_RefillEmptyIsWholesale(t *testing.T) {
 	assert.Expect(c.parts[1].floor(), math.MaxInt)
 	assert.Expect(c.parts[2].floor(), 5)
 
-	// An arrival on the emptied partition is admitted on the strength of the emptying: the partition's
-	// floor reverted to math.MaxInt with its last item, so it is not weighed against a band the
-	// partition no longer holds.
+	// An arrival on the emptied partition is admitted, because emptying it is exactly what re-opens it.
 	assert.True(c.Offer(Job{StepID: 9, Shard: 1}, 7))
 	assert.Expect(len(c.parts[1].items), 1)
 	assert.Expect(c.parts[1].floor(), 7)

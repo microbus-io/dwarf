@@ -689,66 +689,44 @@ step that re-read a row this replica just wrote. The lookup path remains for the
 `not_before` is in the future the doorbell short-circuits and does NOTHING - the work is not due, nothing to
 preempt, the cache stays untouched, and nothing is scheduled: the step's own `not_before` keeps it invisible
 to selection until it comes due, and visible to the next cycle after that.
-Otherwise the priority drives one of three cache paths, each against the step's own shard's PARTITION (an
-`Offer` routes by `Job.Shard` and is admitted against that partition's floor). (1) Strictly more important
-than the partition's band (priority < floor): **head-insert that exact step** so the next pop runs it without
-a refiller scan, lower the floor (derived from the head - see `internal/candidatecache/CLAUDE.md`), wake one
-waiter, and request a refill of that shard to top up the band. **An EMPTY partition takes this path** - its
-derived floor is `math.MaxInt`, so anything is strictly better. (2) Not strictly more important (priority >=
-floor) but the cache is under its bound: **append at the tail**, behind every better candidate, so the derived
-floor is untouched. (3) Not strictly more important and the cache is full: no-op - a steady
-same-or-lower-priority stream against a full cache is pure cache hits. Case 1 - an urgent arrival preempting
-cached lower-priority work -
-deliberately does **not** flush the existing candidates: a guiding principle is that high throughput trumps exact
-priority ordering. Flushing would idle every worker through the refill scan to guarantee zero lower-priority
-executions after a higher-priority arrival; instead the workers keep draining and the refiller's wholesale replace
-re-establishes strict band order within one cycle. Exact ordering is soft anyway - with N replicas draining
-independently there is no global order to preserve. The cache is bound to `size` by trimming the tail on insert; a
-trimmed step stays `pending` and is re-selected. **There is no trigger and no selection gate.** Each shard's piston cycles on its own period, so the
-doorbell's only job is the cache: it never asks anyone to scan. The former `refillTriggers` (one
-buffered(1) channel per shard) and every `requestRefill` origination site - a worker's low-water pop, the
-post-`processStep` nudge, the doorbells themselves, and `pollPendingSteps`' fleet-wide `requestRefillAll` -
-are gone. `Pop` still reports `needRefill`; nothing consumes it.
+Otherwise the step is offered to its own shard's PARTITION (an `Offer` routes by `Job.Shard`), which admits
+it into a **vacated slot**: an empty partition always, otherwise while the cache is under its bound, and at
+the TAIL so nothing the plan chose is reordered. The one priority test is against a **worse** band, which
+is declined - running it while better-band work sits cached is a strict inversion; a *better* band is
+harmless and simply appends, waiting its turn. The partition's floor stays FROZEN at the band it was
+planned to serve rather than tracking the head, so neither `Pop`'s partition choice nor `Offer`'s own
+admission bar oscillates as a better-banded arrival passes through.
+Admissions are counted as `dwarf_steps_offered` and subtracted from the refiller's discard signal, so waste
+stays attributed to whoever caused it.
 
 **An EMPTY partition ADMITS the arrival, and reversing that is what makes a fixed-cadence refiller viable.**
-It used to decline (request a scan, cache nothing), on the reasoning that an arbitrary-priority step must not
-jump an idle replica's queue - an inversion that was genuinely observed. That reasoning held only while the
-single-slot trigger let the refiller answer the decline within a fraction of a cycle. It does not survive the
-trigger's removal: a sequential chain holds exactly one pending step at a time, so its partition is empty at
-*every* hop, and declining costs each hop a uniformly-random fraction of the cycle interval - half on
-average, all of it at worst (~330ms over a 10-step flow at the derived ~67ms). What is given up is that this
-one step bypasses the cross-shard band plan, which is the same "strict within one or two intervals" softness
-stated below and accepted throughout. The tail-append (case 2) has the same character and a shorter life: its
-entries are unplanned, but the next wholesale `Refill` wipes them, and under load the partitions sit at
-capacity so the path is never taken.
+It used to decline (request a scan, cache nothing), reasoning that an arbitrary-priority step must not jump
+an idle replica's queue - an inversion that was genuinely observed. That held only while the single-slot
+trigger let the refiller answer the decline within a fraction of a cycle. It does not survive the trigger's
+removal: a sequential chain holds exactly one pending step at a time, so its partition is empty at *every*
+hop, and declining costs each hop a uniformly-random fraction of the cycle interval - half on average, all
+of it at worst (~330ms over a 10-step flow at the derived ~67ms).
 
-**One pioneer is sufficient; the head-insert is a bridge, not a per-job fast path.** A head-insert is accepted at
-most once per band-opening: it lowers `floor` to the pioneer's priority, so every subsequent arrival at that band
-hits `priority >= floor` and lands at the tail (case 2) or is dropped (case 3). Deliberate, not starvation. The pioneer bridges the single
-cycle gap so the *first* urgent step does not eat a full interval of latency. The next cycle then plans band
-MIN and **wholesale-replaces** the partition with the strict, weighted batch of that band, *evicting* the cached
-lower-priority candidates (they stay `pending`, re-selected when the band drops back), after which the whole band
-is served correctly - no further head-inserts.
+*This is not a fairness exception, and the framing matters:* the plan grants a fairness key a share of the
+batch **for the cycle**, not a single dispatch, so a successor taking the slot its predecessor just vacated
+is that key spending what it already won. It cannot amplify a share either - the successor exists only
+because its predecessor freed the worker that will run it. Fairness governs **admission**, which flows get
+started.
 
-**NOTE the premise that changed.** This paragraph's original argument was that the pioneer bridges the gap
-until the `requestRefill` it fired brought the refiller along. There is no such nudge now, so the rest of an
-arriving burst waits for the next cycle boundary - up to one interval rather than one floor remainder. Bounded
-and within the "strict within one or two intervals" statement below, but it is a real latency shift, and it is
-why `fixtures/crossshardpriorityflow_test.go` measures its ordering margin against a third of the backlog
-rather than half. A non-pioneer
-high-priority step that misses the head-insert (stale `floor`) is **not** stuck behind the backlog: the refiller
-selects band MIN, so it is picked up after at most ~`lowWater` lower-priority pops plus one scan - a bounded
-fast-path *miss*, never priority starvation.
+*Measured, and the obvious prediction is WRONG:* one expects this to be a test-only trick, since an idle
+engine has empty partitions at every hop and a loaded one should not. The reverse holds - the two most
+loaded fixtures gain most from it (`completionraceflow` 2.05x, `soakflow` 1.84x, whole suite 1.41x),
+because a cycle supplies only 1.04-1.47x ahead of consumption, so under load the cache is shallow and
+partitions drain to empty constantly. See `internal/candidatecache/CLAUDE.md` for the table.
 
-**Bounded bridge-window leakage is deliberate and self-healing.** Between the pioneer head-insert and the async
-`refill()` landing, workers keep popping the still-cached lower-priority steps. The leak is bounded by ~the worker
-count, not the backlog: a refiller scan is one DB round-trip while a worker that pops a step is then busy executing
-it for its full duration, so each worker leaks at most ~one lower-priority step before the replace evicts the rest;
-the pioneer itself is at the head and never delayed. The head-insert also bypasses the weighted fairness for exactly
-that one pioneer step (the first work of a just-opened band, bounded to one per escalation, restored by the next
-batch). Both costs are smaller than the cross-replica fairness softness the design already accepts. Do not "fix"
-these by flushing, per-item priority tracking, or re-floor-on-pop: each trades the latency win the head-insert
-exists for and only shaves an already-bounded refiller cycle off a path the refiller already backstops.
+**The priority-preempting head-insert that used to sit beside it is GONE.** It let a strictly-better band
+jump the queue so the first urgent step did not wait a cycle, at the price of a bounded fairness bypass. It
+was removed after measuring `fixtures/crossshardpriorityflow_test.go` - the fixture built for exactly this -
+with and without: burst latency 134-146ms vs 134-152ms, identical ordering. It only ever reordered one
+replica's cache anyway, since the planner learns of the new band from that shard's next tally either way,
+so the fleet-level change costs a cycle regardless. See `internal/candidatecache/CLAUDE.md` for the full
+accounting, and `docs/scheduling-and-reliability.md`, which has always promised the weaker (and now
+accurate) contract: priority is never preemptive, and a new band is served within a snapshot cycle or two.
 
 **The cycle period is the supply control, DERIVED per shard (`deriveRefillInterval` /
 `recomputeRefillIntervals`, ~67ms at the reference config) - NOT a fixed constant.** The pipeline paces each
@@ -858,8 +836,8 @@ fixture silently ran at second-long scan intervals, which is why the fix took ~1
 suite. `recomputeRefillIntervals` clamps `share` at 1. If either fixture starts failing on timing again,
 suspect the derived period before suspecting the test.
 
-What is NOT weakened: the arriving step itself is never delayed (`Offer` head-inserts a strictly-better
-band, so it is popped next), ordering among work already tallied is strict, and nothing is preemptive. The
+What is NOT weakened: ordering among work already tallied is strict, and nothing is preemptive - which is
+now true of the local cache too, since `Offer` no longer head-inserts a better band. The
 public statement of all this is in `docs/scheduling-and-reliability.md` - keep the two in step.
 
 `fixtures/crossshardpriorityflow_test.go` still asserts urgent-burst LATENCY as its sensitive axis (an
@@ -1275,15 +1253,13 @@ selection - slower but complete. R and the ordinal therefore come from **one sha
 comparable across shards and a clock-fast shard would always look freshest; `NOW_UTC() - seen_at` puts both
 terms on one clock and the offset cancels - the same cancellation the refiller's per-shard age relies on.
 
-**The doorbell is deliberately NOT partitioned, and the case for that got simpler.** `Offer` inserts a
-specific step only on the strictly-better-band path (`priority < floor`); an empty partition requests a
-*partitioned* refill and an equal band is a no-op. So a uniform-priority workload never head-inserts at all,
-and a mixed one inserts at most one pioneer per band-opening. Partitioning it would be actively wrong - the
-head-insert exists to give an urgent step immediate dispatch, and skipping it because a peer owns that
-residue class would delay exactly what it is for. The CAS still arbitrates, so the worst case is one lost
-claim. Note this now concerns **only this replica's own** origination sites: with the peer `enqueue`
-broadcast removed, no unpartitioned offer can arrive from a peer at all, which closes the one case where an
-unpartitioned head-insert genuinely raced the residue class's owner.
+**The doorbell is deliberately NOT partitioned, and the case for that got simpler twice.** `Offer` now
+admits only into an EMPTY partition, so a busy replica never offers at all, and a uniform-priority workload
+offers only at the head of a drained chain. Partitioning that check would delay exactly the sequential-hop
+case it exists for, and the claim CAS still arbitrates, so the worst case is one lost claim. Note this
+concerns **only this replica's own** origination sites: with the peer `enqueue` broadcast removed, no
+unpartitioned offer can arrive from a peer at all, which closed the one case where it genuinely raced the
+residue class's owner.
 
 **Known residual: replica death strands a slice for up to `peerFreshWindow` (40s).** A dead replica's
 residue class is owned by nobody until its row ages out of the count and ordinals re-seat. Self-healing,

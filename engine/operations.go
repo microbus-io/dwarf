@@ -631,6 +631,9 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 		return
 	}
 	admitted := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	if admitted {
+		e.metricStepOffered(ctx)
+	}
 	e.logger.DebugContext(ctx, "Doorbell", "stepID", stepID, "priority", priority, "admitted", admitted)
 }
 
@@ -645,6 +648,9 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 		return
 	}
 	admitted := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	if admitted {
+		e.metricStepOffered(ctx)
+	}
 	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "admitted", admitted)
 }
 

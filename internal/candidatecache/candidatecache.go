@@ -27,7 +27,8 @@ import (
 
 // Job holds a step ID, its shard index, and its priority band for the worker pool. Priority is
 // assigned by the cache itself (Refill stamps its floor onto every batch job; Offer stamps the
-// offered priority), so a partition's floor is always derivable from its head.
+// offered priority onto the single job it admits), so a partition's floor is always derivable from
+// its head.
 type Job struct {
 	StepID   int
 	Shard    int
@@ -48,26 +49,48 @@ type Cache struct {
 }
 
 // partition is one shard's slice of the cache. Its floor is DERIVED - the head item's priority, or
-// math.MaxInt when empty - never stored. A stored floor lies after Offer head-inserts one better
-// item over a body at a worse band: the head pops, the stored floor keeps advertising the better
-// band, and floor-based partition selection then drains the whole worse-band body ahead of another
-// partition's better work. Deriving from items[0] is exact: Offer inserts only strictly-better
-// heads and Refill batches are uniform at their band, so the head is always the best item present.
+// math.MaxInt when empty - never stored, because a stored one is a second source of truth that can
+// drift from the items while costing nothing to avoid.
+//
+// Its floor is the band it is serving for the current window - see floor for why that is frozen rather
+// than read off the head.
 type partition struct {
 	items []Job
 	// lastFill is the depth of the last wholesale Refill; the partition's low-water mark is half of
 	// it. Partition sizes are dynamic (each refiller's slice of the global plan), so a global
 	// constant would over-trigger small partitions and under-trigger large ones.
 	lastFill int
+	// offered is how many of the CURRENTLY resident items arrived by Offer rather than by Refill. Refill
+	// subtracts it from the discard count so the refiller's waste signal is not charged for candidates it
+	// never selected. Exact because of the layout: a Refill replaces items wholesale and offers only ever
+	// append, so the refill block is always the head and the offered ones the tail - which makes "was the
+	// item Pop is about to remove an offered one?" the test len(items) <= offered, with no per-job flag.
+	offered int
+	// band is the priority band this partition is serving for the current window - set by the Refill that
+	// planned it, or by an Offer into an empty partition. FROZEN until the next Refill: see floor.
+	band int
 }
 
-// floor returns the partition's best (lowest) represented priority: the head item's, since items
-// are best-first (see the partition doc).
+// floor is the band this partition is serving for the current window, or math.MaxInt when it is empty.
+// It is Pop's key for choosing which partition to drain, and Offer's bar for what it will admit.
+//
+// FROZEN for the window rather than read off the head, and the difference is visible: Offer appends a
+// better-banded step behind the planned batch, so a head-derived floor would DIP as that item reached the
+// front and rise again after it popped. A partition planned at band 6 holding `6 6 5 6` would advertise
+// 6,6,5,6 as it drained, oscillating Pop's partition choice - and worse, Offer's own admission test would
+// swing with it, so an offered band-6 step would be declined or accepted purely on pop timing.
+//
+// Storing it is safe HERE in a way it was not before, and the direction is the whole argument. Offer
+// declines anything worse than this band, so every item present is at least as good as it: a frozen floor
+// can only ever UNDERSTATE the partition's urgency, which delays a buried better-band step by at most a
+// cycle. The old stored floor failed the other way - back when Offer could head-insert, it kept
+// advertising band 1 after the band-1 head had popped, OVERSTATING urgency and draining a whole band-5
+// body ahead of another partition's band-3 work.
 func (p *partition) floor() int {
 	if len(p.items) == 0 {
 		return math.MaxInt
 	}
-	return p.items[0].Priority
+	return p.band
 }
 
 // lowWater is the pop-below-this-requests-a-refill threshold, half the last wholesale refill.
@@ -202,6 +225,9 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 		return Job{}, false, false
 	}
 	j = best.items[0]
+	if len(best.items) <= best.offered {
+		best.offered--
+	}
 	best.items = best.items[1:]
 	if len(best.items) == 0 {
 		best.items = nil
@@ -246,10 +272,15 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 		p = &partition{}
 		c.parts[shard] = p
 	}
-	discarded = len(p.items)
+	// Only the refiller's OWN un-popped selections are waste it can act on; candidates the doorbell
+	// admitted were never its choice, and charging them here would make the oversupply ratio read high
+	// exactly when the doorbell is working well.
+	discarded = len(p.items) - p.offered
+	p.offered = 0
 	if len(batch) == 0 {
 		batch = nil // Pop's empty representation, so Len/append behave identically either way
 	}
+	p.band = floor
 	for i := range batch {
 		batch[i].Priority = floor
 	}
@@ -265,37 +296,46 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	return discarded
 }
 
-// Offer admits a single candidate onto its shard's partition (routing is j.Shard), reporting whether it
-// was taken. There are three ways in, tried in this order:
+// Offer admits a candidate onto its shard's partition (routing is j.Shard) without consulting the plan.
+// Its caller is a step ORIGINATION site - most often the successor of a step that just completed - so the
+// question it answers is whether this replica can run the step now or must wait for a cycle to select it.
 //
-//   - The partition is EMPTY - admit unconditionally, ignoring the global bound (see below).
-//   - STRICTLY BETTER than the partition's floor - head-insert, so the next Pop runs it, trimming the
-//     tail if that pushed the cache past its bound.
-//   - NO BETTER, but the cache is under its bound - append at the TAIL. Best-first at the head is what
-//     the derived floor rests on, so a worse candidate may only ever go behind a better one.
+// THIS IS NOT A FAIRNESS EXCEPTION, and the framing is what makes the rule fall out. A plan grants a
+// fairness key a share of the batch for the CYCLE, not a single dispatch. A step whose predecessor just
+// completed is taking the slot that predecessor vacated, inside the window its key already won. So the
+// bound is not arbitrary: admit where a slot has actually been freed, which is what `totalLen < size`
+// tests. It cannot amplify a tenant's share either - the successor exists only because its predecessor
+// freed the worker that will run it - and fairness still fully governs ADMISSION, which flows get started.
 //
-// Otherwise it declines: the cache is already holding every candidate it is sized to hold, and the
-// refiller's next wholesale replace is what re-establishes strict band order across the partition.
+// An EMPTY partition admits regardless of the global bound. That bound is a sum over ALL partitions, so
+// letting it gate this would have one busy shard silence an idle one's doorbell, and the caller reads a
+// decline as "this partition needs nothing": measured as 159 of 500 flows stranded in
+// fixtures/completionraceflow_test.go. The overshoot is at most one candidate per shard.
 //
-// ADMITTING INTO AN EMPTY PARTITION IS LOAD-BEARING, and it used to be declined on the grounds that "an
-// arbitrary-priority step must not jump an idle replica's queue." That reasoning held only while a
-// separate trigger let the refiller answer the decline within a fraction of its cycle. Under a fixed
-// cadence there is no such trigger: a sequential chain holds exactly one pending step at a time, so its
-// partition is empty at EVERY hop, and declining makes every hop wait a uniformly-random fraction of the
-// cycle interval - half of it on average, the whole of it at worst. The exposure admitting accepts is
-// that this one step bypasses the cross-shard band plan, which is the same "strict within one or two
-// intervals" softness the design already accepts everywhere else.
+// THE ONE PRIORITY TEST IS AGAINST A WORSE BAND, and it points the opposite way from the obvious guess.
+// A BETTER band is harmless: the step is at least as important as everything this partition was planned
+// to run, so appending it violates nothing - it simply dispatches in arrival order rather than ahead of
+// the queue. A WORSE one is the real hazard, and is declined: admitting it would have a worker run
+// band-900 work while band-100 work sits cached right there, which is a strict-priority inversion rather
+// than the soft cross-shard staleness the design already accepts. It waits for a cycle in which its band
+// is the global minimum, which is exactly when it is allowed to run.
 //
-// THE GLOBAL BOUND MUST NOT GATE THAT FIRST CASE, and gating it strands work. The bound is a sum over
-// ALL partitions, so a busy shard filling the cache would make an offer to an IDLE shard's empty
-// partition decline - and since the caller reads the return as "this partition needs nothing", that
-// shard's step waits for a scan nobody asked for. Measured as 159 of 500 flows stranded in
-// fixtures/completionraceflow_test.go, which runs two shards against a cache of 8. The overshoot is at
-// most one candidate per shard, which is why the bound can afford to yield here.
+// A better band is NOT head-inserted either, and that is the part that used to be here. Preempting the
+// queue with it measured as nothing (see the CLAUDE.md) and cost a fairness bypass to argue about. So it
+// waits its turn in arrival order, and the partition goes on advertising the band it was planned at
+// (floor is frozen for the window). The residual softness is that the items ahead of it run first, for at
+// most a cycle, until the next Refill re-plans from the true global minimum - inside what
+// docs/scheduling-and-reliability.md promises: priority is never preemptive, and a new band is served
+// within a snapshot cycle or two.
 //
-// The tail append has a shorter life than either: the entries it adds are unplanned, so they sit outside
-// the weighted fairness pick - but only until the next cycle, since Refill is a wholesale replace that
-// wipes them. Under real load the partitions sit at capacity and the path is never taken at all.
+// Worth knowing which callers can even bring a better band, because it is not the successor case: priority
+// is frozen at Create and inherited by every step of a flow, so a successor never arrives at a better band
+// than its own predecessor ran at. Only a NEW FLOW can (Create/Continue/Fork offering its entry step), or
+// the narrow straggler where a better band drained, the partition was refilled at a worse one, and that
+// band's last successor turns up afterwards.
+//
+// Admitted candidates are counted (see partition.offered) so Refill's discard count stays the refiller's
+// own waste signal rather than being charged for work it never selected.
 func (c *Cache) Offer(j Job, priority int) (admitted bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -310,17 +350,18 @@ func (c *Cache) Offer(j Job, priority int) (admitted bool) {
 	j.Priority = priority
 	switch {
 	case len(p.items) == 0:
+		// Nothing planned here, so nothing to be worse than - and this arrival sets the band the partition
+		// serves until the next Refill.
 		p.items = []Job{j}
-	case priority < p.floor():
-		p.items = append([]Job{j}, p.items...)
-		if c.totalLen() > c.size {
-			p.items = p.items[:len(p.items)-1]
-		}
+		p.band = priority
+	case priority > p.floor():
+		return false // worse than this partition's planned band - see above
 	case c.totalLen() < c.size:
 		p.items = append(p.items, j)
 	default:
-		return false
+		return false // no vacated slot to take
 	}
+	p.offered++
 	c.cond.Signal()
 	return true
 }
