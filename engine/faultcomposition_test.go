@@ -202,7 +202,7 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 }
 
 // TestFaultComposition_CompoundWakeLoss pins that when BOTH the dispatch wake (doorbell) and the terminal wake
-// (signalStop) are lost, the two independent backstops still cover the flow: pollPendingSteps dispatches the
+// (signalStop) are lost, the two independent backstops still cover the flow: recoverExpiredLeases dispatches the
 // stranded pending step, and Await's periodic re-snapshot returns the DB-committed completion.
 func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	t.Parallel()
@@ -238,7 +238,7 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	}()
 
 	// The doorbell was dropped, so the entry step sits pending until this backstop rings the local doorbell.
-	e.pollPendingSteps(ctx)
+	e.recoverExpiredLeases(ctx)
 
 	select {
 	case out := <-outCh:

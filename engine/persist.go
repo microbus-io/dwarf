@@ -88,10 +88,10 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	//
 	// What the guard excludes is the case this closes: lease recovery resets an expired step to `pending` WITHOUT
 	// bumping `lease_seq` (see "Lease fencing"), so the generation fence alone still matches a step recovery has
-	// already taken back. Stamping a FUTURE `lease_expires` onto that pending row would strand it - every
-	// claim/sizing predicate requires `lease_expires<=NOW` on a pending step, while the only query that schedules a
-	// wake on a future `lease_expires` is scoped to `status='running'`, so the row could neither be claimed nor
-	// wake the timer: a step claimable in 30s would sleep up to `maxPollInterval` (5m).
+	// already taken back. Stamping a FUTURE `lease_expires` onto that pending row would strand it OUTRIGHT: every
+	// claim and selection predicate requires `lease_expires<=NOW` on a pending step, so no piston cycle would ever
+	// select it, and lease recovery could not rescue it either - that sweep only resets `running` rows. The step
+	// would simply sit `pending` and invisible until its future lease lapsed on its own.
 	//
 	// A zero-row match (the query SUCCEEDED but matched nothing) therefore means we no longer own the step - a peer
 	// re-claimed it (lease_seq bumped), recovery reset it to `pending`, or a racing Cancel terminalized it. Abandon

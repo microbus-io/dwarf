@@ -19,10 +19,10 @@ package engine
 import "time"
 
 const (
-	// retryInterval is the cadence of drivePollBackstop, the one helper that still loops - it DRIVES the engine
-	// (it calls pollPendingSteps) rather than waiting for it, so it is not a spin-wait on an observation.
+	// retryInterval is the cadence of driveLeaseRecovery, the one helper that still loops - it DRIVES the engine
+	// (it calls recoverExpiredLeases) rather than waiting for it, so it is not a spin-wait on an observation.
 	retryInterval = 20 * time.Millisecond
 
-	// pollBackstopWait bounds a lease-recovery re-dispatch - see drivePollBackstop.
-	pollBackstopWait = 2 * time.Second
+	// leaseRecoveryWait bounds a lease-recovery re-dispatch - see driveLeaseRecovery.
+	leaseRecoveryWait = 2 * time.Second
 )

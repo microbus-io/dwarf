@@ -176,7 +176,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	// Wait past A's 400ms lease, then drive B's lease-recovery poll; B resets the expired lease to pending and
 	// re-dispatches the step to completion.
 	time.Sleep(500 * time.Millisecond)
-	repB.pollPendingSteps(ctx) // B's lease-recovery backstop
+	repB.recoverExpiredLeases(ctx) // B's lease-recovery backstop
 
 	out := enginetest.AwaitAndAssertComplete(t, repB, fk)
 	if assert.NotNil(out) {

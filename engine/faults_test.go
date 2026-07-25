@@ -81,15 +81,15 @@ func awaitNextStop(t *testing.T, e *Engine) func() {
 	}
 }
 
-// drivePollBackstop drives lease recovery until `landed` reports the re-dispatch happened, or retryDuration
+// driveLeaseRecovery drives lease recovery until `landed` reports the re-dispatch happened, or retryDuration
 // elapses and the caller's own assertion reports it.
 //
 // This DRIVES the engine rather than merely observing it, which is why it is the one helper here that still
-// loops: without the e.pollPendingSteps call the recovery never happens inside a test's lifetime, measured -
+// loops: without the e.recoverExpiredLeases call the recovery never happens inside a test's lifetime, measured -
 // every run of the lease-fence battery fails on the wait. A loop that makes the thing happen is not the
 // spin-wait-on-an-observation that every other wait in this package was converted away from.
 //
-// Drive it in a loop rather than sleeping past the lease and polling once. pollPendingSteps only resets a
+// Drive it in a loop rather than sleeping past the lease and polling once. recoverExpiredLeases only resets a
 // `running` step whose lease has ALREADY expired, so a single fixed-sleep poll has to land between the lease
 // lapsing and the caller giving up - and the delay before the lease even starts is variable (the dispatch,
 // and for a subgraph the spawn and the child's claim too). A poll that lands early resets nothing, and a
@@ -98,7 +98,7 @@ func awaitNextStop(t *testing.T, e *Engine) func() {
 // is timing-independent - whichever poll first sees the lapsed lease does the reset - and cannot
 // over-dispatch, since the reset needs `running` plus an expired lease, true only once the previous attempt
 // has finished and its lease has run out.
-func drivePollBackstop(t *testing.T, e *Engine, retryDuration time.Duration, landed func() bool) {
+func driveLeaseRecovery(t *testing.T, e *Engine, retryDuration time.Duration, landed func() bool) {
 	t.Helper()
 	ctx := context.Background()
 	for range max(1, int(retryDuration/retryInterval)) {
@@ -106,7 +106,7 @@ func drivePollBackstop(t *testing.T, e *Engine, retryDuration time.Duration, lan
 			return
 		}
 		time.Sleep(retryInterval)
-		e.pollPendingSteps(ctx)
+		e.recoverExpiredLeases(ctx)
 	}
 }
 
@@ -309,7 +309,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	fk, err := e.Create(ctx, "flease/g", nil, nil)
 	assert.NoError(err)
 	// The 300ms lease must lapse before recovery re-runs A; drive the backstop until it does.
-	drivePollBackstop(t, e, pollBackstopWait, func() bool { return runs.Load() >= 2 })
+	driveLeaseRecovery(t, e, leaseRecoveryWait, func() bool { return runs.Load() >= 2 })
 	waitDone()
 	assert.Equal(workflow.StatusCompleted, enginetest.FlowStatus(t, e, fk))
 	assert.Equal(int32(2), runs.Load())
@@ -355,12 +355,13 @@ func TestFault_DropDoorbell(t *testing.T) {
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
-	// The create-time doorbell is dropped, so the entry step sits pending until the poll backstop rings the
-	// local doorbell. Drive the backstop directly, then the flow completes.
+	// The create-time doorbell is dropped, so nothing hands the entry step to a worker directly. It is
+	// `pending` and due, so the shard's next piston cycle selects it on its own - which is the whole
+	// backstop, and needs no help from this test. Lease recovery is NOT what covers this (it only resets
+	// `running` rows), so the flow simply has to complete within a few cycles.
 	e.seams.Inject(FaultDropDoorbell)
 	fk, err := e.Create(ctx, "fdoor/g", nil, nil)
 	assert.NoError(err)
-	e.pollPendingSteps(ctx) // the backstop that recovers a lost doorbell
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 }
 
@@ -505,30 +506,4 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 	_, _, err := e.pistons[1].ScanBand(ctx, 1)
 	assert.Error(err, "the engine's seams must reach its pistons")
 	assert.Equal(2, e.cache.Len(), "a failed scan does not discard the healthy candidates")
-}
-
-func TestFault_PollSizingErr(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-	proxy := NewTestProxy()
-	e := NewEngineUnderTest(t)
-	e.SetHost(proxy)
-	assert.NoError(e.Startup(t.Context()))
-
-	// A sizing-query failure must clamp the next poll to pollErrorRetryInterval (re-poll soon) rather than
-	// sleeping maxPollInterval on an unknown backlog. Drive one poll with the fault armed and assert the
-	// scheduled wake is near-term, not minutes out.
-	//
-	// Arm the fault sticky (1<<20), not one-shot: Startup starts the background timerLoop, which also
-	// calls pollPendingSteps and would consume a one-shot FaultPollSizingErr out from under this explicit
-	// poll - leaving our poll unclamped and writing maxPollInterval (a MySQL-timing flake). Held armed,
-	// whichever poll runs still clamps, so nextPoll is reliably near-term.
-	e.seams.InjectN(1<<20, FaultPollSizingErr)
-	e.pollPendingSteps(ctx)
-
-	e.nextPollLock.Lock()
-	delay := time.Until(e.nextPoll)
-	e.nextPollLock.Unlock()
-	assert.True(delay <= 3*time.Second, "expected a clamped near-term re-poll, got %s", delay)
 }

@@ -57,18 +57,6 @@ type ShardSummary struct {
 }
 
 const (
-	// maxPollInterval is the timer's resting cadence: the nextPoll default when nothing is pending, the
-	// cap on a single timer sleep, and the horizon bound on pollPendingSteps' two MIN(...) sizing queries.
-	// There is deliberately no shorter "a backlog exists" cadence beside it - the former
-	// backlogPollInterval (1m) and the existence probe that set it were removed once each shard's piston
-	// began cycling unconditionally on its own period, which covers the same case per shard far sooner.
-	maxPollInterval = 5 * time.Minute
-
-	// pollErrorRetryInterval caps the wake delay after a sizing query in pollPendingSteps fails, so a
-	// transient DB error (e.g. a momentary connection-limit rejection) triggers a prompt re-poll instead
-	// of the timer sleeping for maxPollInterval while a due step sits undispatched.
-	pollErrorRetryInterval = 1 * time.Second
-
 	parkedNone     = 0
 	parkedSubgraph = 1
 )
@@ -235,13 +223,6 @@ type Engine struct {
 	pistons      map[int]*piston.Piston
 	pistonCancel context.CancelFunc
 	pistonPool   sync.WaitGroup
-
-	// Timer goroutine. It is a RECOVERY sweep now, not a dispatch participant: nothing wakes it early,
-	// because nothing needs to. See pollPendingSteps.
-	nextPoll     time.Time
-	nextPollLock sync.Mutex
-	timerStop    chan struct{}
-	timerWorker  sync.WaitGroup
 
 	// Recovery goroutine: runs the defense-in-depth parked-step wedge sweep on its own slow cadence,
 	// off the hot poll path.
@@ -766,10 +747,8 @@ func (e *Engine) initRuntime() error {
 	// Shutdown/Startup cycle: a tally left from the previous run would claim a band nobody is serving.
 	e.planner = planner.New()
 	e.pistons = make(map[int]*piston.Piston)
-	e.timerStop = make(chan struct{})
 	e.recoveryStop = make(chan struct{})
 	e.reaperStop = make(chan struct{})
-	e.nextPoll = time.Now()
 	e.graphCache = lru.New[graphCacheKey, *cachedGraph](4096, 15*time.Minute)
 	e.stateRefCache = lru.New[string, json.RawMessage](4096, 15*time.Minute)
 	e.waiters = nil
@@ -849,9 +828,6 @@ func (e *Engine) initRuntime() error {
 	// peer offsite in the host's ExecuteTask - the long-task case, where the resident set alone would cap
 	// throughput because nobody is left to dispatch.
 	e.crew.Start(e.lifetimeCtx, resident)
-	e.timerWorker.Go(func() {
-		e.timerLoop(e.lifetimeCtx)
-	})
 	// The pistons run on a CHILD of the lifetime ctx, because they must stop before it does: the lifetime
 	// ctx is deliberately left live until every other goroutine has drained (so in-flight database work
 	// always commits), while piston.Run ends on ctx alone and has no second signal - both of its queries
@@ -910,10 +886,6 @@ func (e *Engine) drainRuntime() {
 	// goroutines and waits. Both halves are the crew's contract - see internal/workers.
 	e.cache.Close()
 	e.crew.Drain()
-	if e.timerStop != nil {
-		close(e.timerStop)
-	}
-	e.timerWorker.Wait()
 	if e.recoveryStop != nil {
 		close(e.recoveryStop)
 	}

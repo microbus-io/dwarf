@@ -181,7 +181,6 @@ const (
 	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
 	FaultRefillScanErr       = piston.FaultScanErr   // the piston's priority-band scan errors (its name, so there is one catalogue)
 	FaultSlowPoolPush        = "slowPoolPush"        // recomputePools stalls between reading R and pushing the derived sizes
-	FaultPollSizingErr       = "pollSizingErr"       // the poll's pending-sizing query is treated as errored
 	FaultDeliverFailureErr   = "deliverFailureErr"   // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery); unscoped, or scoped by the parked caller's task name for per-level control
 	FaultCancelCommit        = "cancelCommit"        // the Cancel transaction errors
 	FaultResumeCommit        = "resumeCommit"        // the Resume transaction errors

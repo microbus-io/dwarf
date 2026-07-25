@@ -122,7 +122,7 @@ func TestCountRunningByTask_ExcludesParked(t *testing.T) {
 		return
 	}
 	ins := func(taskURL, status string, parked int) {
-		// lease_expires is set far in the future so pollPendingSteps' lease recovery (which resets a
+		// lease_expires is set far in the future so recoverExpiredLeases' lease recovery (which resets a
 		// running step whose lease has lapsed) cannot flip this forged running step back to pending
 		// between the insert and the count - the source of an intermittent "actual '0'" flake. A real
 		// running step likewise holds a live lease into the future.

@@ -28,38 +28,84 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// recoveryLoop runs the parked-step wedge sweep on its own slow cadence, kept off the frequently-nudged
-// poll path (pollPendingSteps can fire sub-second under load) because the sweep's NOT EXISTS / DISTINCT
-// scans are heavy and the wedge condition it guards against is latency-tolerant. A plain ticker - no
-// nudging - so the sweep runs at most once per wedgeSweepInterval.
+// recoveryLoop is THE recovery cadence - every background repair the engine performs runs here, on one
+// plain ticker, and nowhere else.
+//
+// One cadence for all of them is the point. These are repairs for states that are not supposed to occur -
+// a dead worker's lease, a caller whose child can no longer revive it, a child whose parent went terminal,
+// a flow whose every step is terminal - so none of them is on a latency path, and the scans are heavy
+// enough (NOT EXISTS, DISTINCT) that they want a slow, un-nudged clock. Nothing here may be given its own
+// timer or an early wake: if a repair ever needs to be prompt, that is evidence the state it repairs is
+// reachable in normal operation, which is a bug to fix at the source rather than to sweep faster.
+//
+// It sweeps on entry rather than after the first tick, because a replica restarting after a crash inherits
+// its own expired leases and reclaiming those is exactly this loop's job. The wedge detectors are no-ops
+// that early: their age guards exclude everything younger than parkWedgeThreshold.
 func (e *Engine) recoveryLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.wedgeSweepInterval)
 	defer ticker.Stop()
+	e.runRecoverySweep(ctx)
 	for {
 		select {
 		case <-e.recoveryStop:
 			return
 		case <-ticker.C:
-			e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-				e.sweepWedgedParks(ctx, db, shard)
-				e.detectOrphanedFlows(ctx, db, shard)
-				return nil
-			})
 		}
+		e.runRecoverySweep(ctx)
 	}
 }
 
-// sweepWedgedParks is a defense-in-depth recovery pass for parked steps whose releasing condition can no
-// longer occur, so they would otherwise sit forever (a parked step is invisible to selection and, for
-// parkedSubgraph, to lease recovery too). It runs on the dedicated recoveryLoop at wedgeSweepInterval, and
-// every detector carries a parkWedgeThreshold age guard so steady-state operation never trips a false
-// positive. Each recovery re-invokes the normal release mechanism (which is guarded by a CAS on the park
-// state), so it is idempotent and harmless under a concurrent resolution, a false positive, or a peer
-// replica sweeping the same shard. A nonzero dwarf_steps_unwedged means a latent bug let a step wedge
-// - the sweep papered over the effect but the cause is worth finding.
-func (e *Engine) sweepWedgedParks(ctx context.Context, db *sequel.DB, shard int) {
-	e.recoverWedgedSubgraphParks(ctx, db, shard, e.parkWedgeThreshold)
-	e.recoverOrphanedSubgraphChildren(ctx, db, shard, e.parkWedgeThreshold)
+// runRecoverySweep is one pass of every recovery routine.
+//
+// The two park detectors are mirror images and both must run: one finds a live CALLER whose child can no
+// longer revive it, the other a live CHILD whose caller went terminal. Each carries a parkWedgeThreshold
+// age guard, so steady-state operation never trips one, and each recovery re-invokes the normal release
+// mechanism (itself CAS-guarded on the park state) rather than reimplementing it - which is what makes them
+// idempotent, and harmless under a concurrent resolution, a false positive, or a peer sweeping the same
+// shard. A nonzero dwarf_steps_unwedged means a latent bug let a step wedge: the sweep papered over the
+// effect, and the cause is still worth finding.
+func (e *Engine) runRecoverySweep(ctx context.Context) {
+	e.recoverExpiredLeases(ctx)
+	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		e.recoverWedgedSubgraphParks(ctx, db, shard, e.parkWedgeThreshold)
+		e.recoverOrphanedSubgraphChildren(ctx, db, shard, e.parkWedgeThreshold)
+		e.detectOrphanedFlows(ctx, db, shard)
+		return nil
+	})
+}
+
+// recoverExpiredLeases resets every running step whose lease has expired, on every shard. It is the ONLY
+// thing that does - a piston never touches a `running` row - so it is what makes at-least-once execution
+// actually deliver the "at least" half after a worker dies holding a lease.
+//
+// It is not a dispatch mechanism and rings no doorbell. A step it resets to `pending` is due, so its
+// shard's next piston cycle (~67ms at the derived interval) selects it like any other, and the only
+// latency this cadence governs is how long a DEAD worker's step waits past its own lease.
+//
+// THE CADENCE COSTS RECOVERY LATENCY, and the number is worth knowing before shortening anything else:
+// worst case is `budget + leaseMargin + wedgeSweepInterval`, at the defaults 2m + 30s + 5m. That is
+// acceptable because the path runs only when a worker has already died. It stops being acceptable at a
+// SHORT configured budget - a 5s budget makes the lease 35s, which a five-minute sweep dominates - and the
+// fix there is to derive recoveryLoop's ticker from the configured budget, NOT to give this its own timer
+// or to size a wake from a per-sweep `MIN(lease_expires)` query.
+//
+// A failed UPDATE is logged and left for the next sweep. The sweep is idempotent and unconditional, so a
+// transient DB error costs one deferred pass and needs no retry or backoff of its own.
+func (e *Engine) recoverExpiredLeases(ctx context.Context) {
+	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		res, err := db.ExecContext(ctx,
+			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE status='"+workflow.StatusRunning+"' AND parked=0 AND lease_expires<=NOW_UTC()",
+			workflow.StatusPending,
+		)
+		if err != nil {
+			e.logger.ErrorContext(ctx, "Lease recovery sweep", "shard", shard, "error", err)
+			return nil
+		}
+		if recovered, _ := res.RowsAffected(); recovered > 0 {
+			e.metricStepsRecovered(ctx, int(recovered))
+		}
+		return nil
+	})
 }
 
 // recoverWedgedSubgraphParks finds parkedSubgraph caller steps whose child flow can no longer revive them -

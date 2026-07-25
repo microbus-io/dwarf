@@ -85,8 +85,8 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 
 	// The fenced first attempt rolls back and returns nil (abandon quietly), leaving the child step
 	// running-and-leased — it does not schedule its own recovery, so drive the lease-recovery backstop until
-	// the re-dispatch lands (see drivePollBackstop; this is the site whose fixed-sleep version flaked).
-	drivePollBackstop(t, e, pollBackstopWait, func() bool { return xCalls.Load() >= 2 })
+	// the re-dispatch lands (see driveLeaseRecovery; this is the site whose fixed-sleep version flaked).
+	driveLeaseRecovery(t, e, leaseRecoveryWait, func() bool { return xCalls.Load() >= 2 })
 
 	// The flow reaches interrupted only via that recovered second attempt — the fenced first attempt rolled
 	// back, so the interrupt could not take on the first try.

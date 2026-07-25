@@ -117,7 +117,7 @@ which is a race between the parallel ops. Pinned by `TestOnEach_ErrorNamesTheFai
 attempt was rejected: real outages mostly manifest as hangs, not errors; classifying "shard down" vs transient/data
 errors is driver-specific and brittle; and a helper that *claims* partial tolerance only in a narrow subset of failure
 modes lies to operators about resilience. `OnEach` is invoked once per shard with the resolved DB and the shard
-index; any non-nil return fails the whole call. Each caller retries on its next natural cycle (`pollPendingSteps` next
+index; any non-nil return fails the whole call. Each caller retries on its next natural cycle (`recoverExpiredLeases` next
 tick, `scanBandKeys` next refill), so a transient hiccup heals within one cycle and a persistent outage degrades
 loudly.
 

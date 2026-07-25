@@ -39,6 +39,21 @@ Further guidance within each:
 - **Private comments** should stay concise: don't restate what the code plainly does; do capture design rationale
   or a pitfall specific to that location.
 - **Cross-cutting design rationale** belongs in the appropriate `CLAUDE.md`, not scattered across code comments.
+- **Describe what IS, never what changed.** Every comment and every `CLAUDE.md` line states the design as it
+  stands now. Do not write "X used to be Y", "this replaced Z", "there is no longer a...", or a numbered account
+  of what was deleted in what order. Git holds the change history; prose that re-tells it ages into a lie at the
+  next edit, and it costs the reader the one thing they came for - the current picture.
+- **Record the footgun, not the change.** A rejected or removed alternative earns its place only when it encodes
+  a trap the next person would otherwise walk into, and then it is written as a **standing constraint with its
+  evidence**, not as a chronology:
+  - Yes: *"Do not bind the status in a `WHERE` clause - it defeats the SQL Server / SQLite filtered index."*
+  - Yes: *"Do not give this its own timer; derive the ticker from the configured budget. Measured: a derived
+    interval oscillated at ~1,000x the discard and a 2.4x worse p99."*
+  - No: *"This used to have its own timer, which we deleted in favour of a ticker."*
+
+  The test is whether a reader who had never seen the old code could **act** on the sentence. If they could not,
+  it is history, and it belongs in the commit message. Keep the number, the measurement, or the failure mode that
+  makes the constraint checkable - that is the part with value, and it survives the code being rewritten again.
 - **No prose refers to ephemeral working documents** - e.g. "finding A2" or "_PLAN.md".
 - **Code comments do not refer to `CLAUDE.md`.** The agent reads `CLAUDE.md` implicitly.
 
@@ -85,16 +100,17 @@ matching one before working there:**
   changes delta with the tombstone intact, then `DelNils` when the delta folds onto state. A cleared value on
   a *reducer*-managed field is *ignored* (the reducer's identity), never dropped. (`workflow/CLAUDE.md`; enforced
   at `execution.go`)
-- **Two unstorable values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt** (the former
-  write-side storability guard, and its whole `internal/jsonx` package, were removed). Both are *silent* if let through: (1) an
+- **Two unstorable values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt.** Nothing checks
+  storability on the write side, by decision, not oversight. Both are *silent* if let through: (1) an
   integer-shaped value beyond **±2^53** - state numbers are float64-domain, so it comes back **rounded** (a wrong
   id, no error anywhere); carry a large id as a string. (2) A **NUL** (`U+0000`) in a string - Postgres `JSONB`
   rejects it (`SQLSTATE 22P05`) while the other dialects accept it, so it passes SQLite tests and fails on the
   recommended production DB; base64-encode binary data. The float64 invariant still holds for every value the
   engine itself produces (every stored number round-trips exactly through `float64`), which is what lets every
   reader - including `boolexp` - treat numbers as `float64`; it is only *external/authored* oversized integers
-  that are no longer caught. Do not reintroduce a guard (nor "fix" the integer with `UseNumber`) without
-  revisiting the punt. (`workflow/CLAUDE.md`)
+  that go uncaught. Do not add a guard (nor "fix" the integer with `UseNumber`) without revisiting the punt -
+  a write-side guard must run on the **raw caller bytes** before the decode (the decode already rounds past
+  2^53) and must not re-check the engine's own derived merges. (`workflow/CLAUDE.md`)
 - **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
 - **Lease fencing:** every post-execution write to the *dispatched* step must carry `AND lease_seq=?` (the
@@ -139,7 +155,8 @@ are merged using the reducer for that field. Ten are defined (`workflow/reducers
 default), `append` (concatenate arrays), `union` (concatenate arrays, deduplicated), `add` (sum numbers), `min`/`max`
 (smaller/larger number), `and`/`or` (logical fold of booleans), `concat` (concatenate strings), and `merge` (combine
 objects, new key wins). A field with no registered reducer uses `replace`; every non-default fan-in field is wired
-explicitly with `graph.SetReducer(name, reducer)` (the older `sum*`/`list*`/`set*` name-prefix inference was removed).
+explicitly with `graph.SetReducer(name, reducer)`. There is **no** inference from a field's name - a `sum*`/`list*`/
+`set*` prefix means nothing, so an unwired field silently takes `replace` instead of the reducer its name implies.
 
 **Thread** - A chain of flows linked by `Continue`. Each flow has a `thread_id` grouping it with others in the same
 multi-turn conversation; defaults to `flow_id` (each flow its own thread). `Continue` inherits the thread's
@@ -152,8 +169,9 @@ flowKey returned by the initial `Create` doubles as the threadKey.
 `error`/`cancel_reason`) is frozen; the only operations on it are **read** (Snapshot/History/Continue-source/
 Fork-source) and **removal** (Delete/Purge). There is **no in-place re-run of a terminal flow** - recovery and
 exploration happen only via **`Fork`**, which clones a terminal flow up to a chosen step into a *new*
-self-contained flow and never mutates the original. This invariant governs which operations may exist; it is
-why `Restart`/`RestartFrom`/`Recover` (in-place rewinds) were removed.
+self-contained flow and never mutates the original. This invariant governs which operations may exist: there is
+no `Restart`/`RestartFrom`/`Recover`, and no in-place rewind may be added, because any of them would mutate a
+frozen outcome.
 
 Two clarifications: *immutable ≠ permanent* - Delete/Purge/DeleteOnCompletion still **remove** terminal flows.
 And *outcome*-frozen, not byte-frozen - a straggler fan-out sibling can still settle to terminal after its

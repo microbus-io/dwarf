@@ -202,9 +202,9 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		fk, err := e.Create(ctx, "fbatlease/g", nil, nil)
 		assert.NoError(err)
 		// The 300ms lease must lapse before recovery resets the fenced step; drive the backstop until it does
-		// (see drivePollBackstop). Anchored on the flow's own status rather than calls["a"], which is a plain *int shared
+		// (see driveLeaseRecovery). Anchored on the flow's own status rather than calls["a"], which is a plain *int shared
 		// across this battery and would race a read from here.
-		drivePollBackstop(t, e, pollBackstopWait, func() bool { return enginetest.FlowStatus(t, e, fk) == workflow.StatusCompleted })
+		driveLeaseRecovery(t, e, leaseRecoveryWait, func() bool { return enginetest.FlowStatus(t, e, fk) == workflow.StatusCompleted })
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 		assert.Equal(baseFS, readFinalState(t, e, fk), "final_state diverged from the no-fault baseline")

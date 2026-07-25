@@ -320,8 +320,10 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	// The entry step's initial-state snapshot, written by insertFlowTx above.
 	e.metricStateWriteBytes(ctx, workflowURL, "state", len(seed.stateJSON))
 	// Ring the doorbell so a replica with spare capacity claims the entry step immediately, rather than
-	// waiting for the backstop poll. A missed doorbell is recovered by pollPendingSteps. The entry step
-	// was just inserted due-now with the resolved priority, so the fast-path doorbell applies.
+	// waiting out a piston cycle. A missed doorbell costs only that: the step is `pending` and due, so the
+	// shard's next cycle selects it like any other. (Lease recovery is NOT the backstop here - it only
+	// resets `running` rows.) The entry step was just inserted due-now with the resolved priority, so the
+	// fast-path doorbell applies.
 	e.enqueueStepDue(ctx, shardNum, int(newStepID), seed.priority)
 	return flowKey, nil
 }

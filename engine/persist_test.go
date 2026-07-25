@@ -138,8 +138,8 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 // the lease of a step we still own but NEVER stamps a future lease_expires onto one that lease recovery has
 // already reset to `pending`. Recovery resets an expired step running->pending WITHOUT bumping lease_seq, so
 // the generation fence alone still matches it; a `pending` row with a future lease_expires is un-claimable
-// (every claim/sizing predicate needs lease_expires<=NOW) and cannot wake the timer (which schedules only on a
-// `running` future lease_expires), so a step claimable in 30s could sleep up to maxPollInterval (5m).
+// (every claim and selection predicate needs lease_expires<=NOW) and cannot be rescued by lease recovery (which resets only
+// `running` rows), so such a step would sit `pending` and invisible until its future lease lapsed.
 //
 // Both directions are pinned, because the guard must be neither too wide (fence the pending reset) nor too
 // narrow (running-only would wrongly fence the transition retry, which runs while the step is `completed`).

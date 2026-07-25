@@ -85,7 +85,7 @@ func (e *Engine) initMetrics() error {
 	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started.")
 	m.flowsTerminated = ctr("dwarf_flows_terminated", "Counts flows that have reached a terminal status.")
 	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed.")
-	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps recovered by pollPendingSteps after lease expiry.")
+	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps whose worker lease expired and were reset to pending for re-execution - the crash-recovery path. A nonzero rate means workers are dying or overrunning their lease.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
 	m.stepsWriteRetried = ctr("dwarf_steps_write_retried", "Counts in-place retries of a step's persistence write after a non-contention database error. The task is NOT re-executed; only the write is retried. A rising count tracks database flakiness, not workflow failure.")
 	m.stepsWriteFailed = ctr("dwarf_steps_write_failed", "Counts steps terminalized because their outcome could not be persisted while the database was reachable - i.e. the payload, not the database, was the problem. A nonzero value signals a latent bug (an unstorable value, a column/packet limit, a constraint violation), like dwarf_steps_unwedged.")

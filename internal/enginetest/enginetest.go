@@ -18,7 +18,7 @@ limitations under the License.
 // white-box tests that stay in package engine AND by the black-box tests in the fixtures package. A helper
 // lands here only when it is (a) used from more than one package and (b) expressible through the engine's
 // exported test surface alone (the DB and Seams accessors and the public operations). A helper that needs an
-// unexported internal (drivePollBackstop calling pollPendingSteps, startSolo touching testConnCap, the
+// unexported internal (driveLeaseRecovery calling recoverExpiredLeases, startSolo touching testConnCap, the
 // peer-row writers) cannot live here and stays in package engine with the white-box tests that use it.
 //
 // This package must NOT import github.com/microbus-io/dwarf/engine. The package engine white-box tests import

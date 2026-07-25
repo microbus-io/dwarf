@@ -94,11 +94,11 @@ func TestCompletionRaceflow(t *testing.T) {
 		// terminal status and never will - so "nothing has completed for a while" is the precise symptom,
 		// while "the whole drain took a while" is not a symptom at all.
 		//
-		// It used to be an absolute 30s deadline, which conflated the two and failed under -race. A race
-		// build drains this burst CORRECTLY in ~20s of that 30s budget with the package to itself, so any
-		// real load pushed it over - and the flows it then named as stranded read `completed` in the dump
-		// moments later, because the deadline had simply expired mid-drain. Progress makes a slow machine
-		// free while keeping the strand detectable within noProgressBound of the last completion.
+		// An absolute deadline cannot serve here, however generous: a -race build drains this burst
+		// CORRECTLY in ~20s with the package to itself, so any real load carries it past a 30s budget, and
+		// the flows such a bound reports as stranded read `completed` moments later in the dump. Progress
+		// makes a slow machine free while keeping the strand detectable within noProgressBound of the last
+		// completion.
 		const (
 			noProgressBound = 15 * time.Second // a strand completes NOTHING further, ever; 15s of that is unambiguous
 			absoluteCap     = 2 * time.Minute  // so a pathological hang still fails with the dump below, not a suite timeout

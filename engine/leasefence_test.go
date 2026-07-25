@@ -108,7 +108,7 @@ func TestLeaseFence_FailStep(t *testing.T) {
 // zombieDispatch drives the real dispatch path into the late-error healthy-flow-kill lease-loss race and returns once a peer
 // worker has re-claimed and completed the flow while the first ("zombie") dispatch is still blocked. It:
 //   - blocks the named task's FIRST dispatch on a release channel (so it sits running under generation N),
-//   - force-expires that step's lease and runs pollPendingSteps so a free worker re-claims it (generation
+//   - force-expires that step's lease and runs recoverExpiredLeases so a free worker re-claims it (generation
 //     N+1) and re-runs it to completion, driving the flow to a terminal outcome,
 //   - awaits that terminal outcome, then returns a release func the caller invokes to unblock the zombie.
 //
@@ -142,7 +142,7 @@ func zombieDispatch(t *testing.T, eng *Engine, flowURL, blockTaskName string, ta
 		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE status='"+workflow.StatusRunning+"' AND task_name=?",
 		blockTaskName)
 	assert.NoError(err)
-	eng.pollPendingSteps(ctx)
+	eng.recoverExpiredLeases(ctx)
 
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -365,7 +365,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	if n, _ := res.RowsAffected(); !assert.Equal(int64(1), n) { // the zombie really did mark A completed
 		return
 	}
-	eng.pollPendingSteps(ctx) // ring the doorbell so a free worker re-claims the now-pending A
+	eng.recoverExpiredLeases(ctx) // ring the doorbell so a free worker re-claims the now-pending A
 
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -552,7 +552,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 }
 
 // TestLeaseRecovery_EndToEnd is the end-to-end proof of lease-based crash recovery:
-// a worker "crashes" mid-task (its first execution never returns), its lease expires, pollPendingSteps
+// a worker "crashes" mid-task (its first execution never returns), its lease expires, recoverExpiredLeases
 // resets the step, and a free worker re-executes it to completion. It asserts the whole path heals - the
 // flow completes on the second execution - and pins two properties: the dwarf_steps_recovered metric fires,
 // and lease recovery is NOT a retry (the step's attempt counter stays 0, unlike flow.Retry which bumps it).
@@ -599,7 +599,7 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 	assert.Equal("yes", outcome.State["ran"]) // the recovery re-execution wrote the state
 
-	// The recovery metric fired: pollPendingSteps reset the lost-lease step to pending for re-execution.
+	// The recovery metric fired: recoverExpiredLeases reset the lost-lease step to pending for re-execution.
 	var rm metricdata.ResourceMetrics
 	if !assert.NoError(reader.Collect(ctx, &rm)) {
 		return

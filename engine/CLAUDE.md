@@ -870,66 +870,50 @@ single-slot coalescing, never scan post-completion state, wedging a single-worke
 The other half of liveness is the doorbell: `Offer` admits into an EMPTY partition, so a sequential chain's
 next hop dispatches immediately rather than waiting out a cycle. The cache holds 2x the worker count.
 
-`pollPendingSteps` does not enumerate the backlog onto a queue. It recovers expired-lease steps, sizes the wake
-timer to the nearest future `not_before`, and rings the local doorbell each cycle. (Orphan-flow and parked-step
-wedge detection are *not* here - their heavy `NOT EXISTS` scans run on the separate latency-tolerant `recoveryLoop`;
-see "Background Recovery".)
+**There is no timer goroutine and no dispatch-facing poll.** Background repair is one function -
+`recoverExpiredLeases` - running on `recoveryLoop` beside the other repairs (see "Background Recovery"),
+which is **THE** cadence for every background repair the engine performs.
 
-**There is no "a backlog exists" cadence any more, and the probe that set one is GONE.** The poll used to run
-a fourth statement per shard - an existence probe (`SELECT 1 FROM dwarf_steps … LIMIT_OFFSET(1,0)`) - whose
-*only* purpose was to cap `nextPoll` at `backlogPollInterval` (1 minute) so an idle replica that missed a
-doorbell still re-scanned. Each shard's piston now cycles unconditionally on its own period, covering that
-case per shard far sooner, with one band scan instead of the probe plus the poll's other three statements -
-so the chain was strictly dominated (the 1m cap existed only to reach a fleet-wide nudge that no longer
-exists). Both
-the constant and the probe were removed. **Do not reintroduce anything here that fires on a backlog
-existing:** this poll is nudged sub-second under load, so a statement added to it is paid on every nudge,
-and the per-shard refiller is the right place for any work-discovery cadence.
+**Do not reintroduce any of the three mechanisms that used to sit here.** Each is individually plausible
+and each is strictly dominated:
 
-`maxPollInterval` keeps its meanings: the `nextPoll` default when nothing is pending, the cap on one timer
-sleep, and the horizon bound on the `MIN(lease_expires)` sizing query. Lease recovery never depended on the
-1m cap - that query already schedules `nextPoll` at the soonest future expiry, and re-evaluates each
-`maxPollInterval` sweep for expiries beyond the horizon.
+- **A due-backlog existence probe** (to cap the sweep when an idle replica missed a doorbell). A piston
+  cycles unconditionally, so it covers that per shard, far sooner, with one band scan.
+- **An early-wake channel** (`shortenNextPoll` / `nudgeTimer` / `wakeTimer`). Every site that armed a wake
+  did it to make the poll ring the doorbell at the right instant, and nothing rings a doorbell from here:
+  every piston's scan predicate is already `not_before<=NOW_UTC()`, so a sleeping or backed-off step becomes
+  visible to the next cycle on its own. Verified by no-oping `shortenNextPoll` and running the full suite
+  green, sleep and retry fixtures included. It also carried a past-deadline-replace predicate defending
+  against a ~1-in-40 `sleepretrycomposeflow` wedge, which cannot arise with no deadline to replace.
+- **A self-sizing deadline** (`MIN(lease_expires)`, scheduling the next sweep at the soonest future expiry).
+  This is the one that reads as load-bearing and is not. Its period works out to
+  `lease - age of the oldest in-flight step`, so with ordinary millisecond steps it sits at ~2.5 minutes
+  (the default `budget + leaseMargin`) and 5 at idle - not a hot loop, and all it buys is recovery landing
+  *at* the instant a lease lapses instead of within a sweep of it, for a per-shard query every sweep plus a
+  deadline field, a mutex, an error clamp and a fault seam.
 
-**Sizing-error clamp.** A sizing SELECT in `pollPendingSteps` can *fail* (a transient DB error - most commonly a
-momentary connection-limit rejection under load; see "Per-test engine + sequential execution" in `fixtures/CLAUDE.md`). The error must not be swallowed into
-a "nothing pending" reading, because that would size `nextPoll` to `maxPollInterval` (5 minutes) while a due step
-sits undispatched - a multi-minute wedge that a transient blip turned into a stall. So when any shard's sizing query
-errors, `pollPendingSteps` clamps `nextPoll` to `pollErrorRetryInterval` (1s): re-poll promptly, ring the doorbell
-again, and let the step dispatch once the blip clears. The clamp is the engine's own resilience to transient DB
-errors; it never *retries the connection* (that is left to the layer holding the resource - the task or host), it
-just refuses to convert an unknown backlog into a long sleep.
+**Lease recovery costs latency, and the number is the constraint on shortening anything else.** Worst-case
+recovery is `budget + leaseMargin + wedgeSweepInterval` - at the defaults 2m + 30s + 5m. That is acceptable
+because the path runs only when a worker has already died. It stops being acceptable at a SHORT configured
+budget: a 5s budget makes the lease 35s, which a five-minute sweep dominates. The fix there is to **derive
+`recoveryLoop`'s ticker from the configured budget**, never a per-sweep query asking the database for it.
 
-**The pistons do NOT apply that clamp, and no longer need to.** A scan or fetch can fail on the same
-transient DB error, and swallowing it would be the mirror wedge: the shard's partition refills **empty**,
-its workers block in `Pop`, and nothing retries. Under the trigger design that needed an explicit re-poll to
-get the refiller re-run. Now the next cycle is at most one interval away unconditionally, so the retry is
-the cadence itself. What the cycle DOES do on a scan error is `planner.Clear` (this shard stops claiming a
-band it cannot serve) while leaving the cache partition intact - an error means "unknown", not "nothing is
-due", so wholesale-replacing a healthy partition would idle its workers for no reason. A fetch error clears
-neither: the tally already succeeded and is still true.
+**Lease recovery is the ONLY thing that recovers a crashed worker**, because a piston never touches a
+`running` row - and it is *not* the backstop for anything else. A missed doorbell leaves a `pending` row,
+which the next cycle selects like any other; a step that is `pending` with a future `lease_expires` is
+invisible to both (see the lease-extension guard in `persist.go`).
 
-**The timer is a RECOVERY sweep and nothing else - there is no early-wake channel.** `shortenNextPoll`,
-`nudgeTimer` and the `wakeTimer` channel are all gone, and with them the past-deadline-replace predicate
-that had to defend against a subtle wedge (a worker arming a *future* `not_before` while `nextPoll` sat in
-the past, whose wake was then dropped and clobbered by the in-flight poll's far default - reproduced as
-~1-in-40 timeouts of `fixtures/sleepretrycomposeflow_test.go`).
+**The pistons need no error clamp either.** A scan or fetch can fail on the same transient DB error that the
+poll's clamp used to cover, and swallowing it would be the mirror wedge: the shard's partition refills
+**empty** and its workers block in `Pop`. Under the trigger design that needed an explicit re-poll; now the
+next cycle is at most one interval away unconditionally, so the retry *is* the cadence. What a cycle does do
+on a scan error is `planner.Clear` (this shard stops claiming a band it cannot serve) while leaving the
+cache partition intact - an error means "unknown", not "nothing is due". A fetch error clears neither: the
+tally already succeeded and is still true.
 
-Every one of those sites armed a wake so the poll would ring the doorbell at the right instant. **The poll
-no longer rings anything**, so waking it early accomplishes nothing for dispatch: every piston's scan
-predicate is already `not_before<=NOW_UTC()`, so a sleeping or backed-off step becomes visible to the very
-next cycle on its own. The whole channel was strictly dominated, exactly like the due-backlog existence
-probe before it. Verified by no-oping `shortenNextPoll` entirely and running the full suite - green,
-including every sleep and retry fixture.
-
-What the poll still does, and why it must keep running: **lease recovery**. Resetting a `running` step whose
-lease expired is the ONLY thing that recovers a crashed worker, because a piston never touches a `running`
-row. Its `MIN(lease_expires)` sizing query stays for the same reason - without it, recovery degrades from
-"promptly at expiry" to "within `maxPollInterval`" (5 minutes).
-
-*The trade, stated because it is a semantic change:* `flow.Sleep(until)` and retry backoffs now land within
-a cycle interval of their deadline rather than on a precise wake. At the derived ~67ms that is as good as
-the floor-gated path it replaces; at the `refillIntervalCap` (1s), or under a pinned bench interval, it can
+*The trade from removing the early wake, restated:* `flow.Sleep(until)` and retry backoffs land within a
+cycle interval of their deadline rather than on a precise wake. At the derived ~67ms that is as good as the
+floor-gated path it replaced; at the `refillIntervalCap` (1s), or under a pinned bench interval, it can
 overshoot by that much. Acceptable for a durable sleep - do not reintroduce a timer to shave it.
 
 ### Round-trip minimization in `processStep`
@@ -1597,7 +1581,7 @@ reset must also be fenced) and log an ERROR for a normal, expected lease-protoco
 genuine `WHERE` filter (not a value-changing `SET`), so `RowsAffected` reflects the real match on **every**
 driver, MySQL included — no `touch`-column trick needed on steps.
 
-**`lease_seq` is bumped only where a lease is *granted* — the claim CAS.** `pollPendingSteps`' expired-lease
+**`lease_seq` is bumped only where a lease is *granted* — the claim CAS.** `recoverExpiredLeases`' expired-lease
 reset (`running`→`pending`) leaves it untouched: the reset does not grant a lease, it only makes the step
 claimable, and the next claim bumps the generation. Consequence: a step reset-but-not-yet-reclaimed still
 carries the prior worker's generation, so that worker's write is *not* fenced — but this is the benign
@@ -2000,7 +1984,7 @@ awaiters are their own. Pinned by `TestAwaited_GatesStatusChangeBroadcast` (engi
   hitting a write lock wait up to 1s instead of failing immediately with `SQLITE_BUSY`. Essential during fan-out.
 - **Lock contention recovery** - `processStep` defers a check: on a lock-contention error
   (`sequel.IsLockContentionError`), it resets the step it had leased (`running` -> `pending`, `lease_expires=NOW`),
-  so the step is claimable again. The reset is load-bearing on its own: `pollPendingSteps` only recovers running
+  so the step is claimable again. The reset is load-bearing on its own: `recoverExpiredLeases` only recovers running
   steps whose lease has *already* expired, and a freshly leased step holds a minutes-long lease, so without the
   rewind the step (and its fan-in) would stall until the lease lapsed. It no longer needs a paired re-poll - the
   step goes back to `pending` and the next cycle selects it. Guarded by `WHERE status='running'`, so only the
@@ -2325,7 +2309,7 @@ fan-out). `Fork` resolves scheduling once for the whole cloned tree and binds it
 hot-path scan - no in-memory filter at refill time. (The selection index's trailing `(created_at, step_id)` serves
 the refiller's per-key oldest-first ordering; see `internal/migrations/CLAUDE.md`.) The `parked` value labels *why* the step is held:
 
-- `parked=0` (`parkedNone`, default) - active. Selection sees it; `pollPendingSteps` recovers it if its lease
+- `parked=0` (`parkedNone`, default) - active. Selection sees it; `recoverExpiredLeases` recovers it if its lease
   expires; saturation counts it as one in-flight slot. (Also the precondition the claim CAS requires.)
 - `parked=1` (`parkedSubgraph`) - the step called `flow.Subgraph` and is waiting for the child. `status='running'`
   (logically running, blocked on its child) but excluded from selection, saturation, AND lease-expiry recovery. No
@@ -2356,7 +2340,7 @@ the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_e
 **8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
 (start path), `dwarf_flows_terminated` (completeFlow), `dwarf_steps_executed` (every terminal step
 disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered`
-(pollPendingSteps lease recovery), `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
+(recoverExpiredLeases lease recovery), `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
 nonzero value flags a latent bug), `dwarf_flows_orphaned` (the orphan sweep's detection-only alarm - the
 flow-level sibling of `dwarf_steps_unwedged`, counted at the same site as its error log, never auto-recovered),
 and the two persist alarms `dwarf_steps_write_retried` / `dwarf_steps_write_failed` (detailed under "Persisting
@@ -2860,13 +2844,14 @@ completing sibling's transition), so it short-circuits only genuinely-terminal f
 Transactions don't help when a worker crashes during the `ExecuteTask` call (outside any transaction). The
 `lease_expires` column is a crash-recovery lease: the claim CAS sets `lease_expires` to
 `NOW + step.time_budget_ms + leaseMargin` (the step's own frozen budget, referenced self-referentially in the
-UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `pollPendingSteps` resets the step to
+UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `recoverExpiredLeases` resets the step to
 `pending` for re-execution.
 
 ### Background Recovery
 
-1. **`pollPendingSteps`** - on a timer. Recovers `running` steps whose lease expired by resetting to `pending`; rings
-   the doorbell for due pending steps.
+1. **`recoverExpiredLeases`** (`wedge.go`) - resets `running` steps whose lease expired to `pending`, one UPDATE
+   per shard. It rings no doorbell: a reset step is due and `pending`, so its shard's next piston cycle selects it
+   like any other. Runs on `recoveryLoop` with everything else here - there is no timer goroutine.
 2. **Terminal flow check** in `processStep` - after loading flow data, if the flow is `cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
@@ -2877,7 +2862,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
    duplicate transition-evaluation logic and a false positive could double-advance it. The real recovery is the
    `processStep` recovery defer (which rolls the just-`completed` step back to `pending` to re-dispatch); this detector
    is the last-resort alarm for the residual case the defer cannot cover (its own reset UPDATE losing to a contention
-   storm). It runs on the same **dedicated `recoveryLoop`** as the wedge sweep (#4) - off `pollPendingSteps` for the
+   storm). It runs on the same **dedicated `recoveryLoop`** as the wedge sweep (#4) - off `recoverExpiredLeases` for the
    same heavy-scan reason (its `NOT EXISTS` over `dwarf_steps` is latency-tolerant, while the poll is nudged
    sub-second). **Both correctness conditions are on `dwarf_steps`, deliberately.** The age guard used to *be* the
    flow row (`dwarf_flows.updated_at older than the threshold`), but the `touch`-column refactor froze that column
@@ -2894,13 +2879,12 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
    (silent under the default discard logger) **and** increments `dwarf_flows_orphaned{workflow}` - the flow-level
    sibling of `dwarf_steps_unwedged`, on the same "nonzero = latent bug" footing, so an operator can alert on it
    without scraping logs. It is a detection-only alarm: unlike the wedge sweep it does **not** auto-recover.
-4. **Parked-step wedge sweep** (`sweepWedgedParks`, `wedge.go`) - defense in depth for the `parkedSubgraph` park,
-   whose releasing condition could in principle never fire (a parked step is invisible to selection, and
-   `parkedSubgraph` is invisible to lease recovery too). Runs on a **dedicated recovery goroutine** (`recoveryLoop`)
-   on a plain `wedgeSweepInterval` (5m) ticker - kept *off* `pollPendingSteps` because that poll is nudged sub-second
-   under load while the sweep's `NOT EXISTS`/`GROUP BY` scans are heavy and the wedge it guards against is
-   latency-tolerant; the recovery loop is drained before the refiller in `drainRuntime` since a recovered park can
-   re-offer a step. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a
+4. **Parked-step wedge sweep** (`recoverWedgedSubgraphParks` + `recoverOrphanedSubgraphChildren`, `wedge.go`,
+   called inline from `runRecoverySweep`) - defense in depth for the `parkedSubgraph` park, whose releasing
+   condition could in principle never fire (a parked step is invisible to selection, and `parkedSubgraph` is
+   invisible to lease recovery too). Runs on the **dedicated recovery goroutine** (`recoveryLoop`) on a plain
+   `wedgeSweepInterval` (5m) ticker; the loop is drained before the pistons in `drainRuntime` since a recovered
+   park can re-offer a step. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a
    false positive (the guard sits comfortably beyond normal subgraph-completion latency). Unlike orphan-flow detection
    this **does** auto-recover, because each recovery re-invokes a *normal, status-guarded* mechanism (the
    `parkedSubgraph` revive CAS, or a subtree `Cancel` guarded by `status NOT IN (terminal)`) rather than duplicating
@@ -2949,13 +2933,13 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
 
 - **Create** - one transaction: insert flow (`running`) -> insert entry step (`pending`) -> set the flow's
   `thread_id`/`step_id`, then ring the doorbell. A pre-commit crash rolls back entirely (no partial flow); a
-  post-commit crash before the doorbell is recovered by `pollPendingSteps` picking up the `pending` entry step.
+  post-commit crash before the doorbell is recovered by `recoverExpiredLeases` picking up the `pending` entry step.
   There is no separate `Start`, so no inert `created` window. Self-healing.
 - **Resume** - one transaction (steps -> `pending`, flow -> `running`). A crash after commit but before the
-  doorbell is recovered by `pollPendingSteps`. Self-healing.
+  doorbell is recovered by `recoverExpiredLeases`. Self-healing.
 - **Fork** - one transaction clones the whole tree (new flow + step rows, id remap, re-parked ancestor callers), with
   the leaf fork step held `created` until the mapping completes, then enqueue. A pre-commit crash rolls back entirely
-  (no partial clone); a post-commit crash before the doorbell is recovered by `pollPendingSteps`. The original flow is
+  (no partial clone); a post-commit crash before the doorbell is recovered by `recoverExpiredLeases`. The original flow is
   read-only throughout, so it is never at risk. Self-healing.
 - **Cancel / failStep** - one transaction over the whole surgraph chain. A pre-commit crash rolls back; a post-commit
   crash leaves correct terminal state, `Await` callers discover it on the next poll. Self-healing.
@@ -2975,7 +2959,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `poll
   completion tasks must tolerate re-running. Residual hole: the reset UPDATE can itself lose to a contention storm,
   leaving the step `completed` - surfaced (log-only) by `detectOrphanedFlows` (#3).
 - **processStep - Flow Completion (no next steps)** - flow -> `completed` then step -> `completed`. A crash between
-  leaves the step `running`; the lease expires, `pollPendingSteps` resets it, and the terminal-flow check marks it
+  leaves the step `running`; the lease expires, `recoverExpiredLeases` resets it, and the terminal-flow check marks it
   `completed`. Self-healing.
 
 ### Database Sharding
