@@ -234,9 +234,8 @@ const peerDispatchWindow = 5 * time.Second
 // overlapping peers at the price of a lost claim); the piston beats as soon as that first cycle lands, so
 // the window is milliseconds rather than a heartbeat interval.
 func (e *Engine) upsertSelf(ctx context.Context, db *sequel.DB) error {
-	dispatches := e.dispatchesFlag()
 	res, err := db.ExecContext(ctx,
-		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), dispatches=? WHERE engine_id=?", dispatches, e.engineID)
+		"UPDATE dwarf_peers SET seen_at=NOW_UTC() WHERE engine_id=?", e.engineID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -250,7 +249,7 @@ func (e *Engine) upsertSelf(ctx context.Context, db *sequel.DB) error {
 		return nil
 	}
 	_, err = db.ExecContext(ctx,
-		"INSERT INTO dwarf_peers (engine_id, seen_at, dispatches) VALUES (?, NOW_UTC(), ?)", e.engineID, dispatches)
+		"INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (?, NOW_UTC())", e.engineID)
 	return errors.Trace(err)
 }
 
@@ -304,16 +303,6 @@ func freshestRoster(rosters []shardRoster) shardRoster {
 	return rosters[best]
 }
 
-// dispatchesFlag reports whether this replica claims work at all. An await-only replica (SetWorkers(0))
-// holds connections - so it still counts toward R, which divides the pools - but selects nothing, so it
-// must be excluded from the candidate partition: a residue class assigned to it would never be served.
-func (e *Engine) dispatchesFlag() int {
-	if e.workers.Load() > 0 {
-		return 1
-	}
-	return 0
-}
-
 // scanFreshPeers reads one shard's engine_id-sorted roster of peers inside peerFreshWindow, plus the age
 // of its newest heartbeat. ORDER BY in SQL rather than in Go so the ordering is the database's, identical
 // for every replica reading the same rows - which is what lets each replica compute a distinct ordinal
@@ -339,9 +328,9 @@ func (e *Engine) scanFreshPeers(ctx context.Context, db *sequel.DB, freshMs int6
 		roster.ids = append(roster.ids, id)
 		// EVIDENCE, not a claim: dispatched_at is advanced only by a replica whose piston actually turned,
 		// so a wedged one drops out of the partition divisor on its own while its seen_at keeps it in R.
-		// The `dispatches` flag carries the same fact but is a claim, and a replica that publishes "I
-		// dispatch" and then wedges keeps its residue class forever - and a class nobody selects is work
-		// nobody runs.
+		// This REPLACED a `dispatches` flag, which carried the same fact as a claim: a replica that
+		// published "I dispatch" and then wedged kept its residue class forever, and a class nobody selects
+		// is work nobody runs. The column was dropped once this became its only reader.
 		if dispatchAgeMs <= dispatchMs {
 			roster.dispatchers = append(roster.dispatchers, id)
 		}
@@ -395,11 +384,9 @@ func (e *Engine) heartbeatPeers(ctx context.Context) (shardRoster, error) {
 	indices, pos := e.shardOrdinals()
 	rosters := make([]shardRoster, len(indices))
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		// No upsert here: the PISTONS own the heartbeat write now, one per shard on their own cadence, and
-		// two writers racing the same row would break the UPDATE-then-INSERT fallback's premise (MySQL
-		// counts CHANGED rows, so two writes inside one NOW_UTC() millisecond report zero matched and fire a
-		// spurious INSERT onto an existing primary key). This pass is a pure reader plus the prune.
-		// registerSelf still writes once at Startup, before any piston exists.
+		// No steady-state upsert here: the PISTONS own the heartbeat write, one per shard on their own
+		// cadence, and this pass is a reader plus the prune. registerSelf writes once at Startup, before any
+		// piston exists.
 		//
 		// The roster replaces the fresh COUNT: it carries the same number (its length) plus the identities
 		// the ordinal needs, so this still costs one scan. The stale count keeps its own aggregate, which
@@ -407,6 +394,25 @@ func (e *Engine) heartbeatPeers(ctx context.Context) (shardRoster, error) {
 		roster, err := e.scanFreshPeers(ctx, db, freshMs)
 		if err != nil {
 			return errors.Trace(err)
+		}
+
+		// SELF-HEAL: the beat is UPDATE-only, so a row that has gone MISSING is refreshed by nobody and
+		// matches zero rows forever, silently. It can go missing: this replica's beats to one shard failing
+		// (or its process stalling) for peerStragglerAge lets a peer's prune delete the row, and then the
+		// replica is permanently absent from R - peers UNDER-count, which over-sizes their pools, the
+		// direction that collapses a database - while its own partitioning fails open and it overlaps every
+		// peer. That used to be self-correcting within a pingInterval, back when this loop upserted.
+		//
+		// Re-registering HERE rather than restoring the beat's INSERT fallback keeps exactly one steady-state
+		// writer per row, so the two can never race; this fires only on a state that is already broken. It is
+		// checked per shard, against that shard's own roster, because a row can be pruned on one shard while
+		// alive on another and freshestRoster reports only one shard's view. Ordered before the prune below,
+		// so the row it writes is fresh and cannot be swept by this same pass.
+		if len(roster.ids) > 0 && rosterOrdinal(roster.ids, e.engineID) < 0 {
+			e.logger.WarnContext(ctx, "Peer registry row missing; re-registering", "shard", shard)
+			if err := e.upsertSelf(ctx, db); err != nil {
+				return errors.Trace(err)
+			}
 		}
 		var stale int
 		err = db.QueryRowContext(ctx,

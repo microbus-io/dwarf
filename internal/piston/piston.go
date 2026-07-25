@@ -187,7 +187,7 @@ func (p *Piston) Shard() int { return p.shard }
 
 // SetIdle puts the piston in or out of idle. Idling still turns over - it heartbeats, so the replica
 // keeps its registry row and keeps dividing the connection pools - but it runs no cycle and claims no
-// work, and its registry row says so (dispatches=0) so peers exclude it from the candidate partition.
+// work - so it never advances dispatched_at, which is how peers exclude it from the candidate partition.
 //
 // The default is NOT idle: a fresh piston dispatches, which is the common case, and a zero value that
 // silently did nothing would be the worse default.
@@ -320,7 +320,8 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 		cycleDuration: hist("dwarf_refill_duration_seconds",
 			"Wall-clock duration of one shard's complete refill cycle, excluding the pace it slept beforehand."),
 		queryDuration: hist("dwarf_refill_query_duration_seconds",
-			"Duration of one shard's refill query, labelled by shard and by phase (band_keys, fetch_steps)."),
+			"Duration of one phase of one shard's refill cycle, labelled by shard and by phase: the two queries "+
+				"(band_keys, fetch_steps) and the two in-memory phases (planning, pushing)."),
 		selected: ctr("dwarf_refill_candidates_selected",
 			"Counts step candidates the refiller selected into the cache. Compare against dwarf_refill_candidates_discarded for the oversupply ratio."),
 		discarded: ctr("dwarf_refill_candidates_discarded",
@@ -418,7 +419,15 @@ func (p *Piston) beatLoop(ctx context.Context) {
 func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 	in := p.inst.Load()
 	shardAttr := attribute.Int("shard", p.shard)
-	in.cycleDuration.Record(ctx, r.Total.Seconds(), metric.WithAttributes(shardAttr))
+	// A FAILED cycle is deliberately excluded from the end-to-end histogram, while the per-phase durations
+	// below still record. A cycle that returned early on a scan or fetch error is a truncated one with no
+	// meaningful total, and folding it in would drag the percentiles toward an error path that is already
+	// logged; the same goes for the ~0 sample a cancellation during the pace produces, one per shard per
+	// shutdown. The phase timings are worth keeping either way - they show WHICH phase was slow on the way
+	// to failing.
+	if r.Err == nil {
+		in.cycleDuration.Record(ctx, r.Total.Seconds(), metric.WithAttributes(shardAttr))
+	}
 	if r.Tallying > 0 {
 		in.queryDuration.Record(ctx, r.Tallying.Seconds(),
 			metric.WithAttributes(shardAttr, attribute.String("phase", "band_keys")))
@@ -468,8 +477,8 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 // what the candidate partition must divide across. A replica handed a residue class of step ids it never
 // selects strands them, so that divisor needs EVIDENCE rather than a claim: a piston that says it
 // dispatches and then wedges stops advancing dispatched_at and falls out of the divisor on its own,
-// while its seen_at keeps it in R where it belongs. dispatches carries the same fact as a flag for the
-// benefit of readers that have not moved to the timestamp yet.
+// while its seen_at keeps it in R where it belongs. (A `dispatches` FLAG carried the same fact as a claim
+// and was dropped once every reader had moved to the timestamp.)
 //
 // A failed write is not retried. Retrying a broken registry write would turn a database blip into a write
 // storm, and the next beat is a second away regardless.
@@ -482,19 +491,15 @@ func (p *Piston) beat(ctx context.Context) {
 	// piston that is neither finishing nor attempting cycles stops advancing dispatched_at, which is the
 	// wedged case the column exists to catch.
 	dispatched := (p.dispatchedSinceBeat.Swap(false) || p.cycleInFlight.Load()) && !idle
-	dispatches := 1
-	if idle {
-		dispatches = 0
-	}
 	// The dispatched_at assignment is composed into the statement rather than bound through a CASE: a
 	// conditional assignment is two plain statement shapes here, where CASE WHEN ? would lean on how each
 	// driver binds a boolean into an expression.
-	set := "seen_at=NOW_UTC(), dispatches=?"
+	set := "seen_at=NOW_UTC()"
 	if dispatched {
 		set += ", dispatched_at=NOW_UTC()"
 	}
 	_, err := p.db.ExecContext(ctx,
-		"UPDATE dwarf_peers SET "+set+" WHERE engine_id=?", dispatches, p.engineID)
+		"UPDATE dwarf_peers SET "+set+" WHERE engine_id=?", p.engineID)
 	if err != nil && ctx.Err() == nil {
 		p.logger.Load().ErrorContext(ctx, "Peer heartbeat", "shard", p.shard, "error", err)
 	}

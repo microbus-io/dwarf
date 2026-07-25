@@ -86,7 +86,7 @@ func newRig(t *testing.T) *rig {
 func (r *rig) register(t *testing.T) {
 	t.Helper()
 	_, err := r.db.ExecContext(context.Background(),
-		"INSERT INTO dwarf_peers (engine_id, seen_at, dispatches) VALUES (?, NOW_UTC(), 1)",
+		"INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (?, NOW_UTC())",
 		defaultTestEngineID)
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,6 @@ func (r *rig) park(t *testing.T, stepID int) {
 // clock - never round-tripped through Go - so a "fresh" check means the same thing here as in the engine.
 type peerRow struct {
 	EngineID        int64
-	Dispatches      int
 	SeenAgeMs       float64
 	DispatchedAgeMs float64
 }
@@ -137,7 +136,7 @@ type peerRow struct {
 func (r *rig) peerRows(t *testing.T) []peerRow {
 	t.Helper()
 	rows, err := r.db.QueryContext(context.Background(),
-		"SELECT engine_id, dispatches, DATE_DIFF_MILLIS(NOW_UTC(), seen_at),"+
+		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at),"+
 			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) FROM dwarf_peers ORDER BY engine_id")
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +145,7 @@ func (r *rig) peerRows(t *testing.T) []peerRow {
 	var out []peerRow
 	for rows.Next() {
 		var e peerRow
-		if err := rows.Scan(&e.EngineID, &e.Dispatches, &e.SeenAgeMs, &e.DispatchedAgeMs); err != nil {
+		if err := rows.Scan(&e.EngineID, &e.SeenAgeMs, &e.DispatchedAgeMs); err != nil {
 			t.Fatal(err)
 		}
 		out = append(out, e)
@@ -372,7 +371,6 @@ func TestPiston_HeartbeatUpdatesInPlace(t *testing.T) {
 	rows := r.peerRows(t)
 	assert.Equal(1, len(rows))
 	assert.Equal(int64(defaultTestEngineID), rows[0].EngineID)
-	assert.Equal(1, rows[0].Dispatches, "a dispatching piston publishes dispatches=1")
 
 	time.Sleep(2 * time.Millisecond) // NOW_UTC() is millisecond-precision; ensure seen_at changes
 	r.p.beat(ctx)
@@ -454,31 +452,6 @@ func TestPiston_IdleNeverAdvancesDispatchedAt(t *testing.T) {
 		"but never claims to dispatch, however many times it beats (age %.0fms)", row.DispatchedAgeMs)
 }
 
-// TestPiston_IdlePublishesDispatchesZero pins that idling rides every beat rather than only the insert, so
-// a piston that starts or stops idling republishes it immediately instead of waiting to be pruned. The
-// column and the behaviour come from one setter, so they cannot disagree - and a replica counted as a
-// dispatcher while claiming nothing would be handed a residue class it strands.
-func TestPiston_IdlePublishesDispatchesZero(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-	r := newRig(t)
-
-	r.p.beat(ctx)
-	assert.Equal(1, r.peerRows(t)[0].Dispatches)
-
-	r.p.SetIdle(true)
-	assert.True(r.p.Idle())
-	time.Sleep(2 * time.Millisecond)
-	r.p.beat(ctx)
-	assert.Equal(0, r.peerRows(t)[0].Dispatches, "idling republishes on the next beat")
-
-	r.p.SetIdle(false)
-	time.Sleep(2 * time.Millisecond)
-	r.p.beat(ctx)
-	assert.Equal(1, r.peerRows(t)[0].Dispatches, "and so does leaving idle")
-}
-
 // TestPiston_RunDispatchesAndBeats drives the whole loop end to end: real steps in, candidates in the
 // cache, and a registry row written.
 // NOT parallel: it shortens the package-level heartbeatInterval, which every other test reads.
@@ -521,7 +494,6 @@ func TestPiston_RunDispatchesAndBeats(t *testing.T) {
 	rows := r.peerRows(t)
 	assert.Equal(1, len(rows))
 	assert.Equal(int64(defaultTestEngineID), rows[0].EngineID)
-	assert.Equal(1, rows[0].Dispatches)
 	assert.True(rows[0].SeenAgeMs < staleDispatch)
 	assert.True(rows[0].DispatchedAgeMs < staleDispatch,
 		"a loop that really dispatched publishes the evidence for it (age %.0fms)", rows[0].DispatchedAgeMs)
@@ -556,7 +528,6 @@ func TestPiston_RunIdleBeatsWithoutDispatching(t *testing.T) {
 	rows := r.peerRows(t)
 	assert.Equal(1, len(rows), "beats update one row, they do not accumulate")
 	assert.Equal(int64(defaultTestEngineID), rows[0].EngineID)
-	assert.Equal(0, rows[0].Dispatches)
 	assert.Equal(0, r.cache.Len(), "an idle piston selects nothing, however much is due")
 	band, _ := r.planner.LastBand()
 	assert.Equal(-1, band, "and never touches the planner, so nothing was ever planned")

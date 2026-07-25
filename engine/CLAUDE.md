@@ -877,7 +877,8 @@ The fuse used to be `refillScanFloorMin`, a 20ms clamp inside the derivation. It
 bounds the quiet time between the END of one cycle and the START of the next, and that is the STRONGER
 form: a start-to-start minimum cannot bound a cycle that outruns it, which is exactly the deep-backlog case
 the fuse exists for. Inert in the derived path (~67ms), so a healthy configuration pays nothing, and
-`SetRefillInterval` bypasses the derivation (not the gap) so bench sweeps can still measure below it.
+`SetRefillInterval` lowers the gap to match a pinned interval when that is tighter, so a bench sweep can
+still measure the unlimited arm; it never raises it, so a 500ms pin keeps the ordinary 20ms gap.
 
 Liveness is unaffected: a cycle always runs, so a drained-early partition waits at most the remainder of the
 period. Pinned by `TestRefillInterval_DeepBacklogLiveness` (a deep backlog still drains under a period
@@ -1249,7 +1250,7 @@ ever DELAY this replica's dispatch of a step by a bounded window, never prevent 
   at the shared entry point rather than at each caller.
 
 **The partition divides DISPATCHERS, not R** - counted from `dwarf_peers.dispatched_at` freshness (see
-`peerDispatchWindow`, 5s), not the `dispatches` flag. The column is EVIDENCE that a piston turned rather
+`peerDispatchWindow`, 5s). The column is EVIDENCE that a piston turned rather
 than a claim about intent: a replica that publishes "I dispatch" and then wedges keeps its residue class
 forever, and a class nobody selects is work nobody runs, whereas a stale timestamp drops it from the
 divisor on its own while `seen_at` keeps it in R. The two windows are asymmetric in OPPOSITE directions

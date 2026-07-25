@@ -82,8 +82,8 @@ replica handed a residue class of `step_id` it never selects leaves those steps 
 divisor trusts a flag, a replica that publishes "I dispatch" and then wedges keeps its class forever. With
 a timestamp, a wedged piston simply stops advancing `dispatched_at` and drops out of the divisor on its
 own, while `seen_at` keeps it in R where it belongs. An idle piston runs no cycle, so it never advances
-`dispatched_at` — the two populations separate with nothing believed. (`dispatches` still carries the same
-fact as a flag, only until every reader has moved to the timestamp.)
+`dispatched_at` — the two populations separate with nothing believed. (A `dispatches` FLAG carried the same
+fact as a claim; it was dropped once every reader had moved to the timestamp.)
 
 **A cycle that found nothing due still counts.** It proves the piston looked and could have served.
 Gating on candidates instead would make a quiet fleet read as having no dispatchers at all, disable
@@ -100,13 +100,22 @@ stops beating can drop its whole replica from R and reshuffle ordinals. A shard 
 still a live replica holding connections; "this piston stopped beating" must mean the process is stuck,
 nothing less.
 
-**`lastBeat` advances even when the write fails.** Retrying a broken registry write every cycle would turn
-a database blip into a write storm, and the next beat is a second away regardless. A beat on a cancelled
-context is likewise dropped — best-effort by design, and the row ages out.
+**A failed write is not retried.** Retrying a broken registry write would turn a database blip into a write
+storm, and the next beat is one interval away regardless. A beat on a cancelled context is likewise dropped
+— best-effort by design, and the row ages out.
 
-**`heartbeatInterval` (1s) is load-bearing, not merely cheaper than beating every cycle.** The
-UPDATE-then-INSERT fallback reads `RowsAffected` to decide whether a row existed, and MySQL counts
-CHANGED rows rather than matched ones — so two beats landing inside the same `NOW_UTC()` tick
+**The beat is UPDATE-ONLY: it refreshes the row and never creates it.** The owner registers once at startup
+and deletes once at shutdown, so the row's lifetime belongs to the process rather than to this loop. An
+INSERT fallback would let a beat RESURRECT a row the owner just deleted on its way down, which makes the
+shutdown delete correct only under an ordering constraint spanning two packages. It also dragged in a
+`RowsAffected` read and with it a MySQL changed-rows premise. The consequence to know: a row that goes
+missing is refreshed by nobody, so the engine's peers loop re-registers when it finds itself absent from a
+shard's roster (`engine/CLAUDE.md` §"Peer discovery") — one steady-state writer, plus a repair path that
+only fires on an already-broken state.
+
+**`heartbeatInterval` (1s) is a cost knob, and the owner may override it** (`SetHeartbeatInterval`). It
+used to be load-bearing for a second reason - the UPDATE-then-INSERT fallback read `RowsAffected`, and
+MySQL counts CHANGED rows rather than matched ones, so two beats inside one `NOW_UTC()` tick
 (millisecond precision) would report zero and fire a spurious INSERT. At a second's spacing that cannot
 happen; per-cycle, the margin is one millisecond. It is a `var` only so a test can shorten it, which is
 why any test that does so must **not** be `t.Parallel()`.

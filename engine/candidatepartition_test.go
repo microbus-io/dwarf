@@ -199,25 +199,21 @@ func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	assert.Equal(2, dispatchers, "only the two dispatchers divide the candidates")
 }
 
-// addPeerRowWithDispatch inserts a fake peer that either does or does not claim work, then forces a
-// recount. The dispatching variant is what addPeerRow already does; this spells the flag out so the
+// addPeerRowWithDispatch inserts a fake peer that either has or has not demonstrably dispatched, then
+// forces a recount. The dispatching variant is what addPeerRow already does; this spells it out so the
 // await-only case is expressible.
 func addPeerRowWithDispatch(t *testing.T, e *Engine, id int64, dispatches bool) {
 	t.Helper()
 	ctx := context.Background()
-	flag := 0
-	if dispatches {
-		flag = 1
-	}
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		// A non-dispatching peer leaves dispatched_at at its far-past default, which is exactly how an
-		// await-only replica presents itself: alive in seen_at, never advancing the evidence column.
-		cols, vals := "engine_id, seen_at, dispatches", "?, NOW_UTC(), ?"
+		// await-only replica presents itself: alive in seen_at, never advancing the evidence column. There
+		// is no flag to set - the timestamp IS the signal.
+		cols, vals := "engine_id, seen_at", "?, NOW_UTC()"
 		if dispatches {
 			cols, vals = cols+", dispatched_at", vals+", NOW_UTC()"
 		}
-		_, err := db.ExecContext(ctx,
-			"INSERT INTO dwarf_peers ("+cols+") VALUES ("+vals+")", id, flag)
+		_, err := db.ExecContext(ctx, "INSERT INTO dwarf_peers ("+cols+") VALUES ("+vals+")", id)
 		return err
 	})
 	if err != nil {

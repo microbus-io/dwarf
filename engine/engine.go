@@ -522,11 +522,17 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 
 // SetRefillInterval is an expert override that PINS every piston's cycle period to d, replacing the value
 // the engine derives from capacity/vCPUs/R (deriveRefillInterval). d <= 0 restores derivation. Operators
-// normally never call this - the derived period tracks the cache sizing it depends on automatically. The
-// override exists for benchmarking (scan-rate sweeps): the period is measured, not tuned, so finding its
-// optimum needs to hold it at a series of fixed values. It bypasses the derivation only; the pipeline's
-// own minimum gap between cycles still applies. Live: applies on the next recomputeRefillIntervals, and
-// this triggers one immediately on a running engine.
+// normally never call this - the derived period tracks the cache sizing it depends on automatically.
+//
+// The override exists for benchmarking (scan-rate sweeps): the period is measured, not tuned, so finding
+// its optimum needs to hold it at a series of fixed values - INCLUDING values below the 20ms minimum gap,
+// since the unlimited-scanning arm is one of the measured reference points (it costs 8% candidate churn
+// and a 77% worse p99 while buying no throughput, and that number has to stay reproducible). So a pinned
+// interval also lowers the pipeline's MinGap to match when it is the tighter of the two; restoring
+// derivation restores the default gap. Without that the fuse would silently clamp every sub-20ms arm of a
+// sweep to 20ms and quietly flatten the interesting end of the curve.
+//
+// Live: applies on the next recomputeRefillIntervals, and this triggers one immediately on a running engine.
 func (e *Engine) SetRefillInterval(d time.Duration) error {
 	e.refillIntervalOverride.Store(int64(d))
 	if e.started.Load() {
@@ -712,7 +718,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.workersDispatch = max(64, workersPerConnBudget*totalConns)
 	e.recomputeWorkerCeiling(ctx)
 
-	e.initRuntime()
+	if err := e.initRuntime(); err != nil {
+		return errors.Trace(err)
+	}
 	// A NewEngineUnderTest engine tears itself down at test end: register the Shutdown as a t.Cleanup so a
 	// test needs no explicit defer e.Shutdown (an explicit one still works - Shutdown is idempotent). Use
 	// t.Context(), not the caller's ctx: it stays valid until just before cleanups run, whereas the
@@ -738,8 +746,9 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// initRuntime starts all goroutines and initializes runtime state.
-func (e *Engine) initRuntime() {
+// initRuntime starts all goroutines and initializes runtime state. It returns an error only for a
+// failure that would leave the engine half-supplied - see the piston build below.
+func (e *Engine) initRuntime() error {
 	e.lifetimeCtx, e.lifetimeCancel = context.WithCancel(context.Background())
 	// How many workers to spawn eagerly. An explicit SetWorkers is a request for exactly that many, so it
 	// is honored in full: the operator's number is the pool, not a ceiling the pool might never reach
@@ -788,15 +797,20 @@ func (e *Engine) initRuntime() {
 	// the pools, but they claim no work and are excluded from the candidate partition.
 	idle := int(e.workers.Load()) == 0
 	for _, idx := range e.db.Indices() {
+		// A shard without a piston has no supply cycle AND no heartbeat, so the replica silently ages out
+		// of R on that shard and is eventually pruned from its registry - a half-supplied engine reporting
+		// success. Startup returns an error; use it. Both failures are near-impossible today (the shard set
+		// is already open, the arguments are non-nil), which is exactly why continuing quietly is the wrong
+		// default: the only way to reach here is a bug, and a loud one is cheaper than a degraded fleet.
 		db, dbErr := e.db.Shard(idx)
 		if dbErr != nil {
-			e.logger.ErrorContext(e.lifetimeCtx, "Resolving shard for piston", "shard", idx, "error", dbErr)
-			continue
+			e.unwindRuntime()
+			return errors.New("resolving shard %d for its piston: %w", idx, dbErr)
 		}
 		p, perr := piston.New(e.engineID, idx, db, e.planner, &e.cache)
 		if perr != nil {
-			e.logger.ErrorContext(e.lifetimeCtx, "Building piston", "shard", idx, "error", perr)
-			continue
+			e.unwindRuntime()
+			return errors.New("building piston for shard %d: %w", idx, perr)
 		}
 		p.SetLogger(e.logger)
 		p.SetSeams(e.seams)
@@ -855,6 +869,16 @@ func (e *Engine) initRuntime() {
 	e.peersLoop.Go(func() {
 		e.runPeersLoop()
 	})
+	return nil
+}
+
+// unwindRuntime undoes the part of initRuntime that runs before any goroutine is spawned, so a failed
+// Startup leaves an engine that reports itself stopped rather than started-but-inert. Only the metrics
+// callback needs undoing - it is registered with the OTEL reader and would otherwise query a database
+// nobody is driving.
+func (e *Engine) unwindRuntime() {
+	e.closeMetrics()
+	e.started.Store(false)
 }
 
 // spawnWorker adds one worker goroutine to the pool, unless the pool is draining (spawnClosed) or the

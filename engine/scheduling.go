@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -335,6 +336,10 @@ func (e *Engine) recomputeRefillIntervals() {
 	for idx, p := range e.pistons {
 		if override > 0 {
 			p.SetInterval(override)
+			// The gap is the fuse against a 100%-duty-cycle scan loop, and a bench sweep measuring below it
+			// is the one caller entitled to say so explicitly. Only lowered, never raised: a 500ms pinned
+			// interval keeps the ordinary 20ms gap.
+			p.SetMinGap(min(pipeline.DefaultMinGap, override))
 			continue
 		}
 		// Pass the shard's ACTUAL pool (shardPool resolves the SetMaxOpenConns pin) and its RAW declared
@@ -343,5 +348,6 @@ func (e *Engine) recomputeRefillIntervals() {
 		spec := specs[idx]
 		_, pool := shardPool(spec, pinned, replicas)
 		p.SetInterval(deriveRefillInterval(share, spec.VirtualCPUs, pool, replicas))
+		p.SetMinGap(pipeline.DefaultMinGap)
 	}
 }
