@@ -395,7 +395,14 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	// The child's revive of the parked caller is lost: the caller wedges running+parkedSubgraph with a
 	// terminal child. The wedge sweep must re-drive the release. Arm, create, wait for the wedge, then
 	// invoke the sweep with minAge 0 (bypassing the steady-state age guard) and the parent completes.
-	e.seams.Inject(FaultSubgraphReviveLost)
+	//
+	// Armed with a COUNT and withdrawn below, rather than Inject's single fire, because the rendezvous
+	// below lands one statement too early to order the two consults. completeFlow fires the stop
+	// checkpoint and only THEN calls completeSurgraphFlow, so waitChild returns before the worker has
+	// consulted the fault - and a single fire would then be consumed by whichever of the worker and the
+	// sweep got there first. If the sweep won, ITS revive would be the one dropped, the worker would
+	// perform the real one, and this test would pass while proving nothing about the sweep.
+	e.seams.InjectN(1<<20, FaultSubgraphReviveLost)
 	waitChild := awaitNextStop(t, e) // rendezvous on the child's completion (the first stop; parent is parked)
 	fk, err := e.Create(ctx, "fsub/parent", nil, nil)
 	assert.NoError(err)
@@ -406,6 +413,8 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 
 	// The child has now gone terminal; its revive is (faultily) lost, so the caller is wedged.
 	waitChild()
+	// Disarm before the sweep, so the re-drive below is the one revive that is allowed to land.
+	e.seams.Withdraw(FaultSubgraphReviveLost)
 	// Rendezvous on the parent's completion after the sweep re-drives the release (armed before the sweep).
 	waitParent := awaitNextStop(t, e)
 	e.recoverWedgedSubgraphParks(ctx, db, shard, 0) // the sweep, no age guard

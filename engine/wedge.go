@@ -69,10 +69,17 @@ func (e *Engine) sweepWedgedParks(ctx context.Context, db *sequel.DB, shard int)
 // here, and flow.Retry leaves older terminal children whose latest sibling is still active. completeSurgraphFlow
 // runs within milliseconds of child completion in steady state, so a step older than parkWedgeThreshold with
 // no non-terminal child is genuinely wedged.
+//
+// The age comparison is `<=`, not `<`, so that minAge=0 means "no age guard" - which is exactly what every
+// caller passing it reads it as. NOW_UTC() is millisecond-precision, so a strict `<` silently excludes a
+// step stamped inside the CURRENT millisecond: a genuinely wedged caller whose park happens to share a tick
+// with the sweep is skipped, the sweep reports nothing to do, and the wedge it exists to clear survives.
+// The boundary is immaterial at the production threshold (one millisecond either side of five minutes), so
+// `<=` costs nothing there and makes the zero case honest.
 func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, shard int, minAge time.Duration) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT s.step_id, s.flow_id FROM dwarf_steps s"+
-			" WHERE s.parked=? AND s.status='"+workflow.StatusRunning+"' AND s.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
+			" WHERE s.parked=? AND s.status='"+workflow.StatusRunning+"' AND s.updated_at <= DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" AND NOT EXISTS (SELECT 1 FROM dwarf_flows f WHERE f.surgraph_step_id=s.step_id AND f.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))",
 		parkedSubgraph, -minAge.Milliseconds(),
 	)
@@ -164,7 +171,9 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 		"SELECT c.flow_id, c.flow_token FROM dwarf_flows c"+
 			" JOIN dwarf_flows p ON p.flow_id=c.surgraph_flow_id"+
 			" WHERE c.surgraph_flow_id>0 AND c.status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
-			" AND c.updated_at < DATE_ADD_MILLIS(NOW_UTC(), ?)"+
+			// `<=`, so minAge=0 means "no age guard" - see recoverWedgedSubgraphParks for why a strict `<`
+			// silently skips a row stamped inside the sweep's own millisecond.
+			" AND c.updated_at <= DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" AND p.status IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
 		-minAge.Milliseconds(),
 	)
