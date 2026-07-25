@@ -624,10 +624,9 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 		).Scan(&priority, &notBeforeDelayMs)
 	}
 	if notBeforeDelayMs.Valid && notBeforeDelayMs.Float64 > 0 {
-		// Not due yet: nothing to preempt, so leave the cache untouched and let the poll timer wake at the
-		// right moment instead.
-		wakeAt := time.Now().Add(time.Duration(notBeforeDelayMs.Float64 * float64(time.Millisecond)))
-		e.shortenNextPoll(wakeAt)
+		// Not due yet: nothing to preempt, so leave the cache untouched. Nothing is scheduled either - the
+		// step's own not_before makes it invisible to selection until it comes due, and visible to the
+		// next cycle after that.
 		e.logger.DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
 		return
 	}

@@ -122,7 +122,6 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// would still take it, but a solo replica would eat the delay. Safe in the fenced-zombie case too: a
 		// peer that re-claimed owns it via its own tracker, and this relinquish at worst costs one lost CAS.
 		e.claims.RelinquishClaim(shardNum, stepID)
-		e.shortenNextPoll(time.Now())
 	}()
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
@@ -605,10 +604,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		// re-offer below (enqueueStepDue on a zero-backoff retry) is not skipped by its own still-live entry.
 		e.claims.RelinquishClaim(shardNum, stepID)
 		e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
-		if retrySleepMs > 0 {
-			e.shortenNextPoll(time.Now().Add(time.Duration(retrySleepMs) * time.Millisecond))
-		} else {
-			// The step was reset in place (same row, same denormalized priority) due now.
+		if retrySleepMs == 0 {
+			// The step was reset in place (same row, same denormalized priority) due now. A BACKED-OFF
+			// retry needs nothing here: its not_before is in the future, so the piston's scan picks it up
+			// within a cycle of coming due, and offering it now would only cache a hint no worker may claim.
 			e.enqueueStepDue(ctx, shardNum, stepID, flowPriority)
 		}
 		e.metricStepExecuted(ctx, taskName, "retried")
@@ -1171,9 +1170,9 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		return nil
 	}
 
-	if sleepDur > 0 {
-		e.shortenNextPoll(time.Now().Add(sleepDur))
-	} else if len(newStepIDs) > 0 {
+	// A sleeping successor is left to the piston: its not_before is in the future, so it is invisible to
+	// selection until it comes due and then visible to the very next cycle.
+	if sleepDur == 0 && len(newStepIDs) > 0 {
 		// Priority is the flow's, just bound into the successor INSERTs; the sleep branch diverged above.
 		e.enqueueStepDue(ctx, shardNum, newStepIDs[0], flowPriority)
 	}
@@ -1399,9 +1398,8 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 	e.metricStateReadBytes(ctx, workflowURL, "state", txBytes.stateRead)
 	e.metricStateReadBytes(ctx, workflowURL, "changes", txBytes.changesRead)
 
-	if sleepDur > 0 {
-		e.shortenNextPoll(time.Now().Add(sleepDur))
-	} else {
+	// A sleeping fan-in step is left to the piston; see the sibling site above.
+	if sleepDur == 0 {
 		// Priority was just bound into the fan-in INSERT; the sleep branch diverged above.
 		e.enqueueStepDue(ctx, shardNum, int(fanInStepID), priority)
 	}

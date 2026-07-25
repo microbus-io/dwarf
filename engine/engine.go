@@ -242,10 +242,10 @@ type Engine struct {
 	pistonCancel context.CancelFunc
 	pistonPool   sync.WaitGroup
 
-	// Timer goroutine
+	// Timer goroutine. It is a RECOVERY sweep now, not a dispatch participant: nothing wakes it early,
+	// because nothing needs to. See pollPendingSteps.
 	nextPoll     time.Time
 	nextPollLock sync.Mutex
-	wakeTimer    chan struct{}
 	timerStop    chan struct{}
 	timerWorker  sync.WaitGroup
 
@@ -763,7 +763,6 @@ func (e *Engine) initRuntime() {
 	// Shutdown/Startup cycle: a tally left from the previous run would claim a band nobody is serving.
 	e.planner = planner.New()
 	e.pistons = make(map[int]*piston.Piston)
-	e.wakeTimer = make(chan struct{}, 1)
 	e.timerStop = make(chan struct{})
 	e.recoveryStop = make(chan struct{})
 	e.reaperStop = make(chan struct{})
@@ -961,26 +960,6 @@ func (e *Engine) drainRuntime() {
 	e.waitersLock.Unlock()
 	if e.lifetimeCancel != nil {
 		e.lifetimeCancel()
-	}
-}
-
-// shortenNextPoll updates nextPoll to tm if tm is earlier, and wakes the timer.
-func (e *Engine) shortenNextPoll(tm time.Time) {
-	e.nextPollLock.Lock()
-	// Lower nextPoll to tm, or replace it if it already lies in the past (a fired deadline the timer is
-	// mid-poll on) - else a wake request later than that stale value is dropped and lost to a re-dispatch wedge.
-	if tm.Before(e.nextPoll) || e.nextPoll.Before(time.Now()) {
-		e.nextPoll = tm
-	}
-	e.nextPollLock.Unlock()
-	e.nudgeTimer()
-}
-
-// nudgeTimer nudges the timer goroutine to re-evaluate its deadline.
-func (e *Engine) nudgeTimer() {
-	select {
-	case e.wakeTimer <- struct{}{}:
-	default:
 	}
 }
 

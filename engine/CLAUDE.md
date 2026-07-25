@@ -686,8 +686,9 @@ count: a per-step broadcast reintroduced under any new op name fails it.
 sleep branch already diverged, so it offers the step directly with the values in hand - one round-trip per completed
 step that re-read a row this replica just wrote. The lookup path remains for the cold origination sites
 (surgraph revive, resume, `Fork`'s leaf, `Continue`, the wedge sweep) where the priority is not in hand. If
-`not_before` is in the future the doorbell short-circuits into `shortenNextPoll(not_before)` -
-the work is not due, nothing to preempt, the cache stays untouched; the local poll timer wakes at the right moment.
+`not_before` is in the future the doorbell short-circuits and does NOTHING - the work is not due, nothing to
+preempt, the cache stays untouched, and nothing is scheduled: the step's own `not_before` keeps it invisible
+to selection until it comes due, and visible to the next cycle after that.
 Otherwise the priority drives one of three cache paths, each against the step's own shard's PARTITION (an
 `Offer` routes by `Job.Shard` and is admitted against that partition's floor). (1) Strictly more important
 than the partition's band (priority < floor): **head-insert that exact step** so the next pop runs it without
@@ -906,10 +907,10 @@ the constant and the probe were removed. **Do not reintroduce anything here that
 existing:** this poll is nudged sub-second under load, so a statement added to it is paid on every nudge,
 and the per-shard refiller is the right place for any work-discovery cadence.
 
-`maxPollInterval` keeps all three of its meanings: the `nextPoll` default when nothing is pending, the cap on
-one timer sleep, and the horizon bound on the two `MIN(...)` sizing queries. Lease recovery never depended on
-the 1m cap - the `MIN(lease_expires)` query already schedules `nextPoll` at the soonest future expiry, and
-re-evaluates each `maxPollInterval` sweep for expiries beyond the horizon.
+`maxPollInterval` keeps its meanings: the `nextPoll` default when nothing is pending, the cap on one timer
+sleep, and the horizon bound on the `MIN(lease_expires)` sizing query. Lease recovery never depended on the
+1m cap - that query already schedules `nextPoll` at the soonest future expiry, and re-evaluates each
+`maxPollInterval` sweep for expiries beyond the horizon.
 
 **Sizing-error clamp.** A sizing SELECT in `pollPendingSteps` can *fail* (a transient DB error - most commonly a
 momentary connection-limit rejection under load; see "Per-test engine + sequential execution" in `fixtures/CLAUDE.md`). The error must not be swallowed into
@@ -922,24 +923,35 @@ just refuses to convert an unknown backlog into a long sleep.
 
 **The pistons do NOT apply that clamp, and no longer need to.** A scan or fetch can fail on the same
 transient DB error, and swallowing it would be the mirror wedge: the shard's partition refills **empty**,
-its workers block in `Pop`, and nothing retries. Under the trigger design that needed an explicit
-`shortenNextPoll(now + pollErrorRetryInterval)` to get the refiller re-run. Now the next cycle is at most
-one interval away unconditionally, so the retry is the cadence itself. What the cycle DOES do on a scan
-error is `planner.Clear` (this shard stops claiming a band it cannot serve) while leaving the cache
-partition intact - an error means "unknown", not "nothing is due", so wholesale-replacing a healthy
-partition would idle its workers for no reason. A fetch error clears neither: the tally already succeeded
-and is still true. Same policy, same 1s interval as the poll clamp above.
+its workers block in `Pop`, and nothing retries. Under the trigger design that needed an explicit re-poll to
+get the refiller re-run. Now the next cycle is at most one interval away unconditionally, so the retry is
+the cadence itself. What the cycle DOES do on a scan error is `planner.Clear` (this shard stops claiming a
+band it cannot serve) while leaving the cache partition intact - an error means "unknown", not "nothing is
+due", so wholesale-replacing a healthy partition would idle its workers for no reason. A fetch error clears
+neither: the tally already succeeded and is still true.
 
-The timer waits on the `nextPoll` deadline, shortened to the nearest future `not_before` (`flow.Sleep` / retry
-backoff) so a due step wakes the replica even when no doorbell arrives. The timer loop (`timerLoop`) runs
-`pollPendingSteps` on the adaptive interval.
+**The timer is a RECOVERY sweep and nothing else - there is no early-wake channel.** `shortenNextPoll`,
+`nudgeTimer` and the `wakeTimer` channel are all gone, and with them the past-deadline-replace predicate
+that had to defend against a subtle wedge (a worker arming a *future* `not_before` while `nextPoll` sat in
+the past, whose wake was then dropped and clobbered by the in-flight poll's far default - reproduced as
+~1-in-40 timeouts of `fixtures/sleepretrycomposeflow_test.go`).
 
-**`shortenNextPoll` treats a past `nextPoll` as "needs rescheduling," not just lower.** If `nextPoll` already lies in
-the past (a fired deadline the timer is mid-poll on), a strictly-lower-only update would drop a wake request arming a
-*future* `not_before`, and the in-flight poll then clobbers `nextPoll` with its far `maxPollInterval` default - an
-intermittent sleep/retry **wedge** (every worker parked on the cache, the timer asleep on the stale far deadline). So
-it updates when `tm` is sooner **or** `nextPoll` is already past (the exact predicate is at `shortenNextPoll` in
-`engine.go`). Reproduced as ~1-in-40 timeouts of `fixtures/sleepretrycomposeflow_test.go` under stress before the fix.
+Every one of those sites armed a wake so the poll would ring the doorbell at the right instant. **The poll
+no longer rings anything**, so waking it early accomplishes nothing for dispatch: every piston's scan
+predicate is already `not_before<=NOW_UTC()`, so a sleeping or backed-off step becomes visible to the very
+next cycle on its own. The whole channel was strictly dominated, exactly like the due-backlog existence
+probe before it. Verified by no-oping `shortenNextPoll` entirely and running the full suite - green,
+including every sleep and retry fixture.
+
+What the poll still does, and why it must keep running: **lease recovery**. Resetting a `running` step whose
+lease expired is the ONLY thing that recovers a crashed worker, because a piston never touches a `running`
+row. Its `MIN(lease_expires)` sizing query stays for the same reason - without it, recovery degrades from
+"promptly at expiry" to "within `maxPollInterval`" (5 minutes).
+
+*The trade, stated because it is a semantic change:* `flow.Sleep(until)` and retry backoffs now land within
+a cycle interval of their deadline rather than on a precise wake. At the derived ~67ms that is as good as
+the floor-gated path it replaces; at the `refillIntervalCap` (1s), or under a pinned bench interval, it can
+overshoot by that much. Acceptable for a durable sleep - do not reintroduce a timer to shave it.
 
 ### Round-trip minimization in `processStep`
 
@@ -2011,10 +2023,11 @@ awaiters are their own. Pinned by `TestAwaited_GatesStatusChangeBroadcast` (engi
   hitting a write lock wait up to 1s instead of failing immediately with `SQLITE_BUSY`. Essential during fan-out.
 - **Lock contention recovery** - `processStep` defers a check: on a lock-contention error
   (`sequel.IsLockContentionError`), it resets the step it had leased (`running` -> `pending`, `lease_expires=NOW`),
-  then `shortenNextPoll(time.Now())` to re-poll immediately. Both halves are load-bearing: `pollPendingSteps` only
-  recovers running steps whose lease has *already* expired, and a freshly leased step holds a minutes-long lease.
-  Without the lease reset, the immediate poll finds nothing and the step (and its fan-in) stalls until the lease
-  lapses. The reset is guarded by `WHERE status='running'`, so only the leased-and-uncommitted case is rewound.
+  so the step is claimable again. The reset is load-bearing on its own: `pollPendingSteps` only recovers running
+  steps whose lease has *already* expired, and a freshly leased step holds a minutes-long lease, so without the
+  rewind the step (and its fan-in) would stall until the lease lapsed. It no longer needs a paired re-poll - the
+  step goes back to `pending` and the next cycle selects it. Guarded by `WHERE status='running'`, so only the
+  leased-and-uncommitted case is rewound.
 
 ### Database Choice and Configuration
 
@@ -2749,12 +2762,9 @@ is the `ExecuteTask` call: `executeTask` derives it from the lifetime ctx with t
 
 ### Shutdown ordering: workers, then timer, then recovery/reaper, then the pistons
 
-`nudgeTimer` (the sender behind `shortenNextPoll`) nudges the timer via
-`select { case wakeTimer <- struct{}{}: default: }`. The `default` only guards a *full* channel - a send on a
-*closed* channel still panics, even inside a `select`. The senders are worker goroutines (`processStep` and
-its retry/sleep/recovery paths), so there is no drain point after which a `wakeTimer` send is guaranteed
-impossible. `wakeTimer` is therefore **never closed**; `timerLoop` is terminated by a dedicated `timerStop`
-channel it selects on.
+`timerLoop` is terminated by a dedicated `timerStop` channel it selects on. It has no other channel: the
+early-wake path is gone (see "The timer is a RECOVERY sweep"), which also retired the hazard an earlier
+design carried, where a `wakeTimer` send could race a close and panic a worker mid-`processStep`.
 
 ```
 close(peersStop); peersLoop.Wait()   // stop the registry READ loop (pistons still own the write)
@@ -2783,8 +2793,7 @@ nothing instead of resurrecting the row. Deleting while a piston could still bea
 replica registered after it had gone.
 
 A `cache.Refill` into an already-closed cache is a no-op. Never-closed nudge channels plus dedicated stop
-signals remove the ordering hazard an earlier design carried (closing `wakeTimer` before draining the workers
-let a worker mid-`processStep` race the close and panic).
+signals keep the drain free of ordering hazards.
 
 ### An unchecked `tx.ExecContext` inside `Transact` is SAFE - do not "fix" it
 

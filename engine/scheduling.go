@@ -60,7 +60,8 @@ func (e *Engine) workerLoop(ctx context.Context) {
 	}
 }
 
-// timerLoop sleeps until nextPoll, then polls.
+// timerLoop sleeps until nextPoll, then polls. There is no early-wake channel: the poll is a recovery
+// sweep and nothing else needs it to run at a particular instant.
 func (e *Engine) timerLoop(ctx context.Context) {
 	for {
 		e.nextPollLock.Lock()
@@ -73,15 +74,27 @@ func (e *Engine) timerLoop(ctx context.Context) {
 		case <-e.timerStop:
 			return
 		case <-time.After(delay):
-		case <-e.wakeTimer:
-			continue
 		}
 
 		e.pollPendingSteps(ctx)
 	}
 }
 
-// pollPendingSteps recovers expired-lease steps and sizes the wake timer.
+// pollPendingSteps is the LEASE RECOVERY sweep. It resets steps whose lease expired - the only thing that
+// does, since a piston never touches a `running` row - and sizes its own next wake from the soonest future
+// expiry.
+//
+// It has no role in DISPATCH any more, and the not_before sizing query that gave it one is gone. Every
+// piston's scan predicate already includes `not_before<=NOW_UTC()`, so a sleeping or backed-off step
+// becomes visible to the very next cycle on its own; waking a timer at that instant used to matter only
+// because the poll then rang the doorbell, and the doorbell is gone. That made the whole shortenNextPoll
+// channel - and with it the past-deadline-replace wedge it had to defend against - strictly dominated.
+// Verified by no-oping shortenNextPoll entirely: the full suite passed, sleep and retry fixtures included.
+//
+// The trade, stated because it is a semantic change: a flow.Sleep or retry backoff now lands within a
+// cycle interval of its deadline rather than on a precise wake. At the derived ~67ms that is as good as
+// the floor-gated path it replaces; at the 1s cap, or under a pinned bench interval, it can overshoot by
+// that much. Fine for a durable sleep, and not something to reintroduce a timer for.
 func (e *Engine) pollPendingSteps(ctx context.Context) {
 	var mu sync.Mutex
 	var nearestDelay time.Duration = -1
@@ -106,18 +119,7 @@ func (e *Engine) pollPendingSteps(ctx context.Context) {
 			shardErr = true
 		}
 
-		var nearestMs sql.NullFloat64
-		if err := db.QueryRowContext(ctx,
-			"SELECT DATE_DIFF_MILLIS(MIN(not_before), NOW_UTC()) FROM dwarf_steps"+
-				" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before>NOW_UTC() AND not_before<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND lease_expires<=NOW_UTC()",
-			maxPollInterval.Milliseconds(),
-		).Scan(&nearestMs); err != nil && err != sql.ErrNoRows {
-			shardErr = true
-		}
 		var shardNearestDelay time.Duration = -1
-		if nearestMs.Valid && nearestMs.Float64 > 0 {
-			shardNearestDelay = time.Duration(nearestMs.Float64 * float64(time.Millisecond))
-		}
 
 		// There is deliberately NO due-backlog existence probe here. It used to cap nextPoll at
 		// backlogPollInterval (1 minute) so an idle replica that missed a doorbell still re-scanned, and
