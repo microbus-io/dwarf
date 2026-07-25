@@ -28,6 +28,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -550,6 +551,61 @@ func TestPiston_RunStopsOnCancel(t *testing.T) {
 }
 
 // TestPiston_NewValidates pins that a wiring mistake is caught at construction.
+// TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy pins the one seam this package consults, and the
+// reason it earns its place: the pipeline's scan-error policy - clear this shard from planning, leave its
+// cache partition ALONE - is otherwise reachable only by breaking a real database mid-run. The two halves
+// are asymmetric on purpose (an error means "unknown", not "nothing is due"), so both are asserted.
+func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	r.insertStep(t, 1, 5, "alpha", 1)
+
+	// A healthy cycle first, so there is a tally to clear and a partition to preserve.
+	assert.NoError(r.p.pipe.Cycle(ctx).Err)
+	band, keys := r.planner.LastBand()
+	assert.Equal(5, band)
+	assert.Equal(1, keys)
+	assert.True(r.cache.Len() > 0, "the healthy cycle populated the partition")
+	held := r.cache.Len()
+
+	seams := seamster.New(true)
+	r.p.SetSeams(seams)
+	seams.Inject(FaultScanErr)
+
+	// The scan fails without reaching the database at all.
+	_, _, err := r.p.ScanBand(ctx, 1)
+	assert.Error(err)
+
+	// And through a whole cycle: the shard clears itself from planning, but its candidates survive.
+	seams.Inject(FaultScanErr)
+	res := r.p.pipe.Cycle(ctx)
+	assert.Error(res.Err, "the cycle reports the failure rather than returning it")
+	assert.Equal(held, r.cache.Len(), "a FAILED scan must not wholesale-replace a healthy partition")
+	assert.Equal(pipeline.NoBand, res.GlobalBand, "the cleared shard no longer claims a band")
+}
+
+// TestPiston_SeamsDefaultInert pins that a piston nobody handed seams to consults nothing - the
+// production shape, and the reason SetSeams can be left unwired without a nil check at the consult site.
+func TestPiston_SeamsDefaultInert(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t)
+	r.insertStep(t, 1, 5, "alpha", 1)
+
+	_, _, err := r.p.ScanBand(context.Background(), 1)
+	assert.NoError(err, "the default seams are inert")
+
+	// Nil restores that default after a live one was set.
+	live := seamster.New(true)
+	r.p.SetSeams(live)
+	r.p.SetSeams(nil)
+	live.Inject(FaultScanErr)
+	_, _, err = r.p.ScanBand(context.Background(), 1)
+	assert.NoError(err, "nil restores the inert default")
+}
+
 func TestPiston_NewValidates(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)

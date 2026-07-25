@@ -118,12 +118,33 @@ moment a name drifted, and nothing here needs provider-level capability. Instrum
 surface that dashboards bind to — `TestPiston_RecordsItsInstruments` asserts them by name so a rename
 fails loudly.
 
-## No test seams, and none are needed
+**`refillBuckets`' LOW end is load-bearing and must not be raised.** A warm same-zone band scan measures
+~0.29ms; the *same* query on the *same* data measures ~100ms once its Postgres statistics go stale and the
+plan flips to a sequential scan — the flip the `phase` label exists to expose. Boundaries starting at
+0.0005 file the healthy case in the first bucket and hide exactly that, which is what an earlier cut of
+this package did. The values match the engine's, deliberately: these are the same four instruments,
+and a histogram whose boundaries changed under a dashboard is a silent regression.
 
-Every fault an engine-level test could want is reachable through the engine's own `Source` implementation
-— which is where the equivalent injected fault already lives — or through `SetInterval`/`SetMinGap`, and
-`pipeline.Result` gives a caller everything a counting checkpoint would. A seam inside pure logic is a
-signal a dependency should have been injected instead; here the dependency already is.
+## One seam, and why it is the exception
+
+`SetSeams` takes the **owner's** `*seamster.Seamster` — one catalogue of fault names per application,
+armed in one place, however many modules consult it — for the same reason `SetMeter` takes a `Meter`. Nil
+restores an inert one, which is the default, so an unwired piston consults nothing and a disabled Seamster
+makes every consult a bool read.
+
+Exactly one fault is consulted: **`FaultScanErr`**, in `ScanBand`. It earns its place because it perturbs
+the **database query**, which is the boundary a test cannot otherwise reach — the pipeline's scan-error
+policy (clear this shard from planning, leave its cache partition *alone*) is only reachable by making a
+real scan fail, and the two halves are asymmetric, so neither can be inferred from the other. The name is
+exported so the owner's catalogue aliases it rather than re-spelling the string. Pinned by
+`TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy` and `TestPiston_SeamsDefaultInert`.
+
+**`pipeline` gets none, and that is not an oversight.** Every fault a test could want of a cycle is
+reachable through its `Source` — which is this type — or through `SetInterval`/`SetMinGap`, and
+`pipeline.Result` gives a caller everything a counting checkpoint would. The rule that separates the two
+cases: a seam inside **pure logic** is a signal a dependency should have been injected instead; a seam at
+an **I/O boundary** is reaching the one thing that cannot be injected away. Do not add one to `planner`
+either, for the same reason.
 
 ## Tests run against real SQL
 

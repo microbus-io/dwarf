@@ -50,6 +50,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
+	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -65,6 +66,22 @@ import (
 // NOW_UTC() tick (millisecond precision) would report zero and fire a spurious INSERT. At a second's
 // spacing that cannot happen; at a per-cycle cadence the margin is one millisecond.
 var heartbeatInterval = time.Second
+
+// refillBuckets are the explicit bucket boundaries for both histograms, in SECONDS. The OTEL defaults are
+// tuned for millisecond-valued instruments and would file every one of these samples in the first bucket.
+//
+// The LOW end is the load-bearing part, and it must not be raised. A warm same-zone band scan measures
+// ~0.29ms, while the same query on the same data measures ~100ms once its Postgres statistics go stale
+// and the plan flips to a sequential scan - the flip the phase label exists to expose. Boundaries that
+// start at 0.0005 put the healthy case in the first bucket and hide exactly that. The tail stays open past
+// 1s to separate a genuinely sick shard from a merely slow one.
+var refillBuckets = []float64{
+	0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
+}
+
+// FaultScanErr makes ScanBand fail without touching the database - see SetSeams. The name is exported so
+// the owning application's fault catalogue can alias it rather than re-spell the string.
+const FaultScanErr = "refillScanErr"
 
 // PartitionFunc reports the replica partition - see SetPartitionFunc.
 type PartitionFunc func() (replicas, ordinal int, ok bool)
@@ -98,6 +115,7 @@ type Piston struct {
 	partition atomic.Pointer[PartitionFunc]
 	logger    atomic.Pointer[slog.Logger]
 	inst      atomic.Pointer[instruments]
+	seams     atomic.Pointer[seamster.Seamster]
 
 	// Beat state, touched only by Run. dispatchedSinceBeat is sticky: any successful cycle sets it and the
 	// beat that publishes it clears it. Sticky rather than "did the last cycle succeed" because beats are
@@ -134,6 +152,7 @@ func New(engineID int64, shard int, db *sequel.DB, plan *planner.Planner, cache 
 	p.pipe = pipe
 	p.SetLogger(nil)
 	p.SetMeter(nil)
+	p.SetSeams(nil)
 	return p, nil
 }
 
@@ -192,6 +211,26 @@ func (p *Piston) SetLogger(l *slog.Logger) {
 	p.logger.Store(l)
 }
 
+// SetSeams supplies the owner's fault-injection seams, so a test that drives a whole engine can make this
+// piston's scan fail (FaultScanErr) without reaching for the database. Nil restores an inert one, which is
+// also the default - a piston built and never told otherwise consults nothing.
+//
+// The seams are the OWNER's, not this package's, for the same reason the meter is: one catalogue of fault
+// names per application, armed in one place, however many modules consult it. A Seamster built disabled
+// makes every consult a bool read, so a production piston pays nothing for the call site.
+//
+// This package deliberately has no seam of its OWN, and the distinction matters. A seam inside pure logic
+// would be a signal that a dependency should have been injected instead; this one perturbs the DATABASE
+// query, which is exactly the boundary a test cannot otherwise reach - the pipeline's error policy (clear
+// the shard from planning, leave the cache alone) is only reachable by making a real scan fail. The
+// pipeline itself gets none: its faults are all reachable through the Source, which is this type.
+func (p *Piston) SetSeams(s *seamster.Seamster) {
+	if s == nil {
+		s = seamster.New(false)
+	}
+	p.seams.Store(s)
+}
+
 // SetMeter resolves this piston's instruments from an already-created meter. Nil restores no-ops.
 //
 // A Meter rather than a MeterProvider so the OWNER picks the instrumentation scope once, for every
@@ -206,11 +245,8 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 	}
 	var errs []error
 	hist := func(name, desc string) metric.Float64Histogram {
-		// Sub-millisecond through several seconds: a warm index probe at one end, a deep-backlog scan at
-		// the other.
 		h, err := m.Float64Histogram(name, metric.WithDescription(desc), metric.WithUnit("s"),
-			metric.WithExplicitBucketBoundaries(
-				0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5))
+			metric.WithExplicitBucketBoundaries(refillBuckets...))
 		if err != nil {
 			errs = append(errs, errors.Trace(err))
 		}
@@ -389,6 +425,12 @@ func (p *Piston) partitionPredicate() (string, []any) {
 // The shard argument is the pipeline's own and equals Shard(); it is accepted for symmetry with the
 // planner and cache calls, which are keyed the same way.
 func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []planner.Tally, err error) {
+	// FaultScanErr fails the scan without touching the database, so a test can drive the pipeline's
+	// scan-error policy - clear this shard from planning, leave its cache partition intact - which is
+	// otherwise reachable only by breaking a real database mid-run.
+	if p.seams.Load().IsFault(FaultScanErr) {
+		return pipeline.NoBand, nil, errors.New("injected fault: " + FaultScanErr)
+	}
 	part, partArgs := p.partitionPredicate()
 	args := make([]any, 0, len(partArgs)+1)
 	args = append(args, partArgs...)
