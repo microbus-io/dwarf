@@ -170,19 +170,26 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	e.pingInterval = 50 * time.Millisecond // freshness window = 4x = 200ms
+	// The freshness window (4x pingInterval) must comfortably exceed one loaded round trip, because
+	// addPeerRow INSERTs the row and only THEN recounts: if that gap outruns the window the row reads stale
+	// on arrival, R is 1, and the 1/2-share assertion below sees the full budget instead. At 50ms the window
+	// was 200ms and a loaded SQL Server outran it. 500ms buys a 2s window and costs the test ~2s, since
+	// phase two must then wait that window out.
+	e.pingInterval = 500 * time.Millisecond // freshness window = 4x = 2s
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 
-	// A peer registers a fresh row but then never heartbeats again (crashed).
+	// A peer registers a fresh row but then never heartbeats again (crashed). addPeerRow forces the recount,
+	// so this is synchronous.
 	addPeerRow(t, e, 2001)
 	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share while the peer's row is fresh")
 
-	// The heartbeat loop re-reads R every 50ms; once the crashed peer's row ages past 200ms it is no
-	// longer counted, and the pool regrows to the full budget - with no forced recount from the test.
-	deadline := time.Now().Add(5 * time.Second)
+	// The heartbeat loop re-reads R every pingInterval; once the crashed peer's row ages past the window it
+	// is no longer counted, and the pool regrows to the full budget - with no forced recount from the test.
+	// The bound is a "did it hang" ceiling, not a timing contract: the loop leaves as soon as it sees 48.
+	deadline := time.Now().Add(30 * time.Second)
 	for db.DB.Stats().MaxOpenConnections != 48 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -345,7 +352,13 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 			}
 		}()
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	// The drain is a PRECONDITION for the two assertions below, not a throughput contract, so the bound is a
+	// "did it hang" ceiling and is sized for the slowest database the suite runs against. 400 flows through a
+	// deliberately 2-connection pool is throughput-bound by construction: in-memory SQLite drains it in about a
+	// second and leaves immediately, while a loaded remote SQL Server was measured at 3.5-6.5 flows/s - so a 30s
+	// bound cut the drain off at 105 and 196 of 400 on two separate runs. Do NOT shrink the backlog to fit a
+	// tighter bound: the 400 concurrent Runs ARE the saturation this test needs every worker queued behind.
+	deadline := time.Now().Add(3 * time.Minute)
 	for done.Load() < 400 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}

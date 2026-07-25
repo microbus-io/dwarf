@@ -26,8 +26,8 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestRuntimeoutcancelflow pins that when Run's context expires before the flow stops, Run does NOT tear the
-// flow down. Run awaits on the caller's ctx; when that ctx times out, await returns a 408, and Run leaves the
+// TestRuntimeoutcancelflow pins that when Run's context ends before the flow stops, Run does NOT tear the
+// flow down. Run awaits on the caller's ctx; when that ctx ends, await returns a 408, and Run leaves the
 // durable flow running (it is not bound to this call) and returns its flowKey with the error - so the caller
 // keeps a handle. Cancelling a healthy durable flow just because the caller stopped waiting is an availability
 // footgun (and the earlier "cancel on the caller's behalf" both never ran - the await ctx was already expired -
@@ -42,10 +42,18 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
-	// A blocked task holds the flow running past Run's short deadline. Released at test teardown before the
+	// A blocked task holds the flow running past the end of Run's ctx. Released at test teardown before the
 	// engine drains (registered after Startup, so LIFO ordering runs it before the engine's shutdown cleanup).
 	block := make(chan struct{})
 	t.Cleanup(func() { close(block) })
+
+	// Run's ctx bounds the WHOLE call - create then await - so a wall-clock deadline short enough to expire the
+	// await also expires the create on a slow server, and the test then measures a create failure (empty
+	// flowKey, no flow) instead of the await timeout it is about. Ending the ctx from INSIDE the task removes
+	// the clock entirely: the task cannot run until the flow exists and is running, so create has unbounded
+	// time and the await is ended at a point the engine reached, not one a timer guessed at.
+	tctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	graph := workflow.NewGraph("RunTimeoutCancel")
 	graph.SetEndpoint("Block", "runtimeoutcancelflow.verify:428/block")
@@ -53,18 +61,16 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	proxy.HandleGraph("runtimeoutcancelflow.verify:428/run-timeout-cancel", graph)
 
 	proxy.HandleTask("runtimeoutcancelflow.verify:428/block", func(taskCtx context.Context, f *workflow.Flow) error {
+		cancel() // the caller stops waiting; the task (and so the flow) keeps running
 		select {
 		case <-block:
-		case <-taskCtx.Done(): // time-budget safety net
+		case <-taskCtx.Done(): // time-budget safety net; taskCtx is the engine's, not the caller's
 		}
 		return nil
 	})
 
-	// Run with a deadline far shorter than the (never-arriving) completion, so await times out.
-	tctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-	defer cancel()
 	flowKey, outcome, err := eng.Run(tctx, "runtimeoutcancelflow.verify:428/run-timeout-cancel", nil, nil)
-	assert.Error(err)            // 408 from the expired await
+	assert.Error(err)            // 408 from the ended await
 	assert.NotEqual("", flowKey) // the flow's handle is returned so the caller can recover it
 	assert.Nil(outcome)
 

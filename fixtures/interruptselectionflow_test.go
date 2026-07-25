@@ -27,6 +27,39 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
+// awaitPropagatedInterrupts blocks until `want` interrupts have propagated up to the given root flow.
+//
+// handleInterrupt signalStops every flow in the surgraph chain - the root included - once per interrupting
+// step, so the stop checkpoint scoped to (root key, interrupted) counts exactly the propagations that have
+// landed. A wall-clock poll cannot stand in for it here: the path from Create to two children interrupting is a
+// dozen round trips, and on SQL Server two parallel subgraph callers interrupting at once genuinely DEADLOCK
+// (moving a step running->interrupted deletes keys from three status-filtered indexes), so the write is rolled
+// back and retried by Transact. That is correct engine behaviour and it is not fast - measured under a loaded
+// parallel suite, ZERO of the two had landed inside a 5s bound on a run whose remaining assertions all passed.
+//
+// Arm FIRST, then read Visits: a propagation that landed before the call is caught by the count, a later one by
+// the channel, and one landing between the two lines by the channel, since the waiter is already registered.
+// Waiter is one-shot, hence the loop - it is a rendezvous per propagation, not a spin on an observation.
+//
+// The minute is a "did it hang" ceiling, not a timing contract: an interrupt that never propagates never will,
+// so nothing is traded away by leaving generous room for a loaded server and for -race.
+func awaitPropagatedInterrupts(t *testing.T, eng *engine.Engine, flowKey string, want int) {
+	t.Helper()
+	seams := eng.Seams()
+	for {
+		reached := seams.Waiter(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted)
+		got := seams.Visits(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted)
+		if got >= want {
+			return
+		}
+		select {
+		case <-reached:
+		case <-time.After(time.Minute):
+			t.Fatalf("only %d of %d interrupts propagated to the root flow", got, want)
+		}
+	}
+}
+
 // interruptedStepCount returns how many of a flow's steps are currently interrupted.
 func interruptedStepCount(t *testing.T, eng *engine.Engine, flowKey string) int {
 	t.Helper()
@@ -101,22 +134,13 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	flowKey, err := eng.Create(ctx, "snapresume.verify:428/g", nil, nil)
 	assert.NoError(err)
 
-	waitInterrupted := func(want int) bool {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if interruptedStepCount(t, eng, flowKey) == want {
-				return true
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		return false
-	}
-
 	// A interrupts; B is still gated (running, not interrupted).
-	assert.True(waitInterrupted(1))
+	awaitPropagatedInterrupts(t, eng, flowKey, 1)
+	assert.Equal(1, interruptedStepCount(t, eng, flowKey))
 	close(gateB)
 	// Now B interrupts too - both interrupted, A's updated_at strictly earlier.
-	assert.True(waitInterrupted(2))
+	awaitPropagatedInterrupts(t, eng, flowKey, 2)
+	assert.Equal(2, interruptedStepCount(t, eng, flowKey))
 
 	// Snapshot must report A (earliest updated_at = the next Resume's target), not B.
 	out, err := eng.Snapshot(ctx, flowKey)
@@ -126,8 +150,10 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 
 	// Resume resolves exactly that step (A); afterward only B remains interrupted, and Snapshot reports B -
 	// proving Snapshot tracked Resume's selection.
+	// Resume resets the leaf to `pending` inside its own transaction, so B is the only interrupted step the
+	// moment it returns - this is an assertion, not a wait.
 	assert.NoError(eng.Resume(ctx, flowKey, nil))
-	assert.True(waitInterrupted(1))
+	assert.Equal(1, interruptedStepCount(t, eng, flowKey))
 	out, err = eng.Snapshot(ctx, flowKey)
 	assert.NoError(err)
 	assert.Equal("B", out.InterruptPayload["branch"])
@@ -209,10 +235,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	// Postgres NOW_UTC() is the transaction-start time, which is not ordered by commit/visibility), so the
 	// earliest-updated pick - which both Snapshot and Resume use - can shift between the Snapshot and the
 	// Resume. With both settled, the set is frozen and the two selections agree (the invariant under test).
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && interruptedStepCount(t, eng, flowKey) < 2 {
-		time.Sleep(10 * time.Millisecond)
-	}
+	awaitPropagatedInterrupts(t, eng, flowKey, 2)
 	assert.Equal(2, interruptedStepCount(t, eng, flowKey))
 
 	// snapshotN returns the n of the child Snapshot says will resolve next (the propagated interrupt payload

@@ -454,6 +454,10 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		return
 	}
 
+	// The Startup sweep runs detectOrphanedFlows too; let it finish before forging, or it logs the orphan a
+	// second time and the "exactly one flagged" assertion below reads two.
+	awaitStartupRecoverySweep(t, e)
+
 	// Backdate both flows past orphanFlowThreshold (DB clock, native format), and flip the orphan to running.
 	pastMs := -(e.orphanFlowThreshold + time.Minute).Milliseconds()
 	_, err = db.ExecContext(ctx,

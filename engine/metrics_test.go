@@ -397,6 +397,10 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 		return
 	}
 
+	// The Startup sweep runs detectOrphanedFlows too; let it finish before forging, or it counts the orphan
+	// a second time and this test's "exactly once" reads two.
+	awaitStartupRecoverySweep(t, eng)
+
 	// Forge the orphan shape: running flow, every step terminal and stale past the threshold.
 	pastMs := -(eng.orphanFlowThreshold + time.Minute).Milliseconds()
 	_, err = db.ExecContext(ctx,

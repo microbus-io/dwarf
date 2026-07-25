@@ -106,14 +106,58 @@ cooperate.
   (it just waits longer); an upper-bound **timing** assertion does not. A lower-bound timing assertion (`sleepflow`:
   elapsed `>=` the sleep) is parallel-safe, since oversubscription can only make it longer.
 
+  **Dropping `t.Parallel()` buys CPU, not database latency - so a reaction-latency window must still exclude the
+  engine's own round trips.** Measure from the last moment before the reaction, never across an engine operation
+  that talks to the database: `awaitshutdownflow` timed its "< 2s" from *before* `Shutdown`, so it was really
+  measuring drain-plus-release and tripped at 3.09s against a loaded SQL Server, where the drain alone is
+  unbounded. Timing from where `Shutdown` RETURNS pins the same property (the waiter is not still blocked once
+  the board is closed) with nothing else folded in.
+
 **Under `-race`, the engine's shared wait helpers stretch their "don't hang" ceilings.** `-race` slows execution
 ~10x, and with the whole suite parallel that compounds with CPU oversubscription, so a recovery that finishes in
-seconds serially can exceed a 15s ceiling. `boundedRun` and `awaitFlowStatus` multiply their timeouts by
-`testTimeoutScale` - a build-tagged constant that is **5 under `-race`, 1 otherwise** (`engine/timeoutscale_*_test.go`).
+seconds serially can exceed a 15s ceiling. `enginetest.BoundedRun` and `enginetest.AwaitFlowStatus` multiply their
+timeouts by `testTimeoutScale` - a build-tagged constant that is **5 under `-race`, 1 otherwise**
+(`internal/enginetest/timeoutscale_*.go`).
 The ceilings guard against a genuine hang, not a timing contract, so stretching them under `-race` keeps every test
 parallel without masking a real wedge (a wedged flow never completes and still trips even the stretched ceiling).
 This applies to the engine package's helpers; a fixture with its own hardcoded ceiling that flakes under `-race`
 either routes through those helpers or gets the same treatment.
+
+**A wall-clock bound may be a "did it hang" ceiling; it may never be the MECHANISM.** Against a real server
+under the parallel suite, every latency a test would bound - create, queue, claim, dispatch, an interrupt write
+that deadlocks and is retried - is unbounded, so a bound short enough to be the thing a test *relies on*
+eventually loses. It fails as a wrong-phase or wrong-count assertion, never as an honest timeout, which is what
+makes it expensive to diagnose. Three shapes, each measured failing against SQL Server:
+
+- **A short ctx handed to `Run` bounds create AND await.** A deadline chosen to expire the *await* expires the
+  *create* first on a slow server, and the test then measures a create failure - empty flowKey, no flow, every
+  later assertion cascading - instead of the semantics it is about. End the ctx from **inside the task**: the
+  task cannot run until the flow exists and is running, so create is unbounded and the await ends at a point
+  the engine reached rather than one a timer guessed at (`runtimeoutcancelflow`, where 100ms did this).
+- **Polling for engine progress on a deadline.** Rendezvous on a checkpoint instead. `CheckpointFlowStopped`
+  fires POST-COMMIT and is scoped by `(flowKey, status)`, and `handleInterrupt` fires it once per interrupting
+  step for every flow in the surgraph chain - so counting its `Visits` on the ROOT key counts propagations
+  durably (`interruptselectionflow`'s `awaitPropagatedInterrupts`; a 5s poll saw ZERO of two on a run whose
+  every other assertion passed).
+- **A wall-clock FEATURE under test competes with dispatch latency for the same budget.** `flow.Retry`'s
+  `giveUpAfter` is anchored at the step's CREATION, so a 250ms horizon with a 20ms initial delay left 230ms of
+  headroom and gave up at attempt 0 - failing "the horizon is not first-try". Size such a horizon to dominate
+  dispatch latency, not to make the test fast (`retryhorizonflow`: 2s, ~6 attempts unloaded).
+
+**A test that FORGES a shape a background sweep also detects must first wait for that sweep.** `recoveryLoop`
+sweeps ON ENTRY (Startup), concurrently with the test body, and it is four scans on one goroutine sharing the
+engine's pool - so on a loaded server it lands seconds in. The orphan detectors are the exposed ones, because
+the backdating a test does to *trigger* its own detector call satisfies the background pass's age guard too, and
+both then count the forged shape. `awaitStartupRecoverySweep` (engine `checkpointhelpers_test.go`) rendezvouses
+on `CheckpointRecoverySweepDone`. Measured: the sweep's own `detectOrphanedFlows` landed **27ms** before the
+test's on a run that happened to pass. The park detectors are not exposed - they run against fresh, un-backdated
+rows that their 5m guard excludes, while the tests drive their own call with `minAge=0`.
+
+Both helpers, and `enginetest.AwaitFlowStatus`, share one idiom: **arm the waiter FIRST, then read `Visits`.** An
+event that landed before the call is caught by the count, a later one by the channel, and one landing between
+the two lines by the channel, since the waiter is already registered. Reversing the two lines reintroduces
+exactly the race the split-arm `Waiter` exists to remove. `Waiter` is one-shot, so waiting for N occurrences
+loops over (arm, check, block) - a rendezvous per occurrence, not a spin on an observation.
 
 Each fixture owns its own engine *and* its own `TestProxy`, so there is no cross-test sharing to coordinate. `TestProxy`
 still guards its handler maps with a `RWMutex` because the engine's own worker goroutines dispatch concurrently while

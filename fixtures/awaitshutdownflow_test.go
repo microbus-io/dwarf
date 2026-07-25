@@ -84,10 +84,16 @@ func TestAwaitShutdownflow(t *testing.T) {
 	// before Shutdown fans the sentinel out - a waiter registered after the wake loop would never see it.
 	time.Sleep(300 * time.Millisecond)
 
-	shutStart := time.Now()
 	if !assert.NoError(eng.Shutdown(ctx)) {
 		return
 	}
+	// Time the wait from when Shutdown RETURNS, not from before it. The release travels with the board close
+	// INSIDE drainRuntime, so a healthy waiter is normally already back before Shutdown returns and this reads
+	// ~0. Timing across Shutdown instead folds in Shutdown's own duration - draining workers, pistons and
+	// connections against the database - which is unbounded on a loaded server (measured 3.09s on SQL Server,
+	// tripping a 2s bound) and is not what this test pins. The non-parallel note above addresses CPU
+	// oversubscription; it does not protect against server latency, which is why the start point has to move.
+	shutDone := time.Now()
 
 	select {
 	case res := <-done:
@@ -98,7 +104,7 @@ func TestAwaitShutdownflow(t *testing.T) {
 		if assert.Error(res.err) {
 			assert.Contains(res.err.Error(), "shutting down")
 		}
-		assert.True(time.Since(shutStart) < 2*time.Second, "Await did not return promptly after Shutdown: %v", time.Since(shutStart))
+		assert.True(time.Since(shutDone) < 2*time.Second, "Await did not return promptly after Shutdown: %v", time.Since(shutDone))
 	case <-time.After(10 * time.Second):
 		assert.True(false, "Await never returned after Shutdown")
 		return

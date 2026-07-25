@@ -72,6 +72,10 @@ func (e *Engine) runRecoverySweep(ctx context.Context) {
 		e.detectOrphanedFlows(ctx, db, shard)
 		return nil
 	})
+	// Test rendezvous: this pass is over, so every detector below has already read the database. A test that
+	// FORGES a wedge/orphan shape and then drives one detector itself must wait for this, or the background
+	// pass races its forge and the shape is counted twice (see CheckpointRecoverySweepDone).
+	e.seams.Checkpoint(ctx, CheckpointRecoverySweepDone)
 }
 
 // recoverExpiredLeases resets every running step whose lease has expired, on every shard. It is the ONLY

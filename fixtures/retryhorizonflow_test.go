@@ -49,14 +49,22 @@ func TestRetryHorizonflow(t *testing.T) {
 	proxy.HandleGraph("retryhorizonflow.verify:428/retry-horizon", graph)
 
 	// Flaky reads its own policy from state: succeed once Attempt() reaches successAt (0 = never); otherwise
-	// retry against a giveUpAfter horizon read from giveUpMs. Backoff is short so the horizon is reached fast.
+	// retry against a giveUpAfter horizon read from giveUpMs.
+	//
+	// The backoff is sized against DISPATCH LATENCY, not against how fast the test would like to run. The
+	// horizon is anchored at the step's CREATION, so every millisecond between creating the step and the task
+	// reaching this call is already spent when Retry does its arithmetic - and on the first attempt Retry gives
+	// up outright if `elapsed + initialDelay >= horizon`. So the horizon must dominate the engine's queue and
+	// claim latency, which is unbounded under load: a 250ms horizon with a 20ms initial delay left only 230ms
+	// of headroom, and against a loaded SQL Server the first dispatch outran it, giving up at attempt 0 and
+	// failing the "the horizon is not first-try" assertion below.
 	proxy.HandleTask("retryhorizonflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {
 		successAt := f.GetInt("successAt")
 		if successAt > 0 && f.Attempt() >= successAt {
 			return nil
 		}
 		horizon := time.Duration(f.GetInt("giveUpMs")) * time.Millisecond
-		if f.Retry(20*time.Millisecond, 2.0, 60*time.Millisecond, horizon) {
+		if f.Retry(100*time.Millisecond, 2.0, 400*time.Millisecond, horizon) {
 			return nil // task returns nil while a further attempt is still within the horizon
 		}
 		return errors.New("flaky exhausted its retry horizon")
@@ -83,9 +91,11 @@ func TestRetryHorizonflow(t *testing.T) {
 	t.Run("gives_up_after_horizon", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		// Never succeeds; a ~250ms horizon must stop the retries and fail the flow.
+		// Never succeeds; a 2s horizon must stop the retries and fail the flow. Unloaded that is ~6 attempts
+		// (delays 100/200/400/400/400/400 against elapsed-from-creation), so the upper bound below has room;
+		// loaded it is fewer, because dispatch latency spends the same horizon.
 		flowKey, err := eng.Create(ctx, "retryhorizonflow.verify:428/retry-horizon",
-			map[string]any{"successAt": 0, "giveUpMs": 250}, nil)
+			map[string]any{"successAt": 0, "giveUpMs": 2000}, nil)
 		assert.NoError(err)
 
 		outcome, err := eng.Await(ctx, flowKey)

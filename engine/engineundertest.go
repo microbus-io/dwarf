@@ -225,4 +225,13 @@ const (
 	// The scoped form is meaningful only because signalStop runs POST-COMMIT: when it fires, the status is
 	// durable, so a test reading the row immediately after sees it - the exact guarantee a status poll spun for.
 	CheckpointFlowStopped = "flowStopped" // signalStop(), a flow just reached a stop (completed/failed/cancelled/interrupted)
+
+	// Lifecycle rendezvous, fired at the END of a recovery pass - every detector in it has read the database
+	// by then. recoveryLoop sweeps ON ENTRY (Startup), so that first pass runs CONCURRENTLY with the test body,
+	// and a test that forges a wedge/orphan shape and then drives one detector itself is racing it: the sweep
+	// sees the forged shape too and counts/logs it a second time. The pass is not instant - it is four scans on
+	// one goroutine sharing the engine's connection pool, so against a loaded server it lands seconds after
+	// Startup (measured on SQL Server: the sweep's own detectOrphanedFlows landed 27ms before a forge that
+	// followed a Create+Await). Wait for this before forging; the wait is free once the sweep is behind (Visits).
+	CheckpointRecoverySweepDone = "recoverySweepDone" // runRecoverySweep(), one full recovery pass is over
 )
