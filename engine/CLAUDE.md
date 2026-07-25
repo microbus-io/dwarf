@@ -835,8 +835,36 @@ fixture silently ran at second-long scan intervals, which is why the fix took ~1
 suite. `recomputeRefillIntervals` clamps `share` at 1. If either fixture starts failing on timing again,
 suspect the derived period before suspecting the test.
 
-What is NOT weakened: ordering among work already tallied is strict, and nothing is preemptive - which is
-now true of the local cache too, since `Offer` no longer head-inserts a better band. The
+**THE PUBLISH GAP IS NOT THE ONLY WAY ORDER INVERTS. The second way needs no arriving band at all, and it
+is the local cache: `Pop` ranks partitions by a FROZEN band that the DOORBELL can set.** `Offer` admits into
+an EMPTY partition unconditionally and stamps `p.band` from the arrival itself; `Pop` then picks the lowest
+`floor()` - which *is* `p.band` - and never consults `items[0].Priority` nor the planner's current global
+minimum. So a doorbell-admitted hint is indistinguishable, at pop time, from one the plan chose. Each
+partition is reconciled only by its OWN shard's next pushing cycle (an empty plan clears it), and the pistons
+turn independently - so with several shards, the window between "N steps were offered locally" and "every
+shard has reconciled" is one in which dispatch order is decided by *which pistons have got round to it*,
+not by priority.
+
+**Consequence: cross-shard dispatch order is only as strict as the SLOWEST piston's reconciliation, and the
+failure is ASYMMETRIC - a uniformly slow fleet is fine.** Every piston cycling slowly still reconciles before
+the work drains; one piston starved or blocked on a round trip while its peers turn is what strands a stale
+hint into the drain. This is why a loaded server reproduces it and a uniformly slowed local run never does.
+
+Measured, by A/B on `fixtures/shardedflow_test.go` (8 shards, one worker, nine flows at distinct bands, all
+created before any can dispatch): with the pistons pinned to a 1s interval and no wait for reconciliation,
+**5 of 5 runs mis-ordered** - always adjacent swaps (`p6 p9 p7 p8`, `p7 p6`, `p6 p5`), the same signature seen
+once on a loaded SQL Server suite. Waiting for two pushing cycles per shard before releasing the work, with
+the pacing otherwise identical, **8 of 8 passed**. That wait is what `piston.CheckpointCycleDone` exists for
+(`CheckpointRefillCycleDone` in the engine catalogue): a pushing cycle is exactly the moment a shard's
+partition reflects the plan, and no elapsed time substitutes for it.
+
+None of this is a correctness bug - the cache holds hints, the claim CAS grants the step - and none of it is
+reachable by a single-shard deployment. It is an ordering caveat, and the honest statement of the contract is
+that priority governs *admission* across shards within a cycle or two, not the exact interleaving of a batch
+already sitting in one replica's cache.
+
+What is NOT weakened: ordering among work already tallied **and reconciled** is strict, and nothing is
+preemptive - which is now true of the local cache too, since `Offer` no longer head-inserts a better band. The
 public statement of all this is in `docs/scheduling-and-reliability.md` - keep the two in step.
 
 `fixtures/crossshardpriorityflow_test.go` still asserts urgent-burst LATENCY as its sensitive axis (an

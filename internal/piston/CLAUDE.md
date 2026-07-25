@@ -174,7 +174,7 @@ plan flips to a sequential scan — the flip the `phase` label exists to expose.
 this package did. The values match the engine's, deliberately: these are the same four instruments,
 and a histogram whose boundaries changed under a dashboard is a silent regression.
 
-## One seam, and why it is the exception
+## Two seams, and why each is the exception
 
 `SetSeams` takes the **owner's** `*seamster.Seamster` — one catalogue of fault names per application,
 armed in one place, however many modules consult it — for the same reason `SetMeter` takes a `Meter`. Nil
@@ -187,6 +187,22 @@ policy (clear this shard from planning, leave its cache partition *alone*) is on
 real scan fail, and the two halves are asymmetric, so neither can be inferred from the other. The name is
 exported so the owner's catalogue aliases it rather than re-spelling the string. Pinned by
 `TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy` and `TestPiston_SeamsDefaultInert`.
+
+Exactly one checkpoint is fired: **`CheckpointCycleDone`**, in `Run`, once per cycle that PUSHED. It earns
+its place on the same boundary rule read from the other side — it publishes the one fact about a cycle that
+is invisible from outside the process and cannot be waited out on a clock. **Each piston turns on its own
+cadence, so "every shard has reconciled its partition against the plan" is not a function of elapsed time**:
+a shard whose goroutine is starved, or whose cycle is blocked on a slow round trip, can hold an unreconciled
+partition arbitrarily long while its peers turn normally. A caller that needs that state — a test asserting
+strict cross-shard priority must, because `Cache.Pop` ranks partitions by a FROZEN band and cannot tell a
+doorbell-set one from a plan-set one — has no other way to know. It is gated on `r.Err == nil` because that
+is exactly the push: both error paths return *before* pushing and deliberately leave the partition alone, so
+a visit on error would mean "looked and gave up", which is the opposite of what a waiter needs.
+
+The gate is what keeps this from being the forbidden kind of seam. A counting checkpoint over pure logic
+would be a signal to inject a dependency instead; this one reports a **cycle's effect on shared state** the
+package borrows (the cache partition), which no injection into `pipeline` would surface, since the effect is
+the point rather than the call.
 
 **`pipeline` gets none, and that is not an oversight.** Every fault a test could want of a cycle is
 reachable through its `Source` — which is this type — or through `SetInterval`/`SetMinGap`, and

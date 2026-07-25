@@ -234,4 +234,17 @@ const (
 	// Startup (measured on SQL Server: the sweep's own detectOrphanedFlows landed 27ms before a forge that
 	// followed a Create+Await). Wait for this before forging; the wait is free once the sweep is behind (Visits).
 	CheckpointRecoverySweepDone = "recoverySweepDone" // runRecoverySweep(), one full recovery pass is over
+
+	// Fired per shard (scoped by the shard number, and once unscoped) when that shard's piston completes a
+	// cycle that PUSHED - i.e. its cache partition now reflects the plan. Its name is the piston's, so there
+	// is one catalogue, exactly like FaultRefillScanErr.
+	//
+	// What it exists for: `Offer` admits a step into an EMPTY partition unconditionally and stamps that
+	// partition's band from the arrival, while `Cache.Pop` ranks partitions by that FROZEN band and never
+	// consults the current global minimum - so a doorbell-admitted hint is indistinguishable from a
+	// plan-selected one until the owning shard's next cycle reconciles it. Every shard reconciles on its own
+	// cadence, so a test that needs the fleet's partitions to agree with the plan before it asserts dispatch
+	// ORDER must wait for a cycle per shard; no amount of elapsed time substitutes, because one starved
+	// piston is exactly the case that breaks it.
+	CheckpointRefillCycleDone = piston.CheckpointCycleDone // a shard's piston reconciled its cache partition
 )

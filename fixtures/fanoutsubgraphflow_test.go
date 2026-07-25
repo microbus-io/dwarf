@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -34,8 +35,8 @@ import (
 // park lands, the caller is stranded permanently and its fan-in never fires. This is a functional check that
 // the fan-out-sibling subgraph path completes; note it does NOT deterministically reproduce the strand
 // in-process (the TestProxy dispatch is too synchronous for the child to win the race) - the deterministic
-// repro is transport-timing-specific (observed over a real bus transport), tracked separately. The short
-// drain bound makes a stranded flow fail rather than hang.
+// repro is transport-timing-specific (observed over a real bus transport), tracked separately. The bounded
+// per-flow rendezvous below makes a stranded flow fail, named, rather than hang.
 func TestFanoutSubgraphflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -97,23 +98,14 @@ func TestFanoutSubgraphflow(t *testing.T) {
 			keys = append(keys, k)
 		}
 
-		stuck := keys
-		deadline := time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			var remaining []string
-			for _, k := range stuck {
-				o, _ := eng.Snapshot(ctx, k)
-				if o != nil && o.Status == workflow.StatusCompleted {
-					continue
-				}
-				remaining = append(remaining, k)
-			}
-			stuck = remaining
-			if len(stuck) == 0 {
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
+		// Rendezvous per flow rather than polling every snapshot on one wall-clock ceiling. The strand this
+		// test exists to catch never completes, so it still fails - just named, and after a bound that
+		// stretches under -race (AwaitFlowStatus scales by testTimeoutScale). The poll it replaces did
+		// neither: 50 flows x a fan-out with a subgraph caller is the slowest shape in the suite, and a flat
+		// 20s ceiling reported a healthy-but-slow run as a strand once -race's ~10x landed on top of
+		// whole-suite contention.
+		for _, k := range keys {
+			enginetest.AwaitFlowStatus(t, eng, k, workflow.StatusCompleted, 20*time.Second)
 		}
-		assert.Equal(0, len(stuck), "stranded fan-out-subgraph flows: %d of %d", len(stuck), n)
 	})
 }

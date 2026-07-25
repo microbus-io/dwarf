@@ -43,6 +43,7 @@ package piston
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -86,6 +87,22 @@ var refillBuckets = []float64{
 // FaultScanErr makes ScanBand fail without touching the database - see SetSeams. The name is exported so
 // the owning application's fault catalogue can alias it rather than re-spell the string.
 const FaultScanErr = "refillScanErr"
+
+// CheckpointCycleDone fires once per cycle that PUSHED - see SetSeams. Exported for the same catalogue
+// reason as FaultScanErr.
+//
+// It is fired only when the cycle reached its push, which is exactly when this shard's cache partition has
+// been reconciled against the plan: the two error paths (a failed tally, a failed fetch) return before
+// pushing and deliberately leave the partition alone, while an empty plan pushes nothing and CLEARS it. So
+// a visit means "this shard's partition now reflects the plan", which is the thing a test can neither
+// observe from outside nor wait out on a clock - each piston turns on its own cadence, and a shard whose
+// goroutine is starved or blocked on a slow round trip can hold an unreconciled partition arbitrarily long
+// while its peers turn normally.
+//
+// Fired BOTH unscoped and scoped by shard (a scoped fire does not wake an unscoped waiter, so a waiter for
+// "any shard cycled" and one for "shard 3 cycled" need separate fires). Counting scoped visits is the way
+// to wait for a SPECIFIC shard, since with several shards the unscoped count says nothing about which.
+const CheckpointCycleDone = "refillCycleDone"
 
 // PartitionFunc reports the replica partition - see SetPartitionFunc.
 type PartitionFunc func() (replicas, ordinal int, ok bool)
@@ -372,6 +389,13 @@ func (p *Piston) Run(ctx context.Context) {
 		r := p.Cycle(ctx)
 		if r.Err != nil && ctx.Err() == nil {
 			p.logger.Load().ErrorContext(ctx, "Refill cycle", "shard", p.shard, "error", r.Err)
+		}
+		if r.Err == nil {
+			// This shard's partition now reflects the plan - see CheckpointCycleDone. Gated on the error so
+			// a visit cannot mean "looked and gave up": neither error path pushed, so neither reconciled.
+			seams := p.seams.Load()
+			seams.Checkpoint(ctx, CheckpointCycleDone)
+			seams.Checkpoint(ctx, CheckpointCycleDone, strconv.Itoa(p.shard))
 		}
 		if !published && r.Err == nil {
 			published = true
