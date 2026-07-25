@@ -237,30 +237,21 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 	return j, true, needRefill
 }
 
-// Refill replaces one shard's partition with batch at the given priority floor and wakes all
-// waiters. The floor is stamped onto every batch job (a refill batch is uniform at its band), which
-// is what keeps the partition's derived floor exact. The replacement is wholesale: an EMPTY batch
-// empties the partition, exactly as draining the last item through Pop does.
+// Refill replaces one shard's partition with batch at the given priority floor and wakes all waiters. The
+// floor is stamped onto every batch job, which is what keeps the partition's floor exact.
 //
-// The empty case must not be skipped. An empty batch is the scan's statement that NOTHING IS DUE on
-// that shard, so every candidate still cached there is a step that is no longer pending - a dead
-// hint. An early return on len(batch)==0 (what this once did) keeps that whole dead batch, and each
-// worker then pops one and burns a claim-CAS round-trip discovering it is gone, up to a partition's
-// worth of them. Neither breaks liveness - a CAS loser re-requests a refill, so the cache
-// self-corrects within a cycle - which is exactly why the bug was invisible; it is wasted work, not
-// a wedge.
+// The replacement is WHOLESALE, and the empty case must not be short-circuited. An empty batch is the
+// scan's statement that nothing is due on that shard, so every candidate still cached there is a dead hint
+// a worker would pop and burn a claim-CAS round trip on. An early return on len(batch)==0 - what this once
+// did - keeps the whole dead batch, and nothing breaks loudly: the cache self-corrects within a cycle, so
+// it reads as wasted work rather than a wedge, which is why the bug was invisible.
 //
-// The caller must NOT route a *failed* scan here: a scan error means "unknown", not "nothing is
-// due", and wholesale-replacing a healthy partition with nothing on a transient DB blip would idle
-// its workers in Pop. runShardRefill returns early instead (see the error path in
-// engine/scheduling.go).
+// The caller must NOT route a FAILED scan here. An error means "unknown", not "nothing is due", and
+// replacing a healthy partition with nothing on a transient blip idles its workers in Pop.
 //
-// discarded is the number of candidates the replace threw away un-popped. It is the refiller's WASTE
-// signal: a refiller is triggered after every processStep on its shard and turns far faster than the
-// workers drain, so a replace routinely discards candidates the previous scan selected and paid to
-// fetch. Those steps stay `pending` and are simply re-selected, so this is cost, never loss - but the
-// ratio against the batch size is what says whether the refiller is oversupplying, which no other
-// instrument can see.
+// discarded counts the candidates thrown away un-popped, MINUS those the doorbell admitted - it is the
+// refiller's oversupply signal, and charging it for work it never selected would read worst exactly when
+// the doorbell is working best.
 func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	c.mu.Lock()
 	if c.closed {
@@ -297,45 +288,22 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 }
 
 // Offer admits a candidate onto its shard's partition (routing is j.Shard) without consulting the plan.
-// Its caller is a step ORIGINATION site - most often the successor of a step that just completed - so the
-// question it answers is whether this replica can run the step now or must wait for a cycle to select it.
+// Callers are step-origination sites, most often the successor of a step that just completed, so what it
+// answers is whether this replica can run the step now or must wait for a cycle to select it.
 //
-// THIS IS NOT A FAIRNESS EXCEPTION, and the framing is what makes the rule fall out. A plan grants a
-// fairness key a share of the batch for the CYCLE, not a single dispatch. A step whose predecessor just
-// completed is taking the slot that predecessor vacated, inside the window its key already won. So the
-// bound is not arbitrary: admit where a slot has actually been freed, which is what `totalLen < size`
-// tests. It cannot amplify a tenant's share either - the successor exists only because its predecessor
-// freed the worker that will run it - and fairness still fully governs ADMISSION, which flows get started.
+// Three rules, and each is load-bearing:
 //
-// An EMPTY partition admits regardless of the global bound. That bound is a sum over ALL partitions, so
-// letting it gate this would have one busy shard silence an idle one's doorbell, and the caller reads a
-// decline as "this partition needs nothing": measured as 159 of 500 flows stranded in
-// fixtures/completionraceflow_test.go. The overshoot is at most one candidate per shard.
+//   - An EMPTY partition admits REGARDLESS of the global bound. That bound is a sum over all partitions, so
+//     gating this on it lets one busy shard silence an idle one's doorbell - and a caller reads a decline as
+//     "this partition needs nothing", so the step then waits for a scan nobody asked for.
+//   - A WORSE band than the partition's is DECLINED. Admitting it would run band-900 work while band-100
+//     work sits cached right here, a strict-priority inversion rather than the soft staleness the design
+//     accepts. Note the direction: a BETTER band is harmless and simply appends.
+//   - Otherwise admit while a slot has been freed (totalLen < size), at the TAIL so nothing the plan chose
+//     is reordered. A better band is deliberately not head-inserted; preempting was built, measured as
+//     nothing, and removed.
 //
-// THE ONE PRIORITY TEST IS AGAINST A WORSE BAND, and it points the opposite way from the obvious guess.
-// A BETTER band is harmless: the step is at least as important as everything this partition was planned
-// to run, so appending it violates nothing - it simply dispatches in arrival order rather than ahead of
-// the queue. A WORSE one is the real hazard, and is declined: admitting it would have a worker run
-// band-900 work while band-100 work sits cached right there, which is a strict-priority inversion rather
-// than the soft cross-shard staleness the design already accepts. It waits for a cycle in which its band
-// is the global minimum, which is exactly when it is allowed to run.
-//
-// A better band is NOT head-inserted either, and that is the part that used to be here. Preempting the
-// queue with it measured as nothing (see the CLAUDE.md) and cost a fairness bypass to argue about. So it
-// waits its turn in arrival order, and the partition goes on advertising the band it was planned at
-// (floor is frozen for the window). The residual softness is that the items ahead of it run first, for at
-// most a cycle, until the next Refill re-plans from the true global minimum - inside what
-// docs/scheduling-and-reliability.md promises: priority is never preemptive, and a new band is served
-// within a snapshot cycle or two.
-//
-// Worth knowing which callers can even bring a better band, because it is not the successor case: priority
-// is frozen at Create and inherited by every step of a flow, so a successor never arrives at a better band
-// than its own predecessor ran at. Only a NEW FLOW can (Create/Continue/Fork offering its entry step), or
-// the narrow straggler where a better band drained, the partition was refilled at a worse one, and that
-// band's last successor turns up afterwards.
-//
-// Admitted candidates are counted (see partition.offered) so Refill's discard count stays the refiller's
-// own waste signal rather than being charged for work it never selected.
+// Admissions are counted (partition.offered) so Refill's discard count stays the refiller's own waste.
 func (c *Cache) Offer(j Job, priority int) (admitted bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

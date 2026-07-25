@@ -24,42 +24,8 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/workflow"
-	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 )
-
-// workerLoop pops candidates from the cache and executes them.
-//
-// It no longer nudges a refiller. Each shard's piston cycles on a fixed cadence of its own, so there is
-// nothing to ring: the low-water signal Pop still returns has no consumer here, and the post-processStep
-// nudge is covered by the next cycle. What replaced the nudge's liveness role - "the scan after a
-// completion sees the freed slot" - is that the cycle is unconditional, plus the doorbell's Offer, which
-// now admits into an empty partition so a chain's next step dispatches without waiting for a cycle at all.
-func (e *Engine) workerLoop(ctx context.Context) {
-	for {
-		j, ok, _ := e.cache.Pop()
-		if !ok {
-			return
-		}
-		e.logger.DebugContext(ctx, "Worker popped", "stepID", j.StepID, "shard", j.Shard, "priority", j.Priority)
-		// A sibling worker in this process reserved this step within the last ~second - its claim CAS may
-		// still be in flight, or may have committed already (the reservation deliberately outlives the CAS
-		// to span selection -> pop; see internal/claimstracker). Either way the piston re-selected it
-		// because an uncommitted claim reads `pending`, so issuing our own claim would cost a round trip to
-		// be told we lost. Popping the next candidate costs nothing. Checked HERE rather than inside
-		// processStep so a skip does not pay for its setup, and the cache has already removed the entry.
-		if !e.claims.TryClaim(j.Shard, j.StepID) {
-			e.metricStepClaimPreempted(ctx)
-			continue
-		}
-		err := errors.CatchPanic(func() error {
-			return e.processStep(ctx, j.StepID, j.Shard)
-		})
-		if err != nil {
-			e.logger.ErrorContext(ctx, "Failed to process step", "stepID", j.StepID, "error", err)
-		}
-	}
-}
 
 // timerLoop sleeps until nextPoll, then polls. There is no early-wake channel: the poll is a recovery
 // sweep and nothing else needs it to run at a particular instant.

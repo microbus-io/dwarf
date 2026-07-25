@@ -39,6 +39,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
+	"github.com/microbus-io/dwarf/internal/workers"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
@@ -210,24 +211,17 @@ type Engine struct {
 	// while work is waiting spawns one more, up to the max. A worker blocked in a long ExecuteTask holds
 	// no connection, so the ceiling can be large without the resident set - and therefore the candidate
 	// cache and its refill scan, both sized from the resident count - paying for it.
-	cache           candidatecache.Cache
-	workerPool      sync.WaitGroup
-	workersResident atomic.Int32 // goroutines spawned so far
-	workersInTask   atomic.Int32 // goroutines currently parked inside the host's ExecuteTask (holding no connection)
-	// drainStop is closed at the top of drainRuntime, BEFORE the worker pool is waited on. It is the only
-	// signal a worker can select on to learn that a shutdown started: the lifetime ctx is deliberately not
-	// cancelled until after every worker has drained (so in-flight database work always commits), so there is
-	// nothing else to watch. Used by persist's retry loop to hand its step back immediately rather than sleep
-	// out a backoff nobody is waiting for.
-	drainStop   chan struct{}
-	spawnLock   sync.Mutex
-	spawnClosed bool // set under spawnLock before the pool is drained: no goroutine may join
+	cache candidatecache.Cache
+	// crew runs processStep on the candidates it pops. The engine supplies both sizing numbers.
+	crew *workers.Crew
+	// drainStop is closed at the top of drainRuntime, before the crew is waited on.
+	drainStop chan struct{}
 	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
-	// input, resolved at Startup. shardRTTMs is each shard's round-trip time, probed once at Startup and
-	// held so the worker ceiling can be re-derived whenever the observed replica count (and with it each
-	// shard's pool) changes - the ceiling is a function of the pool, so it must follow it.
+	// input, resolved at Startup.
 	workersDispatch int
-	shardRTTMs      map[int]float64
+	// shardRTTMs is each shard's round-trip time, probed once at Startup and HELD, so the worker ceiling
+	// can be re-derived whenever a shard's pool changes - the ceiling is a function of the pool.
+	shardRTTMs map[int]float64
 
 	// Candidate supply: one piston per shard, each cycling its own database on its own clock with no
 	// barrier against its peers. They share the planner (which is what a cross-shard barrier used to be -
@@ -831,17 +825,30 @@ func (e *Engine) initRuntime() error {
 	// re-derives it on every later fleet change.
 	e.recomputeRefillIntervals()
 
-	// Spawn the resident set eagerly; the rest of the ceiling is spawned on demand by a worker that finds
-	// every peer parked inside ExecuteTask (see maybeSpawnWorker) - the long-task case, where the resident
-	// set alone would cap throughput because nobody is left to dispatch.
-	e.spawnLock.Lock()
-	e.spawnClosed = false
-	e.workersResident.Store(0)
-	e.workersInTask.Store(0)
-	e.spawnLock.Unlock()
-	for range resident {
-		e.spawnWorker()
+	// The worker pool. Its callback is the claim skip plus processStep - NOT the host's ExecuteTask, which
+	// runs deep inside processStep and would drag the whole execution core into the pool if it were the
+	// boundary. The skip is checked HERE rather than inside processStep so it does not pay for that setup:
+	// a sibling worker in this replica reserved the step within the last ~second, its claim CAS may still
+	// be in flight, and the piston re-selected it because an uncommitted claim still reads `pending`, so
+	// issuing our own claim would cost a round trip to be told we lost.
+	crew, perr := workers.New(&e.cache, func(ctx context.Context, shard, stepID int) error {
+		if !e.claims.TryClaim(shard, stepID) {
+			e.metricStepClaimPreempted(ctx)
+			return nil
+		}
+		return e.processStep(ctx, shard, stepID)
+	})
+	if perr != nil {
+		e.unwindRuntime()
+		return errors.Trace(perr)
 	}
+	e.crew = crew
+	e.crew.SetLogger(e.logger)
+	e.crew.SetMax(maxWorkers)
+	// Start the resident set; the rest of the ceiling is spawned on demand by a worker that finds every
+	// peer offsite in the host's ExecuteTask - the long-task case, where the resident set alone would cap
+	// throughput because nobody is left to dispatch.
+	e.crew.Start(e.lifetimeCtx, resident)
 	e.timerWorker.Go(func() {
 		e.timerLoop(e.lifetimeCtx)
 	})
@@ -881,42 +888,6 @@ func (e *Engine) unwindRuntime() {
 	e.started.Store(false)
 }
 
-// spawnWorker adds one worker goroutine to the pool, unless the pool is draining (spawnClosed) or the
-// maximum is already reached. Called for the resident set at startup and on demand thereafter. The
-// spawnLock makes the resident count and the WaitGroup.Add inside Go atomic with respect to the drain,
-// which sets spawnClosed before it Waits - a goroutine joining a WaitGroup concurrently with Wait is a
-// panic, so the flag, not a bare counter check, is what makes shutdown safe.
-func (e *Engine) spawnWorker() {
-	e.spawnLock.Lock()
-	defer e.spawnLock.Unlock()
-	if e.spawnClosed || int(e.workersResident.Load()) >= int(e.workers.Load()) {
-		return
-	}
-	e.workersResident.Add(1)
-	e.workerPool.Go(func() {
-		e.workerLoop(e.lifetimeCtx)
-	})
-}
-
-// maybeSpawnWorker grows the pool by one when EVERY spawned worker is parked inside the host's
-// ExecuteTask, so not one of them is left to dispatch. That is the long-task signature, and it is the
-// only condition under which another worker helps: a worker inside ExecuteTask holds no database
-// connection, so its replacement adds dispatch capacity rather than competing for the pool.
-//
-// The counter must therefore track time inside ExecuteTask and NOTHING ELSE. An earlier version counted
-// time inside processStep - which includes waiting for a database connection - and so fired on ordinary
-// saturation: workers queued on the pool, the engine read that as "all busy", spawned more workers, and
-// those queued on the same pool too. A positive feedback loop on a signal that measured contention
-// rather than parking; it cost ~20% throughput on a saturated 8-vCPU shard (2,902 vs 3,523 steps/s) and
-// bloated the pool to ~1,300 workers where ~512 sufficed. Any future change here must keep asking: does
-// the worker this condition counts hold a connection? If it might, the condition is measuring the wrong
-// thing.
-func (e *Engine) maybeSpawnWorker() {
-	if int(e.workersInTask.Load()) >= int(e.workersResident.Load()) {
-		e.spawnWorker()
-	}
-}
-
 // drainRuntime stops all goroutines in order. The caller (Shutdown) has already flipped e.started to false
 // via CompareAndSwap, which also serves as the single-shutdown guard.
 func (e *Engine) drainRuntime() {
@@ -926,11 +897,6 @@ func (e *Engine) drainRuntime() {
 	if e.drainStop != nil {
 		close(e.drainStop)
 	}
-	// Close the pool to new workers BEFORE the WaitGroup is waited on below (an Add concurrent with a
-	// Wait panics). After this, a worker mid-loop can still finish its step; it just cannot spawn a peer.
-	e.spawnLock.Lock()
-	e.spawnClosed = true
-	e.spawnLock.Unlock()
 	// Stop the peer READ loop. The registry row is deleted further down, after the pistons stop - they own
 	// the write now, so deleting here would just be undone by the next beat.
 	if e.peersStop != nil {
@@ -940,8 +906,10 @@ func (e *Engine) drainRuntime() {
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()
+	// Closing the cache is what releases workers parked in Pop; Drain then closes the crew to new
+	// goroutines and waits. Both halves are the crew's contract - see internal/workers.
 	e.cache.Close()
-	e.workerPool.Wait()
+	e.crew.Drain()
 	if e.timerStop != nil {
 		close(e.timerStop)
 	}

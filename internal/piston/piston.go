@@ -458,33 +458,25 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 	}
 }
 
-// beat refreshes this replica's row in the shard's peer registry. It is an UPDATE by engine_id and
-// NOTHING ELSE - it never creates the row. Timestamps come from the database clock (NOW_UTC()), never a
-// bound Go time, so every freshness comparison on this shard runs on one clock.
+// beat refreshes this replica's row in the shard's peer registry. Timestamps come from the database clock
+// (NOW_UTC()), never a bound Go time, so every freshness comparison on this shard runs on one clock.
 //
-// UPDATE-ONLY is what makes the row's lifetime belong to the process rather than to this loop: the owner
-// creates it once at startup and deletes it once at shutdown, and every beat in between is an in-place
-// refresh. An INSERT fallback here (what this used to do) makes a beat able to RESURRECT a row the owner
-// has just deleted on its way down, so the shutdown delete only sticks if every piston is guaranteed to
-// have stopped first - an ordering constraint spanning two packages, to handle a case that means the
-// replica was already unreachable for longer than the fleet's staleness window. It also dragged in a
-// RowsAffected read and, with it, the MySQL changed-rows premise. A row that is somehow missing now
-// simply matches nothing, which is the same no-op a beat after shutdown should be.
+// It is an UPDATE and NOTHING ELSE - it never creates the row. The owner creates it at startup and deletes
+// it at shutdown, so a straggler beat after that delete matches nothing instead of RESURRECTING the row.
+// An INSERT fallback here (what this used to do) would make the shutdown delete stick only under an
+// ordering constraint spanning two packages.
 //
-// TWO timestamps, and the distinction is the point. seen_at moves on every beat and means "this replica
-// is alive and holding connections" - what the pool divisor R counts. dispatched_at moves only when a
-// cycle has actually completed since the last beat, and means "this replica is genuinely serving work" -
-// what the candidate partition must divide across. A replica handed a residue class of step ids it never
-// selects strands them, so that divisor needs EVIDENCE rather than a claim: a piston that says it
-// dispatches and then wedges stops advancing dispatched_at and falls out of the divisor on its own,
-// while its seen_at keeps it in R where it belongs. (A `dispatches` FLAG carried the same fact as a claim
-// and was dropped once every reader had moved to the timestamp.)
+// TWO timestamps, and the distinction is evidence versus claim. seen_at moves on every beat: this replica
+// is alive and holding connections, which is what the pool divisor R counts. dispatched_at moves only with
+// a cycle behind it: this replica is genuinely serving, which is what the candidate partition divides
+// across. A replica handed a residue class it never selects strands those steps, so that divisor cannot
+// trust a flag - a piston that claims to dispatch and then wedges simply stops advancing dispatched_at.
 //
-// A failed write is not retried. Retrying a broken registry write would turn a database blip into a write
-// storm, and the next beat is a second away regardless.
+// A failed write is not retried: that would turn a database blip into a write storm, and the next beat is
+// an interval away regardless.
 //
-// Safe to call from either loop: everything it reads is atomic, and the write is an idempotent UPDATE, so
-// two beats racing can only produce the same row twice. Run uses that to publish its first evidence early.
+// Safe to call from either loop - everything it reads is atomic and the write is idempotent - which is
+// what lets Run publish its first evidence early.
 func (p *Piston) beat(ctx context.Context) {
 	idle := p.idle.Load()
 	// Either a cycle COMPLETED since the last beat, or one is running right now. Both are evidence; only a

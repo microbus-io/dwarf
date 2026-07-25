@@ -62,6 +62,9 @@ matching one before working there:**
   `engine/CLAUDE.md`.
 - **`internal/keys/CLAUDE.md`** - the flow/step key *format* (`{shard}-{id}-{token}`), token entropy (why 64-bit),
   and the token-free `CorrelationID` derivation. (The engine-side enforcement/posture stays in `engine/CLAUDE.md`.)
+- **`internal/workers/CLAUDE.md`** - the demand side: the grow-on-demand goroutine `Crew` (not "pool" -
+  that word is the database connection pools), the `Offsite`
+  growth signal and the scope rule it turns on, and the two-phase drain.
 - **`internal/candidatecache/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL - godoc only, no design doc.)
 - **`internal/planner/CLAUDE.md`** - the cross-shard band + fairness decision: why per-shard tallies replaced a

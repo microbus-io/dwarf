@@ -2197,10 +2197,10 @@ The worker count is split into two numbers, because they answer different questi
     shard at R=8). `Cache.Resize` trims the tail; a trimmed candidate stays `pending` and is re-selected, exactly
     as one pushed past the bound by an `Offer` head-insert already is.
   - The **resident worker set** is deliberately left over-provisioned. The surplus workers merely queue on the
-    pool - bounded, and *non-compounding* now that the growth trigger counts `workersInTask` rather than
+    pool - bounded, and *non-compounding* now that the growth trigger counts workers OFFSITE rather than
     saturation - so the entire prize for shrinking it is goroutine stacks (~3MB at 384 workers). Buying that
     needs a worker-retirement protocol (a surplus counter, a retirement check on the hot loop, resize
-    serialization, and an interaction with the `WaitGroup`/`spawnClosed` drain ordering). That is a control
+    serialization, and an interaction with the pool's drain ordering). That is a control
     protocol added to the worker lifecycle for a memory saving, which is the trade the removed rate valve lost.
     If a large-R deployment ever shows the goroutine count actually hurting, the design to build is a **surplus
     counter** (retire the first N workers to reach a safe point), never per-worker indices - indices are what
@@ -2218,10 +2218,9 @@ The worker count is split into two numbers, because they answer different questi
   first discarded - it pays connection setup); a failed probe falls back to the measured same-zone
   constant. Every input is engine-visible - **no task duration T anywhere**, which is exactly what makes
   this derivable where `N = M x T/db` is not.
-- **The pool grows on demand** (`spawnWorker`/`maybeSpawnWorker`): a worker about to enter the host's
-  `ExecuteTask` adds one **only if every spawned peer is already parked inside `ExecuteTask`** - i.e. not
-  one worker is left to dispatch. **The counter (`workersInTask`) must wrap the host call and nothing
-  else.** This is the load-bearing detail, and getting it wrong shipped a runaway: an earlier version
+- **The pool grows on demand** (`internal/workers`, `Crew.Offsite`): a worker about to enter the host's
+  `ExecuteTask` reports itself OFFSITE, and the pool adds one **only if every peer is already offsite** -
+  i.e. not one worker is left to dispatch. **That scope must be the host call and nothing else.** This is the load-bearing detail, and getting it wrong shipped a runaway: an earlier version
   counted time inside `processStep`, which *includes waiting for a database connection*, so "every worker
   busy" meant "saturated" - any DB-bound backlog grew the pool toward the ceiling, each new worker
   queueing on the same connections and making the signal truer. Measured cost before the fix: ~20%
@@ -2230,8 +2229,12 @@ The worker count is split into two numbers, because they answer different questi
   dispatch capacity; a worker anywhere else in `processStep` is using or awaiting one, and a peer for it
   is pure added contention. Both directions are pinned (`TestPoolSizing_PoolGrowsForLongTasks`,
   `TestPoolSizing_SaturationDoesNotGrowThePool`) - the second is the one whose absence let the bug ship.
-  `spawnClosed` is set under `spawnLock` **before** `drainRuntime` waits on the pool - a `WaitGroup.Add`
-  concurrent with a `Wait` panics, so the flag, not a counter check, is what makes shutdown safe.
+  The release is called on the next straight line rather than deferred, because a defer at that function's
+  scope would hold the state across everything after the host call - the too-wide scope again.
+  Shutdown is the crew's two-phase `Drain`, and the engine's half is closing the CACHE first: a worker with
+  nothing to run is parked in `Pop`, which only a close releases. Inside `Drain` the crew is closed to new
+  goroutines **before** the `WaitGroup` is waited on - an `Add` concurrent with a `Wait` panics, and a
+  worker can go offsite at any instant. See `internal/workers/CLAUDE.md`.
 - **`SetWorkers` pins the maximum** (deterministic tests use `SetWorkers(1)`, which also disables growth;
   benchmark sweeps; hosts wanting a smaller global bound, e.g. for memory - the in-flight state maps are
   a cost the engine cannot see). Setting it ABOVE the ceiling is allowed and warned about at Startup: an

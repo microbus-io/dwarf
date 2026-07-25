@@ -257,7 +257,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.Startup(t.Context()))
-	resident := e.workersResident.Load()
+	resident := int32(e.crew.Resident())
 	assert.Equal(int32(96), resident, "resident set is the connection-derived dispatch count")
 
 	// Start more flows than the resident set can hold concurrently.
@@ -272,9 +272,9 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	assert.Equal(int32(flows), running.Load(), "every parked task got a worker")
-	assert.True(e.workersResident.Load() > resident, "the pool grew beyond its resident set (got %d, was %d)",
-		e.workersResident.Load(), resident)
-	assert.True(int(e.workersResident.Load()) <= int(e.workers.Load()), "growth stays under the ceiling")
+	assert.True(int32(e.crew.Resident()) > resident, "the pool grew beyond its resident set (got %d, was %d)",
+		int32(e.crew.Resident()), resident)
+	assert.True(e.crew.Resident() <= int(e.workers.Load()), "growth stays under the ceiling")
 	close(release)
 }
 
@@ -333,7 +333,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	// A deliberately tiny pool makes the connection the binding resource: workers WILL queue on it.
 	assert.NoError(e.SetMaxOpenConns(2))
 	assert.NoError(e.Startup(t.Context()))
-	resident := e.workersResident.Load()
+	resident := int32(e.crew.Resident())
 
 	// A deep backlog of DB-bound steps: every worker is contending for 2 connections, continuously.
 	var done atomic.Int32
@@ -350,9 +350,9 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	assert.Equal(int32(400), done.Load(), "the backlog drained")
-	assert.Equal(resident, e.workersResident.Load(),
-		"saturation must not grow the pool (was %d, now %d)", resident, e.workersResident.Load())
-	assert.Equal(int32(0), e.workersInTask.Load(), "no worker is parked in a task once the backlog drains")
+	assert.Equal(resident, int32(e.crew.Resident()),
+		"saturation must not grow the pool (was %d, now %d)", resident, int32(e.crew.Resident()))
+	assert.Equal(0, e.crew.AwayCount(), "no worker is offsite once the backlog drains")
 }
 
 // TestPoolSizing_CapacityWeight pins the placement-weight curve: flat up to 2 vCPUs (the measured
@@ -640,7 +640,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.Equal(96, e.workersDispatch, "resident/dispatch set stays connection-derived")
 	assert.Equal(192, e.cache.Capacity(), "cache is 2x the dispatch count, never 2x the ceiling")
 	assert.True(int(e.workers.Load()) > 1000, "the worker max is the lease-margin ceiling (got %d)", e.workers.Load())
-	assert.Equal(int32(96), e.workersResident.Load(), "only the resident set is spawned eagerly")
+	assert.Equal(int32(96), int32(e.crew.Resident()), "only the resident set is spawned eagerly")
 
 	// An 8-vCPU shard (pool 48) + a 2-vCPU shard (pool 12): dispatch = max(64, 8*60) = 480, and the
 	// ceiling is keyed on the WORST shard (the 2-vCPU pool of 12), never the aggregate.
@@ -660,7 +660,7 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(eBig.SetHost(noopHost{}))
 	assert.NoError(eBig.SetWorkers(300)) // > the zero-config dispatch count of 96
 	startSolo(t, eBig, "eBig")
-	assert.Equal(int32(300), eBig.workersResident.Load(), "an explicit SetWorkers is spawned in full")
+	assert.Equal(int32(300), int32(eBig.crew.Resident()), "an explicit SetWorkers is spawned in full")
 	assert.Equal(192, eBig.cache.Capacity(), "but the cache still follows the dispatch count")
 
 	// Explicit SetWorkers pins, regardless of shards.

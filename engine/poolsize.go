@@ -238,7 +238,7 @@ func (e *Engine) recomputePools() {
 	// claim" rule the worker ceiling is kept away from, arrived at through a different door.
 	//
 	// The RESIDENT worker count is deliberately NOT resized: it is a bounded, non-compounding over-provision
-	// (surplus workers queue on the pool and the growth trigger counts workersInTask, not saturation), and
+	// (surplus workers queue on the pool and the growth trigger counts workers OFFSITE, not saturation), and
 	// shrinking it needs a worker-retirement protocol whose only prize is goroutine stacks.
 	dispatch := max(64, workersPerConnBudget*postSplitConns)
 	e.cache.Resize(min(dispatch, int(e.workers.Load())))
@@ -280,6 +280,11 @@ func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
 		// cannot know), so it is correct for any workload - and the pool only grows into it on demand,
 		// so a short-task deployment never pays for the headroom.
 		e.workers.Store(int32(ceiling))
+		// The crew's ceiling must follow: it is read on every spawn decision, so a stale one would keep
+		// letting the crew grow past what the current connection budget can drain inside the lease margin.
+		if e.crew != nil {
+			e.crew.SetMax(ceiling)
+		}
 		return
 	}
 	if n := int(e.workers.Load()); n > ceiling {

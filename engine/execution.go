@@ -58,7 +58,7 @@ func cohortLockStripe(shard, spawnStepID int) int {
 }
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
-func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err error) {
+func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err error) {
 	// stepMarkedComplete is set once the step is flipped to `completed` below, before its forward
 	// progress (transitions / fan-in / flow completion) is committed in a separate transaction. If
 	// that later commit fails, the recovery defer rolls the step back so it re-dispatches.
@@ -346,13 +346,12 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		taskCtx, cancel = context.WithTimeout(taskCtx, time.Duration(timeBudgetMs)*time.Millisecond)
 		defer cancel()
 	}
-	// Account for this worker as parked in the task, and grow the pool if that leaves NO worker free to
-	// dispatch. The counter must wrap the host call and nothing else: a worker anywhere else in
-	// processStep is either using a database connection or waiting for one, and spawning a peer then only
-	// adds contention for the same pool - the runaway that measures saturation and calls it "long tasks".
-	// Inside ExecuteTask a worker holds no connection, so a peer is pure added dispatch capacity.
-	e.workersInTask.Add(1)
-	e.maybeSpawnWorker()
+	// Report this worker as OFFSITE for the host call, so the pool may grow if that leaves nobody free to
+	// dispatch. The scope must be the host call and nothing else: a worker anywhere else in processStep is
+	// either using a database connection or waiting for one, and spawning a peer then only adds contention
+	// for the same pool - the runaway that measures saturation and calls it "long tasks". Inside
+	// ExecuteTask a worker holds no connection, so a peer is pure added dispatch capacity.
+	onsite := e.crew.Offsite()
 	// A panic in the in-process host is caught here so it flows through the normal error disposition
 	// rather than wedging this leased step until lease expiry.
 	execErr := errors.CatchPanic(func() error {
@@ -363,7 +362,10 @@ func (e *Engine) processStep(ctx context.Context, stepID int, shardNum int) (err
 		}
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	})
-	e.workersInTask.Add(-1)
+	// Released on the next straight line rather than deferred: a defer here would hold the state across
+	// everything that follows, which is exactly the too-wide scope the comment above warns about.
+	// errors.CatchPanic guarantees control reaches this, so no early return can slip between the two.
+	onsite()
 	if execErr == nil && e.seams.IsFault(FaultExecuteTask, taskName) {
 		execErr = errors.New("injected fault: "+FaultExecuteTask+" "+taskName, http.StatusInternalServerError)
 	}

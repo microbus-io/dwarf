@@ -112,9 +112,13 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	for _, backoff := range e.persistBackoff {
 		select {
 		case <-e.drainStop:
-			// Shutting down. Hand the step back NOW rather than making a peer wait out the lease we just
-			// extended. This DOES re-execute the task on the peer - it is the at-least-once contract, and it is
-			// what would have happened at lease expiry anyway, only sooner.
+			// Shutting down. drainStop is the ONLY signal available here: the lifetime ctx is deliberately
+			// left live until every worker has drained, so that in-flight database work always commits, which
+			// means a worker asleep in this backoff has nothing else to watch.
+			//
+			// Hand the step back NOW rather than making a peer wait out the lease we just extended. This DOES
+			// re-execute the task on the peer - it is the at-least-once contract, and it is what would have
+			// happened at lease expiry anyway, only sooner.
 			e.releaseLease(ctx, db, stepID, leaseSeq)
 			return errPersistDrained
 		case <-time.After(backoff):
