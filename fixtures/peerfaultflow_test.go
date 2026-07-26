@@ -77,9 +77,10 @@ func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, r
 	return creator, eng1, eng2, ran
 }
 
-// drainFlows creates n flows on one replica and awaits them all there, failing on the first that does not
-// complete inside the budget.
-func drainFlows(t *testing.T, budget time.Duration, from *engine.Engine, name string, n int) {
+// createFlows creates n flows on one replica and returns their keys, without waiting for any of them.
+// Split from the await half so a test can observe what the fleet does with the work while it is still in
+// flight - see the takeover timing in TestPeerStalledDispatcherflow.
+func createFlows(t *testing.T, from *engine.Engine, name string, n int) []string {
 	t.Helper()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -88,11 +89,20 @@ func drainFlows(t *testing.T, budget time.Duration, from *engine.Engine, name st
 	for range n {
 		k, err := from.Create(ctx, name+"/g", nil, nil)
 		if !assert.NoError(err) {
-			return
+			return keys
 		}
 		keys = append(keys, k)
 	}
-	awaitCtx, cancel := context.WithTimeout(ctx, budget)
+	return keys
+}
+
+// awaitFlows awaits every key on one replica, failing on the first that does not complete inside the
+// budget. The budget is a "did it hang" ceiling, never a timing contract: it covers the dispatch of every
+// step of every flow across the fleet, which a loaded suite makes unbounded.
+func awaitFlows(t *testing.T, budget time.Duration, from *engine.Engine, keys []string) {
+	t.Helper()
+	assert := testarossa.For(t)
+	awaitCtx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	for _, k := range keys {
 		out, err := from.Await(awaitCtx, k)
@@ -101,6 +111,12 @@ func drainFlows(t *testing.T, budget time.Duration, from *engine.Engine, name st
 		}
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
+}
+
+// drainFlows creates n flows on one replica and awaits them all there.
+func drainFlows(t *testing.T, budget time.Duration, from *engine.Engine, name string, n int) {
+	t.Helper()
+	awaitFlows(t, budget, from, createFlows(t, from, name, n))
 }
 
 // TestPeerRegistryBlindflow pins the property an operator depends on: the peer registry going bad must not
@@ -149,8 +165,11 @@ func TestPeerRegistryBlindflow(t *testing.T) {
 // created itself would ride its own doorbell into its own cache and never consult a class at all. Here the
 // only way to the stalled replica's half is for the survivor to stop excluding it, so without the eviction
 // this test hangs on roughly half its flows.
+// Deliberately NOT parallel. The takeover ceiling below is an upper-bound timing assertion, and the
+// window it is measured against - the 5s dispatch freshness window - is a fixed property of the peer
+// registry that no test knob shortens, so the ceiling cannot be stretched to absorb CPU oversubscription
+// from co-running fixtures. An outcome assertion tolerates parallelism; this one does not.
 func TestPeerStalledDispatcherflow(t *testing.T) {
-	t.Parallel()
 	const name = "peerstall.verify:428"
 	creator, eng1, eng2, ran := peerFleet(t, name)
 	assert := testarossa.For(t)
@@ -169,26 +188,33 @@ func TestPeerStalledDispatcherflow(t *testing.T) {
 	visitsBefore := eng1.Seams().Visits(engine.CheckpointRefillStole)
 
 	before := ran["1"].Load()
-	started := time.Now()
-	drainFlows(t, 60*time.Second, creator, name, 20)
-	assert.Equal(before+40, ran["1"].Load(), "the surviving replica ran every step of every flow")
+	keys := createFlows(t, creator, name, 20)
 
 	// WHICH mechanism carried it is the whole question, and the outcome alone cannot answer it: the flows
 	// drain either way. Two routes exist - the survivor STEALS the stalled replica's class while it still
 	// holds it, or it waits out the 5s dispatch window until the stalled replica is evicted from the divisor
-	// and partitioning switches off. The steal is the one under test, so assert on the steal itself.
+	// and partitioning switches off.
+	//
+	// One bounded wait settles both, because a steal CANNOT fire after the eviction: with one dispatcher
+	// left the partition pair fails open, the fetch runs unpartitioned, and no row is outside a class to be
+	// counted as stolen. So a steal seen inside the window IS the takeover, and the wait is the window.
+	//
+	// It is timed on the takeover, not on the drain. Timing the drain instead folds in the dispatch of 40
+	// steps across three replicas sharing one database, which a loaded suite makes unbounded - measured at
+	// 4.3s, 6.7s and 31.2s on runs where this steal assertion passed, so the clock was reporting the suite's
+	// load and not the mechanism. The takeover itself is one grace (4 cycle periods, ~100ms here) behind the
+	// first Create. Measured ~150ms.
 	stolen := visitsBefore != eng1.Seams().Visits(engine.CheckpointRefillStole)
 	if !stolen {
 		select {
 		case <-stole:
 			stolen = true
-		case <-time.After(5 * time.Second):
+		case <-time.After(3 * time.Second):
 		}
 	}
-	assert.True(stolen, "the survivor must TAKE the stalled replica's class, not wait for it to be evicted")
+	assert.True(stolen,
+		"the survivor must TAKE the stalled replica's class within the dispatch window, not wait for it to be evicted")
 
-	// And it must not have cost the dispatch window. This is a "did the slow path run instead" ceiling, not a
-	// timing contract - eviction alone takes >5s, so anything well inside that is the steal. Measured ~150ms.
-	assert.True(time.Since(started) < 3*time.Second,
-		"the takeover must not wait out the dispatch window (took %s)", time.Since(started))
+	awaitFlows(t, 60*time.Second, creator, keys)
+	assert.Equal(before+40, ran["1"].Load(), "the surviving replica ran every step of every flow")
 }
