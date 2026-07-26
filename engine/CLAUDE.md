@@ -2100,16 +2100,20 @@ pure reads of live state, so neither captures anything that can go stale. The pi
 this replica anywhere - it only reports whether it is turning - which is what keeps how often that fact
 reaches the registry independent of how long a cycle takes.
 
-**The engine PULLS; nothing calls back.** `runReconcileLoop` ticks at `peers.Cadence` and calls
-`recomputePools`, which early-returns when no shard's count moved. It is a reconcile loop rather than a
+**The engine PULLS; nothing calls back.** `runReconcileLoop` ticks at an eighth of the Sonars' read cadence
+and calls `recomputePools`, which early-returns when no shard's count moved. It is a reconcile loop rather than a
 change notification, and the distinction is load-bearing: its invariant is "the applied pool sizes match the
 currently observed fleet", a job that exists whether or not anything announces a change, and it absorbs
 drift no notification could express - an override landing, a push that errored, a count moving while a
 previous push was in flight. An edge would have to be fired from every path that can move a published value
 (a confirmed fall, a recovery from blindness, a registration repair, a prune); missing one would leave the
 derived sizes stale forever with no backstop, and it would run pool policy on a Sonar's goroutine, coupling
-one shard's beat to another shard's slow push. The tick must stay at `peers.Cadence` - slower discards
-detection the reads have already paid for.
+one shard's beat to another shard's slow push. **The tick must stay a small fraction of the read cadence,
+and half is not small enough** - the apply spends part of the same budget `Join`'s two-cadence wait is
+already spending (detection alone costs a cadence plus a pass), so at half a cadence a loaded rollout
+priced a four-replica fleet at 56 connections against a 52 bound, two survivors still holding the pre-join
+share while the joiner had already grown. Slower than the read cadence discards detection the reads have
+already paid for; anything faster than an eighth is pure loss on a loop that early-returns.
 
 **Startup announces before it consumes, and that ordering is the guarantee.** `buildSonars` then `joinFleet`
 (parallel across shards), and only then are the pools sized. A joining replica sizes its own pool for the

@@ -257,7 +257,12 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	// which is also what proves the engine handed it the meter: the instruments are the PISTON's, resolved
 	// from the scope the engine resolved once (initRuntime), not built a second time here.
 	assert.True(e.cache.Capacity() > 0)
-	e.pistons[1].SetIdle(false) // SetWorkers(0) idled it; this test drives the cycles itself
+	// The piston STAYS IDLE, which is what makes driving it by hand legal: Piston.Cycle is not safe to call
+	// concurrently with Run, and an idle Run never enters a cycle at all (it parks on the idle poll), so the
+	// test goroutine is the only one touching the pipeline's cadence timestamps. Cycle itself does not
+	// consult the idle flag, so the forced cycles run in full. Clearing the flag here instead released the
+	// engine's own Run goroutine to cycle the same pipeline alongside these calls - a real data race, and
+	// one that fails whichever OTHER tests happen to be running when the detector trips.
 	e.pistons[1].SetInterval(0)
 	e.pistons[1].SetMinGap(0)
 	e.pistons[1].Cycle(ctx)

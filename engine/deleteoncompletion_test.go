@@ -42,6 +42,10 @@ func shardFlowCount(t *testing.T, e *Engine, shardNum int) int {
 }
 
 // waitFlowDeleted polls until the flow's row (and steps) are gone, failing the test on timeout.
+//
+// The timeout is a "did it hang" ceiling, not a timing contract, so it stretches under -race the same way
+// the shared enginetest helpers do: a reap is a flow run plus a reaper tick behind it, and both are
+// unbounded on a loaded parallel suite.
 func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Duration) {
 	t.Helper()
 	assert := testarossa.For(t)
@@ -49,7 +53,7 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 	assert.NoError(err)
 	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(timeout * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		var n int
 		db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&n)
@@ -61,7 +65,7 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("flow %s was not deleted within %s", flowKey, timeout)
+	t.Fatalf("flow %s was not deleted within %s", flowKey, timeout*enginetest.TimeoutScale())
 }
 
 // shortenDeletion overrides the engine's deletion grace / reaper cadence. Must be called after
@@ -296,7 +300,7 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 	assert.NoError(err)
 
 	// Root completes; the reaper then removes it plus the subgraph child - no flows remain.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if shardFlowCount(t, e, shardNum) == 0 {
 			break

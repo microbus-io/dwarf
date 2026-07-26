@@ -51,6 +51,15 @@ func startSolo(t *testing.T, e *Engine, key string) {
 	// Startup registered the t.Cleanup shutdown (e was built with NewEngineUnderTest).
 }
 
+// probedRTT is the round-trip time Startup measured for one shard, read under the lock its writer takes.
+// A test asserting on anything derived from the worker ceiling must go through this rather than assume the
+// same-zone constant: the probe is a real measurement of a real database, and the ceiling moves with it.
+func probedRTT(e *Engine, shard int) float64 {
+	e.shardsLock.Lock()
+	defer e.shardsLock.Unlock()
+	return e.shardRTTMs[shard]
+}
+
 // addPeerRow inserts a fake peer with the given engine_id into every shard's registry and waits for the
 // engine to see it - the DB-backed stand-in for a peer that came online.
 //
@@ -684,7 +693,14 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	startSolo(t, e, "e")
 	assert.Equal(96, e.workersDispatch, "resident/dispatch set stays connection-derived")
 	assert.Equal(192, e.cache.Capacity(), "cache is 2x the dispatch count, never 2x the ceiling")
-	assert.True(int(e.workers.Load()) > 1000, "the worker max is the lease-margin ceiling (got %d)", e.workers.Load())
+	// The max is the ceiling DERIVED from this shard's own probed RTT, not a fixed large number. A constant
+	// floor here silently reads the probe: the ceiling is 90,000/(7 x RTTms + 3), so a `SELECT 1` measured at
+	// 12.4ms - which a loaded parallel -race suite can produce - brings it under a hardcoded 1,000 and fails
+	// a test about wiring on an environment measurement. The formula itself is pinned separately by
+	// TestPoolSizing_WorkerCeiling; what this pins is that the derived max follows it and is not the
+	// dispatch count.
+	assert.Equal(workerCeiling(12, probedRTT(e, 1)), int(e.workers.Load()), "the worker max is the lease-margin ceiling")
+	assert.True(int(e.workers.Load()) > e.workersDispatch, "the max is the ceiling, not the dispatch count")
 	assert.Equal(int32(96), int32(e.crew.Resident()), "only the resident set is spawned eagerly")
 
 	// An 8-vCPU shard (pool 48) + a 2-vCPU shard (pool 12): dispatch = max(64, 8*60) = 480, and the

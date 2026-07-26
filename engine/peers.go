@@ -69,6 +69,12 @@ func (e *Engine) peerCadence() time.Duration {
 // A var so a test can restore the production cadence.
 var testPeerCadence = 50 * time.Millisecond
 
+// reconcileTicksPerCadence is how many times runReconcileLoop ticks per Sonar read cadence - see the
+// margin argument there. Eight rather than two, and rather than something larger still: the apply is
+// already negligible against the wait at eight, while every further tick is pure loss on a loop that
+// early-returns.
+const reconcileTicksPerCadence = 8
+
 // sonarFor returns the Sonar watching one shard, or nil before Startup has built them.
 func (e *Engine) sonarFor(shard int) *peers.Sonar {
 	if e.sonars == nil {
@@ -177,19 +183,24 @@ func (e *Engine) leaveFleet(ctx context.Context) {
 // backstop; it would also run the pool policy on a Sonar's goroutine, coupling one shard's beat to another
 // shard's slow push.
 //
-// IT MUST TICK STRICTLY FASTER THAN THE SONARS READ, and half their cadence is the margin. A joining
-// replica waits two cadences before opening a connection, which is what keeps a join from exceeding a
-// shard's budget - but that wait is sized against the READ, and a peer has not shrunk anything until it has
-// also APPLIED. Detection costs up to one cadence (a peer's read may have begun just before the joiner's
-// row landed), so an apply that also costs a full cadence lands exactly as the joiner starts growing: a
-// photo finish decided by jitter. Ticking at half leaves the apply comfortably inside the wait. It is
-// derived from the cadence the Sonars actually run at, not from the default, so the relationship holds
-// under test too.
+// IT MUST TICK A SMALL FRACTION OF THE CADENCE THE SONARS READ AT, because the apply spends part of a
+// budget the join is already spending. A joining replica waits two cadences before opening a connection,
+// which is what keeps a join from exceeding a shard's budget - but that wait is sized against the READ, and
+// a peer has not shrunk anything until it has also APPLIED. Detection already costs up to one cadence plus
+// a pass (a peer's read may have begun just before the joiner's row landed), so everything the apply spends
+// comes out of the one remaining cadence.
 //
-// Each tick is atomic loads plus a recompute that early-returns when nothing moved - no I/O at all, so the
-// faster tick costs nothing measurable.
+// Half the cadence is NOT enough of a fraction, which was measured rather than reasoned:
+// TestPeerRollingRestart_FleetNeverExceedsTheShardBudget priced a four-replica rollout at 56 connections
+// against a 52 bound (two survivors still holding the pre-join 16 while the joiner had grown to 12) on a
+// loaded -race run. At an eighth the apply is a rounding error against the wait, so what remains is jitter
+// in the peer's own read, which nothing on this side can shorten.
+//
+// The divisor is derived from the cadence the Sonars actually run at, not from the default, so the
+// relationship holds under test too. Each tick is atomic loads plus a recompute that early-returns when
+// nothing moved - no I/O at all, so a faster tick costs nothing measurable.
 func (e *Engine) runReconcileLoop() {
-	ticker := time.NewTicker(max(time.Millisecond, e.peerCadence()/2))
+	ticker := time.NewTicker(max(time.Millisecond, e.peerCadence()/reconcileTicksPerCadence))
 	defer ticker.Stop()
 	// The fleet size this loop last SAW, per shard. Deliberately not recomputePools' lastAppliedR: that one
 	// records what the pools were last DERIVED with and is never updated under a SetMaxOpenConns override
