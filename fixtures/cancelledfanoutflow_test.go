@@ -18,11 +18,13 @@ package fixtures
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -53,10 +55,26 @@ func TestCancelledfanoutflow(t *testing.T) {
 
 	var executed atomic.Int32
 
+	// A branch reports that it is in flight and then HOLDS the single worker until the test lets go. Both
+	// halves replace a duration: the report is what the cancel is sequenced against (a sleep long enough to
+	// cover dispatch on a loaded suite is a guess, and one that reads as "no branch ever ran" when it is
+	// short), and the hold is what keeps a second branch from starting behind the first (a fixed branch
+	// duration has to outlast the Cancel round trip, which is equally unbounded). With the worker held and
+	// growth disabled by SetWorkers(1), exactly one branch can ever have run when the cancel lands.
+	// Released with a defer rather than a t.Cleanup: deferred funcs run BEFORE any registered cleanup, and
+	// Startup registers the engine's Shutdown as one. A cleanup here would run AFTER that Shutdown (they
+	// unwind LIFO and Startup's is registered later), so the drain would wait forever on the very worker
+	// this is holding.
+	var executedOnce sync.Once
+	inFlight := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+
 	branch := func(ctx context.Context, f *workflow.Flow) error {
 		executed.Add(1)
+		executedOnce.Do(func() { close(inFlight) })
 		select {
-		case <-time.After(2 * time.Second):
+		case <-release:
 		case <-ctx.Done():
 			return errors.Trace(ctx.Err())
 		}
@@ -86,7 +104,11 @@ func TestCancelledfanoutflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		time.Sleep(1 * time.Second)
+		select {
+		case <-inFlight:
+		case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+			t.Fatal("no branch of the fan-out ever started, so there was nothing to cancel mid-flight")
+		}
 		err = eng.Cancel(ctx, flowKey, "")
 		if !assert.NoError(err) {
 			return
