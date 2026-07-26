@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -89,7 +90,7 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	// Wait until the child has captured its key and is blocked (so it is still running).
 	select {
 	case <-captured:
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second * enginetest.TimeoutScale()):
 		assert.True(false, "inner (child) task never ran")
 		return
 	}
@@ -118,6 +119,12 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	// returned it: the latch detector reads the committed stop within its own cadence, far inside this bound,
 	// so no timing here can tell a delivered signalStop from a missing one. TestFault_DropSignalStop covers the
 	// detector-only case directly instead.
+	//
+	// Being a "did it happen at all" ceiling rather than the mechanism, it stretches under -race like the
+	// shared enginetest helpers do: everything between the release and the wake - the task returning, failStep
+	// committing, the stop resolving - is database work the suite's own load makes unbounded, and 2s of it was
+	// measured expiring on a `go test ./... -race` pass. A wake that never comes still trips the stretched
+	// bound, and the Await's own ctx is more generous again so it is never what returns here.
 	select {
 	case aw := <-awaitCh:
 		assert.NoError(aw.err, "Await(childKey) must be woken by the failure's signalStop, not time out")
@@ -125,8 +132,8 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 			assert.Equal(workflow.StatusFailed, aw.out.Status)
 			assert.Equal("child boom", aw.out.Error)
 		}
-	case <-time.After(2 * time.Second):
-		assert.True(false, "Await(childKey) not woken within 2s — a failing subgraph child did not signalStop its Await waiters")
+	case <-time.After(2 * time.Second * enginetest.TimeoutScale()):
+		assert.True(false, "Await(childKey) not woken — a failing subgraph child did not signalStop its Await waiters")
 		return
 	}
 
