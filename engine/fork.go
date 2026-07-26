@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/microbus-io/dwarf/internal/keys"
+	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -309,7 +310,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	type stepMeta struct {
 		oldID, predID, succID, lineageID, cohortSize int
 		status                                       string
-		refs                                         stateRefs
+		refs                                         staterefs.Refs
 	}
 	mrows, err := tx.QueryContext(ctx,
 		"SELECT step_id, predecessor_id, successor_id, lineage_id, cohort_size, status, state_refs FROM dwarf_steps WHERE flow_id=? ORDER BY step_id",
@@ -326,7 +327,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if pruned[s.oldID] {
 			continue
 		}
-		s.refs = parseStateRefs(refsJSON)
+		s.refs = staterefs.Parse(refsJSON)
 		keep = append(keep, s)
 	}
 	mrows.Close()
@@ -399,7 +400,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	for _, s := range keep {
 		refsJSON := []byte("{}")
 		if len(s.refs) > 0 {
-			remapped := make(stateRefs, len(s.refs))
+			remapped := make(staterefs.Refs, len(s.refs))
 			for field, anchor := range s.refs {
 				newAnchor, ok := idMap[anchor]
 				if !ok || newAnchor == 0 {

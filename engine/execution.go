@@ -30,6 +30,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/internal/keys"
+	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -280,7 +281,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 	// exist. The refs the step inherited are kept, because minting the successors' state needs to know which
 	// fields arrived as refs (and so must be carried, never re-anchored against this step). resolveStateRefs
 	// mutates the state map in place, so it gets the live backing map.
-	inheritedRefs := parseStateRefs(stateRefsJSON)
+	inheritedRefs := staterefs.Parse(stateRefsJSON)
 	if err := e.resolveStateRefs(ctx, db, shardNum, state, inheritedRefs, nil, workflowURL); err != nil {
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
@@ -802,7 +803,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 	//
 	// The linear/static-fan-out successors all share this one snapshot, so it is minted once; a forEach
 	// branch re-mints because its state carries the injected element (below).
-	linearStateJSON, linearRefsJSON, err := mintStateRefs(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), nil, db.DriverName())
+	linearStateJSON, linearRefsJSON, err := e.linkerFor(shardNum).Mint(childInputState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), nil)
 	if err != nil {
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
@@ -971,7 +972,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 						noRef[next.itemKey+"Count"] = true
 					}
 					var mintErr error
-					stepStateJSON, stepRefsJSON, mintErr = mintStateRefs(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef, db.DriverName())
+					stepStateJSON, stepRefsJSON, mintErr = e.linkerFor(shardNum).Mint(perStepState, accumulatedChanges, inheritedRefs, stepID, len(normalNexts), noRef)
 					if mintErr != nil {
 						return errors.Trace(mintErr)
 					}
@@ -1059,7 +1060,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 					}
 				}
 				if fullyResolved && failures == 0 {
-					fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, db.DriverName())
+					fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 					if err != nil {
 						return errors.Trace(err)
 					}
@@ -1346,7 +1347,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// Resolve only what the reducers actually fold; a merely-carried ref rides through the (empty) cohort
 		// untouched, still pointing at its original anchor - see resolveReducedRefs. resolveReducedRefs mutates
 		// the state map in place, so it gets the live map.
-		ourRefs := parseStateRefs(ourRefsJSON)
+		ourRefs := staterefs.Parse(ourRefsJSON)
 		rerr := e.resolveReducedRefs(ctx, tx, shardNum, ourState, ourRefs, graph.Reducers(), workflowURL)
 		if rerr != nil {
 			return errors.Trace(rerr)
@@ -1361,8 +1362,8 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		// populated cohort's spawn does in insertFanInStep. There are no members, but a field this step wrote
 		// through a COMBINING reducer still has a merged value (reduce(ourState[k], ourChanges[k])) that exists
 		// in no row, so it must be inlined rather than anchored - the same exclusion insertFanInStep applies.
-		exclude := combinedReducerFields(ourState, ourChanges, graph.Reducers())
-		mergedJSON, refsJSON, merr := mintStateRefs(mergedState, ourChanges, ourRefs, stepID, 1, exclude, db.DriverName())
+		inlineOnly := staterefs.CombinedReducerFields(ourState, ourChanges, graph.Reducers())
+		mergedJSON, refsJSON, merr := e.linkerFor(shardNum).Mint(mergedState, ourChanges, ourRefs, stepID, staterefs.Linear, inlineOnly)
 		if merr != nil {
 			return errors.Trace(merr)
 		}
@@ -1415,7 +1416,7 @@ type stateByteCount struct {
 // insertFanInStep creates the fan-in step after the cohort completes. It also returns the state bytes it
 // moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot), which
 // the caller emits after its transaction commits.
-func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardNum, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, workflowURL string, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, driver string) (int, stateByteCount, error) {
+func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardNum, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, workflowURL string, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, stateByteCount, error) {
 	var spawnTaskName string
 	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON []byte
 	var spawnLineageID, spawnFanOutOrdinal int
@@ -1432,7 +1433,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// original anchor: resolving it here would materialize the payload and re-anchor it at EVERY fan-in,
 	// giving back the win in exactly the fan-out graphs this design exists for. resolveReducedRefs mutates
 	// the state map in place, so it gets the live map.
-	spawnRefs := parseStateRefs(spawnRefsJSON)
+	spawnRefs := staterefs.Parse(spawnRefsJSON)
 	err := e.resolveReducedRefs(ctx, tx, shardNum, spawnState, spawnRefs, graph.Reducers(), workflowURL)
 	if err != nil {
 		return 0, stateByteCount{}, errors.Trace(err)
@@ -1525,7 +1526,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// not anchored at the spawn. memberWrites already excludes member-contributed fields; add the spawn's own
 	// combined ones. (A spawn field with a combining reducer but no base has merged[k]==changes[k] and stays a
 	// sound anchor, so combinedReducerFields leaves it off.)
-	for k := range combinedReducerFields(spawnState, spawnChanges, graph.Reducers()) {
+	for k := range staterefs.CombinedReducerFields(spawnState, spawnChanges, graph.Reducers()) {
 		memberWrites[k] = true
 	}
 
@@ -1534,7 +1535,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// `changes` if the spawn's task wrote it), so the spawn is a legitimate anchor and the fan-in must not
 	// re-copy the payload into its own row. A field that arrived at the spawn as a ref keeps that ref, so the
 	// chain stays one hop. Member-contributed and reduced fields are excluded and therefore inline (above).
-	mergedJSON, refsJSON, err := mintStateRefs(merged, spawnChanges, spawnRefs, cohortSpawnID, 1, memberWrites, driver)
+	mergedJSON, refsJSON, err := e.linkerFor(shardNum).Mint(merged, spawnChanges, spawnRefs, cohortSpawnID, staterefs.Linear, memberWrites)
 	if err != nil {
 		return 0, stateByteCount{}, errors.Trace(err)
 	}

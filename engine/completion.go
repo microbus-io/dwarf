@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/keys"
+	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -97,7 +98,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 		defer rows.Close()
 
 		var baseState workflow.State
-		var baseRefs stateRefs
+		var baseRefs staterefs.Refs
 		baseLineage := 0
 		var allChanges []workflow.State
 		found := false
@@ -113,7 +114,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 				if err != nil {
 					return nil, 0, false, errors.Trace(err)
 				}
-				baseRefs = parseStateRefs(refsJSON)
+				baseRefs = staterefs.Parse(refsJSON)
 				baseLineage = lineageID
 			}
 			changes, err := workflow.NewState(changesJSON)
@@ -269,7 +270,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	spawnChanges, _ := workflow.NewState(spawnChangesJSON)
 	// FLATTEN: final_state is a flow-boundary value, so everything the spawn carried by reference is materialized
 	// here - unlike the fan-in, which may pass a carried ref through. resolveStateRefs mutates the map in place.
-	err = e.resolveStateRefs(ctx, db, shardNum, spawnState, parseStateRefs(spawnRefsJSON), nil, workflowURL)
+	err = e.resolveStateRefs(ctx, db, shardNum, spawnState, staterefs.Parse(spawnRefsJSON), nil, workflowURL)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

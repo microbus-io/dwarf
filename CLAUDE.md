@@ -102,6 +102,10 @@ matching one before working there:**
   growth signal and the scope rule it turns on, and the two-phase drain.
 - **`internal/candidatecache/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL - godoc only, no design doc.)
+- **`internal/staterefs/CLAUDE.md`** - storing a large carried state field once: the anchor-cost size policy
+  (why fan-out width is the primary axis), the one-hop and both-column invariants, and why the Loader is a
+  per-call batched callback rather than a bound connection. (The engine-side integration - flow-boundary
+  flattens, `Fork`'s remap - stays in `engine/CLAUDE.md`.)
 - **`internal/planner/CLAUDE.md`** - the cross-shard band + fairness decision: why per-shard tallies replaced a
   barrier, why participation is *declared* (`Clear`) rather than inferred from silence, and the slice rule's
   determinism.

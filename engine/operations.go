@@ -29,6 +29,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/candidatecache"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/latch"
+	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -390,8 +391,8 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			stepState, _ := workflow.NewState(stepStateJSON)
 			stepChanges, _ := workflow.NewState(stepChangesJSON)
 			// The ref encoding is a storage detail, never API-visible: a caller sees the state the step
-			// actually saw (invariant 6). resolveStateRefs mutates the map in place, so it gets the live map.
-			if rerr := e.resolveStateRefs(ctx, db, shardNum, stepState, parseStateRefs(stepRefsJSON), nil, ""); rerr != nil {
+			// actually saw (the ref encoding is internal storage, never API-visible). resolveStateRefs mutates the map in place, so it gets the live map.
+			if rerr := e.resolveStateRefs(ctx, db, shardNum, stepState, staterefs.Parse(stepRefsJSON), nil, ""); rerr != nil {
 				return nil, errors.Trace(rerr)
 			}
 			// Materialize the interrupted step's view: state + changes with pending deletes enacted.

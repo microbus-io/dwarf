@@ -18,7 +18,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"maps"
 	"math"
@@ -40,6 +39,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/peers"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
+	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/internal/workers"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -234,11 +234,10 @@ type Engine struct {
 	// Per-flow parsed-graph cache. The graph JSON is frozen at flow creation, so processStep reuses
 	// the parsed *workflow.Graph across the flow's steps instead of re-unmarshalling it each step.
 	graphCache *lru.Cache[graphCacheKey, *cachedGraph]
-	// stateRefCache serves a ref'd field's bytes without re-reading its anchor row. The key is immutable
-	// once the anchor settles, and in a fan-out every branch resolves the SAME anchor set - so after the
-	// first branch the hit rate is ~1, which is what makes refs a READ win as well as a write win (today
-	// each of the N branches re-reads the payload from the database).
-	stateRefCache *lru.Cache[string, json.RawMessage]
+	// State-ref linkers, one per shard: they decide which state fields a successor step stores by reference
+	// rather than by value, and resolve those references back. Per shard because a step id is only unique
+	// within one, and because a shard's own cache of resolved bytes should not be evicted by another's.
+	linkers map[int]*staterefs.Linker
 
 	// Lifecycle
 	started        atomic.Bool
@@ -753,10 +752,10 @@ func (e *Engine) initRuntime() error {
 	// Shutdown/Startup cycle: a tally left from the previous run would claim a band nobody is serving.
 	e.planner = planner.New()
 	e.pistons = make(map[int]*piston.Piston)
+	e.linkers = make(map[int]*staterefs.Linker)
 	e.recoveryStop = make(chan struct{})
 	e.reaperStop = make(chan struct{})
 	e.graphCache = lru.New[graphCacheKey, *cachedGraph](4096, 15*time.Minute)
-	e.stateRefCache = lru.New[string, json.RawMessage](4096, 15*time.Minute)
 	// A fresh board per run: the previous one was closed at drain, and a closed board turns every Await
 	// away. resolveStoppedFlows is non-nil, so New cannot fail.
 	e.latches, _ = latch.New(e.resolveStoppedFlows)
@@ -789,6 +788,10 @@ func (e *Engine) initRuntime() error {
 			e.unwindRuntime()
 			return errors.New("resolving shard %d for its piston: %w", idx, dbErr)
 		}
+		// One state-ref Linker per shard, built from the same handle: it needs the shard's driver name (the
+		// only dialect-dependent term in the size policy) and it caches resolved payload bytes under step
+		// ids, which are unique only within a shard.
+		e.linkers[idx] = staterefs.New(db.DriverName())
 		p, perr := piston.New(idx, db, e.planner, &e.cache)
 		if perr != nil {
 			e.unwindRuntime()

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/keys"
+	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -203,9 +204,9 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		return nil, errors.Trace(err)
 	}
 	// Materialize the step's carried-by-reference fields: the ref encoding is internal storage, never an
-	// API-visible one, so Step reports the input the task actually saw (invariant 6). resolveStateRefs
+	// API-visible one, so Step reports the input the task actually saw (the ref encoding is internal storage, never API-visible). resolveStateRefs
 	// mutates the state map in place.
-	if err = e.resolveStateRefs(ctx, db, shardNum, fs.State, parseStateRefs(stateRefsJSON), nil, ""); err != nil {
+	if err = e.resolveStateRefs(ctx, db, shardNum, fs.State, staterefs.Parse(stateRefsJSON), nil, ""); err != nil {
 		return nil, errors.Trace(err)
 	}
 	fs.Changes, err = workflow.NewState(changesJSON)
