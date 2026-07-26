@@ -152,7 +152,7 @@ func TestPeerRegistryBlindflow(t *testing.T) {
 func TestPeerStalledDispatcherflow(t *testing.T) {
 	t.Parallel()
 	const name = "peerstall.verify:428"
-	creator, _, eng2, ran := peerFleet(t, name)
+	creator, eng1, eng2, ran := peerFleet(t, name)
 	assert := testarossa.For(t)
 
 	// Both dispatching first, so eng2 really is holding a residue class before it stalls.
@@ -162,14 +162,33 @@ func TestPeerStalledDispatcherflow(t *testing.T) {
 	// correct, it still holds connections - but publishes no dispatch evidence.
 	eng2.Seams().InjectN(1<<20, engine.FaultRefillScanErr)
 
+	// Arm BEFORE the work exists, then check Visits after: a steal landing between the two lines is caught by
+	// the channel, one before them by the count. The reverse order reintroduces the race the split-arm Waiter
+	// exists to remove.
+	stole := eng1.Seams().Waiter(engine.CheckpointRefillStole)
+	visitsBefore := eng1.Seams().Visits(engine.CheckpointRefillStole)
+
 	before := ran["1"].Load()
 	started := time.Now()
 	drainFlows(t, 60*time.Second, creator, name, 20)
 	assert.Equal(before+40, ran["1"].Load(), "the surviving replica ran every step of every flow")
 
-	// It cannot have been quick: the survivor had to watch the stalled replica's evidence age out first, and
-	// that window is deliberately several beats wide. A drain that finished immediately would mean the
-	// partition was never in force and the test proved nothing.
-	assert.True(time.Since(started) > time.Second,
-		"the takeover waits out the dispatch window (took %s)", time.Since(started))
+	// WHICH mechanism carried it is the whole question, and the outcome alone cannot answer it: the flows
+	// drain either way. Two routes exist - the survivor STEALS the stalled replica's class while it still
+	// holds it, or it waits out the 5s dispatch window until the stalled replica is evicted from the divisor
+	// and partitioning switches off. The steal is the one under test, so assert on the steal itself.
+	stolen := visitsBefore != eng1.Seams().Visits(engine.CheckpointRefillStole)
+	if !stolen {
+		select {
+		case <-stole:
+			stolen = true
+		case <-time.After(5 * time.Second):
+		}
+	}
+	assert.True(stolen, "the survivor must TAKE the stalled replica's class, not wait for it to be evicted")
+
+	// And it must not have cost the dispatch window. This is a "did the slow path run instead" ceiling, not a
+	// timing contract - eviction alone takes >5s, so anything well inside that is the steal. Measured ~150ms.
+	assert.True(time.Since(started) < 3*time.Second,
+		"the takeover must not wait out the dispatch window (took %s)", time.Since(started))
 }

@@ -108,6 +108,30 @@ func (r *rig) park(t *testing.T, stepID int) {
 	}
 }
 
+// idsByResidue splits every pending step id into the ones this ordinal owns and the ones it does not,
+// oldest-first within each - the order FetchSteps returns them in.
+func (r *rig) idsByResidue(t *testing.T, replicas, ordinal int) (own, foreign []int) {
+	t.Helper()
+	rows, err := r.db.QueryContext(context.Background(),
+		"SELECT step_id FROM dwarf_steps ORDER BY created_at, step_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if id%replicas == ordinal {
+			own = append(own, id)
+		} else {
+			foreign = append(foreign, id)
+		}
+	}
+	return own, foreign
+}
+
 func drain(c *candidatecache.Cache) []int {
 	out := make([]int, 0, c.Len())
 	for c.Len() > 0 {
@@ -644,4 +668,127 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 	assert.Equal(0, busyHits,
 		"a piston that only fails must never read as busy (%d of %d samples)", busyHits, samples)
 	assert.True(samples > 100, "the sampling has to be dense enough to catch a brief window")
+}
+
+// TestPiston_StealIsGatedOnAnEmptyOwnClass pins the fuse. Partitioning hands each replica a disjoint class
+// of step ids, which is what stops peers racing for the same rows - but a replica that is SLOW rather than
+// dead keeps its class while being unable to serve it, and nobody else will look at those steps. Stealing
+// closes that, and the gate is what keeps it from costing anything the rest of the time: a replica holding
+// work of its OWN never steals, so a uniformly loaded fleet adds no overlapping selection at all.
+func TestPiston_StealIsGatedOnAnEmptyOwnClass(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t)
+	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+
+	// Not armed: the strict residue class, whatever the grace is set to.
+	sql, args := r.p.partitionPredicate()
+	assert.Equal(" AND step_id % ? = ?", sql, "an unarmed piston partitions strictly")
+	assert.Equal(2, len(args))
+
+	// Armed by a cycle that found nothing due in this replica's own class.
+	r.p.stealing.Store(true)
+	sql, args = r.p.partitionPredicate()
+	assert.Contains(sql, "OR not_before <=", "an idle replica relaxes the class")
+	// Two tiers plus the strict term: own class, then the neighbour's after one grace, then anyone's after
+	// two. Six binds - (replicas, ordinal), (replicas, neighbour, -grace), (-2*grace).
+	assert.Equal(6, len(args))
+	assert.Equal(2, args[0], "the strict term keeps the real divisor")
+	assert.Equal(0, args[1], "and this replica's own ordinal")
+	assert.Equal(1, args[3], "the second tier names the NEIGHBOUR's ordinal, (0+1) mod 2")
+	assert.Equal(2*args[4].(int64), args[5], "and anyone's class only after TWICE the grace")
+	// The relaxation only ever ADMITS rows - the strict term survives intact, so no class is stranded.
+	assert.Contains(sql, "step_id % ? = ?")
+
+	// Zero periods disables it outright, even while armed.
+	r.p.SetStealAfter(0)
+	sql, _ = r.p.partitionPredicate()
+	assert.Equal(" AND step_id % ? = ?", sql, "stealAfter=0 restores strict partitioning")
+	r.p.SetStealAfter(defaultStealAfter)
+
+	// Nothing to steal when there is no partition to relax: a solo replica already selects everything.
+	r.p.SetPartitionFunc(func() (int, int, bool) { return 1, 0, true })
+	sql, _ = r.p.partitionPredicate()
+	assert.Equal("", sql, "stealing must not resurrect a partition the pair disabled")
+}
+
+// TestPiston_StealArmsFromTheCycleItSaw pins where the gate comes from: NoBand means nothing was due in
+// this replica's own class, which is a property of the DATABASE backlog rather than of anything the piston
+// did - so it stays true while a peer is stalled and clears itself the moment this class refills.
+func TestPiston_StealArmsFromTheCycleItSaw(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+
+	// An empty shard: nothing due anywhere, so certainly nothing in our class.
+	res := r.p.Cycle(ctx)
+	assert.Equal(pipeline.NoBand, res.Band)
+	assert.True(r.p.stealing.Load(), "a cycle that found nothing due arms the steal")
+
+	// Enough work arrives in THIS replica's class to FILL its batch, and the next cycle disarms. The bar is
+	// the batch, not mere presence: with continuous arrivals a replica keeping up still finds a step or two
+	// due on every scan, so "any work at all" would leave the gate shut while a peer's class backed up
+	// unboundedly beside it - measured as zero steals against an open-loop bench with a crippled peer.
+	// Ordinal 0 of 2 owns the even ids, so 20 inserts yield ~10 own steps against a rig capacity of 8.
+	for range 20 {
+		r.insertStep(t, 1, 5, "k", 1)
+	}
+	r.p.Cycle(ctx)
+	assert.False(r.p.stealing.Load(), "a replica that can fill its own batch must not steal")
+
+	// A FAILED cycle leaves the flag alone: an error means "unknown", not "nothing is due" - the same
+	// distinction the pipeline draws when it clears the shard from planning but spares its cache partition.
+	sm := seamster.New(true)
+	r.p.SetSeams(sm)
+	sm.InjectN(1, FaultScanErr)
+	res = r.p.Cycle(ctx)
+	assert.Error(res.Err)
+	assert.False(r.p.stealing.Load(), "a failed cycle must not arm the steal by accident")
+}
+
+// TestPiston_StealTakesOnlyLongDueForeignSteps drives the relaxed predicate against real SQL, which is the
+// only way to know the clause means what it reads as. The age is measured from not_before, NOT created_at:
+// not_before is stamped at creation and pushed forward by flow.Sleep and every retry backoff, so this reads
+// as "has been DUE for at least the grace". Against created_at, an hour-long sleep would be stolen the
+// instant it came due, on a fleet with nothing wrong with it.
+func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	// Ordinal 0 of 2: this replica owns EVEN step ids, so odd ones are foreign.
+	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+	r.p.SetInterval(50 * time.Millisecond)
+	r.p.SetMinGap(0)
+	r.p.SetStealAfter(4) // grace = 200ms
+
+	for range 8 {
+		r.insertStep(t, 1, 5, "k", 1)
+	}
+	own, foreign := r.idsByResidue(t, 2, 0)
+	assert.True(len(own) > 0 && len(foreign) > 0, "the fixture needs both classes populated")
+
+	// Strict: only our own class is visible.
+	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	assert.NoError(err)
+	assert.Equal(own, got["k"], "strict partitioning sees only this replica's class")
+
+	// Armed, but every step is freshly due - younger than the grace - so a healthy owner's work is left
+	// alone. This is the moderate-load case the grace exists for: spare capacity is common in a healthy
+	// fleet, and the gate alone would re-enable overlapping selection fleet-wide.
+	r.p.stealing.Store(true)
+	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	assert.NoError(err)
+	assert.Equal(own, got["k"], "a young foreign step belongs to its owner")
+
+	// Age the foreign steps past the grace: a stalled owner's class ages without bound, and only then is it
+	// taken. Backdated with the DATABASE clock, never a bound Go time.
+	_, err = r.db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000) WHERE step_id % 2 = 1")
+	assert.NoError(err)
+	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	assert.NoError(err)
+	assert.Equal(8, len(got["k"]), "a long-due foreign step is taken by an idle peer")
 }

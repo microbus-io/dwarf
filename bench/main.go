@@ -101,12 +101,13 @@ func run() error {
 		// Replicas share the database(s) and coordinate through them - nothing is sent between them, so
 		// there is no transport here to make imperfect. Simulating a crashed replica means stopping its
 		// engine so its registry rows go stale, not silencing anything.
-		replicas       = flag.Int("replicas", 1, "number of in-process engine replicas sharing the database(s) (1 = single engine)")
-		replicaWorkers = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
-		volume         = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
-		volumeCheckpt  = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
-		fairnessKeys   = flag.Int("fairness-keys", 1, "spread flows across this many distinct fairness keys (1 = all on the single default key, the degenerate case for the refiller's per-key scan bound)")
-		fanOutWidth    = flag.Int("fanout-width", 16, "forEach branch count for the fanout workload - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
+		replicas        = flag.Int("replicas", 1, "number of in-process engine replicas sharing the database(s) (1 = single engine)")
+		replicaWorkers  = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
+		volume          = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
+		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
+		fairnessKeys    = flag.Int("fairness-keys", 1, "spread flows across this many distinct fairness keys (1 = all on the single default key, the degenerate case for the refiller's per-key scan bound)")
+		linearStepsFlag = flag.Int("linear-steps", linearSteps, "linear workload chain length; sweeping it separates a slow replica's share of STEPS from its share of FLOWS (see workloads.go)")
+		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout workload - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
 	flag.Parse()
@@ -158,7 +159,7 @@ func run() error {
 		taskJitter:   *taskJitter,
 		bytesWritten: sharedBytes,
 	}
-	workloads := registerWorkloads(regHost, *payload, *fanOutWidth)
+	workloads := registerWorkloads(regHost, *payload, *fanOutWidth, *linearStepsFlag)
 	pick, err := chooseWorkload(workloads, *workloadName)
 	if err != nil {
 		return err

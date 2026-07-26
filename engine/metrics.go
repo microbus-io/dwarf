@@ -52,6 +52,7 @@ type engineMetrics struct {
 	stepsClaimLost      metric.Int64Counter
 	stepsClaimPreempted metric.Int64Counter
 	stepsOffered        metric.Int64Counter
+	peerChanges         metric.Int64Counter
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
 }
@@ -82,9 +83,9 @@ func (e *Engine) initMetrics() error {
 	}
 	// Counter instrument names carry no _total suffix; the Prometheus exporter appends it at scrape time.
 	// Unit-denominated counters end with the unit (…_bytes), per the Prometheus naming convention.
-	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started.")
-	m.flowsTerminated = ctr("dwarf_flows_terminated", "Counts flows that have reached a terminal status.")
-	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed.")
+	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by the shard they were placed on. The shard attribute measures PLACEMENT: pickShard is capacity-weighted random, so a skew here means the fleet's work is not spread the way the weights intended, and one shard's steps carry more than their share. Against dwarf_flows_terminated{shard} it is that shard's in-flight flow count. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
+	m.flowsTerminated = ctr("dwarf_flows_terminated", "Counts flows that have reached a terminal status, by the shard holding them.")
+	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed, by the shard holding them. The shard attribute is what turns this into per-shard dispatch throughput - the quantity a per-shard piston, pool and partition all separately govern, and the one a fleet-wide total hides.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps whose worker lease expired and were reset to pending for re-execution - the crash-recovery path. A nonzero rate means workers are dying or overrunning their lease.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
 	m.stepsWriteRetried = ctr("dwarf_steps_write_retried", "Counts in-place retries of a step's persistence write after a non-contention database error. The task is NOT re-executed; only the write is retried. A rising count tracks database flakiness, not workflow failure.")
@@ -110,6 +111,7 @@ func (e *Engine) initMetrics() error {
 	// drifted apart.
 	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a cycle supplies only ~1.05-1.5x ahead of consumption, so partitions drain to empty between cycles) and is what keeps a sequential chain from paying a cycle per hop.")
 	m.stepsClaimPreempted = ctr("dwarf_steps_claim_preempted", "Counts popped candidates skipped without a claim attempt because a sibling worker in this replica already had one in flight for that step - round trips SAVED, the counterpart to dwarf_steps_claim_lost. The refiller re-selects a step whose claim is uncommitted (the selection predicate reads committed state), so this rises with the scan rate rather than with the replica count. Compare the two: a healthy engine converts what would have been lost claims into skips.")
+	m.peerChanges = ctr("dwarf_peer_changes", "Counts times a shard's observed replica count MOVED, by shard. In a settled fleet this must be ZERO for the whole run: every increment past the initial join re-divides that shard's connection pool and re-seats every replica's residue class of step ids, so a nonzero rate means the fleet is churning and the two divisors are chasing it. The usual cause is not a real join or departure but a stale registry row - a replica that died without deleting its row inflates the count until it ages out, and a crash-loop with random ids accumulates them faster than that.")
 	m.stepsClaimLost = ctr("dwarf_steps_claim_lost", "Counts claim attempts whose CAS matched no row - the step was already claimed by a peer, or left the claimable state (cancelled, resumed, parked) between selection and claim. The lease-contention signal: measured against dwarf_steps_executed it is the share of dispatch round trips that produced no work, and it rises with the replica count when replicas select overlapping candidates. Not an error - the step is simply someone else's - but a high ratio means the fleet is paying for round trips it cannot use.")
 
 	gauge := func(name, desc, unit string) metric.Int64ObservableGauge {
@@ -131,6 +133,11 @@ func (e *Engine) initMetrics() error {
 	oldestAge := gauge("dwarf_steps_oldest_pending_age_seconds", "Cluster-wide: age of the oldest due pending step in each priority band, read from the shared database. Every replica reports the same value - aggregate with max, not sum.", "s")
 	fairnessKeys := gauge("dwarf_steps_fairness_keys", "Per-replica: distinct fairness keys in this replica's most recent refill selection at the given priority band.", "")
 	concurrency := gauge("dwarf_task_concurrency_running", "Cluster-wide: running steps per task, read from the shared database. Every replica reports the same value - aggregate with max, not sum.", "")
+	// The two peer gauges are PER-REPLICA readings of a per-shard fact, and both are pulled from the Sonars
+	// rather than emitted by them - internal/peers deliberately owns no meter, so this is the one scope that
+	// has to stay in step. Neither queries anything: both are atomic reads of what the last reading published.
+	peerReplicas := gauge("dwarf_peer_replicas", "Per-replica, per-shard: how many replicas this one currently sees holding connections to that shard - the divisor its pool is sized by. Replicas should AGREE on it, so a spread across the fleet is itself the signal: one replica reading 3 while its peers read 4 is sizing its pool for a fleet that does not exist. It is deliberately slow to fall (a reading that did not happen is not evidence anybody left), so a drop lags a real departure by a reading or two.", "")
+	peerBlind := gauge("dwarf_peer_blind_seconds", "Per-replica, per-shard: how long since that shard's registry was last read successfully. Zero on a healthy Sonar. Past two read cadences the replica is BLIND there - it holds its last known fleet (the safe direction for pools) and stops partitioning that shard's candidates (the safe direction for work), so a nonzero value explains both at once and is the first thing to check when a shard's counts look frozen.", "s")
 
 	reg, err := meter.RegisterCallback(
 		func(ctx context.Context, o metric.Observer) error {
@@ -140,9 +147,11 @@ func (e *Engine) initMetrics() error {
 				oldestAge:    oldestAge,
 				fairnessKeys: fairnessKeys,
 				concurrency:  concurrency,
+				peerReplicas: peerReplicas,
+				peerBlind:    peerBlind,
 			})
 		},
-		queueDepth, stepsPending, oldestAge, fairnessKeys, concurrency,
+		queueDepth, stepsPending, oldestAge, fairnessKeys, concurrency, peerReplicas, peerBlind,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -168,6 +177,8 @@ type observableGauges struct {
 	oldestAge    metric.Int64ObservableGauge
 	fairnessKeys metric.Int64ObservableGauge
 	concurrency  metric.Int64ObservableGauge
+	peerReplicas metric.Int64ObservableGauge
+	peerBlind    metric.Int64ObservableGauge
 }
 
 // observeGauges is the observable-gauge callback. It reads in-memory engine state and queries the
@@ -176,6 +187,16 @@ type observableGauges struct {
 func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observableGauges) error {
 	// Local in-memory gauges - no DB.
 	o.ObserveInt64(g.queueDepth, int64(e.cache.Len()))
+
+	// Peer readings, per shard: atomic reads of what each Sonar last published, so this costs no round trip
+	// and stays honest while a shard is unreadable (the count holds, and blindFor is what says why).
+	for _, idx := range e.db.Indices() {
+		shard := metric.WithAttributes(attribute.String("shard", strconv.Itoa(idx)))
+		o.ObserveInt64(g.peerReplicas, int64(e.replicasOn(idx)), shard)
+		if s := e.sonarFor(idx); s != nil {
+			o.ObserveInt64(g.peerBlind, int64(s.BlindFor().Seconds()), shard)
+		}
+	}
 
 	// Fairness keys: the most recent plan's distinct-key count for the band it selected. LastBand reports a
 	// NEGATIVE band for "nothing to report" - no plan yet, or an idle fleet - and the guard is what keeps an
@@ -321,21 +342,26 @@ func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error)
 
 // --- Inline counter helpers (no-op until initMetrics has run). ---
 
-func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string) {
+// metricFlowStarted counts a flow start against the shard it was PLACED on. Every start path must call it
+// (Create, Continue and Fork), or the standard in-flight panel - started minus terminated - drifts by one
+// per uncounted flow.
+func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string, shardNum int) {
 	e.flowsStartedCount.Add(1)
 	if e.metrics == nil {
 		return
 	}
-	e.metrics.flowsStarted.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow", workflowURL)))
+	e.metrics.flowsStarted.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("workflow", workflowURL), attribute.String("shard", strconv.Itoa(shardNum))))
 }
 
-func (e *Engine) metricFlowTerminated(ctx context.Context, workflowURL, status string) {
+func (e *Engine) metricFlowTerminated(ctx context.Context, workflowURL, status string, shardNum int) {
 	e.flowsTerminatedCount.Add(1)
 	if e.metrics == nil {
 		return
 	}
 	e.metrics.flowsTerminated.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("workflow", workflowURL), attribute.String("status", status)))
+		attribute.String("workflow", workflowURL), attribute.String("status", status),
+		attribute.String("shard", strconv.Itoa(shardNum))))
 }
 
 // The `column` attribute on the byte counters is the dwarf_steps column the bytes moved through -
@@ -367,14 +393,29 @@ func (e *Engine) metricStepOffered(ctx context.Context) {
 	e.metrics.stepsOffered.Add(ctx, 1)
 }
 
-func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string) {
+func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string, shardNum int) {
 	if e.metrics == nil {
 		return
 	}
 	// Step disposition keys by node name (graph topology - "which node"), unlike the concurrency/saturation
-	// metric which keys by task_url (the downstream endpoint).
+	// metric which keys by task_url (the downstream endpoint). The shard is the third axis and the one that
+	// makes per-shard dispatch rate readable: a piston, a pool and a residue class are all per shard, so a
+	// fleet-wide total cannot show one shard falling behind the others.
 	e.metrics.stepsExecuted.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("task_name", taskName), attribute.String("status", status)))
+		attribute.String("task_name", taskName), attribute.String("status", status),
+		attribute.String("shard", strconv.Itoa(shardNum))))
+}
+
+// metricPeerCountChanged records that one shard's observed replica count moved. Deliberately driven from
+// the reconcile loop rather than from recomputePools: that one early-returns under a SetMaxOpenConns
+// override (pools are pinned, so there is nothing to re-derive), which is exactly the configuration a
+// benchmark runs - and a churn counter that reads zero because nobody looked is worse than none at all.
+func (e *Engine) metricPeerCountChanged(ctx context.Context, shardNum, from, to int) {
+	e.logger.InfoContext(ctx, "Fleet size changed", "shard", shardNum, "from", from, "to", to)
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.peerChanges.Add(ctx, 1, metric.WithAttributes(attribute.String("shard", strconv.Itoa(shardNum))))
 }
 
 func (e *Engine) metricStepsRecovered(ctx context.Context, n int) {

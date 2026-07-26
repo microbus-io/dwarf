@@ -73,6 +73,16 @@ var refillBuckets = []float64{
 // piston runs no cycle, so this is only the latency of a live SetIdle(false) resuming dispatch.
 const idlePoll = time.Second
 
+// defaultStealAfter is how many cycle periods a step outside this replica's residue class must have been
+// DUE before an otherwise-idle replica selects it anyway - see stealGrace and SetStealAfter.
+//
+// Four is not a delicate number, and the measurements say why: a healthy fleet's oldest due step sits at
+// 0-1s while a stalled owner's class ages to 23-41s, against a ~67ms derived period. Anything from ~2 to
+// ~10 periods separates those cleanly. It is a small multiple because the gate - not this - is what keeps
+// a busy fleet from stealing at all; this only has to outlast the time a HEALTHY owner takes to reach its
+// own work, which is a cycle or two by construction.
+const defaultStealAfter = 4
+
 // FaultScanErr makes ScanBand fail without touching the database - see SetSeams. The name is exported so
 // the owning application's fault catalogue can alias it rather than re-spell the string.
 const FaultScanErr = "refillScanErr"
@@ -93,6 +103,21 @@ const FaultScanErr = "refillScanErr"
 // to wait for a SPECIFIC shard, since with several shards the unscoped count says nothing about which.
 const CheckpointCycleDone = "refillCycleDone"
 
+// CheckpointStole fires once per fetch that took at least one step from OUTSIDE this replica's residue
+// class - see SetSeams. Exported for the same catalogue reason as FaultScanErr.
+//
+// It earns its place on the same boundary rule as CheckpointCycleDone: it reports an effect on state the
+// package borrows, at the moment the effect happens, and no clock substitutes for it. A test proving that a
+// slow peer's work is picked up cannot wait out a duration - the steal fires on the first cycle after the
+// gate arms and the grace elapses, which is a function of the pipeline's cadence, the peer's degradation
+// and the backlog, none of which the test controls. Without it the only assertion available is "the flows
+// eventually finished", which passes just as well against a build where stealing does nothing and the
+// dispatch-window eviction did the work several seconds later - i.e. it cannot tell the mechanism under
+// test from the mechanism it replaces.
+//
+// Fired BOTH unscoped and scoped by shard, for the same reason CheckpointCycleDone is.
+const CheckpointStole = "refillStole"
+
 // PartitionFunc reports the replica partition - see SetPartitionFunc.
 type PartitionFunc func() (replicas, ordinal int, ok bool)
 
@@ -103,6 +128,7 @@ type instruments struct {
 	queryDuration metric.Float64Histogram
 	selected      metric.Int64Counter
 	discarded     metric.Int64Counter
+	stolen        metric.Int64Counter
 }
 
 // Piston runs one shard's supply cycle and heartbeat.
@@ -123,6 +149,17 @@ type Piston struct {
 	inst      atomic.Pointer[instruments]
 	seams     atomic.Pointer[seamster.Seamster]
 
+	// stealing is armed by a cycle that found nothing due in this replica's own residue class, and read by
+	// the NEXT cycle's predicate. Atomic because SetStealAfter and a test may touch the pair from another
+	// goroutine, not because the cycle path is concurrent - it is not.
+	stealing atomic.Bool
+	// lastTally is the total due-step count this replica's own residue class reported on the last scan,
+	// against which the steal gate measures spare capacity.
+	lastTally atomic.Int64
+	// stealAfter is how many cycle periods a foreign step must have been due before this replica takes it.
+	// Zero disables stealing outright, which is what an owner sets when it wants the residue class enforced
+	// strictly.
+	stealAfter atomic.Int32
 	// turns counts successful cycles, monotonically. A COUNTER rather than a flag the reader clears: a
 	// consuming getter would make any second caller - a metric, a test - silently swallow the evidence and
 	// leave a healthy piston reading as stalled. Holding "since I last looked" is the reader's business.
@@ -145,6 +182,7 @@ func New(shard int, db *sequel.DB, plan *planner.Planner, cache *candidatecache.
 		return nil, errors.New("cache is required")
 	}
 	p := &Piston{shard: shard, db: db, planner: plan, cache: cache}
+	p.stealAfter.Store(defaultStealAfter)
 	pipe, err := pipeline.New(shard, p, plan, cache)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -188,6 +226,30 @@ func (p *Piston) SetIdle(idle bool) {
 
 // Idle reports whether the piston is idling.
 func (p *Piston) Idle() bool { return p.idle.Load() }
+
+// SetStealAfter sets how many cycle periods a step outside this replica's residue class must have been DUE
+// before this replica selects it anyway - and only while its own class is empty. Zero or negative disables
+// stealing, restoring strict residue partitioning.
+//
+// WHAT IT IS FOR. Partitioning hands each replica a disjoint class of step ids, which is what keeps peers
+// from racing for the same rows - but it also means a replica that is slow rather than DEAD keeps its class
+// while being unable to serve it, and nobody else will look at those steps. Measured on a three-replica
+// fleet with one replica crippled: throughput collapsed to a third of what the same fleet did with that
+// replica REMOVED from the divisor entirely, with its class aging past 30s while its healthy peers sat at a
+// third of a core. Two independent cripplings - a one-worker capacity cap and 10ms of injected latency -
+// produced the same cap, so it is a property of the partitioning rather than of how a replica goes slow.
+//
+// It fails open on every axis: stealing only ever ADMITS rows, the claim CAS still grants every step, and a
+// replica holding work of its own never steals at all.
+func (p *Piston) SetStealAfter(periods int) {
+	if periods < 0 {
+		periods = 0
+	}
+	p.stealAfter.Store(int32(periods))
+}
+
+// StealAfter is the current steal grace in cycle periods; zero means stealing is off.
+func (p *Piston) StealAfter() int { return int(p.stealAfter.Load()) }
 
 // Liveness reports whether this piston is turning, for an owner that publishes the fact somewhere the
 // fleet can see it: the count of cycles completed so far, whether one is running right now, and whether
@@ -312,6 +374,8 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 			"Counts step candidates the refiller selected into the cache. Compare against dwarf_refill_candidates_discarded for the oversupply ratio."),
 		discarded: ctr("dwarf_refill_candidates_discarded",
 			"Counts cached step candidates thrown away un-popped by a wholesale refill - the refiller's waste signal. The steps stay pending and are re-selected, so this is cost, not loss."),
+		stolen: ctr("dwarf_steps_stolen",
+			"Counts candidates this replica selected from OUTSIDE its own residue class, because its own class was empty and the step had been due for several cycle periods - i.e. its owner was not taking it. Zero in a healthy fleet by construction: a replica holding its own work never steals. A sustained nonzero rate names a peer that is alive in the registry but not serving its share, which nothing else reports - and it is the quantity to read dwarf_steps_claim_lost against, since stealing trades exclusivity for coverage."),
 	})
 	if len(errs) > 0 {
 		return errors.Trace(errs[0])
@@ -371,6 +435,33 @@ func (p *Piston) Cycle(ctx context.Context) pipeline.Result {
 	// Gating on candidates instead would make a quiet fleet look like it had no dispatchers at all.
 	if r.Err == nil {
 		p.turns.Add(1)
+	}
+	// Arm or disarm the steal from what this cycle SAW, for the next one to act on - see stealGrace.
+	//
+	// SHORTFALL, not emptiness. An earlier cut armed on Band == NoBand - nothing due in this replica's own
+	// class at all - and that is too strict for any workload with CONTINUOUS arrivals: a healthy replica
+	// keeping up with its share still finds a step or two due on almost every scan, so the gate never armed
+	// while its peer's class backed up unboundedly beside it. Measured against a 50 flows/s open-loop bench
+	// with one crippled peer: zero steals, and the fleet stayed at the same ~177 steps/s the unfixed build
+	// managed. Emptiness only looked sufficient because a BURST workload drains a class to nothing.
+	//
+	// What matters is whether this replica could serve more than its class is offering, which is exactly the
+	// tally against the batch it was about to fill. It is a property of the database backlog rather than of
+	// anything this piston did, so it stays true while a peer is stalled and clears itself the moment this
+	// replica's own class can fill its own batch again - which is also why the one-cycle lag is harmless
+	// and, being hysteresis, mildly useful.
+	//
+	// A FAILED cycle leaves the flag alone. An error means "unknown", not "nothing is due" - the same
+	// distinction the pipeline draws when it clears the shard from planning but spares its cache partition.
+	//
+	// While stealing, the scan the gate reads is itself the RELAXED one, so the tally counts what this
+	// replica can now see rather than what its own class holds - and a replica filling its batch by stealing
+	// therefore disarms, scans strictly next cycle, finds the shortfall again and re-arms. That alternation
+	// is deliberate rather than tolerated: it steals on every other cycle while re-checking its own class in
+	// between, so recovery is noticed within one period and no separate re-probe is needed. Reading the strict
+	// tally instead would need a second query per cycle to learn a fact that costs nothing to rediscover.
+	if r.Err == nil {
+		p.stealing.Store(p.lastTally.Load() < int64(p.cache.Capacity()))
 	}
 	return r
 }
@@ -432,6 +523,9 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 // work, with no error anywhere to notice. replicas=1 is a solo replica, where the predicate matches
 // everything and is pure overhead. Today's caller happens to guard all three, but the fail-open posture is
 // this package's promise, so it is enforced here.
+// STEALING relaxes the class - see stealGrace - and it is a RELAXATION, never a restriction: the clause
+// can only ever admit rows, so no residue class can be stranded by it and the claim CAS still arbitrates
+// every step it admits.
 func (p *Piston) partitionPredicate() (string, []any) {
 	fn := p.partition.Load()
 	if fn == nil {
@@ -441,7 +535,70 @@ func (p *Piston) partitionPredicate() (string, []any) {
 	if !ok || replicas < 2 || ordinal < 0 || ordinal >= replicas {
 		return "", nil
 	}
+	if grace := p.stealGrace(); grace > 0 {
+		// TWO TIERS, by distance: the NEIGHBOUR's class after one grace, ANYONE's after two.
+		//
+		// A single tier - anyone's class after one grace - works, and phase-9 measured it curing both
+		// cripplings, but every idle replica becomes eligible for the same steps at the same instant, so
+		// they race each other for rows their owner has abandoned. Giving each class exactly one designated
+		// stealer for the first grace period makes that window contention-FREE: no two replicas are ever
+		// eligible for the same step while it is in tier one.
+		//
+		// The second tier is not a fallback for tidiness - it is what keeps the scheme from stranding work
+		// outright. With neighbour-only, two consecutive degraded replicas leave the far one's class with no
+		// working stealer at all (its designated one is itself broken), so that class gets ZERO service
+		// rather than slow service. Indefinite stranding is the exact failure stealing exists to prevent, so
+		// coverage wins over efficiency once the work has demonstrably been ignored by BOTH its owner and its
+		// neighbour. Pinned by TestStealTwoBadApplesflow.
+		//
+		// The age is measured from not_before, NOT created_at. not_before is stamped NOW_UTC() at creation
+		// and pushed forward by flow.Sleep and every retry backoff, so this reads as "has been DUE for at
+		// least the grace" - which is the quantity meant. Against created_at, an hour-long sleep would be
+		// stolen the instant it came due, on a fleet with nothing wrong with it.
+		ms := grace.Milliseconds()
+		return " AND (step_id % ? = ?" +
+				" OR (step_id % ? = ? AND not_before <= DATE_ADD_MILLIS(NOW_UTC(), ?))" +
+				" OR not_before <= DATE_ADD_MILLIS(NOW_UTC(), ?))",
+			[]any{replicas, ordinal, replicas, (ordinal + 1) % replicas, -ms, -2 * ms}
+	}
 	return " AND step_id % ? = ?", []any{replicas, ordinal}
+}
+
+// stealGrace is how long a step outside this replica's residue class must have been DUE before this
+// replica will select it anyway, or zero when stealing is off.
+//
+// TWO conditions, and each covers the other's blind spot - neither alone is sufficient:
+//
+//   - THE GATE (armed here): the last cycle found nothing due in this replica's OWN class. A replica with
+//     its own work never steals, so a uniformly loaded fleet - every class full - adds no overlap at all,
+//     whatever the grace is. This is the fuse, and it is self-limiting by construction: a replica that
+//     steals is one that had nothing else to do, so the worst case is a lost claim round trip it was not
+//     going to spend anyway.
+//   - THE GRACE: at MODERATE load every replica can have spare capacity while the fleet is perfectly
+//     healthy, and there the gate alone would re-enable overlapping selection fleet-wide. A healthy owner
+//     dispatches its own class within a cycle or two, so requiring several cycles of due-age leaves its
+//     work alone; a stalled owner's class ages without bound (measured: 23-41s against a ~67ms cycle,
+//     while a healthy fleet's oldest due step sits at 0-1s). The two regimes are three orders of magnitude
+//     apart, which is why the exact multiple is not delicate.
+//
+// An ABSOLUTE age threshold was rejected for this: normal queueing delay under load is seconds, so any
+// constant either never fires or disables partitioning under exactly the load it exists for. The gate is
+// what makes an age term usable at all, by restricting it to replicas that are already idle.
+func (p *Piston) stealGrace() time.Duration {
+	if !p.stealing.Load() {
+		return 0
+	}
+	n := p.stealAfter.Load()
+	if n <= 0 {
+		return 0
+	}
+	// Floored at the CONSTANT DefaultMinGap, not at the configured MinGap, and that distinction is the point:
+	// a caller may legitimately pin both the interval and the gap to zero (a bench sweep, a hand-driven
+	// cycle), and deriving the floor from a configurable that can itself be zeroed yields a zero grace -
+	// which would steal every foreign step the instant it came due, with no fuse at all. Same degenerate
+	// regime MinGap exists to fuse, reached through the one door MinGap cannot cover.
+	period := max(p.pipe.Interval(), p.pipe.MinGap(), pipeline.DefaultMinGap)
+	return time.Duration(n) * period
 }
 
 // ScanBand implements pipeline.Source. It returns this shard's minimum due priority band and one
@@ -505,6 +662,14 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	if err := rows.Err(); err != nil {
 		return 0, nil, errors.Trace(err)
 	}
+	// Recorded for the steal gate, which asks whether this replica's own class can fill the batch it is
+	// about to plan. Set here rather than derived by the caller because this is the only place the tallies
+	// and the scan that produced them are both in hand.
+	total := int64(0)
+	for _, t := range tallies {
+		total += int64(t.Count)
+	}
+	p.lastTally.Store(total)
 	return band, tallies, nil
 }
 
@@ -559,16 +724,37 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	}
 	defer rows.Close()
 	out := map[string][]int{}
+	// Count what came from OUTSIDE this replica's class. The pair is re-read rather than threaded down from
+	// partitionPredicate because it is a lock-free load either way, and reading it here keeps the count
+	// honest if the fleet changed mid-cycle. Zero unless stealing armed and actually took something, so a
+	// healthy fleet records nothing at all.
+	replicas, ordinal := 0, 0
+	if fn := p.partition.Load(); fn != nil {
+		if r, o, ok := (*fn)(); ok && r > 1 {
+			replicas, ordinal = r, o
+		}
+	}
+	stolen := 0
 	for rows.Next() {
 		var stepID int
 		var key string
 		if err := rows.Scan(&stepID, &key); err != nil {
 			return nil, errors.Trace(err)
 		}
+		if replicas > 1 && stepID%replicas != ordinal {
+			stolen++
+		}
 		out[key] = append(out[key], stepID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, errors.Trace(err)
+	}
+	if stolen > 0 {
+		p.inst.Load().stolen.Add(ctx, int64(stolen), metric.WithAttributes(attribute.Int("shard", p.shard)))
+		if seams := p.seams.Load(); seams.Enabled() {
+			seams.Checkpoint(ctx, CheckpointStole)
+			seams.Checkpoint(ctx, CheckpointStole, strconv.Itoa(p.shard))
+		}
 	}
 	return out, nil
 }

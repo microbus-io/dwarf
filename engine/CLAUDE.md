@@ -1276,6 +1276,34 @@ accepted deliberately rather than papered over with an age-based fuse (a fuse th
 queueing delay - which is *seconds* under load - would not fire when needed, and below it would disable
 partitioning under exactly the load it is for).
 
+**A replica that is SLOW rather than dead is a different failure, and the partition alone has no answer for
+it - `internal/piston`'s STEAL is that answer.** Eviction handles death: the dispatch evidence stops, the
+divisor shrinks, the class is redistributed. A slow replica keeps beating, keeps its class, and cannot serve
+it - so nothing else will look at those steps. Measured on a three-replica fleet with one replica crippled,
+work created by an await-only replica so the residue class is genuinely in the path: throughput fell to
+**137-153 steps/s against a commanded 500**, its class aging past 30s while its healthy peers sat at a third
+of a core - *worse than removing that replica from the divisor entirely* (494-505). A capacity cripple (one
+worker) and a latency cripple (+10ms RTT) produced the same cap, so the coupling belongs to the partition,
+not to how a replica goes slow. With the steal: **458-501**, at 0.4-5.4% claim loss.
+
+The mechanism, its gate, its two tiers and the measurements behind each are in `internal/piston/CLAUDE.md`.
+Three things stay the engine's:
+
+- **The pair the piston partitions on is still `partitionOn(shard)`** - the steal relaxes that pair's
+  predicate, it does not change how the pair is derived. An await-only replica is still excluded from the
+  divisor, and every fail-open case still disables partitioning outright, which leaves nothing to relax.
+- **`dwarf_steps_stolen{shard}` is the operator's signal that a peer is alive but not serving its share.**
+  Zero in a healthy fleet by construction (measured 0-23 steps across five arms, because the grace blocks a
+  fleet that is keeping up). A sustained nonzero rate names the condition nothing else reports - and it is
+  the quantity to read `dwarf_steps_claim_lost` against, since stealing trades exclusivity for coverage.
+- **The doorbell bypasses all of it, so a fixture must create from an await-only replica to test any of
+  this.** `Offer` admits a step into the local cache regardless of residue class, so a chain created on a
+  dispatcher walks hop by hop on that dispatcher and never consults a class. That is why the steal fixtures
+  create through a `SetWorkers(0)` replica: its offers land in a cache with no workers to pop them, so its
+  work is reachable only by a peer scanning. The bench disables the doorbell outright to isolate the path;
+  **the fixtures do not** - they run at the production default and still exercise the steal, which is the
+  stronger statement of the two.
+
 ### State refs — a large carried field is stored once (`internal/staterefs`)
 
 A step's `state` is a full input snapshot, so a field that is *carried* but not *changed* is re-serialized into

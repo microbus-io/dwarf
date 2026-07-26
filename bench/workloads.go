@@ -32,7 +32,14 @@ type workload struct {
 }
 
 const (
-	stateSteps  = 5
+	stateSteps = 5
+	// linearSteps is the DEFAULT length of the linear chain; -linear-steps overrides it.
+	//
+	// Chain depth is not a cosmetic knob under cross-replica partitioning. A step's residue class is
+	// effectively independent per hop (step ids interleave across concurrent flows), so the chance a
+	// depth-D flow never touches a given replica's class is ((R-1)/R)^D - 30% at D=3 and R=3, but 1.7% at
+	// D=10. A replica that is slow rather than dead therefore blocks a share of FLOWS that rises with
+	// depth, while blocking a share of STEPS that does not. Sweeping this is how the two are told apart.
 	linearSteps = 10
 )
 
@@ -48,14 +55,17 @@ const (
 // time, so a closed-loop generator's backlog can never exceed its concurrency, whereas a fan-out puts
 // `width` steps pending the instant its spawn completes. That is what lets a closed-loop harness reach
 // the deep-backlog regime the refiller's cache bound and scan floor were designed for.
-func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth int) map[string]*workload {
+func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int) map[string]*workload {
+	if chainSteps < 1 {
+		chainSteps = linearSteps
+	}
 	nop := func(ctx context.Context, f *workflow.Flow) error { return nil }
 	h.tasks["bench/nop"] = nop
 
 	// linear
 	linear := workflow.NewGraph("Linear")
-	names := make([]string, 0, linearSteps+1)
-	for i := range linearSteps {
+	names := make([]string, 0, chainSteps+1)
+	for i := range chainSteps {
 		n := fmt.Sprintf("T%d", i)
 		linear.SetEndpoint(n, "bench/nop")
 		names = append(names, n)

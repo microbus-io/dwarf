@@ -50,9 +50,26 @@ func collectCounters(reader *sdkmetric.ManualReader) map[string]int64 {
 			if !ok {
 				continue
 			}
+			// The bare NAME carries the instrument's fleet-wide total, and every attribute set ALSO gets its
+			// own `name|k=v` key - the same spelling gaugePoints uses, so one artifact reads one way.
+			//
+			// Both, not one: the total is what a throughput number is read off, while the split is the only
+			// thing that can show one shard falling behind its peers - and a per-shard piston, pool and residue
+			// class mean that is a routine question, not an exotic one. Summing an attributed metric down to a
+			// scalar here is what made a per-shard counter unreadable in the artifact even after the engine
+			// started emitting one.
 			var total int64
 			for _, dp := range sum.DataPoints {
 				total += dp.Value
+				k := m.Name
+				kvs := dp.Attributes.ToSlice()
+				slices.SortFunc(kvs, func(a, b attribute.KeyValue) int { return strings.Compare(string(a.Key), string(b.Key)) })
+				for _, kv := range kvs {
+					k += "|" + string(kv.Key) + "=" + kv.Value.String()
+				}
+				if k != m.Name {
+					out[k] += dp.Value
+				}
 			}
 			out[m.Name] = total
 		}
@@ -263,15 +280,47 @@ func gaugePoints(m metricdata.Metrics) []gaugeKV {
 	return out
 }
 
-// collectAllGauges sums collectGauges across every replica's reader. Summing is right for the pool-wait
-// totals (each replica owns distinct pools, so the fleet total is their sum) and merely approximate for
-// point-in-time gauges like open-connection counts, which is acceptable: those are recorded for context,
-// not arithmetic.
+// agreementGauges are the instruments every replica reports the SAME value for, so the fleet reading is
+// their MAX and never their sum. Two kinds land here and both are documented in engine/CLAUDE.md:
+//
+//   - CLUSTER-WIDE gauges, computed by querying the shared shard databases (pending, oldest age, running
+//     per task). Every replica observes one backlog, so summing multiplies it by the replica count - a
+//     1,000-step backlog reads as 3,000 on three replicas, and a summed AGE is meaningless outright.
+//   - AGREEMENT gauges, where each replica publishes its own reading of a shared fact (the peer count, how
+//     long since it could read the registry). Summing turns a fleet of R into R-squared, which is what made
+//     a two-replica run report four peers.
+//
+// Everything else is genuinely per replica (this replica's cache depth, its own pools' wait totals) and
+// sums correctly. The split is by instrument name because that is where the semantics live; a gauge added
+// without a line here defaults to summing, which is right for the per-replica majority.
+var agreementGauges = map[string]bool{
+	"dwarf_steps_pending":                    true,
+	"dwarf_steps_oldest_pending_age_seconds": true,
+	"dwarf_task_concurrency_running":         true,
+	"dwarf_peer_replicas":                    true,
+	"dwarf_peer_blind_seconds":               true,
+}
+
+// collectAllGauges combines collectGauges across every replica's reader: MAX for the instruments every
+// replica reports the same value for (see agreementGauges), sum for the rest. Summing is right for the
+// pool-wait totals (each replica owns distinct pools, so the fleet total is their sum) and merely
+// approximate for point-in-time gauges like open-connection counts, which is acceptable: those are
+// recorded for context, not arithmetic.
 func collectAllGauges(readers []*sdkmetric.ManualReader) map[string]float64 {
 	out := map[string]float64{}
+	seen := map[string]bool{}
 	for _, r := range readers {
-		for name, v := range collectGauges(r) {
-			out[name] += v
+		for key, v := range collectGauges(r) {
+			// The key carries its attributes (`name|k=v`), so recover the instrument name to classify it.
+			name, _, _ := strings.Cut(key, "|")
+			if agreementGauges[name] {
+				if !seen[key] || v > out[key] {
+					out[key] = v
+				}
+				seen[key] = true
+				continue
+			}
+			out[key] += v
 		}
 	}
 	return out

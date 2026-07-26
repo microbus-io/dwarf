@@ -1,6 +1,7 @@
 # Dwarf `internal/piston` — the engine's per-shard cylinder
 
-> Load when: changing `Run`, `Liveness`, the two `Source` queries, the idle mode, or the instruments.
+> Load when: changing `Run`, `Liveness`, the two `Source` queries, the steal, the idle mode, or the
+> instruments.
 > Coupled with: `internal/pipeline/CLAUDE.md` (the cycle this drives and its error policy),
 > `internal/planner/CLAUDE.md` (`Tally`/`Clear`), `internal/migrations/CLAUDE.md` (the `dwarf_steps`
 > columns these queries touch), and `internal/peers/CLAUDE.md` (what consumes `Liveness`, and where the
@@ -112,6 +113,98 @@ nothing, so the piston reports `NoBand` while genuinely holding work, with no er
 intended caller guards all of this itself, but fail-open is *this package's* advertised posture, so it is
 enforced here rather than assumed of the caller. Pinned by `TestPiston_PartitionPairIsValidated`.
 
+## Stealing — the answer to a peer that is SLOW rather than dead
+
+A dead replica stops advancing `dispatched_at`, drops out of the dispatcher divisor within the dispatch
+window, and its class is redistributed. A **slow** one keeps beating, keeps its class, and cannot serve it —
+and nothing else in the fleet will look at those steps. `SetStealAfter` relaxes the predicate to close that.
+
+**Measured, because the size of it is the whole justification.** Three replicas, one crippled, work created
+by an await-only replica so the residue class is genuinely in the path:
+
+| | steps/s (commanded 500) | claim lost |
+|---|---|---|
+| no steal, capacity-crippled peer (`1 worker`) | **137–153** | ~0 |
+| no steal, latency-crippled peer (`+10ms` RTT) | **269** | ~0 |
+| no steal, that peer REMOVED from the divisor | 494–505 | ~0 |
+| steal, single tier | 501–558 | 8–27% |
+| steal, two tiers | **458–501** | **0.4–5.4%** |
+
+Two facts to take from the first three rows. Keeping a slow replica cost **more than deleting it** — the
+fleet capped near `S·R` regardless of offered load, its class aging past 30s while healthy peers sat at a
+third of a core. And two unrelated cripplings produced the same cap, so this is a property of the
+PARTITION, not of how a replica goes slow.
+
+### The gate is a SHORTFALL, not emptiness — and fixtures cannot show that
+
+The gate arms when the last cycle's tally came in under `cache.Capacity()`: *can I fill the batch I am about
+to plan?* An earlier cut armed on `Band == NoBand` — nothing due in this replica's own class at all — and it
+**passed every fixture while doing nothing in production shape**. A burst workload drains a class to zero, so
+the fixtures armed; a workload with CONTINUOUS arrivals leaves a keeping-up replica a step or two due on
+almost every scan, so the gate never armed while its peer's class backed up unboundedly beside it. Measured
+against a 50 flows/s open-loop bench with one crippled peer: **zero steals, throughput unchanged at 177**.
+Do not weaken this back to emptiness; the fixtures will not catch it.
+
+**While stealing, the scan the gate reads is the RELAXED one**, so a replica filling its batch by stealing
+disarms, scans strictly next cycle, finds the shortfall again and re-arms. That alternation is deliberate:
+it steals on every other cycle while re-checking its own class in between, so recovery is noticed within one
+period and no separate re-probe is needed. Reading the strict tally instead would cost a second query per
+cycle to learn a fact that is free to rediscover.
+
+### Two tiers, and why the second one is not optional
+
+```
+own class            always
+neighbour's class    after 1 grace   ((ordinal+1) mod replicas)
+anyone's class       after 2 graces
+```
+
+Tier one gives each class exactly ONE designated stealer, so that window is contention-free — no two
+replicas are ever eligible for the same step. Measured: it took the worst single-tier arm from **26.8% claim
+loss to 0.4%** with throughput held.
+
+Tier two exists because tier one alone can STRAND work. With two consecutive degraded replicas the far
+one's class has no working stealer — its designated one is itself broken — so it gets *zero* service rather
+than slow service, which is qualitatively worse than contention. Past two graces the class opens to
+everyone. Pinned by `fixtures/TestStealTwoBadApplesflow`; measured on the bench at `1,1,64`, the fleet still
+met the full commanded rate with `oldest_pending` at 0s.
+
+The honest limit: tier one helps in proportion to the neighbour's SPARE capacity. In a saturated fleet most
+work falls through to tier two and contention returns to the single-tier level. This is a win for one bad
+apple in a fleet with headroom — the common deployment — not a general contention fix.
+
+### The grace, and the three things it must not be
+
+- **Measured from `not_before`, never `created_at`.** `not_before` is stamped `NOW_UTC()` at creation and
+  pushed forward by `flow.Sleep` and every retry backoff, so the predicate reads "has been DUE for at least
+  the grace". Against `created_at` an hour-long sleep would be stolen the instant it came due, on a fleet
+  with nothing wrong with it.
+- **Floored at the `pipeline.DefaultMinGap` CONSTANT, not the configured `MinGap`.** A caller may pin both
+  interval and gap to zero (a bench sweep, a hand-driven cycle); deriving the floor from a configurable that
+  can itself be zeroed yields a zero grace, which steals every foreign step the instant it comes due with no
+  fuse at all.
+- **NOT an absolute age threshold.** That shape was rejected for the fuse it replaced: normal queueing delay
+  under load is *seconds*, so any constant either never fires or disables partitioning under exactly the load
+  it exists for. The gate is what makes an age term usable, by restricting it to replicas already short of
+  work.
+
+`defaultStealAfter = 4` is not delicate: a healthy fleet's oldest due step sits at 0–1s while a stalled
+owner's class ages to 23–41s, against a ~67ms derived period. Anything from ~2 to ~10 periods separates
+those cleanly.
+
+### What a healthy fleet does: nothing
+
+At healthy RTT the bench fleet ran at ~30% of the database's capacity with spare everywhere and stole **0–23
+steps** across five arms. The gate arms — every replica is under capacity — but nothing ages past the grace,
+so nothing is taken. It is not that idle replicas steal harmlessly; they do not steal at all.
+
+**A debounce on the gate was therefore considered and shelved.** The case for it was a uniformly slow fleet
+stealing pointlessly, and it does happen (a `-race` fixture run: 6 of 40 steps; a bench cell at rtt 2.4ms:
+79% of *claims*). But the second figure is a ratio over claims, and a failed claim is one round trip where a
+completed step is ~9.6 — in real terms 7.6% of round trips, on a run already at **78% of the ceiling its RTT
+allowed**. The missing throughput was the slow database, not the steal. Do not build the debounce without
+evidence that names a cost the grace does not already bound.
+
 **`FetchSteps` orders on `rn`, not on a recomputed age.** The window already ranks each key by
 `(created_at, step_id)`, so `ORDER BY fairness_key, rn` is oldest-first *by construction*. An earlier cut
 selected `DATE_DIFF_MILLIS(NOW_UTC(), created_at)` and re-sorted each key in Go by age descending — the same
@@ -149,7 +242,14 @@ real scan fail, and the two halves are asymmetric, so neither can be inferred fr
 exported so the owner's catalogue aliases it rather than re-spelling the string. Pinned by
 `TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy` and `TestPiston_SeamsDefaultInert`.
 
-Exactly one checkpoint is fired: **`CheckpointCycleDone`**, in `Run`, once per cycle that PUSHED. It earns
+Two checkpoints are fired. **`CheckpointStole`** reports a fetch that took steps from outside this
+replica's residue class, and it earns its place on the same boundary rule: a test proving a slow peer's work
+is picked up cannot wait out a duration, because the steal fires on the first cycle after the gate arms and
+the grace elapses — a function of the cadence, the peer's degradation and the backlog, none of which a test
+controls. Without it the only available assertion is "the flows eventually finished", which passes equally
+against a build where stealing does nothing and the dispatch-window eviction did the work seconds later.
+
+The other is **`CheckpointCycleDone`**, in `Run`, once per cycle that PUSHED. It earns
 its place on the same boundary rule read from the other side — it publishes the one fact about a cycle that
 is invisible from outside the process and cannot be waited out on a clock. **Each piston turns on its own
 cadence, so "every shard has reconciled its partition against the plan" is not a function of elapsed time**:

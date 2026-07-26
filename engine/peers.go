@@ -191,11 +191,28 @@ func (e *Engine) leaveFleet(ctx context.Context) {
 func (e *Engine) runReconcileLoop() {
 	ticker := time.NewTicker(max(time.Millisecond, e.peerCadence()/2))
 	defer ticker.Stop()
+	// The fleet size this loop last SAW, per shard. Deliberately not recomputePools' lastAppliedR: that one
+	// records what the pools were last DERIVED with and is never updated under a SetMaxOpenConns override
+	// (pinned pools derive nothing), so churn counted from it would report a settled fleet whenever an
+	// operator pinned the pools - which is exactly what a benchmark does. Owned by this goroutine alone, so
+	// it needs no lock.
+	seen := map[int]int{}
+	for _, idx := range e.db.Indices() {
+		seen[idx] = e.replicasOn(idx)
+	}
 	for {
 		select {
 		case <-e.reconcileStop:
 			return
 		case <-ticker.C:
+		}
+		// Report churn before applying it: a fleet that is settled must count ZERO here for a whole run, so
+		// every move is worth a line and a tick of the counter whether or not any pool size follows from it.
+		for _, idx := range e.db.Indices() {
+			if now := e.replicasOn(idx); now != seen[idx] {
+				e.metricPeerCountChanged(e.lifetimeCtx, idx, seen[idx], now)
+				seen[idx] = now
+			}
 		}
 		e.recomputePools()
 	}

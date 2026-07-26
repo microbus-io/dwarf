@@ -181,3 +181,10 @@ func AwaitAndAssertComplete(t *testing.T, e Engine, flowKey string) *workflow.Fl
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	return out
 }
+
+// TimeoutScale is the multiplier the shared wait helpers apply to their "don't hang" ceilings - 1 normally,
+// 5 under -race. Exported for a fixture that must hold its own ceiling rather than route through a helper
+// here: -race slows execution ~10x and, with the whole suite parallel, compounds with CPU oversubscription,
+// so an unscaled ceiling that passes serially flakes under it. Scale the ceiling, never the assertion - a
+// genuine wedge never completes and trips even the stretched bound.
+func TimeoutScale() time.Duration { return testTimeoutScale }

@@ -249,4 +249,5 @@ const (
 	// ORDER must wait for a cycle per shard; no amount of elapsed time substitutes, because one starved
 	// piston is exactly the case that breaks it.
 	CheckpointRefillCycleDone = piston.CheckpointCycleDone // a shard's piston reconciled its cache partition
+	CheckpointRefillStole     = piston.CheckpointStole     // a shard's piston selected steps from OUTSIDE its residue class
 )

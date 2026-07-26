@@ -547,7 +547,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusCompleted)
-	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted)
+	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted, shardNum)
 	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
 
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
@@ -763,7 +763,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		return true, nil
 	}
 	// The step is now failed regardless of whether the whole flow fails - count it.
-	e.metricStepExecuted(ctx, taskName, workflow.StatusFailed)
+	e.metricStepExecuted(ctx, taskName, workflow.StatusFailed, shardNum)
 
 	if !failFlow {
 		return false, nil

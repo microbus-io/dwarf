@@ -460,7 +460,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 	// Handle interrupt
 	if interruptPayload, interrupted := resultFlow.InterruptRequested(); interrupted {
 		e.logger.DebugContext(ctx, "Task interrupted", "task", taskName, "workflow", workflowURL)
-		e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted)
+		e.metricStepExecuted(ctx, taskName, workflow.StatusInterrupted, shardNum)
 		return e.handleInterrupt(ctx, shardNum, db, stepID, leaseSeq, flowID, flowToken, workflowURL, changesJSON, interruptPayload)
 	}
 
@@ -534,7 +534,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
-		e.metricStepExecuted(ctx, taskName, "subgraph")
+		e.metricStepExecuted(ctx, taskName, "subgraph", shardNum)
 		return nil
 	}
 
@@ -611,17 +611,17 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 			// within a cycle of coming due, and offering it now would only cache a hint no worker may claim.
 			e.enqueueStepDue(ctx, shardNum, stepID, flowPriority)
 		}
-		e.metricStepExecuted(ctx, taskName, "retried")
+		e.metricStepExecuted(ctx, taskName, "retried", shardNum)
 		return nil
 	}
 
 	// Complete the step
 	if errorRouted {
 		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", workflowURL)
-		e.metricStepExecuted(ctx, taskName, "error_routed")
+		e.metricStepExecuted(ctx, taskName, "error_routed", shardNum)
 	} else {
 		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "workflow", workflowURL)
-		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted)
+		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted, shardNum)
 	}
 	// FaultLeaseStaleWrite makes this completion write carry a stale lease generation, exactly as a zombie
 	// worker (whose lease was re-granted to a peer) would. The fence must reject it (zero rows -> benign
