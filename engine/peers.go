@@ -119,6 +119,7 @@ func (e *Engine) buildSonars() {
 			continue
 		}
 		s.SetLogger(e.logger)
+		s.SetSeams(e.seams)
 		if testing.Testing() {
 			// A test fleet is ephemeral: every engine pays Join's two cadences on the way up, and a suite that
 			// stands one up per test would spend most of its time there. Shortening the cadence shortens Join

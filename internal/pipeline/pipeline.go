@@ -125,7 +125,10 @@ type Pipeline struct {
 	// Cadence state, touched only by Cycle. lastTallyStart anchors the interval (start to start) and
 	// lastCycleEnd the gap (end to start); both zero until the first cycle runs.
 	lastTallyStart time.Time
-	lastCycleEnd   time.Time
+	// workStart is when the current cycle entered its queries, in nanoseconds, or 0 between cycles - see
+	// WorkingFor. Atomic because the driving goroutine sets it and an owner's publisher reads it.
+	workStart    atomic.Int64
+	lastCycleEnd time.Time
 }
 
 // New returns a Pipeline for one shard, paced at DefaultInterval and DefaultMinGap until told otherwise.
@@ -189,10 +192,35 @@ func (p *Pipeline) Cycle(ctx context.Context) Result {
 		return r
 	}
 	p.lastTallyStart = time.Now()
+	// The work window spans the queries and nothing else - deliberately not the pace above, which is most of
+	// a healthy cycle's wall clock.
+	p.workStart.Store(p.lastTallyStart.UnixNano())
 	p.run(ctx, &r)
+	p.workStart.Store(0)
 	p.lastCycleEnd = time.Now()
 	r.Total = p.lastCycleEnd.Sub(p.lastTallyStart)
 	return r
+}
+
+// WorkingFor is how long the current cycle has been inside its queries, or zero when none is - excluding
+// the pace it sleeps first.
+//
+// A DURATION rather than a bool, and that is the load-bearing part. It exists for a caller publishing this
+// shard's liveness on its own clock, where a completed cycle is the ordinary evidence but one scan can
+// outrun any sane publishing cadence on a deep backlog (phase one is O(backlog) on every dialect without
+// the run-condition early-stop). A bool cannot serve that: a cycle whose scan fails INSTANTLY is also
+// briefly inside its queries - building the error, recording the phase, logging it - and a caller sampling
+// often enough will keep catching that. Measured at ~1.2% of samples with a failing scan, which is easily
+// enough to keep a broken shard looking alive indefinitely. Only a cycle that has run longer than the
+// caller's own expectations is evidence, and a duration lets the caller decide what that means.
+//
+// Safe to call from any goroutine.
+func (p *Pipeline) WorkingFor() time.Duration {
+	started := p.workStart.Load()
+	if started == 0 {
+		return 0
+	}
+	return max(0, time.Since(time.Unix(0, started)))
 }
 
 // pace sleeps out whatever the cadence still owes and reports how long that took. The wait is the larger

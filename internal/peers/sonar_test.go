@@ -26,6 +26,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/errors"
+	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
@@ -744,4 +745,209 @@ func TestPeers_ConstantsHoldTheirRelationships(t *testing.T) {
 	assert.True(pruneHealthyFor > stragglerAge)
 	// Detection is the read's job, and reading more often than beating is the whole point of splitting them.
 	assert.True(scanInterval < beatInterval)
+}
+
+// TestPeers_SeamsDefaultInert pins that a Sonar built and never told otherwise consults nothing, so a
+// production one pays a bool read per site and neither fault can fire.
+func TestPeers_SeamsDefaultInert(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+
+	assert.False(r.s.faulted(FaultReadErr))
+	assert.False(r.s.faulted(FaultBeatErr))
+	r.s.SetSeams(nil) // nil restores the inert default rather than nil-panicking
+	assert.False(r.s.faulted(FaultReadErr))
+
+	r.s.pass(ctx)
+	assert.NoError(r.s.lastErr)
+	assert.Equal(1, len(r.ids(t)), "an unwired Sonar reads and writes normally")
+}
+
+// TestPeers_ReadFaultDrivesTheBlindPolicy pins the seam against the policy it exists to reach: a reading
+// that fails publishes nothing, and once the readings have stopped for longer than the grace the partition
+// switches off. Every one of those is this package's decision, and none is reachable from outside without
+// a reading that fails.
+func TestPeers_ReadFaultDrivesTheBlindPolicy(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	sm := seamster.New(true)
+	r.s.SetSeams(sm)
+
+	// A healthy fleet of three, two of them dispatching alongside us.
+	r.addPeer(t, 10, time.Second, time.Second)
+	r.addPeer(t, 20, time.Second, 10*time.Minute) // alive, but claims no work
+	assert.NoError(r.s.register(ctx))
+	var turns atomic.Uint64
+	var busy, idle atomic.Bool
+	turns.Store(1)
+	r.s.SetEvidence(evidence(&turns, &busy, &idle))
+	r.s.pass(ctx)
+	assert.Equal(3, r.s.Replicas())
+	_, _, ok := r.s.Partition()
+	assert.True(ok)
+
+	// Now the readings fail. Nothing is published, so the fleet is held rather than collapsing - which is
+	// the direction that matters, since under-counting over-sizes every pool derived from it.
+	sm.InjectN(1000, FaultReadErr)
+	for range 5 {
+		r.clk.advance(r.s.scan)
+		r.s.pass(ctx)
+	}
+	assert.Error(r.s.lastErr, "the reading failed")
+	assert.Equal(3, r.s.Replicas(), "a read that did not happen is not an observation that anybody left")
+	_, _, ok = r.s.Partition()
+	assert.False(ok, "but the pair can no longer be justified, so selection stops being partitioned")
+
+	// Reading resumes while the fleet has genuinely shrunk. The first reading back must NOT be believed:
+	// this is the correlated stall, where every row looks stale at once and every replica would otherwise
+	// size for a fleet of one against a database that is already sick.
+	sm.Withdraw(FaultReadErr)
+	assert.NoError(r.s.register(ctx))
+	_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id IN (10, 20)")
+	assert.NoError(err)
+	r.clk.advance(r.s.scan)
+	r.s.pass(ctx)
+	assert.NoError(r.s.lastErr)
+	assert.Equal(3, r.s.Replicas(), "the reading that ended the blind spell cannot shrink the fleet")
+
+	// The next one can, and does.
+	r.clk.advance(r.s.scan)
+	r.s.pass(ctx)
+	assert.Equal(1, r.s.Replicas(), "confirmed on the next reading")
+}
+
+// TestPeers_BeatFaultStopsProvingLiveness pins the other seam. The process goes on running and reading
+// perfectly well; it simply stops refreshing its own row, which is exactly how a replica that has lost the
+// ability to prove it is alive appears to its peers - and the only way a test can occupy that view without
+// killing a process.
+func TestPeers_BeatFaultStopsProvingLiveness(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	sm := seamster.New(true)
+	r.s.SetSeams(sm)
+	assert.NoError(r.s.register(ctx))
+
+	var turns atomic.Uint64
+	var busy, idle atomic.Bool
+	turns.Store(1)
+	r.s.SetEvidence(evidence(&turns, &busy, &idle))
+	r.s.pass(ctx)
+	assert.True(r.row(t, selfID).dispatchAgeMs < staleAge, "a healthy beat proves both facts")
+
+	// Age the row, then beat with the fault armed: the row must stay exactly as stale as we left it.
+	sm.InjectN(1000, FaultBeatErr)
+	_, err := r.db.ExecContext(ctx,
+		"UPDATE dwarf_peers SET seen_at=DATE_ADD_MILLIS(NOW_UTC(), ?), dispatched_at=DATE_ADD_MILLIS(NOW_UTC(), ?)"+
+			" WHERE engine_id=?", -60000, -60000, selfID)
+	assert.NoError(err)
+	turns.Store(2)
+	r.clk.advance(r.s.beat)
+	r.s.pass(ctx)
+	assert.True(r.row(t, selfID).seenAgeMs > 50000, "the beat wrote nothing, so the row went on ageing")
+
+	// The reading still works throughout - this replica is blind to nothing, it is simply invisible.
+	assert.NoError(r.s.lastErr)
+
+	// Its own count still includes itself, because it demonstrably exists whatever its row says. That is the
+	// asymmetry: a replica never argues itself out of the pool divisor.
+	assert.Equal(1, r.s.Replicas())
+
+	// And it must not RESURRECT itself either. A peer eventually prunes the row this replica stopped
+	// refreshing; the repair path would then re-create it with a fresh timestamp, so a replica that cannot
+	// prove its liveness would prove it anyway through the other write. The fault covers both writes for
+	// exactly this reason.
+	_, err = r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", selfID)
+	assert.NoError(err)
+	r.clk.advance(r.s.scan)
+	r.s.pass(ctx) // observes itself absent and tries to repair
+	assert.Len(r.ids(t), 0, "a replica that cannot prove its liveness must not re-register either")
+
+	// Lift the fault and the repair works again, which is what proves the gate was the fault and not a
+	// broken repair path.
+	sm.Withdraw(FaultBeatErr)
+	r.clk.advance(r.s.scan)
+	r.s.pass(ctx)
+	assert.Equal([]int64{selfID}, r.ids(t), "and repairs itself the moment it can write again")
+}
+
+// TestPeers_FaultsScopeByShard pins the per-shard consult. Blinding one shard must leave every other shard
+// reading, which is the property this package's whole per-shard shape exists to provide - and it would be
+// untestable if the seam were fleet-wide only.
+func TestPeers_FaultsScopeByShard(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t) // shard 1
+	sm := seamster.New(true)
+	r.s.SetSeams(sm)
+
+	sm.InjectN(1000, FaultReadErr, "2")
+	assert.False(r.s.faulted(FaultReadErr), "a fault scoped to another shard leaves this one reading")
+
+	sm.Withdraw(FaultReadErr, "2")
+	sm.InjectN(1000, FaultReadErr, "1")
+	assert.True(r.s.faulted(FaultReadErr), "scoped to this shard, it fires")
+
+	sm.Withdraw(FaultReadErr, "1")
+	sm.InjectN(1000, FaultReadErr)
+	assert.True(r.s.faulted(FaultReadErr), "and unscoped means every shard")
+}
+
+// TestPeers_LongTurnKeepsProvingService pins the case the busy term exists for, and it is the mirror of
+// TestPeers_BeatFaultStopsProvingLiveness: a replica part-way through ONE very long turn must go on proving
+// it serves the shard, beat after beat, for as long as the turn lasts.
+//
+// Without it a scan that outruns the dispatch window would drop a perfectly healthy replica out of the
+// divisor - and on any dialect without the run-condition early-stop a deep-backlog scan runs for tens of
+// seconds, so in a loaded fleet it would drop EVERY replica at once, disabling partitioning exactly when
+// overlapping selection costs the most.
+//
+// The turn count never moves here, which is the point: for the whole span, the busy term is the only thing
+// carrying the evidence.
+func TestPeers_LongTurnKeepsProvingService(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	assert.NoError(r.s.register(ctx))
+
+	var turns atomic.Uint64
+	var busy, idle atomic.Bool
+	turns.Store(7) // one turn completed long ago, and none since
+	r.s.SetEvidence(evidence(&turns, &busy, &idle))
+	r.s.pass(ctx)
+
+	// The turn now in flight has outrun its period, so the dispatcher reports busy for its whole duration.
+	// With the turn count parked where the last beat published it, that term is the ONLY thing left saying
+	// this replica serves the shard - assert it directly, so this test cannot pass on the counter instead.
+	assert.Equal(uint64(7), r.s.lastTurns, "the last beat published this count, so it is no longer news")
+	_, dispatched := r.s.dispatchEvidence()
+	assert.False(dispatched, "a parked counter alone proves nothing")
+	busy.Store(true)
+	_, dispatched = r.s.dispatchEvidence()
+	assert.True(dispatched, "a turn that has outrun its period does")
+	const rounds = 10
+	stamps := 0
+	for range rounds {
+		r.clk.advance(r.s.beat) // a beat comes due
+		// The row's age is measured by the DATABASE clock, which the fake one does not move, so let real time
+		// pass before reading it. Without this the before/after ages tie at millisecond precision and a stamp
+		// is invisible - the row is being refreshed either way, but the test cannot see it.
+		time.Sleep(15 * time.Millisecond)
+		before := r.row(t, selfID).dispatchAgeMs
+		r.s.pass(ctx)
+		if r.row(t, selfID).dispatchAgeMs < before {
+			stamps++ // the age went DOWN, so this beat re-stamped it
+		}
+		assert.Equal(uint64(7), turns.Load(), "no turn ever completes during the span")
+	}
+	assert.Equal(rounds, stamps, "every beat across a long turn re-stamps the dispatch timestamp")
+	assert.True(r.row(t, selfID).dispatchAgeMs < 100,
+		"so the row never ages toward a window, however long the turn runs (age %.0fms)",
+		r.row(t, selfID).dispatchAgeMs)
 }

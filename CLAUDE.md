@@ -108,8 +108,13 @@ matching one before working there:**
 - **`internal/pipeline/CLAUDE.md`** - one shard's supply cycle (`sleep -> tallying -> planning -> fetching ->
   pushing`): its self-pacing, and the asymmetric error policy (a failed scan clears the shard but spares the
   cache; a failed fetch touches neither; an empty plan clears the partition).
-- **`internal/piston/CLAUDE.md`** - the per-shard cylinder that drives that cycle: the two SQL queries, the
-  heartbeat on its own goroutine, idle mode, and the replica-partition predicate.
+- **`internal/piston/CLAUDE.md`** - the per-shard cylinder that drives that cycle: the two SQL queries, idle
+  mode, the replica-partition predicate, and `Liveness` (why dispatch evidence is a turn COUNTER plus a
+  duration-qualified busy flag, not a bool).
+- **`internal/peers/CLAUDE.md`** - one shard's replica registry: the `Sonar` that owns this replica's row
+  there, the two timestamps (alive vs serving), and the three consumers of one reading whose postures are
+  matched to how reversible each decision is (hold the pool divisor, fail the work divisor open, make the
+  hygiene delete wait).
 - **`internal/claimstracker/CLAUDE.md`** - the intra-replica in-flight claim set: why the window is bounded
   (1-2s) rather than tied to a step, and the two-generation roll that costs no per-entry work.
 - **`internal/faninmap/CLAUDE.md`** - the per-flow fan-out-to-fan-in routing map: why it is derived at dispatch

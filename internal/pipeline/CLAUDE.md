@@ -11,6 +11,23 @@ This is the supply side of dispatch: it looks at what is due on one shard, asks 
 shard may serve, fetches it, and pushes it to the cache the workers drain. Workers are the demand side and
 live elsewhere.
 
+## `WorkingFor` is a duration, not a bool
+
+The pipeline is driven by an owner that publishes its shard's liveness somewhere the fleet can see it, and
+the ordinary evidence is a cycle COMPLETING. `WorkingFor` covers the case that evidence cannot: one scan can
+outrun any sane publishing cadence on a deep backlog, since phase one is O(backlog) on every dialect without
+the run-condition early-stop.
+
+**A bool cannot serve that, and shipping one was a bug.** A cycle whose scan fails instantly is also briefly
+inside its queries — building the error, recording the phase, logging it — so a "working right now" flag
+reads true a small but nonzero fraction of the time (**measured ~1.2%** with an injected scan failure). A
+reader sampling every 50ms catches that within seconds, and a shard that serves nothing then looks alive
+indefinitely. Returning how LONG lets the reader require more than a blip, which is the only version of the
+question that distinguishes a slow scan from a broken one.
+
+**It spans the queries and not the pace.** The pace is most of a healthy cycle's wall clock, so including it
+would make any predicate over this permanently true.
+
 ## The five phases name everything here
 
 ```

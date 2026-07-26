@@ -46,8 +46,22 @@ Three things the shape has to get right:
 - **A counter, never a flag the reader clears.** A consuming getter would create a contract — call it once
   per publication, from one caller — and any second caller (a metric, a test) would silently swallow the
   evidence. Holding "since I last looked" belongs to the reader.
-- **A turn IN FLIGHT counts.** Same O(backlog) argument: a piston in the middle of a long scan is plainly
-  still serving.
+- **A turn in flight counts, but only once it has outrun the cycle period.** Same O(backlog) argument — a
+  piston in the middle of a long scan is plainly still serving — but "in flight" alone is the wrong
+  predicate and shipped as a bug. A cycle whose scan fails *instantly* is also briefly in its queries
+  (building the error, recording the phase, logging it), measured at **~1.2% of samples**, and a reader
+  sampling every 50ms catches that within seconds. It then keeps a piston that serves nothing looking alive
+  indefinitely — the precise stranding the evidence exists to prevent. A scan shorter than the period will
+  have completed and advanced the turn count before any reader looks, so nothing is lost by requiring the
+  duration. Pinned by `TestPiston_FailingCyclesReportNoLiveness`, which samples ~1ms apart for half a second
+  and requires *zero* busy readings; against the bool it fails with 16 of 438, and 333 of 440 at the zero
+  period a bench sweep or a hand-driven caller can legitimately set — which is why the threshold is floored
+  at `MinGap`, the package's existing fuse for that same degenerate regime.
+
+  The threshold bounds the **false-alive** direction only. A query that hangs forever reads busy forever and
+  keeps its residue class — indistinguishable from a legitimate long scan by construction, and the same
+  trade the bool made. That is accepted: a piston stuck inside a query genuinely is a piston nobody should
+  be redistributing work away from until its lease-recovery-shaped problems surface elsewhere.
 - **A cycle that found nothing due still counts.** It proves the piston looked and could have served;
   gating on candidates instead would make a quiet fleet read as having no dispatchers at all, disable
   partitioning, and then thrash when work arrived.

@@ -127,12 +127,6 @@ type Piston struct {
 	// consuming getter would make any second caller - a metric, a test - silently swallow the evidence and
 	// leave a healthy piston reading as stalled. Holding "since I last looked" is the reader's business.
 	turns atomic.Uint64
-	// cycleInFlight is true while the cycle loop is inside pipe.Cycle. A cycle that has not RETURNED yet is
-	// still evidence this piston is serving - and on a dialect without the run-condition early-stop a deep
-	// backlog scan can run for tens of seconds, far longer than any window a reader applies. Without this a
-	// loaded fleet's healthy replicas would all look stalled at once and fall out of the partition divisor
-	// exactly when overlapping selection costs the most.
-	cycleInFlight atomic.Bool
 }
 
 // New returns a piston for one shard over an already-open database handle. The planner and cache are
@@ -205,10 +199,24 @@ func (p *Piston) Idle() bool { return p.idle.Load() }
 // as stalled. Holding the previous count is the reader's business, so this is a pure read that may be
 // called any number of times.
 //
-// A cycle IN FLIGHT counts, because a scan can legitimately run for tens of seconds on a deep backlog
-// where the executor cannot early-stop, and a piston in the middle of one is plainly still serving.
+// A cycle inside its QUERIES counts, because a scan can legitimately run for tens of seconds on a deep
+// backlog where the executor cannot early-stop, and a piston in the middle of one is plainly still serving.
+// It is deliberately the queries and not the whole cycle: a cycle spends most of a healthy wall clock
+// asleep in its pace, so counting that would make busy permanently true and turn this into "the loop is
+// alive" - which a piston whose every scan FAILS would satisfy just as well, keeping a residue class of
+// steps it never selects. That is the exact stranding the evidence exists to prevent.
 func (p *Piston) Liveness() (turns uint64, busy, idle bool) {
-	return p.turns.Load(), p.cycleInFlight.Load(), p.idle.Load()
+	// Busy means a cycle has been in its queries LONGER THAN ONE CYCLE PERIOD, not merely that one is. A
+	// cycle that fails instantly is also briefly in its queries, and a reader sampling on its own clock
+	// catches that often enough to keep a broken piston looking alive for good - the exact stranding this
+	// evidence exists to prevent. A scan that outruns the period is the case busy is for, and a scan that
+	// does not will have completed and advanced the turn count long before any reader looks.
+	//
+	// FLOORED AT MinGap, because the period can legitimately be zero - a bench sweep measuring the unlimited
+	// arm pins it there, and so does any caller driving cycles by hand - and a zero threshold is the bool
+	// this predicate exists to replace. MinGap is already this package's fuse for that same degenerate
+	// regime, so it is the floor that already means "shorter than this is not a cycle worth pacing".
+	return p.turns.Load(), p.pipe.WorkingFor() > max(p.Interval(), pipeline.DefaultMinGap), p.idle.Load()
 }
 
 // SetInterval sets the cycle period, start of one cycle's scan to the next. See pipeline.SetInterval.
@@ -357,9 +365,7 @@ func (p *Piston) Run(ctx context.Context) {
 // NOT safe to call concurrently with Run, or with itself: the pipeline's cadence timestamps are
 // single-goroutine state. A caller that drives cycles by hand should idle the piston first.
 func (p *Piston) Cycle(ctx context.Context) pipeline.Result {
-	p.cycleInFlight.Store(true)
 	r := p.pipe.Cycle(ctx)
-	p.cycleInFlight.Store(false)
 	p.record(ctx, r)
 	// A cycle that found nothing due still counts: it proves this piston looked and could have served.
 	// Gating on candidates instead would make a quiet fleet look like it had no dispatchers at all.

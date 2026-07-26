@@ -1240,9 +1240,12 @@ divisor on its own while `seen_at` keeps it counted for the connections it holds
 asymmetric in OPPOSITE directions and deliberately so - over-counting the pool divisor over-sizes pools and
 can collapse a database, while over-counting DISPATCHERS strands work, so the first errs toward keeping a
 replica and this errs toward dropping one.
-`dispatched_at` also advances while a cycle is IN FLIGHT, without which a deep-backlog scan (still
-O(backlog) on any dialect lacking the run-condition early-stop) would drop every healthy replica in a
-loaded fleet out of the divisor at once. Registration does NOT stamp it - intent is not evidence - so a
+`dispatched_at` also advances while a cycle has been working LONGER THAN ITS OWN PERIOD, without which a
+deep-backlog scan (still O(backlog) on any dialect lacking the run-condition early-stop) would drop every
+healthy replica in a loaded fleet out of the divisor at once. The duration qualifier is load-bearing rather
+than incidental: "a cycle is in flight" reads true ~1.2% of the time even when every scan fails instantly,
+which a reader sampling on a cadence catches within seconds - so a piston serving NOTHING would hold its
+residue class forever. See `internal/piston/CLAUDE.md`. Registration does NOT stamp it - intent is not evidence - so a
 replica earns it on its first cycle, and the beat rides the read cadence when that evidence flips so the
 window is a read interval rather than a beat interval. An await-only replica (`SetWorkers(0)`) holds
 connections, so it counts toward the pool divisor, but it claims nothing: giving it a residue class means

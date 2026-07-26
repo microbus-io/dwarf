@@ -592,3 +592,56 @@ func TestPiston_SettersAreLive(t *testing.T) {
 	assert.NotNil(r.p.logger.Load(), "a nil logger restores the discarding default, never nil")
 	assert.NoError(r.p.SetMeter(nil), "a nil meter restores no-op instruments")
 }
+
+// TestPiston_FailingCyclesReportNoLiveness pins the distinction the whole dispatch-evidence design rests
+// on: a piston whose every cycle FAILS must report itself as not serving, so its owner can stop handing it
+// work that nobody would then select.
+//
+// It is easy to get wrong in a way that looks right. A failing cycle is still briefly inside its queries -
+// building the error, recording the phase, logging it - so a busy flag meaning "a cycle is in flight" reads
+// true a small but nonzero fraction of the time (measured ~1.2% with a scan that fails instantly), and a
+// reader sampling on its own clock catches that within seconds. It then keeps a broken piston looking alive
+// for good, which is exactly the stranding the evidence exists to prevent. Busy therefore means a cycle has
+// been working LONGER THAN ONE PERIOD, which a failing cycle never is.
+func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	sm := seamster.New(true)
+	r.p.SetSeams(sm)
+	r.insertStep(t, 1, 5, "k", 1) // rig default interval is 0 - the degenerate case the floor covers
+
+	// A healthy cycle first: it completes, so the turn count is the evidence.
+	before, _, _ := r.p.Liveness()
+	r.p.Cycle(ctx)
+	after, busy, _ := r.p.Liveness()
+	assert.Equal(before+1, after, "a completed cycle is a turn")
+	assert.False(busy, "and it is not still working")
+
+	// From here every scan fails. Sample hard while the loop runs: the turn count must not move and busy
+	// must never once read true.
+	sm.InjectN(1<<20, FaultScanErr)
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); r.p.Run(runCtx) }()
+
+	stalled, _, _ := r.p.Liveness()
+	var busyHits, samples int
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		n, b, _ := r.p.Liveness()
+		samples++
+		if b {
+			busyHits++
+		}
+		assert.Equal(stalled, n, "a failing cycle must never count as a turn")
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	assert.Equal(0, busyHits,
+		"a piston that only fails must never read as busy (%d of %d samples)", busyHits, samples)
+	assert.True(samples > 100, "the sampling has to be dense enough to catch a brief window")
+}

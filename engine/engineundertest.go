@@ -19,6 +19,7 @@ package engine
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/microbus-io/dwarf/internal/peers"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"log/slog"
 	"os"
@@ -179,6 +180,8 @@ const (
 	FaultReapMidTree         = "reapMidTree"         // the reaper errors after deleting steps, before flows
 	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
 	FaultRefillScanErr       = piston.FaultScanErr   // the piston's priority-band scan errors (its name, so there is one catalogue)
+	FaultPeerReadErr         = peers.FaultReadErr    // a shard's peer-registry reading fails: this replica goes BLIND on that shard (their names, so there is one catalogue)
+	FaultPeerBeatErr         = peers.FaultBeatErr    // a shard's peer-registry beat writes nothing: this replica stops proving its liveness THERE, while running on
 	FaultSlowPoolPush        = "slowPoolPush"        // recomputePools stalls between reading R and pushing the derived sizes
 	FaultDeliverFailureErr   = "deliverFailureErr"   // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery); unscoped, or scoped by the parked caller's task name for per-level control
 	FaultCancelCommit        = "cancelCommit"        // the Cancel transaction errors

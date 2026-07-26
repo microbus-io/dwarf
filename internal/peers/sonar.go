@@ -59,12 +59,31 @@ package peers
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/microbus-io/errors"
+	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
+)
+
+// The two faults an owner may arm - see SetSeams. Exported so the owning application's catalogue aliases
+// them rather than re-spelling the strings.
+const (
+	// FaultReadErr makes the registry read fail without touching the database. It is how a test reaches
+	// every consequence of being BLIND: the counts hold, a fall is withheld across the gap that follows,
+	// the partition switches off, and the prune's healthy run starts over.
+	FaultReadErr = "peerReadErr"
+	// FaultBeatErr makes every write that would PROVE this replica's liveness fail without touching the
+	// database - the beat, and the registration repair that would otherwise re-create a row a peer has
+	// pruned. Its row therefore stops being refreshed while the process goes on running, which is what a
+	// replica that has lost the ability to prove itself looks like to its PEERS, and the only way to reach
+	// that view without killing a process.
+	//
+	// It deliberately does NOT gate Leave: a test still has to be able to tear its fleet down.
+	FaultBeatErr = "peerBeatErr"
 )
 
 // The cadences and windows. Only the read cadence is settable (SetCadence), because only it prices
@@ -159,6 +178,7 @@ type Sonar struct {
 
 	evidence atomic.Pointer[EvidenceFunc]
 	logger   atomic.Pointer[slog.Logger]
+	seams    atomic.Pointer[seamster.Seamster]
 
 	// Published state: written only by the driving goroutine, read by the owner from anywhere.
 	replicas atomic.Int32
@@ -217,6 +237,7 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 		dispatch: dispatchWindow, straggler: stragglerAge, pruneAfter: pruneHealthyFor,
 	}
 	s.SetLogger(nil)
+	s.SetSeams(nil)
 	s.lastGood.Store(s.now().UnixNano())
 	s.replicas.Store(1)
 	s.part.Store(&partition{ordinal: -1})
@@ -227,10 +248,12 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 // this shard is turning. It decides whether a beat also stamps this replica as SERVING the shard, which is
 // what earns it a residue class of step ids.
 //
-// The three returns are read together and interpreted as: turns advanced since the last beat, or a turn is
-// in flight right now, and the dispatcher is not idling. A turn IN FLIGHT counts because a scan can
-// legitimately run far longer than the dispatch window on a deep backlog, and a replica in the middle of one
-// is plainly still serving.
+// The three returns are read together and interpreted as: turns advanced since the last beat, or a turn has
+// been running long enough to count on its own, and the dispatcher is not idling. The second term is for a
+// scan that legitimately runs far longer than the dispatch window on a deep backlog - but it must mean a
+// LONG turn rather than merely one in flight, because a turn that fails instantly is briefly in flight too,
+// and a reader sampling on a cadence catches that often enough to keep a dispatcher that serves nothing
+// looking alive for good.
 //
 // It is a PURE READ and may be called any number of times - the "since the last beat" part is this
 // package's business, held against the turn count it last published. A consuming getter would make any
@@ -265,6 +288,37 @@ func (s *Sonar) SetCadence(d time.Duration) {
 		d = scanInterval
 	}
 	s.scan = d
+}
+
+// SetSeams supplies the OWNER's fault-injection seams, so a test driving a whole engine can break this
+// Sonar's database calls without breaking its database. Nil restores an inert one, which is also the
+// default - a Sonar built and never told otherwise consults nothing, and a Seamster built disabled makes
+// every consult a bool read.
+//
+// The seams are the owner's, not this package's, for the same reason the logger is: one catalogue of fault
+// names per application, armed in one place, however many modules consult it.
+//
+// EXACTLY TWO FAULTS, both at an I/O boundary, and that is the whole rule for adding a third. A seam inside
+// pure logic here would be a signal that a dependency should have been injected instead - and every
+// time-dependent decision already has one, the clock - so it would buy nothing. These two reach what
+// injection cannot: a database that answers, but wrongly for this replica. FaultReadErr makes the reading
+// fail (blindness, and everything downstream of it); FaultBeatErr stops this replica proving its own
+// liveness while it goes on running, which is the only way for a test to occupy a PEER's point of view of a
+// replica that has effectively died.
+//
+// Both are consulted unscoped OR scoped by shard, so a test can blind one shard and leave the rest reading
+// - which is the per-shard property this package exists to provide, and it would be untestable otherwise.
+func (s *Sonar) SetSeams(sm *seamster.Seamster) {
+	if sm == nil {
+		sm = seamster.New(false)
+	}
+	s.seams.Store(sm)
+}
+
+// faulted reports whether a fault is armed for this Sonar, either fleet-wide or for this shard alone.
+func (s *Sonar) faulted(name string) bool {
+	sm := s.seams.Load()
+	return sm.IsFault(name) || sm.IsFault(name, strconv.Itoa(s.shard))
 }
 
 // SetLogger sets the logger. Nil restores the discarding default.
@@ -399,6 +453,13 @@ func (s *Sonar) Leave(ctx context.Context) error {
 // millisecond. Join runs before anything has beaten, and the repair path has just OBSERVED the row absent.
 // This replica is the only writer of its own row, so that observation cannot be raced.
 func (s *Sonar) register(ctx context.Context) error {
+	// FaultBeatErr covers this as well as the beat, and the reason is the repair below: a Sonar that observes
+	// itself absent re-registers, so gating only the beat would let a replica which cannot prove its liveness
+	// resurrect its own row - with a FRESH seen_at - the moment a peer pruned it. The fault's premise is that
+	// no write of this replica's proves anything, and there are two such writes.
+	if s.faulted(FaultBeatErr) {
+		return nil
+	}
 	res, err := s.db.ExecContext(ctx,
 		"UPDATE dwarf_peers SET seen_at=NOW_UTC() WHERE engine_id=?", s.engineID)
 	if err != nil {
@@ -462,6 +523,12 @@ func (s *Sonar) dispatchEvidence() (turns uint64, dispatched bool) {
 // A failed write is not retried. Retrying a broken registry write turns a database blip into a write storm,
 // and the next beat is one interval away regardless.
 func (s *Sonar) publishBeat(ctx context.Context, dispatched bool) {
+	// FaultBeatErr drops the write, so this replica stops refreshing its own row while everything else about
+	// it goes on working. That is what a replica which can no longer prove its liveness looks like from a
+	// PEER's side, and a test can occupy that side no other way short of killing a process.
+	if s.faulted(FaultBeatErr) {
+		return
+	}
 	// The dispatch assignment is composed into the statement rather than bound through a CASE: a conditional
 	// assignment is two plain statement shapes here, where CASE WHEN ? would lean on how each driver binds a
 	// boolean into an expression.
@@ -492,6 +559,13 @@ func (s *Sonar) publishBeat(ctx context.Context, dispatched bool) {
 // The ages are float64 because DATE_DIFF_MILLIS is fractional on SQLite, where scanning it into an int64
 // fails outright.
 func (s *Sonar) read(ctx context.Context) ([]peer, error) {
+	// FaultReadErr fails the reading without touching the database, which is the only way to reach what
+	// being blind implies - the counts held, a fall withheld across the gap, the partition switched off,
+	// the prune's patience restarted. All four are policy this package owns and none is reachable from
+	// outside without a reading that fails.
+	if s.faulted(FaultReadErr) {
+		return nil, errors.New("injected fault: " + FaultReadErr)
+	}
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS seen_age_ms,"+
 			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms"+

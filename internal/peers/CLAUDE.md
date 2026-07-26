@@ -38,9 +38,9 @@ registration repair exists (below) and why it cannot be left to the beat.
 way out — its context is cancelled by then, so the DELETE would fail — and `Run` having returned is itself
 the guarantee that no beat follows.
 
-**The API is ten calls, and keeping it that small is a standing constraint.** Three inputs (`New`,
-`SetEvidence`, `SetLogger`), three lifecycle calls (`Join`, `Run`, `Leave`), three published facts
-(`Replicas`, `Partition`, `BlindFor`), and one knob (`SetCadence`).
+**The API is eleven calls, and keeping it that small is a standing constraint.** Four inputs (`New`,
+`SetEvidence`, `SetLogger`, `SetSeams`), three lifecycle calls (`Join`, `Run`, `Leave`), three published
+facts (`Replicas`, `Partition`, `BlindFor`), and one knob (`SetCadence`).
 
 The windows and the beat are **constants with plain fields behind them**, not setters, because they are
 this package's policy — derived from which errors are safe in which direction rather than from anything an
@@ -79,9 +79,13 @@ itself. Three rules, each load-bearing:
   stalled. The counter moves the "since the last beat" part *here*, held against `lastTurns`, which only a
   beat that actually published advances. A pass that merely looks cannot swallow a turn.
   Pinned by `TestPeers_EvidenceIsNotConsumedByLooking`.
-- **`busy` is evidence too.** A scan can legitimately outlast the dispatch window on a deep backlog, so
-  without it every healthy replica in a loaded fleet would fall out of the divisor at once — precisely when
-  overlapping selection costs the most.
+- **`busy` is evidence too, and it must mean a LONG turn rather than one in flight.** A scan can
+  legitimately outlast the dispatch window on a deep backlog, so without the term every healthy replica in a
+  loaded fleet would fall out of the divisor at once — precisely when overlapping selection costs the most.
+  But a turn that fails *instantly* is also briefly in flight, and this Sonar samples every cadence: at a
+  measured ~1.2% duty that is caught within seconds, and a dispatcher that serves nothing then keeps its
+  residue class forever. The producer owes a duration-qualified answer, not a liveness bit — see
+  `internal/piston/CLAUDE.md`.
 - **The `idle` term stays explicit** even though an idling dispatcher stops advancing its counter anyway. A
   turn that completed just before it went idle would otherwise make the next beat claim service for a whole
   window, and over-counting dispatchers is the direction that strands work.
@@ -273,9 +277,22 @@ is about the decision, not the socket count.
 
 - **No metrics.** The owner builds its own async gauges by pulling `Replicas`, `Partition` and `BlindFor` at
   collection time, which is one fewer scope to keep in step and needs no meter here.
-- **No fault or checkpoint seams.** Every interesting failure is reachable by calling `observe` with an
-  error, and every time-dependent decision by advancing the injected clock. A seam over pure logic is a
-  signal that a dependency should have been injected instead — and here it already is.
+- **Exactly two fault seams, both at an I/O boundary, and that is the whole rule for adding a third.**
+  Everything reachable from *inside* the package needs none: `observe` takes an error directly, and every
+  time-dependent decision takes the injected clock. A seam over pure logic would be a signal that a
+  dependency should have been injected instead — and here it already is. What the two reach is what
+  injection cannot: `FaultReadErr` is the only way an owner's assembled engine can be made blind, and
+  `FaultBeatErr` the only way a test can occupy a *peer's* view of a replica that has stopped proving
+  itself. Both consult unscoped OR shard-scoped, because per-shard blindness is the property this package
+  exists to provide and would otherwise be untestable.
+
+  `FaultBeatErr` gates **both** writes that prove liveness — the beat and the registration repair. Gating
+  only the beat leaves the hole its own premise forbids: a peer eventually prunes the row this replica
+  stopped refreshing, the repair then re-creates it with a *fresh* timestamp, and a replica that cannot
+  prove its liveness proves it anyway through the other write. Pinned inside
+  `TestPeers_BeatFaultStopsProvingLiveness`, including that lifting the fault restores the repair — so the
+  gate is the fault and not a broken repair path.
+- **No checkpoint seams.** Nothing here has a moment a test needs to hold.
 - **No config setters beyond `SetCadence`.** See the API note above for the bar it cleared.
 - **No callback to the owner.** The Sonar publishes into atomics and the owner *pulls*. An edge
   notification would have to be fired from every path that can move a published value — a confirmed fall, a
