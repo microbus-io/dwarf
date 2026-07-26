@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -77,19 +78,37 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 	assert.NoError(err)
 
 	// The tree must settle at interrupted (not failed), despite the "bad" branch having already failed.
-	var out *workflow.FlowOutcome
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		out, err = eng.Snapshot(ctx, flowKey)
-		assert.NoError(err)
-		if out.Status == workflow.StatusInterrupted {
-			break
+	//
+	// Rendezvous on the stop checkpoint rather than polling the flow row: it fires POST-COMMIT and is scoped
+	// by (flowKey, status), so a wake means the row is durable, and arming one waiter per outcome keeps the
+	// "terminalized early" diagnosis that a bare wait-for-interrupted would trade away. A poll on a 3s
+	// deadline read `running` under a loaded parallel -race run - the tree was still on its way, so the
+	// clock was reporting the suite rather than the engine. Arm all three FIRST, then read Visits: a stop
+	// before the call is caught by the count, a later one by the channel.
+	seams := eng.Seams()
+	interrupted := seams.Waiter(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted)
+	failed := seams.Waiter(engine.CheckpointFlowStopped, flowKey, workflow.StatusFailed)
+	completed := seams.Waiter(engine.CheckpointFlowStopped, flowKey, workflow.StatusCompleted)
+	const early = "tree terminalized as %s before resume; must rest interrupted while a branch is parked"
+	switch {
+	case seams.Visits(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted) > 0:
+	case seams.Visits(engine.CheckpointFlowStopped, flowKey, workflow.StatusFailed) > 0:
+		t.Fatalf(early, workflow.StatusFailed)
+	case seams.Visits(engine.CheckpointFlowStopped, flowKey, workflow.StatusCompleted) > 0:
+		t.Fatalf(early, workflow.StatusCompleted)
+	default:
+		select {
+		case <-interrupted:
+		case <-failed:
+			t.Fatalf(early, workflow.StatusFailed)
+		case <-completed:
+			t.Fatalf(early, workflow.StatusCompleted)
+		case <-time.After(15 * time.Second * enginetest.TimeoutScale()):
+			t.Fatal("the tree never reached any stop; the interrupt did not propagate to the root")
 		}
-		if out.Status == workflow.StatusFailed || out.Status == workflow.StatusCompleted {
-			t.Fatalf("tree terminalized as %q before resume; must rest interrupted while a branch is parked", out.Status)
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
+	out, err := eng.Snapshot(ctx, flowKey)
+	assert.NoError(err)
 	assert.Equal(workflow.StatusInterrupted, out.Status, "a failed branch alongside an interrupted one must rest interrupted")
 
 	// Resume the root: the interrupted inner branch completes, the cohort resolves with a failure, the child
