@@ -783,9 +783,16 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	r := newRig(t)
 	// Ordinal 0 of 2: this replica owns EVEN step ids, so odd ones are foreign.
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
-	r.p.SetInterval(50 * time.Millisecond)
+	// The grace has to dominate the fixture's own setup, because "young" is measured against the DATABASE
+	// clock from the moment a step became due - so every insert, query and round trip between the two
+	// counts against it. At a 50ms period the grace was 200ms, and eight inserts plus two queries under
+	// -race on a busy box outran it: the oldest foreign step crossed the line and was taken, failing "a
+	// young foreign step belongs to its owner" by exactly one id. FetchSteps is driven directly here, so the
+	// interval paces nothing and only feeds stealGrace; 2s leaves the setup an order of magnitude of room
+	// while staying well under the 5s backdate the last phase uses to age a step PAST the grace.
+	r.p.SetInterval(500 * time.Millisecond)
 	r.p.SetMinGap(0)
-	r.p.SetStealAfter(4) // grace = 200ms
+	r.p.SetStealAfter(4) // grace = 2s
 
 	for range 8 {
 		r.insertStep(t, 1, 5, "k", 1)
@@ -801,6 +808,12 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	// Armed, but every step is freshly due - younger than the grace - so a healthy owner's work is left
 	// alone. This is the moderate-load case the grace exists for: spare capacity is common in a healthy
 	// fleet, and the gate alone would re-enable overlapping selection fleet-wide.
+	//
+	// Re-stamped rather than trusted to still be young: this makes "freshly due" true at the instant of the
+	// fetch rather than a bet on how long the setup above took, so only the fetch's own round trip is
+	// charged against the grace. Same database clock as the ageing UPDATE below, never a bound Go time.
+	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC()")
+	assert.NoError(err)
 	r.p.stealing.Store(true)
 	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
 	assert.NoError(err)
