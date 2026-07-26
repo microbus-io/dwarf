@@ -189,36 +189,59 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 // or a regression: a healthy fleet must keep dispatching from its OWN classes, or the residue partition
 // stops excluding anything and every replica is back to racing its peers for the same rows.
 //
-// The bound is "a small minority", NOT zero, and the difference is a real property rather than a hedge.
-// Stealing needs an idle replica AND a foreign step older than the grace (four cycle periods), and a
-// UNIFORMLY slow fleet satisfies both without any replica being at fault: everything ages past the grace
-// because everything is slow, while classes empty between arrivals because the load is light. Measured
-// under -race, which slows execution ~10x: 6 of 40 steps stolen in a fleet with nothing wrong with it.
+// It is measured over the window where the gate's condition is unambiguously met - a backlog deep enough
+// that BOTH classes can fill their batch - and over CYCLES rather than a duration, so a loaded suite makes
+// the backlog deeper rather than the measurement noisier. That framing is the whole point of the shape
+// below, and the reason for each half:
 //
-// That is bounded rather than harmful - only an idle replica steals, and the claim CAS arbitrates, so the
-// cost is a lost round trip the stealer had nothing better to do with - but it is NOT free, and if it ever
-// shows up as claim contention the fix is a debounce on the gate (require the class empty for several
-// consecutive cycles) rather than a longer grace, which would just delay the takeover this exists for.
+//   - DEEP, because at MODERATE load the gate legitimately opens with no replica at fault: classes empty
+//     between arrivals while everything ages past the grace, so a light workload measures the grace rather
+//     than the gate. Under -race, which slows execution ~10x, that regime stole on up to 17 cycles of a
+//     31-cycle drain - i.e. the light-load number carries no signal about the gate at all.
+//   - CYCLES, because CheckpointRefillStole fires once per FETCH that took a foreign row, and a pending
+//     step is re-fetched every cycle until someone claims it. The raw count is therefore bounded by the
+//     LENGTH of the drain, not by the steps in it, and a loaded suite lengthens the drain: an absolute
+//     bound on it reported the suite's load (measured 22-23 against a bound of 20 in a parallel -race run
+//     with nothing wrong).
 //
-// Half the total would mean the partition had stopped excluding anything at all, which is the regression
-// this guards; the gate itself is pinned deterministically in internal/piston, where it is directly
-// observable rather than inferred from timing.
+// The residual is not zero and is not expected to be: the fleet still passes through moderate load on its
+// way in and out of the deep phase, and the count also picks up cycles where this replica's partition pair
+// was momentarily unavailable, which makes every row it fetched read as foreign. Both are bounded, and a
+// build whose gate never held off would steal on essentially every cycle that fetched anything - which is
+// the regression this guards. The gate itself is pinned deterministically in internal/piston, where the
+// armed flag is directly observable rather than inferred.
 func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 	t.Parallel()
 	const name = "stealhealthy.verify:428"
 	assert := testarossa.For(t)
 	creator, healthy, crippled, ran := stealFleet(t, name, 4, 0)
 
-	before := healthy.Seams().Visits(engine.CheckpointRefillStole) +
-		crippled.Seams().Visits(engine.CheckpointRefillStole)
+	// The cache holds 2 x 4 workers, so ~100 due steps per residue class is far past "this class can fill
+	// its own batch". Created up front, and not awaited until the measurement is over.
+	keys := createFlows(t, creator, name, 200)
 
-	drainFlows(t, 60*time.Second, creator, name, 20)
-
-	after := healthy.Seams().Visits(engine.CheckpointRefillStole) +
+	// Two cycles of settling before the window opens: the gate arms from the PREVIOUS cycle's tally, and
+	// the cycle before this work landed saw an empty shard, so the first one after it is legitimately still
+	// armed.
+	awaitShardCycles(t, healthy, 1, 2)
+	awaitShardCycles(t, crippled, 1, 2)
+	stoleBefore := healthy.Seams().Visits(engine.CheckpointRefillStole) +
 		crippled.Seams().Visits(engine.CheckpointRefillStole)
-	assert.True(after-before < 20,
-		"a healthy fleet must dispatch mostly from its own classes (stole on %d of 40 steps)", after-before)
-	assert.Equal(int64(40), ran["healthy"].Load()+ran["crippled"].Load(), "and the work still drains exactly once")
+	cyclesBefore := healthy.Seams().Visits(engine.CheckpointRefillCycleDone) +
+		crippled.Seams().Visits(engine.CheckpointRefillCycleDone)
+
+	awaitShardCycles(t, healthy, 1, 10)
+	awaitShardCycles(t, crippled, 1, 10)
+	stole := healthy.Seams().Visits(engine.CheckpointRefillStole) +
+		crippled.Seams().Visits(engine.CheckpointRefillStole) - stoleBefore
+	cycles := healthy.Seams().Visits(engine.CheckpointRefillCycleDone) +
+		crippled.Seams().Visits(engine.CheckpointRefillCycleDone) - cyclesBefore
+	assert.True(2*stole < cycles,
+		"a fleet whose every class can fill its own batch must mostly not steal (stole on %d of %d cycles)",
+		stole, cycles)
+
+	awaitFlows(t, 120*time.Second, creator, keys)
+	assert.Equal(int64(400), ran["healthy"].Load()+ran["crippled"].Load(), "and the work still drains exactly once")
 	assert.Equal(int64(0), ran["creator"].Load())
 }
 
