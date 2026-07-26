@@ -650,23 +650,46 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); r.p.Run(runCtx) }()
 
+	// EPISODES, not samples, and the distinction is what makes this measurable on a shared machine. The two
+	// things a busy reading can mean have opposite shapes:
+	//
+	//   - A busy flag meaning merely "a cycle is in flight" reads true for the sliver each failing cycle
+	//     spends in its queries, over and over. Against a 1ms sampler that is a scatter of MANY short
+	//     episodes: measured 61-103 of them per window under -race, by running this against a build whose
+	//     predicate was `WorkingFor() > 0`.
+	//   - A machine that starves this piston's goroutine inside one cycle produces ONE episode, however long
+	//     the stall: every sample for its duration reads busy. Counting samples cannot tell a scatter of
+	//     short episodes from one long stall - measured 8 busy samples in a starved window, against 175-271
+	//     under the broken predicate - while counting rising edges tells them apart by an order of magnitude.
+	//
+	// So a handful of episodes is tolerated and a scatter is not, which is the honest reading of the
+	// evidence: under the duration-qualified predicate a busy sample is only ever produced by a cycle that
+	// genuinely outran its period, and on this workload nothing but the scheduler can do that. The bound sits
+	// ~6x under the broken build's floor and ~5x over the worst starvation seen (2 episodes, in a window
+	// whose sample count had itself collapsed from ~450 to 175 - the same contention, visible twice).
 	stalled, _, _ := r.p.Liveness()
-	var busyHits, samples int
+	var busyEpisodes, busySamples, samples int
+	wasBusy := false
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		n, b, _ := r.p.Liveness()
 		samples++
 		if b {
-			busyHits++
+			busySamples++
+			if !wasBusy {
+				busyEpisodes++
+			}
 		}
+		wasBusy = b
 		assert.Equal(stalled, n, "a failing cycle must never count as a turn")
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 	<-done
 
-	assert.Equal(0, busyHits,
-		"a piston that only fails must never read as busy (%d of %d samples)", busyHits, samples)
+	assert.True(busyEpisodes < 10,
+		"a piston that only fails must not read as busy across separate cycles (%d episodes, %d of %d samples)",
+		busyEpisodes, busySamples, samples)
 	assert.True(samples > 100, "the sampling has to be dense enough to catch a brief window")
 }
 

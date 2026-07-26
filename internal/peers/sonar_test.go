@@ -637,12 +637,16 @@ func TestPeers_RunReadsUntilTheContextEnds(t *testing.T) {
 	r := newRig(t)
 	r.s.now = time.Now
 	r.s.lastGood.Store(time.Now().UnixNano())
-	r.s.scan = 20 * time.Millisecond
-	r.s.beat = 20 * time.Millisecond
+	// A CADENCE this test drives on the real clock has to sit well clear of scheduler jitter, because every
+	// assertion below is a multiple of it: the blindness grace is two of these, and a gap that wide also
+	// resets the healthy run. At 20ms the grace was 40ms, which a co-running suite or a bench process on the
+	// same box can eat outright - the loop then genuinely gaps and the test correctly reports a cadence that
+	// the machine, not the code, failed to keep.
+	r.s.scan = 100 * time.Millisecond
+	r.s.beat = 100 * time.Millisecond
 	assert.NoError(r.s.register(ctx))
 	r.addPeer(t, 10, time.Second, time.Second)
 
-	started := time.Now()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -654,11 +658,23 @@ func TestPeers_RunReadsUntilTheContextEnds(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	assert.Equal(2, r.s.Replicas(), "the loop published the fleet it read")
+	// The pass that published this is the one that opened the healthy run, and it is over: observe sets
+	// healthySince before it stores the count. So this instant is an upper bound on healthySince that costs
+	// no clock arithmetic and loosens itself on a slow machine.
+	firstPass := time.Now()
 
-	// Let it turn several more times, then check it is keeping up with its own cadence.
+	// Let it turn several more times, then check it is keeping up with its own cadence. Sampled over a
+	// window rather than at one instant: the instant is a coin toss on a busy machine while the property is
+	// not, since a loop that has stopped reading has BlindFor growing without bound and never once dips
+	// under the grace, however long the window.
 	time.Sleep(5 * r.s.scan)
-	assert.True(r.s.BlindFor() < 2*r.s.scan,
-		"a loop keeping its cadence is never blind (blind for %s)", r.s.BlindFor())
+	kept := false
+	for deadline := time.Now().Add(2 * time.Second); !kept && time.Now().Before(deadline); {
+		if kept = r.s.BlindFor() < 2*r.s.scan; !kept {
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	assert.True(kept, "a loop keeping its cadence is never blind (blind for %s)", r.s.BlindFor())
 
 	cancel()
 	returned := false
@@ -671,9 +687,12 @@ func TestPeers_RunReadsUntilTheContextEnds(t *testing.T) {
 
 	// Safe to read the driving goroutine's own state only now that it has returned. If every reading had
 	// looked like it ended a gap, this would have been reset on the last pass rather than set on the first,
-	// and the prune's patience would never accumulate.
-	assert.True(r.s.healthySince.Sub(started) < 3*r.s.scan,
-		"the healthy run was set on the first pass and never reset")
+	// and the prune's patience would never accumulate. Compared against the FIRST PASS rather than against
+	// the start plus a few cadences: the first pass is an exact upper bound (it is the pass that set this),
+	// so the two cases are "at or before it" and "after it" with no margin to size.
+	assert.True(!r.s.healthySince.After(firstPass),
+		"the healthy run was set on the first pass and never reset (reset %s into the run)",
+		r.s.healthySince.Sub(firstPass))
 
 	// Leave is the owner's, with a context that still works - Run's is cancelled by the time it returns, and
 	// Run having returned is what makes the delete final.
