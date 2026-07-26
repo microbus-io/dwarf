@@ -77,8 +77,8 @@ outcome, err := eng.Await(ctx, flowKey)
 Blocks until the flow stops — `completed`, `failed`, `cancelled`, or `interrupted` — and returns the
 outcome, or returns without it when the caller's context ends first. The wait is bounded by a short internal
 cadence rather than by anything the caller or the host has to arrange: a flow that stops on another replica
-wakes its waiters just as one that stops locally does, and a host that implements `SignalPeers` as a no-op
-changes nothing here.
+wakes its waiters just as one that stops locally does, and nothing has to be delivered between replicas for
+that to happen.
 
 If the ctx deadline fires first, `Await` returns the error and the flow **keeps running** — it is durable and
 not bound to your call. You still hold the key, so you can `Await` again.
@@ -232,12 +232,5 @@ before the reaper removes it — so a fire-and-forget caller can still `Run` it 
 ```go
 summaries, err := eng.ShardInfo(ctx)    // per-shard health and size
 ```
-
-## Cross-replica inbound signals
-
-When running multiple replicas, your host's `SignalPeers` publishes coordination signals; the receiving replica
-feeds them back in via `DeliverSignal(ctx, op, payload)`. This is the inbound half of multi-replica
-coordination, not part of the day-to-day API — see
-[Deployment → Running multiple replicas](deployment.md#running-multiple-replicas).
 
 Next: [Fan-out & subgraphs](fan-out-and-subgraphs.md).

@@ -23,27 +23,14 @@ import (
 )
 
 // Host is the contract between the dwarf engine and the surrounding host application. The engine owns no
-// transport of its own; it reaches workflow graphs and tasks and carries cross-replica coordination
-// signals exclusively through the host. Register it once via Engine.SetHost.
+// transport of its own; it reaches workflow graphs and tasks exclusively through the host. Register it
+// once via Engine.SetHost.
 //
-// A host MUST implement LoadGraph and ExecuteTask. SignalPeers is optional: an implementation may do
-// nothing in it when it runs single-replica with no cross-replica coordination.
-//
-// Cross-replica signal contract (SignalPeers): the engine funnels all of its coordination signals
-// (flow-stop wakes, fleet-membership nudges) through this one method. op is a routing key the host may
-// use as a topic/subject; payload is opaque bytes the engine already serialized. The host delivers
-// (op, payload) to OTHER replicas, EXCLUDING the calling replica, and on the receiving side hands them
-// back via Engine.DeliverSignal(ctx, op, payload) - it is a pure pipe that never inspects either. The
-// engine always applies a signal's effect locally before calling SignalPeers, so an implementation that
-// echoes the signal back to the sender would cause it to be processed twice on the originating replica; if
-// the transport delivers published messages to the publisher, the implementation must filter out
-// self-delivery. Because the host never branches on op or inspects payload, adding a new engine signal
-// kind requires no host change.
-//
-// Signal volume is bounded by DEPLOYMENT events, never by flow or step throughput: the engine discovers
-// both pending work and flow outcomes by reading its own databases, so nothing is emitted per step or per
-// flow. A host may size its transport accordingly, and an implementation that is expensive per call is not
-// on the hot path.
+// THE ENGINE SENDS NOTHING TO ITS PEERS, and a host therefore wires no inter-replica transport for it.
+// Replicas sharing a database coordinate entirely by reading it: pending work, flow outcomes and fleet
+// membership are all discovered by polling, on cadences the engine sets, so a fleet converges with no
+// message passing between replicas at any volume - not per step, not per flow, not per deployment event.
+// What a host must supply is exactly what only it can: the graphs and the task dispatch below.
 type Host interface {
 	// LoadGraph fetches a workflow graph definition by its URL (the addressable resolve key passed to
 	// Create). The flow's opaque baggage rides on ctx; read it with workflow.BaggageFrom(ctx) if loading
@@ -64,12 +51,6 @@ type Host interface {
 	// responsibility - tasks must be idempotent. Honor the ctx deadline (it bounds the step's time budget);
 	// a task that ignores it can only be recovered by lease expiry, not cancelled.
 	ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error
-
-	// SignalPeers delivers a cross-replica coordination signal to the other replicas. op is an opaque
-	// routing key (usable as a topic); payload is opaque bytes the engine already serialized. The host
-	// ships (op, payload) to peers and on the receiving side calls Engine.DeliverSignal(ctx, op,
-	// payload). See the cross-replica signal contract above. A single-replica host does nothing here.
-	SignalPeers(ctx context.Context, op string, payload []byte)
 }
 
 // noopHost is a Host whose methods all do nothing (LoadGraph/ExecuteTask return nil). Used by tests that
@@ -80,4 +61,3 @@ func (noopHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, er
 func (noopHost) ExecuteTask(ctx context.Context, name string, flow *workflow.Flow) error {
 	return nil
 }
-func (noopHost) SignalPeers(context.Context, string, []byte) {}

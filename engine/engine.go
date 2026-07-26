@@ -25,7 +25,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,6 +37,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/lru"
+	"github.com/microbus-io/dwarf/internal/peers"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/internal/workers"
@@ -95,13 +95,11 @@ type Engine struct {
 	maxOpenConns           atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
 	refillIntervalOverride atomic.Int64 // expert override (nanoseconds): pins every piston's cycle period; <=0 = derive
 
-	// engineID is a random positive identifier minted per engine instance (fresh on every restart).
-	// It is stamped on every flow/step INSERT (creator) and overwritten by the claim CAS (claimer) -
-	// forensic provenance, deliberately unindexed. engineIDBase36 is its base-36 string form, the origin
-	// on every outbound peer signal: DeliverSignal discards the engine's own signals when the host's
-	// SignalPeers echoes the broadcast back, and the peer-discovery map is keyed by it.
-	engineID       int64
-	engineIDBase36 string
+	// engineID is a random positive identifier minted per engine instance (fresh on every restart). It is
+	// this replica's identity in the shared dwarf_peers registry - the primary key its Sonars own a row
+	// under - and it is stamped on every flow/step INSERT (creator) and overwritten by the claim CAS
+	// (claimer) as forensic provenance, deliberately unindexed.
+	engineID int64
 
 	// flowsStartedCount / flowsTerminatedCount are cheap in-memory lifecycle counts, incremented
 	// alongside the dwarf_flows_started / dwarf_flows_terminated OTEL counters but WITHOUT needing a
@@ -142,24 +140,22 @@ type Engine struct {
 	// while its own claim is still in flight) and expires it with no per-entry sweep - see the package doc.
 	claims *claimstracker.Tracker
 
-	// Peer discovery: the observed replica count R, read from the shared dwarf_peers registry by the
-	// Startup discovery and the heartbeat loop (see peers.go). R divides the derived per-shard
-	// connection pools - a lookup, not a control loop. peersStop/peersLoop drive the heartbeat.
-	observedR atomic.Int32
-	// observedOrdinal is this engine's 0-based position in the SAME fresh-peer roster observedR was counted
-	// from, engine_id-sorted - the other half of the (R, ordinal) pair that partitions candidate selection
-	// across replicas (see partitionPredicate). -1 means "unknown" (self absent from the roster), which
-	// DISABLES partitioning rather than guessing: a wrong ordinal strands a slice, while no partitioning
-	// only restores the overlapping-selection behaviour that predates it.
-	observedOrdinal atomic.Int32
-	// observedDispatchers is how many of those peers actually claim work (dispatches=1). It is the
-	// partition divisor, deliberately distinct from observedR: an await-only replica holds connections
-	// (so it divides the pools) but selects nothing (so it must not own a slice of the candidates).
-	observedDispatchers atomic.Int32
-	peersStop           chan struct{}
-	peersLoop           sync.WaitGroup
-	// lastAppliedR is the replica count the pools were last derived with, to skip no-op recomputes.
-	lastAppliedR atomic.Int32
+	// Peer discovery: one Sonar per shard owns this replica's row in that shard's dwarf_peers registry and
+	// publishes what reading it implies - how many replicas hold connections to the shard (its pool
+	// divisor) and which residue class of step_id this replica selects there (its work divisor). Built in
+	// Startup before anything is sized from them, read-only thereafter; sonarCancel stops their loops. See
+	// peers.go and internal/peers.
+	sonars      map[int]*peers.Sonar
+	sonarCancel context.CancelFunc
+	sonarPool   sync.WaitGroup
+	// reconcileStop ends the loop that keeps the derived pool sizes in step with what the Sonars observe.
+	reconcileStop   chan struct{}
+	reconcileWorker sync.WaitGroup
+	// lastAppliedR is the per-shard replica count the pools were last derived with, to skip no-op
+	// recomputes. Written and read only under poolsLock, so a plain map needs no synchronization of its
+	// own. Per shard because the counts are: a fleet change on one shard must not re-push every other
+	// shard's unchanged sizes, and an unchanged one must not mask a change elsewhere.
+	lastAppliedR map[int]int
 	// poolsLock serializes every APPLICATION of a pool size - the derived recompute (recomputePools) and
 	// the live override (SetMaxOpenConns). Deduping the recompute on lastAppliedR is not enough: two peer
 	// signals microseconds apart during a rolling deploy each read a different R, and nothing orders their
@@ -255,7 +251,6 @@ type Engine struct {
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	latchSweepInterval  time.Duration // Await latch detector cadence - the bound on cross-replica wake (50ms)
 	awaitDefaultBudget  time.Duration // how long Await blocks when the caller's ctx carries no deadline (15m)
-	pingInterval        time.Duration // peer-registry heartbeat cadence; a peer is counted <4x, pruned >8x (30s)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
 	orphanFlowThreshold time.Duration // min age before a stepless running flow is reported orphaned (5m)
@@ -291,10 +286,9 @@ func NewEngine() *Engine {
 	e.timeBudgetMs.Store(int64(2 * time.Minute / time.Millisecond))
 	e.defaultPriority.Store(100)
 	e.SetEngineID(int64(rand.Uint64() >> 1)) // positive, 63 bits of entropy
-	// 0, not 1: "nothing derived yet." Startup reads R from the registry, sizes the pools directly, and
-	// sets lastAppliedR=R; the heartbeat's recompute then dedupes against that. shardPool clamps
-	// replicas=max(1,...), so the 0 sentinel never reaches the arithmetic.
-	e.lastAppliedR.Store(0)
+	// Empty, not seeded: "nothing derived yet" per shard. Startup reads each shard's count, sizes its pool
+	// directly, and records it here; the reconcile loop then dedupes against that.
+	e.lastAppliedR = map[int]int{}
 	e.leaseMargin = 30 * time.Second
 	// The detector's cost scales with concurrent AWAITERS, not with step throughput - one small indexed
 	// IN-lookup per shard holding one, and nothing at all when nobody is waiting - so the cadence is picked
@@ -306,7 +300,6 @@ func NewEngine() *Engine {
 	// is cutting short a wait somebody legitimately asked for.
 	e.awaitDefaultBudget = 15 * time.Minute
 	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-	e.pingInterval = 10 * time.Second
 	e.wedgeSweepInterval = 5 * time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute
 	e.orphanFlowThreshold = 5 * time.Minute
@@ -433,7 +426,6 @@ func (e *Engine) SetEngineID(id int64) error {
 		return errors.New("engine id must be positive", http.StatusBadRequest)
 	}
 	e.engineID = id
-	e.engineIDBase36 = strconv.FormatInt(id, 36)
 	return nil
 }
 
@@ -654,9 +646,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// Measure the RTT to each shard (a few SELECT 1s on connections just opened) and hold it: the worker
 	// ceiling is a function of the shard's POOL, which changes when the fleet changes or an override
 	// lands, so the ceiling is re-derived on those events (recomputeWorkerCeiling) rather than frozen
-	// here. The map is published under shardsLock because its readers are the heartbeat goroutine and
-	// the live SetMaxOpenConns, and a Shutdown/Startup restart reassigns it - an unsynchronized map
-	// read/write is a fatal throw, not a recoverable panic.
+	// here. The map is published under shardsLock because its readers are the reconcile loop and the live
+	// SetMaxOpenConns, and a Shutdown/Startup restart reassigns it - an unsynchronized map read/write is a
+	// fatal throw, not a recoverable panic.
 	rtts := make(map[int]float64, len(shards))
 	for idx := range shards {
 		db, dbErr := e.db.Shard(idx)
@@ -674,12 +666,17 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.shardRTTMs = rtts
 	e.shardsLock.Unlock()
 
-	// Discover R from the registry (register self, nudge peers, settle, read), then size every pool from
-	// the derived R-divided budget - the real sizes, taken before any worker dispatches. lastAppliedR is
-	// seeded to R so the first heartbeat recompute dedupes; observedR is set inside discovery.
-	replicas := e.discoverReplicasAtStartup(ctx, override)
-	e.observedR.Store(int32(replicas))
-	e.lastAppliedR.Store(int32(replicas))
+	// Announce this replica on every shard, wait for peers to notice, and read each shard's fleet back -
+	// then size every pool from the derived budget split by THAT shard's count. Those are the real sizes,
+	// taken before any worker dispatches, so the replica takes on work with pools already correct for the
+	// fleet it is in: no async grace window and no partial-count over-connect.
+	//
+	// The announce-then-wait ordering is what keeps the join from exceeding a shard's connection budget even
+	// momentarily - peers hold pools sized for the fleet WITHOUT this replica until they read again, so it
+	// shrinks them first and grows into the space afterward. It costs one wait for the whole fleet, since the
+	// shards join in parallel.
+	e.buildSonars()
+	e.joinFleet(ctx)
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)
 	e.shardsLock.Unlock()
@@ -689,9 +686,11 @@ func (e *Engine) Startup(ctx context.Context) error {
 		if dbErr != nil {
 			continue
 		}
+		replicas := e.replicasOn(idx)
 		idle, open := shardPool(specs[idx], override, replicas) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
+		e.lastAppliedR[idx] = replicas
 		totalConns += open
 	}
 	// The RESIDENT worker set (and, with it, the candidate cache and every refill scan) is sized from
@@ -775,34 +774,36 @@ func (e *Engine) initRuntime() error {
 	e.initTracer()
 
 	// Build the pistons now that the cache is sized: each takes its own shard's handle, the shared planner
-	// and the shared cache, plus this replica's identity for the peer registry. An await-only replica
-	// (SetWorkers(0)) idles them - they keep heartbeating, so the replica stays in R and goes on dividing
-	// the pools, but they claim no work and are excluded from the candidate partition.
+	// and the shared cache. An await-only replica (SetWorkers(0)) idles them - the replica goes on holding
+	// connections and dividing the pools, since its Sonars keep beating either way, but it claims no work
+	// and its idling pistons report as much, which is what excludes it from the candidate partition.
 	idle := int(e.workers.Load()) == 0
 	for _, idx := range e.db.Indices() {
-		// A shard without a piston has no supply cycle AND no heartbeat, so the replica silently ages out
-		// of R on that shard and is eventually pruned from its registry - a half-supplied engine reporting
-		// success. Startup returns an error; use it. Both failures are near-impossible today (the shard set
-		// is already open, the arguments are non-nil), which is exactly why continuing quietly is the wrong
-		// default: the only way to reach here is a bug, and a loud one is cheaper than a degraded fleet.
+		// A shard without a piston has no supply cycle, so nothing on it is ever dispatched while the replica
+		// goes on advertising itself as alive there - a half-supplied engine reporting success. Startup
+		// returns an error; use it. Both failures are near-impossible today (the shard set is already open,
+		// the arguments are non-nil), which is exactly why continuing quietly is the wrong default: the only
+		// way to reach here is a bug, and a loud one is cheaper than a degraded fleet.
 		db, dbErr := e.db.Shard(idx)
 		if dbErr != nil {
 			e.unwindRuntime()
 			return errors.New("resolving shard %d for its piston: %w", idx, dbErr)
 		}
-		p, perr := piston.New(e.engineID, idx, db, e.planner, &e.cache)
+		p, perr := piston.New(idx, db, e.planner, &e.cache)
 		if perr != nil {
 			e.unwindRuntime()
 			return errors.New("building piston for shard %d: %w", idx, perr)
 		}
 		p.SetLogger(e.logger)
 		p.SetSeams(e.seams)
-		// The pistons refresh this replica's registry row, but the window READERS judge it by is derived
-		// from pingInterval - two different places, so tie them together here rather than leaving a healthy
-		// replica able to age out of its own fleet. A quarter of the read cadence leaves ample margin, and
-		// the 1s cap keeps a long pingInterval from making the beat needlessly rare.
-		p.SetHeartbeatInterval(min(time.Second, max(10*time.Millisecond, e.pingInterval/4)))
-		p.SetPartitionFunc(e.observedPartition)
+		// The two halves of this shard's peer accounting, wired to each other through the engine rather than
+		// through either package knowing the other: the piston selects within the residue class its shard's
+		// Sonar publishes, and that Sonar stamps this replica as SERVING the shard only when the piston says
+		// it is turning. Both are pure reads of live state, so neither captures anything that could go stale.
+		p.SetPartitionFunc(func() (int, int, bool) { return e.partitionOn(idx) })
+		if s := e.sonarFor(idx); s != nil {
+			s.SetEvidence(p.Liveness)
+		}
 		if merr := p.SetMeter(e.meter); merr != nil {
 			e.logger.ErrorContext(e.lifetimeCtx, "Building piston instruments", "shard", idx, "error", merr)
 		}
@@ -858,12 +859,23 @@ func (e *Engine) initRuntime() error {
 	e.latchWorker.Go(func() {
 		e.latchLoop(e.lifetimeCtx)
 	})
-	// Peer discovery: start the heartbeat. This replica already registered itself and read R during
-	// Startup (discoverReplicasAtStartup), and the pools are already sized for that R; the loop keeps the
-	// registry row fresh and re-reads R every pingInterval so a fleet change resizes the pools.
-	e.peersStop = make(chan struct{})
-	e.peersLoop.Go(func() {
-		e.runPeersLoop()
+	// Peer discovery. This replica has already joined every shard's registry and the pools are sized for
+	// what it read there (Startup); from here the Sonars keep their rows fresh and re-read on their own
+	// cadence, while the reconcile loop keeps what the engine DERIVES in step with what they observe.
+	//
+	// The Sonars run on their OWN child of the lifetime ctx rather than the pistons', because they must
+	// outlive them: a replica has to stay registered while its workers are still executing steps, since
+	// every peer sized its pools for a fleet that includes us.
+	sonarCtx, sonarCancel := context.WithCancel(e.lifetimeCtx)
+	e.sonarCancel = sonarCancel
+	for _, s := range e.sonars {
+		e.sonarPool.Go(func() {
+			s.Run(sonarCtx)
+		})
+	}
+	e.reconcileStop = make(chan struct{})
+	e.reconcileWorker.Go(func() {
+		e.runReconcileLoop()
 	})
 	return nil
 }
@@ -886,12 +898,12 @@ func (e *Engine) drainRuntime() {
 	if e.drainStop != nil {
 		close(e.drainStop)
 	}
-	// Stop the peer READ loop. The registry row is deleted further down, after the pistons stop - they own
-	// the write now, so deleting here would just be undone by the next beat.
-	if e.peersStop != nil {
-		close(e.peersStop)
+	// Stop deriving pool sizes from the fleet. Pure in-memory work, so it can stop first and there is
+	// nothing in flight to wait for beyond the tick itself.
+	if e.reconcileStop != nil {
+		close(e.reconcileStop)
 	}
-	e.peersLoop.Wait()
+	e.reconcileWorker.Wait()
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()
@@ -912,20 +924,22 @@ func (e *Engine) drainRuntime() {
 		close(e.latchStop)
 	}
 	e.latchWorker.Wait()
-	// The pistons last: their cycles are pure reads, so cancelling mid-flight strands nothing, and their
-	// heartbeat must keep this replica in the registry for as long as it is still executing steps - the
-	// workers above were draining against pools every peer sized for a fleet that still included us.
+	// Then the pistons: their cycles are pure reads, so cancelling mid-flight strands nothing.
 	if e.pistonCancel != nil {
 		e.pistonCancel()
 	}
 	e.pistonPool.Wait()
-	// Only now is the last possible beat behind us, so the row can be deleted and peers nudged to recount -
-	// they regrow their pool shares immediately rather than waiting out peerStragglerAge. Best-effort on a
-	// still-open shard set: a missed delete just ages out of peers' counts on its own.
-	if err := e.deregisterPeer(context.Background()); err != nil {
-		e.logger.Error("Deregistering peer at shutdown", "error", err)
+	// The Sonars LAST, because this replica must stay registered while its workers are still executing
+	// steps - every one of them was draining against pools each peer sized for a fleet that still included
+	// us. Only once their loops have returned is the last possible beat behind us, which is what makes the
+	// delete final: a beat only ever UPDATEs, so nothing can resurrect a row deleted after its loop stopped.
+	// Peers then regrow their shares immediately rather than waiting out the freshness window. Best-effort
+	// on a still-open shard set, and on a context of its own since the lifetime one is about to be cancelled.
+	if e.sonarCancel != nil {
+		e.sonarCancel()
 	}
-	e.signalPeersChanged(context.Background())
+	e.sonarPool.Wait()
+	e.leaveFleet(context.Background())
 	// Wake every blocked Await so it returns a shutdown error rather than waiting out its own context on a
 	// board nothing will ever release again - every goroutine that could have is drained above. A caller
 	// already holding a stop status keeps it and returns that outcome instead.

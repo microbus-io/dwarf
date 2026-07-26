@@ -79,9 +79,6 @@ func TestTwoReplicaflow(t *testing.T) {
 	eng2 := engine.NewEngineUnderTest(t)
 	eng2.SetHost(proxy2)
 	assert.NoError(eng2.SetWorkers(4))
-	proxy1.AddPeer(eng2)
-	proxy2.AddPeer(eng1)
-
 	assert.NoError(eng1.Startup(ctx))
 	t.Cleanup(func() { eng1.Shutdown(ctx) })
 	assert.NoError(eng2.Startup(ctx))
@@ -157,8 +154,6 @@ func TestTwoReplicaflow(t *testing.T) {
 		worker := engine.NewEngineUnderTest(t)
 		worker.SetHost(pb)
 		assert.NoError(worker.SetWorkers(2))
-		pa.AddPeer(worker)
-		pb.AddPeer(awaiter)
 		assert.NoError(awaiter.Startup(ctx))
 		t.Cleanup(func() { awaiter.Shutdown(ctx) })
 		assert.NoError(worker.Startup(ctx))

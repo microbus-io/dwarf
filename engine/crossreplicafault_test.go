@@ -73,16 +73,14 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	assert.NoError(worker.SetShard(ShardSpec{Index: 1, DSN: dsn}))
 	assert.NoError(worker.SetWorkers(2))
 
-	proxyAwaiter.AddPeer(worker) // awaiter's create-doorbell reaches the worker
-	proxyWorker.AddPeer(awaiter) // worker's (dropped) terminal wake would reach the awaiter
-
 	assert.NoError(awaiter.Startup(ctx))
 	t.Cleanup(func() { awaiter.Shutdown(ctx) })
 	assert.NoError(worker.Startup(ctx))
 	t.Cleanup(func() { worker.Shutdown(ctx) })
 
-	// Break the worker's terminal wake for the rest of the test: every signalStop on the worker (local notify
-	// + peer broadcast) delivers nothing, so the awaiter can learn the outcome only by reading the flow row.
+	// Break the worker's terminal wake for the rest of the test: every signalStop on the worker delivers
+	// nothing, so the awaiter can learn the outcome only by reading the flow row. Nothing crosses between the
+	// two replicas in any case - they share a database and nothing else.
 	worker.seams.InjectN(1<<20, FaultDropSignalStop)
 
 	fk, err := awaiter.Create(ctx, "xrwake/g", nil, nil)

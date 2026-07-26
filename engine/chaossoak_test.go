@@ -35,7 +35,7 @@ import (
 
 // TestChaosSoak mechanizes hunting for the lease-fence and Delete/Purge-vs-Resume bug class: it
 // runs a mixed workload of three graph shapes while a chaos goroutine fires random lifecycle operations
-// (Cancel/Resume/Snapshot/History/Fork/Delete/duplicate DeliverSignal) at random flows, then drives every
+// (Cancel/Resume/Snapshot/History/Fork/Delete/duplicate work doorbell) at random flows, then drives every
 // flow to terminal and asserts (a) nothing wedged - every Await returns - (b) the structural invariants
 // are clean, and (c) the dwarf_steps_unwedged "latent bug" alarm never fired. The RNG seed is logged so a
 // failure reproduces (DWARF_SOAK_SEED overrides it).
@@ -211,8 +211,8 @@ func TestChaosSoak(t *testing.T) {
 // chaosEnqueue rings a duplicate/possibly-stale LOCAL work doorbell for one of the flow's steps,
 // exercising the documented idempotency of a candidate hint: the cache holds hints, never ownership, so
 // re-offering a step that is already running, completed or gone must be absorbed by the claim CAS. It
-// used to drive this through DeliverSignal's `enqueue` op; that per-step peer broadcast was removed, so
-// the chaos now targets the local primitive the broadcast used to feed.
+// used to drive this through a per-step peer broadcast, which no longer exists, so the chaos targets the
+// local primitive that broadcast used to feed.
 func chaosEnqueue(ctx context.Context, eng *Engine, flowKey string) {
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -314,7 +314,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 }
 
 // TestChaosSoak_Faults layers random test-only fault injection over the chaos soak: alongside the
-// random lifecycle operations (Cancel/Resume/Fork/Delete/DeliverSignal) a fault goroutine continuously arms
+// random lifecycle operations (Cancel/Resume/Fork/Delete/doorbell) a fault goroutine continuously arms
 // random recovery faults - transition/completion-commit failures, lock contention, stale-lease zombie writes,
 // dropped wakes, a lost subgraph revive, a refiller scan error (and, under longsoak, a mid-tree reaper abort)
 // - scoped to random live task names. This exercises *recovery interacting with chaos*, the surface where the

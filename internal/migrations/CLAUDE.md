@@ -84,20 +84,25 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 
 #### `dwarf_peers`
 
-The replica registry that backs the observed replica count R (which divides each shard's connection pool - see
-`engine/CLAUDE.md` §"Peer discovery"). One row per **live** engine replica, written to **every** shard.
+The replica registry that backs both fleet divisors - how many replicas hold connections to a shard (which
+divides its connection pool) and how many demonstrably serve it (which divides its work). One row per **live**
+engine replica, written to **every** shard, and read **per shard**: every timestamp here is stamped by the shard
+holding it, so ages are comparable within a shard and timestamps are comparable nowhere. The mechanism is
+`internal/peers/CLAUDE.md`; the engine's use of it is `engine/CLAUDE.md` §"Peer discovery".
 
 | Column | Meaning |
 |---|---|
 | `engine_id` | **Primary key** - the replica's per-process id (the same value stamped as provenance on `dwarf_flows`/`dwarf_steps`). PK, not a mere index: it is *identity*, so a heartbeat is a clean update-by-id and the astronomically-unlikely id collision surfaces as a loud constraint violation rather than a silent double-count. Random and fresh on every restart *by default*, so a restarted replica inserts a new row and its old one ages out (never updated again) - unless the host pins a stable id via `SetEngineID` (see `engine/CLAUDE.md` §"Peer discovery"), in which case a restart re-upserts its one row and leaves no ghost |
-| `seen_at` | UTC heartbeat timestamp, `NOW_UTC()` at every write (never a bound Go time - one clock per shard). A replica is **counted** while `seen_at > NOW - 4x pingInterval` (so a crashed peer, whose owner sends no goodbye, drops out of the count on its own) and its dead row becomes eligible for the prune **DELETE** once `seen_at < NOW - 8x pingInterval` (hygiene only; the read filter already stopped counting it). The prune is **conditional + statistical** - it runs only when a heartbeat's scan finds `stale > 0` and the replica wins a `1/R` dice roll - so steady state issues no range-DELETEs and the only writes are conflict-free per-PK upserts (see `engine/CLAUDE.md` §"Peer discovery"). Shutdown deletes the row outright |
+| `seen_at` | UTC heartbeat timestamp, `NOW_UTC()` at every write (never a bound Go time - one clock per shard). A replica is **counted** toward the pool divisor while this is inside the fresh window (40s, some 40 beats - generous because under-counting over-sizes every pool derived from it, and the beat is itself a pooled write that can starve for a connection under load). A crashed peer, whose owner sends no goodbye, drops out on its own; its dead row becomes eligible for the hygiene **DELETE** past the straggler age (80s), and even then only once the registry has been continuously readable for five minutes. The delete names ids explicitly rather than filtering on a timestamp range, so the server never re-evaluates a clock the deleting process did not observe - which is what keeps a stall that ages every row at once from emptying the registry fleet-wide - and it never includes the deleter's own row. Shutdown deletes the row outright |
 | `dispatched_at` | UTC time this replica last *demonstrably* served the shard - written `NOW_UTC()` only by a heartbeat that has a **completed refill cycle** behind it. It answers the same question as `dispatches` with evidence instead of a claim, and that is the whole reason it exists: a replica that publishes `dispatches=1` and then wedges keeps its residue class of `step_id` forever and nothing ever selects those steps, whereas a wedged replica simply stops advancing `dispatched_at` and drops out of the partition divisor on its own while `seen_at` keeps it in R where it belongs. A cycle that found *nothing due* still counts - it proves the replica looked and could have served; gating on candidates instead would make a quiet fleet read as having no dispatchers at all. An **idle** replica runs no cycle, so it never advances this and needs no flag to say so. Defaults to `'2000-01-01 00:00:00'` - a **literal** constant, not a computed `NOW_UTC()`-relative default, because MySQL admits no function-based expression default other than `CURRENT_TIMESTAMP`; the literal is decades stale against any clock, so a pre-column or freshly-inserted row correctly reads "never dispatched" until it earns otherwise. It REPLACED a `dispatches` flag (`1` when the replica claimed work, `0` for an await-only one), which was dropped once this became its only reader; the flag's default was the optimistic `1`, and this one's is the opposite posture on purpose - absence of evidence must not read as evidence, and the cost is one heartbeat of under-counting rather than an indefinitely stranded residue class. The registry answers two different questions and conflating them strands work: **R** (the pool divisor) counts *every* fresh row, since an await-only replica still holds connections, while the **candidate partition** divides across dispatchers only |
 
 **No secondary index, by design.** The table holds one row per live replica - a handful, effectively always in the
-buffer pool - so the `COUNT`/`DELETE`/`UPDATE` all run as trivial full scans. A `seen_at` index would be pure write
+buffer pool - so every statement against it runs as a trivial full scan. A `seen_at` index would be pure write
 amplification on a hot-ish row for zero read benefit. The PK on `engine_id` is *identity* (the upsert target), not a
-scan-speed index. Written and read on **all** shards via `OnEach` (parallel), taking `MAX(count)` across them, so a
-future shard-fault-tolerant `OnEach` reads the count from the survivors with no schema change.
+scan-speed index. The read is deliberately **unfiltered**, for the same reason: it is a whole-table scan either way,
+and returning every row is what lets the freshness windows live in Go, gives the hygiene delete its candidates from
+the same reading everything else is derived from, and keeps a row that is ABSENT distinguishable from one that is
+merely stale.
 
 ## Database Indexing Strategy
 

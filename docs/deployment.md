@@ -141,11 +141,14 @@ these constants are in the [cloud benchmarks](benchmark-cloud.md).
 > of one replica: R replicas each holding the full ~6 × `VirtualCPUs` pool would overshoot the knee R
 > times over, into the over-connection zone the cap exists to prevent. The engine handles this
 > automatically: each replica records a periodic heartbeat in the shard databases it already shares
-> with the others, reads the live replica count R back from them, and takes its 1/R share of every
-> derived pool — resizing live as the fleet scales in or out, with nothing to declare. Because the
-> count lives in the shared databases, this works **even if you leave `SignalPeers` (below) a no-op**;
-> wiring `SignalPeers` only makes the count converge faster (sub-second, rather than within one
-> heartbeat). (`SetMaxOpenConns`, when used, is an exact per-replica number and is never divided.)
+> with the others, reads the live replica count back from them **per shard**, and takes its 1/R share of
+> that shard's derived pool — resizing live as the fleet scales in or out, with nothing to declare. Per
+> shard because the budget is: a replica that loses touch with one shard mis-sizes only that shard's pool.
+> The count lives in the shared databases, so nothing has to be delivered between replicas for it to
+> converge. A joining replica also waits to be seen by the others before it opens its own connections, so
+> the fleet shrinks to make room for it rather than briefly overshooting the budget together. (Lowering a
+> pool's limit closes nothing, so a peer's surplus connections drain as they are returned rather than
+> instantly.) (`SetMaxOpenConns`, when used, is an exact per-replica number and is never divided.)
 
 > **Crashing replicas and `SetEngineID`.** A replica identifies itself in the registry by an id that is
 > random by default. A replica that *crashes* (rather than shutting down cleanly) leaves its last entry
@@ -195,42 +198,23 @@ when the downstream pushes back.
 
 Dwarf scales horizontally: run many engine replicas against the same shards. Each replica selects and
 dispatches work independently; the database (via an atomic claim) arbitrates, so two replicas never run the
-same step. Most coordination is recovered automatically by each replica's background poll, but for low
-latency replicas exchange **fire-and-forget peer signals**.
+same step.
 
-Implement your host's `SignalPeers` to publish those signals to your other replicas (over whatever
-transport you have), and feed inbound signals back in with `DeliverSignal`. All signal kinds funnel
-through this one method on the `Host` interface — the engine pre-serializes the body, so your host is a
-pure pipe that never inspects `op` or `payload`:
+**There is nothing to wire between them.** Replicas coordinate entirely through the databases they already
+share — pending work, flow outcomes and fleet membership are all discovered by reading, on cadences the
+engine sets. No message bus, no peer-to-peer transport, no host method to implement. Running a second
+replica is: point it at the same shards and start it.
 
-```go
-type Host interface {
-    // ... required LoadGraph / ExecuteTask ...
+That has three consequences worth knowing:
 
-    // op is a routing key (usable as a topic); payload is opaque bytes. Ship (op, payload) to OTHER
-    // replicas; on receipt call eng.DeliverSignal(ctx, op, payload).
-    SignalPeers(ctx context.Context, op string, payload []byte)
-}
-```
-
-```
-Outbound:  eng emits → host.SignalPeers(ctx, op, payload) → your transport → peers
-Inbound:   peer transport → host → eng.DeliverSignal(ctx, op, payload)
-```
-
-Two delivery rules:
-
-- **Deliver to other replicas only.** The engine applies each signal locally *before* publishing it, so
-  the sender has nothing to learn from its own broadcast. If your transport delivers to the publisher,
-  filter out self-delivery. As a backstop the engine also stamps each signal with its own instance id
-  and silently discards an echo of its own broadcast — but that discard still costs your transport a
-  round-trip per signal, so filtering at the transport remains the right design.
-- **Nothing here carries a flow's outcome.** A cross-replica `Await` does not depend on this transport: a flow
-  created on replica A and completed on replica B is found by A reading the shared database, so `Await` returns
-  promptly whether or not a signal is delivered. Signals are convergence nudges — losing one costs latency in
-  the fleet's own bookkeeping, never a missed outcome.
-
-In a single-replica deployment, leave `SignalPeers` a no-op; none of this runs.
+- **A cross-replica `Await` needs no delivery.** A flow created on replica A and completed on replica B is
+  found by A reading the shared database, so `Await` returns promptly with nothing sent.
+- **Fleet size is observed, not declared.** Each replica registers itself in a small `dwarf_peers` table
+  per shard and reads the others back, which is what splits each shard's connection budget (above). A
+  joining replica waits to be seen before it opens its own connections, so the fleet makes room for it
+  rather than briefly overshooting together.
+- **A replica that dies needs no goodbye.** Its rows stop being refreshed and it drops out of both counts
+  on its own; a clean shutdown deletes them outright and the fleet regrows immediately.
 
 ## Shutting down
 

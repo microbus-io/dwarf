@@ -85,7 +85,6 @@ func (e *Engine) recomputeRefillIntervals() {
 	// guard and answers with the 1s cap - backwards for a tiny cache, which drains instantly and wants
 	// frequent scans. The case is a small cache, not an unknown one.
 	share := max(1, e.cache.Capacity()/n)
-	replicas := max(1, int(e.observedR.Load()))
 	override := time.Duration(e.refillIntervalOverride.Load())
 	pinned := int(e.maxOpenConns.Load()) // >0 when SetMaxOpenConns pins every shard's pool
 	e.shardsLock.Lock()
@@ -107,6 +106,9 @@ func (e *Engine) recomputeRefillIntervals() {
 		// vCPUs (0 = undeclared), so the drain is bounded by whichever channel is real - the pinned pool,
 		// not a defaulted vCPU count. An unconfigured shard's zero-value spec falls to the conn channel.
 		spec := specs[idx]
+		// This shard's own replica count: the pool it drains through was divided by that one, so deriving the
+		// period from any other shard's fleet would measure the buffer against the wrong drain rate.
+		replicas := e.replicasOn(idx)
 		_, pool := shardPool(spec, pinned, replicas)
 		p.SetInterval(deriveRefillInterval(share, spec.VirtualCPUs, pool, replicas))
 		p.SetMinGap(pipeline.DefaultMinGap)

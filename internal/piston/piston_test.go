@@ -35,9 +35,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// defaultTestEngineID is the replica identity every rig is built with; the registry is keyed on it.
-const defaultTestEngineID = 4242
-
 // rig is one piston over its own isolated, migrated database.
 type rig struct {
 	p       *Piston
@@ -70,27 +67,13 @@ func newRig(t *testing.T) *rig {
 	cache.Init(4) // capacity 8
 	t.Cleanup(cache.Close)
 	pl := planner.New()
-	p, err := New(defaultTestEngineID, 1, db, pl, cache)
+	p, err := New(1, db, pl, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.SetInterval(0)
 	p.SetMinGap(0)
-	r := &rig{p: p, db: db, planner: pl, cache: cache}
-	r.register(t)
-	return r
-}
-
-// register creates this replica's registry row, which in production the OWNER does once at startup
-// (before any piston runs). The beat only ever refreshes it, so without this every beat is a no-op.
-func (r *rig) register(t *testing.T) {
-	t.Helper()
-	_, err := r.db.ExecContext(context.Background(),
-		"INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (?, NOW_UTC())",
-		defaultTestEngineID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	return &rig{p: p, db: db, planner: pl, cache: cache}
 }
 
 // insertStep adds one due pending step and returns its id. Steps are inserted oldest-first by call
@@ -124,38 +107,6 @@ func (r *rig) park(t *testing.T, stepID int) {
 		t.Fatal(err)
 	}
 }
-
-// peerRow is one registry row as a test sees it. DispatchedAgeMs is computed in SQL against the database
-// clock - never round-tripped through Go - so a "fresh" check means the same thing here as in the engine.
-type peerRow struct {
-	EngineID        int64
-	SeenAgeMs       float64
-	DispatchedAgeMs float64
-}
-
-func (r *rig) peerRows(t *testing.T) []peerRow {
-	t.Helper()
-	rows, err := r.db.QueryContext(context.Background(),
-		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at),"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) FROM dwarf_peers ORDER BY engine_id")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var out []peerRow
-	for rows.Next() {
-		var e peerRow
-		if err := rows.Scan(&e.EngineID, &e.SeenAgeMs, &e.DispatchedAgeMs); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, e)
-	}
-	return out
-}
-
-// staleDispatch is any age old enough that no live piston could have produced it - the default sits
-// decades back, so a generous threshold still separates "never" from "just now" unambiguously.
-const staleDispatch = 24 * 60 * 60 * 1000.0
 
 func drain(c *candidatecache.Cache) []int {
 	out := make([]int, 0, c.Len())
@@ -359,130 +310,30 @@ func TestPiston_PartitionDoesNotNarrowTheBand(t *testing.T) {
 	}
 }
 
-// TestPiston_HeartbeatInsertsThenUpdates pins the dialect-agnostic upsert: the first beat INSERTs, later
-// beats UPDATE the same row rather than accumulating duplicates.
-func TestPiston_HeartbeatUpdatesInPlace(t *testing.T) {
+// TestPiston_RunDispatchesAndReportsItsTurns drives the whole loop end to end: real steps in, candidates
+// in the cache, and a turn count an owner can see moving.
+func TestPiston_RunDispatchesAndReportsItsTurns(t *testing.T) {
 	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-	r := newRig(t)
-
-	r.p.beat(ctx)
-	rows := r.peerRows(t)
-	assert.Equal(1, len(rows))
-	assert.Equal(int64(defaultTestEngineID), rows[0].EngineID)
-
-	time.Sleep(2 * time.Millisecond) // NOW_UTC() is millisecond-precision; ensure seen_at changes
-	r.p.beat(ctx)
-	assert.Equal(1, len(r.peerRows(t)), "the second beat updates in place")
-
-	// A beat with no row to update is a NO-OP, never an insert. That is what lets the owner delete the row
-	// at shutdown without having to prove every piston stopped beating first - a straggler beat simply
-	// matches nothing instead of resurrecting the replica in a registry it has just left.
-	_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", defaultTestEngineID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.p.beat(ctx)
-	assert.Equal(0, len(r.peerRows(t)), "a beat must never re-create a deleted row")
-}
-
-// TestPiston_DispatchedAtNeedsEvidence pins the distinction between the two timestamps. seen_at says the
-// replica is alive and holding connections - what R counts. dispatched_at says it is genuinely serving -
-// what the candidate partition divides across - and it moves ONLY after a cycle actually completed. A
-// piston that beats without ever cycling must not look like a dispatcher, because a replica handed a
-// residue class it never selects strands those steps.
-func TestPiston_DispatchedAtNeedsEvidence(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-	r := newRig(t)
-
-	// Beating with no cycle behind it: alive, but no evidence of dispatch.
-	r.p.beat(ctx)
-	row := r.peerRows(t)[0]
-	assert.True(row.SeenAgeMs < staleDispatch, "seen_at is fresh from the first beat")
-	assert.True(row.DispatchedAgeMs > staleDispatch,
-		"dispatched_at keeps its never-dispatched default (age %.0fms)", row.DispatchedAgeMs)
-
-	// A completed cycle is the evidence; the next beat publishes it.
-	res := r.p.Cycle(ctx)
-	assert.NoError(res.Err)
-
-	time.Sleep(2 * time.Millisecond)
-	r.p.beat(ctx)
-	row = r.peerRows(t)[0]
-	assert.True(row.DispatchedAgeMs < staleDispatch, "a completed cycle advances dispatched_at")
-
-	// And it is consumed, not sticky forever: a beat with no cycle since leaves it where it was.
-	before := row.DispatchedAgeMs
-	time.Sleep(5 * time.Millisecond)
-	r.p.beat(ctx)
-	assert.True(r.peerRows(t)[0].DispatchedAgeMs > before,
-		"with no cycle since the last beat, dispatched_at stops advancing and ages")
-}
-
-// TestPiston_IdleNeverAdvancesDispatchedAt pins how the two populations separate with nothing trusted:
-// an idle piston runs no cycle, so its dispatched_at simply never moves. No flag has to be believed.
-// NOT parallel: it shortens the package-level heartbeatInterval, which every other test reads.
-func TestPiston_IdleNeverAdvancesDispatchedAt(t *testing.T) {
-	assert := testarossa.For(t)
-	r := newRig(t)
-	r.p.SetIdle(true)
-	r.insertStep(t, 1, 5, "k", 1)
-
-	restore := heartbeatInterval
-	heartbeatInterval = 5 * time.Millisecond
-	t.Cleanup(func() { heartbeatInterval = restore })
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); r.p.Run(ctx) }()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && len(r.peerRows(t)) == 0 {
-		time.Sleep(2 * time.Millisecond)
-	}
-	time.Sleep(30 * time.Millisecond) // several more beats
-	cancel()
-	<-done
-
-	row := r.peerRows(t)[0]
-	assert.True(row.SeenAgeMs < staleDispatch, "idling keeps the replica alive in R")
-	assert.True(row.DispatchedAgeMs > staleDispatch,
-		"but never claims to dispatch, however many times it beats (age %.0fms)", row.DispatchedAgeMs)
-}
-
-// TestPiston_RunDispatchesAndBeats drives the whole loop end to end: real steps in, candidates in the
-// cache, and a registry row written.
-// NOT parallel: it shortens the package-level heartbeatInterval, which every other test reads.
-func TestPiston_RunDispatchesAndBeats(t *testing.T) {
 	assert := testarossa.For(t)
 	r := newRig(t)
 	r.p.SetInterval(5 * time.Millisecond)
 
-	// The beat runs on its OWN loop now, so the evidence of dispatch is published by whichever beat follows
-	// the first successful cycle - not by the cycle itself. The very first beat fires before any cycle has
-	// run and correctly reports no dispatch, so the interval has to be short enough for a second one to land
-	// inside the test.
-	restore := heartbeatInterval
-	heartbeatInterval = 5 * time.Millisecond
-	t.Cleanup(func() { heartbeatInterval = restore })
+	turns, busy, idle := r.p.Liveness()
+	assert.Equal(uint64(0), turns, "nothing has turned yet")
+	assert.False(busy)
+	assert.False(idle)
 
 	want := []int{
 		r.insertStep(t, 1, 5, "k", 1),
 		r.insertStep(t, 2, 5, "k", 1),
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.p.Run(ctx) }()
 
-	// Wait for the real end state - candidates pushed AND the dispatch evidence published - rather than for
-	// a peer row merely existing, which the pre-cycle beat satisfies on its own.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		rows := r.peerRows(t)
-		if r.cache.Len() >= len(want) && len(rows) > 0 && rows[0].DispatchedAgeMs < staleDispatch {
+		if n, _, _ := r.p.Liveness(); n > 0 && r.cache.Len() >= len(want) {
 			break
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -491,46 +342,40 @@ func TestPiston_RunDispatchesAndBeats(t *testing.T) {
 	<-done
 
 	assert.Equal(want, drain(r.cache), "the loop pushed both due steps, oldest first")
-	rows := r.peerRows(t)
-	assert.Equal(1, len(rows))
-	assert.Equal(int64(defaultTestEngineID), rows[0].EngineID)
-	assert.True(rows[0].SeenAgeMs < staleDispatch)
-	assert.True(rows[0].DispatchedAgeMs < staleDispatch,
-		"a loop that really dispatched publishes the evidence for it (age %.0fms)", rows[0].DispatchedAgeMs)
+	turns, _, _ = r.p.Liveness()
+	assert.True(turns > 0, "and a turning loop says so")
+
+	// Reading it again reports the same count: the evidence is a counter, not a flag the reader clears. A
+	// consuming getter would let any second caller - a metric, a test - silently swallow it and leave a
+	// healthy piston looking stalled.
+	again, _, _ := r.p.Liveness()
+	assert.Equal(turns, again, "looking twice reports the same turns twice")
 }
 
-// TestPiston_RunIdleBeatsWithoutDispatching pins the idle mode over the real loop: it keeps the registry
-// row fresh - so the replica goes on dividing the pools - while selecting nothing at all.
-// NOT parallel: it shortens the package-level heartbeatInterval, which every other test reads.
-func TestPiston_RunIdleBeatsWithoutDispatching(t *testing.T) {
+// TestPiston_RunIdleTurnsNothing pins the idle mode over the real loop: it selects nothing at all and
+// reports itself idle, so an owner can keep the replica counted for the connections it holds while
+// excluding it from anything that divides work.
+func TestPiston_RunIdleTurnsNothing(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t)
 	r.p.SetIdle(true)
 	r.insertStep(t, 1, 5, "k", 1)
 
-	// Shortened so the test observes several beats without waiting out real seconds.
-	restore := heartbeatInterval
-	heartbeatInterval = 5 * time.Millisecond
-	t.Cleanup(func() { heartbeatInterval = restore })
-
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.p.Run(ctx) }()
-
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && len(r.peerRows(t)) == 0 {
-		time.Sleep(2 * time.Millisecond)
-	}
-	time.Sleep(30 * time.Millisecond) // several more beats
+	time.Sleep(30 * time.Millisecond)
 	cancel()
 	<-done
 
-	rows := r.peerRows(t)
-	assert.Equal(1, len(rows), "beats update one row, they do not accumulate")
-	assert.Equal(int64(defaultTestEngineID), rows[0].EngineID)
-	assert.Equal(0, r.cache.Len(), "an idle piston selects nothing, however much is due")
+	turns, busy, idle := r.p.Liveness()
+	assert.Equal(uint64(0), turns, "an idle piston never turns, however much is due")
+	assert.False(busy)
+	assert.True(idle, "and says so, so nothing has to infer it from the silence")
+	assert.Equal(0, r.cache.Len())
 	band, _ := r.planner.LastBand()
-	assert.Equal(-1, band, "and never touches the planner, so nothing was ever planned")
+	assert.Equal(-1, band, "it never touches the planner, so nothing was ever planned")
 }
 
 // TestPiston_RunStopsOnCancel pins prompt shutdown: both queries are read-only, so there is nothing to
@@ -681,23 +526,18 @@ func TestPiston_NewValidates(t *testing.T) {
 	r := newRig(t)
 
 	assert.Equal(1, r.p.Shard())
-	assert.Equal(int64(defaultTestEngineID), r.p.EngineID())
 	assert.Equal(pipeline.DefaultInterval, func() time.Duration {
-		p, _ := New(7, 1, r.db, r.planner, r.cache)
+		p, _ := New(1, r.db, r.planner, r.cache)
 		return p.Interval()
 	}(), "a fresh piston inherits the pipeline's paced default")
 
-	_, err := New(0, 1, r.db, r.planner, r.cache)
-	assert.Error(err, "engine id 0 is the registry's colliding primary key, not a default")
-	_, err = New(-1, 1, r.db, r.planner, r.cache)
-	assert.Error(err, "engine id must be positive")
-	_, err = New(7, 0, r.db, r.planner, r.cache)
+	_, err := New(0, r.db, r.planner, r.cache)
 	assert.Error(err, "shard must be positive")
-	_, err = New(7, 1, nil, r.planner, r.cache)
+	_, err = New(1, nil, r.planner, r.cache)
 	assert.Error(err, "db is required")
-	_, err = New(7, 1, r.db, nil, r.cache)
+	_, err = New(1, r.db, nil, r.cache)
 	assert.Error(err, "planner is required")
-	_, err = New(7, 1, r.db, r.planner, nil)
+	_, err = New(1, r.db, r.planner, nil)
 	assert.Error(err, "cache is required")
 }
 

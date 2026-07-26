@@ -26,56 +26,22 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestPartition_OrdinalFromSortedRoster pins the assignment rule the whole scheme rests on: every
-// replica sorts the SAME registry rows the same way, so each derives a DISTINCT ordinal with no
-// coordination. A rule that did not agree across replicas would seat two on one residue class (back to
-// colliding) or leave one owned by nobody (stranded work).
-func TestPartition_OrdinalFromSortedRoster(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	roster := []int64{11, 22, 33, 44}
-	for want, id := range roster {
-		assert.Equal(want, rosterOrdinal(roster, id), "engine %d should be ordinal %d", id, want)
-	}
-	// Absent from the roster is -1, NOT 0: 0 is a legitimate ordinal, so collapsing the two would make an
-	// unregistered replica silently claim the first residue class.
-	assert.Equal(-1, rosterOrdinal(roster, 99))
-	assert.Equal(-1, rosterOrdinal(nil, 11))
-}
-
-// TestPartition_DisabledUnlessSafe pins the fail-open direction. Partitioning EXCLUDES rows, so a wrong
-// (R, ordinal) strands a residue class; declining to partition only restores the pre-partition
-// overlapping selection, which is slower but complete. Every uncertain case must therefore fail open.
-func TestPartition_DisabledUnlessSafe(t *testing.T) {
+// TestPartition_DisabledBeforeTheFleetIsKnown pins the engine's own fail-open case, the one that is its
+// rather than the Sonar's: a shard with no Sonar at all - one that failed to build, or any lookup before
+// Startup - must not partition. Partitioning EXCLUDES rows, so a wrong pair strands a residue class, while
+// declining only restores overlapping selection, which the claim CAS arbitrates.
+//
+// The pair's other fail-open cases (solo dispatcher, unknown ordinal, out-of-range ordinal, a blind Sonar)
+// belong to internal/peers and are pinned there, and internal/piston validates the pair a third time as its
+// own advertised posture. Three guards, deliberately: each package answers for what it knows.
+func TestPartition_DisabledBeforeTheFleetIsKnown(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngine()
 
-	// Solo replica: nothing to divide.
-	e.observedDispatchers.Store(1)
-	e.observedOrdinal.Store(0)
-	_, _, ok := e.observedPartition()
-	assert.False(ok, "R=1 must not partition")
-
-	// Unknown ordinal (self absent from the roster) - the case that would otherwise guess.
-	e.observedDispatchers.Store(4)
-	e.observedOrdinal.Store(-1)
-	_, _, ok = e.observedPartition()
-	assert.False(ok, "unknown ordinal must not partition")
-
-	// Ordinal out of range for R - a stale-high ordinal against a freshly-lowered R.
-	e.observedDispatchers.Store(2)
-	e.observedOrdinal.Store(3)
-	_, _, ok = e.observedPartition()
-	assert.False(ok, "out-of-range ordinal must not partition")
-
-	// The one case that DOES partition.
-	e.observedDispatchers.Store(4)
-	e.observedOrdinal.Store(2)
-	replicas, ordinal, ok := e.observedPartition()
-	assert.True(ok)
-	assert.Equal(4, replicas)
-	assert.Equal(2, ordinal)
+	_, _, ok := e.partitionOn(1)
+	assert.False(ok, "no Sonar for the shard: select everything")
+	assert.Equal(1, e.replicasOn(1), "and size for a solo replica, which is the pool-safe direction")
 }
 
 // The predicate this pair drives now lives in internal/piston (partitionPredicate), which validates it a
@@ -103,33 +69,6 @@ func TestPartition_ResidueClassesCoverEveryStepExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestPartition_FreshestRosterWins pins the shard pick. R is a roster's LENGTH and the ordinal a
-// position within it, so both must come from ONE shard's view - assembling them from two could seat two
-// replicas on one ordinal.
-func TestPartition_FreshestRosterWins(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	// The freshest shard wins even though it is not the longest: a longer-but-staler roster is a view of
-	// the fleet as it was, and its extra entry is exactly the dead peer that has not aged out yet.
-	got := freshestRoster([]shardRoster{
-		{ids: []int64{1, 2, 3}, dispatchers: []int64{1, 2, 3}, freshest: 9000},
-		{ids: []int64{1, 2}, dispatchers: []int64{1, 2}, freshest: 100},
-	})
-	assert.Equal([]int64{1, 2}, got.ids)
-
-	// A shard that reported no peers is skipped rather than winning with a MaxInt64 age.
-	got = freshestRoster([]shardRoster{
-		{freshest: math.MaxFloat64},
-		{ids: []int64{7}, dispatchers: []int64{7}, freshest: 5000},
-	})
-	assert.Equal([]int64{7}, got.ids)
-
-	// Every shard silent - "unknown", which applyReplicaCount treats as "keep the last good pair" rather
-	// than collapsing R to 1 and re-expanding the pools on a blip.
-	assert.Len(freshestRoster([]shardRoster{{freshest: math.MaxFloat64}}).ids, 0)
-	assert.Len(freshestRoster(nil).ids, 0)
-}
-
 // TestPartition_AppliedFromRegistry drives the real path end to end: peer rows in the shared registry ->
 // heartbeat read -> (R, ordinal) -> predicate. It is the one test that would catch the halves being read
 // from different places.
@@ -141,32 +80,30 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
 
-	awaitSelfDispatching(t, e)
-
 	// Solo: registered, but nothing to divide.
-	_, _, ok := e.observedPartition()
+	_, _, ok := e.partitionOn(1)
 	assert.False(ok, "a solo replica must not partition")
 
 	// Two peers join with ids straddling this engine's own, so the ordinal is a real position rather
 	// than an artifact of always sorting first or last.
 	addPeerRow(t, e, 1)
 	addPeerRow(t, e, math.MaxInt64)
-	replicas, ordinal, ok := e.observedPartition()
-	assert.True(ok, "R=3 must partition")
-	assert.Equal(3, replicas)
-	assert.Equal(1, ordinal, "own id sorts between 1 and MaxInt64, so ordinal 1")
+	awaitPartition(t, e, 1, 3, 1) // own id sorts between them, so ordinal 1
 
-	// A peer leaves: R drops and the ordinal re-seats, both off the same re-read roster.
+	// A peer leaves: the divisor drops and the ordinal re-seats, both off the same reading.
 	delPeerRow(t, e, 1)
-	replicas, ordinal, ok = e.observedPartition()
-	assert.True(ok)
-	assert.Equal(2, replicas)
-	assert.Equal(0, ordinal, "with the lower id gone, this engine is now first")
+	awaitPartition(t, e, 1, 2, 0) // with the lower id gone, this engine is now first
 
 	// Back to solo - partitioning switches off rather than leaving a stale residue class.
 	delPeerRow(t, e, math.MaxInt64)
-	_, _, ok = e.observedPartition()
-	assert.False(ok, "returning to solo must disable partitioning")
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, ok := e.partitionOn(1); !ok {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("returning to solo must disable partitioning")
 }
 
 // TestPartition_AwaitOnlyPeerOwnsNoSlice is the regression test for the flaw that shipped in the first
@@ -182,21 +119,17 @@ func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
 
-	awaitSelfDispatching(t, e)
-
 	// A peer that holds connections but dispatches nothing.
 	addPeerRowWithDispatch(t, e, 4242, false)
-	assert.Equal(2, e.observedReplicas(), "an await-only peer still divides the connection pools")
-	_, _, ok := e.observedPartition()
-	assert.False(ok, "one dispatcher means nothing to partition, whatever R says")
+	assert.Equal(2, e.replicasOn(1), "an await-only peer still divides the connection pools")
+	_, _, ok := e.partitionOn(1)
+	assert.False(ok, "one dispatcher means nothing to partition, whatever the pool divisor says")
 
 	// A second DISPATCHING peer does open partitioning - proving the exclusion is about dispatch, not
 	// about peer count.
 	addPeerRowWithDispatch(t, e, 4243, true)
-	assert.Equal(3, e.observedReplicas(), "R counts all three")
-	dispatchers, _, ok := e.observedPartition()
-	assert.True(ok)
-	assert.Equal(2, dispatchers, "only the two dispatchers divide the candidates")
+	assert.Equal(3, e.replicasOn(1), "the pool divisor counts all three")
+	awaitPartition(t, e, 1, 2, -1) // only the two dispatchers divide the candidates
 }
 
 // addPeerRowWithDispatch inserts a fake peer that either has or has not demonstrably dispatched, then
@@ -204,8 +137,8 @@ func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 // await-only case is expressible.
 func addPeerRowWithDispatch(t *testing.T, e *Engine, id int64, dispatches bool) {
 	t.Helper()
-	ctx := context.Background()
-	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+	before := peerCounts(e)
+	err := e.db.OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
 		// A non-dispatching peer leaves dispatched_at at its far-past default, which is exactly how an
 		// await-only replica presents itself: alive in seen_at, never advancing the evidence column. There
 		// is no flag to set - the timestamp IS the signal.
@@ -219,7 +152,7 @@ func addPeerRowWithDispatch(t *testing.T, e *Engine, id int64, dispatches bool) 
 	if err != nil {
 		t.Fatalf("insert peer %d: %v", id, err)
 	}
-	e.refreshReplicaCount(ctx)
+	awaitPeerChange(t, e, before)
 }
 
 // The intra-peer claim reservation lives in internal/claimstracker with its own tests (the roll window,
@@ -227,20 +160,25 @@ func addPeerRowWithDispatch(t *testing.T, e *Engine, id int64, dispatches bool) 
 // break single-replica lease recovery - a worker whose step's lease expires mid-execution must still be
 // re-claimable by a sibling - is the integration test TestLeaseFence_CompletionNoDuplicateSuccessor.
 
-// awaitSelfDispatching waits until this engine's own piston has published dispatch evidence and a recount
-// has picked it up. dispatched_at is EARNED by a completed cycle rather than stamped at registration - it
-// is evidence, not intent - so a test asserting on the dispatcher roster straight after Startup would
-// otherwise race that first cycle. The wait is milliseconds: the piston beats as soon as the cycle lands.
-func awaitSelfDispatching(t *testing.T, e *Engine) {
+// awaitPartition waits until one shard reports the expected (dispatchers, ordinal) pair.
+//
+// A wait rather than a read, because this replica's own place among the dispatchers is EARNED: the
+// registry's dispatch column is stamped only once a cycle has actually turned - evidence, not intent - so
+// asserting straight after a registry write would race that cycle. The wait is milliseconds.
+// A negative wantOrdinal means "any": this engine's id is random, so where it sorts among the dispatchers
+// is only fixed when the test plants peer ids that straddle it.
+func awaitPartition(t *testing.T, e *Engine, shard, wantDispatchers, wantOrdinal int) {
 	t.Helper()
-	ctx := context.Background()
+	assert := testarossa.For(t)
 	deadline := time.Now().Add(10 * time.Second)
+	var d, o int
+	var ok bool
 	for time.Now().Before(deadline) {
-		e.refreshReplicaCount(ctx)
-		if e.observedOrdinal.Load() >= 0 {
+		if d, o, ok = e.partitionOn(shard); ok && d == wantDispatchers && (wantOrdinal < 0 || o == wantOrdinal) {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("engine never published dispatch evidence")
+	assert.True(false, "shard %d settled at (%d,%d,%v), want (%d,%d,true)",
+		shard, d, o, ok, wantDispatchers, wantOrdinal)
 }

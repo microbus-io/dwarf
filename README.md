@@ -48,8 +48,8 @@ fmt.Println(out.State["greeting"]) // hello ada
   approvals, manual review, async callbacks.
 - **Fair and prioritized.** Two-level scheduling: strict priority bands across the cluster, weighted
   fairness within a band so one tenant can't starve another.
-- **Scales horizontally.** Run many replicas against sharded databases; replicas coordinate through
-  fire-and-forget peer signals you publish however you like.
+- **Scales horizontally.** Run many replicas against sharded databases; they coordinate entirely through
+  the databases they already share, with no message bus to run between them.
 - **OTEL-native observability.** Structured logs (`slog`), 15 `dwarf_*` metrics, and distributed tracing,
   all through standard providers you inject.
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
@@ -78,8 +78,9 @@ scheduler) stay out of those builds.
 
 ## The host model
 
-The engine reaches the outside world through a single `Host` interface, registered once with
-`SetHost`. The first two methods are required; `SignalPeers` does nothing for a single-replica host.
+The engine reaches the outside world through a single `Host` interface, registered once with `SetHost`.
+Two methods, both required — and that is the whole contract, single-replica or not: the engine sends
+nothing between replicas, so there is no transport for you to wire.
 
 ```go
 type Host interface {
@@ -89,11 +90,6 @@ type Host interface {
 
     // Required. Execute one task. The Flow carrier arrives with its input state populated; write outputs.
     ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error
-
-    // Optional. Ship one cross-replica coordination signal to the other replicas (no-op for
-    // single-replica). op is a routing key; payload is opaque bytes. Peers hand it back via
-    // eng.DeliverSignal(ctx, op, payload).
-    SignalPeers(ctx context.Context, op string, payload []byte)
 }
 ```
 

@@ -26,9 +26,9 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// NoopHost is a Host that does nothing - LoadGraph returns no graph, ExecuteTask is a no-op, SignalPeers is a
-// no-op. It satisfies the engine's Host interface structurally (the methods reference only workflow types, so
-// this package needs no import of engine), and is used by tests that stand an engine up purely to exercise
+// NoopHost is a Host that does nothing - LoadGraph returns no graph and ExecuteTask is a no-op. It
+// satisfies the engine's Host interface structurally (the methods reference only workflow types, so this
+// package needs no import of engine), and is used by tests that stand an engine up purely to exercise
 // wiring/config paths where no task ever runs.
 type NoopHost struct{}
 
@@ -36,7 +36,6 @@ func (NoopHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, er
 func (NoopHost) ExecuteTask(ctx context.Context, name string, flow *workflow.Flow) error {
 	return nil
 }
-func (NoopHost) SignalPeers(context.Context, string, []byte) {}
 
 // WaitUntil polls cond until it returns true or timeout elapses, returning cond's final value. A generic
 // timing helper with no engine dependency; the cadence (5ms) is fine-grained enough for test observation

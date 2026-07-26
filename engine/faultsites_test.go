@@ -263,32 +263,6 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	assertFaultRecoveryClean(t, e, reader)
 }
 
-// TestFaultSite_SignalPeersPanic pins host-call panic isolation for SignalPeers: when the host's
-// SignalPeers panics, the boundary CatchPanic swallows it and flow completion / Await are unaffected
-// (distinct from dropSignalStop, which returns cleanly).
-func TestFaultSite_SignalPeersPanic(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	proxy := NewTestProxy()
-	g := workflow.NewGraph("Solo")
-	g.SetEndpoint("A", "ftbpanic/a")
-	g.AddTransition("A", workflow.END)
-	proxy.HandleGraph("ftbpanic/g", g)
-	proxy.HandleTask("ftbpanic/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-
-	e := NewEngineUnderTest(t)
-	e.SetHost(proxy)
-	reader := withManualReader(e)
-	assert.NoError(e.Startup(t.Context()))
-
-	// Every peersChanged broadcast panics inside the CatchPanic boundary. Nothing a flow does depends on
-	// that signal reaching anyone, so the flow still runs and Await returns the completed outcome.
-	e.seams.InjectN(1000, FaultSignalPeersPanic, string(signalOpPeersChanged))
-	_, out := batteryRun(t, e, "ftbpanic/g")
-	assert.Equal(workflow.StatusCompleted, out.Status)
-	assertFaultRecoveryClean(t, e, reader)
-}
-
 // TestFaultSite_DeliverFailureErr pins that when a subgraph child's failure-delivery to its parked caller is
 // lost (the child terminalizes failed, but the caller is never re-armed), the parked-step wedge sweep
 // backstops it: recoverWedgedSubgraphParks re-drives the delivery and the parent still terminalizes failed.

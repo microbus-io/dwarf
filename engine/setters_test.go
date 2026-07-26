@@ -19,7 +19,6 @@ package engine
 import (
 	"context"
 	"math"
-	"strconv"
 	"testing"
 	"time"
 
@@ -55,8 +54,8 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	assert.NoError(e.SetMaxOpenConns(4))
 }
 
-// TestSetEngineID_PinsIdentity pins SetEngineID: a positive id overrides the random default (and its base-36
-// engineIDBase36 form, the peer-signal echo-suppression key), while 0 and negatives are rejected. 0 is the
+// TestSetEngineID_PinsIdentity pins SetEngineID: a positive id overrides the random default, while 0 and
+// negatives are rejected. 0 is the
 // pre-column/no-engine sentinel, so accepting it would stamp provenance and heartbeat rows that read as
 // "no engine"; the invariant is a positive identifier. The stable-id opt-in exists so a crash-restart reuses
 // its one registry row instead of leaving a ghost that transiently over-counts replicas.
@@ -72,7 +71,6 @@ func TestSetEngineID_PinsIdentity(t *testing.T) {
 
 	assert.NoError(e.SetEngineID(424242))
 	assert.Equal(int64(424242), e.engineID)
-	assert.Equal(strconv.FormatInt(424242, 36), e.engineIDBase36, "engineIDBase36 is the base-36 form of the pinned id")
 }
 
 // TestSetDefaultPriority_RejectsNonPositive pins the validation on the engine-level default. A flow stamped

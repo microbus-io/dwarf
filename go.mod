@@ -8,7 +8,7 @@ require (
 	github.com/microbus-io/boolexp v1.1.3
 	github.com/microbus-io/errors v1.0.1
 	github.com/microbus-io/seamster v0.3.1
-	github.com/microbus-io/sequel v1.10.9
+	github.com/microbus-io/sequel v1.10.10
 	github.com/microbus-io/testarossa v0.7.3
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0

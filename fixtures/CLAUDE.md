@@ -174,6 +174,6 @@ convention. A fixture asserting over the **full** flow set (`List`/`Purge`/`Shar
 - its engine sees only its own flows.
 
 A fixture needing a **non-default topology** (multiple `SetShard`s, `SetTimeBudget`, a specific `SetWorkers` count) or
-**host singletons** (multi-replica `AddPeer`/peers, a custom host wrapping `TestProxy`) configures
+**host singletons** (a custom host wrapping `TestProxy`) configures
 them on its own engine/proxy between `NewEngineUnderTest` and `Startup` - the same per-test ownership, just with
 non-default knobs.

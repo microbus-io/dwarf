@@ -30,15 +30,14 @@ import (
 type TaskHandler func(ctx context.Context, flow *workflow.Flow) error
 
 // TestProxy routes graph fetches and task dispatches to registered handlers. It implements the Host
-// interface for use with Engine.SetHost: LoadGraph and ExecuteTask dispatch to the
-// registered handlers, and SignalPeers relays to the peer engines registered with AddPeer (none by
-// default, i.e. single-replica). For a multi-replica test, give each replica its own proxy and AddPeer
-// the other engines.
+// interface for use with Engine.SetHost.
+//
+// A multi-replica test needs nothing else from it: replicas coordinate through the database they share,
+// so several engines pointed at one test database ARE a fleet, with no relay between them to stand up.
 type TestProxy struct {
 	mu     sync.RWMutex
 	graphs map[string]*workflow.Graph
 	tasks  map[string]TaskHandler
-	peers  []*Engine
 }
 
 // NewTestProxy creates a new test proxy with empty handler registries.
@@ -85,26 +84,4 @@ func (p *TestProxy) ExecuteTask(ctx context.Context, taskURL string, flow *workf
 		return errors.New("task not found: %s", taskURL, http.StatusNotFound)
 	}
 	return h(ctx, flow)
-}
-
-// AddPeer registers a peer engine that SignalPeers relays to, standing in for the bus in a
-// single-process multi-replica test. Registering the proxy's own engine is allowed and mirrors a
-// broadcast bus that includes the publisher: the engine stamps every signal
-// with its engineIDBase36 and DeliverSignal discards its own echo. Call before Startup.
-func (p *TestProxy) AddPeer(peer *Engine) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.peers = append(p.peers, peer)
-}
-
-// SignalPeers implements Host; it relays the signal to every peer engine registered with AddPeer. With
-// no peers (the default) it is a single-replica no-op. The relay is async to mirror bus semantics and
-// avoid synchronous reentrancy into a peer mid-processStep.
-func (p *TestProxy) SignalPeers(ctx context.Context, op string, payload []byte) {
-	p.mu.RLock()
-	peers := p.peers
-	p.mu.RUnlock()
-	for _, peer := range peers {
-		go peer.DeliverSignal(context.WithoutCancel(ctx), op, payload)
-	}
 }

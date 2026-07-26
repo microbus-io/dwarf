@@ -29,9 +29,11 @@ import (
 
 // TestCrossReplicaAwait verifies that an Await on the replica that did NOT run a flow's final step still
 // wakes when a peer replica completes it. eng1 is a pure awaiter (zero workers, so it can never claim or
-// execute a step); eng2 does all the work. proxy2's SignalPeers relays the status-change signal from eng2 to eng1, so
-// the only path by which eng1's Await can return is the cross-replica notification. Without that wiring
-// this test would block until its context deadline.
+// execute a step); eng2 does all the work.
+//
+// NOTHING is wired between the two engines - they share a database and nothing else - so the only path by
+// which eng1's Await can return is its own detector reading the row eng2 committed. That is the whole
+// cross-replica wake: no relay to stand up, and nothing to lose.
 func TestCrossReplicaAwait(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -68,14 +70,6 @@ func TestCrossReplicaAwait(t *testing.T) {
 	eng2 := engine.NewEngineUnderTest(t)
 	eng2.SetHost(proxy2)
 	eng2.SetWorkers(2)
-	// Broadcast shape including the publisher (a bus that echoes to the sender): each engine also
-	// receives its own signals and must discard them by origin, exercising the echo suppression the
-	// production transport relies on.
-	proxy1.AddPeer(eng1)
-	proxy1.AddPeer(eng2)
-	proxy2.AddPeer(eng1)
-	proxy2.AddPeer(eng2)
-
 	err := eng1.Startup(ctx)
 	assert.NoError(err)
 	t.Cleanup(func() { eng1.Shutdown(ctx) })

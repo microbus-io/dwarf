@@ -40,9 +40,9 @@ limitations under the License.
 // construction-time-only ones (SetShard, SetWorkers, SetHost, SetLogger, SetMeterProvider,
 // SetTracerProvider) return an error if called after Startup. Tuning derives from the facts the host
 // declares plus what the engine observes: ShardSpec.VirtualCPUs drives each shard's connection budget
-// and its placement weight; the budget is automatically split across the engine replicas sharing the
-// databases, counted from a shared peer registry the replicas heartbeat into (no replica count is ever
-// declared, and the SignalPeers transport only accelerates convergence, never determines it); and the
+// and its placement weight; the budget is automatically split across the engine replicas sharing each
+// database, counted from a shared peer registry the replicas heartbeat into (no replica count is ever
+// declared, and nothing is sent between replicas to establish it); and the
 // worker maximum is derived from the crash-recovery lease margin and the
 // round-trip time measured at Startup, so it holds for any task duration (the pool grows into it only
 // on demand, so short-task deployments never pay for the headroom). The SetWorkers/SetMaxOpenConns
@@ -55,8 +55,9 @@ limitations under the License.
 //   - LoadGraph fetches a workflow graph by name (called at Create; the graph JSON is then frozen on the
 //     flow), and on subgraph spawn.
 //   - ExecuteTask executes one task, given the Flow carrier with its state pre-populated.
-//   - SignalPeers ships a cross-replica coordination signal (op + opaque payload bytes) to the other
-//     replicas, which hand it back via Engine.DeliverSignal; a single-replica host does nothing.
+//
+// That is the whole interface: the engine sends nothing between replicas, so a host wires no
+// inter-replica transport for it. Replicas sharing a database coordinate by reading it.
 //
 // The flow's opaque baggage (host identity/tenant/context, set in workflow.FlowOptions) rides on the
 // dispatch context of every LoadGraph and ExecuteTask call; read it with workflow.BaggageFrom(ctx).
@@ -96,10 +97,9 @@ limitations under the License.
 // parent and subgraph-child flows, so a single step key reaches the whole tree (each neighbor key both
 // discloses that step's state and can seed a Fork). Authorizing introspection by one flow's ownership is
 // therefore insufficient when the caller holds any step key in that tree; treat the tree (its root) as the
-// authorization unit, or restrict these surfaces to fully-trusted operators. The inbound peer entry point DeliverSignal is unauthenticated
-// by the engine; authenticating replica-to-replica transport is the host's responsibility. Operations on
-// an unknown or mismatched key return a uniform not-found (no existence oracle), but that is a hardening
-// detail, not a substitute for host authorization.
+// authorization unit, or restrict these surfaces to fully-trusted operators. Operations on an unknown or
+// mismatched key return a uniform not-found (no existence oracle), but that is a hardening detail, not a
+// substitute for host authorization.
 //
 // # Resource limits
 //

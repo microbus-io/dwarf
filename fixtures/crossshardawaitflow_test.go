@@ -84,14 +84,6 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 		assert.NoError(eng1.SetShard(engine.ShardSpec{Index: shard}))
 		assert.NoError(eng2.SetShard(engine.ShardSpec{Index: shard}))
 	}
-	// Wired as peers in the production shape - a broadcast bus that echoes to the publisher too, so each
-	// engine also receives its own signals and must discard them by origin. None of it participates in
-	// the wake below; it is here so the fixture runs the configuration a deployment actually has.
-	proxy1.AddPeer(eng1)
-	proxy1.AddPeer(eng2)
-	proxy2.AddPeer(eng1)
-	proxy2.AddPeer(eng2)
-
 	assert.NoError(eng1.Startup(ctx))
 	assert.NoError(eng2.Startup(ctx))
 	// Shut BOTH engines down before anything else unwinds. Startup registers a cleanup per engine and

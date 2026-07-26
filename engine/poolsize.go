@@ -169,43 +169,46 @@ func effectiveVirtualCPUs(declared int) int {
 // clear the parallel register + read + probe, which are a couple of statements per shard.
 const startupBootstrapConns = 4
 
-// startupPeerSettle is how long discoverReplicasAtStartup waits, after registering its own row and
-// nudging peers, before reading R. It exists for the SIMULTANEOUS cold start: without it an early
-// reader races the other starters' inserts and sees a partial fleet, over-sizing its pool. The wait
-// lets those rows land so one read yields the converged count. It is orders of magnitude shorter than
-// the old signal-convergence window because it is backed by a real registry read, not a guess about
-// when replies have arrived.
-//
-// A `var` so a test can disable it (0 = read R immediately), the same reason reapInterval and
-// persistBackoff are.
-var startupPeerSettle = 250 * time.Millisecond
-
 // slowPoolPushDelay is how long the FaultSlowPoolPush seam stalls a recompute between reading R and pushing
 // the derived sizes. Test-only (the fault is inert in production); a var so it stays adjustable.
 var slowPoolPushDelay = 200 * time.Millisecond
 
-// recomputePools re-derives every shard's connection pool from the observed replica count and pushes
+// recomputePools re-derives every shard's connection pool from that shard's OWN replica count and pushes
 // the sizes to the open shards (sequel's pool setters are hot/atomic), then re-derives the worker
-// ceiling, which is a function of those pools. Called by refreshReplicaCount whenever the fleet may
-// have changed (the heartbeat re-read, or a peersChanged nudge). No-ops when the engine is not running,
-// when the SetMaxOpenConns override pins the pools (an exact per-replica number, never divided), and
-// when R is unchanged since the last application. (Startup itself sizes the pools directly from its
-// discovered R, not through here, and seeds lastAppliedR with it.)
+// ceiling, which is a function of those pools. Called by the reconcile loop on the Sonars' cadence.
+// No-ops when the engine is not running, when the SetMaxOpenConns override pins the pools (an exact
+// per-replica number, never divided), and when no shard's count has moved since the last application.
+// (Startup itself sizes the pools directly from what it read, not through here, and records the counts.)
+//
+// The divisor is PER SHARD because the budget is: it belongs to the shard's database, so the replicas that
+// matter are the ones holding connections to THAT database. One shard's fleet changing must not re-push
+// another's unchanged sizes, and one shard's count staying put must not mask a change elsewhere.
 func (e *Engine) recomputePools() {
 	// poolsLock is held across the whole read-then-push, not just the dedupe: lastAppliedR keeps a no-op
 	// recompute from touching the pools, but it does not ORDER two live ones, so without this an R=2 push
 	// could land after an R=3 push (over-connecting a fleet of 3), and a concurrent SetMaxOpenConns could
 	// have its pinned pools overwritten by derived ones. The poolsLock -> shardsLock order below cannot
-	// cycle (observedReplicas is now a lock-free atomic read).
+	// cycle (the counts are lock-free reads of the Sonars' published state).
 	e.poolsLock.Lock()
 	defer e.poolsLock.Unlock()
 	if !e.started.Load() || e.maxOpenConns.Load() != 0 {
 		return
 	}
-	replicas := e.observedReplicas()
-	if int32(replicas) == e.lastAppliedR.Swap(int32(replicas)) {
+	// Read every shard's count first and compare as a whole: a push is all-or-nothing, so a single shard
+	// moving is enough to re-derive, and nothing moving is the cheap common case.
+	observed := make(map[int]int, len(e.lastAppliedR))
+	changed := false
+	for _, idx := range e.db.Indices() {
+		r := e.replicasOn(idx)
+		observed[idx] = r
+		if prev, ok := e.lastAppliedR[idx]; !ok || prev != r {
+			changed = true
+		}
+	}
+	if !changed && len(observed) == len(e.lastAppliedR) {
 		return
 	}
+	e.lastAppliedR = observed
 	// The window poolsLock closes: R has been read, the sizes are not yet pushed. A test stalls one recompute
 	// here to hold a stale R while a peer's fresher one races past (see TestPoolSizing_ConcurrentRecompute-
 	// AppliesLatestR). Deliberately a FAULT, not a checkpoint: a breakpoint would freeze the racing recompute
@@ -222,7 +225,7 @@ func (e *Engine) recomputePools() {
 		if err != nil {
 			continue
 		}
-		idle, open := shardPool(specs[idx], 0, replicas) // zero-value spec = the default shard's sizing
+		idle, open := shardPool(specs[idx], 0, observed[idx]) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
 		postSplitConns += open
@@ -245,7 +248,7 @@ func (e *Engine) recomputePools() {
 	// The refill scan floor is measured against the cache's capacity, so it follows the same split -
 	// the same rule the dispatch count and worker ceiling obey just above.
 	e.recomputeRefillIntervals()
-	e.logger.Info("Derived pools recomputed", "replicas", replicas, "dispatch", dispatch)
+	e.logger.Info("Derived pools recomputed", "replicas", observed, "dispatch", dispatch)
 	e.recomputeWorkerCeiling(e.lifetimeCtx)
 }
 
@@ -260,7 +263,6 @@ func (e *Engine) recomputePools() {
 // a worker mid-step is not a thing the pool does). The ceiling is a bound on how far the pool may grow,
 // not a live target.
 func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
-	replicas := e.observedReplicas()
 	override := int(e.maxOpenConns.Load())
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)
@@ -269,7 +271,9 @@ func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
 
 	ceiling := math.MaxInt
 	for idx, rttMs := range rtts {
-		_, open := shardPool(specs[idx], override, replicas)
+		// Each shard's own count, since each shard's pool is divided by its own fleet - and the worst shard's
+		// number wins, because a storm drains through whichever pool is tightest.
+		_, open := shardPool(specs[idx], override, e.replicasOn(idx))
 		ceiling = min(ceiling, workerCeiling(open, rttMs))
 	}
 	if ceiling == math.MaxInt {

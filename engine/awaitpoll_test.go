@@ -28,8 +28,9 @@ import (
 )
 
 // TestAwait_WakesWhenNoSignalIsDelivered pins that Await returns even when the in-memory signalStop wake
-// is never delivered - a worker crash between the terminal commit and the signal, or a no-op SignalPeers
-// on a multi-replica host. The test blocks a flow so Await parks on the latch against a running flow,
+// is never delivered - a worker crash between the terminal commit and the wake, or the ordinary
+// cross-replica case, where the stop happens in another process entirely and nothing is sent at all. The
+// test blocks a flow so Await parks on the latch against a running flow,
 // then forges the terminal commit directly in the DB (bypassing signalStop entirely), and asserts Await
 // still wakes rather than hanging until ctx (here, forever).
 //

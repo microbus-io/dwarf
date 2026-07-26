@@ -20,22 +20,19 @@ limitations under the License.
 //
 // A piston is a CONSUMER of its database, never the owner: the handle is passed in already open and is
 // closed by whoever opened it, so there is no Open, no Close, and no say over pool sizes. It owns the
-// supply cycle, the two queries behind it, its instruments, and this replica's heartbeat into the shard's
-// peer registry; it borrows the planner and the candidate cache, both shared with every other piston on
-// the replica.
+// supply cycle, the two queries behind it, and its instruments; it borrows the planner and the candidate
+// cache, both shared with every other piston on the replica.
 //
-// Run blocks and drives two independent loops until its context ends:
+// Run blocks and drives the cycle until its context ends:
 //
 //	cycle (paced by the pipeline) -> record -> repeat
-//	beat -> sleep -> repeat
 //
-// The heartbeat only REFRESHES this replica's registry row - the owner must register it once at startup
-// and delete it once at shutdown.
+// Liveness reports whether that loop is turning, for an owner that publishes this replica's liveness
+// somewhere the fleet can see it.
 //
-// SetIdle(true) skips the cycle entirely and leaves only the heartbeat, which is the await-only replica:
-// it keeps holding connections and counting toward the fleet, but claims no work. Going idle withdraws
-// the shard from the shared planner and empties its cache partition, so nothing is left claiming a band
-// this piston no longer reports on.
+// SetIdle(true) skips the cycle entirely, which is the await-only replica: it keeps holding connections,
+// but claims no work and reports itself idle. Going idle withdraws the shard from the shared planner and
+// empties its cache partition, so nothing is left claiming a band this piston no longer reports on.
 //
 // Every Set* is live: the owner may re-derive any of them while Run is in flight.
 package piston
@@ -45,7 +42,6 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -61,17 +57,6 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 )
 
-// heartbeatInterval is the DEFAULT cadence at which a piston refreshes this replica's row in its shard's
-// peer registry; SetHeartbeatInterval overrides it per piston. A var rather than a const only so a test
-// can shorten the default.
-//
-// One second is simply cheap enough against a freshness window measured in tens of seconds. It used to be
-// load-bearing for a second reason - the beat was an UPDATE with an INSERT fallback, which read
-// RowsAffected to decide whether a row existed, and MySQL counts CHANGED rather than matched rows, so two
-// beats inside one NOW_UTC() millisecond would report zero and fire a spurious INSERT. The beat no longer
-// inserts (see beat), so that constraint is gone and this is a cost knob again.
-var heartbeatInterval = time.Second
-
 // refillBuckets are the explicit bucket boundaries for both histograms, in SECONDS. The OTEL defaults are
 // tuned for millisecond-valued instruments and would file every one of these samples in the first bucket.
 //
@@ -83,6 +68,10 @@ var heartbeatInterval = time.Second
 var refillBuckets = []float64{
 	0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
 }
+
+// idlePoll is how often an idle piston re-checks whether it is still idle. It paces nothing else: an idle
+// piston runs no cycle, so this is only the latency of a live SetIdle(false) resuming dispatch.
+const idlePoll = time.Second
 
 // FaultScanErr makes ScanBand fail without touching the database - see SetSeams. The name is exported so
 // the owning application's fault catalogue can alias it rather than re-spell the string.
@@ -126,46 +115,29 @@ type Piston struct {
 	cache   *candidatecache.Cache
 	pipe    *pipeline.Pipeline
 
-	// engineID identifies this replica in the peer registry. Immutable: it is the registry's primary key,
-	// and a replica that changed it mid-life would leave a ghost row behind.
-	engineID int64
-
 	// Live configuration, each independently atomic. There is no grouped snapshot because nothing here is
 	// coupled - reading idle and the partition a microsecond apart cannot produce an inconsistent pair.
 	idle      atomic.Bool
-	beatEvery atomic.Int64 // nanoseconds; see SetHeartbeatInterval
 	partition atomic.Pointer[PartitionFunc]
 	logger    atomic.Pointer[slog.Logger]
 	inst      atomic.Pointer[instruments]
 	seams     atomic.Pointer[seamster.Seamster]
 
-	// dispatchedSinceBeat is sticky: any successful cycle sets it and the beat that publishes it clears it.
-	// Sticky rather than "did the last cycle succeed" because beats are ~20x rarer than cycles, so sampling
-	// the single cycle that happens to precede one would let a healthy piston look stalled whenever a
-	// transient error landed in that gap. Atomic because the cycle loop sets it and the beat loop - a
-	// separate goroutine, see Run - consumes it.
-	dispatchedSinceBeat atomic.Bool
+	// turns counts successful cycles, monotonically. A COUNTER rather than a flag the reader clears: a
+	// consuming getter would make any second caller - a metric, a test - silently swallow the evidence and
+	// leave a healthy piston reading as stalled. Holding "since I last looked" is the reader's business.
+	turns atomic.Uint64
 	// cycleInFlight is true while the cycle loop is inside pipe.Cycle. A cycle that has not RETURNED yet is
 	// still evidence this piston is serving - and on a dialect without the run-condition early-stop a deep
-	// backlog scan can run for tens of seconds, far longer than a reader's dispatch window. Without this a
-	// loaded fleet's healthy replicas would all stop advancing dispatched_at at once and fall out of the
-	// partition divisor exactly when overlapping selection costs the most.
+	// backlog scan can run for tens of seconds, far longer than any window a reader applies. Without this a
+	// loaded fleet's healthy replicas would all look stalled at once and fall out of the partition divisor
+	// exactly when overlapping selection costs the most.
 	cycleInFlight atomic.Bool
 }
 
 // New returns a piston for one shard over an already-open database handle. The planner and cache are
 // shared with this replica's other pistons and are not owned here.
-//
-// engineID leads because it is required rather than optional: it is the peer registry's PRIMARY KEY, so
-// an unset one is not a harmless default - every unconfigured replica in the fleet would collide on id 0
-// and fight over a single row. A setter would make that state reachable; a constructor argument does not.
-func New(engineID int64, shard int, db *sequel.DB, plan *planner.Planner, cache *candidatecache.Cache) (*Piston, error) {
-	// Rejected rather than defaulted, for the reason the argument exists at all: engine_id is the registry's
-	// PRIMARY KEY, so zero is not a harmless placeholder but a value every unconfigured replica in the fleet
-	// would collide on, fighting over one row.
-	if engineID <= 0 {
-		return nil, errors.New("engine id must be positive, got %d", engineID)
-	}
+func New(shard int, db *sequel.DB, plan *planner.Planner, cache *candidatecache.Cache) (*Piston, error) {
 	if shard < 1 {
 		return nil, errors.New("shard must be positive, got %d", shard)
 	}
@@ -178,8 +150,7 @@ func New(engineID int64, shard int, db *sequel.DB, plan *planner.Planner, cache 
 	if cache == nil {
 		return nil, errors.New("cache is required")
 	}
-	p := &Piston{engineID: engineID, shard: shard, db: db, planner: plan, cache: cache}
-	p.beatEvery.Store(int64(heartbeatInterval))
+	p := &Piston{shard: shard, db: db, planner: plan, cache: cache}
 	pipe, err := pipeline.New(shard, p, plan, cache)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -191,15 +162,12 @@ func New(engineID int64, shard int, db *sequel.DB, plan *planner.Planner, cache 
 	return p, nil
 }
 
-// EngineID is this replica's identity in the peer registry.
-func (p *Piston) EngineID() int64 { return p.engineID }
-
 // Shard is the shard this piston works.
 func (p *Piston) Shard() int { return p.shard }
 
-// SetIdle puts the piston in or out of idle. Idling still turns over - it heartbeats, so the replica
-// keeps its registry row and keeps dividing the connection pools - but it runs no cycle and claims no
-// work - so it never advances dispatched_at, which is how peers exclude it from the candidate partition.
+// SetIdle puts the piston in or out of idle. An idling piston runs no cycle and claims no work, so
+// Liveness reports it idle and its owner can keep this replica counted for the connections it holds while
+// excluding it from anything that divides work.
 //
 // The default is NOT idle: a fresh piston dispatches, which is the common case, and a zero value that
 // silently did nothing would be the worse default.
@@ -227,23 +195,21 @@ func (p *Piston) SetIdle(idle bool) {
 // Idle reports whether the piston is idling.
 func (p *Piston) Idle() bool { return p.idle.Load() }
 
-// SetHeartbeatInterval sets how often this piston refreshes the registry row. Zero or negative restores
-// the default.
+// Liveness reports whether this piston is turning, for an owner that publishes the fact somewhere the
+// fleet can see it: the count of cycles completed so far, whether one is running right now, and whether
+// the piston is idling.
 //
-// THE OWNER MUST KEEP THIS WELL UNDER THE FRESHNESS WINDOW ITS READERS APPLY, and the two are set in
-// different places, so the coupling is easy to break silently: readers decide a peer is gone when its
-// seen_at ages past their window, and the only thing refreshing that column is this beat. Beat slower than
-// the window and a perfectly healthy replica ages out of its own fleet - including out of R, which
-// re-expands every peer's connection pools.
-func (p *Piston) SetHeartbeatInterval(d time.Duration) {
-	if d <= 0 {
-		d = heartbeatInterval
-	}
-	p.beatEvery.Store(int64(d))
+// A COUNTER rather than a "since you last asked" flag, and that is the load-bearing part. A consuming
+// getter would create a contract - call it exactly once per publication, from exactly one caller - and any
+// second caller, a metric or a test, would silently clear the evidence and leave a healthy piston reading
+// as stalled. Holding the previous count is the reader's business, so this is a pure read that may be
+// called any number of times.
+//
+// A cycle IN FLIGHT counts, because a scan can legitimately run for tens of seconds on a deep backlog
+// where the executor cannot early-stop, and a piston in the middle of one is plainly still serving.
+func (p *Piston) Liveness() (turns uint64, busy, idle bool) {
+	return p.turns.Load(), p.cycleInFlight.Load(), p.idle.Load()
 }
-
-// HeartbeatInterval is the current registry-refresh cadence.
-func (p *Piston) HeartbeatInterval() time.Duration { return time.Duration(p.beatEvery.Load()) }
 
 // SetInterval sets the cycle period, start of one cycle's scan to the next. See pipeline.SetInterval.
 func (p *Piston) SetInterval(d time.Duration) { p.pipe.SetInterval(d) }
@@ -348,40 +314,24 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 // Run drives the piston until ctx is cancelled. It blocks; a caller runs it in a goroutine and waits on
 // its own WaitGroup.
 //
-// The heartbeat runs on its OWN goroutine, and that is a correctness requirement rather than tidiness.
-// Beating from the cycle loop gates the beat not merely on the cycle *succeeding* - which it must not be,
-// see beat - but on the cycle *returning*, so an expensive scan postpones this replica's liveness signal
-// by its whole duration. That is not hypothetical here: phase one's `rn <= capacity` cut early-stops only
-// on Postgres 15+, so on MySQL/SQL Server/SQLite a deep backlog is still O(backlog), measured in the tens
-// of seconds at a few million due rows. A scan that outruns the peer freshness window would drop a
-// perfectly healthy replica out of R - shrinking the divisor fleet-wide - and out of the roster, which
-// reshuffles every peer's ordinal and hands the residue classes around. Exactly the outcome that should
-// mean "the process is stuck, nothing less."
-//
-// The two loops share only dispatchedSinceBeat, which is atomic, so nothing else needs synchronizing.
+// It publishes nothing about this replica's liveness itself - Liveness is a pure read an owner samples on
+// its own cadence, which is what keeps how often that is published independent of how long a cycle takes.
+// The independence is a correctness requirement rather than tidiness: phase one's `rn <= capacity` cut
+// early-stops only on Postgres 15+, so on MySQL/SQL Server/SQLite a deep backlog is still O(backlog),
+// measured in the tens of seconds at a few million due rows. A liveness signal gated on a cycle RETURNING
+// would let one such scan drop a perfectly healthy replica out of its own fleet - which should mean "the
+// process is stuck", nothing less.
 func (p *Piston) Run(ctx context.Context) {
-	var beats sync.WaitGroup
-	beats.Go(func() {
-		p.beatLoop(ctx)
-	})
-	defer beats.Wait()
-	// published tracks whether any beat has carried dispatch evidence yet. The beat loop fires once on
-	// entry, BEFORE the first cycle can have completed, so that beat correctly reports none - leaving the
-	// replica out of its own fleet's dispatcher count until the next one. Beating again the instant the
-	// first cycle lands closes that to milliseconds instead of a whole heartbeat interval, which matters
-	// because a replica absent from the divisor partitions nothing and selects everything, overlapping
-	// every peer. Only the FIRST one is special-cased; after that the loop's cadence is the whole policy.
-	published := false
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		if p.idle.Load() {
-			// An idle piston runs no cycle, so it never advances dispatched_at - which is precisely how a
-			// reader tells the two populations apart without trusting anything the replica claims about
-			// itself. The beat loop keeps its registry row alive meanwhile. Re-checked on the beat cadence
-			// so a live SetIdle(false) resumes dispatching within one interval.
-			if !p.sleep(ctx, p.HeartbeatInterval()) {
+			// An idle piston runs no cycle, so its turn count never moves and Liveness reports it idle -
+			// which is how a reader tells the two populations apart without trusting anything the replica
+			// says about itself. Re-checked on the idle poll so a live SetIdle(false) resumes dispatching
+			// within one interval.
+			if !p.sleep(ctx, idlePoll) {
 				return
 			}
 			continue
@@ -396,10 +346,6 @@ func (p *Piston) Run(ctx context.Context) {
 			seams := p.seams.Load()
 			seams.Checkpoint(ctx, CheckpointCycleDone)
 			seams.Checkpoint(ctx, CheckpointCycleDone, strconv.Itoa(p.shard))
-		}
-		if !published && r.Err == nil {
-			published = true
-			p.beat(ctx)
 		}
 	}
 }
@@ -418,20 +364,9 @@ func (p *Piston) Cycle(ctx context.Context) pipeline.Result {
 	// A cycle that found nothing due still counts: it proves this piston looked and could have served.
 	// Gating on candidates instead would make a quiet fleet look like it had no dispatchers at all.
 	if r.Err == nil {
-		p.dispatchedSinceBeat.Store(true)
+		p.turns.Add(1)
 	}
 	return r
-}
-
-// beatLoop refreshes this replica's registry row on a fixed cadence, independent of whatever the cycle
-// loop is doing. It beats immediately on entry so a starting piston registers without waiting an interval.
-func (p *Piston) beatLoop(ctx context.Context) {
-	for {
-		p.beat(ctx)
-		if !p.sleep(ctx, p.HeartbeatInterval()) {
-			return
-		}
-	}
 }
 
 // record translates a cycle's result into this piston's instruments.
@@ -474,45 +409,6 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 	}
 	if r.Discarded > 0 {
 		in.discarded.Add(ctx, int64(r.Discarded), metric.WithAttributes(shardAttr))
-	}
-}
-
-// beat refreshes this replica's row in the shard's peer registry. Timestamps come from the database clock
-// (NOW_UTC()), never a bound Go time, so every freshness comparison on this shard runs on one clock.
-//
-// It is an UPDATE and NOTHING ELSE - it never creates the row. The owner creates it at startup and deletes
-// it at shutdown, so a straggler beat after that delete matches nothing instead of RESURRECTING the row.
-// An INSERT fallback here (what this used to do) would make the shutdown delete stick only under an
-// ordering constraint spanning two packages.
-//
-// TWO timestamps, and the distinction is evidence versus claim. seen_at moves on every beat: this replica
-// is alive and holding connections, which is what the pool divisor R counts. dispatched_at moves only with
-// a cycle behind it: this replica is genuinely serving, which is what the candidate partition divides
-// across. A replica handed a residue class it never selects strands those steps, so that divisor cannot
-// trust a flag - a piston that claims to dispatch and then wedges simply stops advancing dispatched_at.
-//
-// A failed write is not retried: that would turn a database blip into a write storm, and the next beat is
-// an interval away regardless.
-//
-// Safe to call from either loop - everything it reads is atomic and the write is idempotent - which is
-// what lets Run publish its first evidence early.
-func (p *Piston) beat(ctx context.Context) {
-	idle := p.idle.Load()
-	// Either a cycle COMPLETED since the last beat, or one is running right now. Both are evidence; only a
-	// piston that is neither finishing nor attempting cycles stops advancing dispatched_at, which is the
-	// wedged case the column exists to catch.
-	dispatched := (p.dispatchedSinceBeat.Swap(false) || p.cycleInFlight.Load()) && !idle
-	// The dispatched_at assignment is composed into the statement rather than bound through a CASE: a
-	// conditional assignment is two plain statement shapes here, where CASE WHEN ? would lean on how each
-	// driver binds a boolean into an expression.
-	set := "seen_at=NOW_UTC()"
-	if dispatched {
-		set += ", dispatched_at=NOW_UTC()"
-	}
-	_, err := p.db.ExecContext(ctx,
-		"UPDATE dwarf_peers SET "+set+" WHERE engine_id=?", p.engineID)
-	if err != nil && ctx.Err() == nil {
-		p.logger.Load().ErrorContext(ctx, "Peer heartbeat", "shard", p.shard, "error", err)
 	}
 }
 

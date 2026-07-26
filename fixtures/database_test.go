@@ -39,7 +39,6 @@ func (oneTaskHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph,
 	return g, nil
 }
 func (oneTaskHost) ExecuteTask(ctx context.Context, name string, f *workflow.Flow) error { return nil }
-func (oneTaskHost) SignalPeers(context.Context, string, []byte)                          {}
 
 func TestDatabase_TestModeCreatesSchema(t *testing.T) {
 	t.Parallel()

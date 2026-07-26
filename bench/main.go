@@ -98,15 +98,10 @@ func run() error {
 		out              = flag.String("out", "", "artifact path (default bench/results/run-<timestamp>.json)")
 		soak             = flag.Duration("soak", 0, "soak mode: run a mixed create/interrupt/continue workload under create-purge churn for this long, sampling drift, instead of the concurrency sweep (uses the first -concurrency value as the submitter count)")
 		soakSample       = flag.Duration("soak-sample", 30*time.Second, "soak drift sampling interval")
-		replicas         = flag.Int("replicas", 1, "number of in-process engine replicas sharing the database(s), peered for signal relay (1 = single engine)")
-		// Signal-fault injection on the peer transport (see benchHost). Jitter/drop simulate an imperfect
-		// network; -drop-ops kills specific signal kinds outright (e.g. 'enqueue' for the poll-fallback
-		// A/B); the mute pair simulates one replica crashing (its outbound signals stop) and recovering.
-		signalJitter   = flag.Duration("signal-jitter", 0, "delay each peer signal by a uniform random [0,d) - simulated network latency")
-		signalDrop     = flag.Float64("signal-drop", 0, "probability [0,1) of dropping each per-peer signal delivery - simulated loss")
-		dropOps        = flag.String("drop-ops", "", "comma-separated signal ops to drop entirely (e.g. 'enqueue')")
-		muteAfter      = flag.Duration("mute-replica-after", 0, "mute the LAST replica's outbound signals this long after startup (simulated peer crash; 0 = never)")
-		muteDuration   = flag.Duration("mute-duration", 0, "unmute again after this long muted (0 = stay muted)")
+		// Replicas share the database(s) and coordinate through them - nothing is sent between them, so
+		// there is no transport here to make imperfect. Simulating a crashed replica means stopping its
+		// engine so its registry rows go stale, not silencing anything.
+		replicas       = flag.Int("replicas", 1, "number of in-process engine replicas sharing the database(s) (1 = single engine)")
 		replicaWorkers = flag.String("replica-workers", "", "comma-separated per-replica worker counts overriding -workers (e.g. '0,4' = replica 1 awaits only)")
 		volume         = flag.Int("volume", 0, "volume mode: fill to this many dwarf_steps rows with NO deletion, probing the read paths at checkpoints, then measure Purge/reaper throughput (0 = disabled)")
 		volumeCheckpt  = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
@@ -153,13 +148,6 @@ func run() error {
 			perReplicaWorkers[i] = n
 		}
 	}
-	dropOpsSet := map[string]bool{}
-	for op := range strings.SplitSeq(*dropOps, ",") {
-		if op = strings.TrimSpace(op); op != "" {
-			dropOpsSet[op] = true
-		}
-	}
-
 	// One graph/task registry and one byte counter, shared by every replica's host (registered through the
 	// public API only - the path a production host takes).
 	sharedBytes := &atomic.Int64{}
@@ -177,9 +165,9 @@ func run() error {
 	}
 
 	// Build the fleet of in-process engine replicas. Each shares the registry above and the same
-	// database(s), so they contend for every pending step at the claim CAS - exercising peer discovery,
-	// the connection pool-split (open/R per replica), and the cross-replica doorbell/wake. Each has its own
-	// metrics reader (summed across the fleet) and its own view of the fleet for signal relay. NOTE: one
+	// database(s), so they contend for every pending step at the claim CAS - exercising peer discovery and
+	// the connection pool-split (open/R per replica, per shard). Each has its own metrics reader (summed
+	// across the fleet). NOTE: one
 	// process, so goroutine/heap readings are a fleet total and there is no per-replica RSS attribution or
 	// kill-9 isolation - those need separate processes (a follow-up).
 	ctx := context.Background()
@@ -195,9 +183,6 @@ func run() error {
 			taskDelay:    *taskDelay,
 			taskJitter:   *taskJitter,
 			bytesWritten: sharedBytes,
-			signalJitter: *signalJitter,
-			signalDrop:   *signalDrop,
-			dropOps:      dropOpsSet,
 		}
 		hosts[i] = host
 		eng := engine.NewEngine()
@@ -231,33 +216,12 @@ func run() error {
 		}
 		engines[i] = eng
 	}
-	// Wire every host to the whole fleet (self-echo discarded by Origin), then start all replicas.
-	for _, host := range hosts {
-		host.peers = engines
-	}
 	for _, eng := range engines {
 		err = eng.Startup(ctx)
 		if err != nil {
 			return err
 		}
 		defer eng.Shutdown(ctx)
-	}
-
-	// Simulated peer crash: mute the last replica's outbound signals at T (its pings stop; the rest of
-	// the fleet evicts it after ~3x pingInterval and regrows pools), optionally unmuting later (it
-	// "rejoins" on its next ping and pools re-split). The engine keeps running - only its voice goes.
-	if *muteAfter > 0 && *replicas > 1 {
-		mutee := hosts[len(hosts)-1]
-		time.AfterFunc(*muteAfter, func() {
-			fmt.Printf("--- muting replica %d (simulated crash)\n", len(hosts))
-			mutee.muted.Store(true)
-			if *muteDuration > 0 {
-				time.AfterFunc(*muteDuration, func() {
-					fmt.Printf("--- unmuting replica %d (rejoin)\n", len(hosts))
-					mutee.muted.Store(false)
-				})
-			}
-		})
 	}
 
 	rtt, err := startRTTSampler(dsns[0].dsn)
@@ -284,22 +248,17 @@ func run() error {
 		Label:     *label,
 		StartedAt: time.Now().UTC(),
 		Config: map[string]any{
-			"workload":        *workloadName,
-			"payloadBytes":    *payload,
-			"taskDelayMs":     taskDelay.Milliseconds(),
-			"workers":         *workers,
-			"virtualCPUs":     *vcpus,
-			"maxOpenConns":    *maxOpenConns,
-			"replicas":        *replicas,
-			"replicaWorkers":  *replicaWorkers,
-			"signalJitterMs":  signalJitter.Milliseconds(),
-			"signalDrop":      *signalDrop,
-			"dropOps":         *dropOps,
-			"muteAfterSec":    muteAfter.Seconds(),
-			"muteDurationSec": muteDuration.Seconds(),
-			"shards":          dsns.redacted(),
-			"windowSec":       window.Seconds(),
-			"warmupSec":       warmup.Seconds(),
+			"workload":       *workloadName,
+			"payloadBytes":   *payload,
+			"taskDelayMs":    taskDelay.Milliseconds(),
+			"workers":        *workers,
+			"virtualCPUs":    *vcpus,
+			"maxOpenConns":   *maxOpenConns,
+			"replicas":       *replicas,
+			"replicaWorkers": *replicaWorkers,
+			"shards":         dsns.redacted(),
+			"windowSec":      window.Seconds(),
+			"warmupSec":      warmup.Seconds(),
 		},
 		Environment: environment(),
 		Valid:       true,

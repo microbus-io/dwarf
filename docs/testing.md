@@ -113,9 +113,8 @@ eyeballing what ran in what order.
 
 ## Multi-replica tests
 
-To test cross-replica behavior, give each engine its own `TestProxy` and register the other engines with
-`proxy.AddPeer(otherEngine)`. The proxy's `SignalPeers` then relays each signal to every peer's
-`DeliverSignal`, standing in for the bus:
+To test cross-replica behavior, stand up two engines against the same test database. That is all a fleet
+is — they coordinate through the database, so there is no relay to wire between them:
 
 ```go
 proxy1, proxy2 := engine.NewTestProxy(), engine.NewTestProxy()
@@ -124,16 +123,15 @@ eng1 := engine.NewEngineUnderTest(t) // both keyed by t.Name() → one shared is
 eng1.SetHost(proxy1)
 eng2 := engine.NewEngineUnderTest(t)
 eng2.SetHost(proxy2)
-proxy1.AddPeer(eng2)
-proxy2.AddPeer(eng1)
 eng1.Startup(ctx)
 eng2.Startup(ctx)
 ```
 
 Both engines share one isolated database because they key by the same `t.Name()` — no explicit DSN needed
-(use `SetTestName` if you want a specific shared key, or distinct keys to isolate them). This is how the
-engine's own cross-replica `Await` and step-recovery tests are written — see the `fixtures` package in the
-repository for worked examples.
+(use `SetTestName` if you want a specific shared key, or distinct keys to isolate them). Note that sharing a
+database is exactly what makes them count each other as peers, so two engines meant to be *separate*
+deployments need distinct keys. This is how the engine's own cross-replica `Await` and step-recovery tests
+are written — see the `fixtures` package in the repository for worked examples.
 
 ## Where examples live
 

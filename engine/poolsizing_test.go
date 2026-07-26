@@ -51,17 +51,16 @@ func startSolo(t *testing.T, e *Engine, key string) {
 	// Startup registered the t.Cleanup shutdown (e was built with NewEngineUnderTest).
 }
 
-// addPeerRow inserts a fake peer with the given engine_id (fresh seen_at) into every shard's registry,
-// then forces a recount - the DB-backed stand-in for a peer that came online. In test mode Startup
-// sizes the pools to their derived R immediately (no settle window), so a solo engine already holds its
-// full derived pool before the first addPeerRow.
+// addPeerRow inserts a fake peer with the given engine_id into every shard's registry and waits for the
+// engine to see it - the DB-backed stand-in for a peer that came online.
+//
+// dispatched_at as well as seen_at: the dispatcher count reads that column's freshness (evidence a piston
+// actually turned), so a fake peer stamping only seen_at is a live replica that never dispatches - a real
+// state, but not the one these fixtures mean.
 func addPeerRow(t *testing.T, e *Engine, id int64) {
 	t.Helper()
-	ctx := context.Background()
-	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		// dispatched_at as well as seen_at: the roster counts DISPATCHERS by that column's freshness now
-		// (evidence a piston actually turned), so a fake peer that only stamps seen_at is a live replica
-		// that never dispatches - which is a real state, but not the one these fixtures mean.
+	before := peerCounts(e)
+	err := e.db.OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
 		_, err := db.ExecContext(ctx,
 			"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at) VALUES (?, NOW_UTC(), NOW_UTC())", id)
 		return err
@@ -69,21 +68,87 @@ func addPeerRow(t *testing.T, e *Engine, id int64) {
 	if err != nil {
 		t.Fatalf("insert peer %d: %v", id, err)
 	}
-	e.refreshReplicaCount(ctx)
+	awaitPeerChange(t, e, before)
 }
 
-// delPeerRow removes a fake peer from every shard's registry and forces a recount - a peer going away.
+// delPeerRow removes a fake peer from every shard's registry and waits for the engine to see it go.
 func delPeerRow(t *testing.T, e *Engine, id int64) {
 	t.Helper()
-	ctx := context.Background()
-	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+	before := peerCounts(e)
+	err := e.db.OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
 		_, err := db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", id)
 		return err
 	})
 	if err != nil {
 		t.Fatalf("delete peer %d: %v", id, err)
 	}
-	e.refreshReplicaCount(ctx)
+	awaitPeerChange(t, e, before)
+}
+
+// insertPeerRows writes fake peers straight into every shard's registry, without waiting for the engine to
+// notice. For a test that needs to control WHEN the change is observed - addPeerRow folds the wait and the
+// recompute in, which is what most tests want and exactly what a race test must not have.
+func insertPeerRows(t *testing.T, e *Engine, ids ...int64) {
+	t.Helper()
+	for _, id := range ids {
+		err := e.db.OnEach(context.Background(), func(ctx context.Context, db *sequel.DB, shard int) error {
+			_, err := db.ExecContext(ctx,
+				"INSERT INTO dwarf_peers (engine_id, seen_at, dispatched_at) VALUES (?, NOW_UTC(), NOW_UTC())", id)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("insert peer %d: %v", id, err)
+		}
+	}
+}
+
+// awaitPeerCount waits until one shard's Sonar reports want, WITHOUT recomputing anything - so a test can
+// line up what the next recompute will read.
+func awaitPeerCount(t *testing.T, e *Engine, shard, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if e.replicasOn(shard) == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("shard %d settled at %d replicas, want %d", shard, e.replicasOn(shard), want)
+}
+
+// peerCounts is what every shard's Sonar currently reports.
+func peerCounts(e *Engine) map[int]int {
+	counts := map[int]int{}
+	for _, idx := range e.db.Indices() {
+		counts[idx] = e.replicasOn(idx)
+	}
+	return counts
+}
+
+// awaitPeerChange waits until every shard's count has moved off `before`, then applies it.
+//
+// A wait rather than a forced read, because the read is the Sonars' and they own their own cadence -
+// there is no nudge entry point, deliberately. Under test that cadence is milliseconds (buildSonars), so
+// this settles almost at once. The recompute is then driven directly rather than waiting out a second
+// cadence for the reconcile loop, so a test asserting on POOL sizes sees them the moment the count it
+// caused has landed.
+func awaitPeerChange(t *testing.T, e *Engine, before map[int]int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		moved := true
+		for idx, was := range before {
+			if e.replicasOn(idx) == was {
+				moved = false
+			}
+		}
+		if moved {
+			e.recomputePools()
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("peer count never moved off %v (now %v)", before, peerCounts(e))
 }
 
 func TestPoolSizing_ShardPool(t *testing.T) {
@@ -124,7 +189,6 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	ctx := context.Background()
 
 	e := NewEngineUnderTest(t)
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
@@ -135,22 +199,22 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
-	assert.Equal(1, e.observedReplicas())
+	assert.Equal(1, e.replicasOn(1))
 
 	addPeerRow(t, e, 1001)
-	assert.Equal(2, e.observedReplicas())
+	assert.Equal(2, e.replicasOn(1))
 	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share once the peer registered")
 
 	addPeerRow(t, e, 1002)
-	assert.Equal(3, e.observedReplicas())
+	assert.Equal(3, e.replicasOn(1))
 	assert.Equal(16, db.DB.Stats().MaxOpenConnections, "1/3 share at three replicas")
 
-	e.refreshReplicaCount(ctx) // recount with no fleet change: no recompute
+	e.recomputePools() // recompute with no fleet change: dedupes, so the pools are untouched
 	assert.Equal(16, db.DB.Stats().MaxOpenConnections)
 
 	delPeerRow(t, e, 1001)
 	delPeerRow(t, e, 1002)
-	assert.Equal(1, e.observedReplicas())
+	assert.Equal(1, e.replicasOn(1))
 	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
 
 	// The pinned override wins over any fleet change.
@@ -159,10 +223,15 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	assert.Equal(11, db.DB.Stats().MaxOpenConnections, "the pinned override is never divided")
 }
 
-// TestPoolSizing_PeerExpiry pins the crashed-peer path: a peer that stops heartbeating (its row goes
-// stale, and no goodbye ever comes) drops out of the count once its row ages past the freshness window
-// (4x the heartbeat cadence). The heartbeat loop re-reads R on its own and regrows the pool - no signal
-// is involved, which is exactly what makes a vanished peer recoverable without cooperation.
+// TestPoolSizing_PeerExpiry pins the crashed-peer path: a peer that stops heartbeating (its row goes stale,
+// and no goodbye ever comes) drops out of the count once its row ages past the freshness window, and the
+// pool regrows on its own. No signal is involved, which is exactly what makes a vanished peer recoverable
+// without cooperation.
+//
+// The row is AGED rather than waited out. The window is tens of seconds by design - it is the conservative
+// one, because under-counting over-sizes every pool derived from it - so a test that waited would be
+// trading half a minute for a fact the row's own timestamp states directly. What the wait would add is the
+// Sonar's read cadence, and that is milliseconds here.
 func TestPoolSizing_PeerExpiry(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -170,72 +239,32 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	// The freshness window (4x pingInterval) must comfortably exceed one loaded round trip, because
-	// addPeerRow INSERTs the row and only THEN recounts: if that gap outruns the window the row reads stale
-	// on arrival, R is 1, and the 1/2-share assertion below sees the full budget instead. At 50ms the window
-	// was 200ms and a loaded SQL Server outran it. 500ms buys a 2s window and costs the test ~2s, since
-	// phase two must then wait that window out.
-	e.pingInterval = 500 * time.Millisecond // freshness window = 4x = 2s
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 
-	// A peer registers a fresh row but then never heartbeats again (crashed). addPeerRow forces the recount,
-	// so this is synchronous.
+	// A peer registers a fresh row but then never heartbeats again (crashed).
 	addPeerRow(t, e, 2001)
 	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share while the peer's row is fresh")
 
-	// The heartbeat loop re-reads R every pingInterval; once the crashed peer's row ages past the window it
-	// is no longer counted, and the pool regrows to the full budget - with no forced recount from the test.
-	// The bound is a "did it hang" ceiling, not a timing contract: the loop leaves as soon as it sees 48.
+	// Its row ages out. Written with the database's own clock, never a bound Go time, so this is stale by
+	// exactly the measure the Sonar applies.
+	shardDB, err := e.db.Shard(1)
+	assert.NoError(err)
+	_, err = shardDB.ExecContext(t.Context(),
+		"UPDATE dwarf_peers SET seen_at=DATE_ADD_MILLIS(NOW_UTC(), ?), dispatched_at=DATE_ADD_MILLIS(NOW_UTC(), ?)"+
+			" WHERE engine_id=?", -600000, -600000, 2001)
+	assert.NoError(err)
+
+	// Nothing forces a recount: the Sonar re-reads on its own cadence and the reconcile loop re-derives.
+	// The bound is a "did it hang" ceiling, not a timing contract.
 	deadline := time.Now().Add(30 * time.Second)
 	for db.DB.Stats().MaxOpenConnections != 48 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
-	assert.Equal(1, e.observedReplicas(), "crashed peer aged out of the count")
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget restored by the heartbeat recount")
-}
-
-// TestPeers_HeartbeatPrunesStragglers pins the conditional prune: a crashed peer's straggler row (older
-// than the 8x delete window) is removed by the heartbeat pass, while this replica's own fresh row - the
-// one it just upserted - is never touched (the prune predicate is `seen_at < NOW - 8x`, which a fresh
-// row structurally cannot match). Solo (R=1), so the 1/R prune roll always fires when there is something
-// stale, making the assertion deterministic; a larger fleet would prune the same rows, just spread the
-// dice roll so ~one replica per round does it.
-func TestPeers_HeartbeatPrunesStragglers(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-
-	e := NewEngineUnderTest(t)
-	assert.NoError(e.SetHost(noopHost{}))
-	// solo: R=1, so a stale row is always pruned on the next heartbeat pass
-	assert.NoError(e.Startup(t.Context()))
-
-	// A crashed peer's straggler: a row far older than the 8x prune window.
-	staleMs := e.peerStragglerAge().Milliseconds() + 60_000
-	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		_, err := db.ExecContext(ctx,
-			"INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (?, DATE_ADD_MILLIS(NOW_UTC(), ?))",
-			int64(999001), -staleMs)
-		return err
-	})
-	assert.NoError(err)
-
-	// One heartbeat pass: upsert self (fresh), see stale>0, prune.
-	_, err = e.heartbeatPeers(ctx)
-	assert.NoError(err)
-
-	count := func(id int64) int {
-		var n int
-		assert.NoError(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-			return db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_peers WHERE engine_id=?", id).Scan(&n)
-		}))
-		return n
-	}
-	assert.Equal(0, count(999001), "the straggler row is pruned")
-	assert.Equal(1, count(e.engineID), "this replica's own fresh row survives the prune")
+	assert.Equal(1, e.replicasOn(1), "crashed peer aged out of the count")
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget restored with no signal and no forcing")
 }
 
 // TestPoolSizing_PoolGrowsForLongTasks pins the grow-on-demand pool: with every worker parked in a
@@ -427,10 +456,10 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 // over-connecting the shard's server, and sticky until the next fleet change (the dedupe sees R unchanged
 // and skips). poolsLock now spans read-of-R through push, so the last writer wins with the value it read.
 //
-// The interleaving is forced, not raced: a fault freezes the first recompute in exactly that window.
-// With the lock, the second recompute blocks on it and applies AFTER - which is the fix working. R is
-// driven directly (observedR + recomputePools) rather than through the registry, so the two recomputes
-// read the two different counts the race needs.
+// The interleaving is forced, not raced: a fault freezes the first recompute in exactly that window. With
+// the lock, the second recompute blocks on it and applies AFTER - which is the fix working. The two counts
+// the race needs are staged through the registry itself, waiting for each to be OBSERVED before the
+// recompute that must read it.
 func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -446,26 +475,28 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	}
 	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 
-	// Stall the first recompute (one-shot) after it has read R=2, before it pushes 48/2=24.
+	// Stall the first recompute (one-shot) after it has read a fleet of 2, before it pushes 48/2=24.
+	insertPeerRows(t, e, 1001)
+	awaitPeerCount(t, e, 1, 2)
 	e.seams.InjectN(1, FaultSlowPoolPush)
 	var wg sync.WaitGroup
-	e.observedR.Store(2)
 	wg.Go(func() {
 		e.recomputePools()
 	})
-	time.Sleep(slowPoolPushDelay / 10) // the first recompute is now inside the window, holding a stale R=2
+	time.Sleep(slowPoolPushDelay / 10) // the first recompute is now inside the window, holding a stale 2
 
-	// A second recompute runs while the first is stalled, and is NOT stalled: it sees R=3 and wants
-	// 48/3=16. Unserialized, it pushes 16 immediately and the first then overwrites it with the stale 24.
+	// A second recompute runs while the first is stalled, and is NOT stalled: it sees 3 and wants 48/3=16.
+	// Unserialized, it pushes 16 immediately and the first then overwrites it with the stale 24.
 	// Serialized, it cannot start until the first's push is done, so 16 lands last - the correct value.
-	e.observedR.Store(3)
+	insertPeerRows(t, e, 1002)
+	awaitPeerCount(t, e, 1, 3)
 	wg.Go(func() {
 		e.recomputePools()
 	})
 	wg.Wait()
 
 	// The fleet is 3, so the pool must be the R=3 share - not the R=2 share applied last.
-	assert.Equal(3, e.observedReplicas())
+	assert.Equal(3, e.replicasOn(1))
 	assert.Equal(16, db.DB.Stats().MaxOpenConnections,
 		"the pool must reflect the LATEST replica count (48/3), not a stale recompute that pushed last")
 }
@@ -492,10 +523,11 @@ func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
 		return
 	}
 
-	// A recompute reads R=2 (derived 24) and stalls before pushing.
+	// A recompute reads a fleet of 2 (derived 24) and stalls before pushing.
+	insertPeerRows(t, e, 1001)
+	awaitPeerCount(t, e, 1, 2)
 	e.seams.InjectN(1, FaultSlowPoolPush)
 	var wg sync.WaitGroup
-	e.observedR.Store(2)
 	wg.Go(func() {
 		e.recomputePools()
 	})
@@ -707,7 +739,7 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // open = 6 x 8 = 48 at R=1
 	assert.NoError(e.Startup(t.Context()))
 
-	assert.Equal(1, e.observedReplicas())
+	assert.Equal(1, e.replicasOn(1))
 	solo := e.cache.Capacity()
 	assert.True(solo > 100, "a solo replica caches against the whole budget (got %d)", solo)
 
@@ -715,7 +747,7 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	for id := int64(3001); id <= 3007; id++ {
 		addPeerRow(t, e, id)
 	}
-	assert.Equal(8, e.observedReplicas())
+	assert.Equal(8, e.replicasOn(1))
 
 	split := e.cache.Capacity()
 	assert.True(split < solo, "the cache must follow the pool split down (was %d, still %d)", solo, split)
@@ -724,7 +756,7 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	for id := int64(3001); id <= 3007; id++ {
 		delPeerRow(t, e, id)
 	}
-	assert.Equal(1, e.observedReplicas())
+	assert.Equal(1, e.replicasOn(1))
 	assert.Equal(solo, e.cache.Capacity(), "the cache follows the pool back up when the fleet shrinks")
 }
 
@@ -743,7 +775,7 @@ func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	assert.Equal(1, e.observedReplicas(), "solo replica reads R=1 from the registry at startup")
+	assert.Equal(1, e.replicasOn(1), "solo replica reads R=1 from the registry at startup")
 	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "the full derived pool is in place the moment Startup returns")
 }
 
@@ -762,7 +794,6 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	eng1 := NewEngineUnderTest(t)
 	assert.NoError(eng1.SetHost(noopHost{}))
 	assert.NoError(eng1.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	eng1.pingInterval = 100 * time.Millisecond
 	assert.NoError(eng1.Startup(ctx))
 	t.Cleanup(func() { eng1.Shutdown(ctx) })
 
@@ -776,21 +807,20 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	eng2 := NewEngineUnderTest(t)
 	assert.NoError(eng2.SetHost(noopHost{}))
 	assert.NoError(eng2.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	eng2.pingInterval = 100 * time.Millisecond
 	assert.NoError(eng2.Startup(ctx))
 	t.Cleanup(func() { eng2.Shutdown(ctx) })
 
 	db2, err := eng2.db.Shard(1)
 	assert.NoError(err)
-	assert.Equal(2, eng2.observedReplicas(), "eng2 sees the registered fleet at startup")
+	assert.Equal(2, eng2.replicasOn(1), "eng2 sees the registered fleet at startup")
 	assert.Equal(24, db2.DB.Stats().MaxOpenConnections, "eng2 sizes for R=2 immediately - no partial over-connect")
 
-	// eng1 converges to the R=2 share on its own heartbeat recount, with no signal wiring.
+	// eng1 converges to the R=2 share on its own reading, with no signal wiring.
 	deadline := time.Now().Add(5 * time.Second)
 	for db1.DB.Stats().MaxOpenConnections != 24 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	assert.Equal(24, db1.DB.Stats().MaxOpenConnections, "eng1 converges to R=2 via its heartbeat recount")
+	assert.Equal(24, db1.DB.Stats().MaxOpenConnections, "eng1 converges to R=2 by reading the registry")
 }
 
 // TestPoolSizing_StartupOverridePins pins that SetMaxOpenConns - the expert / external-pooler path -

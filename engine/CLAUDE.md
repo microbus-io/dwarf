@@ -7,9 +7,21 @@
 
 ### The Host interface (how the engine reaches the outside world)
 
-The graph/task/peer seam is a single **`Host`** interface, registered once via `SetHost`; the
-observability providers below are injected separately. A host must implement `LoadGraph` and `ExecuteTask`;
-`SignalPeers` may be a no-op. The interface methods:
+The graph/task seam is a single **`Host`** interface, registered once via `SetHost`; the observability
+providers below are injected separately. It has exactly two methods, both required.
+
+**THE ENGINE SENDS NOTHING TO ITS PEERS, and nothing may be added that does.** Replicas coordinate purely
+by reading the database they share - work discovery, `Await` wakes and fleet membership are all polled, on
+cadences the engine derives - so there is no inter-replica transport in the contract and no host obligation
+to provide one. Three signal kinds have existed here and all three were deleted after measurement, in this
+order: a per-step work doorbell (volume O(steps), and it bought no latency because every piston was already
+scanning at its cycle interval), a per-flow stop broadcast (the await latch's detector reads the shared
+rows on a tighter cadence than a broadcast could beat), and a fleet-membership nudge (peers re-read the
+registry every 250ms, which is faster than a broadcast converges). The rule that killed each: a signal may
+only ACCELERATE a convergence the database already guarantees, and once the poll is faster than the
+message, it accelerates nothing. Do not reintroduce one without showing it beats the poll it would replace.
+
+The interface methods:
 
 - **`LoadGraph(ctx, workflowURL string) (*workflow.Graph, error)`** - fetches a workflow graph by name.
   Called at `Create` (and on subgraph spawn); the graph JSON is then frozen on the flow row. The flow's opaque
@@ -20,19 +32,6 @@ observability providers below are injected separately. A host must implement `Lo
   graph's `onError` transition if one exists, else the step fails. A **panic** in the in-process handler is caught at
   the call boundary and treated as such an error (see "Host-call panic isolation"). The engine never sniffs status
   codes or error text; a task backing off on a transient failure detects that itself and arms `flow.Retry`.
-- **`SignalPeers(ctx, op string, payload []byte)`** - delivers one cross-replica coordination signal to the
-  other replicas, all fire-and-forget. `op` is an opaque routing key (usable as a topic); `payload` is opaque bytes
-  the engine already serialized. The host ships `(op, payload)` to peers and, on the receiving side, hands them back
-  via `Engine.DeliverSignal(ctx, op, payload)`, which parses `op` and applies the effect. **Exactly one op
-  exists - `peersChanged`, a fleet-membership nudge - so signal volume is bounded by DEPLOYMENT events and by
-  nothing else.** Neither work discovery nor `Await` emits anything: both are pull-based (see "The work doorbell
-  is purely local" and "Await"). All signal kinds funnel through this one method, so
-  adding a new kind needs no host change; the host never branches on `op` or inspects `payload`. A single-replica host
-  does nothing here and none of this runs. The contract asks the host to deliver to OTHER replicas only (the engine
-  applies each signal locally before publishing), but the engine does not rely on it: every payload carries the
-  sending engine's random `engineIDBase36` as `Origin`, and `DeliverSignal` silently discards its own echo (a
-  broadcast transport that includes the publisher is then correct, just wasteful). An empty `Origin` (an older
-  build's signal) is never discarded - process it normally.
 - **`*slog.Logger`** - structured logging sink (`SetLogger`); defaults to a **discard** logger (the engine and
   its sequel DB layer stay silent until a logger is injected, rather than writing to the application-owned
   `slog.Default()` - the library convention). A nil logger resets to that silent default. The engine logs through
@@ -170,9 +169,7 @@ state is reachable in production, not just by API misuse: `Shutdown` -> `ShardSe
 so a host still serving while it tears the engine down (or a request in flight when `Shutdown` lands) hits
 it. `pickShard` keeps its **own** no-open-shards guard, because `started` can flip between the gate and the
 pick - and there, indexing the empty index slice (`rand.IntN(0)`) **panicked the host's process**. Inbound
-`DeliverSignal` is the deliberate exception: a doorbell to a stopped engine is inert (`return nil`), not an
-error, since it is fire-and-forget and there is nothing to wake. Pinned by
-`TestPoolSizing_NoOpenShardsIs503`.
+Pinned by `TestPoolSizing_NoOpenShardsIs503`.
 
 **Policy is set once at genesis and inherited by derivation; the operation is the inherit-vs-default selector.**
 A flow's policy (priority, fairness, time budget, baggage, thread membership) is authored
@@ -412,13 +409,9 @@ ran *and* the intent to cancel a healthy durable flow was itself wrong.)
 
 **HistoryMermaid** - Writes the execution DAG as a Mermaid diagram to an `io.StringWriter`.
 
-**The inbound peer entry point `DeliverSignal(ctx, op, payload)`** is the receiving side of cross-replica
-coordination: the host adapter calls it with the `(op, payload)` it received from a peer, and the engine parses `op`
-and applies the effect. The outbound side is the host's `SignalPeers`. **One op exists** - `peersChanged`, a
-fleet-membership nudge - and it scales with deployment events. Fire-and-forget: a missed one is recovered by the
-next heartbeat's registry read. Any other op is an ERROR rather than a silent absorption, so a peer on a
-different build broadcasting something this engine does not implement is reported; `peers.go` records the two
-shapes that must never be added back.
+**There is no inbound peer entry point.** `peers.go` records the two signal shapes that must never come
+back - a per-step work doorbell and a per-flow stop broadcast - and the standing rule above covers the
+third.
 
 ### Subgraph keys are read-only
 
@@ -672,7 +665,8 @@ by scanning, bounded, with no message at all. The consequence to hold in mind wh
 reading the origination sites: a step created here is offered to **this replica's cache only**, so if this
 replica cannot serve it (its partition is non-empty, and the step falls in a peer's residue class) the step
 waits for that peer's next scan. If a per-step peer signal is ever revived it must be coalesced and
-payload-free ("shard S has work", rate-limited), never per-step.
+payload-free ("shard S has work", rate-limited), never per-step - and it would first have to beat the
+cycle interval it is trying to shorten, which is the bar every removed signal failed.
 
 Pinned by `TestSignals_VolumeDoesNotScaleWithSteps`, which asserts on the emitted **op names** rather than a
 count: a per-step broadcast reintroduced under any new op name fails it.
@@ -1238,31 +1232,31 @@ ever DELAY this replica's dispatch of a step by a bounded window, never prevent 
   this replica never reserved (Fork's leaf, `Continue`) is a harmless no-op, which is why the guard belongs
   at the shared entry point rather than at each caller.
 
-**The partition divides DISPATCHERS, not R** - counted from `dwarf_peers.dispatched_at` freshness (see
-`peerDispatchWindow`, 5s). The column is EVIDENCE that a piston turned rather
+**The partition divides DISPATCHERS, not the pool divisor** - counted from `dwarf_peers.dispatched_at`
+freshness, per shard (`internal/peers`). The column is EVIDENCE that a piston turned rather
 than a claim about intent: a replica that publishes "I dispatch" and then wedges keeps its residue class
 forever, and a class nobody selects is work nobody runs, whereas a stale timestamp drops it from the
-divisor on its own while `seen_at` keeps it in R. The two windows are asymmetric in OPPOSITE directions
-and deliberately so - over-counting R over-sizes pools and can collapse a database, while over-counting
-DISPATCHERS strands work, so R errs toward keeping a replica and this errs toward dropping one.
+divisor on its own while `seen_at` keeps it counted for the connections it holds. The two windows are
+asymmetric in OPPOSITE directions and deliberately so - over-counting the pool divisor over-sizes pools and
+can collapse a database, while over-counting DISPATCHERS strands work, so the first errs toward keeping a
+replica and this errs toward dropping one.
 `dispatched_at` also advances while a cycle is IN FLIGHT, without which a deep-backlog scan (still
 O(backlog) on any dialect lacking the run-condition early-stop) would drop every healthy replica in a
 loaded fleet out of the divisor at once. Registration does NOT stamp it - intent is not evidence - so a
-replica earns it on its first cycle, and the piston beats immediately when that lands. An await-only replica
-(`SetWorkers(0)`) holds connections, so it counts toward R and divides the pools, but it claims nothing:
-giving it a residue class means *nothing ever selects those steps*. This shipped broken in the first cut
-and hung `fixtures/crossreplicaawait_test.go`, which uses exactly that configuration; `observedDispatchers`
-is now the partition divisor and `observedR` stays the pool divisor.
+replica earns it on its first cycle, and the beat rides the read cadence when that evidence flips so the
+window is a read interval rather than a beat interval. An await-only replica (`SetWorkers(0)`) holds
+connections, so it counts toward the pool divisor, but it claims nothing: giving it a residue class means
+*nothing ever selects those steps*. This shipped broken in the first cut and hung
+`fixtures/crossreplicaawait_test.go`, which uses exactly that configuration.
 
-**Everything fails open.** Solo replica, unknown ordinal (self absent from the roster), or an ordinal out of
-range for the divisor all disable partitioning, restoring pre-change behavior. Partitioning EXCLUDES rows,
-so a wrong `(R, ordinal)` strands a residue class while declining to partition only restores overlapping
-selection - slower but complete. R and the ordinal therefore come from **one shard's roster**
-(`freshestRoster`), never assembled from two, or two replicas could seat on one ordinal.
+**Everything fails open.** Solo dispatcher, unknown ordinal (self absent from the roster), an ordinal out of
+range for the divisor, a Sonar gone blind, or no Sonar at all - every one disables partitioning on that
+shard. Partitioning EXCLUDES rows, so a wrong pair strands a residue class while declining only restores
+overlapping selection - slower but complete. The pair is published as ONE value, so a reader can never
+catch half a fleet change: an ordinal only means anything against the count it was derived from.
 
-*Ranked on AGE, never raw `seen_at`.* Each shard stamps its own `NOW_UTC()`, so timestamps are not
-comparable across shards and a clock-fast shard would always look freshest; `NOW_UTC() - seen_at` puts both
-terms on one clock and the offset cancels - the same cancellation the refiller's per-shard age relies on.
+*The count and the ordinal come from ONE shard's rows*, which is what per-shard accounting makes automatic -
+there is no cross-shard roster to assemble, and no timestamps from different clocks to rank.
 
 **The doorbell is deliberately NOT partitioned, and the case for that got simpler twice.** `Offer` now
 admits only into an EMPTY partition, so a busy replica never offers at all, and a uniform-priority workload
@@ -1272,8 +1266,9 @@ concerns **only this replica's own** origination sites: with the peer `enqueue` 
 unpartitioned offer can arrive from a peer at all, which closed the one case where it genuinely raced the
 residue class's owner.
 
-**Known residual: replica death strands a slice for up to `peerFreshWindow` (40s).** A dead replica's
-residue class is owned by nobody until its row ages out of the count and ordinals re-seat. Self-healing,
+**Known residual: replica death strands a slice for up to the dispatch window (5s) plus a read cadence.** A
+dead replica's residue class is owned by nobody until its row ages out of the dispatcher count and ordinals
+re-seat. Self-healing,
 accepted deliberately rather than papered over with an age-based fuse (a fuse threshold above normal
 queueing delay - which is *seconds* under load - would not fire when needed, and below it would disable
 partitioning under exactly the load it is for).
@@ -2075,38 +2070,28 @@ engine policy — below.
   connections only queue inside the database - and on small servers actively collapse throughput
   (745 -> 212 steps/s at 1 vCPU between M=16 and M=96), which is why the budget is a hard cap, not an
   optimization.
-- **R is discovered at Startup BEFORE any worker dispatches, so pools are sized right the first time - there is no
-  async grace window.** Reading R from the registry needs open connections, so `Startup` opens the shards at a
-  small **bootstrap** pool (`startupBootstrapConns`, 4 - enough to register the peer row, probe the RTT, and read
-  the count, which is all any pre-dispatch work needs), then `discoverReplicasAtStartup` registers self, nudges
-  peers, waits `startupPeerSettle`, reads R, and only then resizes every pool to its derived R-divided share and
-  computes `workersDispatch` - all before `initRuntime` spawns a worker. So the replica takes on work with pools
-  already correct for the fleet it is in; a **cold-starting fleet's** rows settle in the registry and one read
-  yields the converged count, with no partial-count over-connect to defend against.
+- **The fleet is known BEFORE any worker dispatches, so pools are sized right the first time - there is no
+  async grace window.** Reading the registry needs open connections, so `Startup` opens the shards at a small
+  **bootstrap** pool (`startupBootstrapConns`, 4 - enough to register the row, probe the RTT and read the fleet,
+  which is all any pre-dispatch work needs), then builds the Sonars, joins every shard in parallel, and only
+  then resizes each pool to its derived share and computes `workersDispatch` - all before `initRuntime` spawns
+  a worker. So the replica takes on work with pools already correct for the fleet it is in, with no
+  partial-count over-connect to defend against. The ordering rationale - announce, let peers shrink, then grow -
+  is in §"Peer discovery"; what matters here is that the sizing happens after it and before dispatch.
 
   **The bootstrap pool is deliberately tiny** because a cold-starting fleet's only connections during that window
-  are these (no worker dispatches yet, and lazy fill means the ceiling barely materializes - a handful of
-  connections), so even N replicas starting together stay far under any server's `max_connections`. It is not the
-  over-connect guard the old cap was - the guard is now "R known before dispatch" - just enough to bootstrap the
-  registry read.
+  are these (no worker dispatches yet, and lazy fill means the ceiling barely materializes - roughly one
+  connection per shard, since everything in the window runs sequentially on one goroutine per shard), so even N
+  replicas starting together stay far under any server's `max_connections`. It is not an over-connect guard - that
+  is "the fleet is known before dispatch" - just enough to bootstrap the read.
 
-  **`startupPeerSettle` (250ms) exists for the SIMULTANEOUS cold start, and only that.** Without it an early reader
-  races the other starters' inserts and sees a partial fleet (R=2 when the truth is 8), over-sizing. The wait lets
-  those rows land so one read yields the converged count. It is orders of magnitude shorter than the old
-  signal-convergence window because it is backed by a real registry read, not a guess about when replies arrived;
-  it is skipped under a `SetMaxOpenConns` override (R does not size the pools then) and under test
-  (`!testing.Testing()`, so the suite does not pay it on every `NewEngineUnderTest` - the peer tests drive R by
-  writing the registry directly). A single replica joining an established fleet needs no settle: the established rows are
-  already there, so its first read is exact.
+  **`lastAppliedR` starts EMPTY (`"nothing derived yet"` per shard), and Startup records each shard's count**
+  after sizing its pool directly, so the first reconcile `recomputePools` dedupes against the values the pools
+  actually hold. `shardPool` clamps `replicas = max(1, replicas)`, so an absent count never reaches the
+  arithmetic.
 
-  **`lastAppliedR` is seeded to 0 (`"nothing derived yet"`), and Startup sets it to the discovered R** after sizing
-  the pools directly, so the first heartbeat `recomputePools` dedupes against the value the pools actually hold.
-  `shardPool` clamps `replicas = max(1, replicas)`, so the 0 sentinel never reaches the arithmetic.
-
-  This does **not** rescue a host that leaves `SignalPeers` a no-op *and* also isolates each replica's databases -
-  but that is a misconfiguration, not the SignalPeers gap: with a shared database the registry alone converges R
-  within one `pingInterval` even if `SignalPeers` never fires. The `peersChanged` nudge only *accelerates* that to
-  sub-second (see "Peer discovery" below).
+  None of this depends on any transport: the registry is the only thing anyone reads (see "Peer discovery"
+  below).
 
 - **The derived budget is per DATABASE, so the observed replica count R splits it**: each replica
   takes `max(2, open/R)`. The knee belongs to the shard's server, not to one replica - R replicas
@@ -2115,34 +2100,76 @@ engine policy — below.
   recomputed pools to the open shards immediately. The `SetMaxOpenConns` override is a per-replica
   exact number and is never divided.
 
-**Peer discovery (observed replica count, `peers.go`).** The engine reads how many replicas share its shards' databases
-from the shared **`dwarf_peers`** registry, NOT from the host transport. Each replica's **pistons** heartbeat its own row into their own shard (one per shard, on the piston's own
-cadence - `SetHeartbeatInterval`, pushed by the engine as `min(1s, pingInterval/4)`), while the engine's
-peers loop is a pure READER that re-reads the engine_id-sorted **roster** of rows fresh within
-`4x pingInterval` on each shard every `pingInterval` (10s), taking the **freshest shard's
-roster whole** (freshest by heartbeat age, not raw `seen_at` - each shard stamps its own `NOW_UTC()`, so ages are
-comparable across shards where timestamps are not). One roster, not a per-shard `MAX(COUNT)`, because it carries two
-coupled values that must agree: **R** = its length (the pool divisor - every peer holds connections) and this
-replica's **ordinal** = its position in it (the candidate-partition divisor - see §"Candidate de-duplication").
-Reading R from one shard and the ordinal from another could seat two replicas on one ordinal. A lagging shard only
-shortens the roster, which under-counts R and grows pools - the safe direction. A row unheard-from for 4x
-(40s) is no longer counted (a crashed peer, whose owner sends no goodbye, drops out on its own) and becomes eligible
-for the prune DELETE past 8x (80s). `Startup` registers + reads synchronously (above); `Shutdown` deletes the row and
-nudges peers so they regrow without waiting out the expiry. `observedReplicas()` is a lock-free atomic read of the
-last count.
+**Peer discovery (`peers.go` + `internal/peers`).** Everything the engine knows about its fleet comes from
+the shared **`dwarf_peers`** registry, NOT from the host transport, and it comes **per shard**: one
+`peers.Sonar` per open shard owns this replica's row in that shard's registry, reads the whole registry on
+its own cadence, and publishes what the reading implies. The mechanism - the two timestamps, the two windows
+and their opposite postures, the blindness rules, the id-list prune - lives in `internal/peers/CLAUDE.md`.
+What belongs here is the engine's side of it.
 
-*Why the cadence is 10s (was 30s), and why not lower.* The cadence governs the **ghost-peer window**: a *crashed*
-replica sends no goodbye, so its row lingers for the 4x counting window before it stops inflating R. A shorter
-cadence shrinks that window; the decisive constraint on how short is **false death**. The two R-errors are
-asymmetric - a ghost *over*-counts R -> pools too small -> under-connect (the *safe* direction; costs throughput,
-stays healthy), while falsely declaring a *live* replica dead *under*-counts R -> pools too big -> over-connect (the
-*dangerous* direction, which collapses a database). A live replica is declared dead only if it misses ~4 consecutive
-beats (a >4x stall), and the heartbeat is itself a pooled DB write, so under heavy load it can starve for a
-connection - exactly when growing pools is most harmful. 10s/40s keeps a comfortable false-death margin while cutting
-the ghost window from ~2min to ~40s; **do not chase 4s** (a 4s stale window has essentially no margin and risks a
-starvation feedback loop - heartbeat starves -> peers grow pools -> more load -> more starvation). The
-ghost-*accumulation* case (a fast crashloop with random ids piling up rows faster than they age out) is not fixed by
-the cadence at all - it is fixed structurally by `SetEngineID` (below).
+**Two numbers, from one reading, with opposite risk profiles.** `replicasOn(shard)` divides that shard's
+connection **pool**, because the budget belongs to the shard's database and N replicas each holding the whole
+budget would overshoot it N times over. `partitionOn(shard)` divides that shard's **work** - the residue
+class of `step_id` each replica selects - across the replicas that demonstrably serve it (see §"Candidate
+de-duplication"). Over-counting the first over-sizes pools and can collapse a database; over-counting the
+second hands a residue class to a replica that never selects it and strands the work in it. They are
+therefore never the same number, and the second excludes an await-only replica (`SetWorkers(0)`) that the
+first counts.
+
+**PER SHARD is the point, and a fleet-global count cannot express it.** A peer whose piston wedges on shard 3
+drops out of shard 3's work divisor and stays in every other shard's; a peer whose beats to shard 3 fail
+mis-sizes only shard 3's pool. It also retires cross-shard comparison entirely - every timestamp in the
+registry is stamped by the shard holding it, so ages are comparable within a shard and timestamps are
+comparable nowhere. Consequently **every derivation that consumes a replica count does so per shard**:
+`recomputePools`, `recomputeWorkerCeiling` (worst shard wins, since a storm drains through the tightest
+pool) and `recomputeRefillIntervals` (the period is measured against the pool that shard drains through).
+`lastAppliedR` is a per-shard map under `poolsLock` for the same reason: one shard's change must not re-push
+another's unchanged sizes, and one shard's stillness must not mask a change elsewhere.
+
+**The two halves are wired to each other through the engine**, so neither package imports the other:
+`piston.SetPartitionFunc(func() { return e.partitionOn(idx) })` and `sonar.SetEvidence(p.Liveness)`. Both are
+pure reads of live state, so neither captures anything that can go stale. The piston publishes nothing about
+this replica anywhere - it only reports whether it is turning - which is what keeps how often that fact
+reaches the registry independent of how long a cycle takes.
+
+**The engine PULLS; nothing calls back.** `runReconcileLoop` ticks at `peers.Cadence` and calls
+`recomputePools`, which early-returns when no shard's count moved. It is a reconcile loop rather than a
+change notification, and the distinction is load-bearing: its invariant is "the applied pool sizes match the
+currently observed fleet", a job that exists whether or not anything announces a change, and it absorbs
+drift no notification could express - an override landing, a push that errored, a count moving while a
+previous push was in flight. An edge would have to be fired from every path that can move a published value
+(a confirmed fall, a recovery from blindness, a registration repair, a prune); missing one would leave the
+derived sizes stale forever with no backstop, and it would run pool policy on a Sonar's goroutine, coupling
+one shard's beat to another shard's slow push. The tick must stay at `peers.Cadence` - slower discards
+detection the reads have already paid for.
+
+**Startup announces before it consumes, and that ordering is the guarantee.** `buildSonars` then `joinFleet`
+(parallel across shards), and only then are the pools sized. A joining replica sizes its own pool for the
+fleet it is joining while its peers still hold pools sized for the fleet *without* it, so consuming
+immediately would put the shard's server over budget by roughly one replica's share until they caught up.
+`Join` blocks two read cadences - a peer's read may have begun just before this replica's row was committed,
+so only the reading after it must see the row - which also gives a simultaneously-starting fleet's rows time
+to land, so what follows is a settled roster rather than a partial one. A partial one *under*-counts, which
+over-sizes pools. What the wait buys is peers having STOPPED ACQUIRING beyond their new cap, not connections
+already closed: lowering a pool's limit closes nothing, so any surplus drains as connections are returned.
+
+**Shutdown drains the Sonars LAST**, after the pistons, because this replica must stay registered while its
+workers are still executing steps - every one of them drains against pools each peer sized for a fleet that
+still includes us. Only once their loops have returned is the last possible beat behind us, which is what
+makes `leaveFleet`'s delete final: a beat only ever UPDATEs, so nothing can resurrect a row deleted after its
+loop stopped.
+
+**Everything fails open.** A shard with no Sonar (one that failed to build, or any lookup before Startup)
+sizes for a solo replica - the pool-safe direction - and declines to partition. The Sonar's own uncertain
+cases (solo dispatcher, self absent from the roster, an ordinal outside the divisor, a Sonar gone blind) do
+the same, and `internal/piston` validates the pair a third time as its own advertised posture. Three guards,
+deliberately: each package answers for what it knows.
+
+**Under test the cadence is shortened** (`testPeerCadence`, `buildSonars`), because every engine pays
+`Join`'s two cadences on the way up and a suite standing one up per test would spend most of its time there.
+It must not be shortened too far: the blindness grace is TWO cadences, and a Sonar that reads as blind
+declines to partition, so a grace inside ordinary goroutine-scheduling jitter disables partitioning at random
+under a parallel suite - the same cliff a slow pass produces in production, reached through the test knob.
 
 **`SetEngineID(id int64)` pins the identity, defaulting to random.** `engine_id` (a `BIGINT`, minted
 `rand.Uint64()>>1` per instance in `NewEngine`) is the peer-registry PK and the flow/step provenance stamp. Random is
@@ -2161,31 +2188,16 @@ per-process case (bundled host) deliberately does *not* opt in: it keeps the ran
 count), and its test-teardown ghosts are handled by clean `Shutdown` (deletes the row) + fresh-DB-per-run, not by an
 identity.
 
-**The prune is conditional and statistical, so steady state issues no range-DELETEs at all.** The heartbeat reads
-the fresh count and the stale count (`seen_at <= NOW - 8x`) in **one** scan (`heartbeatPeers`, two `CASE`-`SUM`s -
-no extra round trip), and runs the prune `DELETE` only when `stale > 0` **and** the replica wins a `1/R` dice roll
-(`rand.IntN(fresh) == 0`). So in a healthy fleet the *only* writes touching `dwarf_peers` are conflict-free per-PK
-upserts - the range-`DELETE` (the one op with MySQL gap-lock/deadlock potential on the shared table) never fires -
-and a crash's stragglers are cleaned by ~one replica per round rather than an N-way concurrent DELETE burst right
-when a node died. Pruning is pure hygiene (the fresh filter already excludes stale rows from the count), so a
-delayed or skipped prune is harmless, and a solo replica (R=1) always wins the roll so its own restart stragglers
-never linger. Only the **heartbeat** pass prunes; the `peersChanged` nudge and the Startup read are pure count
-reads (no write). Pinned by `TestPeers_HeartbeatPrunesStragglers`.
+**Nothing announces a fleet change, and nothing needs to.** The Sonars have no nudge entry point,
+deliberately: reading every `peers.Cadence` converges faster than a broadcast would, so a nudge could only
+ever arrive after the reading that made it redundant.
 
-The host's **`peersChanged`** signal is a *best-effort nudge* only: a receiver re-reads the registry on it, which
-accelerates convergence from the heartbeat cadence to sub-second, but correctness rests on the registry + heartbeat.
-So a host that no-ops `SignalPeers` degrades convergence **speed, not the count** - the decisive change from the old
-signal-only scheme, where a no-op `SignalPeers` left every replica believing R=1 and over-connecting. The registry is
-now the database backstop the old design explicitly lacked. Placement: written/read on ALL shards (forward-looking -
-a future shard-fault-tolerant `OnEach` reads the count from survivors with no change here; today `OnEach` is
-all-or-nothing, which is correct because today a down shard fails everything, so the count degrades in lockstep).
-Design posture: still a **lookup, not a control loop** (the count is exact/discrete and independent of the actuation -
-a shrunk pool still heartbeats); R is a **tuning** number (a wrong count mis-sizes pools, corrupts nothing).
-Asymmetry by construction: a new peer shrinks pools promptly (its row + a nudge); a vanished peer regrows them lazily
-(only once its row ages past 4x on some replica's heartbeat recount).
+Design posture: a **lookup, not a control loop** (the counts are exact and discrete and
+independent of the actuation - a shrunk pool still beats), and they are **tuning** numbers (a wrong count
+mis-sizes pools, corrupts nothing).
 
 **Every APPLICATION of a pool size is serialized under `poolsLock`** - both writers: the derived
-recompute (`recomputePools`, driven by `refreshReplicaCount` on the heartbeat or a `peersChanged` nudge) and the live
+recompute (`recomputePools`, driven by the reconcile loop) and the live
 override (`SetMaxOpenConns`). The `lastAppliedR` dedupe skips a no-op recompute but does **not order two live ones**:
 two recounts microseconds apart during a rolling deploy each read a different R, and with nothing serializing
 read-of-R through push, the **R=2 sizes can land AFTER the R=3 sizes** - every replica then holds a half-budget
@@ -2195,12 +2207,13 @@ reads `maxOpenConns` and only *then* pushes, so a `SetMaxOpenConns` landing in t
 **pinned pools silently overwritten by derived ones** - the operator's explicit pin evaporates. With
 the lock spanning read through push, whichever writer goes second sees a settled world (the override
 applies last, or the recompute early-returns because the override is now set). Lock order:
-`poolsLock` -> `shardsLock` (`observedReplicas` is now a lock-free atomic, so it drops out of the order). Pinned by
+`poolsLock` -> `shardsLock` (the counts are lock-free reads of the Sonars' published state, so they drop out of the order). Pinned by
 `TestPoolSizing_ConcurrentRecomputeAppliesLatestR` and
 `TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride` (both drive the interleaving with the
-`slowPoolPush` seam rather than racing for it - setting `observedR` directly so the two recomputes read the two
-counts the race needs; without the lock they measure 24 instead of 16, and a pinned 7 turning into 24).
-`engine_id`/`engineIDBase36` (random per process, fresh on restart) is the id a replica writes into `dwarf_peers`; it is
+`slowPoolPush` seam rather than racing for it - staging the two counts through the registry itself and waiting for
+each to be OBSERVED before the recompute that must read it; without the lock they measure 24 instead of 16, and a
+pinned 7 turning into 24).
+`engine_id` (random per process, fresh on restart) is the id a replica writes into `dwarf_peers`; it is
 also **stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - forensic
 provenance there ("which replica created/ran this row"), deliberately unindexed.
 
@@ -2209,8 +2222,8 @@ engines that share a test database (`NewEngineUnderTest` keyed by the same `t.Na
 each other - which is exactly right for a genuine multi-replica test (`fixtures/crossreplicaawait_test.go`), and
 exactly wrong for a single test that spins up several *independent* engines to assert their solo pool sizes. The
 latter (`TestPoolSizing_DerivedWorkers`) uses `startSolo`, a unique per-engine test-DB key, so each reads R=1. The
-sizing tests drive fleet size by writing fake peer rows (`addPeerRow`/`delPeerRow` + a forced `refreshReplicaCount`)
-rather than through signals.
+sizing tests drive fleet size by writing fake peer rows (`addPeerRow`/`delPeerRow`, which wait for the Sonars to
+observe the change) rather than through signals.
 - **`VirtualCPUs = 0` (undeclared) assumes `defaultVirtualCPUs = 2`** (pool 12). The vCPU count is a fact
   off the spec sheet - something an operator KNOWS - so this covers the zero-config case, not a guess
   anyone should rely on. It is bounded, not reckless: 2 is the FLOOR of every current-gen AWS RDS class,
@@ -2315,16 +2328,17 @@ shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`
 (TCP-style probe-up/back-off) would eliminate the last declared fact, `VirtualCPUs` - but that fact is
 trivial for an operator to supply, and the engine has already shipped-and-removed one control loop (the
 per-task rate valve + breaker, 25959d0). The remaining exposure is honest and documented: a *wrong* declared
-`VirtualCPUs`, or a multi-replica deployment whose host leaves `SignalPeers` a no-op (each replica then sees
-R=1 and over-connects). Both are declared-fact failures, the same contract the shard set already carries. Do
-not reintroduce a controller without a much stronger reason than tidiness.
+`VirtualCPUs`, or a deployment that isolates each replica's databases from the others (each then reads a
+registry containing only itself, sees a fleet of one, and over-connects). Both are declared-fact failures,
+the same contract the shard set already carries. Do not reintroduce a controller without a much stronger
+reason than tidiness.
 
 The idle-drain / lifetime-recycle connection timers (`ConnMaxIdleTime` / `ConnMaxLifetime`, server-drivers only)
 are a database-layer mechanism — see `internal/database/CLAUDE.md`.
 
 **Live re-sizing.** Derived sizing **is** live. `recomputePools` re-derives each shard's pool from the observed
 replica count and pushes `SetMaxOpenConns`/`SetMaxIdleConns` to every open shard, `Resize`s the candidate cache, and
-re-derives the worker ceiling - on a peer-map change, on the grace timer, and on the heartbeat prune. The
+re-derives the worker ceiling - on every reconcile tick that finds a shard's count moved. The
 `SetMaxOpenConns` override is the opposite of "the live one": it *pins* every shard's pool and thereby **suppresses**
 the derived path (`recomputePools` early-returns once an override is set). See the live-vs-derived split at lines
 122-133 and 1506-1511, and the load-bearing rule there - "EVERY path that changes a pool must re-derive it," and "the
@@ -2764,7 +2778,7 @@ The engine uses SQL transactions for multi-statement operations and `lease_expir
 
 The host runs **in-process**, so a panic in host code propagates straight into the engine's own goroutines - and
 that is the reason to defend: with no process boundary, one buggy task handler would otherwise take down every flow
-sharing the replica. Each of the four `Host` calls is wrapped in `errors.CatchPanic` at its **call boundary** (not
+sharing the replica. Both `Host` calls are wrapped in `errors.CatchPanic` at their **call boundary** (not
 only at the worker loop):
 
 - **`ExecuteTask`** (`execution.go`) - the panic becomes the call's `error` and flows through the **normal
@@ -2779,8 +2793,6 @@ only at the worker loop):
   return. The subgraph-spawn site runs inside `processStep`, so without this it would wedge the caller step
   exactly like `ExecuteTask`; the `Create` site fails the `Create` call cleanly instead of unwinding into the
   host's own frame.
-- **`SignalPeers`** (`peers.go`) - fire-and-forget; the panic is
-  caught and logged at error level only, so it can never derail the calling operation.
 
 The worker-loop and refiller `CatchPanic` wrappers stay as **defense-in-depth** for panics in *engine* code
 (transition evaluation, fan-in, etc.) outside any host call. `fixtures/panicflow_test.go` pins both task-panic
@@ -2801,30 +2813,30 @@ early-wake path is gone (see "The timer is a RECOVERY sweep"), which also retire
 design carried, where a `wakeTimer` send could race a close and panic a worker mid-`processStep`.
 
 ```
-close(peersStop); peersLoop.Wait()   // stop the registry READ loop (pistons still own the write)
-closeMetrics()                       // the gauge callback must not query a closing database
-cache.close()                        // unblocks blocked candidate pops independently of any channel
+close(reconcileStop); reconcileWorker.Wait() // in-memory only: nothing in flight to wait for
+closeMetrics()                               // the gauge callback must not query a closing database
+cache.close()                                // unblocks blocked candidate pops independently of any channel
 workers.Wait()
 close(timerStop);    timerWorker.Wait()
 close(recoveryStop); recoveryWorker.Wait()
 close(reaperStop);   reaperWorker.Wait()
 pistonCancel();      pistonPool.Wait()   // ctx is the pistons' only stop signal
-deregisterPeer()                         // only now is the last possible beat behind us
+sonarCancel();       sonarPool.Wait()    // ditto - and they must outlive the pistons
+leaveFleet()                             // only now is the last possible beat behind us
 ```
 
-**The pistons drain LAST, and both halves of that matter.** Their cycles are pure reads, so cancelling one
-mid-flight commits nothing and strands nothing - which is why they need no second signal and no stop channel,
-unlike every loop above them. And their heartbeat must keep this replica in the registry while its workers
-are still executing steps, because every peer sized its pools for a fleet that includes us.
+**The Sonars drain LAST, after the pistons, and that ordering is load-bearing.** This replica must stay
+registered while its workers are still executing steps, because every one of them drains against pools each
+peer sized for a fleet that still includes us. Only once the Sonars' loops have returned is the last
+possible beat behind us, which is what makes `leaveFleet`'s delete final: a beat only ever UPDATEs, so
+nothing can resurrect a row deleted after its loop stopped.
 
-They run on a **child** of the lifetime ctx (`pistonCancel`), not the lifetime ctx itself: that one is
-deliberately left live until every goroutine has drained, so in-flight database work always commits, and
-`piston.Run` ends on ctx alone.
+Both run on **children** of the lifetime ctx (`pistonCancel`, `sonarCancel`), not the lifetime ctx itself:
+that one is deliberately left live until every goroutine has drained, so in-flight database work always
+commits, while `piston.Run` and `Sonar.Run` end on ctx alone. Neither needs a second signal - a cycle is a
+pure read and a beat is one idempotent UPDATE, so abandoning either mid-flight strands nothing.
 
-`deregisterPeer` is placed after the piston drain for a reason that used to be an ordering constraint and is
-now belt-and-braces: the beat is UPDATE-only and never inserts, so a straggler beat after the delete matches
-nothing instead of resurrecting the row. Deleting while a piston could still beat would otherwise leave the
-replica registered after it had gone.
+`leaveFleet` runs on `context.Background()` rather than the lifetime ctx, which is cancelled moments later.
 
 A `cache.Refill` into an already-closed cache is a no-op. Never-closed nudge channels plus dedicated stop
 signals keep the drain free of ordering hazards.
