@@ -205,6 +205,10 @@ func TimeoutScale() time.Duration { return testTimeoutScale }
 // The timeout is a "did it hang" ceiling, never a timing contract, so it stretches under -race like every
 // other ceiling here. Waiting for N occurrences of a checkpoint is how a test states "the engine has had its
 // chance" without naming a duration: a slow machine makes each occurrence later, not fewer.
+//
+// Call it from the TEST goroutine, like every other helper here that fails the test: t.Fatalf from a task
+// handler or any other engine-owned goroutine is illegal, and here it is also useless - the engine goroutine
+// it kills is the one that would have driven the checkpoint, so the suite wedges instead of reporting.
 func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Duration, checkpointName string, scope ...string) {
 	t.Helper()
 	want := seams.Visits(checkpointName, scope...) + n

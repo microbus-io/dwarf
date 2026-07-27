@@ -87,8 +87,13 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	assert.Equal(workflow.StatusCancelled, callStatus) // not revived to pending
 
 	// callRuns == 1: the caller ran once (its park), the revive was fenced, so no re-dispatch.
-	// Give any (erroneous) re-dispatch a moment to have happened, then confirm it did not.
-	time.Sleep(200 * time.Millisecond)
+	//
+	// A negative assertion needs the window it denies to be CLOSED, and two pushing cycles close it: the only
+	// way the caller could run again is as a pending candidate, and a cycle is the dispatcher looking for
+	// exactly those. A sleep denies the same thing over an interval nobody sized against the dispatcher's
+	// own cadence, and gets weaker the busier the machine - here it gets STRONGER, since a slow piston makes
+	// the two cycles later rather than fewer.
+	enginetest.AwaitShardCycles(t, e, 1, 2)
 	assert.Equal(1, callRuns)
 	enginetest.AssertInvariants(t, e)
 }

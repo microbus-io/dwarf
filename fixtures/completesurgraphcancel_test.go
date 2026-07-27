@@ -154,9 +154,11 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		// resurrected to pending.
 		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
 
-		// Give the released worker a moment to (wrongly) revive the caller, then confirm nothing did: the flow
-		// stays cancelled, the caller stays cancelled, and no orphan/wedge shape was created.
-		time.Sleep(200 * time.Millisecond)
+		// Confirm nothing revived the caller: the flow stays cancelled, the caller stays cancelled, and no
+		// orphan/wedge shape was created. Two pushing cycles close the window rather than a duration - a
+		// wrongly revived caller is a PENDING step, and a cycle is the dispatcher looking for exactly those,
+		// so a slow piston makes this wait longer rather than weaker.
+		enginetest.AwaitShardCycles(t, e, 1, 2)
 		assert.Equal(workflow.StatusCancelled, enginetest.FlowStatus(t, e, fk))
 		assert.Equal(workflow.StatusCancelled, callStatus(t, e, fk))
 		enginetest.AssertInvariants(t, e)

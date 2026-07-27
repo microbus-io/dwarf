@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -122,7 +123,9 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 		"the failure names the cause (got %q)", out.Error)
 
 	// And the task must not have been re-executed on a loop: the deliberate retry plus its one re-run -
-	// emphatically not thousands (the reviewer measured 2,735 failed transitions in 2 seconds).
-	time.Sleep(300 * time.Millisecond)
+	// emphatically not thousands (the reviewer measured 2,735 failed transitions in 2 seconds). Two pushing
+	// cycles after the flow has FAILED close the window: a hot loop re-dispatches through the same pending
+	// candidate the cycle scans for, so the dispatcher has demonstrably looked twice and found nothing.
+	enginetest.AwaitShardCycles(t, e, 1, 2)
 	assert.True(workRuns.Load() <= 4, "the task did not hot-loop (ran %d times)", workRuns.Load())
 }

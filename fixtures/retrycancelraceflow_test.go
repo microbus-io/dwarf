@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -91,20 +92,12 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCancelled, outcome.Status)
 
-	// Invariant: the cancelled step is never revived. With the guard it stays `cancelled` (attempt 0)
-	// throughout; without it the step would flip to `pending` (attempt 1) and persist there for the ~10s
-	// backoff, which this loop would catch.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		st := stepRecordByTask(t, eng, flowKey, "Work")
-		if !assert.NotEqual(workflow.StatusPending, st.Status) {
-			return
-		}
-		if !assert.Equal(0, st.Attempt) {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	// Invariant: the cancelled step is never revived. With the guard it stays `cancelled` (attempt 0);
+	// without it the step flips to `pending` (attempt 1) and PERSISTS there for the ~10s retry backoff, so
+	// one reading taken after the window has closed is as strong as the two seconds of polling this
+	// replaces - and the window closes on the dispatcher's own terms rather than on a clock. Two pushing
+	// cycles are the dispatcher demonstrably looking for pending candidates and finding none.
+	enginetest.AwaitShardCycles(t, eng, 1, 2)
 
 	final := stepRecordByTask(t, eng, flowKey, "Work")
 	assert.Equal(workflow.StatusCancelled, final.Status)
