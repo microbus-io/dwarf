@@ -76,6 +76,11 @@ type stepResult struct {
 	// present only on Postgres with the extension preloaded. Server-side clocks: excludes pool wait,
 	// wire time and client scheduling - the other half of the attribution above.
 	PgStatements []pgssRow `json:"pgStatements,omitempty"`
+	// WaitProfile is where the database's active backends spent the window, as a share of observations.
+	// It is what makes a throughput plateau interpretable: PgStatements says which statement was slow,
+	// this says what it was stopped on, and only the second distinguishes a pool short of its knee from
+	// a commit path that is already the wall.
+	WaitProfile []waitRow `json:"waitProfile,omitempty"`
 	// Host is what the throughput COST this engine host - CPU cores and network bandwidth over the
 	// measurement window. StepsPerCore is the engine-sizing headline: steps/s driven per engine CPU core.
 	Host hostUsage `json:"host"`
@@ -86,7 +91,7 @@ type stepResult struct {
 // claimed cluster-wide by whichever replica wins the CAS, so execution distributes regardless of which
 // replica a flow was submitted to. The warmup segment is discarded; only flows completing inside the
 // measurement window count. Returns the measured result.
-func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler,
+func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler, wait *waitSampler,
 	bytesWritten *atomic.Int64, pick func() *workload, k, fairnessKeys int, warmup, window time.Duration) stepResult {
 
 	// The refiller bounds its scan PER fairness key (ROW_NUMBER partitioned by it). With every flow on
@@ -138,6 +143,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	histBefore := collectAllHistograms(readers)
 	gaugesBefore := collectAllGauges(readers)
 	pgssBefore := pgss.snapshot(ctx)
+	waitBefore := wait.snapshot()
 	bytesBefore := bytesWritten.Load()
 	hostBefore := sampleHost()
 	windowStart := time.Now()
@@ -150,6 +156,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	histAfter := collectAllHistograms(readers)
 	gaugesAfter := collectAllGauges(readers)
 	pgssAfter := pgss.snapshot(ctx)
+	waitAfter := wait.snapshot()
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
 	submitters.Wait()
@@ -177,6 +184,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		GaugesBefore:   gaugesBefore,
 		GaugesAfter:    gaugesAfter,
 		PgStatements:   pgssDelta(pgssBefore, pgssAfter),
+		WaitProfile:    waitDelta(waitBefore, waitAfter),
 		Host:           host,
 	}
 }
@@ -195,7 +203,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 // by a small bounded pool of
 // Await goroutines, not one per flow. arrivalPerSec>0 rate-limits creation (fixed offered load); 0 runs
 // flat-out to saturation (find max throughput vs the scan interval).
-func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler,
+func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler, wait *waitSampler,
 	bytesWritten *atomic.Int64, pick func() *workload, creators, fairnessKeys, maxOutstanding, arrivalPerSec int,
 	warmup, window time.Duration) stepResult {
 
@@ -304,6 +312,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	histBefore := collectAllHistograms(readers)
 	gaugesBefore := collectAllGauges(readers)
 	pgssBefore := pgss.snapshot(ctx)
+	waitBefore := wait.snapshot()
 	bytesBefore := bytesWritten.Load()
 	hostBefore := sampleHost()
 	windowStart := time.Now()
@@ -316,6 +325,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	histAfter := collectAllHistograms(readers)
 	gaugesAfter := collectAllGauges(readers)
 	pgssAfter := pgss.snapshot(ctx)
+	waitAfter := wait.snapshot()
 	bytesAfter := bytesWritten.Load()
 	stop.Store(true)
 	cancelAwaits()
@@ -348,6 +358,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		GaugesBefore:   gaugesBefore,
 		GaugesAfter:    gaugesAfter,
 		PgStatements:   pgssDelta(pgssBefore, pgssAfter),
+		WaitProfile:    waitDelta(waitBefore, waitAfter),
 		Host:           host,
 	}
 }

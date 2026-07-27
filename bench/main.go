@@ -244,6 +244,10 @@ func run() error {
 	// wants a sampler per shard.
 	pgss := startPgssSampler(dsns[0].dsn)
 	defer pgss.close()
+	// Same shard-0-only caveat as pgss and the RTT sampler: a multi-shard run has no server-side
+	// counterpart for shards 2+.
+	waits := startWaitSampler(dsns[0].dsn)
+	defer waits.close()
 
 	art := artifact{
 		Label:     *label,
@@ -303,9 +307,9 @@ func run() error {
 		for _, k := range ks {
 			var res stepResult
 			if *openLoop {
-				res = runStepOpenLoop(ctx, engines, readers, pgss, sharedBytes, pick, k, *fairnessKeys, *maxOutstanding, *arrivalRate, *warmup, *window)
+				res = runStepOpenLoop(ctx, engines, readers, pgss, waits, sharedBytes, pick, k, *fairnessKeys, *maxOutstanding, *arrivalRate, *warmup, *window)
 			} else {
-				res = runStep(ctx, engines, readers, pgss, sharedBytes, pick, k, *fairnessKeys, *warmup, *window)
+				res = runStep(ctx, engines, readers, pgss, waits, sharedBytes, pick, k, *fairnessKeys, *warmup, *window)
 			}
 			art.Results = append(art.Results, res)
 			fmt.Printf("%-6d %10.1f %10.1f %10.2f %8.1f %8.1f %8.1f %7.2f %7.1f %9.0f %8.1f %8.1f %7d\n",

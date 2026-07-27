@@ -106,6 +106,9 @@ matching one before working there:**
   (why fan-out width is the primary axis), the one-hop and both-column invariants, and why the Loader is a
   per-call batched callback rather than a bound connection. (The engine-side integration - flow-boundary
   flattens, `Fork`'s remap - stays in `engine/CLAUDE.md`.)
+- **`bench/CLAUDE.md`** - the load harness: how a rig lies (RTT dominance, database litter, stale peer
+  rows), how to design an arm so the comparison survives it, and what a workload must do to exercise the
+  refiller at all.
 - **`internal/planner/CLAUDE.md`** - the cross-shard band + fairness decision: why per-shard tallies replaced a
   barrier, why participation is *declared* (`Clear`) rather than inferred from silence, and the slice rule's
   determinism.

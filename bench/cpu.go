@@ -37,12 +37,16 @@ import (
 //   - Network counters are host-wide (all interfaces except loopback), so they include SSH and any other
 //     traffic. On a dedicated bench VM that is negligible next to the database traffic.
 
-// hostSample is one point-in-time reading of the process CPU clock and host network counters.
+// hostSample is one point-in-time reading of the process CPU clock, host network counters, and heap.
 type hostSample struct {
 	at      time.Time
 	cpuNano int64 // process user+system CPU consumed since start
 	rxBytes int64
 	txBytes int64
+	// heapAlloc/heapSys are LEVELS, not counters: they are reported from the LATER sample rather than
+	// differenced. See hostUsage.
+	heapAlloc uint64
+	heapSys   uint64
 }
 
 // hostUsage is the delta between two hostSamples, normalized to rates.
@@ -57,6 +61,18 @@ type hostUsage struct {
 	NetRxMBps    float64 `json:"netRxMBps"`
 	NetTxMBps    float64 `json:"netTxMBps"`
 	NumCPU       int     `json:"numCPU"`
+	// HeapAllocMB (live objects) and HeapSysMB (reserved from the OS) are read at the END of the
+	// interval, not differenced across it: they are levels, and the level a window ENDS at is the one
+	// that matters, since a ramping worker pool only grows.
+	//
+	// The pair exists because worker growth is memory-priced and the engine cannot see the price. The
+	// crew's ceiling is derived from connections and RTT alone, so it can reach tens of thousands, and
+	// every in-flight step additionally holds its own state map. Concurrency is throughput x task
+	// duration, so a long-task arm sits at a concurrency the same throughput never reaches with fast
+	// tasks - which makes these the numbers that say whether such an arm is sustainable or merely
+	// survived. HeapSys is the one to compare against the VM, being what was taken from the OS.
+	HeapAllocMB float64 `json:"heapAllocMB"`
+	HeapSysMB   float64 `json:"heapSysMB"`
 }
 
 // sampleHost reads the process CPU clock (portable via getrusage) and the host's network counters
@@ -68,6 +84,11 @@ func sampleHost() hostSample {
 		s.cpuNano = ru.Utime.Nano() + ru.Stime.Nano()
 	}
 	s.rxBytes, s.txBytes = readNetCounters()
+	// Stops the world briefly, which is why this is sampled at the window EDGES and never on a tick:
+	// twice per measurement window is unmeasurable against it, a periodic sampler would not be.
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	s.heapAlloc, s.heapSys = ms.HeapAlloc, ms.HeapSys
 	return s
 }
 
@@ -79,11 +100,13 @@ func usageSince(before, after hostSample) hostUsage {
 	}
 	cores := float64(after.cpuNano-before.cpuNano) / 1e9 / secs
 	return hostUsage{
-		CPUCores:  cores,
-		CPUPct:    cores / float64(runtime.NumCPU()) * 100,
-		NetRxMBps: float64(after.rxBytes-before.rxBytes) / (1 << 20) / secs,
-		NetTxMBps: float64(after.txBytes-before.txBytes) / (1 << 20) / secs,
-		NumCPU:    runtime.NumCPU(),
+		CPUCores:    cores,
+		CPUPct:      cores / float64(runtime.NumCPU()) * 100,
+		NetRxMBps:   float64(after.rxBytes-before.rxBytes) / (1 << 20) / secs,
+		NetTxMBps:   float64(after.txBytes-before.txBytes) / (1 << 20) / secs,
+		NumCPU:      runtime.NumCPU(),
+		HeapAllocMB: float64(after.heapAlloc) / (1 << 20),
+		HeapSysMB:   float64(after.heapSys) / (1 << 20),
 	}
 }
 
