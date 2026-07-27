@@ -177,3 +177,40 @@ A fixture needing a **non-default topology** (multiple `SetShard`s, `SetTimeBudg
 **host singletons** (a custom host wrapping `TestProxy`) configures
 them on its own engine/proxy between `NewEngineUnderTest` and `Startup` - the same per-test ownership, just with
 non-default knobs.
+
+#### What a sleep is standing in for, and what to use instead
+
+Every duration in a fixture is standing in for something the engine could say directly. Sorting them by
+what they stand in for is what decides whether one is a bug waiting to happen or perfectly fine:
+
+- **Simulated work** - a `time.Sleep` inside a task body, so a step takes measurable time. Legitimate and
+  not a target: the delay IS the workload.
+- **A "did it hang" ceiling** - the bound on a wait that should never be reached. Legitimate, and it must
+  scale under `-race` (`enginetest.TimeoutScale`) rather than be tightened.
+- **Waiting for engine progress** - "let the cache converge", "let the Await register", "let the holder take
+  the worker". These are the bugs. A duration that comes up short here does not fail; it quietly changes
+  what the test exercised, and every assertion still passes.
+- **Closing the window of a NEGATIVE assertion** - "give the wrong thing a moment to happen, then confirm
+  it did not". Also a bug, and the sneakiest: the sleep is the only thing making the denial mean anything,
+  and it is weakest exactly when the machine is busiest.
+
+For the last two, name the event instead:
+
+- **`enginetest.AwaitVisits(t, seams, n, timeout, checkpoint, scope...)`** - wait for N further arrivals at
+  a checkpoint. seamster's `Waiter` is one-shot and `Visits` is monotonic, so N occurrences means re-arming
+  per occurrence, arming BEFORE reading the count each time. Call it from the test goroutine: `t.Fatalf`
+  inside a task handler kills the engine goroutine that would have driven the checkpoint, so the suite
+  wedges instead of reporting.
+- **`enginetest.AwaitShardCycles(t, e, shards, extra)`** - wait for each shard's partition to be reconciled
+  against the plan. TWO cycles, not one: a cycle already in flight when the work committed may have scanned
+  before it existed. This is also how a **negative** assertion closes its window - the thing being denied is
+  almost always a DISPATCH, and a cycle is the dispatcher looking for exactly the pending candidate that
+  would carry it. It gets longer on a busy machine, where a duration gets weaker.
+- **`CheckpointAwaitParked`** - an `Await` is on the latch board and about to block. Any test about a
+  BLOCKED caller being woken needs this; the board is polled, so a late-registering Await is answered by its
+  own pre-park read and the wake path under test never runs.
+- **A task that holds, rather than a task that is slow.** To keep a worker occupied while the test sets up,
+  block the task on a channel and have it report when it has the worker - never a fixed delay long enough to
+  cover the setup. Release with a `defer` and a `sync.Once`, NOT a `t.Cleanup`: cleanups unwind after
+  deferred funcs, so a cleanup frees the worker only after Startup's own Shutdown cleanup is already waiting
+  on it, and the suite deadlocks.
