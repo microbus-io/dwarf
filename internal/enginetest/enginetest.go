@@ -30,10 +30,13 @@ package enginetest
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/testarossa"
@@ -188,3 +191,55 @@ func AwaitAndAssertComplete(t *testing.T, e Engine, flowKey string) *workflow.Fl
 // so an unscaled ceiling that passes serially flakes under it. Scale the ceiling, never the assertion - a
 // genuine wedge never completes and trips even the stretched bound.
 func TimeoutScale() time.Duration { return testTimeoutScale }
+
+// AwaitVisits blocks until the host passes the named checkpoint n FURTHER times, counted from the moment of
+// the call, and fails the test if it does not inside the timeout.
+//
+// The arm-check-block loop is the whole content, and it earns a shared helper because the ways to get it
+// wrong are quiet ones. seamster's Waiter is ONE-SHOT and arms for the host's NEXT arrival, while Visits is
+// a monotonic count - so waiting for several occurrences means re-arming per occurrence, and the two have to
+// be read in the order below: arm FIRST, then read the count, so an arrival landing between the two lines is
+// caught by the channel that is already registered rather than lost between them. The deadline is taken once
+// rather than per iteration, or each arrival would silently renew the whole budget.
+//
+// The timeout is a "did it hang" ceiling, never a timing contract, so it stretches under -race like every
+// other ceiling here. Waiting for N occurrences of a checkpoint is how a test states "the engine has had its
+// chance" without naming a duration: a slow machine makes each occurrence later, not fewer.
+func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Duration, checkpointName string, scope ...string) {
+	t.Helper()
+	want := seams.Visits(checkpointName, scope...) + n
+	deadline := time.After(timeout * testTimeoutScale)
+	for {
+		reached := seams.Waiter(checkpointName, scope...) // arm FIRST...
+		got := seams.Visits(checkpointName, scope...)     // ...then read
+		if got >= want {
+			return
+		}
+		select {
+		case <-reached:
+		case <-deadline:
+			t.Fatalf("checkpoint %q reached %d of the %d times awaited within %s",
+				strings.Join(append([]string{checkpointName}, scope...), ":"),
+				seams.Visits(checkpointName, scope...), want, timeout*testTimeoutScale)
+		}
+	}
+}
+
+// AwaitShardCycles blocks until every shard's piston has completed `extra` further pushing cycles, counted
+// from the moment of the call.
+//
+// A pushing cycle is the point at which that shard's cache partition has been reconciled against the plan,
+// so this is how a test waits for the fleet's cached hints to agree with what the planner actually chose.
+// There is no wall-clock stand-in for it, and that is the whole reason the checkpoint exists: each piston
+// turns on its own cadence, so one starved or slow shard holds an unreconciled partition for as long as it
+// likes while its peers turn normally - the asymmetric case, which no uniform delay reproduces or waits out.
+//
+// TWO cycles, not one, is the usual ask: a cycle already in flight when the work committed may have scanned
+// before it existed, so its push proves nothing about it. The second is the one whose scan is guaranteed to
+// have seen it.
+func AwaitShardCycles(t *testing.T, e Engine, shards, extra int) {
+	t.Helper()
+	for shard := 1; shard <= shards; shard++ {
+		AwaitVisits(t, e.Seams(), extra, time.Minute, piston.CheckpointCycleDone, strconv.Itoa(shard))
+	}
+}

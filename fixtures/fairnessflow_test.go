@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -42,7 +43,21 @@ func TestFairnessflow(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 
+	// The holder occupies the single worker until the test lets go, and reports the moment it has it. Both
+	// halves are rendezvous rather than durations, because both are waits on ENGINE progress: "the worker is
+	// mine" is a dispatch, and a fixed hold long enough to cover 80 Creates plus the cache converging is a
+	// bet that reads as a share imbalance when it is lost, not as a timeout.
+	var holdOnce, releaseOnce sync.Once
+	holderRunning := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	release := func() { releaseOnce.Do(func() { close(releaseHolder) }) }
+	defer release() // an early return must not leave the worker held, or Shutdown drains forever
+
 	proxy.HandleTask("fairnessflow.verify:428/tally", func(ctx context.Context, f *workflow.Flow) error {
+		if f.GetBool("hold") {
+			holdOnce.Do(func() { close(holderRunning) })
+			<-releaseHolder
+		}
 		delayMs := f.GetInt("delayMs")
 		if delayMs > 0 {
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)
@@ -61,13 +76,19 @@ func TestFairnessflow(t *testing.T) {
 	t.Run("weighted_share_and_liveness", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		// Holder flow blocks the single worker so test flows queue up.
+		// The holder takes the one worker and keeps it until released, so all 80 test flows below are
+		// created while nothing can be dispatched - which is what makes the drain a single weighted lottery
+		// over a settled backlog rather than a race between arrival and dispatch.
 		holderKey, err := eng.Create(ctx, "fairnessflow.verify:428/fairness",
-			map[string]any{"delayMs": 1500, "tag": "holder"},
+			map[string]any{"hold": true, "tag": "holder"},
 			&workflow.FlowOptions{Priority: 1, FairnessKey: "_holder"})
 		assert.NoError(err)
 
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-holderRunning:
+		case <-time.After(time.Minute):
+			t.Fatal("the holder flow never reached its task, so the worker was never occupied")
+		}
 
 		// 40 heavy (weight 4) and 40 light (weight 1), interleaved, same priority.
 		var keys []string
@@ -85,7 +106,12 @@ func TestFairnessflow(t *testing.T) {
 			_ = i
 		}
 
-		time.Sleep(400 * time.Millisecond)
+		// Both keys are committed pending; now let the cache be reconciled against the plan before the
+		// holder frees the lone worker, so the share below is decided by the weighted pick and not by which
+		// flows the doorbell happened to admit first. Two pushing cycles, not a duration - a cycle already
+		// in flight when these Creates committed may have scanned before they existed.
+		enginetest.AwaitShardCycles(t, eng, 1, 2)
+		release()
 
 		eng.Await(ctx, holderKey)
 		for _, k := range keys {

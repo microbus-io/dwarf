@@ -18,13 +18,13 @@ package fixtures
 
 import (
 	"context"
-	"slices"
 	"sort"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -44,7 +44,21 @@ func TestPriorityflow(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 
+	// The holder occupies the single worker until the test lets go, and reports the moment it has it. Both
+	// halves are rendezvous rather than durations, because both are waits on ENGINE progress: "the worker is
+	// mine" is a dispatch, and a fixed hold long enough to cover everything the test does before releasing is
+	// a bet that reads as an ordering failure when it is lost, not as a timeout.
+	var holdOnce, releaseOnce sync.Once
+	holderRunning := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	release := func() { releaseOnce.Do(func() { close(releaseHolder) }) }
+	defer release() // an early return must not leave the worker held, or Shutdown drains forever
+
 	proxy.HandleTask("priorityflow.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
+		if f.GetBool("hold") {
+			holdOnce.Do(func() { close(holderRunning) })
+			<-releaseHolder
+		}
 		delayMs := f.GetInt("delayMs")
 		if delayMs > 0 {
 			time.Sleep(time.Duration(delayMs) * time.Millisecond)
@@ -66,14 +80,18 @@ func TestPriorityflow(t *testing.T) {
 		order = nil
 		mu.Unlock()
 
-		// Holder flow at priority 1 with long delay to fill the single worker.
+		// The holder takes the one worker and keeps it until released, so every test flow below is created
+		// while nothing can be dispatched.
 		holderKey, err := eng.Create(ctx, "priorityflow.verify:428/priority",
-			map[string]any{"delayMs": 1500, "tag": "holder"},
+			map[string]any{"hold": true, "tag": "holder"},
 			&workflow.FlowOptions{Priority: 1})
 		assert.NoError(err)
-		assert.NoError(err)
 
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-holderRunning:
+		case <-time.After(time.Minute):
+			t.Fatal("the holder flow never reached its task, so the worker was never occupied")
+		}
 
 		// Create test flows with varying priorities. Each tag is its creation index so the
 		// expected order can be derived by a stable sort on priority.
@@ -94,10 +112,14 @@ func TestPriorityflow(t *testing.T) {
 			keys = append(keys, k)
 		}
 
-		// Let every test flow commit pending and the candidate cache converge to strict order before the
-		// holder frees the lone worker. Creating in a tight burst (no inter-create spacing) keeps the
-		// refiller from caching the first flow alone as a pioneer; intra-band order is FIFO by step_id.
-		time.Sleep(300 * time.Millisecond)
+		// Every test flow is committed pending; now let the candidate cache converge to strict order before
+		// the holder frees the lone worker. Two pushing cycles, not a duration: each flow was doorbell-
+		// admitted at creation and `Cache.Pop` ranks partitions by the band the FIRST arrival stamped, so
+		// until a cycle has reconciled the partition against the plan the cache holds hints in creation
+		// order that no plan chose. A cycle already in flight when these Creates committed may have scanned
+		// before they existed, so the second is the one whose scan is guaranteed to have seen them.
+		enginetest.AwaitShardCycles(t, eng, 1, 2)
+		release()
 
 		// Wait for all to complete.
 		eng.Await(ctx, holderKey)
@@ -110,12 +132,13 @@ func TestPriorityflow(t *testing.T) {
 		copy(got, order)
 		mu.Unlock()
 
-		// Priority is best-effort, not a structural guarantee: the dispatcher trades exact ordering for
-		// throughput. The first-created test flow (f0) is the one flow that can briefly be the sole
-		// pending candidate while the holder occupies the worker, so the refiller may cache it as a
-		// "pioneer" and dispatch it ahead of the strict band order. Every other flow drains in strict
-		// priority, FIFO (by step_id) within a band. So exactly two orderings are valid: strict, or
-		// strict with f0 pioneered to the front of the test set.
+		// Strict, with no allowance. The order was best-effort while the release was a duration: the
+		// first-created flow could still be sitting in the cache as the "pioneer" the doorbell admitted into
+		// an empty partition, ahead of anything a plan chose, and the test had to accept that as a second
+		// valid ordering. Waiting for the partition to be RECONCILED removes the case rather than tolerating
+		// it - a pushing cycle wholesale-replaces the partition with the plan, and no further doorbell
+		// arrival can disturb it because these flows are single-task and spawn no successors. Intra-band
+		// order is FIFO by step_id.
 		stable := make([]flow, len(flows))
 		copy(stable, flows)
 		sort.SliceStable(stable, func(i, j int) bool { return stable[i].priority < stable[j].priority })
@@ -123,14 +146,6 @@ func TestPriorityflow(t *testing.T) {
 		for _, fl := range stable {
 			strictOrder = append(strictOrder, fl.tag)
 		}
-		pioneerOrder := []string{"holder", flows[0].tag}
-		for _, fl := range stable {
-			if fl.tag != flows[0].tag {
-				pioneerOrder = append(pioneerOrder, fl.tag)
-			}
-		}
-		assert.Equal("holder", got[0])
-		assert.True(slices.Equal(got, strictOrder) || slices.Equal(got, pioneerOrder),
-			"got %v, want strict %v or pioneer %v", got, strictOrder, pioneerOrder)
+		assert.Equal(strictOrder, got, "dispatch order")
 	})
 }

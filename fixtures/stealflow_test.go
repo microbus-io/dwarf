@@ -223,15 +223,15 @@ func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 	// Two cycles of settling before the window opens: the gate arms from the PREVIOUS cycle's tally, and
 	// the cycle before this work landed saw an empty shard, so the first one after it is legitimately still
 	// armed.
-	awaitShardCycles(t, healthy, 1, 2)
-	awaitShardCycles(t, crippled, 1, 2)
+	enginetest.AwaitShardCycles(t, healthy, 1, 2)
+	enginetest.AwaitShardCycles(t, crippled, 1, 2)
 	stoleBefore := healthy.Seams().Visits(engine.CheckpointRefillStole) +
 		crippled.Seams().Visits(engine.CheckpointRefillStole)
 	cyclesBefore := healthy.Seams().Visits(engine.CheckpointRefillCycleDone) +
 		crippled.Seams().Visits(engine.CheckpointRefillCycleDone)
 
-	awaitShardCycles(t, healthy, 1, 10)
-	awaitShardCycles(t, crippled, 1, 10)
+	enginetest.AwaitShardCycles(t, healthy, 1, 10)
+	enginetest.AwaitShardCycles(t, crippled, 1, 10)
 	stole := healthy.Seams().Visits(engine.CheckpointRefillStole) +
 		crippled.Seams().Visits(engine.CheckpointRefillStole) - stoleBefore
 	cycles := healthy.Seams().Visits(engine.CheckpointRefillCycleDone) +

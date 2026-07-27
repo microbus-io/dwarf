@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -95,9 +96,13 @@ func TestCrossShardPriorityflow(t *testing.T) {
 		lowKeys = append(lowKeys, k)
 	}
 
-	// Let the refillers cache band-100 candidates and start draining them, so the urgent work below
-	// arrives into caches that are already full of lower-priority hints - the preemption case.
-	time.Sleep(250 * time.Millisecond)
+	// The urgent work below must arrive into caches ALREADY full of lower-priority hints - that is the
+	// preemption case, and a burst that lands before the low band is cached tests the empty-cache one
+	// instead. Two pushing cycles per shard is that condition stated exactly: a cycle already in flight when
+	// these Creates committed may have scanned before they existed, so the second is the one whose scan is
+	// guaranteed to have seen them and whose push put them in the partition. A duration cannot state it,
+	// because each piston turns on its own cadence and one slow shard is precisely the case that breaks it.
+	enginetest.AwaitShardCycles(t, eng, 3, 2)
 
 	// The urgent burst. More than one, deliberately: Offer head-inserts at most ONE pioneer per
 	// band-opening per partition, so everything past the pioneers can only be served by a refill scan

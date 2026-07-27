@@ -26,42 +26,10 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
-
-// awaitShardCycles blocks until every shard's piston has completed `extra` further pushing cycles, counted
-// from the moment of the call. A pushing cycle is the point at which that shard's cache partition has been
-// reconciled against the plan (see engine.CheckpointRefillCycleDone), so this is how a test waits for the
-// fleet's cached hints to agree with what the planner actually chose.
-//
-// There is no wall-clock stand-in for it, and that is the whole reason the seam exists: each piston turns on
-// its own cadence, so one starved or slow shard holds an unreconciled partition for as long as it likes while
-// its peers turn normally - the asymmetric case, which no uniform delay reproduces or waits out.
-//
-// Arm the waiter FIRST, then read Visits, per shard: a cycle that lands before the read is caught by the
-// count, a later one by the channel, and one landing between the two lines by the channel. Waiter is
-// one-shot, hence the inner loop. The minute is a "did it hang" ceiling, not a timing contract.
-func awaitShardCycles(t *testing.T, eng *engine.Engine, shards, extra int) {
-	t.Helper()
-	seams := eng.Seams()
-	for shard := 1; shard <= shards; shard++ {
-		key := strconv.Itoa(shard)
-		want := seams.Visits(engine.CheckpointRefillCycleDone, key) + extra
-		for {
-			cycled := seams.Waiter(engine.CheckpointRefillCycleDone, key)
-			got := seams.Visits(engine.CheckpointRefillCycleDone, key)
-			if got >= want {
-				break
-			}
-			select {
-			case <-cycled:
-			case <-time.After(time.Minute):
-				t.Fatalf("shard %d completed %d of the %d cycles awaited", shard, got, want)
-			}
-		}
-	}
-}
 
 func TestShardedflow(t *testing.T) {
 	t.Parallel()
@@ -148,7 +116,7 @@ func TestShardedflow(t *testing.T) {
 		// Two cycles per shard, not one: a cycle already in flight when these Creates committed may have
 		// scanned before they existed, so its push proves nothing about them. The second is the one whose
 		// scan is guaranteed to have seen them.
-		awaitShardCycles(t, eng, 8, 2)
+		enginetest.AwaitShardCycles(t, eng, 8, 2)
 		close(releaseHolder)
 
 		eng.Await(ctx, holderKey)
