@@ -17,13 +17,12 @@ limitations under the License.
 package engine
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"github.com/microbus-io/dwarf/internal/peers"
-	"github.com/microbus-io/dwarf/internal/piston"
 	"log/slog"
 	"os"
 	"testing"
+
+	"github.com/microbus-io/dwarf/internal/peers"
+	"github.com/microbus-io/dwarf/internal/piston"
 
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/errors"
@@ -105,12 +104,12 @@ func (e *Engine) SetTestName(name string) error {
 	if e.started.Load() {
 		return errSetAfterStartup("test name")
 	}
-	// Hash the name to a short, bounded id so the testing-database name sequel derives stays within the
-	// strictest SQL identifier limit (Postgres 63 / MySQL 64), whatever the name's length. A non-empty
-	// testHashedID becomes Config.TestID at Open, which switches the ShardSet's open path onto the
-	// isolated-test path; it is set before initRuntime flips started, so it is in place before any shard opens.
-	sum := sha256.Sum256([]byte(name))
-	e.testHashedID = hex.EncodeToString(sum[:])[:16]
+	// database.TestID hashes the name to a short, bounded id (the SQL identifier limit) and salts it with a
+	// per-PROCESS nonce, so concurrent `go test` runs of one package do not derive the same database name and
+	// drop it out from under each other. A non-empty testHashedID becomes Config.TestID at Open, which
+	// switches the ShardSet's open path onto the isolated-test path; it is set before initRuntime flips
+	// started, so it is in place before any shard opens.
+	e.testHashedID = database.TestID(name)
 	return nil
 }
 

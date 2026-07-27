@@ -18,8 +18,6 @@ package piston
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"testing"
 	"time"
 
@@ -48,11 +46,10 @@ type rig struct {
 // the piston itself never opens or closes a handle.
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	sum := sha256.Sum256([]byte(t.Name()))
 	var set database.ShardSet
 	err := set.Open(context.Background(), database.Config{
 		Shards:      map[int]database.ShardConfig{1: {MaxIdleConns: 2, MaxOpenConns: 4}},
-		TestID:      hex.EncodeToString(sum[:8]),
+		TestID:      database.TestID(t.Name()),
 		TestConnCap: 4,
 	})
 	if err != nil {

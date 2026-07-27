@@ -18,8 +18,6 @@ package peers
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -81,12 +79,11 @@ type rig struct {
 // ones assigns them here rather than through an API no owner would call.
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	sum := sha256.Sum256([]byte(t.Name()))
 	var set database.ShardSet
 	assert := testarossa.For(t)
 	assert.NoError(set.Open(context.Background(), database.Config{
 		Shards:      map[int]database.ShardConfig{1: {MaxIdleConns: 2, MaxOpenConns: 4}},
-		TestID:      hex.EncodeToString(sum[:8]),
+		TestID:      database.TestID(t.Name()),
 		TestConnCap: 4,
 	}))
 	t.Cleanup(set.Close)

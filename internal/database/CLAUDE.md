@@ -136,3 +136,27 @@ substitution is what makes each shard's database distinct (`strings.ReplaceAll`,
 isolated, auto-dropped database keyed on `(driver, baseDSN, TestID)`. Two shards resolving to the same DSN are
 rejected at `Open` (the collapse guard). The test-harness rationale (per-test isolation, why the `%d` default, the
 multi-replica shared-key case) lives in `fixtures/CLAUDE.md`. Pinned by `internal/database/database_test.go`.
+
+### The test-database key is salted per PROCESS (`testid.go`)
+
+`Config.TestID` is what sequel keys an isolated test database on, and the name it derives carries the hour
+and that key and nothing else that varies. Two `go test` runs of the same package in the same hour
+therefore land on the same database names, and the second one's `CreateTestingDatabase` drops and recreates
+a database the first is still using. Reproduced against Postgres: `failed to create database
+testing_01_dwarftest_1_...: duplicate key value violates unique constraint "pg_database_datname_index"`,
+and a soak fixture failing on rows deleted underneath it. Neither failure names the real cause, which is
+what makes it worth preventing rather than diagnosing.
+
+`TestID` salts the hash with a per-process nonce, so concurrent runs cannot collide. Two properties of that
+scope are load-bearing:
+
+- **Per process, not per call.** Several engines in ONE test must resolve to the SAME databases - that is
+  how a multi-replica fixture gives its peer engines shared state - and a test wanting separate ones says so
+  by passing a distinct name (`SetTestName`).
+- **It does NOT distinguish `-count=N` iterations, and nothing needs it to.** They run in one process, so
+  the nonce is the same for all of them; they are also sequential (a count round's parent blocks on its
+  parallel children before the next starts), and sequel reference-counts the handles on a testing database
+  and evicts its cached DSN when the last one closes, so each iteration re-mints the database it dropped.
+  Verified: `-count=2` over `engine` + `fixtures` against a real Postgres is clean.
+
+Every caller goes through this one function, so the hashing and the salt cannot drift between them.
