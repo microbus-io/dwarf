@@ -37,6 +37,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/internal/peers"
+	"github.com/microbus-io/dwarf/internal/permits"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -193,6 +194,11 @@ type Engine struct {
 	cache candidatecache.Cache
 	// crew runs processStep on the candidates it pops. The engine supplies both sizing numbers.
 	crew *workers.Crew
+	// permits bounds how many workers may be doing DATABASE work on each shard at once, which is what
+	// lets the crew grow freely for long tasks without the growth turning into pool contention. Sized
+	// permitsPerConn x that shard's pool, so every path that changes a pool must re-size it - the same
+	// rule the worker ceiling, the cache and the refill interval already obey.
+	permits *permits.Set
 	// drainStop is closed at the top of drainRuntime, before the crew is waited on.
 	drainStop chan struct{}
 	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
@@ -490,6 +496,15 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	// (the fleet-change path) early-returns while the override pins the pools.
 	if e.started.Load() {
 		e.recomputeWorkerCeiling(e.lifetimeCtx)
+		// The permits are a function of the pool too, and for the same reason this path re-derives the
+		// ceiling: with an override set, recomputePools early-returns, so this is the only path left that
+		// can follow the pool. The override is an exact per-replica number and is never divided, so every
+		// shard takes the same count.
+		if e.permits != nil {
+			for _, idx := range e.db.Indices() {
+				e.permits.Resize(idx, permitsPerConn*n)
+			}
+		}
 	}
 	return nil
 }
@@ -680,6 +695,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)
 	e.shardsLock.Unlock()
+	// A fresh permit set per run, like the cache and the planner: counts left over from a previous
+	// Startup would bound this one against pools it no longer has.
+	e.permits = permits.New()
 	totalConns := 0
 	for _, idx := range e.db.Indices() {
 		db, dbErr := e.db.Shard(idx)
@@ -690,6 +708,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 		idle, open := shardPool(specs[idx], override, replicas) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
+		// Sized here rather than in initRuntime because it is derived from the pool this loop just set,
+		// and the workers initRuntime starts must never see an unsized (admit-nothing) shard.
+		e.permits.Resize(idx, permitsPerConn*open)
 		e.lastAppliedR[idx] = replicas
 		totalConns += open
 	}
@@ -835,12 +856,16 @@ func (e *Engine) initRuntime() error {
 	// a sibling worker in this replica reserved the step within the last ~second, its claim CAS may still
 	// be in flight, and the piston re-selected it because an uncommitted claim still reads `pending`, so
 	// issuing our own claim would cost a round trip to be told we lost.
-	crew, perr := workers.New(&e.cache, func(ctx context.Context, shard, stepID int) error {
+	crew, perr := workers.New(&e.cache, e.permits, func(ctx context.Context, shard, stepID int, release func()) error {
 		if !e.claims.TryClaim(shard, stepID) {
 			e.metricStepClaimPreempted(ctx)
+			// Release explicitly rather than leaving it to the crew's backstop: a preempted candidate does
+			// no database work at all, so holding its permit until the callback returns would bound admission
+			// on a step nobody is running.
+			release()
 			return nil
 		}
-		return e.processStep(ctx, shard, stepID)
+		return e.processStep(ctx, shard, stepID, release)
 	})
 	if perr != nil {
 		e.unwindRuntime()
@@ -849,9 +874,9 @@ func (e *Engine) initRuntime() error {
 	e.crew = crew
 	e.crew.SetLogger(e.logger)
 	e.crew.SetMax(maxWorkers)
-	// Start the resident set; the rest of the ceiling is spawned on demand by a worker that finds every
-	// peer offsite in the host's ExecuteTask - the long-task case, where the resident set alone would cap
-	// throughput because nobody is left to dispatch.
+	// Start the resident set; the rest of the ceiling is spawned on demand whenever nobody is idle, work is
+	// waiting and a permit is free - the long-task case, where the resident set alone would cap throughput
+	// because nobody is left to dispatch.
 	e.crew.Start(e.lifetimeCtx, resident)
 	// The pistons run on a CHILD of the lifetime ctx, because they must stop before it does: the lifetime
 	// ctx is deliberately left live until every other goroutine has drained (so in-flight database work
@@ -921,9 +946,14 @@ func (e *Engine) drainRuntime() {
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()
-	// Closing the cache is what releases workers parked in Pop; Drain then closes the crew to new
-	// goroutines and waits. Both halves are the crew's contract - see internal/workers.
+	// Closing the cache releases workers parked waiting for work, and closing the permits releases those
+	// waiting on one; Drain then closes the crew to new goroutines and waits. All three halves are the
+	// crew's contract - see internal/workers. BOTH closes are required: a worker blocked on a permit is
+	// not blocked on the cache, so closing only the cache would leave the drain waiting on it forever.
 	e.cache.Close()
+	if e.permits != nil {
+		e.permits.Close()
+	}
 	e.crew.Drain()
 	if e.recoveryStop != nil {
 		close(e.recoveryStop)

@@ -403,7 +403,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	assert.Equal(int32(400), done.Load(), "the backlog drained")
 	assert.Equal(resident, int32(e.crew.Resident()),
 		"saturation must not grow the pool (was %d, now %d)", resident, int32(e.crew.Resident()))
-	assert.Equal(0, e.crew.AwayCount(), "no worker is offsite once the backlog drains")
+	assert.Equal(e.crew.Resident(), e.crew.Idle(), "every worker is idle once the backlog drains")
 }
 
 // TestPoolSizing_CapacityWeight pins the placement-weight curve: flat up to 2 vCPUs (the measured

@@ -149,6 +149,11 @@ func (e *Engine) initMetrics() error {
 	// has to stay in step. Neither queries anything: both are atomic reads of what the last reading published.
 	peerReplicas := gauge("dwarf_peer_replicas", "Per-replica, per-shard: how many replicas this one currently sees holding connections to that shard - the divisor its pool is sized by. Replicas should AGREE on it, so a spread across the fleet is itself the signal: one replica reading 3 while its peers read 4 is sizing its pool for a fleet that does not exist. It is deliberately slow to fall (a reading that did not happen is not evidence anybody left), so a drop lags a real departure by a reading or two.", "")
 	tallyAge := gaugeF("dwarf_refill_tally_age_seconds", "Per-replica: how long ago the STALEST shard still in this replica's planner reported. Every shard plans from a merged view of every shard's LAST report, so a piston cycling slowly holds its peers' plans on a picture that old - the global priority band and the per-key slice rule are both computed from those mixed-freshness tallies. Expect roughly one cycle interval in a healthy fleet; sustained multiples name a shard whose piston has fallen behind its peers, which no throughput number can distinguish from a slow database. Single-shard deployments always read ~one interval and can ignore it.", "s")
+	// SIGNED, and that is the point: the persist path takes its permit by DEBIT rather than by waiting, so a
+	// negative value means completions have fully suppressed new admission on that shard. That is the storm
+	// signature and it has no other readout - throughput merely sags, and every other gauge reads healthy.
+	permitsAvail := gauge("dwarf_permits_available", "Per-replica, per-shard: database-work permits currently free, sized as a fixed multiple of that shard's connection pool. It bounds how many workers may be in a step's database phases at once, which is what lets the worker crew grow for long tasks without the growth becoming pool contention. SIGNED: a NEGATIVE value means the completion path (which debits without waiting, so a finished task is never held up) has driven the count below zero and no new work is being admitted on that shard until it drains - the completion-storm signature, and the only place it is visible. Sustained zero means admission is the binding constraint; sustained near-full means it is not.", "")
+	workersResident := gauge("dwarf_workers_resident", "Per-replica: worker goroutines that exist. It only ever grows (nothing retires a worker) and is bounded by the lease-margin ceiling. Read against dwarf_permits_available to tell the two long-task regimes apart: a crew far above the permit count with permits free is serving long tasks correctly, while a crew pinned at the ceiling is the one to alarm on. Sum across replicas.", "")
 	peerBlind := gauge("dwarf_peer_blind_seconds", "Per-replica, per-shard: how long since that shard's registry was last read successfully. Zero on a healthy Sonar. Past two read cadences the replica is BLIND there - it holds its last known fleet (the safe direction for pools) and stops partitioning that shard's candidates (the safe direction for work), so a nonzero value explains both at once and is the first thing to check when a shard's counts look frozen.", "s")
 
 	reg, err := meter.RegisterCallback(
@@ -162,9 +167,12 @@ func (e *Engine) initMetrics() error {
 				peerReplicas: peerReplicas,
 				peerBlind:    peerBlind,
 				tallyAge:     tallyAge,
+				permitsAvail: permitsAvail,
+				workersRes:   workersResident,
 			})
 		},
 		queueDepth, stepsPending, oldestAge, fairnessKeys, concurrency, peerReplicas, peerBlind, tallyAge,
+		permitsAvail, workersResident,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -193,6 +201,8 @@ type observableGauges struct {
 	peerReplicas metric.Int64ObservableGauge
 	peerBlind    metric.Int64ObservableGauge
 	tallyAge     metric.Float64ObservableGauge
+	permitsAvail metric.Int64ObservableGauge
+	workersRes   metric.Int64ObservableGauge
 }
 
 // observeGauges is the observable-gauge callback. It reads in-memory engine state and queries the
@@ -202,6 +212,17 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	// Local in-memory gauges - no DB.
 	o.ObserveInt64(g.queueDepth, int64(e.cache.Len()))
 
+	if e.crew != nil {
+		o.ObserveInt64(g.workersRes, int64(e.crew.Resident()))
+	}
+
+	// The permit counts, taken as ONE snapshot rather than a read per shard: they are the quantity a storm
+	// moves fastest, and per-shard reads would report different instants as a mixed picture.
+	var permitsBy map[int]int64
+	if e.permits != nil {
+		permitsBy = e.permits.Snapshot()
+	}
+
 	// Peer readings, per shard: atomic reads of what each Sonar last published, so this costs no round trip
 	// and stays honest while a shard is unreadable (the count holds, and blindFor is what says why).
 	for _, idx := range e.db.Indices() {
@@ -209,6 +230,9 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		o.ObserveInt64(g.peerReplicas, int64(e.replicasOn(idx)), shard)
 		if s := e.sonarFor(idx); s != nil {
 			o.ObserveInt64(g.peerBlind, int64(s.BlindFor().Seconds()), shard)
+		}
+		if n, ok := permitsBy[idx]; ok {
+			o.ObserveInt64(g.permitsAvail, n, shard)
 		}
 	}
 

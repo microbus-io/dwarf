@@ -17,6 +17,27 @@ share of workers regardless of backlog), then by shard index for determinism. On
 variable span all partitions: N cond vars would let a worker blocked on shard 3's emptiness sleep through
 shard 1 filling.
 
+**Taking work is SPLIT in two — `WaitForWork` then `TryPopFrom` — and the split is the demand side's,
+not the cache's.** `Pop` (park until something is available, then remove it) is still here and still the
+single-call form, but the engine's workers use the pair, because they must take a permit *between* the two
+halves: parking while holding a permit would hoard admission capacity, and popping before holding one would
+strand a candidate inside a worker that cannot proceed with it. So `WaitForWork` blocks and reports only
+**which shard** `Pop` would drain, and `TryPopFrom(shard)` removes from that partition without blocking.
+`PeekShard` is the non-blocking twin of the first, for the growth decision.
+
+Two consequences to keep straight:
+
+- **The shard is a HINT.** Between the peek and the pop another worker may take the peeked entry and a
+  better-banded arrival may land, so `TryPopFrom` failing is ORDINARY. Its caller must retry the park, never
+  treat it as a close.
+- **`WaitForWork` alone reports the close.** `TryPopFrom` deliberately does not distinguish "empty" from
+  "closed" — both mean *go back and park* — and folding the close into it would let a caller mistake a lost
+  race for a shutdown and exit. In the crew that would silently erode the worker set under exactly the
+  contention that caused the race.
+
+All four selection paths share `bestPartition`, so the lowest-floor rule exists in exactly one place; two
+copies of it would drift, and the drift would be invisible (both would still dispatch *something*).
+
 **The floor is the band a partition is serving for the current window, and it is FROZEN there** — set by
 the `Refill` that planned it (or by an `Offer` into an empty partition), `math.MaxInt` when empty. It is
 `Pop`'s key for choosing which partition to drain, and `Offer`'s bar for what it will admit.

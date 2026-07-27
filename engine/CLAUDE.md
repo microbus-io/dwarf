@@ -2262,23 +2262,41 @@ The worker count is split into two numbers, because they answer different questi
   first discarded - it pays connection setup); a failed probe falls back to the measured same-zone
   constant. Every input is engine-visible - **no task duration T anywhere**, which is exactly what makes
   this derivable where `N = M x T/db` is not.
-- **The pool grows on demand** (`internal/workers`, `Crew.Offsite`): a worker about to enter the host's
-  `ExecuteTask` reports itself OFFSITE, and the pool adds one **only if every peer is already offsite** -
-  i.e. not one worker is left to dispatch. **That scope must be the host call and nothing else.** This is the load-bearing detail, and getting it wrong shipped a runaway: an earlier version
-  counted time inside `processStep`, which *includes waiting for a database connection*, so "every worker
-  busy" meant "saturated" - any DB-bound backlog grew the pool toward the ceiling, each new worker
-  queueing on the same connections and making the signal truer. Measured cost before the fix: ~20%
-  throughput on a saturated 8-vCPU shard (2,902 vs 3,523 steps/s) with the pool bloated to ~1,300 workers
-  where ~512 sufficed. A worker inside `ExecuteTask` holds no connection, so its replacement is pure added
-  dispatch capacity; a worker anywhere else in `processStep` is using or awaiting one, and a peer for it
-  is pure added contention. Both directions are pinned (`TestPoolSizing_PoolGrowsForLongTasks`,
-  `TestPoolSizing_SaturationDoesNotGrowThePool`) - the second is the one whose absence let the bug ship.
-  The release is called on the next straight line rather than deferred, because a defer at that function's
-  scope would hold the state across everything after the host call - the too-wide scope again.
-  Shutdown is the crew's two-phase `Drain`, and the engine's half is closing the CACHE first: a worker with
-  nothing to run is parked in `Pop`, which only a close releases. Inside `Drain` the crew is closed to new
-  goroutines **before** the `WaitGroup` is waited on - an `Add` concurrent with a `Wait` panics, and a
-  worker can go offsite at any instant. See `internal/workers/CLAUDE.md`.
+- **`permits` (how many workers may be doing DATABASE work on a shard at once)** = `permitsPerConn x open`,
+  with `permitsPerConn = 8`. This is the gate that lets the crew grow freely for long tasks without the
+  growth turning into pool contention, and it is what the crew's growth trigger consults. See "Database-phase
+  permits" below.
+
+- **The pool grows on demand** (`internal/workers`): a worker that takes a candidate and finds **nobody
+  idle, work still waiting, and a permit free** adds one. The permit is what makes that trigger safe, so the
+  two are a single design and neither is separately tunable.
+
+  **DO NOT gate growth on every worker being simultaneously inside `ExecuteTask`.** That is a *sufficient*
+  condition for "a replacement adds capacity" and nowhere near a necessary one, and the gap is quantifiable:
+  with a worker off-resource a fraction `task/(task+db)` of the time, `P(all N away) ~ e^(-N.db/task)`, so
+  integrating `dN/dt = D.e^(-N.db/task)` gives **`N(t) ~ (task/db).ln(D.t)`** - logarithmic. Throughput is
+  `N/task`, so the `task` factor CANCELS and throughput converges to `ln(D.t)/db`: **independent of task
+  duration, and approached only logarithmically.** Measured on a 16-vCPU shard at 600 flows/s with
+  `-task-delay` the only variable: 6,005 steps/s at 0s, 1,020 at 1s (1,157 goroutines), 637 at 8s (5,298
+  goroutines) - the last against a derived `workerCeiling` of 141,000 and a workload needing ~48,000
+  concurrent. Eight times the task duration buys 4.6x the crew and *less* throughput, with both long-task
+  arms in the same band. No threshold tuning fixes it: the predicate is on the wrong quantity, an
+  instantaneous COUNT where the answer is a ratio of DURATIONS.
+
+  **DO NOT reintroduce a caller-maintained counter for this either.** Its correctness rests on the caller
+  wrapping exactly the host call and nothing else, and one line too many - wrapping the wait for a
+  connection - makes saturation read as idleness, so any DB-bound backlog grows the pool toward the ceiling
+  with each new worker queueing on the same connections: **~20% throughput on a saturated 8-vCPU shard
+  (2,902 vs 3,523 steps/s), ~1,300 workers where ~512 sufficed.** The crew maintains its own idleness
+  counter; what the caller owns is *when the permit is released*, backstopped by `sync.OnceFunc` plus an
+  unconditional call, so a leak is unreachable rather than merely detected.
+
+  Both directions stay pinned - `TestPoolSizing_PoolGrowsForLongTasks` and
+  `TestPoolSizing_SaturationDoesNotGrowThePool`, the second being the one whose absence let the runaway ship.
+  Shutdown is the crew's two-phase `Drain`, and the engine's half is closing the CACHE **and the PERMITS**
+  first: a worker with nothing to run is parked on one of them, and only a close releases it. Closing the
+  cache alone leaves any worker blocked on a permit unreachable and `Drain` waits forever. See
+  `internal/workers/CLAUDE.md`.
 - **`SetWorkers` pins the maximum** (deterministic tests use `SetWorkers(1)`, which also disables growth;
   benchmark sweeps; hosts wanting a smaller global bound, e.g. for memory - the in-flight state maps are
   a cost the engine cannot see). Setting it ABOVE the ceiling is allowed and warned about at Startup: an
@@ -2291,6 +2309,110 @@ wrong axis all over again (see "Backpressure is the task's or host's job"). Per-
 belongs in the host's `ExecuteTask` (a semaphore keyed on the real provider/account) with `flow.Retry`
 when the downstream says no. The engine sizes workers for throughput, bounded only by what it can see:
 the lease margin.
+
+### Database-phase permits (`internal/permits`) — gate the PHASE, not the step
+
+**Gate the phases that hold a connection, and gate ADMISSION by blocking while gating COMPLETION by
+debit.** A worker's time splits into three regimes that want opposite policies:
+
+- **pre-task** (claim CAS, step read, flow/graph load) — holds or awaits a connection. New work, so it can
+  and should wait.
+- **the host call** (`ExecuteTask`) — holds no connection. Must be unbounded; this is the long-task case.
+- **post-task** (persist / transitions) — holds a connection, but the task has **already run**.
+
+```
+park for work                       <- holding NOTHING
+  -> peek: which shard has work?
+  -> ACQUIRE permit (blocking)      <- admission
+  -> TryPopFrom that partition       (empty? release, retry)
+  -> claim CAS, flow/graph load
+  -> release permit
+  -> ExecuteTask                    <- unbounded, holds nothing
+  -> DEBIT permit (never blocks)    <- may drive the count NEGATIVE
+  -> persist / transitions
+  -> restore permit
+```
+
+**Why this is derivable where `N = M x T/db` is not.** The recorded objection to duty-cycle sizing is to
+*estimating* `T/db` — a single fitted ratio is wrong for every class of a mixed workload (5ms lookups and
+30s model calls on one crew). The permit does not estimate: it **counts occupancy exactly**, one holder per
+worker actually touching the database, at the instant it is doing so. The duration ratio then enforces
+itself as a *consequence* rather than an input — a worker sleeping 8s holds no permit, a 5ms lookup holds
+one for 5ms — so no `T` appears anywhere, measured, fitted or assumed. Same rule as `workerCeiling`: bound
+what you can see (connections, round trips, current holders), never what you cannot (task duration).
+
+**It bounds QUEUE DEPTH, not rate, and that distinction is what makes it safe.** Workers wait for
+connections *inside* the permit, so the gate's throughput self-adjusts to whatever the pool can serve; at
+`P` permits the pool's waiter queue is bounded at `max(0, P - M)`. **Do NOT re-shape this as a RATE limiter**
+(tempting, because a rate needs no release, which would delete the leak risk and the acquire/release
+asymmetry across the callback boundary). Little's law runs the wrong way: `concurrency = rate x latency`, so
+fixing the rate lets concurrency track latency — when the database slows you keep admitting at the same rate
+and concurrency *grows*, exactly backwards, while a counter fixes concurrency and lets the rate fall out,
+which self-corrects. It is also circular: the duration a rate would need is `k.RTT + server + pool wait`, and
+pool wait is the very thing being controlled.
+
+**The DEBIT is what makes the permit bound the right quantity.** A worker returning from `ExecuteTask` has
+already fired its side effects and its outcome exists nowhere but in that goroutine, so making it queue
+would hold a *finished* job hostage to a throughput optimisation — the principle `persist.go` already
+encodes ("retry the WRITE, never the task") running backwards. But the persister must not be *invisible*
+either, or a completion storm would swamp the pool while admission carried on at full rate. So it takes a
+permit **without waiting** and the count is allowed to go negative: persist load suppresses new admission
+automatically, and while the count is negative nothing new is admitted at all. Consequences worth stating:
+permit-seconds per step become the step's **whole** database cost, so permits-in-use approximates *workers
+currently touching the database*; **no deadlock is possible** (admission waits, persist never does, so
+persisters always drain and restore); and it needs a semaphore permitting **negative** values, which is not
+something a channel or `x/sync/semaphore` can be talked into (`internal/permits/CLAUDE.md`).
+
+**Sizing: `permitsPerConn = 8`, deliberately the same ratio as `workersPerConnBudget` and not because the
+two are the same quantity.** The candidate cache already holds `8 x conns` entries, so **today at most
+`8 x M` workers can hold a candidate at once no matter how many workers exist** — cache capacity is the de
+facto bound on database concurrency. Pinning the permit to the same ratio reproduces that bound at the
+*admission* end, so the change does not tighten what the database already sees; what it changes is that
+worker count is no longer welded to it.
+
+The evidence brackets 8 rather than leaving it a guess: 8x is measured FREE (cutting the resident set 4x
+moves neither throughput nor p99 and leaves host CPU flat), while the runaway trigger ran ~27x where ~10.7x
+sufficed, so the harmful threshold sits between ~11x and ~27x. **Do NOT tighten the ratio to 2-3x** on the
+theory that less concurrency is safer: that cuts database concurrency *below* what already runs, which is a
+second change bundled into a fix for something else.
+
+**The 0s-delay arm is NOT a pure no-op, and do not treat a change there as a regression by itself.** The
+admission half cannot bind where cache capacity already did, but the **debit** half is live at every task
+duration: under short tasks every worker cycles acquire → release → debit → restore continuously, so persist
+load can drive the count negative and throttle admission — which shortens the pool's waiter queue. That is a
+real mechanism with a real sign, and pool wait is known to rate-limit the refiller, so a short-task
+*improvement* is as plausible an outcome as a null. Read the arm against `dwarf_permits_available`
+(sustained negative = the debit is binding) rather than assuming which way it should move.
+
+**Per shard, resolved by peek-then-acquire.** Connections are per shard, so permits must be — but the pop is
+what chooses the partition, so the shard is not known until after a pop, which is the ordering the design
+rejects (a permit must never be held across a blocking pop, and a popped-then-blocked candidate is stranded
+inside a worker that cannot run it). Hence: peek the shard, acquire, then pop **from that partition only**,
+releasing and retrying on a lost race. **Do NOT make the permits GLOBAL** — that is the removed rate valve's
+error, a control keyed on the wrong resource: one shard's work would consume every permit and deepen exactly
+the pool queue permits exist to protect.
+
+**Every path that changes a pool must re-size the permits**, the same standing rule the worker ceiling, the
+cache and the refill interval obey: `Startup`, `recomputePools`, and `SetMaxOpenConns` (the last is not
+optional — once an override is set `recomputePools` early-returns, so it is the only path left). `Resize`
+moves the available count by the **delta**, never to the new ceiling, or an in-flight holder's permit would
+be handed out twice.
+
+**Known watch-item: head-of-line blocking across shards.** If shard S's permits are exhausted, a worker
+blocks on S while shard T sits with work and free permits — the one place this design can idle capacity it
+already has. It is self-balancing with many workers, so this is a watch-item rather than a blocker, and it
+is roughly no worse than an ungated crew (those workers would instead be queued on S's connections).
+
+**It has a second facet that is easy to miss: it suppresses GROWTH too.** A worker blocked in `Acquire`
+counts as *idle* to the crew, which is right same-shard (it proceeds the moment a permit frees) and wrong
+across shards — so while S is exhausted, `considerGrowth` sees a non-zero idle count and declines to spawn
+for T even when T has both work and free permits. So the cost is not only the blocked workers; it is also
+that the crew stops growing for the healthy shard.
+
+The cheap mitigation, if it ever binds: take the permit **non-blockingly** first, and on failure re-peek for
+a shard with capacity before falling back to a blocking acquire. That needs a non-blocking `Acquire` variant
+on the permit set, which is not there today — do not add one speculatively; add it with the re-peek that
+uses it.
 
 **New-flow placement is capacity-weighted (`pickShard`).** Placement is the engine's only load-balancing
 moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks) - so heterogeneous
@@ -2388,7 +2510,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 27 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 29 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
@@ -2540,7 +2662,7 @@ de-duplicates, so a name already ending in `_total` is not doubled), while the O
 instrument name verbatim. So the instruments are named `dwarf_flows_started` etc., and a Prometheus query
 references them as `dwarf_flows_started_total`. Do not bake `_total` into a counter's instrument name.
 
-**8 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
+**10 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
 time and reads engine state: in-memory for
 `dwarf_steps_queue_depth` (cache length) and `dwarf_steps_fairness_keys` (read from `planner.LastBand()`,
 which reports a NEGATIVE band for "nothing to report" - no plan yet, or an idle fleet - so an idle engine
@@ -2792,7 +2914,7 @@ design carried, where a `wakeTimer` send could race a close and panic a worker m
 ```
 close(reconcileStop); reconcileWorker.Wait() // in-memory only: nothing in flight to wait for
 closeMetrics()                               // the gauge callback must not query a closing database
-cache.close()                                // unblocks blocked candidate pops independently of any channel
+cache.close(); permits.Close()               // BOTH: a worker parks on one or waits on the other
 workers.Wait()
 close(timerStop);    timerWorker.Wait()
 close(recoveryStop); recoveryWorker.Wait()

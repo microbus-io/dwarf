@@ -40,7 +40,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 27 instruments — 17 counters, 8 gauges, and 2 histograms. Counter instrument names carry **no** `_total`
+The engine emits 29 instruments — 17 counters, 10 gauges, and 2 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -73,6 +73,8 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_peer_replicas` | gauge | `shard` | replicas this one currently sees holding connections to that shard — the divisor its pool is sized by | `dwarf_peer_replicas` |
 | `dwarf_peer_blind_seconds` | gauge | `shard` | time since that shard's peer registry was last read successfully; zero when healthy | `dwarf_peer_blind_seconds` |
 | `dwarf_refill_tally_age_seconds` | gauge | — | how long ago the stalest shard still in this replica's planner reported | `dwarf_refill_tally_age_seconds` |
+| `dwarf_permits_available` | gauge | `shard` | database-work permits free on that shard. **Signed** — negative means completions have suppressed new admission (the storm signature) | `dwarf_permits_available` |
+| `dwarf_workers_resident` | gauge | — | worker goroutines that exist; grows on demand, never shrinks | `dwarf_workers_resident` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state
 at collection time.
@@ -85,6 +87,8 @@ replica count:**
 | `dwarf_steps_queue_depth` | **per-replica** (this replica's in-memory cache) | `sum` |
 | `dwarf_steps_fairness_keys` | **per-replica** (this replica's last refill) | `sum` |
 | `dwarf_refill_tally_age_seconds` | **per-replica** (this replica's planner) | `max` |
+| `dwarf_permits_available` | **per-replica** (this replica's gate) | `sum` |
+| `dwarf_workers_resident` | **per-replica** (this replica's crew) | `sum` |
 | `dwarf_steps_pending` | **cluster-wide** (queries the shared database) | `max` |
 | `dwarf_steps_oldest_pending_age_seconds` | **cluster-wide** (queries the shared database) | `max` |
 | `dwarf_task_concurrency_running` | **cluster-wide** (queries the shared database) | `max` |

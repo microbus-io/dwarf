@@ -123,9 +123,11 @@ eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal
 
 ## Connection pool
 
-Each shard's pool derives from its `ShardSpec.VirtualCPUs`: open = ~6× the database's CPU count (the
-measured knee — beyond it connections only queue inside the database, and on small servers actively
-harm throughput), with a warm idle core of half that. An undeclared count assumes 2 vCPUs (a pool of
+Each shard's pool derives from its `ShardSpec.VirtualCPUs`: open = **6× the database's CPU count, or 12×
+on a server of 32 vCPUs or more** (beyond that connections only queue inside the database, and on small
+servers actively harm throughput), with a warm idle core of half that. Large servers get the higher ratio
+because it is where the measured throughput knee sits with no measured increase in instability; smaller
+ones stay conservative because past their knee they collapse rather than plateau. An undeclared count assumes 2 vCPUs (a pool of
 12), which stays under the knee of even a 1-vCPU machine — so a zero-config engine cannot reach the
 collapse zone, but it also cannot use a large database: **declare `VirtualCPUs`.** `SetMaxOpenConns`
 is an expert override that pins every shard's pool exactly — for benchmarking sweeps or
@@ -139,7 +141,7 @@ these constants are in the [cloud benchmarks](benchmark-cloud.md).
 > while the system stays healthy.
 
 > **Running more than one replica?** The derived budget is a property of the shard's *database*, not
-> of one replica: R replicas each holding the full ~6 × `VirtualCPUs` pool would overshoot the knee R
+> of one replica: R replicas each holding the full derived pool would overshoot the knee R
 > times over, into the over-connection zone the cap exists to prevent. The engine handles this
 > automatically: each replica records a periodic heartbeat in the shard databases it already shares
 > with the others, reads the live replica count back from them **per shard**, and takes its 1/R share of
@@ -181,9 +183,12 @@ post-task database phase and `L` is the round-trip time it measures with a few `
 The worst shard's number wins.
 
 The pool **grows into that ceiling on demand**: it starts at a resident set sized by the connection
-budget (which is what dispatch is actually bound by) and adds a worker whenever every existing one is
-parked in a task and more work is waiting. So a short-task deployment stays small, and a workload of
-long tasks grows to fit its own concurrency — no knob either way.
+budget (which is what dispatch is actually bound by) and adds a worker whenever none is free to take the
+next candidate, work is waiting, and the database still has admission capacity to spare. That last
+condition is what keeps growth from turning into contention — a worker occupies that capacity only
+across the phases that use a connection, never across the task itself, so a workload of long tasks grows
+to fit its own concurrency while a database-bound one stops growing at the point extra workers would only
+queue. Short-task deployments stay small; no knob either way.
 
 Reasons to call `SetWorkers(n)` anyway: **memory** (each in-flight step holds its state map, a size the
 engine cannot see — the ceiling can be tens of thousands), a deliberately smaller global bound, or

@@ -144,7 +144,7 @@ headline metric is **payloadMB/s = payload size × steps/sec**: the rate at whic
 through durable storage. Fixed at 1 shard. (Same hardware/config as above; median of three runs at
 `-benchtime=100x`.)
 
-**Persisted bytes are no longer a fixed multiple of this number.** The engine avoids re-storing a payload a
+**Persisted bytes are not a fixed multiple of this number.** The engine avoids re-storing a payload a
 step did not change, referring to the copy the predecessor already stored instead. How many bytes actually
 land on disk therefore depends on the flow's shape: a chain that *rewrites* the payload at every step (what
 this benchmark measures, the worst case) stores roughly one copy per step, while a chain that merely
@@ -181,10 +181,9 @@ Reading it:
   payloads what matters is how well the database parallelizes big writes: PostgreSQL and MySQL spread them
   across many connections, whereas SQLite has a single writer that handles them one at a time, so its byte
   rate levels off early. So the best dialect depends on how large your state is, not just on the raw flow rate.
-- **SQL Server improved dramatically at large payloads** — from the slowest dialect by a wide margin to
-  mid-pack (a 1 MB flow's median latency fell from ~12 s to ~0.8 s). Its JSON payload columns are stored as
-  binary rather than UTF-16 text, which halves the bytes written and read for the same caller payload and
-  avoids the large-object path that dominated the old figure.
+- **SQL Server holds up at large payloads** (~101 MB/s, a 1 MB flow at ~0.8 s median) because its JSON
+  payload columns are stored as binary rather than UTF-16 text: half the bytes written and read for the
+  same caller payload, and no large-object path.
 - **Large state is still expensive.** A flow carrying 1 MB of state takes hundreds of milliseconds, not
   milliseconds, and small payloads move caller bytes 20–50× less efficiently than large ones. Workflows that
   move large documents should trim state early with `flow.Del`, and keep big blobs in object storage — passing

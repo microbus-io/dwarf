@@ -80,7 +80,11 @@ is no engine-imposed *flow* deadline — implement one in author space with a `C
 
 ## Workers
 
-`SetWorkers` (default 64) caps per-replica concurrency. It's a generous static ceiling — a worker blocked
-on an `ExecuteTask` call is just a goroutine and a socket, so over-provisioning is cheap.
+Per-replica concurrency needs no configuration: the engine sizes a resident worker set from each shard's
+connection budget and grows it on demand, up to a ceiling derived from the crash-recovery lease margin. A
+worker blocked in an `ExecuteTask` call holds no database connection, so a workload of long tasks grows to
+fit its own concurrency. `SetWorkers(n)` is an expert override — mainly for bounding memory, since each
+in-flight step carries its state map — and pins the maximum rather than the resident set. See
+[Deployment → Workers](deployment.md#workers).
 
 Next: [Observability](observability.md).

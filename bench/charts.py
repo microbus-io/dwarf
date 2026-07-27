@@ -240,80 +240,54 @@ ax.set_ylim(0, 235)
 ax.legend(loc="upper left", frameon=False, fontsize=9.5)
 finish(fig, ax, f"{OUT}/benchmark-dialects-payload.png")
 
-# ---- 8. Shard ladder: steps/s vs shard count, and the refiller headroom behind the taper ----
-# Supersedes an n=1 campaign that reported "the second shard doubles, the third does nothing" and
-# attributed it to cross-shard straggler waits. That campaign ran on a 4-vCPU engine host which was
-# ITSELF the bottleneck: per-shard database CPU fell from ~82% at one shard to ~51% at three while
-# the engine saturated, and the knee moved when the engine was resized - so the plateau was a
-# property of the load generator, not of sharding. Re-measured on a 16-vCPU host, n=3 interleaved,
-# a dedicated Cloud SQL instance and a fresh database per run, 256 fairness keys and a 5ms task
-# delay (the single-key zero-delay corner exaggerates the refiller's cost).
+# ---- 8. Shard ladder: steps/s vs shard count ----
+# Six 8-vCPU shards, one Cloud SQL instance each, 1 TB PD-SSD (~30K IOPS), 16-vCPU engine host, n=3
+# interleaved, fresh database per run, 256 fairness keys, 5 ms task delay.
+#
+# The disk size is not incidental: on the 100 GB default (~3,000 IOPS) the same ladder tapered at the
+# top and the taper was read as a supply-side ceiling. With IOPS headroom the 5->6 step gains +29%.
+# The whiskers are min/max of the three replicates and are LEFT VISIBLE - the 1-shard arm's spread is
+# 22% of its mean, which is wider than several adjacent-arm differences, so the endpoint is the claim
+# and the individual steps are not.
+LADDER_DIR = "bench/results/11-shardladder-1tb-20260723"
 LADDER = {}
-# Same nesting caveat as load(): this campaign's artifacts sit under bench/results/<NN-name>/ once
-# filed, so the glob covers both. A chart whose artifacts are absent SKIPS with a message rather than
-# dying - every campaign directory is gitignored, so on any machine but the one that ran a campaign
-# its charts have no inputs, and one missing set must not stop the rest of the file rendering.
-for f in (glob.glob("bench/results/r-shardladder6-*shard-r*.json")
-          + glob.glob("bench/results/*/r-shardladder6-*shard-r*.json")):
+# A chart whose artifacts are absent SKIPS with a message rather than dying - every campaign directory
+# is gitignored, so on any machine but the one that ran the campaign its charts have no inputs, and one
+# missing set must not stop the rest of the file rendering. The directory is pinned rather than globbed
+# because later campaigns reuse these filenames on different hardware.
+for f in glob.glob(f"{LADDER_DIR}/r-l*shard-r*.json"):
     a = json.load(open(f))
-    n = int(os.path.basename(f).split("-")[2].replace("shard", ""))
-    r = a["results"][0]
-    c = r["engineCounters"]
-    sel = c.get("dwarf_refill_candidates_selected", 0)
-    LADDER.setdefault(n, []).append((
-        r["stepsPerSec"],
-        sel / r["windowSec"] / r["stepsPerSec"] if r["stepsPerSec"] else 0,
-    ))
+    n = int(os.path.basename(f).split("-")[1].replace("shard", "").lstrip("l"))
+    LADDER.setdefault(n, []).append(a["results"][0]["stepsPerSec"])
 
 SHARDS = sorted(LADDER)
 if not SHARDS:
-    print("skip docs/benchmark-cloud-shardladder.png (no r-shardladder6-* artifacts on this machine)")
-steps = [med([v[0] for v in LADDER[n]]) for n in SHARDS]
-lo = [min(v[0] for v in LADDER[n]) for n in SHARDS]
-hi = [max(v[0] for v in LADDER[n]) for n in SHARDS]
-head = [med([v[1] for v in LADDER[n]]) for n in SHARDS]
-ideal = [steps[0] * n for n in SHARDS]
+    print(f"skip docs/benchmark-cloud-shardladder.png (no artifacts in {LADDER_DIR})")
+else:
+    # Means, not medians, so the plotted points are the same statistic the doc's table reports.
+    steps = [sum(LADDER[n]) / len(LADDER[n]) for n in SHARDS]
+    lo = [min(LADDER[n]) for n in SHARDS]
+    hi = [max(LADDER[n]) for n in SHARDS]
+    ideal = [steps[0] * n for n in SHARDS]
+    x = [str(n) for n in SHARDS]
 
-if SHARDS:
-  fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.2, 6.4), sharex=True,
-                               gridspec_kw={"height_ratios": [1.45, 1]})
-x = [str(n) for n in SHARDS]
-# Ideal linear is a reference, not a measurement - dashed and recessive so it never reads as data.
-ax1.plot(x, ideal, color=MUTED, linewidth=2, linestyle=(0, (5, 4)), zorder=1)
-ax1.annotate("ideal linear", (x[-1], ideal[-1]), xytext=(-6, -14),
-             textcoords="offset points", ha="right", color=MUTED, fontsize=9.5)
-ax1.errorbar(x, steps, yerr=[[s - l for s, l in zip(steps, lo)],
-                             [h - s for s, h in zip(steps, hi)]],
-             color=S1, linewidth=2, marker="o", markersize=8, capsize=4,
-             markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=3)
-for xi, s_, n in zip(x, steps, SHARDS):
-    if n == len(SHARDS):
-        ax1.annotate(f"x{s_/steps[0]:.1f} vs 1 shard", (xi, s_), xytext=(-8, 12),
-                     textcoords="offset points", ha="right",
-                     color=INK, fontsize=11, fontweight="bold")
-# Title states only what n=3 supports. The refiller headroom below explains the taper toward six
-# shards; it does NOT explain the flat step at three (headroom is at its HIGHEST there), and that
-# arm's wide replicate spread is left visible rather than smoothed away.
-ax1.set_title("Shards keep paying past three; the refiller binds at the top")
-ax1.set_ylabel("steps / second")
-ax1.set_ylim(0, max(ideal) * 1.06)
-ax1.grid(axis="x", visible=False)
-
-# The mechanism panel. Headroom is how far the refiller's candidate supply runs ahead of what the
-# workers consume; at 1.0 it is handing out exactly what is taken and IS the ceiling.
-ax2.plot(x, head, color=S3, linewidth=2, marker="o", markersize=8,
-         markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=3)
-ax2.axhline(1.0, color=MUTED, linewidth=1, linestyle=(0, (5, 4)))
-ax2.annotate("refiller is the ceiling", (x[-1], 1.0), xytext=(-6, 6),
-             textcoords="offset points", ha="right", color=INK2, fontsize=9.5)
-ax2.set_ylabel("refiller headroom (supply / used)")
-ax2.set_xlabel("shards (one 8-vCPU database instance each)")
-ax2.set_ylim(0.9, max(head) * 1.12)
-ax2.grid(axis="x", visible=False)
-fig.tight_layout()
-fig.savefig(f"{OUT}/benchmark-cloud-shardladder.png", dpi=200, facecolor=SURFACE, bbox_inches="tight")
-plt.close(fig)
-print("wrote", f"{OUT}/benchmark-cloud-shardladder.png")
+    fig, ax = plt.subplots(figsize=(7.2, 4.4))
+    # Ideal linear is a reference, not a measurement - dashed and recessive so it never reads as data.
+    ax.plot(x, ideal, color=MUTED, linewidth=2, linestyle=(0, (5, 4)), zorder=1)
+    ax.annotate("ideal linear", (x[-1], ideal[-1]), xytext=(-6, -14),
+                textcoords="offset points", ha="right", color=MUTED, fontsize=9.5)
+    ax.errorbar(x, steps, yerr=[[s - l for s, l in zip(steps, lo)],
+                                [h - s for s, h in zip(steps, hi)]],
+                color=S1, linewidth=2, marker="o", markersize=8, capsize=4,
+                markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=3)
+    ax.annotate(f"x{steps[-1]/steps[0]:.2f} vs 1 shard", (x[-1], steps[-1]), xytext=(-8, 14),
+                textcoords="offset points", ha="right", color=INK, fontsize=11, fontweight="bold")
+    ax.set_title("Sharding keeps paying to six shards")
+    ax.set_ylabel("steps / second")
+    ax.set_xlabel("shards (one 8-vCPU database instance each)")
+    ax.set_ylim(0, max(ideal) * 1.06)
+    ax.grid(axis="x", visible=False)
+    finish(fig, ax, f"{OUT}/benchmark-cloud-shardladder.png")
 
 # ---- Campaign 14: vertical scaling 1-64 vCPU (2026-07-27) ----
 # One session, one engine host, 1TB SSD and ~4GB RAM per vCPU on every tier, open-loop `linear`.

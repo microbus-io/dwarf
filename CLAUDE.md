@@ -98,10 +98,15 @@ matching one before working there:**
 - **`internal/keys/CLAUDE.md`** - the flow/step key *format* (`{shard}-{id}-{token}`), token entropy (why 64-bit),
   and the token-free `CorrelationID` derivation. (The engine-side enforcement/posture stays in `engine/CLAUDE.md`.)
 - **`internal/workers/CLAUDE.md`** - the demand side: the grow-on-demand goroutine `Crew` (not "pool" -
-  that word is the database connection pools), the `Offsite`
-  growth signal and the scope rule it turns on, and the two-phase drain.
+  that word is the database connection pools), the idleness-plus-gate growth trigger (and why it needs both
+  an edge and a cadence), and the two-phase drain.
 - **`internal/candidatecache/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL - godoc only, no design doc.)
+- **`internal/permits/CLAUDE.md`** - the per-shard signed semaphore that bounds concurrent DATABASE work,
+  and so lets the worker crew grow for long tasks without the growth becoming pool contention: why the
+  count must go negative (and what that rules out), the per-shard waiting queues, and the delta resize.
+  (The sizing, the debit-on-completion rationale and the peek-then-acquire ordering stay in
+  `engine/CLAUDE.md` §"Database-phase permits".)
 - **`internal/staterefs/CLAUDE.md`** - storing a large carried state field once: the anchor-cost size policy
   (why fan-out width is the primary axis), the one-hop and both-column invariants, and why the Loader is a
   per-call batched callback rather than a bound connection. (The engine-side integration - flow-boundary

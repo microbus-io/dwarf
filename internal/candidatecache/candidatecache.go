@@ -201,25 +201,7 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 	for c.totalLen() == 0 && !c.closed {
 		c.cond.Wait()
 	}
-	var best *partition
-	for _, p := range c.parts {
-		if len(p.items) == 0 {
-			continue
-		}
-		if best == nil {
-			best = p
-			continue
-		}
-		bf, pf := best.floor(), p.floor()
-		switch {
-		case pf < bf:
-			best = p
-		case pf == bf && len(p.items) > len(best.items):
-			best = p
-		case pf == bf && len(p.items) == len(best.items) && p.items[0].Shard < best.items[0].Shard:
-			best = p
-		}
-	}
+	best, _ := c.bestPartition()
 	if best == nil {
 		c.mu.Unlock()
 		return Job{}, false, false
@@ -235,6 +217,104 @@ func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 	needRefill = len(best.items) <= best.lowWater()
 	c.mu.Unlock()
 	return j, true, needRefill
+}
+
+// bestPartition returns the partition Pop would drain and its shard, or nil when every partition is empty.
+// Callers hold c.mu. Selection is lowest floor; ties break by depth (deepest first - round-robin would hand
+// every shard an equal share of workers regardless of backlog), then by lower shard index for determinism.
+func (c *Cache) bestPartition() (*partition, int) {
+	var best *partition
+	bestShard := 0
+	for shard, p := range c.parts {
+		if len(p.items) == 0 {
+			continue
+		}
+		if best == nil {
+			best, bestShard = p, shard
+			continue
+		}
+		bf, pf := best.floor(), p.floor()
+		switch {
+		case pf < bf:
+			best, bestShard = p, shard
+		case pf == bf && len(p.items) > len(best.items):
+			best, bestShard = p, shard
+		case pf == bf && len(p.items) == len(best.items) && shard < bestShard:
+			best, bestShard = p, shard
+		}
+	}
+	return best, bestShard
+}
+
+// WaitForWork blocks until some partition holds a candidate, and reports which shard Pop would drain. ok is
+// false ONLY when the cache CLOSES, so a worker parked here distinguishes "drained" from "nothing yet"
+// without a second signal - the same contract Pop has always had.
+//
+// It exists so a worker can park holding NOTHING. A worker that took a permit and then blocked waiting for
+// work would hoard admission capacity it is not using, so the order must be park, then acquire, then take
+// work non-blockingly - which is what splits the old Pop into this plus TryPopFrom.
+//
+// The shard is a HINT and nothing more. By the time the caller acts on it another worker may have taken the
+// peeked entry and a better-banded arrival may have landed, which is why the pop that follows must tolerate
+// finding the partition empty.
+func (c *Cache) WaitForWork() (shard int, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for c.totalLen() == 0 && !c.closed {
+		c.cond.Wait()
+	}
+	if c.closed {
+		return 0, false
+	}
+	_, shard = c.bestPartition()
+	return shard, true
+}
+
+// TryPopFrom removes and returns the front candidate of ONE shard's partition without blocking. ok is false
+// when that partition is empty (lost the race, or it drained) or the cache is closed.
+//
+// THE TWO CASES ARE DELIBERATELY NOT DISTINGUISHED HERE, because the caller must treat them identically:
+// retry the park. It is WaitForWork that reports a close, and a worker that returned on an empty partition
+// instead of looping would erode the crew under exactly the contention that caused the race - silently,
+// since nothing retires a worker any other way.
+//
+// needRefill signals that this partition has drained to its low-water mark, exactly as Pop's does.
+func (c *Cache) TryPopFrom(shard int) (j Job, ok bool, needRefill bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return Job{}, false, false
+	}
+	p := c.parts[shard]
+	if p == nil || len(p.items) == 0 {
+		return Job{}, false, false
+	}
+	j = p.items[0]
+	if len(p.items) <= p.offered {
+		p.offered--
+	}
+	p.items = p.items[1:]
+	if len(p.items) == 0 {
+		p.items = nil
+	}
+	return j, true, len(p.items) <= p.lowWater()
+}
+
+// PeekShard reports which shard Pop would drain right now, without blocking and without removing anything.
+// ok is false when every partition is empty or the cache is closed.
+//
+// It is the non-blocking twin of WaitForWork, and exists for the demand side's growth decision: "is there
+// work waiting, and on which shard" is one question, and answering it with two calls would let the two
+// halves disagree. A HINT either way - the answer can be stale before the caller acts on it, which there
+// costs one goroutine that parks harmlessly.
+func (c *Cache) PeekShard() (shard int, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return 0, false
+	}
+	p, shard := c.bestPartition()
+	return shard, p != nil
 }
 
 // Refill replaces one shard's partition with batch at the given priority floor and wakes all waiters. The

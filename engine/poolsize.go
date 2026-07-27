@@ -61,6 +61,27 @@ const (
 	// connection, so it must not inflate the cache/refill scan, which serves dispatch only.
 	workersPerConnBudget = 8
 
+	// permitsPerConn bounds how many workers may be doing DATABASE work on one shard at a time, as a
+	// multiple of that shard's pool. It is what lets the crew grow freely for long tasks without the growth
+	// turning into contention: a worker holds a permit only across the phases that hold or await a
+	// connection, so a task sleeping 8s holds none and a 5ms lookup holds one for 5ms.
+	//
+	// 8 is deliberately the same ratio as workersPerConnBudget, and NOT because the two quantities are the
+	// same thing - one sizes worker EXISTENCE, this bounds concurrent database WORK. The reason is that the
+	// candidate cache already holds 8 x conns entries, so at most 8 x conns workers can hold a candidate at
+	// once no matter how many workers exist: cache capacity is TODAY's de facto bound on database
+	// concurrency, and pinning the permit to the same ratio reproduces it exactly. The database therefore
+	// sees the load it already sees, and the only thing that changes is that worker count is no longer
+	// welded to it - so there is no new database-concurrency regime to validate, only the growth path.
+	//
+	// The evidence brackets it rather than leaving it a guess. 8x was measured FREE (cutting the resident
+	// set 4x, 8x -> 2x, moved neither throughput nor p99 and left host CPU flat), while the runaway that
+	// motivated all of this ran ~27x (1,300 goroutines against a 48-connection pool) where ~10.7x sufficed.
+	// So the harmful threshold sits somewhere between ~11x and ~27x, and 8 is comfortably below the
+	// measured-fine point. A TIGHTER ratio (2-3x) was considered and dropped: it would cut database
+	// concurrency below today's, which is a second change bundled into a fix for something else.
+	permitsPerConn = 8
+
 	// completionRoundTrips is the number of database round trips in a step's post-task phase: the
 	// standalone completed-UPDATE plus the transition transaction (lock-grab UPDATE, successor INSERT,
 	// successor_id UPDATE, flow step_id UPDATE, COMMIT). Multiplied by the measured RTT it gives the
@@ -161,10 +182,10 @@ func shardPool(spec ShardSpec, override int, replicas int) (idle, open int) {
 // but throughput is NOT what places the threshold. STABILITY is. Counted over an open-loop campaign, by
 // the share of arms that entered the collapse state below:
 //
-//	  8 vCPU    6x   1/13 collapsed     12x   2/11 collapsed
-//	 16 vCPU    6x   0/13 collapsed     12x   2/ 9 collapsed
-//	 32 vCPU    6x   0/14 collapsed     12x   0/ 9 collapsed
-//	 64 vCPU    6x   0/ 7 collapsed     12x   0/ 6 collapsed
+//	 8 vCPU    6x   1/13 collapsed     12x   2/11 collapsed
+//	16 vCPU    6x   0/13 collapsed     12x   2/ 9 collapsed
+//	32 vCPU    6x   0/14 collapsed     12x   0/ 9 collapsed
+//	64 vCPU    6x   0/ 7 collapsed     12x   0/ 6 collapsed
 //
 // The 16-vCPU row is the one that sets the threshold: same instance, same workload, and moving 6x -> 12x
 // turned a clean sweep into two collapses. At 32 and 64 the same move costs nothing across 15 arms. So
@@ -271,6 +292,13 @@ func (e *Engine) recomputePools() {
 		idle, open := shardPool(specs[idx], 0, observed[idx]) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
+		// The permits follow the pool for the same reason the cache and the worker ceiling do: they bound
+		// concurrent database work as a multiple of the connections this replica actually holds, and the
+		// pool just changed. Resize moves the available count by the DELTA, so permits held by in-flight
+		// workers are never handed out twice.
+		if e.permits != nil {
+			e.permits.Resize(idx, permitsPerConn*open)
+		}
 		postSplitConns += open
 	}
 	// The candidate cache follows the pool split, for the same reason the worker ceiling does: it is sized from

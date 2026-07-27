@@ -29,6 +29,28 @@ so check it in the artifact: nonzero means the fleet churned mid-run and the num
 **Lower-case the database name.** Postgres folds unquoted identifiers, so `CREATE DATABASE dwarfFoo` makes
 `dwarffoo` while a DSN asking for `dwarfFoo` gets `does not exist`. Cost one 22-minute run, every arm.
 
+**RTT DEGRADES ACROSS A SESSION, so back-to-back arms are ordered by server fatigue, not by treatment.** On
+local Docker Postgres, six interleaved arms run without pause measured RTT 0.44 → 5.63 → 6.37 → 2.24 → 0.64
+→ 6.69 ms, and throughput tracked it: every arm that started degraded landed at 291-427 steps/s regardless
+of which build it was running, while the one arm that started fresh hit the full commanded 800. Interleaving
+does **not** save you here — it spreads the damage evenly rather than removing it, and with ρ(rtt, steps/s) ≈
+−0.90 the residual noise is larger than most effects worth measuring. Two controls, both cheap: an idle
+**cooldown** between arms, and an **RTT gate** that probes host→database latency *while idle* and waits for
+it to come back under a threshold before starting. An arm that starts degraded is not a measurement.
+
+**The RTT to gate on is the HOST's, and it must be one long-lived connection.** A `docker exec psql` probe
+measures the unix socket *inside* the container (~0.1 ms) and is blind to the port-forward the engine
+actually traverses; a fresh connection per sample measures the handshake instead of the path. Take the
+**minimum** over a dozen `SELECT 1`s on one connection, discarding the first.
+
+**A flat-out probe measures a different machine than a commanded-rate one — do not size a rig with the
+wrong one.** Choosing the pool by saturating open-loop (`-arrival-rate 0`, deep backlog) said pool 12 beat
+24 and 48 (1041 vs 424 vs 446 steps/s) and looked like a textbook over-connection collapse. At a *commanded*
+rate with a shallow backlog the ordering **reverses**: 357 / 743 / 800, with the largest pool serving the
+full command at 116 flows outstanding and the smallest falling half short. The flat-out arms were
+backlog-bound (a deep same-band queue inflates the band scan and with it RTT), so they measured the scan,
+not the pool. Size the rig under the regime the experiment will actually run in.
+
 ## Design the comparison, not just the run
 
 **Rotate arm order (Latin square).** A fixed order inside each rep ties every arm to a sequence position:

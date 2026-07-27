@@ -59,7 +59,13 @@ func cohortLockStripe(shard, spawnStepID int) int {
 }
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
-func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err error) {
+//
+// releasePermit hands back the admission permit the crew took on this worker's behalf. It is called on
+// exactly one line - immediately before the host's ExecuteTask - because that is where this worker stops
+// competing for a database connection. Everything before it (claim CAS, step read, flow/graph load) holds
+// or awaits one; the host call holds nothing. The crew wraps it in sync.OnceFunc and calls it again on the
+// way out, so every early return below is covered and a double call is a no-op.
+func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, releasePermit func()) (err error) {
 	// stepMarkedComplete is set once the step is flipped to `completed` below, before its forward
 	// progress (transitions / fan-in / flow completion) is committed in a separate transaction. If
 	// that later commit fails, the recovery defer rolls the step back so it re-dispatches.
@@ -345,12 +351,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 		taskCtx, cancel = context.WithTimeout(taskCtx, time.Duration(timeBudgetMs)*time.Millisecond)
 		defer cancel()
 	}
-	// Report this worker as OFFSITE for the host call, so the pool may grow if that leaves nobody free to
-	// dispatch. The scope must be the host call and nothing else: a worker anywhere else in processStep is
-	// either using a database connection or waiting for one, and spawning a peer then only adds contention
-	// for the same pool - the runaway that measures saturation and calls it "long tasks". Inside
-	// ExecuteTask a worker holds no connection, so a peer is pure added dispatch capacity.
-	onsite := e.crew.Offsite()
+	// Hand the admission permit back: from here to the end of ExecuteTask this worker holds no database
+	// connection, so continuing to hold a permit would bound admission on a worker that is not competing
+	// for anything. This is the one line the release belongs on, and it is not deferred - a defer at this
+	// function's scope would hold the permit across the persist half below, which DOES hold a connection
+	// and is deliberately gated by a debit instead.
+	releasePermit()
 	// A panic in the in-process host is caught here so it flows through the normal error disposition
 	// rather than wedging this leased step until lease expiry.
 	execErr := errors.CatchPanic(func() error {
@@ -361,10 +367,22 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int) (err
 		}
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	})
-	// Released on the next straight line rather than deferred: a defer here would hold the state across
-	// everything that follows, which is exactly the too-wide scope the comment above warns about.
-	// errors.CatchPanic guarantees control reaches this, so no early return can slip between the two.
-	onsite()
+	// The task has now RUN. Everything below records that fact, and it holds a connection to do so - so the
+	// persist half takes a permit back, but by DEBIT rather than by acquiring one: a debit never waits, and
+	// drives the count negative when none is free.
+	//
+	// The asymmetry is the whole design. A worker returning from ExecuteTask has already fired its side
+	// effects and its outcome exists nowhere but in this goroutine, so making it queue would hold a
+	// FINISHED job hostage to a throughput optimisation - the same principle persist.go already encodes
+	// ("retry the WRITE, never the task"), and a blocking acquire here would be it running backwards. But
+	// the persist path must not be INVISIBLE either, or a completion storm would swamp the pool while
+	// admission carried on at full rate. Debiting makes the storm suppress new admission automatically:
+	// while the count is negative nothing new is admitted at all, which is exactly the wanted behaviour.
+	//
+	// The defer is mandatory and has no crew-side backstop (unlike the admission permit, which the crew
+	// re-releases on the way out): a lost Restore shrinks this shard's permit pool permanently.
+	e.permits.Debit(shardNum)
+	defer e.permits.Restore(shardNum)
 	if execErr == nil && e.seams.IsFault(FaultExecuteTask, taskName) {
 		execErr = errors.New("injected fault: "+FaultExecuteTask+" "+taskName, http.StatusInternalServerError)
 	}
