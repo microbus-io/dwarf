@@ -2034,14 +2034,15 @@ engine policy — below.
 `ShardSpec` and the engine owns the measured constants (cloud benchmark campaign, `docs/benchmark-cloud.md`):
 
 - **`ShardSpec.VirtualCPUs` drives each shard's pool** at the measured knee, `idle = open/2` (warm core).
-  The ratio is **12x at 8 vCPUs or more, 6x below** (`connsPerVCPUFor`), and it is two numbers because the
-  PENALTY for overshooting the knee is wildly size-dependent while the knee itself is not. The knee measures
-  at 12x on every size tested (16/32/64 vCPU peak there, worth +11.7%/+5.0%/+14.0% over 6x), but past it a
-  16-vCPU instance loses 2.2% at four times the ratio while a 1-vCPU instance loses **55%** and a 4-vCPU one
-  35%. So the small end is sized for the cliff and the large end for the knee; the ~10% that costs below the
-  threshold is the price of not having to be right on a machine that cannot absorb being wrong. Beyond the
-  knee connections only queue inside the database, which is why the budget is a hard cap, not an
-  optimization.
+  The ratio is **12x at 32 vCPUs or more, 6x below** (`connsPerVCPUFor`), and STABILITY places that
+  threshold, not throughput. 12x is the throughput knee from 16 vCPUs up (+11.7%/+5.0%/+14.0% at 16/32/64),
+  but counted over an open-loop campaign it also introduces a collapse mode below 32: at 16 vCPU,
+  6x collapsed in 0 of 13 arms and 12x in 2 of 9, while at 32 and 64 vCPU 12x collapsed in 0 of 15. The
+  collapse is not a slowdown - active backends spike (177 vs a normal 140), the WAL share of their waits
+  falls ~69% -> ~14%, CPU:running rises ~6% -> ~80%, and throughput drops ~15x (8,629 -> 486 steps/s) until
+  it recovers on its own. Roughly 10% of peak throughput does not buy that risk, so 12x is confined to the
+  sizes where it is free. Below 32 the older cliff argument also still holds: a 1-vCPU instance loses 55%
+  past its knee and a 4-vCPU one 35%.
 - **The fleet is known BEFORE any worker dispatches, so pools are sized right the first time - there is no
   async grace window.** Reading the registry needs open connections, so `Startup` opens the shards at a small
   **bootstrap** pool (`startupBootstrapConns`, 4 - enough to register the row, probe the RTT and read the fleet,

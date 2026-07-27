@@ -20,9 +20,9 @@ after `Startup`. `SetMaxOpenConns`, `SetTimeBudget`, and `SetDefaultPriority` ar
 | `SetMaxOpenConns(n)` | derived | Expert override: pins every shard's pool exactly (benchmarks, external poolers). Normally unset - each shard's pool derives from its `VirtualCPUs` |
 
 Provide `ShardSpec.VirtualCPUs` (the database server's CPU count - a fact off its spec sheet) and the
-engine derives the shard's connection budget (the measured knee - 12x CPUs on a server of 8 vCPUs or more,
-6x below that - beyond which connections only queue, and on small servers actively collapse throughput) and
-its new-flow placement weight
+engine derives the shard's connection budget (the measured knee - 12x CPUs on a server of 32 vCPUs or more,
+6x below that - beyond which connections only queue, and on smaller servers actively destabilize or collapse
+throughput) and its new-flow placement weight
 (capacity-proportional across heterogeneous shards). Leave `VirtualCPUs` unset and the engine assumes 2
 — the floor of every current-generation RDS class, and small enough that the resulting pool is still
 safe on the 1-vCPU machines Cloud SQL offers. Declare it: it is a fact off the machine's spec sheet, and

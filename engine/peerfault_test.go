@@ -60,7 +60,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	e := NewEngineUnderTest(t)
 	e.testConnCap = 0 // assert the real derived sizes, not the test-mode cap
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // budget 96 (8 vCPUs -> the 12x ratio)
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // budget 48
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
@@ -70,7 +70,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	addPeerRow(t, e, 5001)
 	addPeerRow(t, e, 5002)
 	assert.Equal(3, e.replicasOn(1))
-	assert.Equal(32, awaitPoolSize(t, db, 32), "1/3 share at three replicas")
+	assert.Equal(16, awaitPoolSize(t, db, 16), "1/3 share at three replicas")
 	awaitPartition(t, e, 1, 3, -1)
 
 	// The registry stops answering on this shard.
@@ -84,7 +84,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	}))
 	time.Sleep(10 * testPeerCadence)
 	assert.Equal(3, e.replicasOn(1), "a failed reading publishes nothing")
-	assert.Equal(32, db.DB.Stats().MaxOpenConnections, "so the pools stay where the last good reading put them")
+	assert.Equal(16, db.DB.Stats().MaxOpenConnections, "so the pools stay where the last good reading put them")
 
 	// The partition, by contrast, is off: the pair is stale and nothing justifies excluding rows on it.
 	_, _, ok := e.partitionOn(1)
@@ -94,7 +94,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	// where a database hiccup makes every row look stale at once and every replica would otherwise size for
 	// a fleet of one simultaneously. It settles on the reading after that.
 	e.seams.Withdraw(FaultPeerReadErr)
-	assert.Equal(96, awaitPoolSize(t, db, 96), "the fleet really did shrink, so the budget comes back")
+	assert.Equal(48, awaitPoolSize(t, db, 48), "the fleet really did shrink, so the budget comes back")
 	assert.Equal(1, e.replicasOn(1))
 }
 
@@ -121,8 +121,8 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 		return
 	}
 	addPeerRow(t, e, 6001) // lands on every shard
-	assert.Equal(48, awaitPoolSize(t, db1, 48))
-	assert.Equal(48, awaitPoolSize(t, db2, 48))
+	assert.Equal(24, awaitPoolSize(t, db1, 24))
+	assert.Equal(24, awaitPoolSize(t, db2, 24))
 
 	// Blind shard 1 only, then take the peer away everywhere.
 	e.seams.InjectN(1<<20, FaultPeerReadErr, "1")
@@ -133,8 +133,8 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 
 	// Shard 2 sees it and regrows; shard 1 cannot, and holds. The two shards' pools are now legitimately
 	// different, derived from different readings of different tables.
-	assert.Equal(96, awaitPoolSize(t, db2, 96), "the shard that can read follows the fleet")
-	assert.Equal(48, db1.DB.Stats().MaxOpenConnections, "the blind shard holds its last good reading")
+	assert.Equal(48, awaitPoolSize(t, db2, 48), "the shard that can read follows the fleet")
+	assert.Equal(24, db1.DB.Stats().MaxOpenConnections, "the blind shard holds its last good reading")
 	assert.Equal(2, e.replicasOn(1))
 	assert.Equal(1, e.replicasOn(2))
 }

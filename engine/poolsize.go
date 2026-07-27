@@ -39,9 +39,9 @@ const (
 	// connsPerVCPULarge is the ratio for shards at or above largeInstanceVCPUs - the measured knee.
 	connsPerVCPULarge = 12
 
-	// largeInstanceVCPUs is where the ratio steps up: the smallest tier measured to peak at 12x AND to
-	// degrade gently rather than collapse past it.
-	largeInstanceVCPUs = 8
+	// largeInstanceVCPUs is where the ratio steps up: the smallest tier at which 12x was measured to add
+	// NO instability, not merely the smallest at which it adds throughput.
+	largeInstanceVCPUs = 32
 
 	// defaultVirtualCPUs is assumed when a ShardSpec does not declare VirtualCPUs. Two facts make this
 	// guess safe rather than reckless (the failure mode of a WRONG guess is the over-connection collapse):
@@ -157,26 +157,29 @@ func shardPool(spec ShardSpec, override int, replicas int) (idle, open int) {
 // connsPerVCPUFor is the connection-per-vCPU ratio for a shard of a given size. Two values, because one
 // number cannot be both safe on a 1-vCPU server and adequate on a 64-vCPU one.
 //
-// The knee is at 12x on EVERY size measured (16, 32 and 64 vCPU all peak there, worth +11.7%, +5.0% and
-// +14.0% over 6x), so the large ratio is simply the measured optimum. What stops 12x from being the only
-// value is that the PENALTY for overshooting the knee is wildly size-dependent, and the danger is all at
-// the small end:
+// 12x is the throughput knee at every size from 16 vCPUs up (+11.7% at 16, +5.0% at 32, +14.0% at 64),
+// but throughput is NOT what places the threshold. STABILITY is. Counted over an open-loop campaign, by
+// the share of arms that entered the collapse state below:
 //
-//	 1 vCPU   peak at M=16, then COLLAPSE to 385 steps/s by M=96      -55%
-//	 4 vCPU   peak at M=32, then collapse to 1,258 by M=96            -35%
-//	16 vCPU   peak at M=192, 7,925 at M=384 (24x - four times 6x)      -2.2%
-//	32 vCPU   peak at M=384, 21,600 at M=576 (18x)                     -1.2%
+//	  8 vCPU    6x   1/13 collapsed     12x   2/11 collapsed
+//	 16 vCPU    6x   0/13 collapsed     12x   2/ 9 collapsed
+//	 32 vCPU    6x   0/14 collapsed     12x   0/ 9 collapsed
+//	 64 vCPU    6x   0/ 7 collapsed     12x   0/ 6 collapsed
 //
-// So a large instance tolerates several times its knee for low single-digit percent, while a small one
-// falls off a cliff. Sizing a single ratio for the cliff is what makes 6x right below the threshold and
-// needlessly timid above it. The cost of that timidity is ~10% throughput, uniformly - the price of not
-// having to be right about the ratio on a machine that cannot absorb being wrong.
+// The 16-vCPU row is the one that sets the threshold: same instance, same workload, and moving 6x -> 12x
+// turned a clean sweep into two collapses. At 32 and 64 the same move costs nothing across 15 arms. So
+// the risk and the gain separate by instance size, and 12x is confined to where it is free.
 //
-// The threshold sits at the smallest tier measured to BOTH peak at 12x and degrade gently: at 8 vCPU,
-// 12x (M=96) measured 4,596 steps/s against 4,351 at 6x (M=48), with no collapse anywhere on its curve.
-// Below it the ratio stays conservative, which also keeps the undeclared-VirtualCPUs default (2 vCPUs ->
-// 12 connections) exactly where its own reasoning put it - see defaultVirtualCPUs, whose safety argument
-// depends on landing under the 1-vCPU tier's knee.
+// THE COLLAPSE IS NOT A SLOWDOWN, which is why ~10% of throughput does not buy it. Active backends spike
+// (177 against a normal 140 on a 16-vCPU instance), the WAL share of their waits falls from ~69% to ~14%,
+// and CPU:running rises from ~6% to ~80% - the backends stop committing and burn CPU instead. Throughput
+// falls roughly 15x for the duration (8,629 -> 486 steps/s). It recovers on its own, so it is a mode
+// rather than a wedge, but a minute in it is a production incident.
+//
+// Small instances keep 6x for the older and blunter reason: they do not merely destabilize past their
+// knee, they fall off a cliff (1 vCPU loses 55% between M=16 and M=96, 4 vCPU 35%). That also keeps the
+// undeclared-VirtualCPUs default (2 vCPUs -> 12 connections) exactly where its own reasoning put it - see
+// defaultVirtualCPUs, whose safety argument depends on landing under the 1-vCPU tier's knee.
 //
 // This is a lookup on a declared fact, not a controller: it reads nothing observed, converges on nothing,
 // and cannot oscillate. Do not grow it into one.
