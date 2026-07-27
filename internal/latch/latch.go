@@ -49,6 +49,7 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/microbus-io/errors"
@@ -99,10 +100,33 @@ type wake struct {
 // concurrent use - drive it from one goroutine, which also means StatusResolver is never re-entered.
 type Board struct {
 	resolve StatusResolver
+	onPark  atomic.Pointer[func(key string)]
 
 	lock    sync.Mutex
 	waiters map[string][]chan wake
 	closed  bool
+}
+
+// SetOnPark registers a callback fired by [Board.Latch] once a caller is ON the board and about to block,
+// or clears it when nil. It is the observation point a caller outside this package cannot reach for
+// itself: registering and blocking are one call here - deliberately, since a gap between them is exactly
+// the race Close is careful not to leave - so "the caller is parked" has no other moment.
+//
+// It exists for the one thing a duration cannot state. Registration order is not a correctness question
+// (the board is polled, so a key that settles before its caller arrives is reported by the next sweep),
+// but it IS the premise of any test about a caller that was ALREADY blocked when the key settled - and
+// left to a sleep, that premise silently degrades into its opposite on a slow machine: the caller
+// registers late, its own first read answers it, and the test passes having exercised nothing.
+//
+// The callback runs on the parking goroutine while it holds no lock of this package's, so it may do as it
+// likes; a board with none set pays one atomic load per Latch. It is NOT called for a Latch turned away
+// by a closed board, which never parks.
+func (b *Board) SetOnPark(fn func(key string)) {
+	if fn == nil {
+		b.onPark.Store(nil)
+		return
+	}
+	b.onPark.Store(&fn)
 }
 
 // New returns an empty board over the callback that reports which keys are done.
@@ -136,6 +160,12 @@ func (b *Board) Latch(ctx context.Context, key string) (string, error) {
 	b.waiters[key] = append(b.waiters[key], ch)
 	b.lock.Unlock()
 	defer b.unlatch(key, ch)
+
+	// After the registration and outside the lock: the caller is now on the board, so a release from any
+	// source will reach it, and an observer told so here cannot be told too early. See SetOnPark.
+	if fn := b.onPark.Load(); fn != nil {
+		(*fn)(key)
+	}
 
 	select {
 	case w := <-ch:

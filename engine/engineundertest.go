@@ -228,6 +228,23 @@ const (
 	// durable, so a test reading the row immediately after sees it - the exact guarantee a status poll spun for.
 	CheckpointFlowStopped = "flowStopped" // signalStop(), a flow just reached a stop (completed/failed/cancelled/interrupted)
 
+	// Lifecycle rendezvous, fired BOTH unscoped and scoped by flow key when an Await has registered on the
+	// latch board and is about to block. It is the mirror of CheckpointFlowStopped: that one says a flow
+	// settled, this one says a caller was already waiting when it did.
+	//
+	// Registration order is not a correctness question - the board is POLLED, so a key that settles before
+	// its caller arrives is reported by the next sweep, and `await` reads once before parking anyway. It is
+	// a question about what a TEST exercised. Every test about a blocked caller being woken has to get its
+	// Await onto the board before the thing it is waiting for happens, and the only alternative to this is
+	// a sleep long enough to make that likely - which on a slow machine silently becomes its opposite: the
+	// Await registers after the stop, its own first read answers it, every assertion still passes, and the
+	// wake path under test never ran. A rendezvous makes the premise exact instead of probable.
+	//
+	// Fired through latch.Board's SetOnPark hook rather than from `await`, because registering and blocking
+	// are deliberately one call there (the gap is the race Close is careful not to leave). Wired only when
+	// the seams are enabled, so a production board carries no hook at all.
+	CheckpointAwaitParked = "awaitParked" // Board.Latch(), an Await is on the board and about to block
+
 	// Lifecycle rendezvous, fired at the END of a recovery pass - every detector in it has read the database
 	// by then. recoveryLoop sweeps ON ENTRY (Startup), so that first pass runs CONCURRENTLY with the test body,
 	// and a test that forges a wedge/orphan shape and then drives one detector itself is racing it: the sweep

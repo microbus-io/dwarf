@@ -102,3 +102,19 @@ process.
 goroutine is the intended shape, and it is what lets `StatusResolver` be written as if it were the only
 caller of whatever it queries. `Release` sends outside the lock and never blocks: a caller that has
 already been released, or gone home on its context, must not hold up the rest of the key's waiters.
+
+### The park hook is an observation point, not a notification
+
+`SetOnPark` fires once a caller is registered and about to block. It exists because registering and
+blocking are ONE call here - deliberately, since a gap between them is the race `Close` is careful not to
+leave - so "this caller is parked" has no other moment an outside caller could name.
+
+What it is for is narrow and worth stating, because the alternative looks adequate and is not. Registration
+order is not a correctness question: the board is polled, so a key that settles before its caller arrives is
+reported by the next sweep. It is the PREMISE of any test about a caller that was already blocked when its
+key settled, and a sleep cannot hold that premise - on a slow machine the caller registers late, the owner's
+own pre-park read answers it, and the test passes having exercised nothing. That failure is silent, which is
+what makes it worth a seam rather than a longer sleep.
+
+Not called for a `Latch` turned away by a closed board (it never parks), and a board with no hook pays one
+atomic load per `Latch`.

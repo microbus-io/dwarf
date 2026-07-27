@@ -759,6 +759,16 @@ func (e *Engine) initRuntime() error {
 	// A fresh board per run: the previous one was closed at drain, and a closed board turns every Await
 	// away. resolveStoppedFlows is non-nil, so New cannot fail.
 	e.latches, _ = latch.New(e.resolveStoppedFlows)
+	// The park rendezvous, wired only under test so a production board holds no hook and Latch pays one
+	// atomic load. Fired unscoped and scoped by flow key, for the same reason signalStop fires both: a
+	// scoped fire does not wake an unscoped waiter, and a test may be waiting for THIS caller to park while
+	// a subgraph child's or a peer's Await parks alongside it.
+	if e.seams.Enabled() {
+		e.latches.SetOnPark(func(flowKey string) {
+			e.seams.Checkpoint(e.lifetimeCtx, CheckpointAwaitParked)
+			e.seams.Checkpoint(e.lifetimeCtx, CheckpointAwaitParked, flowKey)
+		})
+	}
 	e.latchStop = make(chan struct{})
 	e.started.Store(true)
 

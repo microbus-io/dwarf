@@ -105,13 +105,21 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelAwait()
 	awaitCh := make(chan outcome, 1)
+	parked := eng.Seams().Waiter(engine.CheckpointAwaitParked, child) // armed before the goroutine that trips it
 	go func() {
 		o, e := eng.Await(awaitCtx, child)
 		awaitCh <- outcome{o, e}
 	}()
 
-	// Give the Await goroutine time to register its waiter and block on the (still-running) child.
-	time.Sleep(100 * time.Millisecond)
+	// The Await must be ON the board before the child fails, or the test proves nothing: `await` reads once
+	// before parking, so an Await that registers after the failure is answered by its own read and the wake
+	// path under test never runs - silently, with every assertion below still passing.
+	select {
+	case <-parked:
+	case <-time.After(30 * time.Second):
+		assert.True(false, "the Await never parked on the child, so no blocked waiter was there to be woken")
+		return
+	}
 	close(release) // the child now fails via failStep's subgraph-child path, which must signalStop the child
 
 	// What this bound pins is that failStep's subgraph-child path RESOLVES the child key at all - a failure that

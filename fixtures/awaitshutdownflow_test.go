@@ -75,14 +75,25 @@ func TestAwaitShutdownflow(t *testing.T) {
 	done := make(chan awaitResult, 1)
 	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelAwait()
+	// Armed BEFORE the goroutine that triggers it, which is the only ordering that works here: the waiter
+	// has to be registered before the statement that drives the engine to the checkpoint.
+	parked := eng.Seams().Waiter(engine.CheckpointAwaitParked, flowKey)
 	go func() {
 		out, aerr := eng.Await(awaitCtx, flowKey)
 		done <- awaitResult{out, aerr}
 	}()
 
-	// Give the Await goroutine time to register its waiter channel and settle into the snapshot/select loop
-	// before Shutdown fans the sentinel out - a waiter registered after the wake loop would never see it.
-	time.Sleep(300 * time.Millisecond)
+	// The Await must be ON the board before Shutdown closes it - a waiter registered after the wake loop
+	// would never see the sentinel, so the test would be timing a caller that was never released at all.
+	// Rendezvous, not a sleep: a sleep long enough to make this likely still degrades into its opposite on
+	// a slow machine, and does so silently, because a late-registering Await is turned away by the closed
+	// board with the very ErrClosed the assertions below are looking for.
+	select {
+	case <-parked:
+	case <-time.After(30 * time.Second):
+		assert.True(false, "the Await never parked on the board, so there was no blocked waiter to release")
+		return
+	}
 
 	if !assert.NoError(eng.Shutdown(ctx)) {
 		return
