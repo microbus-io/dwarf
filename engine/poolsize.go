@@ -32,10 +32,16 @@ import (
 // (Cloud SQL PostgreSQL, tiers 1-8 vCPU; see docs/benchmark-cloud.md). They are engine knowledge - the
 // operator provides the facts (ShardSpec.VirtualCPUs), the engine owns the constants.
 const (
-	// connsPerVCPU sizes a shard's connection pool at the measured knee: throughput stops improving
-	// beyond ~6x the database's CPU count (range 4-8 across tiers), and on small servers over-connection
-	// actively collapses throughput (745 -> 212 steps/s at 1 vCPU between 16 and 96 connections).
+	// connsPerVCPU sizes a SMALL shard's connection pool. See connsPerVCPUFor for why the ratio is not
+	// one number, and why this one is deliberately below its own tier's knee.
 	connsPerVCPU = 6
+
+	// connsPerVCPULarge is the ratio for shards at or above largeInstanceVCPUs - the measured knee.
+	connsPerVCPULarge = 12
+
+	// largeInstanceVCPUs is where the ratio steps up: the smallest tier measured to peak at 12x AND to
+	// degrade gently rather than collapse past it.
+	largeInstanceVCPUs = 8
 
 	// defaultVirtualCPUs is assumed when a ShardSpec does not declare VirtualCPUs. Two facts make this
 	// guess safe rather than reckless (the failure mode of a WRONG guess is the over-connection collapse):
@@ -143,8 +149,42 @@ func shardPool(spec ShardSpec, override int, replicas int) (idle, open int) {
 		return override, override
 	}
 	replicas = max(1, replicas)
-	open = max(2, connsPerVCPU*effectiveVirtualCPUs(spec.VirtualCPUs)/replicas)
+	vcpus := effectiveVirtualCPUs(spec.VirtualCPUs)
+	open = max(2, connsPerVCPUFor(vcpus)*vcpus/replicas)
 	return max(2, open/2), open
+}
+
+// connsPerVCPUFor is the connection-per-vCPU ratio for a shard of a given size. Two values, because one
+// number cannot be both safe on a 1-vCPU server and adequate on a 64-vCPU one.
+//
+// The knee is at 12x on EVERY size measured (16, 32 and 64 vCPU all peak there, worth +11.7%, +5.0% and
+// +14.0% over 6x), so the large ratio is simply the measured optimum. What stops 12x from being the only
+// value is that the PENALTY for overshooting the knee is wildly size-dependent, and the danger is all at
+// the small end:
+//
+//	 1 vCPU   peak at M=16, then COLLAPSE to 385 steps/s by M=96      -55%
+//	 4 vCPU   peak at M=32, then collapse to 1,258 by M=96            -35%
+//	16 vCPU   peak at M=192, 7,925 at M=384 (24x - four times 6x)      -2.2%
+//	32 vCPU   peak at M=384, 21,600 at M=576 (18x)                     -1.2%
+//
+// So a large instance tolerates several times its knee for low single-digit percent, while a small one
+// falls off a cliff. Sizing a single ratio for the cliff is what makes 6x right below the threshold and
+// needlessly timid above it. The cost of that timidity is ~10% throughput, uniformly - the price of not
+// having to be right about the ratio on a machine that cannot absorb being wrong.
+//
+// The threshold sits at the smallest tier measured to BOTH peak at 12x and degrade gently: at 8 vCPU,
+// 12x (M=96) measured 4,596 steps/s against 4,351 at 6x (M=48), with no collapse anywhere on its curve.
+// Below it the ratio stays conservative, which also keeps the undeclared-VirtualCPUs default (2 vCPUs ->
+// 12 connections) exactly where its own reasoning put it - see defaultVirtualCPUs, whose safety argument
+// depends on landing under the 1-vCPU tier's knee.
+//
+// This is a lookup on a declared fact, not a controller: it reads nothing observed, converges on nothing,
+// and cannot oscillate. Do not grow it into one.
+func connsPerVCPUFor(vcpus int) int {
+	if vcpus >= largeInstanceVCPUs {
+		return connsPerVCPULarge
+	}
+	return connsPerVCPU
 }
 
 // effectiveVirtualCPUs resolves a shard's declared CPU count, substituting defaultVirtualCPUs when the

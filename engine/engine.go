@@ -332,9 +332,9 @@ type ShardSpec struct {
 	// with the shard index, which is what gives each shard its own isolated test database).
 	DSN string
 	// VirtualCPUs is the CPU count of the shard's database server - a fact off the instance's spec
-	// sheet. It drives the shard's connection budget (the pool is capped near the measured knee of ~6x
-	// the CPU count, beyond which connections only queue - and on small servers actively harm
-	// throughput) and its placement weight (new flows are distributed across shards in proportion to
+	// sheet. It drives the shard's connection budget (the pool is capped at the measured knee - 12x the
+	// CPU count on a server of 8 vCPUs or more, 6x below that, beyond which connections only queue - and
+	// on small servers actively harm throughput) and its placement weight (new flows are distributed across shards in proportion to
 	// measured capacity). Left at 0, the engine assumes 2 - the smallest machine any major cloud sells
 	// as a current-generation instance, so the assumed pool stays safe even if the real machine is
 	// smaller. Declare it: a large database sized as if it were a 2-CPU one runs at a fraction of its
@@ -469,7 +469,8 @@ func (e *Engine) SetDefaultPriority(p int) error {
 // SetMaxOpenConns is an expert override that pins every shard's connection pool to exactly n open (and
 // idle) connections, replacing the per-shard budget the engine derives from ShardSpec.VirtualCPUs.
 // Operators normally never call this - provide VirtualCPUs instead and let the engine size the pool at
-// the measured knee (~6x the database's CPU count). The override exists for benchmarking (pool-size
+// the measured knee (12x the database's CPU count at 8 vCPUs or more, 6x below). The override exists for
+// benchmarking (pool-size
 // sweeps) and for deployments whose connection budget is constrained by something the engine cannot see
 // (e.g. a shared database or an external pooler). Live: pushes to every open shard immediately.
 func (e *Engine) SetMaxOpenConns(n int) error {

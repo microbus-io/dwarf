@@ -127,9 +127,11 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 	const (
 		shard    = 1
 		vCPUs    = 8
-		budget   = connsPerVCPU * vCPUs // 48: the whole per-database budget, whatever the fleet size
 		replicas = 4
 	)
+	// The whole per-database budget, whatever the fleet size. Derived from the policy rather than restated,
+	// so the ratio threshold cannot silently invalidate the bound this test asserts.
+	budget := connsPerVCPUFor(vCPUs) * vCPUs
 
 	// Every replica of the fleet shares one registry, which is all a fleet is. SetWorkers(1) keeps the
 	// resident crews small - this test asserts on pool arithmetic, and a derived crew per replica would

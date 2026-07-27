@@ -163,10 +163,12 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, worstReplica
 	const (
 		shard    = 1
 		vCPUs    = 8
-		budget   = connsPerVCPU * vCPUs
 		replicas = 4
-		share    = budget / replicas
 	)
+	// Derived from the policy, not restated: the invariant under test is how the budget DIVIDES across a
+	// fleet, which must hold whatever ratio connsPerVCPUFor picks for this size.
+	budget := connsPerVCPUFor(vCPUs) * vCPUs
+	share := budget / replicas
 
 	proxy, proxied := newStallProxy(t, base)
 	if proxy == nil {
@@ -281,7 +283,7 @@ func TestPeerOutage_FleetWideStallGrowsNoPool(t *testing.T) {
 	worstOpen, worstReplicas, blindPartitions := runFleetOutage(t, 4*time.Second)
 	assert.Equal(0, blindPartitions,
 		"a blind replica must select everything rather than trust a residue class it can no longer justify")
-	assert.Equal(connsPerVCPU*8/4, worstOpen,
+	assert.Equal(connsPerVCPUFor(8)*8/4, worstOpen,
 		"a replica grew its pool to %d during the outage: an unanswered reading was taken for a smaller fleet", worstOpen)
 	assert.Equal(4, worstReplicas,
 		"a replica published a fleet of %d during the outage: a reading that did not happen is not an observation of absence", worstReplicas)

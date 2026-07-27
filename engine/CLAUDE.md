@@ -2033,10 +2033,14 @@ engine policy — below.
 **Connection pool sizing - fact-derived per shard (`poolsize.go`).** The operator provides facts on
 `ShardSpec` and the engine owns the measured constants (cloud benchmark campaign, `docs/benchmark-cloud.md`):
 
-- **`ShardSpec.VirtualCPUs` drives each shard's pool** at the measured knee: `open = 6 x vCPUs`
-  (`connsPerVCPU`; measured range 4-8 across tiers), `idle = open/2` (warm core). Beyond the knee,
-  connections only queue inside the database - and on small servers actively collapse throughput
-  (745 -> 212 steps/s at 1 vCPU between M=16 and M=96), which is why the budget is a hard cap, not an
+- **`ShardSpec.VirtualCPUs` drives each shard's pool** at the measured knee, `idle = open/2` (warm core).
+  The ratio is **12x at 8 vCPUs or more, 6x below** (`connsPerVCPUFor`), and it is two numbers because the
+  PENALTY for overshooting the knee is wildly size-dependent while the knee itself is not. The knee measures
+  at 12x on every size tested (16/32/64 vCPU peak there, worth +11.7%/+5.0%/+14.0% over 6x), but past it a
+  16-vCPU instance loses 2.2% at four times the ratio while a 1-vCPU instance loses **55%** and a 4-vCPU one
+  35%. So the small end is sized for the cliff and the large end for the knee; the ~10% that costs below the
+  threshold is the price of not having to be right on a machine that cannot absorb being wrong. Beyond the
+  knee connections only queue inside the database, which is why the budget is a hard cap, not an
   optimization.
 - **The fleet is known BEFORE any worker dispatches, so pools are sized right the first time - there is no
   async grace window.** Reading the registry needs open connections, so `Startup` opens the shards at a small

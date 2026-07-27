@@ -34,11 +34,17 @@ const (
 	// Do NOT re-derive it from waste (discarded/selected). Waste runs ~2% and nearly flat across the whole
 	// good interval range, so it cannot distinguish the optimum; throughput can.
 	refillSupplyHeadroom = 2.0
-	// sustainedDrainPerVCPU is the measured sustained per-shard drain in steps/s/vCPU: ~120 steps/s per
-	// connection x connsPerVCPU. NOT capacityWeight's 450, which is the PEAK placement ceiling - the period
-	// wants the SUSTAINED rate, and conflating the two undershoots the drain and overshoots the period into
-	// a starved regime.
+	// sustainedDrainPerVCPU is the measured sustained per-shard drain in steps/s/vCPU. NOT capacityWeight's
+	// 450, which is the PEAK placement ceiling - the period wants the SUSTAINED rate, and conflating the two
+	// undershoots the drain and overshoots the period into a starved regime.
 	sustainedDrainPerVCPU = 720
+	// sustainedDrainPerConn is the same measurement expressed per CONNECTION - the quantity the connection
+	// channel below actually wants, measured roughly flat across connection counts, instance sizes and
+	// backlog volumes. It is stated as its own constant rather than as sustainedDrainPerVCPU/connsPerVCPU
+	// because the connection-per-vCPU RATIO is no longer a single number (see connsPerVCPUFor), so dividing
+	// by it would silently mean a different thing on either side of that threshold - and the per-connection
+	// drain does not vary with how many connections the pool was allotted.
+	sustainedDrainPerConn = 120
 	// refillIntervalCap bounds priority latency, and is the only thing that does. A better band arriving
 	// here does not preempt - Offer appends it at the tail - so it becomes servable when a cycle plans it,
 	// and peers plan it a cycle after that. Priority ORDER is never inverted regardless, since every cycle
@@ -49,7 +55,7 @@ const (
 // deriveRefillInterval computes ONE shard's cycle period:
 //
 //	bufferShare = capacity/N        the most one cycle can hand this partition
-//	drain       = sustainedDrainPerVCPU * min(poolConns/connsPerVCPU, vCPUs/R)
+//	drain       = min(sustainedDrainPerConn * poolConns, sustainedDrainPerVCPU * vCPUs/R)
 //	T           = bufferShare / (headroom * drain)
 //
 // The drain takes the TIGHTER of two channels, since sustained throughput cannot exceed either: this
@@ -64,8 +70,8 @@ const (
 // tracks the cache-sizing constants: a change to worker or cache sizing rescales the period with it,
 // instead of leaving a pinned number that exceeds what the buffer can cover.
 func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas int) time.Duration {
-	drain := float64(sustainedDrainPerVCPU) * float64(poolConns) / float64(connsPerVCPU) // connection channel
-	if virtualCPUs > 0 {                                                                 // cap by the CPU ceiling, when it is known
+	drain := float64(sustainedDrainPerConn) * float64(poolConns) // connection channel
+	if virtualCPUs > 0 {                                         // cap by the CPU ceiling, when it is known
 		drain = min(drain, float64(sustainedDrainPerVCPU)*float64(virtualCPUs)/float64(max(1, replicas)))
 	}
 	if bufferShare <= 0 || drain <= 0 {
