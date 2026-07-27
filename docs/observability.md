@@ -40,7 +40,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 19 instruments — 12 counters, 5 gauges, and 2 histograms. Counter instrument names carry **no** `_total`
+The engine emits 27 instruments — 17 counters, 8 gauges, and 2 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -58,6 +58,11 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_state_read_bytes` | counter | `workflow`, `column` | payload bytes read from step rows on the execution path | `dwarf_state_read_bytes_total` |
 | `dwarf_refill_candidates_selected` | counter | `shard` | step candidates selected into the local worker cache | `dwarf_refill_candidates_selected_total` |
 | `dwarf_refill_candidates_discarded` | counter | `shard` | cached candidates replaced un-popped (cost, not loss — the steps stay pending and are re-selected) | `dwarf_refill_candidates_discarded_total` |
+| `dwarf_steps_offered` | counter | — | steps admitted to the local cache by the doorbell rather than found by a scan | `dwarf_steps_offered_total` |
+| `dwarf_steps_claim_preempted` | counter | — | candidates skipped before any claim because a sibling worker on this replica already had one in flight — round trips SAVED | `dwarf_steps_claim_preempted_total` |
+| `dwarf_steps_claim_lost` | counter | — | candidates claimed that lost the CAS to a peer — round trips WASTED. Read against `_preempted`: a healthy engine converts what would have been lost into preempted | `dwarf_steps_claim_lost_total` |
+| `dwarf_steps_stolen` | counter | `shard` | steps selected from outside this replica's residue class because their owner was not serving them. Zero in a healthy fleet by construction; a sustained rate names a peer that is alive but not dispatching | `dwarf_steps_stolen_total` |
+| `dwarf_peer_changes` | counter | `shard` | times this replica observed that shard's replica count change. Zero in a settled fleet by construction, so nonzero during a steady-state window means the fleet churned | `dwarf_peer_changes_total` |
 | `dwarf_refill_duration_seconds` | histogram | `shard` | wall clock of one shard's complete candidate-selection pass | `dwarf_refill_duration_seconds` |
 | `dwarf_refill_query_duration_seconds` | histogram | `shard`, `phase` | one shard's candidate-selection query | `dwarf_refill_query_duration_seconds` |
 | `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
@@ -65,6 +70,9 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_steps_oldest_pending_age_seconds` | gauge | `priority` | age of the oldest due pending step | `dwarf_steps_oldest_pending_age_seconds` |
 | `dwarf_steps_fairness_keys` | gauge | `priority` | distinct fairness keys in the last refill | `dwarf_steps_fairness_keys` |
 | `dwarf_task_concurrency_running` | gauge | `task_url` | running steps per task | `dwarf_task_concurrency_running` |
+| `dwarf_peer_replicas` | gauge | `shard` | replicas this one currently sees holding connections to that shard — the divisor its pool is sized by | `dwarf_peer_replicas` |
+| `dwarf_peer_blind_seconds` | gauge | `shard` | time since that shard's peer registry was last read successfully; zero when healthy | `dwarf_peer_blind_seconds` |
+| `dwarf_refill_tally_age_seconds` | gauge | — | how long ago the stalest shard still in this replica's planner reported | `dwarf_refill_tally_age_seconds` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state
 at collection time.
@@ -76,6 +84,7 @@ replica count:**
 |---|---|---|
 | `dwarf_steps_queue_depth` | **per-replica** (this replica's in-memory cache) | `sum` |
 | `dwarf_steps_fairness_keys` | **per-replica** (this replica's last refill) | `sum` |
+| `dwarf_refill_tally_age_seconds` | **per-replica** (this replica's planner) | `max` |
 | `dwarf_steps_pending` | **cluster-wide** (queries the shared database) | `max` |
 | `dwarf_steps_oldest_pending_age_seconds` | **cluster-wide** (queries the shared database) | `max` |
 | `dwarf_task_concurrency_running` | **cluster-wide** (queries the shared database) | `max` |

@@ -2387,7 +2387,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 19 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 27 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
@@ -2539,7 +2539,7 @@ de-duplicates, so a name already ending in `_total` is not doubled), while the O
 instrument name verbatim. So the instruments are named `dwarf_flows_started` etc., and a Prometheus query
 references them as `dwarf_flows_started_total`. Do not bake `_total` into a counter's instrument name.
 
-**5 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
+**8 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
 time and reads engine state: in-memory for
 `dwarf_steps_queue_depth` (cache length) and `dwarf_steps_fairness_keys` (read from `planner.LastBand()`,
 which reports a NEGATIVE band for "nothing to report" - no plan yet, or an idle fleet - so an idle engine

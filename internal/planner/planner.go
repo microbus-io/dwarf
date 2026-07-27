@@ -37,6 +37,7 @@ import (
 	"math/rand/v2"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Tally is one fairness key's aggregate on one shard, at that shard's minimum due band: how many due
@@ -101,6 +102,10 @@ type shardTally struct {
 	band    int
 	tallies []Tally
 	byKey   map[string]int // key -> index into tallies, for the slice rule's lookups
+	// at is when this report was made, for TallyAge. Observability only - nothing plans on it, and the
+	// planner deliberately infers NOTHING from a tally's age: participation is declared (Clear), never
+	// timed out, because a clock cannot tell a dead shard from a slow one.
+	at time.Time
 }
 
 // entry pairs a tally with its shard for ordered iteration. Map iteration order is not stable, and
@@ -144,7 +149,7 @@ func (p *Planner) Reset() {
 // write into an array a snapshot of the first is still handing out to an unlocked Plan. Every producer
 // today allocates a fresh slice per cycle, which is what the contract asks for.
 func (p *Planner) Tally(shard, band int, tallies []Tally) {
-	st := &shardTally{band: band, tallies: tallies}
+	st := &shardTally{band: band, tallies: tallies, at: time.Now()}
 	if len(tallies) > 0 {
 		st.byKey = make(map[string]int, len(tallies))
 		for i := range tallies {
@@ -160,6 +165,34 @@ func (p *Planner) Tally(shard, band int, tallies []Tally) {
 	p.mu.Lock()
 	p.shards[shard] = st
 	p.mu.Unlock()
+}
+
+// TallyAge is how long ago the STALEST shard still in the planner reported, and zero when none is - the
+// one number that says how mixed the freshness of a plan's inputs is.
+//
+// It measures a real coupling with no other readout. Every shard plans from a merged view of every
+// shard's LAST report, so a piston cycling slowly holds its peers' plans on a picture that old: the
+// global band and the slice rule are both computed from those mixed-freshness tallies, and a shard
+// whose cycle stretched to 400ms while its peers spin at 67ms has them planning against a view six of
+// their own cycles stale. Nothing detects or corrects that today, and nothing here should start to -
+// see Clear on why a timeout would be the wrong fix. This exists so the question "are the inputs
+// diverging" can be ASKED, since a throughput number alone cannot distinguish it from a slow database.
+//
+// Expect roughly one cycle interval in a healthy fleet. Sustained multiples of that name a shard whose
+// piston has fallen behind its peers.
+func (p *Planner) TallyAge() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var oldest time.Time
+	for _, st := range p.shards {
+		if oldest.IsZero() || st.at.Before(oldest) {
+			oldest = st.at
+		}
+	}
+	if oldest.IsZero() {
+		return 0
+	}
+	return time.Since(oldest)
 }
 
 // Clear drops a shard's tally, excluding it from planning until it reports again. A caller whose scan

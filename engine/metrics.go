@@ -121,6 +121,17 @@ func (e *Engine) initMetrics() error {
 		}
 		return g
 	}
+	// A duration gauge is float64 SECONDS, not integer milliseconds. Seconds is the OTEL convention for a
+	// duration, and float64 is what keeps the convention affordable: this quantity is a cycle interval, ~0.067s
+	// in a healthy fleet, so an integer-seconds gauge would read 0 both there AND for a shard three cycles
+	// behind - the entire range that matters collapsed into one bucket.
+	gaugeF := func(name, desc, unit string) metric.Float64ObservableGauge {
+		g, err := meter.Float64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit(unit))
+		if err != nil {
+			errs = append(errs, errors.Trace(err))
+		}
+		return g
+	}
 	// The five gauges split into two kinds, and the difference is NOT cosmetic - it decides how a dashboard
 	// must aggregate them across replicas:
 	//   - PER-REPLICA (read from this replica's memory): queueDepth, fairnessKeys. Sum across replicas.
@@ -137,6 +148,7 @@ func (e *Engine) initMetrics() error {
 	// rather than emitted by them - internal/peers deliberately owns no meter, so this is the one scope that
 	// has to stay in step. Neither queries anything: both are atomic reads of what the last reading published.
 	peerReplicas := gauge("dwarf_peer_replicas", "Per-replica, per-shard: how many replicas this one currently sees holding connections to that shard - the divisor its pool is sized by. Replicas should AGREE on it, so a spread across the fleet is itself the signal: one replica reading 3 while its peers read 4 is sizing its pool for a fleet that does not exist. It is deliberately slow to fall (a reading that did not happen is not evidence anybody left), so a drop lags a real departure by a reading or two.", "")
+	tallyAge := gaugeF("dwarf_refill_tally_age_seconds", "Per-replica: how long ago the STALEST shard still in this replica's planner reported. Every shard plans from a merged view of every shard's LAST report, so a piston cycling slowly holds its peers' plans on a picture that old - the global priority band and the per-key slice rule are both computed from those mixed-freshness tallies. Expect roughly one cycle interval in a healthy fleet; sustained multiples name a shard whose piston has fallen behind its peers, which no throughput number can distinguish from a slow database. Single-shard deployments always read ~one interval and can ignore it.", "s")
 	peerBlind := gauge("dwarf_peer_blind_seconds", "Per-replica, per-shard: how long since that shard's registry was last read successfully. Zero on a healthy Sonar. Past two read cadences the replica is BLIND there - it holds its last known fleet (the safe direction for pools) and stops partitioning that shard's candidates (the safe direction for work), so a nonzero value explains both at once and is the first thing to check when a shard's counts look frozen.", "s")
 
 	reg, err := meter.RegisterCallback(
@@ -149,9 +161,10 @@ func (e *Engine) initMetrics() error {
 				concurrency:  concurrency,
 				peerReplicas: peerReplicas,
 				peerBlind:    peerBlind,
+				tallyAge:     tallyAge,
 			})
 		},
-		queueDepth, stepsPending, oldestAge, fairnessKeys, concurrency, peerReplicas, peerBlind,
+		queueDepth, stepsPending, oldestAge, fairnessKeys, concurrency, peerReplicas, peerBlind, tallyAge,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -179,6 +192,7 @@ type observableGauges struct {
 	concurrency  metric.Int64ObservableGauge
 	peerReplicas metric.Int64ObservableGauge
 	peerBlind    metric.Int64ObservableGauge
+	tallyAge     metric.Float64ObservableGauge
 }
 
 // observeGauges is the observable-gauge callback. It reads in-memory engine state and queries the
@@ -197,6 +211,10 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 			o.ObserveInt64(g.peerBlind, int64(s.BlindFor().Seconds()), shard)
 		}
 	}
+
+	// Tally age: an in-memory read of the planner's own map, unconditional because zero (no shard has
+	// reported yet) is a meaningful reading rather than an absent one.
+	o.ObserveFloat64(g.tallyAge, e.planner.TallyAge().Seconds())
 
 	// Fairness keys: the most recent plan's distinct-key count for the band it selected. LastBand reports a
 	// NEGATIVE band for "nothing to report" - no plan yet, or an idle fleet - and the guard is what keeps an
