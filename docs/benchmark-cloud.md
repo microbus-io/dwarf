@@ -15,6 +15,12 @@ recoveries and zero unwedged steps while deliberately driving the engine into th
 > load; 60 s measured windows after warmup; a run is invalid if any error/recovery/unwedge counter
 > fires. Raw artifacts: one self-contained JSON per run.
 
+> **A third campaign (2026-07-27)** measured [vertical scaling](#vertical-scaling-1-to-64-vcpus) across
+> seven database sizes, 1 to 64 vCPUs, on a 32-vCPU engine host with **1 TB SSD and ~4 GB RAM per vCPU on
+> every tier** so the CPU count is the only variable. It used **open-loop** load (a commanded arrival rate,
+> creators not waiting for completion) rather than closed-loop, which is what let it see saturation
+> behaviour the earlier campaigns structurally could not. Where it overlaps the tier ladder below, it wins.
+
 > **Two campaigns.** The [fan-out ceiling](#fan-out-the-engines-own-ceiling) and
 > [scale-out](#scale-out) sections are from the later campaign, run against three 8-vCPU shards after
 > several engine changes (most relevant here: a deferred flow-row write on fan-in arrival, a
@@ -55,7 +61,8 @@ One step costs the engine a slice of database time and a slice of task time. The
 | `k` — DB round-trips per step | **~11** | the slope of connection-held time vs RTT in the latency sweep below |
 | `s` — server-side execution + group-committed fsync | **~4.4 ms** | the latency fit's intercept |
 | `db` at low utilization, same-zone | **7–8 ms/step** | measured at M=8, a deliberately small pool that keeps the database far from saturation (4/8-vCPU tiers) |
-| Connection knee | **~6 × DB vCPUs** (range 4–8) | the tier table below |
+| Connection knee (throughput) | **~12 × DB vCPUs** at 16 vCPUs and up; ~6–8× below | the [pool sweeps](#connections-the-throughput-knee-and-the-safe-ratio-are-different-numbers) |
+| Connection ratio that is **safe** | **6 ×** — the knee is not the safe point | the [collapse counts](#the-collapse-mode) |
 | Steps ceiling `C_db` | [per tier](#steps-throughput-by-database-tier) | the tier table at saturation |
 | Byte ceiling (incompressible payloads) | **~46–60 MB/s** per instance (100 GB disk); **~88 MB/s** at 500 GB | the `state` workload |
 | Volume settling (mature vs fresh database) | **one-time ~15–20%**, then flat | the [volume fills](#volume-accumulated-rows-and-bytes-cost-a-one-time-settling) |
@@ -63,6 +70,12 @@ One step costs the engine a slice of database time and a slice of task time. The
 ## Steps throughput by database tier
 
 ![Steps throughput by database tier and connection pool size](benchmark-cloud-tiers.png)
+
+⚠️ **Superseded for 1–8 vCPU by the [vertical-scaling campaign](#vertical-scaling-1-to-64-vcpus)**, which
+re-measured these sizes open-loop. This table is **closed-loop**, which caps in-flight work at the submitter
+count — so a saturating instance throttles its own load and the table cannot show what happens past
+saturation. Its *shape* (the knee, the small-tier collapse as `M` grows) reproduced; its absolute ceilings
+did not, and using its `M=96` row to pick a connection ratio put that ratio in the wrong place once.
 
 512 workers; closed-loop concurrency 512; a fresh database per measurement. Rows are
 database tiers, columns are the connection pool size `M`; cells are steps/s. The last column reports
@@ -89,6 +102,90 @@ the tier's peak configuration re-run three times:
   budget, refuting a WAL/IOPS explanation). The 1→2 vCPU step scales poorly (a known commit-heavy
   PostgreSQL pattern, suspected WAL-insert-lock serialization; unconfirmed — needs pg wait-event
   sampling). From 2→4→8 vCPU the ceiling scales ~×2, ~×2.4.
+
+## Vertical scaling: 1 to 64 vCPUs
+
+![Achieved throughput vs offered load, by database size](benchmark-cloud-vertical.png)
+
+Seven database sizes, one session, one 32-vCPU engine host, **1 TB SSD and ~4 GB RAM per vCPU on every
+tier** so vCPU count is the only variable. Open-loop `linear` load at a commanded arrival rate; 20 s
+warmup, 60 s window, fresh database per arm. Each tier runs the connection pool the engine derives for it.
+
+Every curve tracks `offered = achieved` until its instance runs out, then departs. Reading where each one
+leaves the diagonal is the whole chart: that is the load the instance actually serves.
+
+![Vertical scaling: peak throughput by database vCPU count](benchmark-cloud-vertical-scaling.png)
+
+| database | peak steps/s | vs previous | DB CPU at peak | pool |
+|---|---|---|---|---|
+| 1 vCPU | 555 | — | 100% | 6 |
+| 2 vCPU | 1,101 | ×1.98 | 85% | 12 |
+| 4 vCPU | 1,971 | ×1.79 | 84% | 24 |
+| 8 vCPU | 3,679 | ×1.87 | 85% | 48 |
+| 16 vCPU | 7,491 | ×2.04 | 78% | 96 |
+| 32 vCPU | 21,059 | ×2.81 | 49%¹ | 384 |
+| 64 vCPU | 23,290 | ×1.11 | 24%¹ | 768 |
+
+¹ *at the servable point, not at peak — see the caveat below.*
+
+- **Scaling is near-linear from 1 to 16 vCPUs** — four consecutive doublings return ×1.79 to ×2.04. A
+  16-vCPU instance sustains ~7,500 steps/s ≈ 650M steps/day.
+- **The 16→32 step (×2.81) is superlinear and partly an artifact**: the connection ratio also changes
+  there (6× → 12×), so it is not a clean size comparison. Read it as "32 vCPU is worth more than double
+  a 16" without trusting the exact factor.
+- **32→64 returns only ×1.11.** Vertical scaling has clearly bent by 64 vCPUs — but see the caveat.
+
+**The most useful operating number is not a connection count — it is database CPU.** Every tier's
+servable point lands at **70–90% database CPU**, and every arm above ~90% is either collapsed or running
+multi-second p99. Size to keep the database in that band and the connection arithmetic mostly takes care
+of itself.
+
+**⚠️ The 32 and 64-vCPU points are bounds, not measured ceilings.** Database CPU at their best arms was
+49% and 24% — neither instance was ever driven to its own limit. At ~1,200–1,500 `steps/core` on the
+engine host, a 32-vCPU generator tops out near 40,000 steps/s, which is the same order as what a 64-vCPU
+database wants. **Those two points measure the load generator as much as the database.** A larger engine
+fleet would be needed to find where vertical scaling really ends.
+
+### The collapse mode
+
+Past saturation an instance can enter a state that is not a slowdown. It is worth naming because it is
+invisible in an average and because a connection ratio chosen for throughput makes it more likely:
+
+| | healthy | collapsed |
+|---|---|---|
+| throughput (16 vCPU) | 8,629 steps/s | **486 steps/s** |
+| active backends | ~140 | **177** |
+| WAL share of backend waits | ~69% | **~14%** |
+| `CPU:running` share | ~6% | **~80%** |
+
+The backends stop committing and burn CPU instead. It recovers on its own — a mode, not a wedge — but a
+minute in it is an incident. It appeared **only past saturation**, never on an instance with headroom.
+
+### Connections: the throughput knee and the safe ratio are different numbers
+
+Holding the database fixed and sweeping only the pool, the *throughput* knee is at **12 connections per
+vCPU** on every size from 16 up: +11.7% at 16 vCPU, +5.0% at 32, +14.0% at 64, over the 6× default.
+Past the knee, degradation is gentle on large instances (−2.2% at four times the ratio on a 16-vCPU
+instance) and a cliff on small ones (−55% on 1 vCPU, −35% on 4).
+
+**But the knee is not the safe point.** Counting arms that entered the collapse state above:
+
+| database | 6× | 12× |
+|---|---|---|
+| 8 vCPU | 1 / 13 | 2 / 11 |
+| 16 vCPU | 0 / 13 | 2 / 9 |
+| 32 vCPU | 0 / 14 | 0 / 9 |
+| 64 vCPU | 0 / 7 | 1 / 14 |
+| **total** | **1 / 47 (2%)** | **5 / 43 (12%)** |
+
+**A ~6× higher chance of a ~15× throughput drop, to buy 5–14% of peak.** The engine therefore sizes
+pools at the conservative ratio rather than the throughput-optimal one, and an operator raising it with
+`SetMaxOpenConns` should know which of the two numbers they are choosing.
+
+*Methodological note, because it changed the answer twice:* this question is only decidable open-loop and
+only by **interleaved same-instance A/B**. A closed-loop ladder cannot reach the collapse state at all,
+and comparing two ladders run against different instances is unsound — two same-spec 64-vCPU instances
+measured 28,502 vs ~23,500 steps/s at an identical pool.
 
 ## Latency: it costs connections, not throughput
 
@@ -385,6 +482,27 @@ minutes-long tasks in flight against a 48-connection pool, and median flow laten
 task duration itself, with no queueing. Workers parked in a task hold no connection, which is why the
 worker maximum can be this large without touching the database's budget.
 
+⚠️ **That result does NOT generalise to shorter tasks, and the gap is in the middle.** Re-measured
+open-loop at a commanded 600 flows/s on a 16-vCPU shard:
+
+| task duration | steps/s | worker goroutines |
+|---|---|---|
+| none (no-op) | **6,005** | 792 |
+| 1 s | **1,020** | 1,157 |
+| 8 s | **637** | 5,298 |
+
+Throughput becomes `worker count ÷ task duration`, and the worker count stops well short of what the
+workload needs — ~1,100 where ~6,000 were wanted. The pool grows only when *every* worker is
+simultaneously parked in a task, whose probability falls off exponentially as the pool gets larger, so
+growth stalls itself. It stalls **later** the longer tasks are (a 60 s task keeps essentially every
+worker parked essentially all the time, which is why the table above works), and it stalls **hardest**
+in the seconds range — precisely where an ordinary RPC or a small LLM call sits.
+
+Until this is fixed, a deployment whose tasks take **~0.5–10 s** should set `SetWorkers` explicitly to
+roughly `expected steps/s × task seconds`, rather than relying on the derived default. Workers are cheap
+(a goroutine and a socket), and the derived *maximum* is already in the tens of thousands — it is the
+growth toward it that is too slow, not the ceiling that is too low.
+
 ## The sizing formula
 
 Inputs: `V` = the shard database's vCPU count, `L` = RTT to the shard, `exec` = mean task time,
@@ -441,7 +559,15 @@ derived default, and blocked workers are cheap (a goroutine and a socket each).
 
 - **Replicas (R) untested**: the observed-R division and multi-replica coordination await the
   multi-replica campaign. An adaptive connection-budgeting design under consideration would eliminate
-  R from configuration entirely.
+  R from configuration entirely. **Sharding beyond one engine host is likewise untested** — every number
+  here is one engine driving every shard.
+- **The top of vertical scaling is not found.** The 32 and 64-vCPU points were measured with the database
+  at 49% and 24% CPU, so both are lower bounds set partly by the load generator (~1,200–1,500 steps/core
+  on the engine host). Finding where vertical scaling genuinely ends needs an engine fleet, not a bigger
+  database.
+- **Worker growth is too slow for seconds-long tasks** (see [above](#self-tuning-measured-against-hand-tuning)).
+  The derived maximum is correct; the growth rule reaches it only when tasks are long enough to keep
+  every worker parked at once. Set `SetWorkers` explicitly in the 0.5–10 s task range.
 - **Volume was measured under accumulation, not steady-state retention**: the fills grew monotonically
   with autovacuum trailing inserts. A create-and-purge equilibrium (the reaper deleting as fast as flows
   arrive) exercises vacuum differently and is the province of a long soak test, along with slow drift
