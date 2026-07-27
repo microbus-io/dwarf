@@ -950,23 +950,33 @@ func TestPeers_LongTurnKeepsProvingService(t *testing.T) {
 	busy.Store(true)
 	_, dispatched = r.s.dispatchEvidence()
 	assert.True(dispatched, "a turn that has outrun its period does")
+	// Each round BACKDATES the dispatch stamp an hour of window widths into the past and then asks whether
+	// the beat pulled it back. Comparing the age either side of the beat instead reads it twice and charges
+	// the second read's own latency against the difference between them - so with the two reads separated by
+	// only enough real time for the database clock to move (they were 15ms apart), a read delayed past that
+	// inverts the comparison and a beat that did re-stamp reads as one that did not. That is a measurement
+	// of the machine; this is a measurement of the row. The gap between stamped and not is now 60 seconds,
+	// which no read latency can close, and nothing has to sleep to make it visible.
+	//
+	// Only dispatched_at is moved: seen_at stays fresh, so the row goes on counting as live and the pass's
+	// own read has nothing to repair.
 	const rounds = 10
+	const backdateMs = 60_000
 	stamps := 0
 	for range rounds {
 		r.clk.advance(r.s.beat) // a beat comes due
-		// The row's age is measured by the DATABASE clock, which the fake one does not move, so let real time
-		// pass before reading it. Without this the before/after ages tie at millisecond precision and a stamp
-		// is invisible - the row is being refreshed either way, but the test cannot see it.
-		time.Sleep(15 * time.Millisecond)
-		before := r.row(t, selfID).dispatchAgeMs
+		_, err := r.db.ExecContext(ctx,
+			"UPDATE dwarf_peers SET dispatched_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE engine_id=?",
+			-backdateMs, selfID)
+		assert.NoError(err)
 		r.s.pass(ctx)
-		if r.row(t, selfID).dispatchAgeMs < before {
-			stamps++ // the age went DOWN, so this beat re-stamped it
+		if r.row(t, selfID).dispatchAgeMs < backdateMs/2 {
+			stamps++ // the stamp was pulled back to now, so this beat re-stamped it
 		}
 		assert.Equal(uint64(7), turns.Load(), "no turn ever completes during the span")
 	}
 	assert.Equal(rounds, stamps, "every beat across a long turn re-stamps the dispatch timestamp")
-	assert.True(r.row(t, selfID).dispatchAgeMs < 100,
+	assert.True(r.row(t, selfID).dispatchAgeMs < backdateMs/2,
 		"so the row never ages toward a window, however long the turn runs (age %.0fms)",
 		r.row(t, selfID).dispatchAgeMs)
 }
