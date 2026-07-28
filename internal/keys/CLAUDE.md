@@ -17,6 +17,10 @@ A flow/step key is **`{shard}-{id}-{token}`** with a **1-based** shard:
   carried in the key and why the graph cache is keyed by `(shard, flowID)`.
 - `{token}` is an unguessable random capability (`RandomIdentifier(16)`).
 
+`New(shard, id, token)` is the **only** place the format is spelled — nothing outside this package composes a key
+by hand, so the constructor and the two parsers stay inverses by construction rather than by convention (pinned by
+`FuzzParseFlowKey`'s round-trip). It serves flow and step keys alike, since the two formats are identical.
+
 `CorrelationID(shard, id)` returns `"{shard}-{id}"` — the key with the token segment omitted. It is deliberately
 **not** a valid engine key (no operation accepts it) so a trace/log reader cannot escalate it into the flow's write
 capability, and the engine offers no correlation-id→key lookup.

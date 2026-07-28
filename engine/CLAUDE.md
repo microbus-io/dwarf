@@ -1929,8 +1929,10 @@ park is reported by the next sweep. Registration order is a latency question, no
 - **The detector** (`latchLoop` → `Board.Sweep` → `resolveStoppedFlows`, `latchSweepInterval` **50ms**) - one
   indexed `IN` lookup per shard holding a parked key, and *nothing at all* when nobody is awaiting. This is the
   only path that can see a stop made by a **peer**, so it is the primary wake for the cross-replica case, not a
-  backstop. Its cost scales with concurrent **awaiters**, never with step throughput, which is what lets the
-  cadence stay tight without watching how fast the engine is running.
+  backstop. Its `IN` lookup scales with concurrent **awaiters**, which is what lets the cadence stay tight
+  without watching how fast the engine is running - but the recent-stop pre-scan beside it scales with the
+  **stop rate** instead, so the pass is no longer throughput-independent. See the pre-scan bullet below for
+  the axis swap and where it inverts.
 
 **A parked caller runs no query of its own, and that is a property to protect.** `await` parks for the whole
 remaining budget in ONE `Latch` call; the detector's per-shard lookup is the only read on its behalf. Do not
@@ -1954,10 +1956,32 @@ holding a released status keeps it - the closure travels the same one-slot chann
 displace one - so a flow that stopped microseconds before shutdown still returns its outcome. Pinned by
 `fixtures/awaitshutdownflow_test.go`.
 
-**`resolveStoppedFlows` is the board's status resolver, and four of its shapes are load-bearing** (`latch.go`):
+**`resolveStoppedFlows` is the board's status resolver, and five of its shapes are load-bearing** (`latch.go`):
 
 - **One query per SHARD, not per key.** Keys carry their shard, so they are grouped and each shard is asked once;
   a pass costs O(shards), not O(awaiters).
+- **A recent-stop PRE-SCAN settles keys without naming them, and it is an optimization ONLY.** It reads the
+  flows that stopped within **`2 x latchSweepInterval`** (100ms); every key it matches - by token, the same
+  rule as the lookup - is settled and DROPPED from the `IN` list. It never resolves a key as absent (a token
+  mismatch goes to the lookup, which owns that verdict), so no width of the window can cost a wake, and a
+  scan error is recorded but not fatal. Pinned by
+  `TestLatchResolve_RecentStopScanIsOnlyAnOptimization`, which resolves a fresh stop and one backdated past
+  the window in the same pass - **with both `updated_at`s stated outright**, because a 100ms window is
+  shorter than the test's own setup and a "fresh" row left to real time drifts out of the scan, leaving the
+  test passing on the lookup alone and covering nothing.
+
+  **TWO SWEEPS IS THE REQUIREMENT, and widening it is pure cost.** A key stays on the board until some pass
+  settles it, so the window only has to span the gap between consecutive scans of one shard - one interval of
+  coverage, one of slack for a pass that ran late. Rows scanned grow linearly with it, so a wider window
+  (1s was the first cut) buys nothing the next pass would not have caught. No clock term needs padding
+  against: `updated_at` is written with `NOW_UTC()` and compared against `NOW_UTC()` on the same shard, so
+  the two cancel exactly - the same argument that removes clock skew from the refiller's `ageMs`.
+
+  **It buys on the OPPOSITE axis from the lookup it shrinks.** Its rows are `stop rate x window`; the lookup's
+  binds are the awaiter count. So it wins where awaiters are many and flows are long (a `Run`-heavy host) and
+  **loses** on a high-throughput engine with few awaiters, where it scans 20x a second per shard to settle
+  almost nothing. Only the no-parked-key early-out bounds that. If it is ever measured biting, gate the
+  pre-scan on the shard's key count or shorten the window toward the sweep interval - do not widen it.
 - **The token is compared against the row.** A flow key is a capability, so resolving on `flow_id` alone would
   answer a caller holding a forged or stale token. Pinned by `TestLatchResolve_ReportsStoppedFlowsOnly`.
 - **A key that names NO row settles too**, as `flowUnresolved` - the woken caller's own read turns that into

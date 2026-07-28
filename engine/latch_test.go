@@ -18,7 +18,6 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"slices"
 	"testing"
@@ -108,7 +107,7 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	forgedKey := fmt.Sprintf("%d-%d-%s", shard, flowID, "0123456789abcdef")
+	forgedKey := keys.New(shard, flowID, "0123456789abcdef")
 
 	resolved, err := e.resolveStoppedFlows(ctx, []string{stoppedKey, runningKey, forgedKey, "not-a-key"})
 	assert.NoError(err)
@@ -157,7 +156,7 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 		if i == flowID {
 			continue
 		}
-		askFor = append(askFor, fmt.Sprintf("%d-%d-%s", shard, i+1, "0123456789abcdef"))
+		askFor = append(askFor, keys.New(shard, i+1, "0123456789abcdef"))
 	}
 	askFor = append(askFor, stoppedKey)
 
@@ -173,4 +172,70 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 			assert.Equal(flowUnresolved, resolved[k], "synthetic key %s names no row", k)
 		}
 	}
+}
+
+// TestLatchResolve_RecentStopScanIsOnlyAnOptimization pins the one property that keeps the recent-stop
+// pre-scan safe: a flow whose stop fell out of the scan's window still resolves, because the IN lookup
+// answers every key the scan did not. Trusting the scan alone would be SILENT - the key is simply never
+// reported, and its caller waits out its whole deadline - so the stale flow is aged past the window
+// deliberately rather than left to timing.
+func TestLatchResolve_RecentStopScanIsOnlyAnOptimization(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Done")
+	g.SetEndpoint("Done", "latchrecent.verify:0/done")
+	g.AddTransition("Done", workflow.END)
+	proxy.HandleGraph("latchrecent.verify:0/done", g)
+	proxy.HandleTask("latchrecent.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngineUnderTest(t)
+	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.Startup(t.Context()))
+
+	freshKey, _, err := e.Run(ctx, "latchrecent.verify:0/done", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	staleKey, _, err := e.Run(ctx, "latchrecent.verify:0/done", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	shard, freshID, _, err := keys.ParseFlowKey(freshKey)
+	if !assert.NoError(err) {
+		return
+	}
+	_, staleID, _, err := keys.ParseFlowKey(staleKey)
+	if !assert.NoError(err) {
+		return
+	}
+	db, err := e.DB().Shard(shard)
+	if !assert.NoError(err) {
+		return
+	}
+	// BOTH timestamps are stated outright rather than inherited from how fast the harness ran. The window
+	// is two sweep intervals - a hundred milliseconds - which is less than the setup above can take on a
+	// loaded box, so a "fresh" row left to real time drifts out of the scan and the test silently stops
+	// covering the scan at all (it still passes, on the lookup). Written with NOW_UTC()/DATE_ADD_MILLIS
+	// rather than a bound Go time, so both land on the shard's own clock like every other timestamp write.
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_flows SET updated_at=NOW_UTC() WHERE flow_id=?", freshID)
+	if !assert.NoError(err) {
+		return
+	}
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE flow_id=?", staleID)
+	if !assert.NoError(err) {
+		return
+	}
+
+	// One pass, both paths: the fresh stop is settled by the scan, the stale one only by the lookup.
+	resolved, err := e.resolveStoppedFlows(ctx, []string{freshKey, staleKey})
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, resolved[freshKey],
+		"a stop inside the scan's window is settled without the lookup naming it")
+	assert.Equal(workflow.StatusCompleted, resolved[staleKey],
+		"a stop older than the scan's window must still be reported by the lookup")
 }

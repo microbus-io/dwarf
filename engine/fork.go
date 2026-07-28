@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -151,7 +150,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		return "", errors.Trace(err)
 	}
 
-	newFlowKey := fmt.Sprintf("%d-%d-%s", shardNum, newRootFlowID, cc.rootFlowToken)
+	newFlowKey := keys.New(shardNum, newRootFlowID, cc.rootFlowToken)
 	e.logger.InfoContext(ctx, "Flow forked", "fromRoot", rootFlowID, "forkStep", forkStepID, "to", newRootFlowID)
 	// A fork starts a new, self-contained root flow, and its completion runs through the same completeFlow
 	// that increments dwarf_flows_terminated - so it MUST also be counted here, or the standard in-flight

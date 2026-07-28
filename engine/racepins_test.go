@@ -25,13 +25,14 @@ package engine
 
 import (
 	"context"
+	"testing"
+	"time"
+
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
-	"testing"
-	"time"
 )
 
 // TestResumeLosesToDelete_Deterministic pins the Resume-vs-Delete race: when a Delete terminalizes an interrupted flow in the

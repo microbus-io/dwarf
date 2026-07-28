@@ -18,7 +18,6 @@ package fixtures
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
@@ -136,7 +135,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 
 	// End-to-end: the ThreadKey List builds for the child must resolve, not 404. Before the fix its token
 	// half was empty, so queryClauses' `WHERE flow_id=? AND flow_token=?` matched no row.
-	childThreadKey := fmt.Sprintf("%d-%d-%s", shardNum, threadID, threadToken)
+	childThreadKey := keys.New(shardNum, threadID, threadToken)
 	byThread, _, err := eng.List(ctx, workflow.Query{ThreadKey: childThreadKey, IncludeSubgraphs: true})
 	if !assert.NoError(err) {
 		return

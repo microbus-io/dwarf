@@ -313,6 +313,22 @@ being compared against a synthetic one, which reads as either decades of blindne
 tests that exercise real pacing — `Join`'s wait and `Run`'s loop — put the real clock back and shorten the
 scan interval instead.
 
+**Those two are the only tests a slow database can race, and both rules below were learned by it happening.**
+Every threshold in this package is a multiple of the scan interval, so shortening that interval shortens the
+grace the assertions are measured against:
+
+- **Read the getters BEFORE any assertion queries anything.** `Partition` is gated on the blindness grace,
+  so a round trip of the test's own between `Join` and the assertion spends the exact margin under test.
+  Measured on an idle Postgres: one `SELECT engine_id FROM dwarf_peers` moved `BlindFor` from **2µs to
+  2-8ms** — already a third of a 20ms budget, and past it on a loaded box. The same query is microseconds
+  on SQLite, which is why this only ever fails on a real database.
+- **Do not shorten the cadence below a round trip plus scheduler jitter** (both now sit at 100-250ms). At
+  20ms the grace was 40ms, which a co-running suite eats outright — and the test then correctly reports a
+  cadence the machine, not the code, failed to keep.
+
+Prefer stating a fact as an **order** rather than a duration where it can be: "`lastGood` is newer than the
+call" is the same fact as "the read landed" with no wall-clock budget attached.
+
 When advancing the clock across several passes, keep each step inside the blindness grace (two scan
 intervals) or the pass will correctly treat the jump as a gap and reset the healthy run — which is what
 makes a naive "advance five minutes, then prune" test silently prove the opposite of what it intends.

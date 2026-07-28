@@ -18,6 +18,10 @@ package engine
 
 import (
 	"context"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -26,9 +30,6 @@ import (
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"sync/atomic"
-	"testing"
-	"time"
 )
 
 // TestLeaseFence_FailStep pins that failStep's post-execution write is fenced on the dispatch's lease

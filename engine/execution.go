@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"maps"
 	"net/http"
 	"strconv"
@@ -309,8 +308,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	// The task's own identity, so it can correlate logs/traces or call back into the engine
 	// (e.g. History/Step) with its own keys. flow_token is loaded with the flow row, step_token
 	// alongside the claim - both available here.
-	flow.SetFlowKey(fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken))
-	flow.SetStepKey(fmt.Sprintf("%d-%d-%s", shardNum, stepID, stepToken))
+	flow.SetFlowKey(keys.New(shardNum, flowID, flowToken))
+	flow.SetStepKey(keys.New(shardNum, stepID, stepToken))
 
 	if interruptDone {
 		resumeData, _ := workflow.NewState(resumeDataJSON)
@@ -1176,13 +1175,13 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 			// still stopped, so wake any Await on the child key (legal read-only introspection), mirroring
 			// failStep's subgraph-child branch. Without this, an Await(childKey) on a child failed by its
 			// completing last arriver (this path) would wait on the latch detector to read the stop instead.
-			e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken), workflow.StatusFailed)
+			e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), workflow.StatusFailed)
 			if flowFailedReDispatchParent {
 				e.enqueueStep(ctx, shardNum, flowFailedParentStepID)
 			}
 			return nil
 		}
-		compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
+		compositeID := keys.New(shardNum, flowID, flowToken)
 		e.signalStop(ctx, compositeID, workflow.StatusFailed)
 		return nil
 	}

@@ -18,6 +18,13 @@ package engine
 
 import (
 	"context"
+	"math/rand"
+	"os"
+	"strconv"
+	"sync"
+	"testing"
+	"time"
+
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -25,12 +32,6 @@ import (
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"math/rand"
-	"os"
-	"strconv"
-	"sync"
-	"testing"
-	"time"
 )
 
 // TestChaosSoak mechanizes hunting for the lease-fence and Delete/Purge-vs-Resume bug class: it

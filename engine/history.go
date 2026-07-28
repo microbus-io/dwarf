@@ -135,7 +135,7 @@ func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int,
 		}
 		step.StepID = stepID
 		step.Parked = parked != 0
-		step.StepKey = fmt.Sprintf("%d-%d-%s", shardNum, stepID, stepToken)
+		step.StepKey = keys.New(shardNum, stepID, stepToken)
 		step.Error = strings.TrimSpace(errMsg)
 		stepsByFlow[stepFlowID] = append(stepsByFlow[stepFlowID], step)
 	}
@@ -326,7 +326,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
-			key := fmt.Sprintf("%d-%d-%s", shardNum, nid, ntoken)
+			key := keys.New(shardNum, nid, ntoken)
 			if nid == effectivePredID {
 				fs.PrevKey = key
 			}
@@ -532,8 +532,8 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			}
 			lr.summary.Subgraph = surgraphFlowID != 0
 			lr.summary.TraceID = traceIDFromParent(traceParent)
-			lr.summary.FlowKey = fmt.Sprintf("%d-%d-%s", shardIdx, lr.flowID, flowToken)
-			lr.summary.ThreadKey = fmt.Sprintf("%d-%d-%s", shardIdx, threadID, threadToken)
+			lr.summary.FlowKey = keys.New(shardIdx, lr.flowID, flowToken)
+			lr.summary.ThreadKey = keys.New(shardIdx, threadID, threadToken)
 			lr.summary.TaskName = taskName.String
 			lr.summary.Error = strings.TrimSpace(flowError)
 			lr.summary.CancelReason = strings.TrimSpace(cancelReason)
@@ -982,7 +982,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 		return "", errors.Trace(err)
 	}
 
-	flowKey := fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, newFlowToken)
+	flowKey := keys.New(shardNum, int(newFlowID), newFlowToken)
 	e.logger.DebugContext(ctx, "Flow continued and started", "workflow", newWorkflowURL)
 	e.metricFlowStarted(ctx, newWorkflowURL, shardNum)
 	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan.

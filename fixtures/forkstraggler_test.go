@@ -18,7 +18,6 @@ package fixtures
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
@@ -81,7 +80,7 @@ func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
 	}
 
 	// Fork at A. The fork re-runs A -> END and completes; the straggler must not be resurrected.
-	forkKey, err := e.Fork(ctx, fmt.Sprintf("%d-%d-%s", shardNum, aStepID, aStepToken), nil)
+	forkKey, err := e.Fork(ctx, keys.New(shardNum, aStepID, aStepToken), nil)
 	if !assert.NoError(err) {
 		return
 	}

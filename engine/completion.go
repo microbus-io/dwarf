@@ -21,7 +21,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -339,7 +338,7 @@ func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowTo
 	}
 	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
 	allCompositeIDs := append(
-		[]string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)},
+		[]string{keys.New(shardNum, flowID, flowToken)},
 		descendantCompositeIDs...,
 	)
 
@@ -548,7 +547,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusCompleted)
 	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted, shardNum)
-	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
+	compositeID := keys.New(shardNum, flowID, flowToken)
 
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
 
@@ -774,7 +773,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// exactly as the top-level path below does. Without this signalStop, Await(childKey) blocks until its
 	// context deadline despite the child being terminal.
 	if isSubgraphChild {
-		e.signalStop(ctx, fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken), workflow.StatusFailed)
+		e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), workflow.StatusFailed)
 		if reDispatchParent {
 			e.enqueueStep(ctx, shardNum, parentStepID)
 		}
@@ -782,7 +781,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusFailed)
-	compositeID := fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)
+	compositeID := keys.New(shardNum, flowID, flowToken)
 	e.signalStop(ctx, compositeID, workflow.StatusFailed)
 	return false, nil
 }
@@ -1003,7 +1002,7 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 				continue
 			}
 			flowIDs = append(flowIDs, child)
-			compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, child, n.token))
+			compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, child, n.token))
 			queue = append(queue, child)
 		}
 	}
@@ -1074,7 +1073,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 	}
 
 	flowIDs = []any{flowID}
-	compositeFlowIDs = []string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)}
+	compositeFlowIDs = []string{keys.New(shardNum, flowID, flowToken)}
 	cur := flowID
 	for {
 		leaf, ok := interruptedLeafByFlow[cur]
@@ -1090,7 +1089,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 			return flowIDs, stepIDs, compositeFlowIDs, nil // no interrupted child spawned here - leaf reached
 		}
 		flowIDs = append(flowIDs, child)
-		compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, child, tokenByID[child]))
+		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, child, tokenByID[child]))
 		cur = child
 	}
 }
@@ -1276,7 +1275,7 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 	}
 
 	flowIDs = []any{flowID}
-	compositeFlowIDs = []string{fmt.Sprintf("%d-%d-%s", shardNum, flowID, flowToken)}
+	compositeFlowIDs = []string{keys.New(shardNum, flowID, flowToken)}
 	cur := flowID
 	for {
 		n, ok := byID[cur]
@@ -1285,7 +1284,7 @@ func (e *Engine) surgraphChain(ctx context.Context, shardNum int, flowID int, fl
 		}
 		flowIDs = append(flowIDs, n.surgFlowID)
 		stepIDs = append(stepIDs, n.surgStepID)
-		compositeFlowIDs = append(compositeFlowIDs, fmt.Sprintf("%d-%d-%s", shardNum, n.surgFlowID, byID[n.surgFlowID].token))
+		compositeFlowIDs = append(compositeFlowIDs, keys.New(shardNum, n.surgFlowID, byID[n.surgFlowID].token))
 		cur = n.surgFlowID
 	}
 	return flowIDs, stepIDs, compositeFlowIDs, nil

@@ -30,6 +30,13 @@ import (
 	"github.com/microbus-io/errors"
 )
 
+// New composes a flow or step key from its parts: "{shard}-{id}-{token}" with a 1-based shard. Flow and
+// step keys share one format, so one constructor serves both, and it is the inverse of ParseFlowKey and
+// ParseStepKey - a key it builds parses back to the parts it was given.
+func New(shardNum, id int, token string) string {
+	return strconv.Itoa(shardNum) + "-" + strconv.Itoa(id) + "-" + token
+}
+
 // ParseFlowKey extracts the shard, numeric flow ID and flow token from a composite flow key.
 // Format: "{shard}-{flowID}-{token}" with a 1-based shard.
 func ParseFlowKey(flowKey string) (shardNum int, flowID int, flowToken string, err error) {

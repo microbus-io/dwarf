@@ -487,6 +487,14 @@ func TestPeers_ReadIsUnfiltered(t *testing.T) {
 // point rather than an implementation detail: a joining replica sizes its pool for the fleet it is joining
 // while its peers still hold pools sized for the fleet without it, so announcing first is what keeps the
 // shard's connection budget from being exceeded even momentarily.
+//
+// It runs on the REAL clock, which makes it the one test here that can be raced by a slow database, so two
+// rules apply and both cost nothing to keep. EVERY GETTER IS READ BEFORE ANY ASSERTION QUERIES ANYTHING:
+// Partition is gated on the blindness grace - two scan intervals measured against the reading Join just
+// took - so a round trip of the test's own in between spends the exact margin under test, which failed
+// against Postgres and never against SQLite. And the reading is checked by ORDER rather than by duration,
+// since "lastGood is newer than the call" is the same fact as "Join's own read landed" with no wall-clock
+// budget attached.
 func TestPeers_JoinAnnouncesWaitsAndSeedsEveryGetter(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -494,7 +502,9 @@ func TestPeers_JoinAnnouncesWaitsAndSeedsEveryGetter(t *testing.T) {
 	r := newRig(t)
 	r.s.now = time.Now // the wait is real time, so this one runs on the real clock
 	r.s.lastGood.Store(time.Now().UnixNano())
-	r.s.scan = 20 * time.Millisecond
+	// Long enough that the grace derived from it outlasts a round trip and a scheduling hiccup on a loaded
+	// box, short enough that the two cadences Join waits stay a fraction of a second.
+	r.s.scan = 250 * time.Millisecond
 	r.addPeer(t, 10, time.Second, time.Second)
 	r.addPeer(t, 20, time.Second, time.Second)
 	var turns atomic.Uint64
@@ -504,16 +514,19 @@ func TestPeers_JoinAnnouncesWaitsAndSeedsEveryGetter(t *testing.T) {
 
 	started := time.Now()
 	assert.NoError(r.s.Join(ctx))
-	assert.True(time.Since(started) >= 2*r.s.scan,
-		"the announcement must precede consumption by two read cadences")
+	elapsed := time.Since(started)
+	replicas, ordinal, partitioned := r.s.Partition()
+	seeded, readAt := r.s.Replicas(), r.s.lastGood.Load()
 
+	assert.True(elapsed >= 2*r.s.scan, "the announcement must precede consumption by two read cadences")
 	assert.Equal([]int64{10, 20, selfID}, r.ids(t), "announced")
-	assert.Equal(3, r.s.Replicas(), "and every getter is seeded before the owner sizes anything")
-	replicas, ordinal, ok := r.s.Partition()
-	assert.True(ok)
+	assert.Equal(3, seeded, "and every getter is seeded before the owner sizes anything")
+	assert.True(partitioned)
 	assert.Equal(3, replicas)
 	assert.Equal(2, ordinal, "third by engine id among the dispatchers")
-	assert.True(r.s.BlindFor() < r.s.scan, "and the reading behind them is current")
+	// lastGood was seeded at setup, so a value newer than the call is what proves the getters above were
+	// seeded by Join's OWN reading rather than left holding the setup value by a read that never landed.
+	assert.True(readAt > started.UnixNano(), "and the reading behind them is Join's, not the seeded one")
 }
 
 // TestPeers_ReRegistersWhenItsRowIsMissing pins the one repair path. Nothing else can fix a missing row - the

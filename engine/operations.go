@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"math"
 	"net/http"
 	"strings"
@@ -316,7 +315,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		return "", errors.Trace(err)
 	}
 
-	flowKey = fmt.Sprintf("%d-%d-%s", shardNum, newFlowID, flowToken)
+	flowKey = keys.New(shardNum, int(newFlowID), flowToken)
 	e.logger.DebugContext(ctx, "Flow created and started", "workflow", workflowURL, "task", entryPoint)
 	e.metricFlowStarted(ctx, workflowURL, shardNum)
 	// The entry step's initial-state snapshot, written by insertFlowTx above.

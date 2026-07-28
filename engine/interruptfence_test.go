@@ -18,13 +18,14 @@ package engine
 
 import (
 	"context"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
-	"sync/atomic"
-	"testing"
-	"time"
 )
 
 // TestFault_InterruptStaleWriteRollback pins the interrupt lease-fence — the ONLY fence in the engine that

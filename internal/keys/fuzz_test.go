@@ -17,7 +17,6 @@ limitations under the License.
 package keys
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -43,8 +42,9 @@ func FuzzParseFlowKey(f *testing.F) {
 		if shard < 1 {
 			t.Fatalf("accepted key %q with shard %d < 1", raw, shard)
 		}
-		// The token is the verbatim third segment, so re-encoding must reproduce the input.
-		if re := fmt.Sprintf("%d-%d-%s", shard, id, token); re != raw {
+		// New is ParseFlowKey's inverse, and the token is the verbatim third segment, so re-encoding a
+		// parsed key must reproduce the input.
+		if re := New(shard, id, token); re != raw {
 			// Leading zeros / plus signs in the numeric segments are the only way re-encoding can
 			// differ; those are accepted by ParseInt but harmless (they re-parse identically).
 			s2, i2, t2, err2 := ParseFlowKey(re)
@@ -72,7 +72,7 @@ func FuzzParseStepKey(f *testing.F) {
 		if shard < 1 {
 			t.Fatalf("accepted step key %q with shard %d < 1", raw, shard)
 		}
-		s2, i2, t2, err2 := ParseStepKey(fmt.Sprintf("%d-%d-%s", shard, id, token))
+		s2, i2, t2, err2 := ParseStepKey(New(shard, id, token))
 		if err2 != nil || s2 != shard || i2 != id || t2 != token {
 			t.Fatalf("round-trip mismatch for %q", raw)
 		}

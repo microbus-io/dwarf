@@ -22,7 +22,6 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -242,7 +241,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	var aStepID int
 	var aStepToken string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id, step_token FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&aStepID, &aStepToken))
-	forkStepKey := fmt.Sprintf("%d-%d-%s", shard, aStepID, aStepToken)
+	forkStepKey := keys.New(shard, aStepID, aStepToken)
 
 	// The clone transaction fails once: Fork errors, the origin is byte-identical, and no clone rows exist.
 	e.seams.Inject(FaultForkCommit)
