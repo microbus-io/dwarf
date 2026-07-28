@@ -2286,14 +2286,16 @@ The worker count is split into two numbers, because they answer different questi
   first discarded - it pays connection setup); a failed probe falls back to the measured same-zone
   constant. Every input is engine-visible - **no task duration T anywhere**, which is exactly what makes
   this derivable where `N = M x T/db` is not.
-- **`permits` (how many workers may be doing DATABASE work on a shard at once)** = `permitsPerConn x open`,
-  with `permitsPerConn = 8`. This is the gate that lets the crew grow freely for long tasks without the
-  growth turning into pool contention, and it is what the crew's growth trigger consults. See "Database-phase
-  permits" below.
+- **`permits` (how many workers may be doing DATABASE work on a shard at once)** = two separate
+  reservations, `enterPermitsPerConn x open` and `exitPermitsPerConn x open` (8 and 12). This is the gate
+  that lets the crew grow freely for long tasks without the growth turning into pool contention, and the
+  ENTER side is what regulates crew growth, by blocking rather than by being consulted. See
+  "Database-phase permits" below.
 
 - **The pool grows on demand** (`internal/workers`): a worker that takes a candidate and finds **nobody
-  idle, work still waiting, and a permit free** adds one. The permit is what makes that trigger safe, so the
-  two are a single design and neither is separately tunable.
+  idle** adds one, keeping a standing reserve of one. The permit is what makes so easy a trigger safe — but
+  by BLOCKING, not by being queried: a worker waiting for a permit holds no candidate, so it counts idle and
+  the next check declines. The two are a single design and neither is separately tunable.
 
   **DO NOT gate growth on every worker being simultaneously inside `ExecuteTask`.** That is a *sufficient*
   condition for "a replacement adds capacity" and nowhere near a necessary one, and the gap is quantifiable:
@@ -2375,30 +2377,94 @@ and concurrency *grows*, exactly backwards, while a counter fixes concurrency an
 which self-corrects. It is also circular: the duration a rate would need is `k.RTT + server + pool wait`, and
 pool wait is the very thing being controlled.
 
-**The DEBIT is what makes the permit bound the right quantity.** A worker returning from `ExecuteTask` has
-already fired its side effects and its outcome exists nowhere but in that goroutine, so making it queue
-would hold a *finished* job hostage to a throughput optimisation — the principle `persist.go` already
-encodes ("retry the WRITE, never the task") running backwards. But the persister must not be *invisible*
-either, or a completion storm would swamp the pool while admission carried on at full rate. So it takes a
-permit **without waiting** and the count is allowed to go negative: persist load suppresses new admission
-automatically, and while the count is negative nothing new is admitted at all. Consequences worth stating:
-permit-seconds per step become the step's **whole** database cost, so permits-in-use approximates *workers
-currently touching the database*; **no deadlock is possible** (admission waits, persist never does, so
-persisters always drain and restore); and it needs a semaphore permitting **negative** values, which is not
-something a channel or `x/sync/semaphore` can be talked into (`internal/permits/CLAUDE.md`).
+**The completion path takes its permit from a DEDICATED reservation, and simply blocks on it.** A worker
+returning from `ExecuteTask` has already fired its side effects and holds a lease while it waits, so it
+must never queue behind an unbounded population — but with its own reservation it queues only behind other
+completions, which are themselves finishing. The wait is therefore bounded by the shard's service rate, and
+the worst case (every in-flight task unblocking at once) is bounded by `workerCeiling`, which is derived for
+exactly that scenario. No timeout, no forcing past zero, no priority rule.
 
-**Sizing: `permitsPerConn = 8`, deliberately the same ratio as `workersPerConnBudget` and not because the
-two are the same quantity.** The candidate cache already holds `8 x conns` entries, so **today at most
-`8 x M` workers can hold a candidate at once no matter how many workers exist** — cache capacity is the de
-facto bound on database concurrency. Pinning the permit to the same ratio reproduces that bound at the
-*admission* end, so the change does not tighten what the database already sees; what it changes is that
-worker count is no longer welded to it.
+**Why not one pool with a rule about who wins:** both rules were measured failing. Served evenly,
+completions lose permit races at random and queue behind admission (286 of them waited a full second, with
+transactions inflating 3ms → 54ms). Served with completions preferred, **dispatch starves**: when tasks are
+instant the completion queue never empties, so admission is held off continuously and short-task throughput
+collapsed **3x** (4,416 vs 7,964 steps/s, creation itself throttled to 714 of 800 commanded flows/s).
+Separate counts remove the choice instead of answering it.
 
-The evidence brackets 8 rather than leaving it a guess: 8x is measured FREE (cutting the resident set 4x
-moves neither throughput nor p99 and leaves host CPU flat), while the runaway trigger ran ~27x where ~10.7x
-sufficed, so the harmful threshold sits between ~11x and ~27x. **Do NOT tighten the ratio to 2-3x** on the
-theory that less concurrency is safer: that cuts database concurrency *below* what already runs, which is a
-second change bundled into a fix for something else.
+**A drain returns `!ok`, and the step records anyway** — the outcome exists nowhere but in that goroutine,
+and the release is a no-op then.
+
+**Sizing: `enterPermitsPerConn = 8`, `exitPermitsPerConn = 12`** — the two reservations are sized
+independently, each against what actually bounds it.
+
+**The permits CAP contention, they do not eliminate it, and that is the whole objective.** A step acquires
+a connection 9–11 times, so its tail is set by how many workers contend for that pool at once. At
+saturation the waiting **relocates** rather than shrinking — measured on a 16-vCPU shard at 8s tasks, 3/5
+pays 18ms of pool wait but 588–1,459ms at the permit, while 8/12 pays 39ms of pool wait and 81–103ms at the
+permit. What the cap buys is that the contending population is **bounded at all**, rather than growing with
+the crew. Do not judge a sizing by pool wait alone; read it against the two permit-wait histograms, or a
+tighter setting will look better while simply hiding the queue somewhere else.
+
+**The 20x total is a CONSEQUENCE of two independent lower bounds, not a chosen number.** It is more than
+the 8x the cache allows, and the temptation to bring it back down is exactly the trap: doing so requires
+starving a side, and each floor is set by a different mechanism.
+
+- **Entry ≥ 8x — the candidate cache's own bound** (it holds `8 x conns` entries, so at most that many
+  workers can hold a candidate regardless of any permit). Matching it makes permit and cache bind at the
+  same point instead of one silently shadowing the other. Below it, entry — which **is** dispatch —
+  starves: measured at 3x on 8s tasks, 588–1,459ms mean enter wait and the largest backlog of any arm
+  (83–90k outstanding vs 8/12's 62–64k).
+
+  **A tight permit costs GOROUTINES, by Little's law and not by any growth misfire.** The wait is residence
+  time, so sustaining a rate through it needs proportionally more workers: the same runs carried **82–87k
+  workers at 3/5 against 59–62k at 8/12**, which the ~1.6s of extra per-step permit wait predicts to within
+  the measurement. Do not read a large crew here as the growth trigger over-firing — see the asymmetry
+  below for what the trigger actually does.
+- **Exit ≥ ~7/4 × entry**, because `completionRoundTrips` = 7 of a step's ~11 round trips are on the exit
+  side. Under-provision that half and it becomes the new tail: measured locally at an even 4/4, once
+  transactions inflated ~25x, roughly **half of all completions could not get a permit**.
+
+2:3 tracks the 4:7 closely. Both floors are properties of *other* mechanisms, so re-derive them if the
+cache's multiple or the per-step round-trip counts ever change.
+
+**THE GROWTH TRIGGER NEVER ASKS THE PERMITS ANYTHING.** `Crew.idle` counts goroutines *not holding a
+candidate*, and `considerGrowth` spawns only when a take left nobody idle — so the permits regulate growth
+by BLOCKING, not by reporting:
+
+- **Blocked in `AcquireEnter`** — has not popped yet, so it counts **idle**, so growth declines. The crew
+  overshoots a saturated entry by exactly one worker, and that worker is first in line for the next permit.
+- **Blocked in `AcquireExit`** — holds its candidate from pop through `ExecuteTask` and persist, so it
+  counts **busy**. Exit pressure is invisible to `idle`.
+
+**That exit blindness is real and is deliberately left open**, because the exit side is a *turnstile*, not
+a sink: a permit is held only for the persist phase. At 8/12 on a 16-vCPU shard that is 1,152 permits
+against a measured 43–47ms persist, ≈25,600 completions/s of capacity, and the campaign's `inTx` (concurrent
+transactions, by Little's law) read **303–321 — about 26% utilisation**. Exits queue in bursts (tasks that
+start together finish together, so `exitWait` reached 99–1,133ms), but the reservation cannot *bind* without
+the database write path itself having stopped. Growing into it therefore cannot produce the stall the
+blindness would otherwise permit.
+
+**A `permits.Available` reporting both reservations was built to close this, and removed.** It keyed on an
+*instantaneous* zero while the thing it proxied for is a *duration*, so at 26% mean utilisation with bursty
+completions it would have throttled growth routinely — in precisely the long-task regime where the crew must
+reach ~48,000. It also forced this package to summarise itself for a consumer that cannot know what it
+meters, and the natural summary is inverted: free ENTER permits are *anti-correlated* with health once exits
+are the constraint, since they are free because nothing is getting out. **Do not rebuild it.** If exit
+pressure is ever shown to bind, the signal is a sustained exit WAIT, and the bar is the same one every
+control loop here has had to clear.
+
+**Do NOT starve the enter side to feed the exit side.** Blocking on entry is what stops growth, so that
+reservation is what lets the crew grow at all — on the single-pool ladder, squeezing entry to 1x per
+connection left the crew at 60,765 workers against 70,783, and it was the only setting that fell behind the
+offered flow rate.
+
+**Two things the ratio does NOT do, so do not argue from either.** It does not stop the backlog runaway at
+saturation — 2x entered it once in three runs, exactly as 8x did (a short-task arm at a saturating rate
+read 2,373 steps/s against 8,000 commanded, with `CPU:running` jumping 7% → 54% and pending exploding past
+50,000). And it cannot bound total database concurrency, because the **completion path debits without
+waiting**: under short tasks the exiting workers alone reached **651 concurrent persisters against 96
+permits**, so admission governs a minority of contenders in exactly the regime that queues hardest. The
+irreducible term is `completion rate x persist duration`, and only the second factor responds to this knob.
 
 **The 0s-delay arm is NOT a pure no-op, and do not treat a change there as a regression by itself.** The
 admission half cannot bind where cache capacity already did, but the **debit** half is live at every task

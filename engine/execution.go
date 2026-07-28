@@ -34,6 +34,7 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -367,21 +368,29 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	})
 	// The task has now RUN. Everything below records that fact, and it holds a connection to do so - so the
-	// persist half takes a permit back, but by DEBIT rather than by acquiring one: a debit never waits, and
-	// drives the count negative when none is free.
+	// persist half takes a permit from the EXIT reservation, which nothing entering a step can draw on.
 	//
-	// The asymmetry is the whole design. A worker returning from ExecuteTask has already fired its side
-	// effects and its outcome exists nowhere but in this goroutine, so making it queue would hold a
-	// FINISHED job hostage to a throughput optimisation - the same principle persist.go already encodes
-	// ("retry the WRITE, never the task"), and a blocking acquire here would be it running backwards. But
-	// the persist path must not be INVISIBLE either, or a completion storm would swamp the pool while
-	// admission carried on at full rate. Debiting makes the storm suppress new admission automatically:
-	// while the count is negative nothing new is admitted at all, which is exactly the wanted behaviour.
+	// That dedication is what lets this simply block. Sharing one pool between the two populations forces a
+	// choice about who wins, and both answers were measured failing: served evenly, completions lose at
+	// random and queue behind admission; served with completions preferred, dispatch starves and short-task
+	// throughput collapses 3x. With its own reservation a completion waits only behind other completions,
+	// which are themselves finishing, so the wait is bounded by the shard's own service rate - and what
+	// bounds the worst case (every in-flight task unblocking at once) is workerCeiling, not this permit.
 	//
-	// The defer is mandatory and has no crew-side backstop (unlike the admission permit, which the crew
-	// re-releases on the way out): a lost Restore shrinks this shard's permit pool permanently.
-	e.permits.Debit(shardNum)
-	defer e.permits.Restore(shardNum)
+	// !ok means the engine is DRAINING, and the work is recorded anyway: the outcome exists nowhere but in
+	// this goroutine, and the release is a no-op then, so the deferred call is safe either way. The release
+	// is mandatory and has no crew-side backstop (unlike the entry permit, which the crew re-releases on the
+	// way out): a lost one shrinks this shard's exit reservation permanently.
+	permitWaitStart := time.Now()
+	persistRelease, _ := e.permits.AcquireExit(shardNum)
+	defer persistRelease()
+	// Timed HERE rather than inside the permit set, which holds no metrics. Recorded on EVERY completion,
+	// not only the ones that waited: count is then completions and sum/count the mean, so the exit side
+	// becoming the constraint shows up as a shift in the distribution - where the free-permit gauge, being
+	// instantaneous, can miss a reservation that was saturated all window without being sampled empty.
+	e.metrics.exitWait.Record(ctx, time.Since(permitWaitStart).Seconds(),
+		metric.WithAttributes(attribute.String("shard", strconv.Itoa(shardNum))))
+
 	if execErr == nil && e.seams.IsFault(FaultExecuteTask, taskName) {
 		execErr = errors.New("injected fault: "+FaultExecuteTask+" "+taskName, http.StatusInternalServerError)
 	}

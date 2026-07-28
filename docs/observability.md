@@ -40,7 +40,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 29 instruments — 17 counters, 10 gauges, and 2 histograms. Counter instrument names carry **no** `_total`
+The engine emits 31 instruments — 17 counters, 10 gauges, and 4 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -73,7 +73,9 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_peer_replicas` | gauge | `shard` | replicas this one currently sees holding connections to that shard — the divisor its pool is sized by | `dwarf_peer_replicas` |
 | `dwarf_peer_blind_seconds` | gauge | `shard` | time since that shard's peer registry was last read successfully; zero when healthy | `dwarf_peer_blind_seconds` |
 | `dwarf_refill_tally_age_seconds` | gauge | — | how long ago the stalest shard still in this replica's planner reported | `dwarf_refill_tally_age_seconds` |
-| `dwarf_permits_available` | gauge | `shard` | database-work permits free on that shard. **Signed** — negative means completions have suppressed new admission (the storm signature) | `dwarf_permits_available` |
+| `dwarf_permit_enter_wait_seconds` | histogram | `shard` | time a worker waited for a permit to START a step; rises when dispatch queues behind dispatch | `dwarf_permit_enter_wait_seconds` |
+| `dwarf_permit_exit_wait_seconds` | histogram | `shard` | time a worker waited for a permit to RECORD a finished step; rises when completions queue behind completions. Which of the two rises says which half of the split to re-size | `dwarf_permit_exit_wait_seconds` |
+| `dwarf_permits_available` | gauge | `shard`, `role` | database-work permits free on that shard, by `role` (`enter` = work about to start, `exit` = work being recorded; each has its own reservation so neither starves the other). Sustained zero on either role means that side is the binding constraint | `dwarf_permits_available` |
 | `dwarf_workers_resident` | gauge | — | worker goroutines that exist; grows on demand, never shrinks | `dwarf_workers_resident` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state

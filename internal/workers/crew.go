@@ -30,14 +30,14 @@ limitations under the License.
 //	gate.Close()  // releases the goroutines waiting on a permit
 //	crew.Drain()
 //
-// It is GROW-ON-DEMAND, and the growth rule is a question about IDLENESS rather than about what any worker
-// happens to be doing: one more goroutine is added while NOBODY is idle, work is waiting, and the gate
-// reports the bounded resource still has room. That is tested on two paths - by a worker that has just taken
-// a candidate (fast, and it cascades) and on a fixed cadence (reliable, and it is what covers work arriving
-// while every worker is already committed, which fires no edge at all). See considerGrowth and growLoop.
+// It is GROW-ON-DEMAND, and the whole rule is one question asked at one place: a worker that has just taken
+// a candidate adds a peer if NOBODY is left idle. So the crew holds a standing reserve of one, and that
+// reserve is what makes a single edge trigger sufficient - see considerGrowth.
 //
-// The gate is what makes so easy a trigger safe, and it belongs to the caller: the crew holds *a* gate
-// without knowing what it gates.
+// The gate belongs to the caller: the crew holds *a* gate without knowing what it gates, takes a permit
+// before removing work from the cache, and hands it back when the handler says so. It is deliberately NOT
+// consulted by the growth rule; blocking on it is what the rule reads instead, since a worker waiting for a
+// permit is counted idle.
 //
 // The cache and the gate, not ctx, are the stop signals: close them, then Drain. Every Set* is safe to
 // call from anywhere at any time; Start and Drain are the caller's lifecycle and must not overlap.
@@ -54,12 +54,12 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// growCheckInterval is how often the crew re-tests the growth condition independently of any worker
-// activity. It bounds only the STANDING START - the delay before a fully-committed crew reacts to work that
-// arrived while nobody was free - because the edge trigger cascades from the first spawn. Short enough that
-// a long-task workload reaches its working set inside a warmup, long enough that an idle engine's cost is a
-// few atomic loads a second.
-const growCheckInterval = 5 * time.Millisecond
+// There is deliberately no periodic growth check. A cadence was needed only while `idle == 0` could be a
+// RESTING state: growth also required work to be waiting, so a crew that took the last candidate settled
+// with nobody parked, and the next arrival had no one to wake and fired no edge (measured: 130 candidates
+// against a 96-worker resident set stalled at 96). Spawning whenever idle reaches zero makes zero transient
+// instead, so a parked worker is always there to be woken. Pinned by
+// TestCrew_WorkArrivingWhileFullyCommittedStillGrows.
 
 // ProcessFunc handles one popped candidate. It is called on a crew goroutine, and the crew cares about
 // nothing it does except that it eventually returns - an error is logged, a panic is caught, and either
@@ -74,11 +74,16 @@ type ProcessFunc func(ctx context.Context, shard, stepID int, release func()) er
 // Gate bounds how many goroutines may be working against whatever resource actually binds. The crew treats
 // it opaquely: take a permit before removing work from the cache, hand it back when the handler says so.
 //
-// Acquire blocks, and reports !ok only when the gate CLOSES - one of the two stop signals. Available is a
-// hint for the growth decision, where a stale answer costs one goroutine that parks harmlessly.
+// AcquireEnter blocks, and reports !ok only when the gate CLOSES - one of the two stop signals. The crew
+// only ever ENTERS: whatever the gate does for work on its way out is the handler's business, not the
+// crew's.
+//
+// One method, and no capacity query, is the whole interface on purpose. The crew never asks whether the
+// gate has room; it lets a worker BLOCK and reads that instead, because a worker waiting for a permit holds
+// no candidate and so counts idle - which stops growth at its own next check. Saturation therefore needs no
+// reporting, and a gate that meters more than one thing needs no say in how it is summarised.
 type Gate interface {
-	Acquire(shard int) (release func(), ok bool)
-	Available(shard int) bool
+	AcquireEnter(shard int) (release func(), ok bool)
 }
 
 // Crew is a grow-on-demand set of goroutines draining one candidate cache through one gate.
@@ -116,6 +121,9 @@ type Crew struct {
 	// connection - makes saturation read as idleness: measured at ~20% throughput on a saturated 8-vCPU
 	// shard (2,902 vs 3,523 steps/s), with ~1,300 goroutines where ~512 sufficed.
 	idle atomic.Int32
+	// gateWait is an optional observer of how long AcquireEnter blocked. A pointer-to-func in an atomic so
+	// it can be set before Start without a lock and read on the hot path without one; nil means unset.
+	gateWait atomic.Pointer[func(shard int, waited time.Duration)]
 	// spawnLock guards spawnClosed and the resident count against the WaitGroup.Add inside spawn, so the
 	// two cannot be observed apart.
 	spawnLock sync.Mutex
@@ -125,9 +133,6 @@ type Crew struct {
 	spawnClosed bool
 	// group is every goroutine this crew has spawned; Drain waits on it.
 	group sync.WaitGroup
-	// growStop ends the grower; growWorker is what Drain waits on before closing the crew to spawns.
-	growStop   chan struct{}
-	growWorker sync.WaitGroup
 
 	// runCtx is the context Start was given, held because a spawn can happen long afterwards - from a
 	// worker taking the last free candidate - and the new goroutine needs the same lifetime as its peers.
@@ -169,6 +174,18 @@ func (c *Crew) Resident() int { return int(c.resident.Load()) }
 func (c *Crew) Idle() int { return int(c.idle.Load()) }
 
 // SetLogger sets the logger. Nil restores the discarding default.
+// SetGateWaitObserver registers a callback invoked with how long each successful AcquireEnter blocked. It
+// is optional and unset by default (the crew emits no metrics - instrument names are a public surface, so
+// they belong to the owner), and it is called on EVERY acquire including the uncontended ones, so an
+// observer that counts sees acquires and one that sums sees the mean.
+//
+// It exists because the gate's own free-permit count is instantaneous: a reservation saturated for a whole
+// window without ever being sampled empty is indistinguishable from an idle one. The wait is the durable
+// half. The callback runs on the worker's own goroutine, before it takes any work, so it must not block.
+func (c *Crew) SetGateWaitObserver(f func(shard int, waited time.Duration)) {
+	c.gateWait.Store(&f)
+}
+
 func (c *Crew) SetLogger(l *slog.Logger) {
 	if l == nil {
 		l = slog.New(slog.DiscardHandler)
@@ -193,9 +210,6 @@ func (c *Crew) Start(ctx context.Context, resident int) {
 	c.spawnLock.Unlock()
 	c.resident.Store(0)
 	c.idle.Store(0)
-	c.growStop = make(chan struct{})
-	stop := c.growStop
-	c.growWorker.Go(func() { c.growLoop(stop) })
 	for range resident {
 		c.spawn()
 	}
@@ -205,87 +219,46 @@ func (c *Crew) Start(ctx context.Context, resident int) {
 // close the cache AND the gate FIRST, or this blocks forever on goroutines parked in one of them.
 //
 // Closing before waiting is the load-bearing half: a worker can try to spawn a peer at any instant, and an
-// Add racing a Wait panics.
+// Add racing a Wait panics. Only workers spawn, so the flag alone covers it - there is no separate grower
+// goroutine to stop first.
 func (c *Crew) Drain() {
-	// The grower stops FIRST and is waited on before the flag is set, so it cannot be mid-spawn when Drain
-	// closes the crew - the same Add-racing-Wait hazard the flag exists for, arriving from a goroutine that
-	// is not one of the workers.
-	if c.growStop != nil {
-		close(c.growStop)
-		c.growStop = nil
-	}
-	c.growWorker.Wait()
 	c.spawnLock.Lock()
 	c.spawnClosed = true
 	c.spawnLock.Unlock()
 	c.group.Wait()
 }
 
-// considerGrowth adds one goroutine when the crew has just become fully committed, there is more work
-// waiting, and the gate still has room. It is called by a worker that has just TAKEN a candidate, so the
-// question it answers is: now that I am busy, is anyone left to take the next one?
+// considerGrowth keeps ONE goroutine in reserve: called by a worker that has just taken a candidate, it
+// adds a peer if that take left nobody idle. The question it answers is "now that I am busy, is anyone left
+// to take the next one?", and the answer restores the reserve rather than sizing the crew.
 //
-// All three conditions are necessary and none alone is sufficient:
+// The single condition carries three properties that used to need three:
 //
-//   - NOBODY IDLE. An idle peer can already take the next candidate, so another goroutine would be pure
-//     duplication. DO NOT tighten this to "every worker is simultaneously inside the handler": that
-//     coincidence's probability decays exponentially in the crew size, which integrates to
-//     N(t) ~ (task/db).ln(D.t) - logarithmic growth, so throughput converges to ln(D.t)/db and a long-task
-//     workload caps at crew-size-over-task-duration however much capacity sits idle.
-//   - THE GATE HAS ROOM. This is what makes so easy a trigger safe, and growth must never key on
-//     saturation instead: when the bounded resource is already saturated another goroutine cannot dispatch
-//     anything, it can only queue, so a trigger that fires on saturation gets truer the worse it gets
-//     (measured: ~20% throughput lost to a crew ~3x the size that sufficed).
-//   - WORK IS WAITING. Without it the last candidate of a batch spawns a worker that has nothing to do but
-//     park, and it is also what BOUNDS growth: the crew can never outrun the work that justified it.
+//   - IT GROWS FOR LONG TASKS. A worker inside the handler still HOLDS its candidate, so it is not idle -
+//     so a crew entirely inside the handler, with work waiting, grows on every take.
+//     DO NOT tighten this to "every worker is simultaneously inside the handler": that coincidence's
+//     probability decays exponentially in the crew size, which integrates to N(t) ~ (task/db).ln(D.t) -
+//     logarithmic growth, so throughput converges to ln(D.t)/db and a long-task workload caps at
+//     crew-size-over-task-duration however much capacity sits idle.
+//   - IT STOPS ON SATURATION WITHOUT ASKING. Growth must never key on saturation - another goroutine
+//     against a saturated resource cannot dispatch, only queue, so such a trigger gets truer the worse it
+//     gets (measured: ~20% throughput lost to a crew ~3x the size that sufficed). No capacity query is
+//     needed to avoid that: a worker blocked on the gate holds no candidate, so it counts IDLE and the next
+//     check declines. The overshoot is exactly one goroutine per saturation episode, and that one is first
+//     in line for the next permit. Pinned by TestCrew_SaturationDoesNotGrowThePool.
+//   - IT NEEDS NO "WORK IS WAITING" TEST. This runs only after a successful pop, so work demonstrably
+//     existed. Asking whether MORE remains is what used to let idle REST at zero when the last candidate
+//     was taken - leaving nobody to wake when the next arrived, which is precisely why a periodic check
+//     had to exist. Spawning anyway costs one parked worker and buys the reserve that replaced it.
 //
-// DO NOT add a rate damper here. Growth is edge-triggered, so a suppressed spawn is not deferred, it is
-// LOST - and in the very case this exists for (every worker blocked in a long call) there is no later pop
-// to re-evaluate on. Measured: a 1ms damper grows the crew by exactly one past its resident set and then
-// stops forever, serving 97 of 130 parked tasks. The three conditions are the fuse, not a clock.
+// DO NOT add a rate damper here, and do not batch the spawn. Growth is edge-triggered, so a suppressed
+// spawn is not deferred, it is LOST - measured, a 1ms damper grew the crew by one past its resident set and
+// then stopped forever, serving 97 of 130 parked tasks. Batching is the mirror error: spawning n against
+// one available candidate parks n-1, which drives idle to n-1 and suppresses the next n-1 checks. One per
+// take is self-matching, since each spawn is paid for by a candidate actually taken.
 func (c *Crew) considerGrowth() {
-	// Ordered by cost and by how often each is the one that says no: an atomic load, then the cache's
-	// mutex, then the gate's.
-	if c.idle.Load() > 0 {
-		return
-	}
-	shard, ok := c.cache.PeekShard()
-	if !ok {
-		return
-	}
-	if !c.gate.Available(shard) {
-		return
-	}
-	c.spawn()
-}
-
-// growLoop re-evaluates the growth condition on a fixed cadence, and it is what makes growth RELIABLE
-// rather than merely fast.
-//
-// The worker-loop trigger is edge-triggered on a worker TAKING work, and an edge alone cannot cover the
-// state that matters most: once every worker is committed to a long call nobody pops, so work arriving
-// after that moment fires no edge at all and the crew sits at its resident size with candidates queued in
-// front of it. Measured on that shape - 130 parked tasks against a 96-worker resident set - an edge-only
-// crew stops at 96, leaving 34 candidates unserved with permits and ceiling both to spare.
-//
-// So the cadence is the reliable path and the edge is the fast one, which is the same posture as the supply
-// side's piston cycling UNCONDITIONALLY rather than on a trigger: a trigger must be fired from every site
-// that can create the condition, and missing one wedges silently, whereas a cycle that always runs cannot
-// be in that state.
-//
-// One spawn per tick is enough because the edge trigger cascades from it: the worker this spawns takes a
-// candidate, finds nobody idle and work still waiting, and spawns the next - so a single tick unblocks a
-// chain that grows as fast as workers can pop, and the cadence only has to cover the standing start.
-func (c *Crew) growLoop(stop <-chan struct{}) {
-	ticker := time.NewTicker(growCheckInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			c.considerGrowth()
-		}
+	if c.idle.Load() == 0 {
+		c.spawn()
 	}
 }
 
@@ -328,9 +301,13 @@ func (c *Crew) work(ctx context.Context) {
 		if !ok {
 			return // the cache closed
 		}
-		release, ok := c.gate.Acquire(shard)
+		gateStart := time.Now()
+		release, ok := c.gate.AcquireEnter(shard)
 		if !ok {
 			return // the gate closed: draining
+		}
+		if f := c.gateWait.Load(); f != nil {
+			(*f)(shard, time.Since(gateStart))
 		}
 		j, ok, _ := c.cache.TryPopFrom(shard)
 		if !ok {

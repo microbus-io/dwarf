@@ -2,7 +2,7 @@
 
 > Load when: changing the growth trigger, the gate, the drain protocol, or what `Start`/`Drain` own.
 > Coupled with: `internal/candidatecache/CLAUDE.md` (the cache this drains, and why blocking on it is what
-> shutdown turns on), `internal/permits/CLAUDE.md` (the gate the engine supplies), and `engine/CLAUDE.md` §"Worker
+> shutdown turns on), `internal/permits/CLAUDE.md` (the gate the engine supplies; the crew only ever ENTERS it), and `engine/CLAUDE.md` §"Worker
 > sizing" (where the resident count, the maximum and the permit count come from, and what the callback does).
 
 Workers are the **demand** side: a `Crew` of goroutines that pop candidates and hand each to one callback.
@@ -40,11 +40,14 @@ Two consequences visible at the seam:
   callback; an error is logged and the goroutine goes back for the next candidate. A worker that exited on an
   error would silently shrink the crew.
 
-## The growth trigger: idleness, gated by a permit
+## The growth trigger: keep one worker in reserve
 
 ```
-spawn when:  nobody is IDLE  AND  work is waiting  AND  the gate has room
+spawn when:  taking this candidate left NOBODY idle
 ```
+
+One condition, one call site — a worker that has just popped. There is no capacity query, no work-waiting
+test, and no periodic check, and each of those absences is load-bearing rather than incidental (below).
 
 The worker loop is `park holding nothing → take a permit → take work → process`, and **that order is the
 design**. A worker that waited for work while holding a permit would hoard admission capacity it is not
@@ -52,7 +55,7 @@ using; a worker that popped first and then blocked would strand a candidate insi
 proceed with it, having emptied the very partition its peers were choosing between.
 
 **`idle` means "not currently holding a candidate", which is wider than "parked", and the width is
-load-bearing.** It covers three states — parked in `WaitForWork`, blocked in `Acquire`, and *spawned but not
+load-bearing.** It covers three states — parked in `WaitForWork`, blocked in `AcquireEnter`, and *spawned but not
 yet running*. Each is a worker that will take the next candidate unaided, so none justifies another
 goroutine. The third is why `spawn` increments the counter **before** the goroutine exists: count only the
 park and a freshly-started crew reads as fully committed for the instant before its workers reach it, so
@@ -67,39 +70,55 @@ only logarithmically. Measured on a 16-vCPU shard at 600 flows/s with `-task-del
 ceiling of 141,000 and a workload needing ~48,000 concurrent. Eight times the task duration bought 4.6x the
 crew and *less* throughput.
 
-**The gate is what makes so easy a trigger safe, and the two are one design.** Growth stops exactly where
-extra goroutines would become contention rather than capacity: with the bounded resource saturated there are
-no permits, so nothing spawns. `TestCrew_SaturationDoesNotGrowThePool` pins it, expressing "saturated" as
-*every permit held*; it is the test whose absence lets the runaway above ship.
+**Saturation stops growth WITHOUT the trigger ever asking about it, and that is why `Gate` has one method.**
+A worker blocked in `AcquireEnter` holds no candidate, so it counts *idle*, so the next check declines. The
+overshoot is exactly **one** goroutine per saturation episode — and that one is first in line for the next
+permit, so it is not even waste. `TestCrew_SaturationDoesNotGrowThePool` pins the bound at 3 residents (two
+holding both permits, plus the reserve) and fails at `Max` against a build that reads saturation as a reason
+to keep spawning.
+
+**Do NOT reintroduce a capacity query on the gate.** It was there (`Gate.Available`, backed by
+`permits.Available`) and it bought nothing the blocking already gives, while forcing the gate to *summarise*
+itself for a consumer that cannot know what it meters. That summary is not obvious: with an enter/exit
+split, "has room" has two candidate answers, and picking the enter side alone makes free permits
+**anti-correlated** with health once the exit path is the constraint — free precisely *because* nothing is
+getting out. Reading the block instead of the count sidesteps the question rather than answering it wrongly.
 
 **What the caller still owns is *when* the permit is released** — a genuine question only it can answer (the
 engine releases immediately before `ExecuteTask`) — and the crew backstops it with `sync.OnceFunc` plus an
 unconditional call on the way out, so a leaked permit is **unreachable** rather than merely detected.
 
-### Growth needs BOTH an edge and a cadence
+### The standing reserve is what makes ONE edge sufficient
 
-`considerGrowth` runs on two paths, and one is not enough:
+A single edge — a worker that has just popped — cannot cover the state that matters most: **once every
+worker is committed to a long call, nobody pops**, so work arriving *after* that moment fires no edge at
+all. Measured on that shape, 130 candidates against a 96-worker resident set, the crew stalls at 96 with 34
+unserved and permits and ceiling both to spare.
 
-- **The edge** — a worker that has just taken a candidate. Zero latency, and it *cascades*: the worker it
-  spawns takes a candidate, finds nobody idle and work still waiting, and spawns the next.
-- **The cadence** — `growLoop`, every `growCheckInterval` (5ms), unconditionally.
+That stall needed a periodic check only while `idle == 0` could be a **resting** state, which it was when
+growth also required work to be waiting: the worker taking the *last* candidate spawned nothing, so the crew
+settled with zero parked workers and the next arrival had nobody to wake.
 
-An edge cannot cover the state that matters most. **Once every worker is committed to a long call, nobody
-pops**, so work arriving *after* that moment fires no edge at all: the crew sits at its resident size with
-candidates queued in front of it, permits and ceiling both to spare. Measured on that shape — 130 parked
-tasks against a 96-worker resident set — an edge-only crew stops at 96, leaving 34 candidates unserved. This
-is the same posture as the supply side's piston **cycling unconditionally rather than on a trigger**, for
-the same reason: a trigger must be fired from every site that can create the condition, and missing one
-wedges silently.
+Spawning whenever a take leaves nobody idle makes `idle == 0` **transient**. There is always a parked worker
+for `WaitForWork` to wake, the arrival is noticed, and the cascade takes over — the woken worker pops, finds
+nobody idle, and spawns the next. The cost is one worker that parks when the cache happens to be empty,
+which *is* the reserve. `TestCrew_WorkArrivingWhileFullyCommittedStillGrows` pins it and hangs against the
+work-waiting rule (verified: it stalls at its 2 residents with 8 candidates unserved).
 
-One spawn per tick is sufficient precisely because the edge cascades from it — the cadence only has to cover
-the standing start.
+**Do NOT restore a "work is waiting" condition.** It looks free — the trigger runs after a *successful* pop,
+so work demonstrably existed, and it only asks whether *more* remains — but that question is exactly what
+lets the reserve reach zero, and it is what a cadence then has to paper over.
 
-**Do NOT add a rate damper.** Growth is edge-triggered, so a suppressed spawn is not deferred, it is
-**lost**, and in the very case this exists for there is no later pop to re-evaluate on. Measured: a 1ms
-damper grows the crew by exactly one past its resident set and then stops forever, serving 97 of 130 parked
-tasks. What bounds growth is the three conditions — work waiting caps it at the queue, the gate caps it at
-the resource, `Max` caps it absolutely — not a clock.
+**Do NOT add a rate damper, and do NOT batch the spawn.** Growth is edge-triggered, so a suppressed spawn is
+not deferred, it is **lost** (measured: a 1ms damper grew the crew by one past its resident set and then
+stopped forever, serving 97 of 130 parked tasks). Batching is the mirror error: spawning *n* against one
+available candidate parks *n−1*, driving `idle` to *n−1* and suppressing the next *n−1* checks. One per take
+is self-matching, since every spawn is paid for by a candidate actually taken — and the ramp is bounded by
+candidate supply anyway, not by spawn rate (nothing before `considerGrowth` touches the database, so a
+spawn→pop→spawn link is tens of microseconds).
+
+What bounds growth is idleness — the cache running dry parks a worker, the gate blocking parks a worker —
+and `Max` absolutely. Not a clock.
 
 ## `resident` grows, never shrinks
 
@@ -124,9 +143,10 @@ signal.
 
 That is also why the lifecycle is `Start`/`Drain` rather than a blocking `Run` (the shape `piston` uses).
 `Drain` has to do **two** things in order — close the crew to new goroutines, then wait — and a single
-`Run` that blocked in `Wait` could not: growth happens whenever a worker takes a candidate — and on the
-grower's own cadence — so the `Add` would race the `Wait` from the moment `Run` was entered. (The grower is
-stopped and waited on *first* inside `Drain`, since it is a second, non-worker source of spawns.)
+`Run` that blocked in `Wait` could not: growth happens whenever a worker takes a candidate, so the `Add`
+would race the `Wait` from the moment `Run` was entered. Workers are the *only* source of spawns, which is
+what lets `Drain` be just the flag and the wait — with a separate grower goroutine it would also have to be
+stopped and waited on first.
 
 **`spawnClosed` under `spawnLock`, set before the `Wait`, is the load-bearing detail.** A
 `WaitGroup.Add` concurrent with a `Wait` is a **panic**, not a race to be tolerated, and a worker can try to
@@ -137,9 +157,9 @@ argument for the package existing at all: it was previously untestable in isolat
 
 ## `runCtx` is held on the struct, which is usually a smell
 
-A spawn can happen long after `Start` — from a worker taking a candidate, or from the grower's cadence —
-and the new goroutine needs the same lifetime as its peers. There is nowhere else to get it from, so `Start` stores it. It is written once before
-any goroutine exists and only read by `spawn` thereafter.
+A spawn can happen long after `Start` — from a worker taking a candidate — and the new goroutine needs the
+same lifetime as its peers. There is nowhere else to get it from, so `Start` stores it. It is written once
+before any goroutine exists and only read by `spawn` thereafter.
 
 ## What stays outside
 
@@ -154,5 +174,6 @@ gate's own count) to tell the two long-task regimes apart: a crew far above the 
 free* is serving long tasks correctly, while a crew pinned at `Max` is the one to alarm on.
 
 **The gate.** Sized, closed, and given meaning by the owner. The crew never asks what it bounds — in the
-engine it is `permitsPerConn x` that shard's connection pool, and the release point is "immediately before
-the host call", both of which are engine facts the crew would be wrong to encode.
+engine it is a multiple of that shard's connection pool, split into separate enter and exit reservations,
+and the release point is "immediately before the host call". All of those are engine facts the crew would be
+wrong to encode, which is why `Gate` is one blocking method and no accessor.

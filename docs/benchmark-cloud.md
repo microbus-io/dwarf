@@ -482,7 +482,34 @@ set is 384, so anything beyond that requires growth:
 
 Throughput tracks `flows ÷ task duration` exactly at every level: the engine holds 10,000 minutes-long
 tasks in flight against a 48-connection pool, and median flow latency is 60.0 s — the task duration
-itself, with no queueing.
+itself, with no queueing. The same shape holds on a 16-vCPU shard, where the database-work allowance
+(a fixed multiple of that shard's 96 connections) reads **completely untouched at all three levels** — 10,000 workers
+parked in tasks consume none of it, which is why they cost the database nothing.
+
+**Seconds-long tasks: throughput is set by the database, not by the task.** The harder case is a task
+long enough to tie up a worker but short enough that the database still has to keep up. Open-loop at a
+commanded 300 flows/s (3,000 steps/s on the 10-step chain), 8-second tasks, one 16-vCPU shard, n=3:
+
+| | rep 1 | rep 2 | rep 3 |
+|---|---|---|---|
+| steps/s (commanded 3,000) | 3,003 | 3,003 | 3,004 |
+| worker goroutines | 24,058 | 24,060 | 24,066 |
+| flows in flight | 24,038 | 24,038 | 24,040 |
+| connection wait per acquire | 2.2 ms | 2.0 ms | 4.1 ms |
+
+The full offered rate, three times, with a 0.03% spread — while holding 24,000 flows in flight, exactly
+the `300 flows/s × 80 s` the workload implies. **Task duration has dropped out of the throughput
+equation entirely**; what remains is `min(offered load, database capacity)`.
+
+**Near the instance's ceiling the same workload becomes run-to-run bimodal**, and it is worth knowing why
+before reading it as a task-duration effect. At a commanded 600 flows/s — around 80% of what this shard
+serves — the 8-second arm ranged from 1,369 to 6,824 steps/s across three otherwise identical runs. The
+worker count was large in every one; what differed was the database: the pool ran fully in use with
+**~50 ms of wait per connection acquired**, against 2 ms at half the rate, and the engine's own
+candidate-selection pass slowed from ~120 ms to ~320 ms and halved its rate. Long tasks put more workers
+in front of the same connections, so at saturation the supply of work to dispatch competes with the work
+itself. Size for the [70–90% database CPU band](#database-size-vertical-scaling-from-1-to-64-vcpus) and
+this does not arise.
 
 A worker inside a task holds no database connection, so worker count and database load are separate
 quantities. The engine adds a worker when no existing worker is free, work is waiting, **and** the shard
@@ -555,8 +582,12 @@ memory-bounded hosts, and externally-constrained connection budgets.
   shard's cycle diverge is unresolved. Quote multi-shard numbers with their replicate range.
 - **Replica scaling is measured against one shard only, with replicas as engines inside one process.** No
   per-replica memory figure, and no hard-kill test of the stale-registration path.
-- **Worker growth is not measured on cloud hardware in the 0.5–10 s task band.** The 60 s end and the
-  no-op end both are.
+- **Where a long-task workload stops serving its offered load is not pinned.** Measured stable at half an
+  instance's capacity and bimodal at ~80% of it, with nothing in between; the knee is somewhere in that
+  gap, and it is a property of the database's spare capacity rather than of the tasks.
+- **Mixed short and long tasks on one engine are not measured.** Nothing about the sizing refers to task
+  duration, so the expectation is that they compose — but the benchmark applies one task delay globally
+  and cannot express the case.
 - **Volume was measured under accumulation, not steady-state retention.** A create-and-purge equilibrium
   exercises autovacuum differently, and slow drift (memory, goroutines, connection recycling) needs a
   soak test rather than a 60 s window.

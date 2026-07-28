@@ -43,12 +43,12 @@ func newCache(t *testing.T) *candidatecache.Cache {
 }
 
 // newGate returns the real permit set, sized for shard 1, closed at test end. These tests deliberately use
-// the production Gate rather than a fake: the crew's contract with it (Acquire blocks, close is a stop
-// signal, Available gates growth) is exactly what is under test.
+// the production Gate rather than a fake: the crew's contract with it (Acquire blocks, blocking counts as
+// idle and so stops growth, close is a stop signal) is exactly what is under test.
 func newGate(t *testing.T, n int) *permits.Set {
 	t.Helper()
 	g := permits.New()
-	g.Resize(1, n)
+	g.Resize(1, n, n)
 	t.Cleanup(g.Close)
 	return g
 }
@@ -129,12 +129,14 @@ func TestCrew_ProcessesEveryCandidate(t *testing.T) {
 // matters: it is the test whose absence let a measured runaway ship (~20% throughput lost on a saturated
 // shard, a crew bloated to ~1,300 goroutines where ~512 sufficed).
 //
-// The property is unchanged - SATURATION MUST NOT GROW THE CREW - but what expresses "saturated" is now the
-// GATE rather than a hand-maintained offsite counter. A worker that still HOLDS its permit is one competing
-// for the bounded resource, so with every permit taken the gate reports no room and growth must stop, even
-// though no worker is parked and the cache is full of work. That is the exact condition the old design got
-// wrong: it read a fully-committed crew as a reason to add another goroutine, and each addition queued on
-// the same connections and made the signal truer.
+// The property is that saturation must not grow the crew WITHOUT BOUND, and it is enforced with no capacity
+// query at all: the crew spawns one worker, that worker blocks in AcquireEnter, and blocking makes it count
+// IDLE - which declines every subsequent check. So the overshoot is exactly one goroutine, permanently, and
+// it is the one first in line for the next permit.
+//
+// Two residents hold both permits, so the assertion is 3: the crew that took the last candidate added its
+// reserve, and the reserve cannot proceed. A build that read saturation as a reason to keep spawning fails
+// here at Max (8), which is the runaway this test exists for.
 func TestCrew_SaturationDoesNotGrowThePool(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -156,8 +158,10 @@ func TestCrew_SaturationDoesNotGrowThePool(t *testing.T) {
 	fill(c, 20)
 	crew.Start(context.Background(), 2)
 	assert.True(eventually(func() bool { return busy.Load() == 2 }), "both workers entered the callback")
-	time.Sleep(50 * time.Millisecond) // long enough for a spurious spawn to show up
-	assert.Equal(2, crew.Resident(), "saturation alone must not grow the crew")
+	time.Sleep(50 * time.Millisecond) // long enough for a runaway to show up
+	assert.Equal(3, crew.Resident(),
+		"saturation adds the one reserve worker and then stops, since that worker blocks on the gate")
+	assert.True(crew.Idle() > 0, "the reserve is blocked on the gate, which is what declines further growth")
 
 	close(hold)
 	c.Close()
@@ -295,7 +299,8 @@ func TestCrew_ReleaseIsBackstopped(t *testing.T) {
 
 	c.Close()
 	crew.Drain()
-	assert.Equal(int64(2), gate.Snapshot()[1], "every permit is back")
+	enter, _ := gate.Snapshot()
+	assert.Equal(int64(2), enter[1], "every permit is back")
 }
 
 // TestCrew_MaxIsRespectedAndLive pins that growth stops at Max and that lowering Max stops further growth
@@ -433,7 +438,7 @@ func TestCrew_ClosedGateReleasesWorkers(t *testing.T) {
 	c := newCache(t)
 
 	gate := permits.New()
-	gate.Resize(1, 1)
+	gate.Resize(1, 1, 1)
 	entered := make(chan struct{}, 1)
 	hold := make(chan struct{})
 	crew, err := New(c, gate, func(_ context.Context, shard, stepID int, release func()) error {
@@ -501,5 +506,53 @@ func TestCrew_HandlerErrorAndPanicKeepTheWorkerAlive(t *testing.T) {
 	c.Close()
 	crew.Drain()
 	assert.True(strings.Contains(buf.String(), "Processing candidate"))
-	assert.Equal(int64(4), gate.Snapshot()[1], "the error and panic paths both gave their permit back")
+	enterBack, _ := gate.Snapshot()
+	assert.Equal(int64(4), enterBack[1], "the error and panic paths both gave their permit back")
+}
+
+// TestCrew_WorkArrivingWhileFullyCommittedStillGrows is what replaced the periodic growth check, and it
+// pins the exact state that check existed for: work arrives when every worker is already committed to a
+// long call, so NOBODY pops and no edge fires.
+//
+// It works without a cadence because the crew keeps a standing reserve of one. The worker that took the
+// last candidate spawned a peer, that peer parked, and a parked worker is one WaitForWork can wake - so the
+// arrival is noticed, the reserve pops, and the cascade takes over from there.
+//
+// Against a build where growth also required work to be waiting, this HANGS: taking the last candidate
+// spawned nothing, the crew settled with zero parked workers, and the second batch had nobody to wake. That
+// is the measured 130-candidates-against-96-workers stall, in miniature.
+func TestCrew_WorkArrivingWhileFullyCommittedStillGrows(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	c := newCache(t)
+
+	hold := make(chan struct{})
+	var inTask atomic.Int32
+	crew, err := New(c, newGate(t, 32), func(_ context.Context, shard, stepID int, release func()) error {
+		release() // the long-call shape: holds no permit while it blocks
+		inTask.Add(1)
+		<-hold
+		return nil
+	})
+	if !assert.NoError(err) {
+		return
+	}
+	crew.SetMax(16)
+
+	// Exactly as many candidates as residents, so the crew consumes the batch and is fully committed with
+	// the cache EMPTY - the resting state the old rule could reach with nobody parked.
+	fill(c, 2)
+	crew.Start(context.Background(), 2)
+	assert.True(eventually(func() bool { return inTask.Load() == 2 }), "both residents are in the long call")
+	assert.True(eventually(func() bool { return crew.Idle() > 0 }),
+		"a reserve worker exists even though the cache is empty and every other worker is committed")
+
+	// Work arrives with every original worker still blocked. Nothing pops it but the reserve.
+	fill(c, 8)
+	assert.True(eventually(func() bool { return inTask.Load() == 10 }),
+		"work arriving while fully committed must still be served, got %d in task", inTask.Load())
+
+	close(hold)
+	c.Close()
+	crew.Drain()
 }

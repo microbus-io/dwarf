@@ -61,26 +61,56 @@ const (
 	// connection, so it must not inflate the cache/refill scan, which serves dispatch only.
 	workersPerConnBudget = 8
 
-	// permitsPerConn bounds how many workers may be doing DATABASE work on one shard at a time, as a
-	// multiple of that shard's pool. It is what lets the crew grow freely for long tasks without the growth
+	// The permits bound how many workers may be doing DATABASE work on one shard at a time, as a multiple
+	// of that shard's pool. They are what lets the crew grow freely for long tasks without the growth
 	// turning into contention: a worker holds a permit only across the phases that hold or await a
 	// connection, so a task sleeping 8s holds none and a 5ms lookup holds one for 5ms.
 	//
-	// 8 is deliberately the same ratio as workersPerConnBudget, and NOT because the two quantities are the
-	// same thing - one sizes worker EXISTENCE, this bounds concurrent database WORK. The reason is that the
-	// candidate cache already holds 8 x conns entries, so at most 8 x conns workers can hold a candidate at
-	// once no matter how many workers exist: cache capacity is TODAY's de facto bound on database
-	// concurrency, and pinning the permit to the same ratio reproduces it exactly. The database therefore
-	// sees the load it already sees, and the only thing that changes is that worker count is no longer
-	// welded to it - so there is no new database-concurrency regime to validate, only the growth path.
+	// enterPermitsPerConn and exitPermitsPerConn bound, per shard and as a multiple of that shard's pool,
+	// how many workers may be in a step's database phases at once - counted SEPARATELY for workers entering
+	// a step and workers recording a finished one, against dedicated reservations neither may draw from.
+	// The entry side stays UNDER the candidate cache's own bound (it holds 8 x conns entries, so at most
+	// that many workers can hold a candidate at once regardless of any permit), so entry is gated by this
+	// rather than by the cache. The exit side is not cache-bound at all - a worker recording a finished
+	// step is past the cache - which is why it is sized above it.
 	//
-	// The evidence brackets it rather than leaving it a guess. 8x was measured FREE (cutting the resident
-	// set 4x, 8x -> 2x, moved neither throughput nor p99 and left host CPU flat), while the runaway that
-	// motivated all of this ran ~27x (1,300 goroutines against a 48-connection pool) where ~10.7x sufficed.
-	// So the harmful threshold sits somewhere between ~11x and ~27x, and 8 is comfortably below the
-	// measured-fine point. A TIGHTER ratio (2-3x) was considered and dropped: it would cut database
-	// concurrency below today's, which is a second change bundled into a fix for something else.
-	permitsPerConn = 8
+	// THE SPLIT IS THE POINT, and it was earned. A single pool has the two populations competing for the
+	// same permits, and neither ordering works: served evenly, completions lose at random and queue behind
+	// admission (measured: 286 of them waiting out a full 1s budget, transactions inflating 3ms -> 54ms);
+	// served with completions given precedence, ENTRY starves, and since entry is dispatch, short-task
+	// throughput collapsed 3x on a saturating rig (4,416 vs 7,964 steps/s, with creation itself throttled
+	// to 714 of 800 commanded flows/s). Dedicated reservations make both failures structurally impossible,
+	// so neither side needs a priority rule, and neither needs an escape hatch past its own bound.
+	//
+	// THE PERMITS CAP CONTENTION, THEY DO NOT ELIMINATE IT. A step acquires a connection 9-11 times, so
+	// what bounds its tail is how many workers are contending for that pool at once. At saturation the
+	// waiting RELOCATES rather than shrinking - measured on a 16-vCPU shard at 8s tasks, 3/5 pays 18ms of
+	// pool wait but 588-1,459ms at the permit, while 8/12 pays 39ms of pool wait and 81-103ms at the
+	// permit. What the cap buys is that the contending population is BOUNDED at all, instead of growing
+	// with the crew.
+	//
+	// THE TOTAL (20x) IS A CONSEQUENCE OF TWO INDEPENDENT LOWER BOUNDS, NOT A CHOSEN NUMBER. Do not try
+	// to bring it down to the 8x the cache allows - that requires starving a side, and each side's floor
+	// is set by something different:
+	//
+	//   - ENTRY >= 8x, the candidate cache's own bound (it holds 8 x conns entries, so at most that many
+	//     workers can hold a candidate regardless of any permit). Matching it makes permit and cache bind
+	//     at the same point instead of one silently shadowing the other. BELOW it, entry - which IS
+	//     dispatch - starves: measured at 3x on 8s tasks, 588-1,459ms mean enter wait and the largest
+	//     backlog of any arm (83-90k outstanding vs 8/12's 62-64k).
+	//
+	//     A TIGHT PERMIT COSTS GOROUTINES, and by Little's law rather than by any growth misfire: the wait
+	//     is residence time, so sustaining a rate through it needs proportionally more workers. Same runs,
+	//     3/5 carried 82-87k workers against 8/12's 59-62k, which its ~1.6s of extra per-step wait
+	//     predicts to within the measurement. Do not read a large crew as the trigger over-firing.
+	//   - EXIT >= ~7/4 x entry, because completionRoundTrips = 7 of a step's ~11 round trips are on the
+	//     exit side. Under-provision that half and it becomes the new tail: measured locally at an even
+	//     4/4, once transactions inflated ~25x, roughly HALF of all completions could not get a permit.
+	//
+	// 2:3 tracks the 4:7 closely, and both floors are properties of other mechanisms - re-derive them if
+	// the cache's multiple or the per-step round-trip counts ever change.
+	enterPermitsPerConn = 8
+	exitPermitsPerConn  = 12
 
 	// completionRoundTrips is the number of database round trips in a step's post-task phase: the
 	// standalone completed-UPDATE plus the transition transaction (lock-grab UPDATE, successor INSERT,
@@ -297,7 +327,7 @@ func (e *Engine) recomputePools() {
 		// pool just changed. Resize moves the available count by the DELTA, so permits held by in-flight
 		// workers are never handed out twice.
 		if e.permits != nil {
-			e.permits.Resize(idx, permitsPerConn*open)
+			e.permits.Resize(idx, enterPermitsPerConn*open, exitPermitsPerConn*open)
 		}
 		postSplitConns += open
 	}

@@ -24,6 +24,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -45,6 +46,7 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -195,9 +197,9 @@ type Engine struct {
 	// crew runs processStep on the candidates it pops. The engine supplies both sizing numbers.
 	crew *workers.Crew
 	// permits bounds how many workers may be doing DATABASE work on each shard at once, which is what
-	// lets the crew grow freely for long tasks without the growth turning into pool contention. Sized
-	// permitsPerConn x that shard's pool, so every path that changes a pool must re-size it - the same
-	// rule the worker ceiling, the cache and the refill interval already obey.
+	// lets the crew grow freely for long tasks without the growth turning into pool contention. Both
+	// reservations are sized as a multiple of that shard's pool, so every path that changes a pool must
+	// re-size them - the same rule the worker ceiling, the cache and the refill interval already obey.
 	permits *permits.Set
 	// drainStop is closed at the top of drainRuntime, before the crew is waited on.
 	drainStop chan struct{}
@@ -502,7 +504,7 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 		// shard takes the same count.
 		if e.permits != nil {
 			for _, idx := range e.db.Indices() {
-				e.permits.Resize(idx, permitsPerConn*n)
+				e.permits.Resize(idx, enterPermitsPerConn*n, exitPermitsPerConn*n)
 			}
 		}
 	}
@@ -710,7 +712,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 		db.SetMaxIdleConns(idle)
 		// Sized here rather than in initRuntime because it is derived from the pool this loop just set,
 		// and the workers initRuntime starts must never see an unsized (admit-nothing) shard.
-		e.permits.Resize(idx, permitsPerConn*open)
+		e.permits.Resize(idx, enterPermitsPerConn*open, exitPermitsPerConn*open)
 		e.lastAppliedR[idx] = replicas
 		totalConns += open
 	}
@@ -872,6 +874,12 @@ func (e *Engine) initRuntime() error {
 		return errors.Trace(perr)
 	}
 	e.crew = crew
+	// The crew measures how long entry blocked; the instrument is named here, because instrument names are
+	// a public surface and belong with the owner rather than with a package that gates anything.
+	e.crew.SetGateWaitObserver(func(shard int, waited time.Duration) {
+		e.metrics.enterWait.Record(e.lifetimeCtx, waited.Seconds(),
+			metric.WithAttributes(attribute.String("shard", strconv.Itoa(shard))))
+	})
 	e.crew.SetLogger(e.logger)
 	e.crew.SetMax(maxWorkers)
 	// Start the resident set; the rest of the ceiling is spawned on demand whenever nobody is idle, work is

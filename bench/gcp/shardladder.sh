@@ -258,7 +258,10 @@ for n in sorted(arms):
 
 print("""
 Reading it:
-  - per-shard scan times DIVERGING between shards  -> one shard is genuinely slower
+  - per-shard scan times DIVERGING between shards  -> mostly CONNECTION-POOL WAIT, not a slow shard:
+                                                      28ms vs 125ms was measured on instances whose RTT
+                                                      differed by 0.036ms. Decompose against
+                                                      pg_stat_statements before calling a shard slow.
   - pass ms >> the per-shard max                   -> the cost is waiting for the slowest shard
   - waste near 100%                                -> the refiller oversupplies the workers
   - none of the above, and the ladder still flat   -> the refiller is not the constraint; look
