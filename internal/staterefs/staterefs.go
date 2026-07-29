@@ -24,7 +24,7 @@ limitations under the License.
 // A Linker holds the size policy and the resolution cache for ONE shard, and has two operations:
 //
 //	stateJSON, refsJSON, err := linker.Mint(merged, changes, inherited, anchorID, successors, inlineOnly)
-//	readBytes, err := linker.Resolve(ctx, state, refs, nil, load)
+//	materialized, err := linker.Resolve(ctx, state, refs, nil, load)
 //
 // Mint is the write side and performs no I/O: the caller's state is already materialized, so omitting a
 // field is all there is to do. Resolve is the read side and reaches the database only through the caller's
@@ -408,32 +408,41 @@ func Parse(refsJSON []byte) Refs {
 	return refs
 }
 
-// Resolve materializes ref'd fields into state, in place, and reports how many payload bytes it read from
-// the database. It is the read side of the whole design, and the reason the anchor - not the field - is
+// Resolve materializes ref'd fields into state, in place, and reports how many bytes of field value it
+// spliced in. It is the read side of the whole design, and the reason the anchor - not the field - is
 // what policy prices: the Loader fetches whole payload columns, so the cost is one row per DISTINCT anchor
 // (and, on a cache miss, one round trip for all of them together), while any number of fields living in an
 // already-fetched row are free.
 //
+// The returned count is NOT the Loader's count and the two are not interchangeable - they answer different
+// questions and disagree in both directions. The Loader counts the RAW COLUMNS it scanned, which is the
+// database's byte throughput: it includes the anchor's untouched other fields, and it is ZERO on a cache
+// hit because nothing was read. This count is the bytes that ended up IN state, which is the caller's
+// residency: it excludes the rest of the anchor row, and it is unchanged by a cache hit because the field
+// is materialized either way. Meter throughput with the former and what a carrier holds with the latter.
+//
 // want, when non-nil, selects which refs to resolve; the rest are left for the caller to carry forward.
 // That is what lets a fan-in reduce the fields it must while a large CARRIED field crosses the cohort as a
 // ref (see ResolveReduced).
-func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, want map[string]bool, load Loader) error {
+func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, want map[string]bool, load Loader) (int, error) {
 	if state == nil || len(refs) == 0 {
-		return nil
+		return 0, nil
 	}
 	values, err := l.fetch(ctx, refs, want, load)
 	if err != nil {
-		return errors.Trace(err)
+		return 0, errors.Trace(err)
 	}
+	materialized := 0
 	for field, value := range values {
 		// State.Set DECODES the bytes into a fresh copy, so a resolved field is indistinguishable from one
 		// never ref'd (no RawMessage leaks into a caller's state), and two fan-out branches resolving the
 		// same anchor never share a decoded map or slice.
 		if err := state.Set(field, value); err != nil {
-			return errors.Trace(err)
+			return 0, errors.Trace(err)
 		}
+		materialized += len(value)
 	}
-	return nil
+	return materialized, nil
 }
 
 // fetch returns the raw bytes of every selected ref'd field, serving what it can from the cache and asking
@@ -525,7 +534,10 @@ func (l *Linker) ResolveReduced(ctx context.Context, state workflow.State, refs 
 	if len(want) == 0 {
 		return nil
 	}
-	return l.Resolve(ctx, state, refs, want, load)
+	// The materialized-bytes count is dropped: a fan-in's resolved state is folded and written inside the
+	// caller's transaction, never held across a host call, so nothing downstream meters its residency.
+	_, err := l.Resolve(ctx, state, refs, want, load)
+	return err
 }
 
 // Flatten returns a step's state column with every ref'd field spliced back in - the form used where a

@@ -288,7 +288,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	// fields arrived as refs (and so must be carried, never re-anchored against this step). resolveStateRefs
 	// mutates the state map in place, so it gets the live backing map.
 	inheritedRefs := staterefs.Parse(stateRefsJSON)
-	if err := e.resolveStateRefs(ctx, db, shardNum, state, inheritedRefs, nil, workflowURL); err != nil {
+	refBytes, err := e.resolveStateRefs(ctx, db, shardNum, state, inheritedRefs, nil, workflowURL)
+	if err != nil {
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
 	}
@@ -357,6 +358,20 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	// function's scope would hold the permit across the persist half below, which DOES hold a connection
 	// and is deliberately gated by a debit instead.
 	releasePermit()
+	// Count what this worker holds for the duration of the host call. The window is the CALL, not this
+	// function: the carrier is live for the whole of processStep, but only here is the worker parked on
+	// something unbounded while holding no connection - which is what makes held state a memory question
+	// rather than a throughput one. Bracketed rather than deferred for the same reason releasePermit is
+	// not deferred; the release is safe unbracketed because CatchPanic converts a host panic into a return
+	// rather than unwinding past it, and a runtime throw takes the process with it either way.
+	//
+	// refBytes, not the read bytes reported to dwarf_state_read_bytes: those are whole anchor ROWS and are
+	// zero on a resolve-cache hit, which is the common case across a fan-out's branches - so a large
+	// carried document would read as nothing on all but the first branch, in the one measurement it exists
+	// to make.
+	heldBytes := int64(len(stateJSON) + len(priorChangesJSON) + refBytes)
+	e.inFlightStateBytes.Add(heldBytes)
+	e.inFlightStateSteps.Add(1)
 	// A panic in the in-process host is caught here so it flows through the normal error disposition
 	// rather than wedging this leased step until lease expiry.
 	execErr := errors.CatchPanic(func() error {
@@ -367,6 +382,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		}
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
 	})
+	e.inFlightStateBytes.Add(-heldBytes)
+	e.inFlightStateSteps.Add(-1)
 	// The task has now RUN. Everything below records that fact, and it holds a connection to do so - so the
 	// persist half takes a permit from the EXIT reservation, which nothing entering a step can draw on.
 	//

@@ -102,13 +102,18 @@ func anchorLoader(db sequel.Executor, readBytes *int) staterefs.Loader {
 
 // resolveStateRefs materializes ref'd fields into state, in place. want, when non-nil, selects which refs to
 // resolve; the rest are left for the caller to carry forward.
-func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, want map[string]bool, workflowURL string) error {
+//
+// It returns the bytes of field value it spliced into state, which is what a caller about to HOLD that state
+// meters its residency with - distinct from the read bytes reported to dwarf_state_read_bytes, which are the
+// raw columns scanned (whole anchor rows, and zero on a cache hit). Only the dispatch path needs it; every
+// other caller resolves inside a transaction and discards it.
+func (e *Engine) resolveStateRefs(ctx context.Context, db sequel.Executor, shardNum int, state workflow.State, refs staterefs.Refs, want map[string]bool, workflowURL string) (int, error) {
 	var readBytes int
-	err := e.linkerFor(shardNum).Resolve(ctx, state, refs, want, anchorLoader(db, &readBytes))
+	materialized, err := e.linkerFor(shardNum).Resolve(ctx, state, refs, want, anchorLoader(db, &readBytes))
 	if readBytes > 0 {
 		e.metricStateReadBytes(ctx, workflowURL, "state_ref", readBytes)
 	}
-	return errors.Trace(err)
+	return materialized, errors.Trace(err)
 }
 
 // resolveReducedRefs materializes only the ref'd fields a fan-in's reducers actually need, into state in

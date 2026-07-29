@@ -391,7 +391,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 			stepChanges, _ := workflow.NewState(stepChangesJSON)
 			// The ref encoding is a storage detail, never API-visible: a caller sees the state the step
 			// actually saw (the ref encoding is internal storage, never API-visible). resolveStateRefs mutates the map in place, so it gets the live map.
-			if rerr := e.resolveStateRefs(ctx, db, shardNum, stepState, staterefs.Parse(stepRefsJSON), nil, ""); rerr != nil {
+			if _, rerr := e.resolveStateRefs(ctx, db, shardNum, stepState, staterefs.Parse(stepRefsJSON), nil, ""); rerr != nil {
 				return nil, errors.Trace(rerr)
 			}
 			// Materialize the interrupted step's view: state + changes with pending deletes enacted.

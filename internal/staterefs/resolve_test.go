@@ -73,7 +73,7 @@ func TestLinker_ResolveReadsBothColumns(t *testing.T) {
 	state := workflow.State{}
 	refs := Refs{"fromState": 7, "fromChanges": 7, "shadowed": 7}
 
-	err := New("sqlite").Resolve(ctx, state, refs, nil, anchors.load)
+	_, err := New("sqlite").Resolve(ctx, state, refs, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal("initial input", state["fromState"], "a field whose bytes are only in the anchor's state column must resolve")
 	assert.Equal("task output", state["fromChanges"])
@@ -95,7 +95,7 @@ func TestLinker_ResolveOneRoundTripPerBatch(t *testing.T) {
 	}}
 	state := workflow.State{}
 
-	err := New("sqlite").Resolve(ctx, state, Refs{"a": 7, "b": 7, "c": 9}, nil, anchors.load)
+	_, err := New("sqlite").Resolve(ctx, state, Refs{"a": 7, "b": 7, "c": 9}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(1, len(anchors.calls), "three fields across two anchors must cost ONE load, not three")
 	assert.Equal(2, len(anchors.calls[0]), "the batch asks for each DISTINCT anchor once")
@@ -118,10 +118,10 @@ func TestLinker_ResolveCachesBytesNotValues(t *testing.T) {
 	linker := New("sqlite")
 
 	first := workflow.State{}
-	err := linker.Resolve(ctx, first, Refs{"doc": 7}, nil, anchors.load)
+	_, err := linker.Resolve(ctx, first, Refs{"doc": 7}, nil, anchors.load)
 	assert.NoError(err)
 	second := workflow.State{}
-	err = linker.Resolve(ctx, second, Refs{"doc": 7}, nil, anchors.load)
+	_, err = linker.Resolve(ctx, second, Refs{"doc": 7}, nil, anchors.load)
 	assert.NoError(err)
 
 	assert.Equal(1, len(anchors.calls), "the second resolve of a settled anchor must be served from cache")
@@ -146,12 +146,12 @@ func TestLinker_ResolveAssertsOneHop(t *testing.T) {
 		7: {Refs: Refs{"doc": 3}}, // holds no bytes for `doc` - it points onward
 		3: {Changes: cols(map[string]any{"doc": "the payload"})},
 	}}
-	err := New("sqlite").Resolve(ctx, workflow.State{}, Refs{"doc": 7}, nil, anchors.load)
+	_, err := New("sqlite").Resolve(ctx, workflow.State{}, Refs{"doc": 7}, nil, anchors.load)
 	assert.Error(err)
 	assert.Contains(err.Error(), "one-hop")
 
 	// A ref at an anchor that does not exist at all is likewise an error, never a silently absent field.
-	err = New("sqlite").Resolve(ctx, workflow.State{}, Refs{"doc": 404}, nil, anchors.load)
+	_, err = New("sqlite").Resolve(ctx, workflow.State{}, Refs{"doc": 404}, nil, anchors.load)
 	assert.Error(err)
 }
 

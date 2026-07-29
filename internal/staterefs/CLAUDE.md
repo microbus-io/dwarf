@@ -114,6 +114,24 @@ other fields are free" is only true if k anchors cost one round trip rather than
 the per-anchor SUM test in `Mint` price something the reader does not do. Pinned by
 `TestLinker_ResolveOneRoundTripPerBatch`.
 
+## Two byte counts, and they are not interchangeable
+
+`Resolve` reports the bytes it **spliced into state**; the `Loader` reports the raw **columns it scanned**.
+They disagree in both directions and answer different questions, so a caller must pick deliberately:
+
+| | Loader's count | `Resolve`'s return |
+|---|---|---|
+| includes the anchor's *other* fields | yes (whole rows) | no |
+| on a resolve-cache hit | **zero** (nothing was read) | unchanged (the field is materialized either way) |
+| answers | the database's byte throughput | what the caller now HOLDS |
+
+`dwarf_state_read_bytes` wants the first - it tracks a throughput ceiling, so it must count whole columns and
+must read zero when no read happened. The engine's held-state gauge wants the second, and the cache-hit row
+is why: across a fan-out every branch resolves the same anchor set, so one miss and N-1 hits means the
+Loader's count reports a large carried document as **nothing on all but the first branch** - in precisely the
+measurement that exists to catch a large carried document. That asymmetry is the whole reason `Resolve`
+returns a count at all; every caller but the dispatch path discards it.
+
 ## One Linker per shard
 
 A `step_id` is a per-shard auto-increment, so the resolve cache's key is only unique within a shard — that is

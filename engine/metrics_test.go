@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,24 @@ func histCount(rm metricdata.ResourceMetrics, name string, attrs map[string]stri
 				matched = true
 			}
 			return total, matched
+		}
+	}
+	return 0, false
+}
+
+// gaugeValue returns the single data point of an int64 observable gauge. It takes the LAST point rather
+// than summing, because an observable gauge reports a level, not an accumulation.
+func gaugeValue(rm metricdata.ResourceMetrics, name string) (int64, bool) {
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			g, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok || len(g.DataPoints) == 0 {
+				return 0, false
+			}
+			return g.DataPoints[len(g.DataPoints)-1].Value, true
 		}
 	}
 	return 0, false
@@ -425,4 +444,95 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	orphaned, ok := sumCounter(rm, "dwarf_flows_orphaned", "workflow", "orphanmetric.verify:428/g")
 	assert.True(ok, "dwarf_flows_orphaned{workflow} should be present")
 	assert.Equal(int64(1), orphaned, "the forged orphan is counted exactly once")
+}
+
+// TestMetrics_InFlightStateGauges pins the one property that makes the in-flight state pair a RESIDENCY
+// gauge rather than another byte counter: it rises while a task holds its carrier and falls back to zero
+// when the host call returns. dwarf_state_read_bytes already reports bytes-ever-read and cannot answer
+// "how much is this replica holding right now", which is the question the crew's unbounded growth for long
+// tasks makes load-bearing - a worker inside ExecuteTask holds no connection, so nothing else bounds how
+// many carriers are live at once.
+//
+// The window asserted is the HOST CALL, not processStep: the task blocks, so the reading below is taken
+// with the engine parked in exactly the phase the gauge exists to measure.
+func TestMetrics_InFlightStateGauges(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	// Large enough that the reading cannot be confused with the empty-state floor ("{}") every flow pays.
+	payload := strings.Repeat("x", 8192)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("H")
+	g.SetEndpoint("A", "inflightstate.verify:428/a")
+	g.AddTransition("A", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("inflightstate.verify:428/g", g)
+	proxy.HandleTask("inflightstate.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	eng := NewEngineUnderTest(t)
+	eng.SetHost(proxy)
+	eng.SetMeterProvider(mp)
+	assert.NoError(eng.Startup(t.Context()))
+
+	done := make(chan *workflow.FlowOutcome, 1)
+	go func() {
+		_, outcome, err := eng.Run(ctx, "inflightstate.verify:428/g", map[string]any{"doc": payload}, nil)
+		if err != nil {
+			done <- nil
+			return
+		}
+		done <- outcome
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("task never started")
+	}
+
+	// DURING the host call: the carrier is held, so both gauges read the work in flight.
+	var rm metricdata.ResourceMetrics
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+	steps, ok := gaugeValue(rm, "dwarf_state_in_flight_steps")
+	assert.True(ok, "dwarf_state_in_flight_steps should be present")
+	assert.Equal(int64(1), steps, "exactly one task is inside a host call")
+	bytes, ok := gaugeValue(rm, "dwarf_state_in_flight_bytes")
+	assert.True(ok, "dwarf_state_in_flight_bytes should be present")
+	assert.True(bytes >= int64(len(payload)),
+		"held bytes must cover the carried payload, got %d for an %d-byte field", bytes, len(payload))
+
+	close(release)
+	select {
+	case outcome := <-done:
+		if !assert.NotNil(outcome, "Run should have succeeded") {
+			return
+		}
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+	case <-time.After(30 * time.Second):
+		t.Fatal("flow never completed")
+	}
+
+	// AFTER: the release is what distinguishes a gauge from a counter. Both must return to zero, or the
+	// bracket leaks and every reading after the first is cumulative.
+	rm = metricdata.ResourceMetrics{}
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+	steps, _ = gaugeValue(rm, "dwarf_state_in_flight_steps")
+	assert.Equal(int64(0), steps, "no task is in a host call once the flow completed")
+	bytes, _ = gaugeValue(rm, "dwarf_state_in_flight_bytes")
+	assert.Equal(int64(0), bytes, "held bytes must return to zero - a nonzero reading here is a leaked bracket")
 }

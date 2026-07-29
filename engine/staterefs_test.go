@@ -104,7 +104,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 
 	state := workflow.State{}
 	refs := staterefs.Refs{"fromState": 1, "fromChanges": 1, "shadowed": 1}
-	err = e.resolveStateRefs(ctx, db, 1, state, refs, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, state, refs, nil, "u")
 	assert.NoError(err)
 
 	// A resolved field is DECODED, exactly like one that was never ref'd: the storage encoding must never leak
@@ -118,9 +118,9 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	assert.Equal("new", shadowed, "changes shadows state - it is the newer value")
 
 	// A dangling ref is an invariant violation and must be loud, never a silently-absent field.
-	err = e.resolveStateRefs(ctx, db, 1, workflow.State{}, staterefs.Refs{"nope": 1}, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, workflow.State{}, staterefs.Refs{"nope": 1}, nil, "u")
 	assert.Error(err)
-	err = e.resolveStateRefs(ctx, db, 1, workflow.State{}, staterefs.Refs{"x": 999}, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, workflow.State{}, staterefs.Refs{"x": 999}, nil, "u")
 	assert.Error(err)
 }
 

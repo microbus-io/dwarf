@@ -40,7 +40,7 @@ It defaults to the global `otel.GetMeterProvider()` — the no-op provider unles
 OpenTelemetry SDK. The engine builds its instruments under the scope `github.com/microbus-io/dwarf`;
 service identity comes from the provider's Resource, not from per-metric attributes.
 
-The engine emits 31 instruments — 17 counters, 10 gauges, and 4 histograms. Counter instrument names carry **no** `_total`
+The engine emits 33 instruments — 17 counters, 12 gauges, and 4 histograms. Counter instrument names carry **no** `_total`
 suffix; a Prometheus exporter appends it at the scrape boundary, so the names below are what you query in
 PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried as `dwarf_flows_started_total`):
 
@@ -77,9 +77,24 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_permit_exit_wait_seconds` | histogram | `shard` | time a worker waited for a permit to RECORD a finished step; rises when completions queue behind completions. Which of the two rises says which half of the split to re-size | `dwarf_permit_exit_wait_seconds` |
 | `dwarf_permits_available` | gauge | `shard`, `role` | database-work permits free on that shard, by `role` (`enter` = work about to start, `exit` = work being recorded; each has its own reservation so neither starves the other). Sustained zero on either role means that side is the binding constraint | `dwarf_permits_available` |
 | `dwarf_workers_resident` | gauge | — | worker goroutines that exist; grows on demand, never shrinks | `dwarf_workers_resident` |
+| `dwarf_state_in_flight_bytes` | gauge | — | state payload this replica is holding across host calls right now, summed over the tasks currently inside a task call | `dwarf_state_in_flight_bytes` |
+| `dwarf_state_in_flight_steps` | gauge | — | tasks currently inside a task call — the denominator for the line above | `dwarf_state_in_flight_steps` |
 
 The counters increment inline at their event sites; the gauges are observable (async) and read engine state
 at collection time.
+
+**Read the two in-flight state gauges as a quotient, not separately.** `bytes / steps` is the mean state a
+task carries, and that is what distinguishes the two ways a replica ends up holding a lot: a few tasks each
+carrying a large document (a big mean) versus a wide fan-out of tasks each carrying a little (a small mean
+against a large count). They call for different responses — the first for narrowing what the workflow
+carries, the second for the fan-out width itself — and neither number alone tells them apart.
+
+It measures the JSON a task's state was built from, not the in-memory form, which is several times larger.
+That is deliberate: read against your runtime's heap it gives the expansion factor, and it stays comparable
+across engine versions that represent state differently. It is also the only reading that covers a cost
+nothing else reports — a task holds no database connection while it runs, so the worker pool grows freely
+for long tasks, and held state times pool size is a memory ceiling `dwarf_workers_resident` cannot show on
+its own.
 
 **Aggregating the gauges across replicas — two kinds, and mixing them up inflates your dashboard by the
 replica count:**
@@ -91,6 +106,8 @@ replica count:**
 | `dwarf_refill_tally_age_seconds` | **per-replica** (this replica's planner) | `max` |
 | `dwarf_permits_available` | **per-replica** (this replica's gate) | `sum` |
 | `dwarf_workers_resident` | **per-replica** (this replica's crew) | `sum` |
+| `dwarf_state_in_flight_bytes` | **per-replica** (this replica's in-flight tasks) | `sum` |
+| `dwarf_state_in_flight_steps` | **per-replica** (this replica's in-flight tasks) | `sum` |
 | `dwarf_steps_pending` | **cluster-wide** (queries the shared database) | `max` |
 | `dwarf_steps_oldest_pending_age_seconds` | **cluster-wide** (queries the shared database) | `max` |
 | `dwarf_task_concurrency_running` | **cluster-wide** (queries the shared database) | `max` |

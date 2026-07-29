@@ -2610,7 +2610,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 29 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 33 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
@@ -2762,7 +2762,7 @@ de-duplicates, so a name already ending in `_total` is not doubled), while the O
 instrument name verbatim. So the instruments are named `dwarf_flows_started` etc., and a Prometheus query
 references them as `dwarf_flows_started_total`. Do not bake `_total` into a counter's instrument name.
 
-**10 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
+**12 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
 time and reads engine state: in-memory for
 `dwarf_steps_queue_depth` (cache length) and `dwarf_steps_fairness_keys` (read from `planner.LastBand()`,
 which reports a NEGATIVE band for "nothing to report" - no plan yet, or an idle fleet - so an idle engine
@@ -2770,8 +2770,38 @@ never labels a series with a priority no caller can set); shard queries for `dwa
 and `dwarf_steps_oldest_pending_age_seconds` (per priority band) and `dwarf_task_concurrency_running` (running
 steps per task).
 
-**The gauges are of two kinds and they aggregate differently - do not paper over this.** `queue_depth` and
-`fairness_keys` are genuinely **per-replica** (read from this replica's memory): sum them. The other three are
+**`dwarf_state_in_flight_bytes` / `_steps` are the HELD-STATE pair, and three things about them are
+load-bearing.** Two atomics on the Engine, bracketed in `processStep` around the `ExecuteTask` call.
+
+- **The window is the HOST CALL, not `processStep`.** The carrier is live for the whole function, but only
+  across the host call is a worker parked on something unbounded while holding no connection - which is what
+  makes held state a memory question rather than a throughput one. The bracket is explicit rather than
+  deferred, for the same reason `releasePermit` is: a function-scoped defer would span the persist half. It
+  is safe unbracketed by a defer because `errors.CatchPanic` converts a host panic into a return rather than
+  unwinding past it. Pinned by `TestMetrics_InFlightStateGauges`, whose after-release assertion fails against
+  a missing subtraction (measured: 8,204 bytes still held).
+- **The ref bytes come from `resolveStateRefs`' return, NOT from `dwarf_state_read_bytes`.** The two counts
+  answer different questions and disagree in both directions: the read metric counts whole anchor ROWS (the
+  database's byte throughput) and is ZERO on a resolve-cache hit, while this needs the bytes that ended up in
+  the carrier. A fan-out resolves the same anchor for every branch - one miss, N-1 hits - so using the read
+  count would report a large carried document as nothing on all but the first branch, in the one measurement
+  the gauge exists to make. This is why `staterefs.Linker.Resolve` returns a materialized-bytes count at all;
+  every caller but the dispatch path discards it.
+- **It measures the WIRE form, and that is the point, not a limitation.** The decoded maps are what occupy
+  the heap, and their size cannot be had cheaply (re-marshalling costs a full encode per dispatch and still
+  reports wire size; walking the structure is expensive and approximate). Measuring the input bytes makes the
+  gauge *invariant to how state is represented in memory*, so read against the Go heap it yields the decode
+  expansion factor - and a change to that representation shows up as **gauge flat, heap down**, which is
+  strictly stronger evidence than a single number moving. A gauge that fell along with the heap could not
+  distinguish "we removed the expansion" from "we did less work".
+
+They also close a blind spot that predates any of this: `SetWorkers`' own rationale concedes that "the
+in-flight state maps are a cost the engine cannot see", and the permits let the crew grow to thousands of
+goroutines for long tasks - so held state x crew size is a memory ceiling nothing else reports.
+
+**The gauges are of two kinds and they aggregate differently - do not paper over this.** `queue_depth`,
+`fairness_keys` and the two `state_in_flight` gauges are genuinely **per-replica** (read from this replica's
+memory): sum them. The three query-backed ones are
 **cluster-wide** by construction - they are computed by querying the SHARED shard databases, so every replica
 observes the *same* number. Summing them multiplies by the replica count (a 1,000-step backlog reads as 3,000
 on three replicas; a summed `oldest_pending_age` is meaningless outright), so they aggregate with `max`/`avg`.

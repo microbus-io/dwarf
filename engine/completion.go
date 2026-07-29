@@ -133,7 +133,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 		// flow would dangle, so the terminal merge always materializes, whatever it costs on this one row.
 		// It is not a regression either: a large field surviving to the end is copied into final_state today.
 		// resolveStateRefs mutates the state map in place, so it gets the live map.
-		if err := e.resolveStateRefs(ctx, db, shardNum, baseState, baseRefs, nil, workflowURL); err != nil {
+		if _, err := e.resolveStateRefs(ctx, db, shardNum, baseState, baseRefs, nil, workflowURL); err != nil {
 			return nil, 0, false, errors.Trace(err)
 		}
 
@@ -269,7 +269,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	spawnChanges, _ := workflow.NewState(spawnChangesJSON)
 	// FLATTEN: final_state is a flow-boundary value, so everything the spawn carried by reference is materialized
 	// here - unlike the fan-in, which may pass a carried ref through. resolveStateRefs mutates the map in place.
-	err = e.resolveStateRefs(ctx, db, shardNum, spawnState, staterefs.Parse(spawnRefsJSON), nil, workflowURL)
+	_, err = e.resolveStateRefs(ctx, db, shardNum, spawnState, staterefs.Parse(spawnRefsJSON), nil, workflowURL)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

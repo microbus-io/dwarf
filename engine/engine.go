@@ -210,6 +210,19 @@ type Engine struct {
 	// can be re-derived whenever a shard's pool changes - the ceiling is a function of the pool.
 	shardRTTMs map[int]float64
 
+	// inFlightStateBytes / inFlightStateSteps are the state payload this replica is holding across host
+	// calls RIGHT NOW, and how many carriers hold it - the two halves of dwarf_state_in_flight_bytes and
+	// _steps. Maintained by processStep around the ExecuteTask call only (see holdState).
+	//
+	// They measure the JSON the carrier was built FROM, not the decoded maps that actually occupy the
+	// heap - the decoded size cannot be had cheaply (re-marshalling costs a full encode per dispatch and
+	// still reports wire size; walking the structure is expensive and approximate). That is the right
+	// proxy precisely BECAUSE it is invariant to how state is represented in memory: read against the Go
+	// heap it yields the decode expansion factor, which is the quantity every held-state decision turns on
+	// and which no instrument currently reports.
+	inFlightStateBytes atomic.Int64
+	inFlightStateSteps atomic.Int64
+
 	// Candidate supply: one piston per shard, each cycling its own database on its own clock with no
 	// barrier against its peers. They share the planner (which is what a cross-shard barrier used to be -
 	// each shard's tally retained, so every shard plans against the merged picture without waiting for

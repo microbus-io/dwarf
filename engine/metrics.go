@@ -176,6 +176,12 @@ func (e *Engine) initMetrics() error {
 	permitsAvail := gauge("dwarf_permits_available", "Per-replica, per-shard, BY ROLE (enter/exit): database-work permits currently free. Work about to start and work being recorded draw on separate reservations, each a fixed multiple of that shard's connection pool, so neither can starve the other. It bounds how many workers may be in a step's database phases at once, which is what lets the worker crew grow for long tasks without the growth becoming pool contention. Sustained zero on a role means that half is the binding constraint - read the matching wait histogram to see how long its callers are actually queueing, since an instantaneous sample cannot tell a reservation that is saturated all window from one that is idle. Sustained near-full means neither is binding. A NEGATIVE value is only ever a live resize that shrank a ceiling below what is currently held; it self-corrects as those holders release.", "")
 	workersResident := gauge("dwarf_workers_resident", "Per-replica: worker goroutines that exist. It only ever grows (nothing retires a worker) and is bounded by the lease-margin ceiling. Read against dwarf_permits_available to tell the two long-task regimes apart: a crew far above the permit count with permits free is serving long tasks correctly, while a crew pinned at the ceiling is the one to alarm on. Sum across replicas.", "")
 	peerBlind := gauge("dwarf_peer_blind_seconds", "Per-replica, per-shard: how long since that shard's registry was last read successfully. Zero on a healthy Sonar. Past two read cadences the replica is BLIND there - it holds its last known fleet (the safe direction for pools) and stops partitioning that shard's candidates (the safe direction for work), so a nonzero value explains both at once and is the first thing to check when a shard's counts look frozen.", "s")
+	// The two in-flight state gauges are ONE reading and are near-useless apart: the quotient is the mean
+	// state a task carries, and that is what says which of the two multipliers is loading this replica -
+	// a few carriers each holding a large document, or a wide fan-out of carriers each holding a little.
+	// They point at different work, and no single number distinguishes them.
+	inFlightBytes := gauge("dwarf_state_in_flight_bytes", "Per-replica: state payload this replica is holding across host calls right now - the JSON each in-flight task's carrier was built from, summed over the tasks currently inside ExecuteTask. Divide by dwarf_state_in_flight_steps for the mean state a task carries: a large mean says state SIZE is what loads this replica, a small mean against a large count says fan-out WIDTH is. It measures the wire form, not the decoded maps that occupy the heap - read against Go heap to get the decode expansion factor, which is the number that says whether holding state in decoded form is worth what it costs. This is the one instrument for a cost the engine otherwise cannot see at all: workers hold no connection during a host call, so the crew grows freely for long tasks, and held state times crew size is the memory ceiling nothing else reports. Sum across replicas.", "By")
+	inFlightSteps := gauge("dwarf_state_in_flight_steps", "Per-replica: tasks currently inside a host call - the denominator for dwarf_state_in_flight_bytes. It is NOT dwarf_task_concurrency_running (cluster-wide, per task_url, read from the shared database) nor dwarf_workers_resident (workers that EXIST, most of which are idle or in a database phase); neither can serve as this denominator. Sum across replicas.", "")
 
 	reg, err := meter.RegisterCallback(
 		func(ctx context.Context, o metric.Observer) error {
@@ -188,12 +194,14 @@ func (e *Engine) initMetrics() error {
 				peerReplicas: peerReplicas,
 				peerBlind:    peerBlind,
 				tallyAge:     tallyAge,
-				permitsAvail: permitsAvail,
-				workersRes:   workersResident,
+				permitsAvail:  permitsAvail,
+				workersRes:    workersResident,
+				inFlightBytes: inFlightBytes,
+				inFlightSteps: inFlightSteps,
 			})
 		},
 		queueDepth, stepsPending, oldestAge, fairnessKeys, concurrency, peerReplicas, peerBlind, tallyAge,
-		permitsAvail, workersResident,
+		permitsAvail, workersResident, inFlightBytes, inFlightSteps,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -224,6 +232,10 @@ type observableGauges struct {
 	tallyAge     metric.Float64ObservableGauge
 	permitsAvail metric.Int64ObservableGauge
 	workersRes   metric.Int64ObservableGauge
+	// The two in-flight state gauges are one reading; see their descriptions for why the quotient, not
+	// either alone, is what an operator reads.
+	inFlightBytes metric.Int64ObservableGauge
+	inFlightSteps metric.Int64ObservableGauge
 }
 
 // observeGauges is the observable-gauge callback. It reads in-memory engine state and queries the
@@ -236,6 +248,12 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	if e.crew != nil {
 		o.ObserveInt64(g.workersRes, int64(e.crew.Resident()))
 	}
+
+	// Read as a pair, in this order, so a collection landing mid-dispatch cannot report bytes against a
+	// count that already includes the carrier those bytes belong to - the quotient is the whole point, and
+	// it is only ever read down (a low mean), never up. Neither is a query.
+	o.ObserveInt64(g.inFlightBytes, e.inFlightStateBytes.Load())
+	o.ObserveInt64(g.inFlightSteps, e.inFlightStateSteps.Load())
 
 	// The permit counts, taken as ONE snapshot rather than a read per shard: they are the quantity a storm
 	// moves fastest, and per-shard reads would report different instants as a mixed picture.
