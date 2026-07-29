@@ -95,6 +95,32 @@ To put load on the scan path, work must be created by a replica that cannot disp
 **Deep backlog needs `-fanout-width` or open-loop.** A linear flow holds one pending step at a time, so a
 closed-loop generator's backlog can never exceed its concurrency.
 
+**`state` and `carry` measure opposite things, and using the wrong one answers the wrong question.**
+`state` REWRITES its payload every step, so every copy is a legitimate change and nothing can ever be
+stored by reference - it is the MB/s instrument and the worst case for state refs. `carry`/`carryfanout`
+write the payload once (as the flow's initial state, so the ENTRY step anchors it) and thereafter only
+carry it, which is the shape refs exist for and the only shape in which their win is visible. Measured on
+local SQLite: `carry -payload 32768 -linear-steps 6` stores **1.01x payload per flow against a naive 6x**,
+and `carryfanout -fanout-width 8` stores **1.07x against a naive 17x**.
+
+**Read the carry workloads off `dwarf_state_write_bytes{column=state}`, NOT off `MB/s`.** Their tasks
+declare almost no write volume of their own - that is the entire point, and `bytesWritten` is deliberately
+left untouched, so the reported MB/s is 0.00 and means nothing. The gap between what the task wrote and what
+the engine wrote *is* the measurement. `dwarf_state_read_bytes{column=state_ref}` reading nonzero is the
+confirmation that refs are actually being resolved rather than the payload having quietly gone missing.
+
+**The carry tasks self-validate, and a run that loses the document fails LOUDLY.** Every carry task asserts
+the document is still present (and, under `-carry-read`, still the right size). This is not decoration: a
+carried field silently vanishing past a fan-in is a real failure mode the ref carry-forward and the anchor
+pin exist to prevent, and it would otherwise present as an *excellent* byte number - the harness would be
+measuring data loss and reporting it as a saving. Verified by removing the document from the initial state:
+the run comes back `valid: false` with 1,425 errors rather than a flattering number.
+
+**`-carry-read` switches how state is HELD, not how much is stored.** It makes every task read the carried
+document instead of passing it along. Storage is identical in both arms, so a byte number that moves with
+this flag means the workload is not carrying what it thinks it is; what it does move is the in-flight
+held-state gauges (`dwarf_state_in_flight_bytes` / `_steps`).
+
 ## Reading an artifact
 
 - **Counters carry attributes** as `name|k=v` alongside the bare-name total. Both are emitted: the total is

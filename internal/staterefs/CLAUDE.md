@@ -173,10 +173,13 @@ the only dialect-dependent term in the policy.
 
 ## Open follow-ups
 
-- **A carry workload for `bench/`.** The existing `state` workload *rewrites* its payload every step — the
-  worst case for refs, where every copy is a legitimate change and nothing ever mints. Measuring the win needs
-  a workload that writes a large field once and *carries* it through D steps, plus a fan-out variant for the
-  N·D case.
+- ~~A carry workload for `bench/`.~~ **Built** — `-workload carry` (writes the payload once as the flow's
+  initial state, then carries it through `-linear-steps` hops) and `-workload carryfanout` (the N·D case:
+  `-fanout-width` branches, two steps deep, all carrying one document anchored at the entry/spawn step).
+  Local SQLite at 32KB: **1.01x payload stored per flow against a naive 6x** linear, **1.07x against 17x** at
+  width 8. The `state` workload remains the opposite instrument — it rewrites its payload every step, so
+  nothing can ever mint. Read these off `dwarf_state_write_bytes{column=state}`; their tasks declare almost
+  no write volume, so MB/s is meaningless for them by design.
 - **Whether `maxAnchors` ever binds** is unmeasured (how many large fields are concurrently live in a
   realistic workflow). The engine's byte counters are the instrument.
 - **forEach item refs** — a branch pointing at its element inside the array's anchor instead of storing it

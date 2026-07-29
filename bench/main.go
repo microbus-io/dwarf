@@ -75,8 +75,8 @@ func main() {
 func run() error {
 	var (
 		dsns         shardFlags
-		workloadName = flag.String("workload", "linear", "workload: linear, fanout, state, llm, mixed")
-		payload      = flag.Int("payload", 64*1024, "state-workload payload bytes written per step")
+		workloadName = flag.String("workload", "linear", "workload: linear, fanout, state, carry, carryfanout, llm, mixed")
+		payload      = flag.Int("payload", 64*1024, "payload size in bytes - rewritten every step by `state`, written once and then carried by `carry`/`carryfanout`")
 		taskDelay    = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
 		taskJitter   = flag.Duration("task-jitter", 0, "additional uniform random [0,d) per-task sleep - de-synchronizes fan-out siblings so a cohort's branches do not all complete at once")
 		// 0 on either override means "let the engine derive it" - the self-tuned path a production host
@@ -107,7 +107,8 @@ func run() error {
 		volumeCheckpt   = flag.Int("volume-checkpoint", 0, "probe every this many step rows during -volume (0 = one fifth of the target)")
 		fairnessKeys    = flag.Int("fairness-keys", 1, "spread flows across this many distinct fairness keys (1 = all on the single default key, the degenerate case for the refiller's per-key scan bound)")
 		linearStepsFlag = flag.Int("linear-steps", linearSteps, "linear workload chain length; sweeping it separates a slow replica's share of STEPS from its share of FLOWS (see workloads.go)")
-		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout workload - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
+		fanOutWidth     = flag.Int("fanout-width", 16, "forEach branch count for the fanout and carryfanout workloads - the knob that decouples pending-step backlog from submitter concurrency (backlog ~= concurrency x width)")
+		carryRead       = flag.Bool("carry-read", false, "carry workloads: make every task READ the carried document instead of only passing it along. Storage is identical either way, so this is the arm switch for how carried state is HELD, not how much is stored")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
 	flag.Parse()
@@ -159,7 +160,7 @@ func run() error {
 		taskJitter:   *taskJitter,
 		bytesWritten: sharedBytes,
 	}
-	workloads := registerWorkloads(regHost, *payload, *fanOutWidth, *linearStepsFlag)
+	workloads := registerWorkloads(regHost, *payload, *fanOutWidth, *linearStepsFlag, *carryRead)
 	pick, err := chooseWorkload(workloads, *workloadName)
 	if err != nil {
 		return err
@@ -256,6 +257,11 @@ func run() error {
 			"workload":       *workloadName,
 			"payloadBytes":   *payload,
 			"taskDelayMs":    taskDelay.Milliseconds(),
+			// The workload's own shape knobs. Without them a -fanout-width or -linear-steps sweep produces
+			// artifacts that are byte-identical in configuration and wildly different in what they measured.
+			"fanOutWidth": *fanOutWidth,
+			"linearSteps": *linearStepsFlag,
+			"carryRead":   *carryRead,
 			"workers":        *workers,
 			"virtualCPUs":    *vcpus,
 			"maxOpenConns":   *maxOpenConns,
