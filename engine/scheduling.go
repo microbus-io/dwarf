@@ -44,6 +44,13 @@ const (
 	// because the connection-per-vCPU RATIO is no longer a single number (see connsPerVCPUFor), so dividing
 	// by it would silently mean a different thing on either side of that threshold - and the per-connection
 	// drain does not vary with how many connections the pool was allotted.
+	//
+	// It is flat across connection counts, instance sizes and backlog volumes on a disk with IOPS headroom,
+	// which is the deployment the operator guidance asks for - NOT across disks. A throttled disk drains
+	// slower, so its optimum interval is LONGER: an interval crawl left to find each instance's own optimum
+	// settled at ~24ms on an IOPS-rich instance and ~51ms on a throttled one, and a laptop Postgres wanted
+	// 170-280ms. The constant is deliberately the healthy-disk value, because being short there costs only
+	// wasted scans while being long starves dispatch (~50% of throughput at the old 141ms).
 	sustainedDrainPerConn = 120
 	// refillIntervalCap bounds priority latency, and is the only thing that does. A better band arriving
 	// here does not preempt - Offer appends it at the tail - so it becomes servable when a cycle plans it,
