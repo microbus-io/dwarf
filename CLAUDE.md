@@ -139,7 +139,9 @@ matching one before working there:**
 
 - **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`internal/migrations/CLAUDE.md`)
 - **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
-- **State delete:** `flow.Del`/`Set(k,nil)` writes a JSON `null` tombstone. `State.Merge`/`MergeReduce`
+- **State delete:** `flow.Del`/`Set(k,nil)` writes a JSON `null` tombstone, which has **two spellings** - a
+  Go nil, and the raw bytes `null` on a field still held as JSON - and `isCleared` must recognize both or a
+  delete read back from a column silently stops taking effect. `State.Merge`/`MergeReduce`
   *preserve* it (accumulation); `State.DelNils` *enacts* it (materialization) - the engine accumulates the
   changes delta with the tombstone intact, then `DelNils` when the delta folds onto state. A cleared value on
   a *reducer*-managed field is *ignored* (the reducer's identity), never dropped. (`workflow/CLAUDE.md`; enforced

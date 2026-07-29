@@ -278,8 +278,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	}
 	graph := cg.graph
 
-	// Build the Flow carrier
-	state, _ := workflow.NewState(stateJSON)
+	// Build the Flow carrier. The state column is held as RAW JSON per field and decoded only if the task
+	// actually reads that field - a step's state is a full input snapshot, so most fields on most steps are
+	// carried rather than read, and decoding them costs several times their byte length for the whole
+	// duration of the host call. StateFromCanonicalJSON rather than NewState because these bytes are the
+	// engine's own, hence canonical; caller-supplied JSON must keep going through NewState's decode.
+	state, _ := workflow.StateFromCanonicalJSON(stateJSON)
 	// Materialize any field this step carries BY REFERENCE (see staterefs.go). Resolving here, once, is what
 	// keeps the ref encoding out of everything downstream: the carrier, `when` evaluation, forEach expansion,
 	// the transport to a remote task, and the transition machinery all work on literals and never learn refs
@@ -292,7 +296,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
 	}
-	priorChanges, _ := workflow.NewState(priorChangesJSON)
+	priorChanges, _ := workflow.StateFromCanonicalJSON(priorChangesJSON)
 	// The carrier's input is state + priorChanges, materialized: Merge accumulates (keeping a prior
 	// delete's tombstone), then DelNils enacts it so the carrier sees the key absent. Clone so `state`
 	// stays the pristine resolved snapshot the successor mint re-uses below.

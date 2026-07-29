@@ -60,6 +60,64 @@ a branch that `flow.Del`s a reduced field never wipes the cohort's contributions
 is not a supported way to clear it - a delete is a *replace*-field concern. Pinned by
 `fixtures/reducerdeleteflow_test.go`.
 
+### `State` is a struct, and a field is held as RAW JSON until something reads it
+
+`State` wraps `map[string]any` in a struct, and a value in that map is EITHER a decoded Go value OR a
+`json.RawMessage`. A field read from a payload column arrives raw and is decoded only if a task actually
+reads it. A step's `state` is a full input snapshot, so most fields on most steps are carried rather than
+read, and decoding a carried field costs several times its byte length for the whole duration of the host
+call - the phase where a worker holds no connection and the crew may grow to thousands.
+
+**Measured:** interleaved 3-rep A/B on local Postgres, `-workload carry -payload 65536 -task-delay 200ms
+-concurrency 16`, structured payload: mean heap **32.2 -> 26.6 MB (-17.5%)**, peak **52.2 -> 47.0 MB
+(-10.0%)**, throughput neutral (+4%, inside noise, with RTT slightly favouring the *decoded* arm so the
+result is not flattered). Every rep moved the same way. `dwarf_state_in_flight_bytes` is unchanged by
+construction - it counts the wire form - which is what makes it the denominator rather than the result.
+
+**The struct is what makes any of this possible.** `State` used to be `type State map[string]any` with its
+map-ness documented as idiomatic, so `state["x"]` handed back whatever was in the slot; a raw value would
+have leaked on the first index. Every access now goes through a method and every accessor materializes, so
+the storage form is unobservable - which is also why the only test that can assert "still raw" is white-box.
+
+**Five constraints hold this up. Four are silent if broken.**
+
+1. **The raw slot is only ever filled from CANONICAL bytes.** Reducers compare marshalled bytes, and Go
+   marshals a map with sorted keys but a **struct in declaration order** - so a value that never went
+   through a decode can carry a second, byte-different spelling of itself, and `union` keeps both. That is
+   the `Continue`-`additionalState` bug (`engine/CLAUDE.md`) re-entering by a new door. `Set`/`NewState`
+   therefore keep their JSON round trip; `StateFromCanonicalJSON`/`SetCanonicalJSON` are the *engine's*
+   constructors for bytes it wrote itself, and their godoc states the warranty. **Do not "optimize" `Set`
+   into `SetCanonicalJSON`.** Pinned by `TestState_SetCanonicalJSONIsNotAFastPathForSet`.
+2. **A read must never write.** Reads do NOT memoize the decoded value back into the map, so a field read
+   twice decodes twice. That is deliberate: memoizing makes a READ a map write, and a `State` is read
+   concurrently in at least one place (baggage on a context), where a concurrent map write is an
+   unrecoverable runtime **throw** that `errors.CatchPanic` cannot contain - it takes the replica down. The
+   cost is smaller than it looks: `Get` on a raw field is **cheaper than before raw storage existed**,
+   because the marshal half of its old marshal-then-unmarshal round trip is gone.
+3. **A tombstone has TWO spellings.** A delete is a JSON null; held raw it is the four bytes `null`, not a
+   Go nil, so `isCleared` tests both. Missing the raw one is silent and nasty - a delete read back from a
+   `changes` column simply stops taking effect (`DelNils` leaves it, `Has` reports the field present) with
+   nothing logged. Pinned by `TestState_RawTombstoneIsCleared`, which fails against a Go-nil-only check.
+4. **Reducers type-assert on Go values, so a fold materializes both operands.** The REPLACE path - the
+   default and the overwhelming majority - assigns without touching either, so a raw value crosses an
+   ordinary merge untouched. Only a registered combining reducer pays. Pinned by
+   `TestState_ReducerFoldsRawOperands`, which fails with `unsupported numeric type json.RawMessage`.
+5. **`Has` and `Contains` are different questions and the mint needs both.** `Has` = present AND holds a
+   value (a cleared slot reads absent); `Contains` = present, tombstone included. They differ on exactly one
+   case, a delete in transit, and `Mint`'s carry-forward wants `Contains` - with `Has` it silently drops
+   carried fields.
+
+**`FieldJSON` is where the win is collected on the write side.** `Mint` sizes every field by its marshalled
+length; `FieldJSON` hands a raw field's bytes straight back, so a carried payload is never expanded merely
+to be measured. A future reducer that can fold bytes directly (append/union onto an array) would plug in
+the same way - designed, not built, because union's dedup leans on constraint 1 above.
+
+**A blob payload cannot measure any of this.** A JSON string decodes to a Go string of about the same size,
+so an opaque payload expands ~1x and a measurement taken with one reads flat however state is represented.
+Structured data is where the expansion lives: measured against `encoding/json`, 800 small records (50.3KB of
+JSON) occupy 340.7KB decoded - **6.8x** - because every element costs an interface, a boxed float64 and a
+map entry. Element count drives it, not byte count. See `bench/CLAUDE.md`.
+
 ### Numbers are float64-domain; two unstorable values are a KNOWN, UNGUARDED punt
 
 **Invariant (still holds): every number the engine itself produces round-trips exactly through a `float64`.**

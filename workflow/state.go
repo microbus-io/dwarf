@@ -176,7 +176,7 @@ func (s State) Clear() {
 func (s State) All() iter.Seq2[string, any] {
 	return func(yield func(string, any) bool) {
 		for k, v := range s.d {
-			if !yield(k, v) {
+			if !yield(k, materialize(v)) {
 				return
 			}
 		}
@@ -200,7 +200,9 @@ func (s State) Names() []string {
 // code, which need no copy.
 func (s State) Map() map[string]any {
 	out := make(map[string]any, len(s.d))
-	maps.Copy(out, s.d)
+	for k, v := range s.d {
+		out[k] = materialize(v)
+	}
 	return out
 }
 
@@ -208,6 +210,55 @@ func (s State) Map() map[string]any {
 // zero. It is what lets a State field be omitted from an encoded struct via the omitzero tag.
 func (s State) IsZero() bool {
 	return s.d == nil
+}
+
+// materialize returns v as a decoded Go value: raw JSON is decoded, anything else is already decoded.
+// A field is decoded on every read rather than memoized, deliberately - memoizing would make a READ a map
+// write, and State is read concurrently in at least one place (baggage on a context), where a concurrent
+// map write is an unrecoverable runtime throw rather than a catchable panic. The repeat-read cost this
+// leaves on the table is small: Get on a raw field is CHEAPER than it was before raw storage existed,
+// because the marshal half of its old marshal-then-unmarshal round trip is gone.
+func materialize(v any) any {
+	raw, ok := v.(json.RawMessage)
+	if !ok {
+		return v
+	}
+	var out any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		// Unreachable for a field that came from a column: it was written by encoding/json. A corrupt slot
+		// reads as cleared rather than propagating an error into every reader's signature.
+		return nil
+	}
+	return out
+}
+
+// FieldJSON returns the field's value as JSON bytes, or nil if the field is absent. It is the accessor for
+// a caller that wants bytes rather than a Go value - sizing a field, splicing it into a document - and it
+// is where holding a field raw actually pays: the bytes are handed straight back, with no decode and no
+// re-encode.
+func (s State) FieldJSON(name string) ([]byte, error) {
+	v, ok := s.d[name]
+	if !ok {
+		return nil, nil
+	}
+	if raw, isRaw := v.(json.RawMessage); isRaw {
+		return raw, nil
+	}
+	b, err := json.Marshal(v)
+	return b, errors.Trace(err)
+}
+
+// SetCanonicalJSON stores a field as pre-encoded JSON, WITHOUT decoding it. The bytes must already be
+// canonical - produced by marshalling a decoded value, which is what every value the engine has written to
+// a column is. It exists so a large field can be carried through a step without ever being expanded.
+//
+// This is not an optimization of Set and must not be used as one. Set round-trips through JSON precisely to
+// canonicalize, and that canonicalization is load-bearing: reducers compare MARSHALLED BYTES, and Go
+// marshals a map with sorted keys but a STRUCT in declaration order, so a value that never went through a
+// decode can carry a second, byte-different spelling of itself. Two such spellings make a union reducer
+// keep both. Pass caller-supplied bytes to Set (or NewState), never here.
+func (s State) SetCanonicalJSON(name string, canonical json.RawMessage) {
+	s.d[name] = canonical
 }
 
 // Get unmarshals the field named name into target, a non-nil pointer, coercing through JSON (so a stored
@@ -220,9 +271,13 @@ func (s State) Get(name string, target any) (ok bool, err error) {
 	if !exists || isCleared(v) {
 		return false, nil
 	}
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return false, errors.Trace(err)
+	raw, isRaw := v.(json.RawMessage)
+	if !isRaw {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return false, errors.Trace(err)
+		}
+		raw = b
 	}
 	if err := json.Unmarshal(raw, target); err != nil {
 		return false, errors.Trace(err)
@@ -315,14 +370,14 @@ func (s State) Contains(name string) bool {
 // cleared slot returns (nil, true) - present, holding nothing - which Contains agrees with and Has does not.
 func (s State) Lookup(name string) (any, bool) {
 	v, ok := s.d[name]
-	return v, ok
+	return materialize(v), ok
 }
 
 // Value returns the stored value for name, or nil if absent - Lookup without the presence flag. The value
 // is in its stored JSON-canonical form, so a number is a float64 and an object a map[string]any; prefer Get
 // or a typed getter when the target type is known, which coerce instead of asserting.
 func (s State) Value(name string) any {
-	return s.d[name]
+	return materialize(s.d[name])
 }
 
 // Parse unmarshals the state's fields into target (a struct pointer, matched by JSON tag, or any other
@@ -388,7 +443,7 @@ func (s State) MergeReduce(incoming State, reducers map[string]Reducer) error {
 		if isCleared(v) {
 			continue
 		}
-		result, err := r.Reduce(s.d[k], v)
+		result, err := r.Reduce(materialize(s.d[k]), materialize(v))
 		if err != nil {
 			return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
 		}

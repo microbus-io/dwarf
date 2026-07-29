@@ -228,7 +228,7 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 	// the cost state refs exists to avoid. Only fields headed for INLINE storage (or new-ref candidacy) are
 	// marshalled here.
 	raw := make(map[string]json.RawMessage, merged.Len())
-	for k, v := range merged.All() {
+	for _, k := range merged.Names() {
 		if !inlineOnly[k] {
 			// A field the task did not rewrite, and which arrived as a ref, KEEPS that ref - it is never
 			// re-minted against this step, whose row does not hold the bytes. This is the one-hop guard, and it
@@ -240,7 +240,9 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 				}
 			}
 		}
-		data, err := json.Marshal(v)
+		// FieldJSON, not a marshal of the decoded value: a field still held as raw bytes is handed back
+		// untouched, so the common case (a carried payload) is never expanded to be measured.
+		data, err := merged.FieldJSON(k)
 		if err != nil {
 			return nil, nil, errors.Trace(err)
 		}
@@ -434,12 +436,16 @@ func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, w
 	}
 	materialized := 0
 	for field, value := range values {
-		// State.Set DECODES the bytes into a fresh copy, so a resolved field is indistinguishable from one
-		// never ref'd (no RawMessage leaks into a caller's state), and two fan-out branches resolving the
-		// same anchor never share a decoded map or slice.
-		if err := state.Set(field, value); err != nil {
-			return 0, errors.Trace(err)
-		}
+		// The anchor's bytes are spliced in AS BYTES and decoded only if something reads the field. This is
+		// the case refs exist for - a large payload carried across a wide fan-out - so decoding here would
+		// hand back the win at the point of collecting it: N branches resolving one anchor would produce N
+		// decoded copies, live at once, of a document most of them never look at.
+		//
+		// Sharing one immutable byte slice across those branches is safe in a way sharing a decoded value is
+		// not: bytes cannot be mutated in place by one branch's task, whereas a shared map or slice can, and
+		// each branch's own read decodes into its own copy. The encoding still never escapes - every State
+		// accessor materializes.
+		state.SetCanonicalJSON(field, value)
 		materialized += len(value)
 	}
 	return materialized, nil

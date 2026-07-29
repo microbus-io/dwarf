@@ -80,10 +80,18 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
 5. **`inlineExcessAnchors` must never drop an un-inlineable carried ref.** Its literal is not in `merged` to
    inline back, so dropping it would delete the field outright. Such an anchor is *pinned* past the
    `maxAnchors` cap — correctness over the perf bound.
-6. **The cache holds BYTES, never decoded values.** A decoded value would alias one map/slice across the
-   fan-out branch goroutines about to hand it to concurrent tasks; each `State.Set` decodes its own copy, so a
-   resolved field is indistinguishable from one never ref'd. Pinned by
-   `TestLinker_ResolveCachesBytesNotValues`, which mutation-fails against a decoded-value cache.
+6. **The cache holds BYTES, never decoded values — and `Resolve` now splices those bytes STRAIGHT INTO
+   state rather than decoding them.** `State` holds a field as raw JSON until something reads it
+   (`SetCanonicalJSON`), so resolving a ref costs the field's byte length instead of the several times that
+   its decoded Go form occupies. This is where the two designs meet: refs already collapse N branches onto
+   one cached copy of the bytes, and not decoding at the splice is what stops those N branches from
+   re-inflating it N times anyway — the read multiplier the ref design deliberately left alone.
+
+   Sharing one immutable byte slice across branches is safe in a way sharing a decoded value is not: bytes
+   cannot be mutated in place by a task, and each branch's own read decodes into its own copy. So the
+   anti-aliasing guarantee is unchanged and now rests on immutability rather than on copying.
+   `TestLinker_ResolveCachesBytesNotValues` still pins it (two resolves must not share a mutable value) and
+   still mutation-fails against a decoded-value cache.
 
 ## `inlineOnly` is NOT "put a nil in changes"
 

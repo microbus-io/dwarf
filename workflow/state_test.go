@@ -454,3 +454,137 @@ func TestState_MarshalZeroValue(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal("{}", string(data))
 }
+
+// TestState_RawFieldIsNotDecodedUntilRead pins the property the whole raw-storage design exists for: a
+// field that nothing reads is never expanded into a Go value, and one that IS read is expanded without
+// disturbing what is stored.
+//
+// White-box on purpose. The public surface deliberately cannot tell the two storage forms apart - every
+// accessor materializes - so a black-box test of "is it still raw" is impossible to write, which is exactly
+// the encapsulation the struct was introduced for.
+func TestState_RawFieldIsNotDecodedUntilRead(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	s, err := StateFromCanonicalJSON([]byte(`{"doc":{"page":"one"},"n":3,"s":"x"}`))
+	assert.NoError(err)
+
+	for _, k := range []string{"doc", "n", "s"} {
+		_, isRaw := s.d[k].(json.RawMessage)
+		assert.True(isRaw, "field %q must be held raw until something reads it", k)
+	}
+
+	// Reading materializes for the CALLER without materializing the STORAGE - there is no memoization, so a
+	// read cannot turn into a map write (which would be an unrecoverable throw under concurrent access).
+	assert.Equal(3, s.GetInt("n"))
+	assert.Equal("x", s.GetString("s"))
+	_, stillRaw := s.d["n"].(json.RawMessage)
+	assert.True(stillRaw, "a read must not rewrite the stored form")
+
+	// A read hands back a decoded value, never the encoding.
+	_, leaked := s.Value("doc").(json.RawMessage)
+	assert.False(leaked, "the storage form must never escape through an accessor")
+	doc, ok := s.Value("doc").(map[string]any)
+	assert.True(ok)
+	assert.Equal("one", doc["page"])
+
+	// Two reads of one raw field yield independent values, so a caller mutating what it read cannot corrupt
+	// the State or another reader - the same guarantee decoding per branch gave.
+	a, _ := s.Value("doc").(map[string]any)
+	b, _ := s.Value("doc").(map[string]any)
+	a["page"] = "mutated"
+	assert.Equal("one", b["page"], "two reads of a raw field must not share a decoded map")
+}
+
+// TestState_RawTombstoneIsCleared pins hazard 3. A delete is recorded as a JSON null; held raw it is the
+// four bytes `null` rather than a Go nil, and a cleared-check that only knows Go nil lets a delete read
+// back from a column silently stop taking effect - DelNils leaves it and Has reports the field present.
+// Fails against isCleared(v) == (v == nil).
+func TestState_RawTombstoneIsCleared(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	s, err := StateFromCanonicalJSON([]byte(`{"gone":null,"kept":1}`))
+	assert.NoError(err)
+
+	assert.False(s.Has("gone"), "a raw JSON null is a tombstone, not a value")
+	assert.True(s.Contains("gone"), "the delta still speaks about the field")
+	assert.True(s.Has("kept"))
+
+	// Merge preserves the tombstone (accumulation); DelNils enacts it (materialization).
+	base, _ := NewState("gone", "was here", "other", 2)
+	assert.NoError(base.Merge(s))
+	assert.True(base.Contains("gone"), "Merge accumulates - the pending delete survives")
+	base.DelNils()
+	assert.False(base.Contains("gone"), "DelNils enacts the delete")
+	assert.True(base.Has("kept"))
+	assert.True(base.Has("other"))
+}
+
+// TestState_ReducerFoldsRawOperands pins hazard 4. The reducers type-assert on Go values, so a fold has to
+// materialize both sides; a raw base or a raw incoming must combine exactly as decoded ones do.
+func TestState_ReducerFoldsRawOperands(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	base, err := StateFromCanonicalJSON([]byte(`{"total":10,"list":["a"]}`))
+	assert.NoError(err)
+	incoming, err := StateFromCanonicalJSON([]byte(`{"total":5,"list":["b"]}`))
+	assert.NoError(err)
+
+	err = base.MergeReduce(incoming, map[string]Reducer{"total": ReducerAdd, "list": ReducerAppend})
+	assert.NoError(err)
+	assert.Equal(15, base.GetInt("total"), "a raw base and a raw incoming must add")
+	assert.Equal([]string{"a", "b"}, base.GetStrings("list"))
+}
+
+// TestState_CanonicalJSONRoundTripsUntouched pins that carrying a field costs nothing and changes nothing:
+// bytes in, the same bytes out, with no decode/re-encode in between.
+func TestState_CanonicalJSONRoundTripsUntouched(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	// Canonical: sorted keys at every level, which is what marshalling a decoded value produces.
+	const canonical = `{"a":{"x":1,"y":[1,2,3]},"b":"str","c":null}`
+	s, err := StateFromCanonicalJSON([]byte(canonical))
+	assert.NoError(err)
+	out, err := s.MarshalJSON()
+	assert.NoError(err)
+	assert.Equal(canonical, string(out), "a carried document must survive byte-identical")
+
+	// FieldJSON hands the stored bytes straight back - the accessor Mint sizes fields with.
+	fj, err := s.FieldJSON("a")
+	assert.NoError(err)
+	assert.Equal(`{"x":1,"y":[1,2,3]}`, string(fj))
+}
+
+// TestState_SetCanonicalJSONIsNotAFastPathForSet pins hazard 1, the one that corrupts silently. Set
+// round-trips through JSON to CANONICALIZE, and that is load-bearing rather than incidental: reducers
+// compare marshalled bytes, and Go marshals a map with sorted keys but a struct in DECLARATION order. So a
+// struct stored via Set must come out spelled identically to its decoded twin - which is what lets a union
+// reducer recognise the two as one value instead of keeping both.
+func TestState_SetCanonicalJSONIsNotAFastPathForSet(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	// Declaration order here is deliberately the reverse of sorted order.
+	type item struct {
+		Z string `json:"z"`
+		A string `json:"a"`
+	}
+
+	viaSet, _ := NewState()
+	assert.NoError(viaSet.Set("it", item{Z: "z", A: "a"}))
+	setBytes, err := viaSet.FieldJSON("it")
+	assert.NoError(err)
+	assert.Equal(`{"a":"a","z":"z"}`, string(setBytes), "Set canonicalizes a struct to sorted keys")
+
+	// The same value arriving as a column read is already canonical, and compares byte-equal to the above.
+	fromColumn, err := StateFromCanonicalJSON([]byte(`{"it":{"a":"a","z":"z"}}`))
+	assert.NoError(err)
+	colBytes, err := fromColumn.FieldJSON("it")
+	assert.NoError(err)
+	assert.Equal(string(setBytes), string(colBytes),
+		"a value stored through Set and the same value read back from a column must have ONE spelling, "+
+			"or a union reducer keeps both")
+}

@@ -49,7 +49,10 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 		return nil, errors.New("task '%s' requested goto to '%s' but no WithGoto transition exists from this task", stripProto(currentTask), stripProto(gotoTarget))
 	}
 
-	// State values are decoded, so RawState is directly the map boolexp evaluates against.
+	// boolexp.Eval takes the symbols as an `any` and marshals them itself, so the State goes in whole and
+	// a field still held as raw JSON passes straight through its MarshalJSON rather than being decoded here
+	// and re-encoded there. Note Eval is called once per conditional out-edge below, so it re-marshals the
+	// whole symbol set per edge - hoisting that is an available win, independent of anything here.
 	stateMap := flow.RawState()
 
 	for _, tr := range graph.Transitions() {
