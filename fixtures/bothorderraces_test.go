@@ -216,11 +216,12 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 // SHARED ancestor (the parent's subgraph-caller step), and the guard (interrupt_payload='{}') keeps the
 // second from clobbering the payload the first already wrote there.
 //
-// Unlike the two races above, the two interrupts hit the *same* payload-write site, and clearBreakpoint
-// releases every arrival at that site together - so the checkpoint seam cannot order two arrivals at one site.
-// The deterministic order is instead imposed at the task level: branch IX interrupts immediately, branch IY
-// blocks until the test confirms IX's payload landed on the shared ancestor, then interrupts - so IX is always
-// the first writer and IY always the guarded no-op writer.
+// Unlike the two races above, the two interrupts hit the *same* payload-write site, and Resume releases every
+// arrival at that site together - so a breakpoint cannot order two arrivals there. The order is imposed at the
+// task level instead: branch IX interrupts immediately, branch IY holds on a channel until the test has seen
+// IX's propagation land, then interrupts - so IX is always the first writer and IY always the guarded no-op
+// writer. A held task is the right tool for that; what must NOT stand in for it is a wall-clock poll on the
+// ancestor row, so both waits here rendezvous with the propagation itself via awaitPropagatedInterrupts.
 func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -291,21 +292,17 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 		return strings.TrimSpace(p)
 	}
 
-	// IX's interrupt propagates its payload onto the shared Call step (the first writer wins it).
-	got := enginetest.WaitUntil(t, 10*time.Second, func() bool {
-		p := callPayload()
-		return p != "" && p != "{}"
-	})
-	assert.True(got, "IX's interrupt never set the shared ancestor payload")
+	// IX's interrupt propagates its payload onto the shared Call step (the first writer wins it). The stop
+	// checkpoint fires POST-COMMIT, so one propagation counted on the parent means the payload is durable
+	// there - the fact the poll this replaces was spinning to sample.
+	awaitPropagatedInterrupts(t, e, fk, 1)
 	assert.True(strings.Contains(callPayload(), "X"), "first writer (IX) should own the ancestor payload")
 
 	// Release IY: its interrupt now reaches the payload write, but the guard (interrupt_payload='{}') matches
-	// zero rows on the already-written Call step - a no-op.
+	// zero rows on the already-written Call step - a no-op. Its propagation still signals a stop, so the
+	// second arrival on the parent is what says IY has been all the way through the write.
 	release()
-	got = enginetest.WaitUntil(t, 10*time.Second, func() bool {
-		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE task_name='IY' AND status='"+workflow.StatusInterrupted+"'") == 1
-	})
-	assert.True(got, "IY never interrupted")
+	awaitPropagatedInterrupts(t, e, fk, 2)
 
 	// The guard held: the shared ancestor still carries IX's payload, uncorrupted by IY.
 	p := callPayload()
