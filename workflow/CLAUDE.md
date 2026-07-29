@@ -156,11 +156,24 @@ buys exactness for a value an author can carry losslessly as a string anyway.
 ingress no longer check). Both fail *silently*, which is why they were guarded and why the punt is a real
 exposure to revisit, not a non-issue:
 
-- **Integer beyond ±2^53.** Comes back **rounded** (`1234567890123456789` -> `...768`) and the engine
-  re-marshals the rounded value onward into the next step's `state`, `final_state`, a `Fork`, a `Continue`.
-  Nothing errors; the workflow charges the wrong order. Only **integer-shaped** literals are affected - a
-  fractional/exponent number is float64-domain at any magnitude (`1e300` is fine). **Workaround: carry a large
-  id as a string** (the `id_str` pattern 64-bit-id APIs already publish).
+- **Integer beyond ±2^53.** A read into an `any` comes back **rounded** (`1234567890123456789` ->
+  `1234567890123456800`), so a task that reads one acts on the wrong number and nothing errors. Only
+  **integer-shaped** literals are affected - a fractional/exponent number is float64-domain at any magnitude
+  (`1e300` is fine). **Workaround: carry a large id as a string** (the `id_str` pattern 64-bit-id APIs
+  already publish).
+
+  **What is STORED no longer rounds, and the exposure is correspondingly narrower than it was.** Raw field
+  storage means a carried field is never decoded, so it round-trips byte-exact into the next step's `state`,
+  `final_state`, a `Fork` and a `Continue`; and because a read does not memoize, even reading one leaves
+  storage exact. Verified: carried `{"id":1234567890123456789}` marshals back identically before and after a
+  read, where the old decode-at-dispatch path stored `...800` from the first hop onward. So the damage is
+  now confined to the Go value a reader receives, and does not propagate.
+
+  Two consequences worth holding. **The remaining rounding is per-READER, not per-field**: a plain `Get`
+  into an `any` (and `Value`/`All`/`Map`/`Parse` into a map) rounds, while `GetInt` does not - it unmarshals
+  straight into an `int`, which is exact at any int64 magnitude. And `boolexp` still rounds, because it
+  re-marshals the symbols and decodes them into `map[string]any` itself, so a `when` expression comparing a
+  >2^53 id is comparing float64s regardless of how the field is stored.
 - **NUL (`U+0000`) in a string.** Valid UTF-8, legal JSON, but **PostgreSQL's `JSONB` rejects it**
   (`SQLSTATE 22P05`) while MySQL/SQLite/SQL Server accept it - so it passes the SQLite test suite and kills the
   flow on the recommended production database, in the worst way: the write that carries it is the step's own
