@@ -72,6 +72,10 @@ type stepResult struct {
 	// server-side time in PgStatements (which excludes it).
 	GaugesBefore map[string]float64 `json:"gaugesBefore,omitempty"`
 	GaugesAfter  map[string]float64 `json:"gaugesAfter,omitempty"`
+	// Gauges is the same instruments TIME-AVERAGED across the window, and for anything that fluctuates at
+	// dispatch frequency it is the only usable reading - the edge snapshots above land between dispatches
+	// and report zero. See gaugesampler.go for which question the mean answers and which the peak does.
+	Gauges gaugeWindow `json:"gauges,omitzero"`
 	// PgStatements is the window delta of pg_stat_statements (top statements by server-side exec time),
 	// present only on Postgres with the extension preloaded. Server-side clocks: excludes pool wait,
 	// wire time and client scheduling - the other half of the attribution above.
@@ -142,6 +146,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	before := collectAllCounters(readers)
 	histBefore := collectAllHistograms(readers)
 	gaugesBefore := collectAllGauges(readers)
+	gaugeS := startGaugeSampler(readers)
 	pgssBefore := pgss.snapshot(ctx)
 	waitBefore := wait.snapshot()
 	bytesBefore := bytesWritten.Load()
@@ -151,6 +156,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	time.Sleep(window)
 	measuring.Store(false)
 	elapsed := time.Since(windowStart)
+	gauges := gaugeS.close()
 	hostAfter := sampleHost()
 	after := collectAllCounters(readers)
 	histAfter := collectAllHistograms(readers)
@@ -182,6 +188,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 		EngineCounters: deltas,
 		EngineHists:    histogramDeltas(histBefore, histAfter),
 		GaugesBefore:   gaugesBefore,
+		Gauges:         gauges,
 		GaugesAfter:    gaugesAfter,
 		PgStatements:   pgssDelta(pgssBefore, pgssAfter),
 		WaitProfile:    waitDelta(waitBefore, waitAfter),
@@ -311,6 +318,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	before := collectAllCounters(readers)
 	histBefore := collectAllHistograms(readers)
 	gaugesBefore := collectAllGauges(readers)
+	gaugeS := startGaugeSampler(readers)
 	pgssBefore := pgss.snapshot(ctx)
 	waitBefore := wait.snapshot()
 	bytesBefore := bytesWritten.Load()
@@ -320,6 +328,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	time.Sleep(window)
 	measuring.Store(false)
 	elapsed := time.Since(windowStart)
+	gauges := gaugeS.close()
 	hostAfter := sampleHost()
 	after := collectAllCounters(readers)
 	histAfter := collectAllHistograms(readers)
@@ -356,6 +365,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		EngineCounters: deltas,
 		EngineHists:    histogramDeltas(histBefore, histAfter),
 		GaugesBefore:   gaugesBefore,
+		Gauges:         gauges,
 		GaugesAfter:    gaugesAfter,
 		PgStatements:   pgssDelta(pgssBefore, pgssAfter),
 		WaitProfile:    waitDelta(waitBefore, waitAfter),

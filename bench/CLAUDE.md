@@ -96,12 +96,26 @@ To put load on the scan path, work must be created by a replica that cannot disp
 closed-loop generator's backlog can never exceed its concurrency.
 
 **`state` and `carry` measure opposite things, and using the wrong one answers the wrong question.**
-`state` REWRITES its payload every step, so every copy is a legitimate change and nothing can ever be
-stored by reference - it is the MB/s instrument and the worst case for state refs. `carry`/`carryfanout`
-write the payload once (as the flow's initial state, so the ENTRY step anchors it) and thereafter only
-carry it, which is the shape refs exist for and the only shape in which their win is visible. Measured on
-local SQLite: `carry -payload 32768 -linear-steps 6` stores **1.01x payload per flow against a naive 6x**,
-and `carryfanout -fanout-width 8` stores **1.07x against a naive 17x**.
+`state` REWRITES its payload every step, so each step's payload is genuinely NEW data that has to be stored
+somewhere - it is the MB/s instrument, and what it measures is irreducible write volume. `carry`/
+`carryfanout` write the payload once (as the flow's initial state, so the ENTRY step anchors it) and
+thereafter only carry it, which is the multiplier refs exist to remove.
+
+**Do NOT say the `state` workload "cannot mint refs" - it mints them fine, and the counters say so.** A
+field the task rewrote is re-anchored at the step that wrote it (its `changes` column holds the bytes) and
+the successor's `state` refs that, so `state`'s STATE column measures **0.0 K/flow** while its CHANGES
+column carries the full 322.5 K/flow (5 rewriting steps x 64K). Measured, local Postgres 18.1, 64K payload,
+6 steps:
+
+| | write `state` | write `changes` | total stored | read `state_ref` |
+|---|---|---|---|---|
+| `state` (5 rewrites) | 0.0 K/flow | 322.5 K/flow | **322.5 K/flow** | 259.1 K/flow |
+| `carry` (0 rewrites) | 64.1 K/flow | 0.1 K/flow | **64.1 K/flow** | 64.0 K/flow |
+
+So the 5x gap between the two is **not** refs working in one and failing in the other; it is that `state`
+genuinely produces five payloads and `carry` produces one. Refs remove the CARRY multiplier, never write
+volume - no storage mechanism can, because the data really is new. Quote the table, not a claim about
+minting.
 
 **Read the carry workloads off `dwarf_state_write_bytes{column=state}`, NOT off `MB/s`.** Their tasks
 declare almost no write volume of their own - that is the entire point, and `bytesWritten` is deliberately

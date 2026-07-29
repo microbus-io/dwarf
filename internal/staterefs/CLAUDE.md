@@ -177,9 +177,15 @@ the only dialect-dependent term in the policy.
   initial state, then carries it through `-linear-steps` hops) and `-workload carryfanout` (the N·D case:
   `-fanout-width` branches, two steps deep, all carrying one document anchored at the entry/spawn step).
   Local SQLite at 32KB: **1.01x payload stored per flow against a naive 6x** linear, **1.07x against 17x** at
-  width 8. The `state` workload remains the opposite instrument — it rewrites its payload every step, so
-  nothing can ever mint. Read these off `dwarf_state_write_bytes{column=state}`; their tasks declare almost
-  no write volume, so MB/s is meaningless for them by design.
+  width 8. Read these off `dwarf_state_write_bytes{column=state}`; their tasks declare almost no write
+  volume, so MB/s is meaningless for them by design.
+
+  **The `state` workload does NOT fail to mint** — a claim worth killing before it spreads. A rewritten
+  field is re-anchored at the step that wrote it (its `changes` holds the bytes) and the successor's
+  `state` refs that, so measured on Postgres at 64K/6 steps its `state` column is **0.0 K/flow** against
+  **322.5 K/flow** of `changes`, versus `carry`'s 64.1 K/flow of `state` and 0.1 K/flow of `changes`. The
+  5x between them is that `state` genuinely produces five payloads and `carry` produces one. Refs remove
+  the CARRY multiplier; write volume for actually-new data is irreducible.
 - **Whether `maxAnchors` ever binds** is unmeasured (how many large fields are concurrently live in a
   realistic workflow). The engine's byte counters are the instrument.
 - **forEach item refs** — a branch pointing at its element inside the array's anchor instead of storing it
