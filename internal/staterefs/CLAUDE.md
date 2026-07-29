@@ -85,7 +85,10 @@ both measure ~1x, so the ambiguity is moot and no server-version probe is needed
    (`SetCanonicalJSON`), so resolving a ref costs the field's byte length instead of the several times that
    its decoded Go form occupies. This is where the two designs meet: refs already collapse N branches onto
    one cached copy of the bytes, and not decoding at the splice is what stops those N branches from
-   re-inflating it N times anyway — the read multiplier the ref design deliberately left alone.
+   re-inflating it N times anyway — the read multiplier the ref design deliberately left alone. Measured
+   (`workflow/CLAUDE.md` has the table): across linear / width-16 / width-64 carry workloads the decoded
+   heap ran 32 / 99 / 281 MB while the raw one stayed FLAT at 27 / 28 / 22 MB. That flatness is the read
+   multiplier being removed rather than merely shrunk.
 
    Sharing one immutable byte slice across branches is safe in a way sharing a decoded value is not: bytes
    cannot be mutated in place by a task, and each branch's own read decodes into its own copy. So the

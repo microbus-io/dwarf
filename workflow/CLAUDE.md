@@ -68,11 +68,30 @@ reads it. A step's `state` is a full input snapshot, so most fields on most step
 read, and decoding a carried field costs several times its byte length for the whole duration of the host
 call - the phase where a worker holds no connection and the crew may grow to thousands.
 
-**Measured:** interleaved 3-rep A/B on local Postgres, `-workload carry -payload 65536 -task-delay 200ms
--concurrency 16`, structured payload: mean heap **32.2 -> 26.6 MB (-17.5%)**, peak **52.2 -> 47.0 MB
-(-10.0%)**, throughput neutral (+4%, inside noise, with RTT slightly favouring the *decoded* arm so the
-result is not flattered). Every rep moved the same way. `dwarf_state_in_flight_bytes` is unchanged by
-construction - it counts the wire form - which is what makes it the denominator rather than the result.
+**Measured.** Interleaved 3-rep A/B per row on local Postgres, alternating binaries against one database,
+structured 64KB payload, 200ms tasks, concurrency 16:
+
+| shape | carriers in flight | heap mean, decoded -> raw | heap peak, decoded -> raw |
+|---|---|---|---|
+| linear, D=6 | 14 | 32.2 -> 26.6 MB (**-18%**) | 52.2 -> 47.0 MB (-10%) |
+| fan-out, width 16 | 83 | 98.8 -> 27.8 MB (**-72%**) | 194.7 -> 49.8 MB (-74%) |
+| fan-out, width 64 | 131 | 281.2 -> 21.7 MB (**-92%**) | 521.9 -> 36.4 MB (-93%) |
+
+**Read the columns, not the percentages: the raw arm is FLAT (26.6 / 27.8 / 21.7 MB) while the decoded arm
+grows with the carrier count (32.2 / 98.8 / 281.2 MB).** The N-carriers multiplier is not reduced, it is
+GONE - which is the whole claim, and the reason the percentage keeps climbing with width rather than
+settling. Per-rep at width 64: decoded 291/295/258 MB against raw 26/20/19 MB, so the direction is not an
+averaging artifact. A decoded fan-out peaked at **522 MB** on one replica of one workload, which is the
+memory ceiling this work exists to remove.
+
+**Throughput is inconclusive here and must not be quoted either way.** It tracks RTT, exactly as
+`bench/CLAUDE.md` warns (rho ~ -0.90): at width 64 the two reps where the raw arm had the better RTT went
++27% and +28%, and the one rep where its RTT was 2.8x worse went -56%. Nothing in these runs separates the
+change from the rig on that axis.
+
+`dwarf_state_in_flight_bytes` is unchanged throughout - it counts the wire form - which is what makes it the
+denominator rather than the result, and the flat-gauge/falling-heap pair is what distinguishes "the
+expansion is gone" from "less work happened".
 
 **The struct is what makes any of this possible.** `State` used to be `type State map[string]any` with its
 map-ness documented as idiomatic, so `state["x"]` handed back whatever was in the slot; a raw value would
