@@ -22,6 +22,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/microbus-io/errors"
@@ -322,6 +323,9 @@ func (e *Engine) recomputePools() {
 		idle, open := shardPool(specs[idx], 0, observed[idx]) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
+		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
+			e.seams.Variable(seamsJoin(VariablePoolIdle, strconv.Itoa(idx)), idle)
+		}
 		// The permits follow the pool for the same reason the cache and the worker ceiling do: they bound
 		// concurrent database work as a multiple of the connections this replica actually holds, and the
 		// pool just changed. Resize moves the available count by the DELTA, so permits held by in-flight

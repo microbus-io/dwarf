@@ -232,6 +232,51 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	assert.Equal(11, db.DB.Stats().MaxOpenConnections, "the pinned override is never divided")
 }
 
+// TestPoolSizing_IdleCoreTracksTheDerivedPool pins the half of shardPool nothing else witnesses. database/sql
+// reports the configured max OPEN size through DBStats.MaxOpenConnections, but never the configured max idle
+// (DBStats.Idle counts connections currently idle - traffic, not configuration), so the derived idle core is
+// read back through the VariablePoolIdle recording the sizing sites make.
+//
+// It is half the open size, floored at 2, and it must follow the open size down as the fleet grows: an idle
+// core left at the R=1 width would hold connections a departing replica's share no longer entitles it to.
+func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t)
+	e.testConnCap = 0 // assert the real derived sizes, not the test-mode connection cap
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
+	assert.NoError(e.Startup(t.Context()))
+
+	idle := func() int {
+		t.Helper()
+		v, ok := e.seams.Capture(seamsJoin(VariablePoolIdle, "1"))
+		if !ok {
+			t.Fatal("the sizing path never recorded a derived idle size for shard 1")
+		}
+		return v.(int)
+	}
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
+	assert.Equal(24, idle(), "idle core is half the open pool at R=1")
+
+	addPeerRow(t, e, 2001)
+	assert.Equal(24, db.DB.Stats().MaxOpenConnections)
+	assert.Equal(12, idle(), "the idle core follows the pool down to the 1/2 share")
+
+	addPeerRow(t, e, 2002)
+	assert.Equal(16, db.DB.Stats().MaxOpenConnections)
+	assert.Equal(8, idle(), "and down again to the 1/3 share")
+
+	delPeerRow(t, e, 2001)
+	delPeerRow(t, e, 2002)
+	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
+	assert.Equal(24, idle(), "and restore the idle core with it")
+}
+
 // TestPoolSizing_PeerExpiry pins the crashed-peer path: a peer that stops heartbeating (its row goes stale,
 // and no goodbye ever comes) drops out of the count once its row ages past the freshness window, and the
 // pool regrows on its own. No signal is involved, which is exactly what makes a vanished peer recoverable

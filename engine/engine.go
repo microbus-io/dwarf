@@ -710,6 +710,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 		idle, open := shardPool(specs[idx], override, replicas) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
+		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
+			e.seams.Variable(seamsJoin(VariablePoolIdle, strconv.Itoa(idx)), idle)
+		}
 		// Sized here rather than in initRuntime because it is derived from the pool this loop just set,
 		// and the workers initRuntime starts must never see an unsized (admit-nothing) shard.
 		e.permits.Resize(idx, enterPermitsPerConn*open, exitPermitsPerConn*open)

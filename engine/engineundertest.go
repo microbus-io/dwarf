@@ -280,3 +280,14 @@ const (
 	CheckpointRefillCycleDone = piston.CheckpointCycleDone // a shard's piston reconciled its cache partition
 	CheckpointRefillStole     = piston.CheckpointStole     // a shard's piston selected steps from OUTSIDE its residue class
 )
+
+// --- Recorded variables ---
+
+// VariablePoolIdle is the idle-connection size the engine DERIVED for a shard, targeted by shard index
+// (seamsJoin(VariablePoolIdle, strconv.Itoa(idx))). It is recorded wherever a derived size is pushed, so a
+// test can read the half of shardPool's result that has no other witness: database/sql reports the configured
+// max OPEN size through DBStats.MaxOpenConnections, but nothing reports the configured max idle -
+// DBStats.Idle is the number of connections currently idle, which is traffic, not configuration. The value
+// recorded is the engine's derivation, before the test-mode cap in internal/database clamps what the pool
+// actually takes.
+const VariablePoolIdle = "poolIdle"
