@@ -165,9 +165,17 @@ state above, across the vertical-scaling session:
 | **total** | **1 / 47 (2%)** | **5 / 43 (12%)** |
 
 A ~6× higher chance of a ~15× throughput drop, to buy 5–14% of peak. **So the engine picks the ratio by
-instance size**: 6× below 32 vCPUs, 12× at 32 and above — the smallest size at which the throughput knee
-was reached with no measured increase in instability. An operator raising it by hand with
-`SetMaxOpenConns` should know which of the two numbers they are choosing.
+instance size**: 6× below 32 vCPUs, 12× at 32 and above — the smallest size whose arms showed no increase
+in instability at the higher ratio. An operator raising it by hand with `SetMaxOpenConns` should know
+which of the two numbers they are choosing.
+
+**Read that threshold as a judgement call, not a safe/unsafe line.** 12× collapsed once in 14 arms at
+64 vCPU, so the higher ratio is not *free* above 32 — it is ~6× more likely to collapse at every size
+measured, and 32 vCPU is simply the one cell where it did not. No cell above reaches 15 arms, which is
+about what a 7–22% event needs before zero is distinguishable from luck. A deployment that would rather
+not meet the collapse mode at all can override the pool with `SetMaxOpenConns` — note it pins a per-replica
+connection count outright rather than a ratio, so divide the budget you want by your replica count — and
+give up 5–14% of peak.
 
 Connection ratios can only be compared open-loop, by interleaved A/B against the **same** instance:
 closed-loop load never reaches the collapse state, and two same-spec instances differ by more than the

@@ -29,8 +29,8 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// The connection-budget and capacity constants below were measured by the cloud benchmark campaign
-// (Cloud SQL PostgreSQL, tiers 1-8 vCPU; see docs/benchmark-cloud.md). They are engine knowledge - the
+// The connection-budget and capacity constants below were measured by the cloud benchmark campaigns
+// (Cloud SQL PostgreSQL, tiers 1-64 vCPU; see docs/benchmark-cloud.md). They are engine knowledge - the
 // operator provides the facts (ShardSpec.VirtualCPUs), the engine owns the constants.
 const (
 	// connsPerVCPU sizes a SMALL shard's connection pool. See connsPerVCPUFor for why the ratio is not
@@ -216,11 +216,24 @@ func shardPool(spec ShardSpec, override int, replicas int) (idle, open int) {
 //	 8 vCPU    6x   1/13 collapsed     12x   2/11 collapsed
 //	16 vCPU    6x   0/13 collapsed     12x   2/ 9 collapsed
 //	32 vCPU    6x   0/14 collapsed     12x   0/ 9 collapsed
-//	64 vCPU    6x   0/ 7 collapsed     12x   0/ 6 collapsed
+//	64 vCPU    6x   0/ 7 collapsed     12x   1/14 collapsed
+//	 total     6x   1/47 (2%)          12x   5/43 (12%)
 //
-// The 16-vCPU row is the one that sets the threshold: same instance, same workload, and moving 6x -> 12x
-// turned a clean sweep into two collapses. At 32 and 64 the same move costs nothing across 15 arms. So
-// the risk and the gain separate by instance size, and 12x is confined to where it is free.
+// The 16-vCPU row is what places the threshold: same instance, same workload, and moving 6x -> 12x turned
+// a clean sweep into two collapses. 32 vCPU is the one cell where 12x collapsed in none of its arms.
+//
+// THE 64-vCPU ROW IS THE HONEST WEAKNESS OF THIS THRESHOLD, and it is stated rather than buried. 12x
+// collapses there at 1/14 (7%) - roughly the rate that placed the threshold at 32 in the first place - so
+// "12x is free above 32" rests on 32's 0/9 alone, with the size ABOVE it showing a collapse. Read the
+// totals row the same way: 12x is ~6x more likely to collapse at EVERY size measured, not only below 32.
+// The threshold stands because 12x buys 5-14% of peak and the collapse is rare and self-recovering, not
+// because the large sizes were shown immune.
+//
+// DO NOT PLACE A STABILITY THRESHOLD FROM ANY COUNT UNDER ~15 ARMS PER CELL. Every cell above is
+// under it. This threshold moved 8 -> 32 across one campaign, each time because more arms landed, and the
+// 64-vCPU collapse arrived last, in a six-arm confirmation run made after the 32 threshold had shipped. A
+// 7-22% event needs enough arms that zero is distinguishable from unlucky, so treat any future move as
+// needing new arms rather than a re-reading of these.
 //
 // THE COLLAPSE IS NOT A SLOWDOWN, which is why ~10% of throughput does not buy it. Active backends spike
 // (177 against a normal 140 on a 16-vCPU instance), the WAL share of their waits falls from ~69% to ~14%,

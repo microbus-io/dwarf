@@ -2060,13 +2060,23 @@ engine policy — below.
 - **`ShardSpec.VirtualCPUs` drives each shard's pool** at the measured knee, `idle = open/2` (warm core).
   The ratio is **12x at 32 vCPUs or more, 6x below** (`connsPerVCPUFor`), and STABILITY places that
   threshold, not throughput. 12x is the throughput knee from 16 vCPUs up (+11.7%/+5.0%/+14.0% at 16/32/64),
-  but counted over an open-loop campaign it also introduces a collapse mode below 32: at 16 vCPU,
-  6x collapsed in 0 of 13 arms and 12x in 2 of 9, while at 32 and 64 vCPU 12x collapsed in 0 of 15. The
-  collapse is not a slowdown - active backends spike (177 vs a normal 140), the WAL share of their waits
-  falls ~69% -> ~14%, CPU:running rises ~6% -> ~80%, and throughput drops ~15x (8,629 -> 486 steps/s) until
-  it recovers on its own. Roughly 10% of peak throughput does not buy that risk, so 12x is confined to the
-  sizes where it is free. Below 32 the older cliff argument also still holds: a 1-vCPU instance loses 55%
-  past its knee and a 4-vCPU one 35%.
+  but counted over an open-loop campaign it also introduces a collapse mode. Arms that entered it, per
+  cell: 8 vCPU **1/13 vs 2/11**, 16 vCPU **0/13 vs 2/9**, 32 vCPU **0/14 vs 0/9**, 64 vCPU **0/7 vs 1/14**
+  (6x vs 12x), totalling **1/47 (2%) against 5/43 (12%)**. The collapse is not a slowdown - active backends
+  spike (177 vs a normal 140), the WAL share of their waits falls ~69% -> ~14%, CPU:running rises
+  ~6% -> ~80%, and throughput drops ~15x (8,629 -> 486 steps/s) until it recovers on its own. Roughly 10%
+  of peak throughput does not buy that risk. Below 32 the older cliff argument also still holds: a 1-vCPU
+  instance loses 55% past its knee and a 4-vCPU one 35%.
+
+  ⚠️ **The threshold is NOT "12x is free above 32", and the 64-vCPU cell is why.** 12x collapses there at
+  1/14 (7%) - about the rate that placed the threshold at 32 to begin with - so the "free" claim rests on
+  32's 0/9 alone while the size ABOVE it shows a collapse, and the totals say 12x is ~6x more likely to
+  collapse at every size measured. It stands because the gain is 5-14% of peak against a rare,
+  self-recovering mode, not because large instances were shown immune. **Do not place a stability
+  threshold from any count under ~15 arms per cell** - every cell above is under it, this threshold moved
+  8 -> 32 across one campaign as more arms landed, and the 64-vCPU collapse arrived last, in a six-arm
+  confirmation run made after 32 had already shipped. Moving it again needs new ARMS, not a re-reading of
+  these. `docs/benchmark-cloud.md` publishes the same table; keep the two in step.
 - **The fleet is known BEFORE any worker dispatches, so pools are sized right the first time - there is no
   async grace window.** Reading the registry needs open connections, so `Startup` opens the shards at a small
   **bootstrap** pool (`startupBootstrapConns`, 4 - enough to register the row, probe the RTT and read the fleet,
