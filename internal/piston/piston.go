@@ -45,7 +45,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/workflow"
@@ -145,7 +145,7 @@ type Piston struct {
 	shard   int
 	db      *sequel.DB
 	planner *planner.Planner
-	cache   *candidatecache.Cache
+	cache   *candidates.Cache
 	pipe    *pipeline.Pipeline
 
 	// Live configuration, each independently atomic. There is no grouped snapshot because nothing here is
@@ -175,7 +175,7 @@ type Piston struct {
 
 // New returns a piston for one shard over an already-open database handle. The planner and cache are
 // shared with this replica's other pistons and are not owned here.
-func New(shard int, db *sequel.DB, plan *planner.Planner, cache *candidatecache.Cache) (*Piston, error) {
+func New(shard int, db *sequel.DB, plan *planner.Planner, cache *candidates.Cache) (*Piston, error) {
 	if shard < 1 {
 		return nil, errors.New("shard must be positive, got %d", shard)
 	}

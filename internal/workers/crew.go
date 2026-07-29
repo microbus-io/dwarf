@@ -50,7 +50,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/errors"
 )
 
@@ -92,7 +92,7 @@ type Gate interface {
 // must not overlap.
 type Crew struct {
 	// cache is the candidate source, and its close is what ends every goroutine - see Start.
-	cache *candidatecache.Cache
+	cache *candidates.Cache
 	// gate bounds concurrent work against the resource the caller cares about.
 	gate Gate
 	// process handles one popped candidate. What that means is entirely the caller's.
@@ -144,7 +144,7 @@ type Crew struct {
 
 // New returns a crew over a cache, the gate that bounds its concurrency, and the callback that handles what
 // it pops. Nothing is spawned until Start.
-func New(cache *candidatecache.Cache, gate Gate, process ProcessFunc) (*Crew, error) {
+func New(cache *candidates.Cache, gate Gate, process ProcessFunc) (*Crew, error) {
 	if cache == nil {
 		return nil, errors.New("cache is required")
 	}

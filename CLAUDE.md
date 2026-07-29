@@ -100,7 +100,7 @@ matching one before working there:**
 - **`internal/workers/CLAUDE.md`** - the demand side: the grow-on-demand goroutine `Crew` (not "pool" -
   that word is the database connection pools), the idleness-plus-gate growth trigger (and why it needs both
   an edge and a cadence), and the two-phase drain.
-- **`internal/candidatecache/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
+- **`internal/candidates/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL - godoc only, no design doc.)
 - **`internal/permits/CLAUDE.md`** - the per-shard signed semaphore that bounds concurrent DATABASE work,
   and so lets the worker crew grow for long tasks without the growth becoming pool contention: why the

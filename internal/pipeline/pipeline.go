@@ -49,7 +49,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/errors"
 )
@@ -115,7 +115,7 @@ type Pipeline struct {
 	shard   int
 	source  Source
 	planner *planner.Planner
-	cache   *candidatecache.Cache
+	cache   *candidates.Cache
 
 	// Cadence knobs, in nanoseconds. Atomic because they are set from wherever the caller derives them
 	// while a cycle may be running.
@@ -133,7 +133,7 @@ type Pipeline struct {
 
 // New returns a Pipeline for one shard, paced at DefaultInterval and DefaultMinGap until told otherwise.
 // It is where a wiring mistake is caught, which is why Cycle itself has no error return to spend on one.
-func New(shard int, source Source, planner *planner.Planner, cache *candidatecache.Cache) (*Pipeline, error) {
+func New(shard int, source Source, planner *planner.Planner, cache *candidates.Cache) (*Pipeline, error) {
 	if shard < 1 {
 		return nil, errors.New("shard must be positive, got %d", shard)
 	}
@@ -301,7 +301,7 @@ func (p *Pipeline) run(ctx context.Context, r *Result) {
 }
 
 // push hands a batch to the cache and records what it cost.
-func (p *Pipeline) push(r *Result, batch []candidatecache.Job, floor int) {
+func (p *Pipeline) push(r *Result, batch []candidates.Job, floor int) {
 	t := time.Now()
 	r.Discarded = p.cache.Refill(p.shard, batch, floor)
 	r.Pushing = time.Since(t)
@@ -315,8 +315,8 @@ func (p *Pipeline) push(r *Result, batch []candidatecache.Job, floor int) {
 // A key that comes up short - its steps claimed or completed between the fetch and now - simply
 // contributes fewer candidates. The batch runs short for one cycle and the next one re-selects; there is
 // nothing to reconcile.
-func assemble(slots []string, steps map[string][]int, shard int) []candidatecache.Job {
-	batch := make([]candidatecache.Job, 0, len(slots))
+func assemble(slots []string, steps map[string][]int, shard int) []candidates.Job {
+	batch := make([]candidates.Job, 0, len(slots))
 	taken := make(map[string]int, len(steps))
 	for _, key := range slots {
 		list := steps[key]
@@ -324,7 +324,7 @@ func assemble(slots []string, steps map[string][]int, shard int) []candidatecach
 		if i >= len(list) {
 			continue
 		}
-		batch = append(batch, candidatecache.Job{StepID: list[i], Shard: shard})
+		batch = append(batch, candidates.Job{StepID: list[i], Shard: shard})
 		taken[key]++
 	}
 	return batch

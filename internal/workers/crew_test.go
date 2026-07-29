@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/permits"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -34,9 +34,9 @@ import (
 
 // newCache returns a cache sized well past anything these tests push through it, so the bound is never
 // what a test is accidentally measuring.
-func newCache(t *testing.T) *candidatecache.Cache {
+func newCache(t *testing.T) *candidates.Cache {
 	t.Helper()
-	c := &candidatecache.Cache{}
+	c := &candidates.Cache{}
 	c.Init(64) // capacity 128
 	t.Cleanup(c.Close)
 	return c
@@ -54,10 +54,10 @@ func newGate(t *testing.T, n int) *permits.Set {
 }
 
 // fill pushes n candidates onto shard 1 as a refill would.
-func fill(c *candidatecache.Cache, n int) {
-	batch := make([]candidatecache.Job, 0, n)
+func fill(c *candidates.Cache, n int) {
+	batch := make([]candidates.Job, 0, n)
 	for i := range n {
-		batch = append(batch, candidatecache.Job{StepID: i + 1, Shard: 1})
+		batch = append(batch, candidates.Job{StepID: i + 1, Shard: 1})
 	}
 	c.Refill(1, batch, 100)
 }
@@ -81,9 +81,9 @@ func TestCrew_NewValidates(t *testing.T) {
 	noop := func(context.Context, int, int, func()) error { return nil }
 	_, err := New(nil, newGate(t, 4), noop)
 	assert.Error(err, "cache is required")
-	_, err = New(&candidatecache.Cache{}, nil, noop)
+	_, err = New(&candidates.Cache{}, nil, noop)
 	assert.Error(err, "gate is required")
-	_, err = New(&candidatecache.Cache{}, newGate(t, 4), nil)
+	_, err = New(&candidates.Cache{}, newGate(t, 4), nil)
 	assert.Error(err, "process is required")
 }
 

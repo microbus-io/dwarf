@@ -1,7 +1,7 @@
 # Dwarf `internal/workers` — the demand side of dispatch
 
 > Load when: changing the growth trigger, the gate, the drain protocol, or what `Start`/`Drain` own.
-> Coupled with: `internal/candidatecache/CLAUDE.md` (the cache this drains, and why blocking on it is what
+> Coupled with: `internal/candidates/CLAUDE.md` (the cache this drains, and why blocking on it is what
 > shutdown turns on), `internal/permits/CLAUDE.md` (the gate the engine supplies; the crew only ever ENTERS it), and `engine/CLAUDE.md` §"Worker
 > sizing" (where the resident count, the maximum and the permit count come from, and what the callback does).
 

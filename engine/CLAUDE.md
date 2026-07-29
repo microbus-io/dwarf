@@ -478,9 +478,9 @@ the host/author, matching the engine's "carry facts, not policy" posture (baggag
 The engine uses a **queue-as-cache execution model** with a configurable worker pool (`SetWorkers`) and **one
 refiller goroutine per shard** (decoupled 2026-07-19; the former single merged refiller fanned out through
 `OnEach`, a barrier whose max-over-shards wait was measured at 2.02x by 6 shards on the path that is the
-engine's throughput ceiling). The in-memory `candidatecache.Cache` is bounded, **partitioned by shard** (each
+engine's throughput ceiling). The in-memory `candidates.Cache` is bounded, **partitioned by shard** (each
 refiller wholesale-replaces its own partition; workers pop from the lowest-floor partition - see
-`internal/candidatecache/CLAUDE.md`), and holds *hints*, not ownership. Each worker pops a candidate and calls
+`internal/candidates/CLAUDE.md`), and holds *hints*, not ownership. Each worker pops a candidate and calls
 `processStep`:
 
 1. Reserve the step (atomic CAS `UPDATE ... WHERE step_id=? AND status='pending' AND parked=parkedNone AND
@@ -672,7 +672,7 @@ Pinned by `TestSignals_VolumeDoesNotScaleWithSteps`, which asserts on the emitte
 count: a per-step broadcast reintroduced under any new op name fails it.
 
 **Queue-as-cache, per-shard single-slot triggers.** The doorbell carries no step to a queue; it is an
-`Offer` into `candidatecache.Cache`. The generic path (`enqueueStep`) resolves the step's priority *and*
+`Offer` into `candidates.Cache`. The generic path (`enqueueStep`) resolves the step's priority *and*
 `not_before` in one PK lookup (off the selection path) - but the **hot-path origination sites skip the lookup**
 (`enqueueStepDue`): the completing worker/creator just bound the step's priority into its INSERT/reset and its own
 sleep branch already diverged, so it offers the step directly with the values in hand - one round-trip per completed
@@ -709,14 +709,14 @@ started.
 engine has empty partitions at every hop and a loaded one should not. The reverse holds - the two most
 loaded fixtures gain most from it (`completionraceflow` 2.05x, `soakflow` 1.84x, whole suite 1.41x),
 because a cycle supplies only 1.04-1.47x ahead of consumption, so under load the cache is shallow and
-partitions drain to empty constantly. See `internal/candidatecache/CLAUDE.md` for the table.
+partitions drain to empty constantly. See `internal/candidates/CLAUDE.md` for the table.
 
 **The priority-preempting head-insert that used to sit beside it is GONE.** It let a strictly-better band
 jump the queue so the first urgent step did not wait a cycle, at the price of a bounded fairness bypass. It
 was removed after measuring `fixtures/crossshardpriorityflow_test.go` - the fixture built for exactly this -
 with and without: burst latency 134-146ms vs 134-152ms, identical ordering. It only ever reordered one
 replica's cache anyway, since the planner learns of the new band from that shard's next tally either way,
-so the fleet-level change costs a cycle regardless. See `internal/candidatecache/CLAUDE.md` for the full
+so the fleet-level change costs a cycle regardless. See `internal/candidates/CLAUDE.md` for the full
 accounting, and `docs/scheduling-and-reliability.md`, which has always promised the weaker (and now
 accurate) contract: priority is never preemptive, and a new band is served within a snapshot cycle or two.
 

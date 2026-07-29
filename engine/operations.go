@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -564,7 +564,7 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 		e.logger.DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
 		return
 	}
-	admitted := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	admitted := e.cache.Offer(candidates.Job{StepID: stepID, Shard: shard}, priority)
 	if admitted {
 		e.metricStepOffered(ctx)
 	}
@@ -581,7 +581,7 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 	if e.seams.IsFault(FaultDropDoorbell) {
 		return
 	}
-	admitted := e.cache.Offer(candidatecache.Job{StepID: stepID, Shard: shard}, priority)
+	admitted := e.cache.Offer(candidates.Job{StepID: stepID, Shard: shard}, priority)
 	if admitted {
 		e.metricStepOffered(ctx)
 	}

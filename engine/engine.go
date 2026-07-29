@@ -32,7 +32,7 @@ import (
 
 	"log/slog"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/claimstracker"
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/latch"
@@ -193,7 +193,7 @@ type Engine struct {
 	// while work is waiting spawns one more, up to the max. A worker blocked in a long ExecuteTask holds
 	// no connection, so the ceiling can be large without the resident set - and therefore the candidate
 	// cache and its refill scan, both sized from the resident count - paying for it.
-	cache candidatecache.Cache
+	cache candidates.Cache
 	// crew runs processStep on the candidates it pops. The engine supplies both sizing numbers.
 	crew *workers.Crew
 	// permits bounds how many workers may be doing DATABASE work on each shard at once, which is what

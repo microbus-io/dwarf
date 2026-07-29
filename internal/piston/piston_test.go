@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
@@ -38,7 +38,7 @@ type rig struct {
 	p       *Piston
 	db      *sequel.DB
 	planner *planner.Planner
-	cache   *candidatecache.Cache
+	cache   *candidates.Cache
 }
 
 // newRig stands up an isolated database for the test, migrates it, and wires a piston over it with
@@ -60,7 +60,7 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache := &candidatecache.Cache{}
+	cache := &candidates.Cache{}
 	cache.Init(4) // capacity 8
 	t.Cleanup(cache.Close)
 	pl := planner.New()
@@ -129,7 +129,7 @@ func (r *rig) idsByResidue(t *testing.T, replicas, ordinal int) (own, foreign []
 	return own, foreign
 }
 
-func drain(c *candidatecache.Cache) []int {
+func drain(c *candidates.Cache) []int {
 	out := make([]int, 0, c.Len())
 	for c.Len() > 0 {
 		j, ok, _ := c.Pop()
@@ -574,7 +574,7 @@ func TestPiston_RecordsItsInstruments(t *testing.T) {
 	assert.NoError(r.p.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")))
 
 	// Seed the cache so the cycle's push has something to discard, exercising that counter too.
-	r.cache.Refill(1, []candidatecache.Job{{StepID: 9999, Shard: 1}}, 100)
+	r.cache.Refill(1, []candidates.Job{{StepID: 9999, Shard: 1}}, 100)
 	r.insertStep(t, 1, 5, "k", 1)
 
 	res := r.p.Cycle(ctx)

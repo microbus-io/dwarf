@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package candidatecache holds the per-replica bounded set of step candidates produced by the
+// Package candidates holds the per-replica bounded set of step candidates produced by the
 // engine's refillers. It is a hint cache, not a work queue: entries confer no ownership, so a stale
 // or duplicated candidate is harmless. The engine claims the underlying step via CAS before running it.
-package candidatecache
+package candidates
 
 import (
 	"math"

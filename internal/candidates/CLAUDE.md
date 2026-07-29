@@ -1,4 +1,4 @@
-# Dwarf `internal/candidatecache` — bounded, shard-partitioned step-candidate hint cache
+# Dwarf `internal/candidates` — bounded, shard-partitioned step-candidate hint cache
 
 > Load when: changing the cache's `Offer`/`Refill`/`Pop`/floor/low-water/partition semantics.
 > Coupled with: `engine/CLAUDE.md` §"Execution Model" — the per-shard refillers' global-plan selection and

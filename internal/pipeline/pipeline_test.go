@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -62,10 +62,10 @@ func (f *fakeSource) FetchSteps(ctx context.Context, shard, band int, keys []str
 
 // newHarness wires a pipeline over a faked database, a real planner and a real cache of capacity 8, with
 // pacing turned OFF so a behavioural test drives cycles back to back. The cadence tests set their own.
-func newHarness(t *testing.T, tallies []planner.Tally, band int) (*Pipeline, *fakeSource, *candidatecache.Cache, *planner.Planner) {
+func newHarness(t *testing.T, tallies []planner.Tally, band int) (*Pipeline, *fakeSource, *candidates.Cache, *planner.Planner) {
 	t.Helper()
 	src := &fakeSource{band: band, tallies: tallies}
-	cache := &candidatecache.Cache{}
+	cache := &candidates.Cache{}
 	cache.Init(4) // capacity is twice the worker count
 	t.Cleanup(cache.Close)
 	pl := planner.New()
@@ -80,17 +80,17 @@ func newHarness(t *testing.T, tallies []planner.Tally, band int) (*Pipeline, *fa
 
 // seed fills the shard's partition so a test can tell "the cache was left alone" from "the cache was
 // cleared" - the distinction the whole error policy rests on, and one an empty starting cache hides.
-func seed(c *candidatecache.Cache, ids ...int) {
-	batch := make([]candidatecache.Job, 0, len(ids))
+func seed(c *candidates.Cache, ids ...int) {
+	batch := make([]candidates.Job, 0, len(ids))
 	for _, id := range ids {
-		batch = append(batch, candidatecache.Job{StepID: id, Shard: 1})
+		batch = append(batch, candidates.Job{StepID: id, Shard: 1})
 	}
 	c.Refill(1, batch, 100)
 }
 
 // drain pops exactly what the cache holds. Pop blocks on an empty cache, so the count is read first.
-func drain(c *candidatecache.Cache) []candidatecache.Job {
-	out := make([]candidatecache.Job, 0, c.Len())
+func drain(c *candidates.Cache) []candidates.Job {
+	out := make([]candidates.Job, 0, c.Len())
 	for c.Len() > 0 {
 		j, ok, _ := c.Pop()
 		if !ok {
@@ -101,7 +101,7 @@ func drain(c *candidatecache.Cache) []candidatecache.Job {
 	return out
 }
 
-func stepIDs(batch []candidatecache.Job) []int {
+func stepIDs(batch []candidates.Job) []int {
 	out := make([]int, 0, len(batch))
 	for _, j := range batch {
 		out = append(out, j.StepID)
@@ -438,7 +438,7 @@ func TestPipeline_NewValidates(t *testing.T) {
 	assert := testarossa.For(t)
 
 	src, pl := &fakeSource{}, planner.New()
-	cache := &candidatecache.Cache{}
+	cache := &candidates.Cache{}
 	cache.Init(4)
 	t.Cleanup(cache.Close)
 

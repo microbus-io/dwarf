@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/candidatecache"
+	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -498,7 +498,7 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 
 	// Seed the cache as a healthy cycle would have, then make every scan fail (sticky, so a background
 	// cycle cannot slip a legitimate empty refill in and wipe the cache on its own).
-	e.cache.Refill(1, []candidatecache.Job{{StepID: 101, Shard: 1}, {StepID: 102, Shard: 1}}, 5)
+	e.cache.Refill(1, []candidates.Job{{StepID: 101, Shard: 1}, {StepID: 102, Shard: 1}}, 5)
 	assert.Equal(2, e.cache.Len())
 	e.seams.InjectN(FaultRefillScanErr, 1<<20)
 

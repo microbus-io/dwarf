@@ -3,7 +3,7 @@
 > Load when: changing `Cycle`'s phases or its error policy, the cadence (`SetInterval`/`SetMinGap`), the
 > `Source` contract, or the plan-to-batch assembly.
 > Coupled with: `internal/planner/CLAUDE.md` (what a `Tally` is worth and why `Clear` exists),
-> `internal/candidatecache/CLAUDE.md` (why a push is a wholesale replace, and hints-not-ownership), and
+> `internal/candidates/CLAUDE.md` (why a push is a wholesale replace, and hints-not-ownership), and
 > `engine/CLAUDE.md` §"Execution Model" (the SQL behind `Source`, where the interval is derived, and the
 > goroutine that drives this).
 
