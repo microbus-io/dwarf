@@ -114,7 +114,7 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 
 	// The caller parks, then createSubgraphFlow errors (no child inserted): failAndReturn must fail the caller
 	// step (un-parked) and the flow, not strand it parked.
-	e.seams.Inject(FaultSubgraphSpawnErr, "ftbspawn/child")
+	e.seams.Inject(seamsJoin(FaultSubgraphSpawnErr, "ftbspawn/child"))
 	fk, out := batteryRun(t, e, "ftbspawn/parent")
 	assert.Equal(workflow.StatusFailed, out.Status)
 
@@ -368,8 +368,8 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 
 	// Drop each level's FIRST failure-delivery independently (scoped by the parked caller's task name). Each
 	// caller's sweep-driven re-delivery (the second consult of its scope) succeeds, so the sweep can recover it.
-	e.seams.Inject(FaultDeliverFailureErr, "Call2")
-	e.seams.Inject(FaultDeliverFailureErr, "Call1")
+	e.seams.Inject(seamsJoin(FaultDeliverFailureErr, "Call2"))
+	e.seams.Inject(seamsJoin(FaultDeliverFailureErr, "Call1"))
 	fk, err := e.Create(ctx, "ftbdeep/root", nil, nil)
 	assert.NoError(err)
 	shard, rootFlowID, _, err := keys.ParseFlowKey(fk)

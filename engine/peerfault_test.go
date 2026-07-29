@@ -74,7 +74,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	awaitPartition(t, e, 1, 3, -1)
 
 	// The registry stops answering on this shard.
-	e.seams.InjectN(1<<20, FaultPeerReadErr)
+	e.seams.InjectN(FaultPeerReadErr, 1<<20)
 
 	// The fleet is HELD. Even after the peers' rows are deleted outright, this replica cannot see it, so it
 	// must go on sizing for three - the safe direction, and the one a blip must not undo.
@@ -125,7 +125,7 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 	assert.Equal(24, awaitPoolSize(t, db2, 24))
 
 	// Blind shard 1 only, then take the peer away everywhere.
-	e.seams.InjectN(1<<20, FaultPeerReadErr, "1")
+	e.seams.InjectN(seamsJoin(FaultPeerReadErr, "1"), 1<<20)
 	assert.NoError(e.db.OnEach(context.Background(), func(ctx context.Context, sdb *sequel.DB, shard int) error {
 		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=6001")
 		return derr
@@ -170,7 +170,7 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 
 	// The peer loses the ability to prove it is alive. It keeps running - it just goes silent in the
 	// registry - so nothing about it changes except what its own row says.
-	peer.seams.InjectN(1<<20, FaultPeerBeatErr)
+	peer.seams.InjectN(FaultPeerBeatErr, 1<<20)
 
 	// The worker drops it from the WORK divisor once its dispatch evidence ages out, and stops partitioning:
 	// with one dispatcher left there is nothing to divide, so the survivor selects everything. That is the

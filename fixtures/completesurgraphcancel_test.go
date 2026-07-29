@@ -112,7 +112,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeCompleteFlowWrite), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
 
 		// Release completion FIRST: the child completes and completeSurgraphFlow revives the caller, which
 		// re-dispatches and blocks (running).
@@ -142,7 +142,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeCompleteFlowWrite), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
 
 		// Cancel wins while the child's completion is held: the whole tree (root, its parked Call caller, and the
 		// still-running child) is terminalized under the cancel transaction.

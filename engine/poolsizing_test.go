@@ -487,7 +487,7 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	// Stall the first recompute (one-shot) after it has read a fleet of 2, before it pushes 48/2=24.
 	insertPeerRows(t, e, 1001)
 	awaitPeerCount(t, e, 1, 2)
-	e.seams.InjectN(1, FaultSlowPoolPush)
+	e.seams.InjectN(FaultSlowPoolPush, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		e.recomputePools()
@@ -535,7 +535,7 @@ func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
 	// A recompute reads a fleet of 2 (derived 24) and stalls before pushing.
 	insertPeerRows(t, e, 1001)
 	awaitPeerCount(t, e, 1, 2)
-	e.seams.InjectN(1, FaultSlowPoolPush)
+	e.seams.InjectN(FaultSlowPoolPush, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		e.recomputePools()

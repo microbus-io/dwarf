@@ -47,8 +47,8 @@ func awaitPropagatedInterrupts(t *testing.T, eng *engine.Engine, flowKey string,
 	t.Helper()
 	seams := eng.Seams()
 	for {
-		reached := seams.Waiter(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted)
-		got := seams.Visits(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted)
+		reached := seams.Waiter(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
+		got := seams.Visits(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
 		if got >= want {
 			return
 		}

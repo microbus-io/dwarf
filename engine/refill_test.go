@@ -93,7 +93,7 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// FaultDropDoorbell removes the local Offer entirely, so nothing but a cycle can discover this step.
-	e.seams.InjectN(1<<20, FaultDropDoorbell)
+	e.seams.InjectN(FaultDropDoorbell, 1<<20)
 	k, err := e.Create(ctx, "notrigger/g", nil, nil)
 	if !assert.NoError(err) {
 		return

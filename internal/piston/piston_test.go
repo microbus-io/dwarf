@@ -642,7 +642,7 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 
 	// From here every scan fails. Sample hard while the loop runs: the turn count must not move and busy
 	// must never once read true.
-	sm.InjectN(1<<20, FaultScanErr)
+	sm.InjectN(FaultScanErr, 1<<20)
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { defer close(done); r.p.Run(runCtx) }()
@@ -762,7 +762,7 @@ func TestPiston_StealArmsFromTheCycleItSaw(t *testing.T) {
 	// distinction the pipeline draws when it clears the shard from planning but spares its cache partition.
 	sm := seamster.New(true)
 	r.p.SetSeams(sm)
-	sm.InjectN(1, FaultScanErr)
+	sm.InjectN(FaultScanErr, 1)
 	res = r.p.Cycle(ctx)
 	assert.Error(res.Err)
 	assert.False(r.p.stealing.Load(), "a failed cycle must not arm the steal by accident")

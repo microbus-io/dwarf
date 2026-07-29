@@ -98,7 +98,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 
 		_, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)
-		return e.Seams().Visits(engine.CheckpointFlowRowWrite, strconv.Itoa(flowID))
+		return e.Seams().Visits(seamsJoin(engine.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 	}
 
 	var narrow, wide int

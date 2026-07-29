@@ -790,7 +790,7 @@ func (e *Engine) initRuntime() error {
 	if e.seams.Enabled() {
 		e.latches.SetOnPark(func(flowKey string) {
 			e.seams.Checkpoint(e.lifetimeCtx, CheckpointAwaitParked)
-			e.seams.Checkpoint(e.lifetimeCtx, CheckpointAwaitParked, flowKey)
+			e.seams.Checkpoint(e.lifetimeCtx, seamsJoin(CheckpointAwaitParked, flowKey))
 		})
 	}
 	e.latchStop = make(chan struct{})

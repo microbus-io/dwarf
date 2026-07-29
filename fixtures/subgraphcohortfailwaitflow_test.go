@@ -135,7 +135,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelAwait()
 	awaitCh := make(chan outcome, 1)
-	parked := eng.Seams().Waiter(engine.CheckpointAwaitParked, child) // armed before the goroutine that trips it
+	parked := eng.Seams().Waiter(seamsJoin(engine.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
 	go func() {
 		o, e := eng.Await(awaitCtx, child)
 		awaitCh <- outcome{o, e}

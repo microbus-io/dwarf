@@ -821,7 +821,7 @@ func TestPeers_ReadFaultDrivesTheBlindPolicy(t *testing.T) {
 
 	// Now the readings fail. Nothing is published, so the fleet is held rather than collapsing - which is
 	// the direction that matters, since under-counting over-sizes every pool derived from it.
-	sm.InjectN(1000, FaultReadErr)
+	sm.InjectN(FaultReadErr, 1000)
 	for range 5 {
 		r.clk.advance(r.s.scan)
 		r.s.pass(ctx)
@@ -870,7 +870,7 @@ func TestPeers_BeatFaultStopsProvingLiveness(t *testing.T) {
 	assert.True(r.row(t, selfID).dispatchAgeMs < staleAge, "a healthy beat proves both facts")
 
 	// Age the row, then beat with the fault armed: the row must stay exactly as stale as we left it.
-	sm.InjectN(1000, FaultBeatErr)
+	sm.InjectN(FaultBeatErr, 1000)
 	_, err := r.db.ExecContext(ctx,
 		"UPDATE dwarf_peers SET seen_at=DATE_ADD_MILLIS(NOW_UTC(), ?), dispatched_at=DATE_ADD_MILLIS(NOW_UTC(), ?)"+
 			" WHERE engine_id=?", -60000, -60000, selfID)
@@ -915,15 +915,15 @@ func TestPeers_FaultsScopeByShard(t *testing.T) {
 	sm := seamster.New(true)
 	r.s.SetSeams(sm)
 
-	sm.InjectN(1000, FaultReadErr, "2")
+	sm.InjectN(seamsJoin(FaultReadErr, "2"), 1000)
 	assert.False(r.s.faulted(FaultReadErr), "a fault scoped to another shard leaves this one reading")
 
-	sm.Withdraw(FaultReadErr, "2")
-	sm.InjectN(1000, FaultReadErr, "1")
+	sm.Withdraw(seamsJoin(FaultReadErr, "2"))
+	sm.InjectN(seamsJoin(FaultReadErr, "1"), 1000)
 	assert.True(r.s.faulted(FaultReadErr), "scoped to this shard, it fires")
 
-	sm.Withdraw(FaultReadErr, "1")
-	sm.InjectN(1000, FaultReadErr)
+	sm.Withdraw(seamsJoin(FaultReadErr, "1"))
+	sm.InjectN(FaultReadErr, 1000)
 	assert.True(r.s.faulted(FaultReadErr), "and unscoped means every shard")
 }
 

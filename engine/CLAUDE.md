@@ -3344,14 +3344,28 @@ check `Visits`. **That order is load-bearing** - a stop before the call is caugh
 channel, one landing between the two lines by the channel (the waiter is already registered). Reversing them
 reintroduces precisely the race `Waiter` exists to remove.
 
-**Checkpoints scope exactly as faults do** - trailing `scope ...string` on every method, joined into the key the
-same way at both ends - so the engine builds no scoped-name helpers of its own. `signalStop` fires the stop
-checkpoint **both unscoped and scoped by `(flowKey, status)`**: `Checkpoint(ctx, checkpointFlowStopped)` and
-`Checkpoint(ctx, checkpointFlowStopped, flowKey, status)`. Both are needed because **a scoped fire does not wake
-an unscoped waiter** (same contract as faults) - the unscoped name serves "any flow stopped", the scoped one lets
-a test wait for one flow while a subgraph child, a fan-out sibling, or a peer replica's flows stop concurrently.
-The scoped form is meaningful only because `signalStop` runs **post-commit**: when it fires the status is durable,
-so a test reading the row immediately after sees it - the exact fact a status poll was spinning to sample.
+**A targeted seam name is built by `On`** (`engineundertest.go`), which joins a base name with the entity it
+targets. A consult site and the test that arms it both call it, which is what keeps the two from spelling the
+join differently - the seam itself keys on a plain string and knows nothing about the parts. `signalStop` fires
+the stop checkpoint **both bare and targeted at `(flowKey, status)`**: `Checkpoint(ctx, checkpointFlowStopped)`
+and `Checkpoint(ctx, On(checkpointFlowStopped, flowKey, status))`. Both are needed because **the two are
+different names, and firing one does not wake a waiter on the other** (the same contract faults carry) - the
+bare name serves "any flow stopped", the targeted one lets a test wait for one flow while a subgraph child, a
+fan-out sibling, or a peer replica's flows stop concurrently. The targeted form is meaningful only because
+`signalStop` runs **post-commit**: when it fires the status is durable, so a test reading the row immediately
+after sees it - the exact fact a status poll was spinning to sample.
+
+**Every `seamsJoin` call outside a test is wrapped in `e.seams.Enabled()`, without exception.** The join
+assembles a string, and a caller assembles it *before* the seam's own gate can short-circuit - so an unguarded
+site allocates on every pass in production, for a seam that can never fire there. A consult reads
+`if e.seams.Enabled() && e.seams.IsFault(seamsJoin(...))`, whose `&&` short-circuits before the join; a
+checkpoint pair puts both fires inside one `if e.seams.Enabled()` block, since the bare fire is a no-op when
+disabled anyway. A **bare constant** name costs nothing and needs no guard - that is most sites.
+
+The join is package-local and unexported everywhere it appears (`engine`, `fixtures`, `internal/enginetest`,
+`internal/piston`, `internal/peers`), because it exists for tests and has no business on any package's public
+surface. The copies must agree on the separator; a drift makes a wait target a name nothing fires, so it times
+out and fails loudly rather than going quietly wrong.
 
 Two limits: only stops routed through `signalStop` have a rendezvous (completed/failed/cancelled/interrupted),
 and because `Visits` is monotonic a **repeated** status (interrupt → resume → interrupt) is satisfied by the

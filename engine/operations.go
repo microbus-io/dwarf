@@ -68,7 +68,7 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		graph, lerr = e.host.LoadGraph(loaderCtx, workflowURL)
 		return lerr
 	})
-	if err == nil && e.seams.IsFault(FaultLoadGraph, workflowURL) {
+	if err == nil && e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultLoadGraph, workflowURL)) {
 		err = errors.New("injected fault: "+FaultLoadGraph+" "+workflowURL, http.StatusInternalServerError)
 	}
 	if err != nil {
@@ -487,8 +487,10 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 	// specific status. Placed before the drop-fault below so both fire even when the wake itself is dropped - a
 	// test waiting on "the flow stopped" should observe the DB-committed stop regardless of wake delivery.
 	// Inert in production: the Enabled gate short-circuits before the scoped name is built.
-	e.seams.Checkpoint(ctx, CheckpointFlowStopped)
-	e.seams.Checkpoint(ctx, CheckpointFlowStopped, flowKey, status)
+	if e.seams.Enabled() { // Enabled gates the assembled name in production
+		e.seams.Checkpoint(ctx, CheckpointFlowStopped)
+		e.seams.Checkpoint(ctx, seamsJoin(CheckpointFlowStopped, flowKey, status))
+	}
 	// FaultDropSignalStop simulates a lost terminal wake - a worker crash between the commit and the
 	// signal - so a test can prove Await still returns without one, via the latch detector reading the
 	// committed row.

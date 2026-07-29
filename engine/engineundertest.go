@@ -19,6 +19,7 @@ package engine
 import (
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/microbus-io/dwarf/internal/peers"
@@ -144,6 +145,18 @@ func (e *Engine) Seams() *seamster.Seamster {
 // surface, so the valid set is discoverable and a test cannot arm a fault or checkpoint no site consumes.
 // They stay in package engine (unlike the shared test HELPERS) because they are fired from production engine
 // code, not only from tests, so moving them to a test-only package would invert that dependency.
+
+// seamsJoin builds a targeted form of a fault or checkpoint name below: the base name, then the entity it
+// targets, joined with ":". A consult site and the test that arms it both call it, so neither can spell the
+// join the other does not - a site consulting seamsJoin(FaultExecuteTask, taskName) is armed by
+// Inject(seamsJoin(FaultExecuteTask, "Charge")). A targeted name and the bare one are DIFFERENT seams, so a
+// site wanting both fires both.
+//
+// It assembles a string on every call, which a production hot path pays whether or not the seams are live;
+// such sites guard it behind e.seams.Enabled().
+func seamsJoin(parts ...string) string {
+	return strings.Join(parts, ":")
+}
 
 // --- Fault injection ---
 const (

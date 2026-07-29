@@ -84,7 +84,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 	resumeDone := make(chan error, 1)
 	go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 
-	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, CheckpointResumeBeforeFlowWrite), "Resume never reached the checkpoint")
+	assert.True(e.seams.WaitTimeout(ctx, CheckpointResumeBeforeFlowWrite, 10*time.Second), "Resume never reached the checkpoint")
 
 	// Resume is frozen before its flow-status gate write. Drive a Delete to completion: it flips the flow
 	// interrupted->cancelled and stamps delete_after_ms under the flow-row lock.
@@ -224,7 +224,7 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 	e.seams.Break(CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cvt/g", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, CheckpointBeforeTransitionTx), "engine never reached checkpoint CheckpointBeforeTransitionTx")
+	assert.True(e.seams.WaitTimeout(ctx, CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint CheckpointBeforeTransitionTx")
 
 	// Cancel wins while A's transition is held: the flow goes cancelled under the flow-row lock.
 	assert.NoError(e.Cancel(ctx, fk, "test"))
@@ -289,7 +289,7 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 	e.seams.Break(CheckpointAfterCallerPark)
 	fk, err := e.Create(ctx, "cvs/parent", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, CheckpointAfterCallerPark), "engine never reached checkpoint CheckpointAfterCallerPark")
+	assert.True(e.seams.WaitTimeout(ctx, CheckpointAfterCallerPark, 10*time.Second), "engine never reached checkpoint CheckpointAfterCallerPark")
 
 	// Cancel the tree while the child does not yet exist: teardown works from a scan taken before the child.
 	assert.NoError(e.Cancel(ctx, fk, "test"))
@@ -362,7 +362,7 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 	e.seams.Break(CheckpointBeforeRetryRewind)
 	fk, err := e.Create(ctx, "rrc/g", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, CheckpointBeforeRetryRewind), "engine never reached checkpoint CheckpointBeforeRetryRewind")
+	assert.True(e.seams.WaitTimeout(ctx, CheckpointBeforeRetryRewind, 10*time.Second), "engine never reached checkpoint CheckpointBeforeRetryRewind")
 
 	// Cancel wins: A's running step is flipped cancelled under the cancel transaction.
 	assert.NoError(e.Cancel(ctx, fk, "test"))

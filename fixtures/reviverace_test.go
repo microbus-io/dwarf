@@ -68,7 +68,7 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	e.Seams().Break(engine.CheckpointBeforeReviveWrite)
 	fk, err := e.Create(ctx, "rvc/parent", nil, nil)
 	assert.NoError(err)
-	assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeReviveWrite), "engine never reached checkpoint engine.CheckpointBeforeReviveWrite")
+	assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeReviveWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeReviveWrite")
 
 	// Cancel wins: the parked caller step is flipped cancelled under the cancel transaction.
 	assert.NoError(e.Cancel(ctx, fk, "test"))

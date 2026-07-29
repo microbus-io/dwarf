@@ -138,12 +138,12 @@ func TestFault_ExecuteTask(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// No onError -> the injected failure fails the flow.
-	e.seams.Inject(FaultExecuteTask, "Work")
+	e.seams.Inject(seamsJoin(FaultExecuteTask, "Work"))
 	if out := enginetest.BoundedRun(t, e, "fexec/bare"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusFailed, out.Status)
 	}
 	// With onError -> routed to the handler and the flow completes. Fault consumed, so re-arm.
-	e.seams.Inject(FaultExecuteTask, "Work")
+	e.seams.Inject(seamsJoin(FaultExecuteTask, "Work"))
 	if out := enginetest.BoundedRun(t, e, "fexec/handled"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		assert.Equal("yes", out.State["rescued"])
@@ -169,7 +169,7 @@ func TestFault_PanicExecuteTask(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// A panic in the host call is caught at the boundary and fails the step (no wedge/crash-loop).
-	e.seams.Inject(FaultPanicExecuteTask, "Boom")
+	e.seams.Inject(seamsJoin(FaultPanicExecuteTask, "Boom"))
 	if out := enginetest.BoundedRun(t, e, "fpanic/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusFailed, out.Status)
 	}
@@ -194,7 +194,7 @@ func TestFault_LoadGraph(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// Armed: Create fails (the graph "cannot be loaded"). Disarmed: it creates and completes.
-	e.seams.Inject(FaultLoadGraph, "floadg/g")
+	e.seams.Inject(seamsJoin(FaultLoadGraph, "floadg/g"))
 	_, err := e.Create(ctx, "floadg/g", nil, nil)
 	assert.Error(err)
 	assert.Equal(500, errors.StatusCode(err))
@@ -223,7 +223,7 @@ func TestFault_TransitionCommit(t *testing.T) {
 	// It used to run twice: the recovery defer rewound A and re-dispatched it, which RE-EXECUTED THE TASK to
 	// recover from a database blip the task had nothing to do with. Retrying the write instead of the task is
 	// the whole point - a task's side effects must not re-fire because a transaction lost a connection.
-	e.seams.Inject(FaultTransitionCommit, "A")
+	e.seams.Inject(seamsJoin(FaultTransitionCommit, "A"))
 	if out := enginetest.BoundedRun(t, e, "ftrans/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -244,7 +244,7 @@ func TestFault_Contention(t *testing.T) {
 
 	// A's transition transaction returns a lock-contention error once: Transact retries the closure to a
 	// clean commit, transparently - the flow completes and A ran only once (retry is inside the tx).
-	e.seams.Inject(FaultContention, "A")
+	e.seams.Inject(seamsJoin(FaultContention, "A"))
 	if out := enginetest.BoundedRun(t, e, "fcont/g"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
@@ -302,7 +302,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	// step stays claimable and lease recovery re-runs it cleanly - a stale write never corrupts or
 	// terminalizes the flow. The first dispatch's write is fenced out; once its lease lapses the poll
 	// backstop resets the step and it re-runs (fault consumed) to a clean completion, so A ran twice.
-	e.seams.Inject(FaultLeaseStaleWrite, "A")
+	e.seams.Inject(seamsJoin(FaultLeaseStaleWrite, "A"))
 	// Rendezvous on the clean re-run's completion (armed before Create: the fenced first dispatch never stops,
 	// so the first - and only - stop is the recovered completion, caught whichever poll drives it).
 	waitDone := awaitNextStop(t, e)
@@ -402,7 +402,7 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	// consulted the fault - and a single fire would then be consumed by whichever of the worker and the
 	// sweep got there first. If the sweep won, ITS revive would be the one dropped, the worker would
 	// perform the real one, and this test would pass while proving nothing about the sweep.
-	e.seams.InjectN(1<<20, FaultSubgraphReviveLost)
+	e.seams.InjectN(FaultSubgraphReviveLost, 1<<20)
 	waitChild := awaitNextStop(t, e) // rendezvous on the child's completion (the first stop; parent is parked)
 	fk, err := e.Create(ctx, "fsub/parent", nil, nil)
 	assert.NoError(err)
@@ -500,7 +500,7 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 	// cycle cannot slip a legitimate empty refill in and wipe the cache on its own).
 	e.cache.Refill(1, []candidatecache.Job{{StepID: 101, Shard: 1}, {StepID: 102, Shard: 1}}, 5)
 	assert.Equal(2, e.cache.Len())
-	e.seams.InjectN(1<<20, FaultRefillScanErr)
+	e.seams.InjectN(FaultRefillScanErr, 1<<20)
 
 	_, _, err := e.pistons[1].ScanBand(ctx, 1)
 	assert.Error(err, "the engine's seams must reach its pistons")

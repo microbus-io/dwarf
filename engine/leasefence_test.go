@@ -336,14 +336,14 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	// database was busy would be exactly backwards - so it is what drives the completed->pending reset now.
 	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transaction gives up and
 	// hands a contention error to the defer; the fault is spent, and the peer's re-dispatch runs clean.
-	eng.seams.InjectN(8, FaultContention, "A")
+	eng.seams.InjectN(seamsJoin(FaultContention, "A"), 8)
 	eng.seams.Break(CheckpointBeforeRecoveryReset)
 
 	flowKey, err := eng.Create(ctx, "lfrr/g", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
-	assert.True(eng.seams.WaitTimeout(ctx, 15*time.Second, CheckpointBeforeRecoveryReset), "engine never reached checkpoint CheckpointBeforeRecoveryReset")
+	assert.True(eng.seams.WaitTimeout(ctx, CheckpointBeforeRecoveryReset, 15*time.Second), "engine never reached checkpoint CheckpointBeforeRecoveryReset")
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	if !assert.NoError(err) {

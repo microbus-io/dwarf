@@ -77,7 +77,7 @@ func TestAwaitShutdownflow(t *testing.T) {
 	defer cancelAwait()
 	// Armed BEFORE the goroutine that triggers it, which is the only ordering that works here: the waiter
 	// has to be registered before the statement that drives the engine to the checkpoint.
-	parked := eng.Seams().Waiter(engine.CheckpointAwaitParked, flowKey)
+	parked := eng.Seams().Waiter(seamsJoin(engine.CheckpointAwaitParked, flowKey))
 	go func() {
 		out, aerr := eng.Await(awaitCtx, flowKey)
 		done <- awaitResult{out, aerr}

@@ -118,6 +118,13 @@ const CheckpointCycleDone = "refillCycleDone"
 // Fired BOTH unscoped and scoped by shard, for the same reason CheckpointCycleDone is.
 const CheckpointStole = "refillStole"
 
+// seamsJoin builds a targeted seam name: a base name, then the entity it targets, joined with ":". A consult
+// site and the test that arms it both call it, so neither can spell the join the other does not. A targeted
+// name and the bare one are DIFFERENT seams, so a site wanting both fires both.
+func seamsJoin(parts ...string) string {
+	return strings.Join(parts, ":")
+}
+
 // PartitionFunc reports the replica partition - see SetPartitionFunc.
 type PartitionFunc func() (replicas, ordinal int, ok bool)
 
@@ -415,9 +422,10 @@ func (p *Piston) Run(ctx context.Context) {
 		if r.Err == nil {
 			// This shard's partition now reflects the plan - see CheckpointCycleDone. Gated on the error so
 			// a visit cannot mean "looked and gave up": neither error path pushed, so neither reconciled.
-			seams := p.seams.Load()
-			seams.Checkpoint(ctx, CheckpointCycleDone)
-			seams.Checkpoint(ctx, CheckpointCycleDone, strconv.Itoa(p.shard))
+			if seams := p.seams.Load(); seams.Enabled() { // Enabled gates the assembled name in production
+				seams.Checkpoint(ctx, CheckpointCycleDone)
+				seams.Checkpoint(ctx, seamsJoin(CheckpointCycleDone, strconv.Itoa(p.shard)))
+			}
 		}
 	}
 }
@@ -753,7 +761,7 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 		p.inst.Load().stolen.Add(ctx, int64(stolen), metric.WithAttributes(attribute.Int("shard", p.shard)))
 		if seams := p.seams.Load(); seams.Enabled() {
 			seams.Checkpoint(ctx, CheckpointStole)
-			seams.Checkpoint(ctx, CheckpointStole, strconv.Itoa(p.shard))
+			seams.Checkpoint(ctx, seamsJoin(CheckpointStole, strconv.Itoa(p.shard)))
 		}
 	}
 	return out, nil

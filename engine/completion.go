@@ -39,7 +39,7 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	// FaultSubgraphSpawnErr simulates the spawn failing after the caller step already parked (processStep's
 	// park-then-create ordering): no child is inserted, and the caller must be failed cleanly (failAndReturn)
 	// rather than left parked forever. Scoped by the child workflow URL.
-	if e.seams.IsFault(FaultSubgraphSpawnErr, subgraphWorkflowURL) {
+	if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultSubgraphSpawnErr, subgraphWorkflowURL)) {
 		return "", errors.New("injected fault: "+FaultSubgraphSpawnErr+" "+subgraphWorkflowURL, http.StatusInternalServerError)
 	}
 	db, err := e.db.Shard(shardNum)
@@ -931,7 +931,7 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 		if !lost {
 			var taskName string
 			if err := tx.QueryRowContext(ctx, "SELECT task_name FROM dwarf_steps WHERE step_id=?", parentStepID).Scan(&taskName); err == nil {
-				lost = e.seams.IsFault(FaultDeliverFailureErr, strings.TrimSpace(taskName))
+				lost = e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultDeliverFailureErr, strings.TrimSpace(taskName)))
 			}
 		}
 		if lost {

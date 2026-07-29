@@ -57,6 +57,13 @@ type Engine interface {
 // time out and the test fail loudly, so it cannot go silently wrong.
 const checkpointFlowStopped = "flowStopped"
 
+// seamsJoin MUST join a targeted seam name the way the engine's own seamsJoin does. It is duplicated (not
+// imported) for the same cycle reason as checkpointFlowStopped above; a drift makes a wait here target a name
+// nothing fires, so it times out and fails loudly rather than going quietly wrong.
+func seamsJoin(parts ...string) string {
+	return strings.Join(parts, ":")
+}
+
 // AssertInvariants is the reusable end-of-test sweep that proves a workload never *created* any of the states
 // the background wedge sweep / orphan detector exist to catch. It runs a fixed set of structural checks by
 // direct SQL against every shard and must be called only after the workload has quiesced (all Awaits
@@ -142,8 +149,9 @@ func AssertInvariants(t *testing.T, e Engine) {
 // the earlier occurrence (wait on such a status with a Waiter armed around the specific trigger instead).
 func AwaitFlowStatus(t *testing.T, e Engine, flowKey, want string, timeout time.Duration) {
 	t.Helper()
-	reached := e.Seams().Waiter(checkpointFlowStopped, flowKey, want) // arm first...
-	if e.Seams().Visits(checkpointFlowStopped, flowKey, want) > 0 {
+	stopped := seamsJoin(checkpointFlowStopped, flowKey, want)
+	reached := e.Seams().Waiter(stopped) // arm first...
+	if e.Seams().Visits(stopped) > 0 {
 		return // ...then catch a stop that beat us to it
 	}
 	select {
@@ -209,13 +217,13 @@ func TimeoutScale() time.Duration { return testTimeoutScale }
 // Call it from the TEST goroutine, like every other helper here that fails the test: t.Fatalf from a task
 // handler or any other engine-owned goroutine is illegal, and here it is also useless - the engine goroutine
 // it kills is the one that would have driven the checkpoint, so the suite wedges instead of reporting.
-func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Duration, checkpointName string, scope ...string) {
+func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Duration, checkpointName string) {
 	t.Helper()
-	want := seams.Visits(checkpointName, scope...) + n
+	want := seams.Visits(checkpointName) + n
 	deadline := time.After(timeout * testTimeoutScale)
 	for {
-		reached := seams.Waiter(checkpointName, scope...) // arm FIRST...
-		got := seams.Visits(checkpointName, scope...)     // ...then read
+		reached := seams.Waiter(checkpointName) // arm FIRST...
+		got := seams.Visits(checkpointName)     // ...then read
 		if got >= want {
 			return
 		}
@@ -223,8 +231,7 @@ func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Dur
 		case <-reached:
 		case <-deadline:
 			t.Fatalf("checkpoint %q reached %d of the %d times awaited within %s",
-				strings.Join(append([]string{checkpointName}, scope...), ":"),
-				seams.Visits(checkpointName, scope...), want, timeout*testTimeoutScale)
+				checkpointName, seams.Visits(checkpointName), want, timeout*testTimeoutScale)
 		}
 	}
 }
@@ -244,6 +251,6 @@ func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Dur
 func AwaitShardCycles(t *testing.T, e Engine, shards, extra int) {
 	t.Helper()
 	for shard := 1; shard <= shards; shard++ {
-		AwaitVisits(t, e.Seams(), extra, time.Minute, piston.CheckpointCycleDone, strconv.Itoa(shard))
+		AwaitVisits(t, e.Seams(), extra, time.Minute, seamsJoin(piston.CheckpointCycleDone, strconv.Itoa(shard)))
 	}
 }

@@ -86,15 +86,15 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 	// clock was reporting the suite rather than the engine. Arm all three FIRST, then read Visits: a stop
 	// before the call is caught by the count, a later one by the channel.
 	seams := eng.Seams()
-	interrupted := seams.Waiter(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted)
-	failed := seams.Waiter(engine.CheckpointFlowStopped, flowKey, workflow.StatusFailed)
-	completed := seams.Waiter(engine.CheckpointFlowStopped, flowKey, workflow.StatusCompleted)
+	interrupted := seams.Waiter(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
+	failed := seams.Waiter(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusFailed))
+	completed := seams.Waiter(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusCompleted))
 	const early = "tree terminalized as %s before resume; must rest interrupted while a branch is parked"
 	switch {
-	case seams.Visits(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted) > 0:
-	case seams.Visits(engine.CheckpointFlowStopped, flowKey, workflow.StatusFailed) > 0:
+	case seams.Visits(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted)) > 0:
+	case seams.Visits(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusFailed)) > 0:
 		t.Fatalf(early, workflow.StatusFailed)
-	case seams.Visits(engine.CheckpointFlowStopped, flowKey, workflow.StatusCompleted) > 0:
+	case seams.Visits(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusCompleted)) > 0:
 		t.Fatalf(early, workflow.StatusCompleted)
 	default:
 		select {

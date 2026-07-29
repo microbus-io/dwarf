@@ -68,7 +68,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeCompleteFlowWrite), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
 
 		// Cancel wins while completion is held: the flow goes cancelled under the flow-row lock.
 		assert.NoError(e.Cancel(ctx, fk, "test"))
@@ -90,7 +90,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeCompleteFlowWrite), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
 		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
@@ -164,8 +164,8 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointResumeBeforeFlowWrite), "engine never reached checkpoint engine.CheckpointResumeBeforeFlowWrite")
-		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeDeleteWrite), "engine never reached checkpoint engine.CheckpointBeforeDeleteWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointResumeBeforeFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointResumeBeforeFlowWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeDeleteWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeDeleteWrite")
 
 		// Resume wins: released first, it flips interrupted->running and returns cleanly (the gate re-dispatches
 		// and blocks, so the flow rests running).
@@ -193,8 +193,8 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointResumeBeforeFlowWrite), "engine never reached checkpoint engine.CheckpointResumeBeforeFlowWrite")
-		assert.True(e.Seams().WaitTimeout(ctx, 10*time.Second, engine.CheckpointBeforeDeleteWrite), "engine never reached checkpoint engine.CheckpointBeforeDeleteWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointResumeBeforeFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointResumeBeforeFlowWrite")
+		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeDeleteWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeDeleteWrite")
 
 		// Delete wins: released first, it flips interrupted->cancelled and stamps deletion, returning cleanly.
 		e.Seams().Resume(engine.CheckpointBeforeDeleteWrite)

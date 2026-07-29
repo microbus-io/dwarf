@@ -53,6 +53,8 @@ github.com/microbus-io/errors v1.0.1 h1:pujosfRSEqSJi0gcx6d+A7Mf2RZr2vQVMSQz0pG+
 github.com/microbus-io/errors v1.0.1/go.mod h1:NZTmmm+wxKQ8JFCeOMWWj+oqGylYsMKmS1YXysHZASM=
 github.com/microbus-io/seamster v0.3.1 h1:GkzFTdA5qFMJCrUTFxJYD6wcaU83UIle7d9huYeHR5s=
 github.com/microbus-io/seamster v0.3.1/go.mod h1:IlCTdnLEOqfaFXd+ctNVC7tmn2GFQquQVcUYljbzZjw=
+github.com/microbus-io/seamster v0.4.0 h1:CCBmoyBChBP5pehnc2zh9kLQifbr6r+BrYUw9pDClWI=
+github.com/microbus-io/seamster v0.4.0/go.mod h1:IlCTdnLEOqfaFXd+ctNVC7tmn2GFQquQVcUYljbzZjw=
 github.com/microbus-io/sequel v1.11.0 h1:Eps5o4k+QM0VkDFBXCxamEkIQ4ALjL0Qlvr4wf/oEvs=
 github.com/microbus-io/sequel v1.11.0/go.mod h1:uRHsZ2rPPrPDTCOHjDevDs59bu+MLWyyMBycRe9Rxy0=
 github.com/microbus-io/testarossa v0.7.3 h1:CsLpfjFG1/+rl0FqT1jJpjBiXZBydEe7CZOnQWbob9A=

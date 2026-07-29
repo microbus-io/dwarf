@@ -315,10 +315,20 @@ func (s *Sonar) SetSeams(sm *seamster.Seamster) {
 	s.seams.Store(sm)
 }
 
+// seamsJoin builds a targeted seam name: a base name, then the entity it targets, joined with ":". A consult
+// site and the test that arms it both call it, so neither can spell the join the other does not. A targeted
+// name and the bare one are DIFFERENT seams, so a site wanting both fires both.
+func seamsJoin(parts ...string) string {
+	return strings.Join(parts, ":")
+}
+
 // faulted reports whether a fault is armed for this Sonar, either fleet-wide or for this shard alone.
 func (s *Sonar) faulted(name string) bool {
 	sm := s.seams.Load()
-	return sm.IsFault(name) || sm.IsFault(name, strconv.Itoa(s.shard))
+	if !sm.Enabled() { // gates the assembled per-shard name in production
+		return false
+	}
+	return sm.IsFault(name) || sm.IsFault(seamsJoin(name, strconv.Itoa(s.shard)))
 }
 
 // SetLogger sets the logger. Nil restores the discarding default.

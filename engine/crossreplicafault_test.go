@@ -81,7 +81,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	// Break the worker's terminal wake for the rest of the test: every signalStop on the worker delivers
 	// nothing, so the awaiter can learn the outcome only by reading the flow row. Nothing crosses between the
 	// two replicas in any case - they share a database and nothing else.
-	worker.seams.InjectN(1<<20, FaultDropSignalStop)
+	worker.seams.InjectN(FaultDropSignalStop, 1<<20)
 
 	fk, err := awaiter.Create(ctx, "xrwake/g", nil, nil)
 	if !assert.NoError(err) {
@@ -136,7 +136,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	repA.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 400ms
 	assert.NoError(repA.Startup(ctx))
 
-	repA.seams.Inject(FaultLeaseStaleWrite, "A")
+	repA.seams.Inject(seamsJoin(FaultLeaseStaleWrite, "A"))
 	fk, err := repA.Create(ctx, "xrrec/g", nil, nil)
 	if !assert.NoError(err) {
 		repA.Shutdown(ctx)

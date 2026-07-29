@@ -143,7 +143,7 @@ func TestPeerRegistryBlindflow(t *testing.T) {
 	// stopped existing.
 	drainFlows(t, 30*time.Second, creator, name, 4)
 	for _, e := range []*engine.Engine{creator, eng1, eng2} {
-		e.Seams().InjectN(1<<20, engine.FaultPeerReadErr)
+		e.Seams().InjectN(engine.FaultPeerReadErr, 1<<20)
 	}
 
 	before := ran["1"].Load() + ran["2"].Load()
@@ -179,7 +179,7 @@ func TestPeerStalledDispatcherflow(t *testing.T) {
 
 	// eng2's supply cycle fails from here on. It goes on beating - so it stays in the POOL divisor, which is
 	// correct, it still holds connections - but publishes no dispatch evidence.
-	eng2.Seams().InjectN(1<<20, engine.FaultRefillScanErr)
+	eng2.Seams().InjectN(engine.FaultRefillScanErr, 1<<20)
 
 	// Arm BEFORE the work exists, then check Visits after: a steal landing between the two lines is caught by
 	// the channel, one before them by the count. The reverse order reintroduces the race the split-arm Waiter

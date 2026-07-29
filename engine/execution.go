@@ -362,7 +362,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	execErr := errors.CatchPanic(func() error {
 		// FaultPanicExecuteTask panics inside the wrapper so it exercises the host-call panic isolation
 		// (caught here, routed as a normal task error), scoped to this task name.
-		if e.seams.IsFault(FaultPanicExecuteTask, taskName) {
+		if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultPanicExecuteTask, taskName)) {
 			panic("injected fault: " + FaultPanicExecuteTask + " " + taskName)
 		}
 		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
@@ -391,7 +391,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	e.metrics.exitWait.Record(ctx, time.Since(permitWaitStart).Seconds(),
 		metric.WithAttributes(attribute.String("shard", strconv.Itoa(shardNum))))
 
-	if execErr == nil && e.seams.IsFault(FaultExecuteTask, taskName) {
+	if execErr == nil && e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultExecuteTask, taskName)) {
 		execErr = errors.New("injected fault: "+FaultExecuteTask+" "+taskName, http.StatusInternalServerError)
 	}
 	recordSpanError(taskSpan, execErr)
@@ -501,7 +501,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 			subgraphGraph, e2 = e.host.LoadGraph(loadCtx, subgraphURL)
 			return e2
 		})
-		if lerr == nil && e.seams.IsFault(FaultLoadGraph, subgraphURL) {
+		if lerr == nil && e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultLoadGraph, subgraphURL)) {
 			lerr = errors.New("injected fault: "+FaultLoadGraph+" "+subgraphURL, http.StatusInternalServerError)
 		}
 		loadCancel() // a panic here fails the step like any LoadGraph error rather than wedging it
@@ -654,7 +654,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	// no-op below), so the step stays claimable and lease recovery re-runs it cleanly - the test proves a
 	// late/slow worker's write can never corrupt or terminalize a flow a peer is healthily re-executing.
 	writeSeq := leaseSeq
-	if e.seams.IsFault(FaultLeaseStaleWrite, taskName) {
+	if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultLeaseStaleWrite, taskName)) {
 		writeSeq = leaseSeq - 1
 	}
 	// THE task has already run - its side effects have fired - so this write is the only record that it did.
@@ -666,7 +666,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		// FaultPersistErr makes this write fail with a synthetic NON-contention error, consumed per attempt -
 		// so InjectN(1) is a transient blip the retry must absorb with NO re-execution, and InjectN(large) is a
 		// permanent failure the classifier must terminalize rather than loop on.
-		if e.seams.IsFault(FaultPersistErr, taskName) {
+		if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultPersistErr, taskName)) {
 			return errors.New("injected fault: " + FaultPersistErr + " " + taskName)
 		}
 		res, werr := db.ExecContext(ctx,
@@ -893,10 +893,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 			// returns a non-retryable error, so the tx fails after the step was already marked completed and the
 			// processStep recovery defer must reset it (completed->pending) and re-dispatch. Both are scoped to
 			// the completing task and checked before the flow-row write, so a fired fault rolls back nothing.
-			if e.seams.IsFault(FaultContention, taskName) {
+			if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultContention, taskName)) {
 				return errors.New("database is locked (injected fault: " + FaultContention + " " + taskName + ")")
 			}
-			if e.seams.IsFault(FaultTransitionCommit, taskName) {
+			if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultTransitionCommit, taskName)) {
 				return errors.New("injected fault: " + FaultTransitionCommit + " " + taskName)
 			}
 
@@ -914,8 +914,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 			// Reports whether the flow is still non-terminal; a false return means the caller must bail (nil).
 			flowRowLocked := false
 			lockFlowRow := func() (bool, error) {
-				if e.seams.Enabled() { // counting checkpoint; Enabled gates the throwaway scope string in production
-					e.seams.Checkpoint(ctx, CheckpointFlowRowWrite, strconv.Itoa(flowID))
+				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
+					e.seams.Checkpoint(ctx, seamsJoin(CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
 				flowRes, flowErr := tx.ExecContext(ctx,
 					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
@@ -1148,8 +1148,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 			// flow's hottest row (two extra tuple versions per sibling; 126 per 64-wide cohort) plus the lock
 			// hold that serializes the cohort. Every path that DOES advance the flow holds the row by here.
 			if !flowFailed && flowRowLocked {
-				if e.seams.Enabled() { // counting checkpoint; Enabled gates the throwaway scope string in production
-					e.seams.Checkpoint(ctx, CheckpointFlowRowWrite, strconv.Itoa(flowID))
+				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
+					e.seams.Checkpoint(ctx, seamsJoin(CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
 				tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", nextFlowStepID, flowID)
 			}

@@ -64,7 +64,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))
-	e.seams.InjectN(1, FaultPersistErr, "A") // ONE failing attempt, then the database is fine again
+	e.seams.InjectN(seamsJoin(FaultPersistErr, "A"), 1) // ONE failing attempt, then the database is fine again
 
 	_, outcome, err := e.Run(ctx, "p/transient/wf", nil, nil)
 	assert.NoError(err)
@@ -106,7 +106,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))
-	e.seams.InjectN(1000, FaultPersistErr, "A") // every attempt fails: the payload, not the database
+	e.seams.InjectN(seamsJoin(FaultPersistErr, "A"), 1000) // every attempt fails: the payload, not the database
 
 	_, outcome, err := e.Run(ctx, "p/permanent/wf", nil, nil)
 	assert.NoError(err)
@@ -244,7 +244,7 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 	// select on drainStop, Shutdown would block for this long.
 	e.persistBackoff = []time.Duration{30 * time.Second}
 	assert.NoError(e.Startup(ctx))
-	e.seams.InjectN(1000, FaultPersistErr, "A")
+	e.seams.InjectN(seamsJoin(FaultPersistErr, "A"), 1000)
 
 	_, err := e.Create(ctx, "p/drain/wf", nil, nil)
 	assert.NoError(err)

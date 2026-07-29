@@ -446,7 +446,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 		fs := faultSpecs[rng.intn(len(faultSpecs))]
 		armedMu.Lock()
 		if fs.scoped {
-			eng.seams.Inject(fs.name, taskNodes[rng.intn(len(taskNodes))])
+			eng.seams.Inject(seamsJoin(fs.name, taskNodes[rng.intn(len(taskNodes))]))
 			armed[fs.name] = taskNodes[rng.intn(len(taskNodes))]
 		} else {
 			eng.seams.Inject(fs.name)
@@ -523,7 +523,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 	armedMu.Lock()
 	for name, scope := range armed {
 		if scope != "" {
-			eng.seams.Withdraw(name, scope)
+			eng.seams.Withdraw(seamsJoin(name, scope))
 		} else {
 			eng.seams.Withdraw(name)
 		}

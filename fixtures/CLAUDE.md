@@ -196,9 +196,10 @@ what they stand in for is what decides whether one is a bug waiting to happen or
 
 For the last two, name the event instead:
 
-- **`enginetest.AwaitVisits(t, seams, n, timeout, checkpoint, scope...)`** - wait for N further arrivals at
-  a checkpoint. seamster's `Waiter` is one-shot and `Visits` is monotonic, so N occurrences means re-arming
-  per occurrence, arming BEFORE reading the count each time. Call it from the test goroutine: `t.Fatalf`
+- **`enginetest.AwaitVisits(t, seams, n, timeout, checkpoint)`** - wait for N further arrivals at a
+  checkpoint (a targeted name comes from the package-local `seamsJoin`). seamster's `Waiter` is one-shot
+  and `Visits` is monotonic, so N occurrences means re-arming per occurrence, arming BEFORE reading the
+  count each time. Call it from the test goroutine: `t.Fatalf`
   inside a task handler kills the engine goroutine that would have driven the checkpoint, so the suite
   wedges instead of reporting.
 - **`enginetest.AwaitShardCycles(t, e, shards, extra)`** - wait for each shard's partition to be reconciled
