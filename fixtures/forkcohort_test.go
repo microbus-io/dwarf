@@ -105,7 +105,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	// All three branches contributed to the fan-in merge, so the fork recovered the whole cohort. The order
 	// is not asserted: fan_out_ordinal is stamped on a branch's FIRST step, so the exit steps of a multi-step
 	// branch fold in step_id order, which the clone renumbers.
-	enriched, _ := forkOutcome.State["enriched"].([]any)
+	enriched, _ := forkOutcome.State.Value("enriched").([]any)
 	got := map[any]bool{}
 	for _, v := range enriched {
 		got[v] = true
@@ -344,7 +344,7 @@ func TestForkCohort_NestedFailureInAKeptBranchStillFailsTheFork(t *testing.T) {
 		if s.TaskName == "Chunk" && s.Status == workflow.StatusCompleted && otherChunk == "" {
 			step, serr := eng.Step(ctx, s.StepKey)
 			if serr == nil {
-				if c, _ := step.State["chunk"].(string); c == "a1" {
+				if c, _ := step.State.Value("chunk").(string); c == "a1" {
 					otherChunk = s.StepKey
 				}
 			}

@@ -27,7 +27,7 @@ func TestMergeReduce_Append(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.MergeReduce(State{"items": []int{3, 4}}, map[string]Reducer{"items": ReducerAppend})
+	err := base.MergeReduce(State{d: map[string]any{"items": []int{3, 4}}}, map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 
 	var items []int
@@ -39,7 +39,7 @@ func TestMergeReduce_AppendSingleElement(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []string{"a"})
-	err := base.MergeReduce(State{"items": "b"}, map[string]Reducer{"items": ReducerAppend})
+	err := base.MergeReduce(State{d: map[string]any{"items": "b"}}, map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 
 	var items []string
@@ -51,7 +51,7 @@ func TestMergeReduce_IncomingAbsentIsNoOp(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.MergeReduce(State{"other": 1}, map[string]Reducer{"items": ReducerAppend})
+	err := base.MergeReduce(State{d: map[string]any{"other": 1}}, map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 
 	var items []int
@@ -65,7 +65,7 @@ func TestMergeReduce_BaseAbsentSeedsViaReducer(t *testing.T) {
 	// base has no "items" yet, so the reducer is called with a nil base and decides how to seed.
 	base, _ := NewState("other", 1)
 	reducers := map[string]Reducer{"items": ReducerAppend}
-	err := base.MergeReduce(State{"items": []int{3, 4}}, reducers)
+	err := base.MergeReduce(State{d: map[string]any{"items": []int{3, 4}}}, reducers)
 	assert.NoError(err)
 
 	var items []int
@@ -73,7 +73,7 @@ func TestMergeReduce_BaseAbsentSeedsViaReducer(t *testing.T) {
 	assert.Equal([]int{3, 4}, items)
 
 	// A second merge accumulates onto the seeded slice.
-	err = base.MergeReduce(State{"items": 5}, reducers)
+	err = base.MergeReduce(State{d: map[string]any{"items": 5}}, reducers)
 	assert.NoError(err)
 	_, _ = base.Get("items", &items)
 	assert.Equal([]int{3, 4, 5}, items)
@@ -83,7 +83,7 @@ func TestMergeReduce_NoReducerOverwrites(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.Merge(State{"items": []int{3, 4}}) // no reducers
+	err := base.Merge(State{d: map[string]any{"items": []int{3, 4}}}) // no reducers
 	assert.NoError(err)
 
 	var items []int
@@ -95,7 +95,7 @@ func TestMergeReduce_ErrorPropagates(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("items", []int{1, 2})
-	err := base.MergeReduce(State{"items": "not an int"}, map[string]Reducer{"items": ReducerAppend})
+	err := base.MergeReduce(State{d: map[string]any{"items": "not an int"}}, map[string]Reducer{"items": ReducerAppend})
 	assert.Error(err)
 }
 
@@ -103,7 +103,7 @@ func TestMergeReduce_AddByReducerName(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("total", 10)
-	err := base.MergeReduce(State{"total": 5}, map[string]Reducer{"total": ReducerAdd})
+	err := base.MergeReduce(State{d: map[string]any{"total": 5}}, map[string]Reducer{"total": ReducerAdd})
 	assert.NoError(err)
 
 	var total int

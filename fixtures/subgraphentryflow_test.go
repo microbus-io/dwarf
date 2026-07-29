@@ -91,6 +91,6 @@ func TestSubgraphentryflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "subgraphentryflow.verify:428/outer", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("inner/tail", outcome.State["finalResult"])
+		assert.Equal("inner/tail", outcome.State.Value("finalResult"))
 	})
 }

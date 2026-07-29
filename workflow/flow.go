@@ -18,7 +18,6 @@ package workflow
 
 import (
 	"encoding/json"
-	"maps"
 	"reflect"
 	"time"
 
@@ -290,11 +289,11 @@ func (f *Flow) Del(keys ...string) {
 // value (JSON null) in changes so the following merge drops it, and state is emptied. Useful at workflow
 // boundaries or anywhere a task wants a blank slate before populating it.
 func (f *Flow) Clear() {
-	if f.changes == nil {
+	if f.changes.IsZero() {
 		f.changes, _ = NewState()
 	}
-	for k := range f.state {
-		f.changes[k] = nil // tombstone so the delete propagates into the task's persisted changes
+	for k := range f.state.d {
+		f.changes.d[k] = nil // tombstone so the delete propagates into the task's persisted changes
 	}
 	f.state.Clear()
 }
@@ -302,10 +301,10 @@ func (f *Flow) Clear() {
 // deleteOne is the shared worker: writes a cleared (Go nil) tombstone to changes so the following merge
 // drops the field, and removes it from state so later reads in this task see it as absent.
 func (f *Flow) deleteOne(key string) {
-	if f.changes == nil {
+	if f.changes.IsZero() {
 		f.changes, _ = NewState()
 	}
-	f.changes[key] = nil // tombstone; isCleared treats a Go nil (or JSON null) as cleared
+	f.changes.d[key] = nil // tombstone; isCleared treats a Go nil (or JSON null) as cleared
 	f.state.Del(key)
 }
 
@@ -313,9 +312,7 @@ func (f *Flow) deleteOne(key string) {
 // (including any changes applied so far). Pass the returned snapshot to SetChanges
 // to record only the fields that differ.
 func (f *Flow) Snapshot() map[string]any {
-	snap := make(map[string]any, len(f.state))
-	maps.Copy(snap, f.state)
-	return snap
+	return f.state.Map()
 }
 
 // SetChanges marshals the source struct back to state, comparing against the provided snapshot.
@@ -326,13 +323,13 @@ func (f *Flow) Snapshot() map[string]any {
 // It returns an error if a field holds an unstorable value (see the note above SetInt), and that field
 // is not recorded.
 func (f *Flow) SetChanges(source any, snap map[string]any) error {
-	if f.changes == nil {
-		f.changes = make(map[string]any)
+	if f.changes.IsZero() {
+		f.changes, _ = NewState()
 	}
-	if f.state == nil {
-		f.state = make(map[string]any)
+	if f.state.IsZero() {
+		f.state, _ = NewState()
 	}
-	return f.diffAndApply(source, snap, f.state, f.changes)
+	return f.diffAndApply(source, snap, f.state.d, f.changes.d)
 }
 
 // --- Control ---
@@ -549,15 +546,15 @@ func (f *Flow) SleepRequested() time.Duration {
 }
 
 // InterruptRequested returns the interrupt payload and true if Interrupt was called.
-func (f *Flow) InterruptRequested() (map[string]any, bool) {
+func (f *Flow) InterruptRequested() (State, bool) {
 	return f.interruptPayload, f.interrupt
 }
 
 // SubgraphRequested returns the request URL, input state, and true if Subgraph was called. The engine
 // loads the graph by URL.
-func (f *Flow) SubgraphRequested() (url string, input map[string]any, ok bool) {
+func (f *Flow) SubgraphRequested() (url string, input State, ok bool) {
 	if f.subgraphURL == "" {
-		return "", nil, false
+		return "", State{}, false
 	}
 	return f.subgraphURL, f.subgraphInput, true
 }

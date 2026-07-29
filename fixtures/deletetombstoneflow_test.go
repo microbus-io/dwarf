@@ -59,7 +59,7 @@ func TestDeletetombstoneflow(t *testing.T) {
 	_, outcome, err := eng.Run(ctx, "deletetombstoneflow.verify:428/delete-tombstone", initialState, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal(1.0, outcome.State["keep"])
-	_, dropPresent := outcome.State["drop"]
+	assert.Equal(1.0, outcome.State.Value("keep"))
+	_, dropPresent := outcome.State.Lookup("drop")
 	assert.False(dropPresent) // gone, not present as null
 }

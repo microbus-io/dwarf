@@ -68,7 +68,7 @@ func TestGotoflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(1.0, outcome.State["finalLoops"])
+		assert.Equal(1.0, outcome.State.Value("finalLoops"))
 	})
 
 	t.Run("loops_three_times_via_goto", func(t *testing.T) {
@@ -78,7 +78,7 @@ func TestGotoflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "gotoflow.verify:428/goto", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(3.0, outcome.State["finalLoops"])
+		assert.Equal(3.0, outcome.State.Value("finalLoops"))
 	})
 }
 

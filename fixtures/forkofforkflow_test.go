@@ -126,8 +126,8 @@ func TestForkOfForkflow(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, fork2Out.Status)
-	assert.Equal("x-done", fork2Out.State["xOut"]) // X's output survived from the kept (cloned) branch
-	assert.Equal("y-done", fork2Out.State["yOut"]) // Y's output from the re-run branch, merged at J
+	assert.Equal("x-done", fork2Out.State.Value("xOut")) // X's output survived from the kept (cloned) branch
+	assert.Equal("y-done", fork2Out.State.Value("yOut")) // Y's output from the re-run branch, merged at J
 
 	// Neither origin was mutated by the second fork.
 	assert.Equal(workflow.StatusFailed, snapshotStatus(t, eng, originKey))

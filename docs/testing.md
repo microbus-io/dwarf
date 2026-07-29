@@ -46,7 +46,7 @@ func TestCheckout(t *testing.T) {
     _, out, err := eng.Run(ctx, "checkout", map[string]any{"sku": "ABC"}, nil)
     testarossa.NoError(t, err)
     testarossa.Equal(t, workflow.StatusCompleted, out.Status)
-    testarossa.Equal(t, "r-123", out.State["receipt"])
+    testarossa.Equal(t, "r-123", out.State.GetString("receipt"))
 }
 ```
 

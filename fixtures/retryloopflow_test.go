@@ -73,6 +73,6 @@ func TestRetryloopflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "retryloopflow.verify:428/retry-loop", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(3.0, outcome.State["finalAttempts"])
+		assert.Equal(3.0, outcome.State.Value("finalAttempts"))
 	})
 }

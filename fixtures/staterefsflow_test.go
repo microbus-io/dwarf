@@ -111,11 +111,11 @@ func TestStaterefsflow(t *testing.T) {
 		flowKey, outcome, err := eng.Run(ctx, "staterefsflow.verify:429/doc-refs", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(float64(docLen), outcome.State["pdfLen"])
-		assert.Equal(6.0, outcome.State["pageCount"], "a task's own field must not be eaten by a same-named forEach bookkeeping key")
+		assert.Equal(float64(docLen), outcome.State.Value("pdfLen"))
+		assert.Equal(6.0, outcome.State.Value("pageCount"), "a task's own field must not be eaten by a same-named forEach bookkeeping key")
 		// FLATTEN at the flow boundary: final_state is a dwarf_flows column that outlives the steps backing it,
 		// so it is always materialized. A ref that escaped the flow would dangle.
-		assert.Equal(docLen, len(outcome.State["pdf"].(string)))
+		assert.Equal(docLen, len(outcome.State.Value("pdf").(string)))
 
 		// History/Step are API surface, so they report the input each step actually SAW - never a ref.
 		steps, err := eng.History(ctx, flowKey)
@@ -128,7 +128,7 @@ func TestStaterefsflow(t *testing.T) {
 			branches++
 			step, err := eng.Step(ctx, s.StepKey)
 			assert.NoError(err)
-			doc, ok := step.State["pdf"].(string)
+			doc, ok := step.State.Value("pdf").(string)
 			assert.True(ok, "Step must materialize the branch's carried document, not expose a ref")
 			assert.Equal(docLen, len(doc))
 		}
@@ -151,8 +151,8 @@ func TestStaterefsflow(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, turn2.Status)
 		// Wait - the second turn re-runs with 2 pages and must still see the full document it inherited.
-		assert.Equal(float64(docLen), turn2.State["pdfLen"])
-		assert.Equal(docLen, len(turn2.State["pdf"].(string)))
+		assert.Equal(float64(docLen), turn2.State.Value("pdfLen"))
+		assert.Equal(docLen, len(turn2.State.Value("pdf").(string)))
 	})
 
 	t.Run("fork_clones_a_self_contained_tree", func(t *testing.T) {
@@ -182,14 +182,14 @@ func TestStaterefsflow(t *testing.T) {
 		forkOutcome, err := eng.Await(ctx, forked)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
-		assert.Equal(float64(docLen), forkOutcome.State["pdfLen"])
-		assert.Equal(6.0, forkOutcome.State["pageCount"])
+		assert.Equal(float64(docLen), forkOutcome.State.Value("pdfLen"))
+		assert.Equal(6.0, forkOutcome.State.Value("pageCount"))
 
 		// The origin is never mutated by a fork.
 		origin, err := eng.Snapshot(ctx, flowKey)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, origin.Status)
-		assert.Equal(docLen, len(origin.State["pdf"].(string)))
+		assert.Equal(docLen, len(origin.State.Value("pdf").(string)))
 	})
 
 	t.Run("a_task_can_overwrite_and_delete_a_refd_field", func(t *testing.T) {
@@ -239,9 +239,9 @@ func TestStaterefsflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "staterefsflow.verify:429/doc-refs-mutate", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(false, outcome.State["pdfPresent"], "a deleted field must not be resurrectable through its ref")
-		assert.Equal(0.0, outcome.State["pdfLen"])
-		assert.NotContains(outcome.State, "pdf")
+		assert.Equal(false, outcome.State.Value("pdfPresent"), "a deleted field must not be resurrectable through its ref")
+		assert.Equal(0.0, outcome.State.Value("pdfLen"))
+		assert.False(outcome.State.Contains("pdf"))
 	})
 }
 
@@ -303,9 +303,9 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	assert.NoError(err)
 	// Completed proves A, B and C each saw the whole document; a dropped ref would fail B with StatusFailed.
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal(float64(docLen), outcome.State["pdfLen"])
+	assert.Equal(float64(docLen), outcome.State.Value("pdfLen"))
 	// The ref survived to the flow boundary: final_state is materialized, and the field is still present.
-	assert.Equal(docLen, len(outcome.State["pdf"].(string)))
+	assert.Equal(docLen, len(outcome.State.Value("pdf").(string)))
 
 	// Step is API surface, so B's recorded input is materialized - the whole document, never a ref or "".
 	steps, err := eng.History(ctx, flowKey)
@@ -318,7 +318,7 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 		sawB = true
 		step, err := eng.Step(ctx, s.StepKey)
 		assert.NoError(err)
-		doc, ok := step.State["pdf"].(string)
+		doc, ok := step.State.Value("pdf").(string)
 		assert.True(ok, "Step must materialize B's carried document")
 		assert.Equal(docLen, len(doc))
 	}

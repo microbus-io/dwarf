@@ -70,14 +70,14 @@ func TestLinker_ResolveReadsBothColumns(t *testing.T) {
 			Changes: cols(map[string]any{"fromChanges": "task output", "shadowed": "new"}),
 		},
 	}}
-	state := workflow.State{}
+	state := newState()
 	refs := Refs{"fromState": 7, "fromChanges": 7, "shadowed": 7}
 
 	_, err := New("sqlite").Resolve(ctx, state, refs, nil, anchors.load)
 	assert.NoError(err)
-	assert.Equal("initial input", state["fromState"], "a field whose bytes are only in the anchor's state column must resolve")
-	assert.Equal("task output", state["fromChanges"])
-	assert.Equal("new", state["shadowed"], "changes shadows state - it is the newer of the two")
+	assert.Equal("initial input", state.Value("fromState"), "a field whose bytes are only in the anchor's state column must resolve")
+	assert.Equal("task output", state.Value("fromChanges"))
+	assert.Equal("new", state.Value("shadowed"), "changes shadows state - it is the newer of the two")
 }
 
 // TestLinker_ResolveOneRoundTripPerBatch pins the cost model the free tier is priced on. Several fields at
@@ -93,14 +93,14 @@ func TestLinker_ResolveOneRoundTripPerBatch(t *testing.T) {
 		7: {Changes: cols(map[string]any{"a": "A", "b": "B"})},
 		9: {Changes: cols(map[string]any{"c": "C"})},
 	}}
-	state := workflow.State{}
+	state := newState()
 
 	_, err := New("sqlite").Resolve(ctx, state, Refs{"a": 7, "b": 7, "c": 9}, nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(1, len(anchors.calls), "three fields across two anchors must cost ONE load, not three")
 	assert.Equal(2, len(anchors.calls[0]), "the batch asks for each DISTINCT anchor once")
-	assert.Equal("A", state["a"])
-	assert.Equal("C", state["c"])
+	assert.Equal("A", state.Value("a"))
+	assert.Equal("C", state.Value("c"))
 }
 
 // TestLinker_ResolveCachesBytesNotValues pins two things at once. A second resolve of the same field must not
@@ -117,17 +117,17 @@ func TestLinker_ResolveCachesBytesNotValues(t *testing.T) {
 	}}
 	linker := New("sqlite")
 
-	first := workflow.State{}
+	first := newState()
 	_, err := linker.Resolve(ctx, first, Refs{"doc": 7}, nil, anchors.load)
 	assert.NoError(err)
-	second := workflow.State{}
+	second := newState()
 	_, err = linker.Resolve(ctx, second, Refs{"doc": 7}, nil, anchors.load)
 	assert.NoError(err)
 
 	assert.Equal(1, len(anchors.calls), "the second resolve of a settled anchor must be served from cache")
-	firstMap, ok := first["doc"].(map[string]any)
+	firstMap, ok := first.Value("doc").(map[string]any)
 	assert.True(ok, "a resolved field is decoded, never a raw JSON message")
-	secondMap, ok := second["doc"].(map[string]any)
+	secondMap, ok := second.Value("doc").(map[string]any)
 	assert.True(ok)
 	// Mutating one branch's copy must not be visible to the other's.
 	firstMap["page"] = "mutated"
@@ -146,12 +146,12 @@ func TestLinker_ResolveAssertsOneHop(t *testing.T) {
 		7: {Refs: Refs{"doc": 3}}, // holds no bytes for `doc` - it points onward
 		3: {Changes: cols(map[string]any{"doc": "the payload"})},
 	}}
-	_, err := New("sqlite").Resolve(ctx, workflow.State{}, Refs{"doc": 7}, nil, anchors.load)
+	_, err := New("sqlite").Resolve(ctx, newState(), Refs{"doc": 7}, nil, anchors.load)
 	assert.Error(err)
 	assert.Contains(err.Error(), "one-hop")
 
 	// A ref at an anchor that does not exist at all is likewise an error, never a silently absent field.
-	_, err = New("sqlite").Resolve(ctx, workflow.State{}, Refs{"doc": 404}, nil, anchors.load)
+	_, err = New("sqlite").Resolve(ctx, newState(), Refs{"doc": 404}, nil, anchors.load)
 	assert.Error(err)
 }
 
@@ -167,17 +167,17 @@ func TestLinker_ResolveWantSelects(t *testing.T) {
 	anchors := &fakeAnchors{rows: map[int]Anchor{
 		7: {Changes: cols(map[string]any{"reduced": "R", "carried": "C"})},
 	}}
-	state := workflow.State{}
+	state := newState()
 	refs := Refs{"reduced": 7, "carried": 7}
 
 	err := New("sqlite").ResolveReduced(ctx, state, refs, map[string]workflow.Reducer{"reduced": workflow.ReducerAppend}, anchors.load)
 	assert.NoError(err)
-	assert.Equal("R", state["reduced"], "a field a reducer folds must be materialized, or the fold loses its base")
-	assert.NotContains(state, "carried", "a merely-carried ref must cross the fan-in as a ref")
+	assert.Equal("R", state.Value("reduced"), "a field a reducer folds must be materialized, or the fold loses its base")
+	assert.False(state.Contains("carried"), "a merely-carried ref must cross the fan-in as a ref")
 
 	// No reducer registered for any ref'd field: nothing to fold, so nothing is read at all.
 	anchors.calls = nil
-	err = New("sqlite").ResolveReduced(ctx, workflow.State{}, refs, map[string]workflow.Reducer{"other": workflow.ReducerAdd}, anchors.load)
+	err = New("sqlite").ResolveReduced(ctx, newState(), refs, map[string]workflow.Reducer{"other": workflow.ReducerAdd}, anchors.load)
 	assert.NoError(err)
 	assert.Equal(0, len(anchors.calls))
 }
@@ -205,4 +205,12 @@ func TestLinker_FlattenSplicesWithoutDecoding(t *testing.T) {
 	same, err := New("sqlite").Flatten(ctx, []byte(`{"kept":"inline"}`), nil, anchors.load)
 	assert.NoError(err)
 	assert.Equal(`{"kept":"inline"}`, string(same))
+}
+
+// newState is an initialized empty State - the destination a Resolve writes into. The ZERO State is
+// deliberately not that: it allocates nothing, so Resolve declines it rather than silently resolving into
+// a value the caller cannot see.
+func newState() workflow.State {
+	s, _ := workflow.NewState()
+	return s
 }

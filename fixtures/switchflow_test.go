@@ -82,7 +82,7 @@ func TestSwitchflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 50000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("high", outcome.State["branch"])
+		assert.Equal("high", outcome.State.Value("branch"))
 	})
 
 	t.Run("amount_in_mid_band_takes_mid_branch", func(t *testing.T) {
@@ -91,7 +91,7 @@ func TestSwitchflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 5000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("mid", outcome.State["branch"])
+		assert.Equal("mid", outcome.State.Value("branch"))
 	})
 
 	t.Run("amount_below_thresholds_takes_default_branch", func(t *testing.T) {
@@ -100,7 +100,7 @@ func TestSwitchflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 100}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("low", outcome.State["branch"])
+		assert.Equal("low", outcome.State.Value("branch"))
 	})
 
 	t.Run("boundary_10000_takes_high_branch", func(t *testing.T) {
@@ -109,7 +109,7 @@ func TestSwitchflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 10000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("high", outcome.State["branch"])
+		assert.Equal("high", outcome.State.Value("branch"))
 	})
 
 	t.Run("boundary_1000_takes_mid_branch", func(t *testing.T) {
@@ -118,7 +118,7 @@ func TestSwitchflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch", map[string]any{"amount": 1000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("mid", outcome.State["branch"])
+		assert.Equal("mid", outcome.State.Value("branch"))
 	})
 }
 
@@ -161,7 +161,7 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 100}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(nil, outcome.State["branch"])
+		assert.Equal(nil, outcome.State.Value("branch"))
 	})
 
 	t.Run("matching_input_still_routes_normally", func(t *testing.T) {
@@ -170,6 +170,6 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "switchflow.verify:428/switch-no-match", map[string]any{"amount": 5000}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("mid", outcome.State["branch"])
+		assert.Equal("mid", outcome.State.Value("branch"))
 	})
 }

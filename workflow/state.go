@@ -19,24 +19,26 @@ package workflow
 import (
 	"bytes"
 	"encoding/json"
+	"iter"
 	"maps"
 	"time"
 
 	"github.com/microbus-io/errors"
 )
 
-// State is a JSON-serializable key/value carrier for workflow data. It is a map[string]any and stores
-// the values it is given as-is; JSON is used only to serialize the whole map and to read a field back
-// into a caller-supplied target of a different type. Being a map, it is a reference type: methods take a
-// value receiver yet mutate through to the caller's map. A nil State must be initialized (via NewState or
-// UnmarshalJSON) before Set/Merge - the mutating methods do not allocate.
+// State is a JSON-serializable key/value carrier for workflow data. Values are read and written through
+// its methods - Get for a typed read into a caller pointer, Set to store, Has/Len/Del/Clear to inspect and
+// remove, All to iterate, Map to take a plain copy. It wraps a map and is a reference type: methods take a
+// value receiver yet mutate through to every copy of the State sharing that map.
 //
-// Like http.Header, State is an ordinary map with convenience methods layered on: direct map access is
-// fully supported and idiomatic (state["x"] = x, v, ok := state["x"], delete(state, "x"), range, len).
-// The methods add what raw indexing cannot: Get does a typed read into a caller pointer, Merge/MergeReduce
-// carry the reducer and tombstone semantics, and Marshal/UnmarshalJSON handle the storage encoding. Reach
-// for a method when you want those; index the map directly for a plain get/set.
-type State map[string]any
+// A zero State is empty and safe to read (Get, Has, Len, All, MarshalJSON all work on it), but the mutating
+// methods do not allocate, so one must be initialized via NewState or UnmarshalJSON before Set/Merge.
+//
+// Numbers are float64-domain, as JSON's are: a value stored as an int reads back through GetInt fine, but
+// a plain Get into an any yields a float64. Carry an integer that exceeds 2^53 as a string.
+type State struct {
+	d map[string]any
+}
 
 // NewState builds a State from its arguments, in one of two mutually exclusive modes.
 //
@@ -47,15 +49,14 @@ type State map[string]any
 // is shallow-copied. Any other value - a map, a struct, or any JSON-marshalable value - is round-tripped
 // through JSON into the map, so nested structs become canonical (sorted-key, float64-number) maps exactly as
 // if read from a column. That canonicalization is deliberate: it is what lets reducers compare marshalled
-// bytes, so a caller passing a map with a nested struct (Continue's additionalState) sees the same spelling
-// as its decoded twin. This is the normalizer for a caller-supplied value at an API boundary: wrap it in
-// NewState. It does NOT validate value ranges (a >2^53 integer, a NUL) - see the storability punt in the
-// package notes; a large id is carried as a string.
+// bytes, so a caller passing a map with a nested struct sees the same spelling as its decoded twin. This is
+// the normalizer for a caller-supplied value at an API boundary: wrap it in NewState. It does NOT validate
+// value ranges (a >2^53 integer, a NUL) - see the storability note in the package docs.
 //
 // Two or more arguments are variadic name/value pairs, e.g. NewState("count", 3, "name", "abc"); the value
 // is stored as passed. An odd count, or a non-string in a name position, is an error.
 func NewState(data ...any) (State, error) {
-	s := make(State)
+	s := State{d: map[string]any{}}
 	// Single-argument normalize mode: a lone value is unmarshaled ([]byte), shallow-copied (an already-
 	// normalized State), or JSON-normalized (a map, a struct, or anything else - so nested values decode
 	// exactly as a column read would, which is why a raw map[string]any is NOT short-circuited).
@@ -65,37 +66,37 @@ func NewState(data ...any) (State, error) {
 			return s, nil
 		case []byte:
 			if err := s.UnmarshalJSON(v); err != nil {
-				return nil, errors.Trace(err)
+				return State{}, errors.Trace(err)
 			}
 			return s, nil
 		case json.RawMessage:
 			if err := s.UnmarshalJSON(v); err != nil {
-				return nil, errors.Trace(err)
+				return State{}, errors.Trace(err)
 			}
 			return s, nil
 		case State:
-			maps.Copy(s, v)
+			maps.Copy(s.d, v.d)
 			return s, nil
 		default:
 			b, err := json.Marshal(v)
 			if err != nil {
-				return nil, errors.Trace(err)
+				return State{}, errors.Trace(err)
 			}
-			if err := json.Unmarshal(b, &s); err != nil {
-				return nil, errors.Trace(err)
+			if err := json.Unmarshal(b, &s.d); err != nil {
+				return State{}, errors.Trace(err)
 			}
 			return s, nil
 		}
 	}
 	if len(data)%2 != 0 {
-		return nil, errors.New("workflow: NewState requires an even number of name/value arguments")
+		return State{}, errors.New("workflow: NewState requires an even number of name/value arguments")
 	}
 	for i := 0; i < len(data); i += 2 {
 		name, ok := data[i].(string)
 		if !ok {
-			return nil, errors.New("workflow: NewState name argument must be a string")
+			return State{}, errors.New("workflow: NewState name argument must be a string")
 		}
-		s[name] = data[i+1]
+		s.d[name] = data[i+1]
 	}
 	return s, nil
 }
@@ -103,14 +104,9 @@ func NewState(data ...any) (State, error) {
 // Set stores value under name, normalized through JSON: the value is marshalled and decoded back into its
 // canonical JSON shape (numbers as float64, structs as sorted-key maps), exactly as if it had been read from
 // the database. So a task that stores an int reads it back as an int via GetInt, but a plain Get into an any
-// (or a direct index) sees a float64 - state is float64-domain JSON, and the typed getters coerce. Storing a
-// decoded copy also means a later mutation of the caller's value cannot corrupt what was stored. Returns an
-// error only if value cannot be marshalled (a NaN, an +Inf, a channel).
-//
-// A json.RawMessage value is already JSON, so it is decoded directly and the marshal is skipped - the fast
-// path the engine's state-ref resolution takes, decoding an anchor's cached bytes into its own fresh copy
-// without re-serializing a possibly-large field. The stored value is still the decoded form, never the raw
-// bytes, so the encoding never leaks.
+// sees a float64 - state is float64-domain JSON, and the typed getters coerce. Storing a decoded copy also
+// means a later mutation of the caller's value cannot corrupt what was stored. Returns an error only if
+// value cannot be marshalled (a NaN, an +Inf, a channel).
 func (s State) Set(name string, value any) error {
 	raw, ok := value.(json.RawMessage)
 	if !ok {
@@ -124,7 +120,7 @@ func (s State) Set(name string, value any) error {
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return errors.Trace(err)
 	}
-	s[name] = v
+	s.d[name] = v
 	return nil
 }
 
@@ -156,19 +152,62 @@ func (s State) mustSet(name string, value any) {
 
 // Len returns the number of fields in the state.
 func (s State) Len() int {
-	return len(s)
+	return len(s.d)
 }
 
 // Del removes the named fields. Names that are not present are ignored.
 func (s State) Del(names ...string) {
 	for _, name := range names {
-		delete(s, name)
+		delete(s.d, name)
 	}
 }
 
-// Clear removes every field, leaving an empty (non-nil) State.
+// Clear removes every field, leaving an empty State.
 func (s State) Clear() {
-	clear(s)
+	clear(s.d)
+}
+
+// All iterates the state's fields in unspecified order, for use with range-over-func:
+//
+//	for name, value := range state.All() { ... }
+//
+// Values are the stored (JSON-canonical) forms, so a number is a float64 and a nested object is a
+// map[string]any. Do not mutate the State during iteration.
+func (s State) All() iter.Seq2[string, any] {
+	return func(yield func(string, any) bool) {
+		for k, v := range s.d {
+			if !yield(k, v) {
+				return
+			}
+		}
+	}
+}
+
+// Names returns the field names, in unspecified order.
+func (s State) Names() []string {
+	if len(s.d) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(s.d))
+	for k := range s.d {
+		out = append(out, k)
+	}
+	return out
+}
+
+// Map returns the state's fields as a plain map, freshly allocated, so the caller may hold or mutate it
+// without affecting the State. Use it at a boundary that must hand out a map; prefer Get/All in ordinary
+// code, which need no copy.
+func (s State) Map() map[string]any {
+	out := make(map[string]any, len(s.d))
+	maps.Copy(out, s.d)
+	return out
+}
+
+// IsZero reports whether this is the zero State (never initialized). An initialized but empty State is not
+// zero. It is what lets a State field be omitted from an encoded struct via the omitzero tag.
+func (s State) IsZero() bool {
+	return s.d == nil
 }
 
 // Get unmarshals the field named name into target, a non-nil pointer, coercing through JSON (so a stored
@@ -177,7 +216,7 @@ func (s State) Clear() {
 // target untouched. A value that cannot be unmarshalled into target's type returns (false, err). Use this to
 // HANDLE a type mismatch; the typed getters (GetInt, ...) panic on one instead.
 func (s State) Get(name string, target any) (ok bool, err error) {
-	v, exists := s[name]
+	v, exists := s.d[name]
 	if !exists || isCleared(v) {
 		return false, nil
 	}
@@ -256,17 +295,41 @@ func (s State) GetDuration(name string) time.Duration {
 	return v
 }
 
-// Has reports whether a field is present. A cleared slot (Go nil or JSON null) reads as absent.
+// Has reports whether a field is present and holds a value. A cleared slot (Go nil or JSON null) reads as
+// absent, which is what a caller asking "is there something here to read" wants.
 func (s State) Has(name string) bool {
-	v, ok := s[name]
+	v, ok := s.d[name]
 	return ok && !isCleared(v)
+}
+
+// Contains reports whether the field name is present, INCLUDING a cleared slot. It differs from Has on
+// exactly one case and that case is a delete in transit: a changes delta records a delete as a cleared
+// value, so Has says "nothing to read" while Contains says "this delta speaks about this field". Use Has to
+// decide whether to read a value, Contains to decide whether a delta touched a field at all.
+func (s State) Contains(name string) bool {
+	_, ok := s.d[name]
+	return ok
+}
+
+// Lookup returns the stored value for name and whether it was present, in the manner of a map index. A
+// cleared slot returns (nil, true) - present, holding nothing - which Contains agrees with and Has does not.
+func (s State) Lookup(name string) (any, bool) {
+	v, ok := s.d[name]
+	return v, ok
+}
+
+// Value returns the stored value for name, or nil if absent - Lookup without the presence flag. The value
+// is in its stored JSON-canonical form, so a number is a float64 and an object a map[string]any; prefer Get
+// or a typed getter when the target type is known, which coerce instead of asserting.
+func (s State) Value(name string) any {
+	return s.d[name]
 }
 
 // Parse unmarshals the state's fields into target (a struct pointer, matched by JSON tag, or any other
 // JSON-unmarshalable target). Fields present in the state but absent from a struct target are ignored;
-// cleared fields are skipped. A nil State is a no-op.
+// cleared fields are skipped. A zero State is a no-op.
 func (s State) Parse(target any) error {
-	if s == nil {
+	if s.d == nil {
 		return nil
 	}
 	data, err := json.Marshal(s)
@@ -286,8 +349,8 @@ func (s State) Parse(target any) error {
 //	    state = safe // roll back to the pre-Merge state
 //	}
 func (s State) Clone() State {
-	clone := make(State, len(s))
-	maps.Copy(clone, s)
+	clone := State{d: make(map[string]any, len(s.d))}
+	maps.Copy(clone.d, s.d)
 	return clone
 }
 
@@ -313,10 +376,10 @@ func (s State) Merge(incoming State) error {
 // The incoming State is left unmodified. MergeReduce returns the first reducer error, having applied every
 // field up to that point.
 func (s State) MergeReduce(incoming State, reducers map[string]Reducer) error {
-	for k, v := range incoming {
+	for k, v := range incoming.d {
 		r := reducers[k]
 		if r == "" || r == ReducerReplace {
-			s[k] = v
+			s.d[k] = v
 			continue
 		}
 		// A cleared incoming is the reducer's identity: ignored, leaving the accumulator untouched. So a
@@ -325,11 +388,11 @@ func (s State) MergeReduce(incoming State, reducers map[string]Reducer) error {
 		if isCleared(v) {
 			continue
 		}
-		result, err := r.Reduce(s[k], v)
+		result, err := r.Reduce(s.d[k], v)
 		if err != nil {
 			return errors.New("reducer '%s' for field %q: %w", string(r), k, err)
 		}
-		s[k] = result
+		s.d[k] = result
 	}
 	return nil
 }
@@ -338,19 +401,19 @@ func (s State) MergeReduce(incoming State, reducers map[string]Reducer) error {
 // preserve such tombstones (a delete in transit while a changes-delta is accumulated); DelNils enacts
 // them, so Merge followed by DelNils materializes a snapshot (the pending deletes become absences).
 func (s State) DelNils() {
-	for k, v := range s {
+	for k, v := range s.d {
 		if isCleared(v) {
-			delete(s, k)
+			delete(s.d, k)
 		}
 	}
 }
 
 // MarshalJSON serializes the State's fields as a JSON object.
 func (s State) MarshalJSON() ([]byte, error) {
-	if s == nil {
+	if s.d == nil {
 		return []byte("{}"), nil
 	}
-	b, err := json.Marshal(map[string]any(s))
+	b, err := json.Marshal(s.d)
 	return b, errors.Trace(err)
 }
 
@@ -358,15 +421,14 @@ func (s State) MarshalJSON() ([]byte, error) {
 // (float64, string, bool, []any, map[string]any).
 //
 // The input must be a JSON object: it must begin with '{' and end with '}' (surrounding whitespace is
-// ignored). Three inputs are tolerated as an empty State instead: an empty/nil payload, and a JSON "null" -
+// ignored). Two inputs are tolerated as an empty State instead: an empty/nil payload, and a JSON "null" -
 // matching how the engine reads an absent/NULL state or baggage column (and a nil value marshaled to "null").
 // Anything else - a JSON array, number, string, or malformed bytes - is an error. The result is always
-// non-nil, so the mutating methods (Set/Merge), which do not allocate on a value receiver, are safe to call
-// afterward.
+// initialized, so the mutating methods (Set/Merge), which do not allocate, are safe to call afterward.
 func (s *State) UnmarshalJSON(data []byte) error {
 	data = bytes.TrimSpace(data)
 	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
-		*s = State{}
+		s.d = map[string]any{}
 		return nil
 	}
 	if data[0] != '{' || data[len(data)-1] != '}' {
@@ -378,6 +440,6 @@ func (s *State) UnmarshalJSON(data []byte) error {
 		return errors.Trace(err)
 	}
 	// A well-formed object never decodes to a nil map ("null" is handled above).
-	*s = m
+	s.d = m
 	return nil
 }

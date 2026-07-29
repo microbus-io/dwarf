@@ -91,8 +91,8 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		flowKey, outcome, err := eng.Run(ctx, "carryref.verify:429/carry", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(float64(docLen), outcome.State["pdfLen"])
-		assert.Equal(docLen, len(outcome.State["pdf"].(string)))
+		assert.Equal(float64(docLen), outcome.State.Value("pdfLen"))
+		assert.Equal(docLen, len(outcome.State.Value("pdf").(string)))
 
 		// Continue carries the (materialized) final_state into the next turn, which re-anchors it at the new
 		// entry step - the pre-spawn anchor shape again on turn 2.
@@ -101,7 +101,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		turn2, err := eng.Await(ctx, next)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, turn2.Status)
-		assert.Equal(float64(docLen), turn2.State["pdfLen"])
+		assert.Equal(float64(docLen), turn2.State.Value("pdfLen"))
 
 		// Fork at a branch step re-runs the cohort; the fan-in's carried ref must remap onto the cloned anchor.
 		steps, err := eng.History(ctx, flowKey)
@@ -119,7 +119,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		forkOutcome, err := eng.Await(ctx, forked)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
-		assert.Equal(float64(docLen), forkOutcome.State["pdfLen"])
+		assert.Equal(float64(docLen), forkOutcome.State.Value("pdfLen"))
 	})
 
 	t.Run("empty_cohort_fires_fan_in_direct", func(t *testing.T) {
@@ -155,8 +155,8 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "carryrefe.verify:429/carry", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(float64(docLen), outcome.State["pdfLen"])
-		assert.Equal(docLen, len(outcome.State["pdf"].(string)))
+		assert.Equal(float64(docLen), outcome.State.Value("pdfLen"))
+		assert.Equal(docLen, len(outcome.State.Value("pdf").(string)))
 	})
 
 	t.Run("nested_fanout_carries_through_both_fan_ins", func(t *testing.T) {
@@ -200,7 +200,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "carryrefn.verify:429/carry", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(float64(docLen), outcome.State["pdfLen"])
-		assert.Equal(docLen, len(outcome.State["pdf"].(string)))
+		assert.Equal(float64(docLen), outcome.State.Value("pdfLen"))
+		assert.Equal(docLen, len(outcome.State.Value("pdf").(string)))
 	})
 }

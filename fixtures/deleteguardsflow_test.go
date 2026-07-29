@@ -163,7 +163,7 @@ func TestDeleteguardsflow_ContinueSkipsADeletedTurn(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal("one", outcome.State["marker"])
+	assert.Equal("one", outcome.State.Value("marker"))
 
 	// Turn 2 settles marker="two".
 	turn2Key, err := eng.Continue(ctx, threadKey, map[string]any{"next": "two"})
@@ -175,8 +175,8 @@ func TestDeleteguardsflow_ContinueSkipsADeletedTurn(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, out2.Status)
-	assert.Equal("one", out2.State["builtOn"]) // it built on turn 1, as expected
-	assert.Equal("two", out2.State["marker"])
+	assert.Equal("one", out2.State.Value("builtOn")) // it built on turn 1, as expected
+	assert.Equal("two", out2.State.Value("marker"))
 
 	// Delete turn 2 - the LATEST turn. Its row survives until the reaper sweeps, so an unguarded Continue
 	// would happily pick it as the base.
@@ -194,6 +194,6 @@ func TestDeleteguardsflow_ContinueSkipsADeletedTurn(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, out3.Status)
-	assert.Equal("one", out3.State["builtOn"],
+	assert.Equal("one", out3.State.Value("builtOn"),
 		"Continue must skip the delete-marked turn and build on the latest UNDELETED one")
 }

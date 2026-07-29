@@ -176,7 +176,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusPending)
 
-		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), map[string]any{"ask": "approve?"})
+		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.NoError(err) // fenced -> abandon quietly
 
 		leafStatus, _ := stepState(t, db, 2)
@@ -209,7 +209,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		e.seams.Inject(FaultInterruptChainWrite)
 		defer e.seams.Withdraw(FaultInterruptChainWrite)
 
-		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), map[string]any{"ask": "approve?"})
+		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.Error(err, "a failed chain UPDATE must surface as an error so Transact retries it, NOT be swallowed as a fence")
 
 		// Nothing committed: the leaf is still ours to re-interrupt on the retry.
@@ -228,7 +228,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusRunning)
 
-		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), map[string]any{"ask": "approve?"})
+		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.NoError(err)
 
 		leafStatus, _ := stepState(t, db, 2)
@@ -239,4 +239,13 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		assert.Equal(workflow.StatusInterrupted, flowStatus(t, db, 1))
 		assert.Equal(workflow.StatusInterrupted, flowStatus(t, db, 2))
 	})
+}
+
+// mustState builds a State from a literal map, for the white-box calls that take one.
+func mustState(m map[string]any) workflow.State {
+	s, err := workflow.NewState(m)
+	if err != nil {
+		panic(err)
+	}
+	return s
 }

@@ -254,14 +254,14 @@ func run() error {
 		Label:     *label,
 		StartedAt: time.Now().UTC(),
 		Config: map[string]any{
-			"workload":       *workloadName,
-			"payloadBytes":   *payload,
-			"taskDelayMs":    taskDelay.Milliseconds(),
+			"workload":     *workloadName,
+			"payloadBytes": *payload,
+			"taskDelayMs":  taskDelay.Milliseconds(),
 			// The workload's own shape knobs. Without them a -fanout-width or -linear-steps sweep produces
 			// artifacts that are byte-identical in configuration and wildly different in what they measured.
-			"fanOutWidth": *fanOutWidth,
-			"linearSteps": *linearStepsFlag,
-			"carryRead":   *carryRead,
+			"fanOutWidth":    *fanOutWidth,
+			"linearSteps":    *linearStepsFlag,
+			"carryRead":      *carryRead,
 			"workers":        *workers,
 			"virtualCPUs":    *vcpus,
 			"maxOpenConns":   *maxOpenConns,

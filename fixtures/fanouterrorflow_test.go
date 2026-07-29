@@ -90,6 +90,6 @@ func TestFanouterrorflow(t *testing.T) {
 
 		_, outcome, err := eng.Run(ctx, "fanouterrorflow.verify:428/fan-out-error", nil, nil)
 		assert.NoError(err)
-		assert.Equal(true, outcome.State["recovered"])
+		assert.Equal(true, outcome.State.Value("recovered"))
 	})
 }

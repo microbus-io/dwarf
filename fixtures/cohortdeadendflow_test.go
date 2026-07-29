@@ -144,5 +144,5 @@ func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 	assert.NoError(err)
 	// Every branch reaches Join, the cohort converges, and the trunk `Join -> END` completes the flow.
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal(3.0, outcome.State["done"], "all three branches folded through the fan-in")
+	assert.Equal(3.0, outcome.State.Value("done"), "all three branches folded through the fan-in")
 }

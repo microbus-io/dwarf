@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -456,7 +455,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	var accumulatedChanges workflow.State
 	var changesJSON []byte
 	rawChanges := resultFlow.RawChanges()
-	if len(rawChanges) == 0 {
+	if rawChanges.Len() == 0 {
 		accumulatedChanges = priorChanges
 		changesJSON = priorChangesJSON
 	} else {
@@ -565,8 +564,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		// subgraph child (the recoverOrphanedSubgraphChildren case).
 		e.seams.Checkpoint(ctx, CheckpointAfterCallerPark)
 		childInputState := subgraphInput
-		if childInputState == nil {
-			childInputState = map[string]any{}
+		if childInputState.IsZero() {
+			childInputState, _ = workflow.NewState()
 		}
 		// The caller step's span is still live on taskCtx; parent the subgraph's "workflow" span under it
 		// so the subgraph subtree nests beneath this task in the trace.
@@ -999,12 +998,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 					// fan-out's final_state come back missing the array (a completed sibling's branch-local
 					// snapshot is the merge base there). The general mechanism that owns the cost is state refs:
 					// the array is REF'd, so the branches share one copy of it and each still sees it whole.
-					perStepState := make(map[string]any, len(childInputState)+3)
-					maps.Copy(perStepState, childInputState)
-					perStepState[next.itemKey] = next.item
+					perStepState := childInputState.Clone()
+					_ = perStepState.Set(next.itemKey, next.item)
 					if next.forEachKey != "" {
-						perStepState[next.itemKey+"Index"] = next.cohortIndex
-						perStepState[next.itemKey+"Count"] = next.cohortCount
+						_ = perStepState.Set(next.itemKey+"Index", next.cohortIndex)
+						_ = perStepState.Set(next.itemKey+"Count", next.cohortCount)
 					}
 					// The injected element and its ordinal context are SYNTHESIZED per branch - their bytes are
 					// in no step row at all - so they can never be ref'd; a ref to them would dangle. Everything
@@ -1227,7 +1225,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 var errLeaseFenced = errors.New("dispatch lease fenced")
 
 // handleInterrupt pauses a flow for external input.
-func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.DB, stepID, leaseSeq int, flowID int, flowToken string, workflowURL string, changesJSON []byte, interruptPayload map[string]any) error {
+func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.DB, stepID, leaseSeq int, flowID int, flowToken string, workflowURL string, changesJSON []byte, interruptPayload workflow.State) error {
 	chainFlowIDs, chainStepIDs, chainCompositeIDs, err := e.surgraphChain(ctx, shardNum, flowID, flowToken)
 	if err != nil {
 		return errors.Trace(err)
@@ -1303,7 +1301,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 			return errLeaseFenced
 		}
 
-		if len(interruptPayload) > 0 {
+		if interruptPayload.Len() > 0 {
 			payloadJSON, _ := json.Marshal(interruptPayload)
 			payloadLen = len(payloadJSON)
 			payloadArgs := []any{payloadJSON}
@@ -1540,7 +1538,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 			continue
 		}
 		changes, _ := workflow.NewState(changesJSON)
-		for k := range changes {
+		for k := range changes.All() {
 			memberWrites[k] = true
 		}
 		_ = merged.MergeReduce(changes, graph.Reducers())

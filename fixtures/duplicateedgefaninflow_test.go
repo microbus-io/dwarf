@@ -111,12 +111,12 @@ func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 			assert.NoError(err)
 			assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-			t.Logf("gate=%d workRuns=%d total=%v", tc.gate, workRuns.Load(), outcome.State["total"])
+			t.Logf("gate=%d workRuns=%d total=%v", tc.gate, workRuns.Load(), outcome.State.Value("total"))
 			assert.Equal(tc.wantWorkRuns, workRuns.Load(), "Work runs once per matching `when` clause")
 			if tc.wantTotal == nil {
-				assert.Nil(outcome.State["total"], "no branch ran, so the reducer produced nothing")
+				assert.Nil(outcome.State.Value("total"), "no branch ran, so the reducer produced nothing")
 			} else {
-				assert.Equal(tc.wantTotal, outcome.State["total"], "`add` sums exactly one delta per branch")
+				assert.Equal(tc.wantTotal, outcome.State.Value("total"), "`add` sums exactly one delta per branch")
 			}
 		})
 	}
@@ -218,7 +218,7 @@ func TestDuplicateEdge_TrunkSourceIntoFanInIsDegenerate(t *testing.T) {
 	_, outcome, err := eng.Run(ctx, "duplicateedgefaninflow.verify:701/dup-trunk",
 		map[string]any{"gate": 1}, nil)
 	assert.NoError(err)
-	t.Logf("status=%v joinRuns=%d total=%v", outcome.Status, joinRuns.Load(), outcome.State["total"])
+	t.Logf("status=%v joinRuns=%d total=%v", outcome.Status, joinRuns.Load(), outcome.State.Value("total"))
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 	assert.Equal(int32(1), joinRuns.Load(), "the fan-in fires exactly once despite the duplicate edge")
 }

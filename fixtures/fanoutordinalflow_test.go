@@ -84,7 +84,7 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 	// Deterministic input order, NOT the reverse completion order the sleeps force.
-	assert.Equal([]string{"a", "b", "c", "d"}, toStringSlice(outcome.State["results"]),
+	assert.Equal([]string{"a", "b", "c", "d"}, toStringSlice(outcome.State.Value("results")),
 		"an append reducer must fold a multi-step branch in input-array order, not completion order")
 }
 
@@ -147,6 +147,6 @@ func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 		map[string]any{"cells": []string{"a", "b", "c"}}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal([]string{"a", "b", "c"}, toStringSlice(outcome.State["order"]),
+	assert.Equal([]string{"a", "b", "c"}, toStringSlice(outcome.State.Value("order")),
 		"the outer fan-in must fold each cell's inner fan-in in cell input order")
 }

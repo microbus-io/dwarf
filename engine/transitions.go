@@ -97,7 +97,7 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 		}
 
 		if tr.ForEach != "" {
-			val, ok := flow.RawState()[tr.ForEach]
+			val, ok := flow.RawState().Lookup(tr.ForEach)
 			if !ok {
 				continue
 			}

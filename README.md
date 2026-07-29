@@ -35,7 +35,7 @@ eng.SetHost(proxy)                 // TestProxy implements the Host interface
 eng.Startup(ctx)
 
 _, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil) // Run returns (flowKey, outcome, err)
-fmt.Println(out.State["greeting"]) // hello ada
+fmt.Println(out.State.GetString("greeting")) // hello ada
 ```
 
 ## Why dwarf

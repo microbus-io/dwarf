@@ -78,11 +78,11 @@ func TestFailedforeachstateflow(t *testing.T) {
 
 	items := []any{"a", "b", "c"}
 
-	assertNoBookkeeping := func(assert *testarossa.Asserter, state map[string]any) {
-		assert.Equal(items, state["items"]) // the source array survives the fan-out
-		_, hasItem := state["item"]
-		_, hasIndex := state["itemIndex"]
-		_, hasCount := state["itemCount"]
+	assertNoBookkeeping := func(assert *testarossa.Asserter, state workflow.State) {
+		assert.Equal(items, state.Value("items")) // the source array survives the fan-out
+		hasItem := state.Contains("item")
+		hasIndex := state.Contains("itemIndex")
+		hasCount := state.Contains("itemCount")
 		assert.False(hasItem, "branch-private item leaked into final_state")
 		assert.False(hasIndex, "branch-private itemIndex leaked into final_state")
 		assert.False(hasCount, "branch-private itemCount leaked into final_state")

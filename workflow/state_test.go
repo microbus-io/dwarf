@@ -197,7 +197,7 @@ func TestState_All(t *testing.T) {
 	s, _ := NewState("a", 1, "b", 2, "c", 3)
 
 	seen := map[string]any{}
-	for k, v := range s {
+	for k, v := range s.All() {
 		seen[k] = v
 	}
 	assert.Equal(3, len(seen))
@@ -207,7 +207,7 @@ func TestState_All(t *testing.T) {
 
 	// Early break stops iteration.
 	count := 0
-	for range s {
+	for range s.All() {
 		count++
 		break
 	}
@@ -284,12 +284,12 @@ func TestState_CloneRestoresAfterFailedMerge(t *testing.T) {
 	reducers := map[string]Reducer{"items": ReducerAppend}
 
 	safe := state.Clone()
-	err := state.MergeReduce(State{"items": "not an int"}, reducers)
+	err := state.MergeReduce(State{d: map[string]any{"items": "not an int"}}, reducers)
 	assert.Error(err)
 
 	// Roll back to the pre-Merge snapshot.
 	state = safe
-	err = state.MergeReduce(State{"items": []int{3, 4}}, reducers)
+	err = state.MergeReduce(State{d: map[string]any{"items": []int{3, 4}}}, reducers)
 	assert.NoError(err)
 
 	var items []int
@@ -325,7 +325,7 @@ func TestState_MergeKeepsNilUntilDelNils(t *testing.T) {
 
 	// Merge accumulates: a nil incoming (a JSON-decoded null) is preserved as a tombstone, not dropped.
 	base, _ := NewState("a", 1, "b", 2)
-	err := base.Merge(State{"b": nil})
+	err := base.Merge(State{d: map[string]any{"b": nil}})
 	assert.NoError(err)
 	assert.Equal(2, base.Len()) // "b" still present (as a tombstone)
 
@@ -345,7 +345,7 @@ func TestState_MergeReplaceReducerKeepsNil(t *testing.T) {
 	// enacted only by DelNils.
 	base, _ := NewState("a", 1, "b", 2)
 	reducers := map[string]Reducer{"b": ReducerReplace}
-	err := base.MergeReduce(State{"b": nil}, reducers)
+	err := base.MergeReduce(State{d: map[string]any{"b": nil}}, reducers)
 	assert.NoError(err)
 	assert.Equal(2, base.Len())
 	base.DelNils()
@@ -358,7 +358,7 @@ func TestState_MergeCombiningReducerIgnoresNil(t *testing.T) {
 	// A cleared incoming for a reducer-managed field is the reducer's identity: ignored, leaving the
 	// accumulator untouched (a branch deleting a reduced field does not wipe the cohort's contributions).
 	base, _ := NewState("items", []int{1, 2})
-	err := base.MergeReduce(State{"items": nil}, map[string]Reducer{"items": ReducerAppend})
+	err := base.MergeReduce(State{d: map[string]any{"items": nil}}, map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 	var items []int
 	_, _ = base.Get("items", &items)
@@ -369,8 +369,8 @@ func TestState_MergeSequentialOrder(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("k", "base")
-	assert.NoError(base.Merge(State{"k": "first"}))
-	assert.NoError(base.Merge(State{"k": "last"}))
+	assert.NoError(base.Merge(State{d: map[string]any{"k": "first"}}))
+	assert.NoError(base.Merge(State{d: map[string]any{"k": "last"}}))
 
 	var k string
 	_, _ = base.Get("k", &k)
@@ -409,14 +409,14 @@ func TestState_UnmarshalTolerance(t *testing.T) {
 	err := empty.UnmarshalJSON([]byte(""))
 	assert.NoError(err)
 	assert.Equal(0, empty.Len())
-	assert.NotNil(map[string]any(empty))
+	assert.False(empty.IsZero(), "an unmarshaled State is initialized, so Set/Merge are safe on it")
 
 	// "{}": non-nil empty map.
 	var braces State
 	err = braces.UnmarshalJSON([]byte("{}"))
 	assert.NoError(err)
 	assert.Equal(0, braces.Len())
-	assert.NotNil(map[string]any(braces))
+	assert.False(braces.IsZero(), "an unmarshaled State is initialized, so Set/Merge are safe on it")
 
 	// Whitespace-padded object: tolerated (trimmed before the object check).
 	var padded State

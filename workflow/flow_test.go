@@ -103,8 +103,8 @@ func TestFlow_SetTracksChanges(t *testing.T) {
 	f := NewFlow()
 	f.Set("a", "1")
 	f.Set("b", "2")
-	assert.Equal(2, len(f.changes))
-	assert.Equal("1", f.changes["a"]) // stored decoded, not as raw JSON bytes
+	assert.Equal(2, f.changes.Len())
+	assert.Equal("1", f.changes.Value("a")) // stored decoded, not as raw JSON bytes
 }
 
 func TestFlow_ParseStateAndSetChanges(t *testing.T) {
@@ -113,7 +113,7 @@ func TestFlow_ParseStateAndSetChanges(t *testing.T) {
 	f.Set("name", "Alice")
 	f.Set("score", 10)
 	f.Set("extra", "untouched")
-	f.changes = make(map[string]any) // reset changes from Set calls
+	f.changes, _ = NewState() // reset changes from Set calls
 	snap := f.Snapshot()
 	var view struct {
 		Name  string `json:"name"`
@@ -130,17 +130,17 @@ func TestFlow_ParseStateAndSetChanges(t *testing.T) {
 	assert.NoError(err)
 
 	// Only score should be in changes (decoded to float64, the canonical JSON number form)
-	assert.Equal(1, len(f.changes))
-	assert.Equal(float64(25), f.changes["score"])
+	assert.Equal(1, f.changes.Len())
+	assert.Equal(float64(25), f.changes.Value("score"))
 	// Extra field should be untouched
-	assert.Equal("untouched", f.state["extra"])
+	assert.Equal("untouched", f.state.Value("extra"))
 }
 
 func TestFlow_SetChangesNoChanges(t *testing.T) {
 	assert := testarossa.For(t)
 	f := NewFlow()
 	f.Set("name", "Alice")
-	f.changes = make(map[string]any) // reset changes from Set calls
+	f.changes, _ = NewState() // reset changes from Set calls
 	snap := f.Snapshot()
 	var view struct {
 		Name string `json:"name"`
@@ -150,7 +150,7 @@ func TestFlow_SetChangesNoChanges(t *testing.T) {
 	// No modifications
 	err = f.SetChanges(view, snap)
 	assert.NoError(err)
-	assert.Equal(0, len(f.changes))
+	assert.Equal(0, f.changes.Len())
 }
 
 func TestFlow_Has(t *testing.T) {
@@ -168,7 +168,7 @@ func TestFlow_Delete(t *testing.T) {
 	f.SetString("name", "Alice")
 	f.SetInt("score", 42)
 	f.SetBool("active", true)
-	f.changes = make(map[string]any) // reset changes from typed setters
+	f.changes, _ = NewState() // reset changes from typed setters
 
 	f.Del("name", "score")
 	// State reads see the deleted fields as absent.
@@ -178,7 +178,7 @@ func TestFlow_Delete(t *testing.T) {
 	assert.Equal(0, f.GetInt("score"))
 	// Changes records a cleared tombstone for each deleted key.
 	for _, k := range []string{"name", "score"} {
-		v, ok := f.changes[k]
+		v, ok := f.changes.Lookup(k)
 		assert.True(ok)
 		assert.True(isCleared(v))
 	}
@@ -193,16 +193,16 @@ func TestFlow_Clear(t *testing.T) {
 	f := NewFlow()
 	f.SetString("name", "Alice")
 	f.SetInt("score", 42)
-	f.changes = make(map[string]any)
+	f.changes, _ = NewState()
 
 	f.Clear()
 	// Every field reads as absent.
 	assert.False(f.Has("name"))
 	assert.False(f.Has("score"))
 	// Every prior field has a cleared tombstone in changes.
-	assert.Equal(2, len(f.changes))
+	assert.Equal(2, f.changes.Len())
 	for _, k := range []string{"name", "score"} {
-		v, ok := f.changes[k]
+		v, ok := f.changes.Lookup(k)
 		assert.True(ok)
 		assert.True(isCleared(v))
 	}
@@ -212,8 +212,8 @@ func TestFlow_GetTreatsJSONNullAsAbsent(t *testing.T) {
 	assert := testarossa.For(t)
 
 	f := NewFlow()
-	f.state["x"] = nil // a cleared (null) slot: state stores a decoded JSON null as Go nil
-	f.state["y"] = nil
+	f.state.d["x"] = nil // a cleared (null) slot: state stores a decoded JSON null as Go nil
+	f.state.d["y"] = nil
 	assert.False(f.Has("x"))
 	assert.False(f.Has("y"))
 	assert.Equal("", f.GetString("x"))
@@ -244,7 +244,7 @@ func TestFlow_Interrupt(t *testing.T) {
 	f := NewFlow()
 	f.Interrupt(map[string]any{"request": "ssn"}, nil)
 	assert.True(f.interrupt)
-	assert.Equal("ssn", f.interruptPayload["request"])
+	assert.Equal("ssn", f.interruptPayload.Value("request"))
 }
 
 func TestFlow_SingleParkGuard(t *testing.T) {
@@ -294,7 +294,7 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 	yield, err = f.Interrupt(map[string]any{"request": "second"}, nil)
 	assert.False(yield)
 	assert.Error(err)
-	assert.Equal("first", f.interruptPayload["request"])
+	assert.Equal("first", f.interruptPayload.Value("request"))
 
 	// A second subgraph this dispatch is rejected and does not overwrite the first workflow URL.
 	f = NewFlow()
@@ -374,7 +374,7 @@ func TestFlow_MarshalUnmarshal(t *testing.T) {
 	assert.True(restored.retry)
 	assert.Equal(5*time.Second, restored.sleepDuration)
 	assert.True(restored.interrupt)
-	assert.Equal("ssn", restored.interruptPayload["request"])
+	assert.Equal("ssn", restored.interruptPayload.Value("request"))
 	assert.Equal(2, restored.attempt)
 	assert.Equal(time.Second, restored.backoffInitialDelay)
 	assert.Equal(2.0, restored.backoffDelayMultiplier)

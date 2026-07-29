@@ -71,9 +71,9 @@ func TestSleepRetryComposeflow(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-	t1, ok1 := outcome.State["t1"].(float64)
-	t2, ok2 := outcome.State["t2"].(float64)
-	t3, ok3 := outcome.State["t3"].(float64)
+	t1, ok1 := outcome.State.Value("t1").(float64)
+	t2, ok2 := outcome.State.Value("t2").(float64)
+	t3, ok3 := outcome.State.Value("t3").(float64)
 	assert.True(ok1 && ok2 && ok3, "expected three attempt timestamps, got %v", outcome.State)
 
 	gap1 := t2 - t1

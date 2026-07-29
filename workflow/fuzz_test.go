@@ -54,7 +54,7 @@ func FuzzStateMergeReduce(f *testing.F) {
 		// Wire every changed key to a reducer chosen by the selector.
 		reducers := map[string]Reducer{}
 		i := int(pick)
-		for k := range incoming {
+		for k := range incoming.All() {
 			reducers[k] = fuzzReducers[i%len(fuzzReducers)]
 			i++
 		}
@@ -62,7 +62,7 @@ func FuzzStateMergeReduce(f *testing.F) {
 			return // rejected inputs are fine; panics are not
 		}
 		base.DelNils()
-		for k, v := range base {
+		for k, v := range base.All() {
 			if isCleared(v) {
 				t.Fatalf("null tombstone leaked into merged state at key %q", k)
 			}

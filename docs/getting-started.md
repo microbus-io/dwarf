@@ -73,7 +73,7 @@ func TestGreeting(t *testing.T) {
 	_, out, err := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
 	testarossa.NoError(t, err)
 	testarossa.Equal(t, workflow.StatusCompleted, out.Status)
-	testarossa.Equal(t, "HELLO ADA", out.State["message"])
+	testarossa.Equal(t, "HELLO ADA", out.State.GetString("message"))
 }
 ```
 

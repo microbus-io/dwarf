@@ -113,7 +113,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 		assert.NoError(r.err)
 		if r.out != nil {
 			assert.Equal(workflow.StatusCompleted, r.out.Status)
-			ok, _ := r.out.State["ok"].(bool)
+			ok, _ := r.out.State.Value("ok").(bool)
 			assert.True(ok, "final_state should surface through the poll-fallback wake")
 		}
 	case <-time.After(3 * time.Second):

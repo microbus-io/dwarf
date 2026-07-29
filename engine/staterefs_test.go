@@ -102,7 +102,7 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	)
 	assert.NoError(err)
 
-	state := workflow.State{}
+	state := newState()
 	refs := staterefs.Refs{"fromState": 1, "fromChanges": 1, "shadowed": 1}
 	_, err = e.resolveStateRefs(ctx, db, 1, state, refs, nil, "u")
 	assert.NoError(err)
@@ -118,9 +118,9 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	assert.Equal("new", shadowed, "changes shadows state - it is the newer value")
 
 	// A dangling ref is an invariant violation and must be loud, never a silently-absent field.
-	_, err = e.resolveStateRefs(ctx, db, 1, workflow.State{}, staterefs.Refs{"nope": 1}, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"nope": 1}, nil, "u")
 	assert.Error(err)
-	_, err = e.resolveStateRefs(ctx, db, 1, workflow.State{}, staterefs.Refs{"x": 999}, nil, "u")
+	_, err = e.resolveStateRefs(ctx, db, 1, newState(), staterefs.Refs{"x": 999}, nil, "u")
 	assert.Error(err)
 }
 
@@ -176,16 +176,16 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	_, outcome, err := e.Run(ctx, "refs/wf", initial, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal(8.0, outcome.State["total"])
+	assert.Equal(8.0, outcome.State.Value("total"))
 	// FLATTEN at the flow boundary: final_state is materialized, so a reader never sees a ref.
-	assert.Equal(float64(doc), outcome.State["pdfLen"])
-	assert.Equal(doc, len(outcome.State["pdf"].(string)))
+	assert.Equal(float64(doc), outcome.State.Value("pdfLen"))
+	assert.Equal(doc, len(outcome.State.Value("pdf").(string)))
 
 	// The entry step is the anchor: it holds the initial input in its `state` column, inline.
 	entry := stepIDsByTask(t, e, "Seed")[0]
 	entryState, entryRefs, _ := stepRefsOf(t, e, entry)
 	assert.Equal(0, len(entryRefs), "the entry step holds the initial input itself - it anchors, it does not ref")
-	assert.Equal(doc, len(entryState["pdf"].(string)))
+	assert.Equal(doc, len(entryState.GetString("pdf")))
 
 	// Every branch refs that one anchor rather than copying the document.
 	branches := stepIDsByTask(t, e, "Work")
@@ -193,8 +193,8 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	for _, id := range branches {
 		st, refs, size := stepRefsOf(t, e, id)
 		assert.Equal(entry, refs["pdf"], "a branch carries the document BY REFERENCE to the entry step")
-		assert.NotContains(st, "pdf", "the payload is not copied into the branch's row")
-		assert.Contains(st, "page", "the injected element is synthesized per branch and can never be ref'd")
+		assert.False(st.Contains("pdf"), "the payload is not copied into the branch's row")
+		assert.True(st.Contains("page"), "the injected element is synthesized per branch and can never be ref'd")
 		assert.True(size < doc/2, "a branch's stored state must be a small fraction of the payload it carries")
 	}
 
@@ -203,8 +203,8 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	join := stepIDsByTask(t, e, "Join")[0]
 	joinState, joinRefs, _ := stepRefsOf(t, e, join)
 	assert.Equal(entry, joinRefs["pdf"], "a carried ref crosses the fan-in still pointing at its original anchor")
-	assert.NotContains(joinState, "pdf")
-	assert.Contains(joinState, "processed", "the REDUCED field is materialized into the fan-in step's own state")
+	assert.False(joinState.Contains("pdf"))
+	assert.True(joinState.Contains("processed"), "the REDUCED field is materialized into the fan-in step's own state")
 }
 
 // TestStateRefs_ReducedFieldIsResolvedAndReanchored pins the fan-in's selective resolve from the other side.
@@ -255,14 +255,14 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 	// 400 accumulated + one entry per branch. Had the fan-in folded onto an absent base, this would be 3.
-	assert.Equal(403.0, outcome.State["logLen"])
+	assert.Equal(403.0, outcome.State.Value("logLen"))
 
 	// The reduced value exists in no other row, so the fan-in step INLINES it and becomes its anchor - the
 	// third of the three places an anchor's bytes can live.
 	join := stepIDsByTask(t, e, "Join")[0]
 	joinState, joinRefs, _ := stepRefsOf(t, e, join)
 	assert.NotContains(joinRefs, "log", "a reduced field cannot be a ref - the merged value exists nowhere else")
-	assert.Contains(joinState, "log", "the fan-in step inlines it, anchoring it for everything downstream")
+	assert.True(joinState.Contains("log"), "the fan-in step inlines it, anchoring it for everything downstream")
 }
 
 // TestStateRefs_SpawnCombinedFieldIsNotAnchored pins that a field the SPAWN task itself writes through a
@@ -317,11 +317,19 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 	// 400 accumulated base + the spawn's one appended entry. Anchoring the spawn's combined output would have
 	// dropped the base and read back 1.
-	assert.Equal(401.0, outcome.State["logLen"])
+	assert.Equal(401.0, outcome.State.Value("logLen"))
 
 	// The fan-in step inlines the combined value rather than ref'ing it at the spawn (whose row holds only the delta).
 	join := stepIDsByTask(t, e, "Join")[0]
 	joinState, joinRefs, _ := stepRefsOf(t, e, join)
 	assert.NotContains(joinRefs, "log", "the spawn's combined output cannot be anchored at the spawn - its row holds only the delta")
-	assert.Contains(joinState, "log", "the fan-in step inlines the combined value, anchoring it downstream")
+	assert.True(joinState.Contains("log"), "the fan-in step inlines the combined value, anchoring it downstream")
+}
+
+// newState is an initialized empty State - the destination a Resolve writes into. The ZERO State is
+// deliberately not that: it allocates nothing, so Resolve declines it rather than silently resolving into
+// a value the caller cannot see.
+func newState() workflow.State {
+	s, _ := workflow.NewState()
+	return s
 }

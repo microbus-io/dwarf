@@ -79,12 +79,12 @@ func TestInterruptpayloadflow(t *testing.T) {
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
 
 		// The raw payload is exposed via InterruptPayload.
-		assert.Equal("pick one", outcome.InterruptPayload["question"])
+		assert.Equal("pick one", outcome.InterruptPayload.Value("question"))
 
 		// State is the workflow's own state at the interrupt point: it carries the
 		// task's prior output ("prompt") but NOT the interrupt payload fields.
-		assert.Equal("choose", outcome.State["prompt"])
-		_, hasQuestion := outcome.State["question"]
+		assert.Equal("choose", outcome.State.Value("prompt"))
+		_, hasQuestion := outcome.State.Lookup("question")
 		assert.False(hasQuestion, "payload field leaked into State")
 	})
 }

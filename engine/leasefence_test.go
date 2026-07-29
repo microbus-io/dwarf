@@ -597,7 +597,7 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal("yes", outcome.State["ran"]) // the recovery re-execution wrote the state
+	assert.Equal("yes", outcome.State.Value("ran")) // the recovery re-execution wrote the state
 
 	// The recovery metric fired: recoverExpiredLeases reset the lost-lease step to pending for re-execution.
 	var rm metricdata.ResourceMetrics

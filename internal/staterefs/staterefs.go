@@ -227,14 +227,14 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 	// its (possibly large) bytes stay at the anchor, so re-serializing it here only to discard it is exactly
 	// the cost state refs exists to avoid. Only fields headed for INLINE storage (or new-ref candidacy) are
 	// marshalled here.
-	raw := make(map[string]json.RawMessage, len(merged))
-	for k, v := range merged {
+	raw := make(map[string]json.RawMessage, merged.Len())
+	for k, v := range merged.All() {
 		if !inlineOnly[k] {
 			// A field the task did not rewrite, and which arrived as a ref, KEEPS that ref - it is never
 			// re-minted against this step, whose row does not hold the bytes. This is the one-hop guard, and it
 			// is unconditional precisely because the fan-out policy below is not size-based.
 			if anchor, isRef := inherited[k]; isRef {
-				if _, rewritten := changes[k]; !rewritten {
+				if !changes.Contains(k) {
 					refs[k] = anchor
 					continue
 				}
@@ -274,13 +274,13 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 	// already handled above (rewritten -> re-anchored, or inline-only) is skipped; a tombstoned or
 	// member-overwritten field appears in changes/inlineOnly and is correctly left dropped.
 	for k, anchor := range inherited {
-		if _, inMerged := merged[k]; inMerged {
+		if merged.Contains(k) {
 			continue
 		}
 		if inlineOnly[k] {
 			continue
 		}
-		if _, rewritten := changes[k]; rewritten {
+		if changes.Contains(k) {
 			continue
 		}
 		refs[k] = anchor
@@ -308,11 +308,11 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 // so the anchor's changes is a sound anchor and keeping the ref preserves the byte win.
 func CombinedReducerFields(state, changes workflow.State, reducers map[string]workflow.Reducer) map[string]bool {
 	out := map[string]bool{}
-	for k := range changes {
+	for k := range changes.All() {
 		if r := reducers[k]; r == "" || r == workflow.ReducerReplace {
 			continue
 		}
-		if _, hasBase := state[k]; hasBase {
+		if state.Contains(k) {
 			out[k] = true
 		}
 	}
@@ -323,7 +323,7 @@ func CombinedReducerFields(state, changes workflow.State, reducers map[string]wo
 // state as literals - one copy, paid once, to shorten the resolve IN-list. It costs no database read: the
 // literals are all present in merged (state was resolved at dispatch). Anchors are dropped smallest-bytes
 // first, since those are the ones whose refs buy the least.
-func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged map[string]any) {
+func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workflow.State) {
 	if len(refs) == 0 {
 		return
 	}
@@ -336,7 +336,7 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged map[s
 	pinned := map[int]bool{}
 	for k, anchor := range refs {
 		byAnchor[anchor] = append(byAnchor[anchor], k)
-		if _, ok := merged[k]; !ok {
+		if !merged.Contains(k) {
 			pinned[anchor] = true
 		}
 	}
@@ -355,7 +355,7 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged map[s
 			continue
 		}
 		for _, k := range keys {
-			if v, ok := merged[k]; ok {
+			if v, ok := merged.Lookup(k); ok {
 				if data, err := json.Marshal(v); err == nil {
 					bytesOf[a] += len(data)
 				}
@@ -373,7 +373,7 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged map[s
 	keepDroppable := max(0, maxAnchors-pinnedCount)
 	for _, a := range droppable[min(keepDroppable, len(droppable)):] {
 		for _, k := range byAnchor[a] {
-			if v, ok := merged[k]; ok {
+			if v, ok := merged.Lookup(k); ok {
 				if data, err := json.Marshal(v); err == nil {
 					raw[k] = data
 				}
@@ -425,7 +425,7 @@ func Parse(refsJSON []byte) Refs {
 // That is what lets a fan-in reduce the fields it must while a large CARRIED field crosses the cohort as a
 // ref (see ResolveReduced).
 func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, want map[string]bool, load Loader) (int, error) {
-	if state == nil || len(refs) == 0 {
+	if state.IsZero() || len(refs) == 0 {
 		return 0, nil
 	}
 	values, err := l.fetch(ctx, refs, want, load)

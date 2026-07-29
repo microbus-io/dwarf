@@ -90,7 +90,7 @@ func TestBaggageflow(t *testing.T) {
 	seenLoad := map[string]map[string]any{}
 	seenTask := map[string]map[string]any{}
 	bagOf := func(ctx context.Context) map[string]any {
-		return workflow.BaggageFrom(ctx) // State is a map[string]any; nil when no baggage was set
+		return workflow.BaggageFrom(ctx).Map() // a plain copy; empty when no baggage was set
 	}
 	host := &baggageRecordingHost{
 		TestProxy: proxy,

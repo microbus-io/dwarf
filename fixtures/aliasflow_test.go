@@ -78,7 +78,7 @@ func TestAliasflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("ABC", outcome.State["path"])
+		assert.Equal("ABC", outcome.State.Value("path"))
 	})
 
 	t.Run("alt_path_runs_s_bPrime_d", func(t *testing.T) {
@@ -88,7 +88,7 @@ func TestAliasflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("BD", outcome.State["path"])
+		assert.Equal("BD", outcome.State.Value("path"))
 	})
 
 	t.Run("history_distinguishes_b_and_bPrime_by_node_name", func(t *testing.T) {

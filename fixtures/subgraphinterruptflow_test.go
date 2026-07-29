@@ -110,7 +110,7 @@ func TestSubgraphinterruptflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
-		assert.Equal("input", outcome.InterruptPayload["need"])
+		assert.Equal("input", outcome.InterruptPayload.Value("need"))
 
 		// Resuming the root propagates the answer down to the inner leaf.
 		if !assert.NoError(eng.Resume(ctx, flowKey, map[string]any{"answer": "42"})) {
@@ -121,6 +121,6 @@ func TestSubgraphinterruptflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("Z(X->Y(42))", outcome.State["result"])
+		assert.Equal("Z(X->Y(42))", outcome.State.Value("result"))
 	})
 }

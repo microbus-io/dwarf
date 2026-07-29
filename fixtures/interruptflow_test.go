@@ -85,6 +85,6 @@ func TestInterruptflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("Hello, world", outcome.State["result"])
+		assert.Equal("Hello, world", outcome.State.Value("result"))
 	})
 }

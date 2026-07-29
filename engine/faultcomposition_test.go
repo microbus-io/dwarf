@@ -106,8 +106,8 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, out.Status)
 
 	// The fan-in saw both branches (merged state carries X's and Y's writes).
-	assert.Equal("ran", out.State["x"])
-	assert.Equal("ran", out.State["y"])
+	assert.Equal("ran", out.State.Value("x"))
+	assert.Equal("ran", out.State.Value("y"))
 
 	assert.Equal(int64(1), aCalls.Load())
 	assert.Equal(int64(1), xCalls.Load()) // the WRITE was retried in place, not the branch's task

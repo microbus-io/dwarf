@@ -94,7 +94,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		// Every branch really did arrive - otherwise a low write count would just mean a broken fan-in.
-		assert.Equal(float64(width), outcome.State["legs"], "every branch must have arrived at the fan-in")
+		assert.Equal(float64(width), outcome.State.Value("legs"), "every branch must have arrived at the fan-in")
 
 		_, flowID, _, err := keys.ParseFlowKey(flowKey)
 		assert.NoError(err)

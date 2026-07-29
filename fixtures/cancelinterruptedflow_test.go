@@ -88,7 +88,7 @@ func TestCancelinterruptedflow(t *testing.T) {
 		assert.Equal(workflow.StatusCancelled, outcome.Status)
 		assert.Equal("no longer needed", outcome.CancelReason)
 		// The downstream task never ran.
-		_, reachedB := outcome.State["result"]
+		_, reachedB := outcome.State.Lookup("result")
 		assert.False(reachedB)
 
 		// Resuming a cancelled flow is rejected — it is terminal.

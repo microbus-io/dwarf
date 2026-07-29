@@ -25,6 +25,15 @@ import (
 )
 
 // blob returns a JSON string value of roughly n encoded bytes.
+// mustState builds a State from a literal map, for tests that construct one inline.
+func mustState(m map[string]any) workflow.State {
+	s, err := workflow.NewState(m)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
 func blob(n int) string {
 	return strings.Repeat("x", n)
 }
@@ -97,7 +106,7 @@ func TestLinker_MintTiers(t *testing.T) {
 	t.Parallel()
 	const anchor = 42
 
-	mint := func(t *testing.T, state map[string]any, changes map[string]any, inherited Refs, successors int) (workflow.State, Refs) {
+	mint := func(t *testing.T, state workflow.State, changes workflow.State, inherited Refs, successors int) (workflow.State, Refs) {
 		t.Helper()
 		assert := testarossa.For(t)
 		stateJSON, refsJSON, err := New("sqlite").Mint(state, changes, inherited, anchor, successors, nil)
@@ -111,19 +120,19 @@ func TestLinker_MintTiers(t *testing.T) {
 		assert := testarossa.For(t)
 		// 2KB clears the floor but not the linear bar (4KB): one round-trip is worth ~23KB of avoided writes,
 		// and a linear chain's depth cancels out of the trade, so this does NOT earn an anchor.
-		state := map[string]any{"doc": blob(2048)}
+		state := mustState(map[string]any{"doc": blob(2048)})
 		stored, refs := mint(t, state, state, nil, 1)
 		assert.Equal(0, len(refs), "a 2KB field must not open an anchor for a single successor")
-		assert.Contains(stored, "doc")
+		assert.True(stored.Contains("doc"))
 	})
 
 	t.Run("linear_above_threshold_opens_the_anchor", func(t *testing.T) {
 		assert := testarossa.For(t)
-		state := map[string]any{"doc": blob(8192), "small": "s"}
+		state := mustState(map[string]any{"doc": blob(8192), "small": "s"})
 		stored, refs := mint(t, state, state, nil, 1)
 		assert.Equal(anchor, refs["doc"])
-		assert.NotContains(stored, "doc", "a ref'd field is OMITTED from state - that is the entire saving")
-		assert.Contains(stored, "small", "a field below the floor stays inline")
+		assert.False(stored.Contains("doc"), "a ref'd field is OMITTED from state - that is the entire saving")
+		assert.True(stored.Contains("small"), "a field below the floor stays inline")
 	})
 
 	t.Run("fanout_lowers_the_bar", func(t *testing.T) {
@@ -131,10 +140,10 @@ func TestLinker_MintTiers(t *testing.T) {
 		// The SAME 2KB field that stayed inline for one successor is ref'd across a 16-way fan-out: the bar is
 		// budget/16 (~1.4KB), because one cache-missed resolve now serves 16 branches while the write saving is
 		// paid 16 times. This is the case the whole design exists for.
-		state := map[string]any{"doc": blob(2048)}
+		state := mustState(map[string]any{"doc": blob(2048)})
 		stored, refs := mint(t, state, state, nil, 16)
 		assert.Equal(anchor, refs["doc"], "a wide fan-out must ref a field a linear successor would inline")
-		assert.NotContains(stored, "doc")
+		assert.False(stored.Contains("doc"))
 	})
 
 	t.Run("free_tier_colocated_fields_ride_along", func(t *testing.T) {
@@ -142,16 +151,16 @@ func TestLinker_MintTiers(t *testing.T) {
 		// One big field opens the anchor. Every OTHER field in that same row is then free to ref: resolving
 		// fetches whole payload columns, so the row is already on the wire and a second ref costs no extra
 		// read at all. The floor is the only bar it must clear.
-		state := map[string]any{
+		state := mustState(map[string]any{
 			"doc":    blob(8192), // opens the anchor
 			"medium": blob(1200), // >= floor: rides along for free
 			"tiny":   blob(50),   // < floor: not worth its own bookkeeping
-		}
+		})
 		stored, refs := mint(t, state, state, nil, 1)
 		assert.Equal(anchor, refs["doc"])
 		assert.Equal(anchor, refs["medium"], "a co-located field above the floor is free to ref")
 		assert.NotContains(refs, "tiny")
-		assert.Contains(stored, "tiny")
+		assert.True(stored.Contains("tiny"))
 	})
 
 	t.Run("per_anchor_sum_opens_the_anchor", func(t *testing.T) {
@@ -160,21 +169,21 @@ func TestLinker_MintTiers(t *testing.T) {
 		// they share one prospective anchor and one round-trip. Summing is legitimate precisely because of
 		// that: four 1.5KB fields at four DIFFERENT anchors would mean four whole-row overfetches for the same
 		// bytes, and the sum is never taken across anchors.
-		state := map[string]any{
+		state := mustState(map[string]any{
 			"a": blob(1500), "b": blob(1500), "c": blob(1500),
-		}
+		})
 		stored, refs := mint(t, state, state, nil, 1)
 		assert.Equal(3, len(refs), "co-located fields summing past the bar open the anchor together")
-		assert.Equal(0, len(stored))
+		assert.Equal(0, stored.Len())
 	})
 
 	t.Run("sum_of_sub_floor_fields_does_not_open_it", func(t *testing.T) {
 		assert := testarossa.For(t)
 		// Only fields at or above the floor are candidates, so a swarm of small fields cannot conspire to open
 		// an anchor none of them would benefit from.
-		state := map[string]any{}
+		state := mustState(map[string]any{})
 		for i := range 20 {
-			state[string(rune('a'+i))] = blob(500)
+			_ = state.Set(string(rune('a'+i)), blob(500))
 		}
 		_, refs := mint(t, state, state, nil, 1)
 		assert.Equal(0, len(refs))
@@ -185,18 +194,18 @@ func TestLinker_MintTiers(t *testing.T) {
 		// The one-hop invariant. The field arrived as a ref to step 7 and the task did not rewrite it, so the
 		// successor keeps pointing at 7 - NOT at this step, whose row does not hold the bytes. Re-minting here
 		// would build a chain, which is the rejected delta design wearing a hat.
-		state := map[string]any{"doc": blob(8192)} // materialized at dispatch
-		stored, refs := mint(t, state, map[string]any{}, Refs{"doc": 7}, 1)
+		state := mustState(map[string]any{"doc": blob(8192)}) // materialized at dispatch
+		stored, refs := mint(t, state, mustState(map[string]any{}), Refs{"doc": 7}, 1)
 		assert.Equal(7, refs["doc"], "a carried ref keeps its original anchor")
-		assert.NotContains(stored, "doc")
+		assert.False(stored.Contains("doc"))
 	})
 
 	t.Run("rewritten_ref_is_reanchored_here", func(t *testing.T) {
 		assert := testarossa.For(t)
 		// The task REWROTE the field, so its bytes are now in this step's changes and the inherited anchor is
 		// stale. The ref must move to this step.
-		state := map[string]any{"doc": blob(8192)}
-		changes := map[string]any{"doc": blob(8192)}
+		state := mustState(map[string]any{"doc": blob(8192)})
+		changes := mustState(map[string]any{"doc": blob(8192)})
 		_, refs := mint(t, state, changes, Refs{"doc": 7}, 1)
 		assert.Equal(anchor, refs["doc"], "a rewritten field re-anchors at the step that wrote it")
 	})
@@ -206,16 +215,16 @@ func TestLinker_MintTiers(t *testing.T) {
 		// The forEach element is SYNTHESIZED per branch - its bytes are in no step row - so a ref to it would
 		// dangle. Even a huge element stays inline. (The same inlineOnly set carries a cohort member's contribution
 		// past the fan-in's mint, whose bytes are likewise not in the anchor's row.)
-		state := map[string]any{"item": blob(50000), "doc": blob(50000)}
-		stateJSON, refsJSON, err := New("sqlite").Mint(state, map[string]any{}, nil, anchor, 32, map[string]bool{"item": true})
+		state := mustState(map[string]any{"item": blob(50000), "doc": blob(50000)})
+		stateJSON, refsJSON, err := New("sqlite").Mint(state, mustState(map[string]any{}), nil, anchor, 32, map[string]bool{"item": true})
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
 		refs := Parse(refsJSON)
 		assert.NotContains(refs, "item", "an inline-only field is never ref'd, however large")
-		assert.Contains(stored, "item")
+		assert.True(stored.Contains("item"))
 		assert.Equal(anchor, refs["doc"], "its neighbours still ref normally")
-		assert.NotContains(stored, "doc")
+		assert.False(stored.Contains("doc"))
 	})
 
 	t.Run("foreach_source_array_is_refd_at_width", func(t *testing.T) {
@@ -228,22 +237,22 @@ func TestLinker_MintTiers(t *testing.T) {
 		for i := range items {
 			items[i] = i
 		}
-		state := map[string]any{"items": items, "item": 7, "itemIndex": 7, "itemCount": 64}
+		state := mustState(map[string]any{"items": items, "item": 7, "itemIndex": 7, "itemCount": 64})
 		noRef := map[string]bool{"item": true, "itemIndex": true, "itemCount": true}
 
 		// PostgreSQL: jsonb stores this array ~4.7x larger than its text length, which the dialect factor
 		// corrects for, so the array refs.
-		stateJSON, refsJSON, err := New("pgx").Mint(state, map[string]any{}, nil, anchor, 64, noRef)
+		stateJSON, refsJSON, err := New("pgx").Mint(state, mustState(map[string]any{}), nil, anchor, 64, noRef)
 		assert.NoError(err)
 		var stored workflow.State
 		_ = stored.UnmarshalJSON(stateJSON)
 		refs := Parse(refsJSON)
 		assert.Equal(anchor, refs["items"], "the forEach source array must be ref'd at width 64")
-		assert.NotContains(stored, "items", "one stored copy on the spawn row, not one per branch")
+		assert.False(stored.Contains("items"), "one stored copy on the spawn row, not one per branch")
 		// The synthesized per-branch bookkeeping is still never ref'd - its bytes are in no step row.
 		for _, k := range []string{"item", "itemIndex", "itemCount"} {
 			assert.NotContains(refs, k)
-			assert.Contains(stored, k)
+			assert.True(stored.Contains(k))
 		}
 
 		// A narrow fan-out keeps it inline: at width 4 the array is ~9 bytes and the quadratic term is nothing.
@@ -251,7 +260,7 @@ func TestLinker_MintTiers(t *testing.T) {
 		for i := range few {
 			few[i] = i
 		}
-		_, refsFew := mint(t, map[string]any{"items": few}, map[string]any{}, nil, 4)
+		_, refsFew := mint(t, mustState(map[string]any{"items": few}), mustState(map[string]any{}), nil, 4)
 		assert.NotContains(refsFew, "items", "a 4-element array is not worth a refs entry")
 	})
 
@@ -259,8 +268,8 @@ func TestLinker_MintTiers(t *testing.T) {
 		assert := testarossa.For(t)
 		// The floor that keeps "ref everything on a fan-out" from becoming a regression: a field smaller than
 		// its own state_refs entry loses bytes on every branch, so no width may drag it below minField.
-		state := map[string]any{"tiny": "abc", "flag": true, "n": 42}
-		_, refs := mint(t, state, map[string]any{}, nil, 4096)
+		state := mustState(map[string]any{"tiny": "abc", "flag": true, "n": 42})
+		_, refs := mint(t, state, mustState(map[string]any{}), nil, 4096)
 		assert.Equal(0, len(refs), "trivial scalars are never ref'd, however wide the fan-out")
 	})
 
@@ -269,19 +278,19 @@ func TestLinker_MintTiers(t *testing.T) {
 		// More distinct anchors than maxAnchors: the pointer fan is capped by inlining the anchors whose
 		// refs buy the least (fewest bytes), paying one copy to shorten the resolve IN-list. maxAnchors is
 		// the same knob as the threshold - the cost model prices ROWS.
-		state := map[string]any{}
+		state := mustState(map[string]any{})
 		inherited := Refs{}
 		for i := range maxAnchors + 2 {
 			field := "f" + string(rune('0'+i))
-			state[field] = blob(2000 + i*1000) // f0 smallest ... f5 largest
+			_ = state.Set(field, blob(2000+i*1000)) // f0 smallest ... f5 largest
 			inherited[field] = 100 + i
 		}
-		stored, refs := mint(t, state, map[string]any{}, inherited, 1)
+		stored, refs := mint(t, state, mustState(map[string]any{}), inherited, 1)
 		assert.Equal(maxAnchors, len(refs), "the pointer fan is capped")
 		// The two cheapest anchors were inlined back as literals; the largest survive as refs.
-		assert.Contains(stored, "f0")
-		assert.Contains(stored, "f1")
-		assert.NotContains(stored, "f5")
+		assert.True(stored.Contains("f0"))
+		assert.True(stored.Contains("f1"))
+		assert.False(stored.Contains("f5"))
 		assert.Equal(105, refs["f5"])
 	})
 
@@ -291,18 +300,18 @@ func TestLinker_MintTiers(t *testing.T) {
 		// resolves only what its reducers fold), so its key is absent from `merged`. The inherited ref must
 		// still be re-emitted, or the carried field is silently dropped from the fan-in step onward. This is the
 		// shape a spawn that only carries the ref (an anchoring step precedes the fan-out source) produces.
-		merged := map[string]any{"local": "s"} // `pdf` deliberately absent - carried, not materialized
-		stored, refs := mint(t, merged, map[string]any{}, Refs{"pdf": 7}, 1)
+		merged := mustState(map[string]any{"local": "s"}) // `pdf` deliberately absent - carried, not materialized
+		stored, refs := mint(t, merged, mustState(map[string]any{}), Refs{"pdf": 7}, 1)
 		assert.Equal(7, refs["pdf"], "a carried ref whose payload is not in merged must still be re-emitted")
-		assert.NotContains(stored, "pdf")
-		assert.Contains(stored, "local")
+		assert.False(stored.Contains("pdf"))
+		assert.True(stored.Contains("local"))
 	})
 
 	t.Run("carried_ref_absent_from_merged_but_rewritten_is_dropped", func(t *testing.T) {
 		assert := testarossa.For(t)
 		// A tombstone (member/spawn deleted the carried field) leaves the key in `changes` and out of `merged`.
 		// The stale carried ref must NOT be resurrected - the field is genuinely gone.
-		_, refs := mint(t, map[string]any{}, map[string]any{"pdf": nil}, Refs{"pdf": 7}, 1)
+		_, refs := mint(t, mustState(map[string]any{}), mustState(map[string]any{"pdf": nil}), Refs{"pdf": 7}, 1)
 		assert.NotContains(refs, "pdf", "a tombstoned carried field must not be re-emitted through its stale ref")
 	})
 
@@ -311,16 +320,16 @@ func TestLinker_MintTiers(t *testing.T) {
 		// More distinct anchors than maxAnchors, where one anchor is a CARRIED ref whose payload is absent
 		// from `merged` (un-inlineable). The cap must never drop it - there is no literal to inline it back to,
 		// so dropping would delete the field. It survives even if that means keeping more than maxAnchors.
-		merged := map[string]any{}
+		merged := mustState(map[string]any{})
 		inherited := Refs{}
 		for i := range maxAnchors + 1 {
 			field := "f" + string(rune('0'+i))
-			merged[field] = blob(2000 + i*1000) // inlineable: present in merged
+			_ = merged.Set(field, blob(2000+i*1000)) // inlineable: present in merged
 			inherited[field] = 100 + i
 		}
 		inherited["carried"] = 999 // absent from merged: un-inlineable, must be pinned
-		stored, refs := mint(t, merged, map[string]any{}, inherited, 1)
+		stored, refs := mint(t, merged, mustState(map[string]any{}), inherited, 1)
 		assert.Equal(999, refs["carried"], "an un-inlineable carried anchor must survive the cap")
-		assert.NotContains(stored, "carried")
+		assert.False(stored.Contains("carried"))
 	})
 }

@@ -84,7 +84,7 @@ func TestOnerrorsiblingsflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "onerrorsiblingsflow.verify:428/fan-out-error", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(true, outcome.State["recovered"])
-		assert.Equal(true, outcome.State["siblingsRan"])
+		assert.Equal(true, outcome.State.Value("recovered"))
+		assert.Equal(true, outcome.State.Value("siblingsRan"))
 	})
 }

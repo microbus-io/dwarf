@@ -59,7 +59,7 @@ func failedCellKeyByIndex(t *testing.T, eng *engine.Engine, flowKey string, idx 
 		if err != nil {
 			continue
 		}
-		switch v := full.State["itemIndex"].(type) {
+		switch v := full.State.Value("itemIndex").(type) {
 		case float64:
 			if int(v) == idx {
 				return s.StepKey
@@ -110,7 +110,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	originKey, outcome, err := eng.Run(ctx, "forkflow.verify:428/linear", map[string]any{"seed": "orig"}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal("orig", outcome.State["bSaw"])
+	assert.Equal("orig", outcome.State.Value("bSaw"))
 	assert.Equal(int32(1), bRuns.Load())
 
 	bKey := stepKeyByTask(t, eng, originKey, "B")
@@ -124,15 +124,15 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
 	// The fork re-ran B (and C) with the override.
-	assert.Equal("forked", forkOutcome.State["bSaw"])
-	assert.Equal(true, forkOutcome.State["done"])
+	assert.Equal("forked", forkOutcome.State.Value("bSaw"))
+	assert.Equal(true, forkOutcome.State.Value("done"))
 	assert.Equal(int32(2), bRuns.Load())
 
 	// The original is unchanged and still its own completed flow.
 	origAfter, err := eng.Snapshot(ctx, originKey)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, origAfter.Status)
-	assert.Equal("orig", origAfter.State["bSaw"])
+	assert.Equal("orig", origAfter.State.Value("bSaw"))
 }
 
 // TestForkflow_RecoverFailedStep forks a failed flow at the failing step with an override that makes it
@@ -181,7 +181,7 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 	forkOutcome, err := eng.Await(ctx, forkKey)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
-	assert.Equal(true, forkOutcome.State["done"])
+	assert.Equal(true, forkOutcome.State.Value("done"))
 
 	// Original is still failed - forking never mutates it.
 	origAfter, err := eng.Snapshot(ctx, originKey)
@@ -217,7 +217,7 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	originKey, outcome, err := eng.Run(ctx, "forkflow3.verify:428/g", map[string]any{"seed": "origin"}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal("origin", outcome.State["tag"])
+	assert.Equal("origin", outcome.State.Value("tag"))
 
 	// Fork the origin at B with a distinct override; it completes in the same thread.
 	bKey := stepKeyByTask(t, eng, originKey, "B")
@@ -226,7 +226,7 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	forkOutcome, err := eng.Await(ctx, forkKey)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
-	assert.Equal("forked", forkOutcome.State["tag"])
+	assert.Equal("forked", forkOutcome.State.Value("tag"))
 
 	// Continue on the thread must base on the ORIGIN (tag=origin), not the later fork (tag=forked).
 	contKey, err := eng.Continue(ctx, originKey, map[string]any{})
@@ -235,7 +235,7 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, contOutcome.Status)
 	// B re-ran in the continuation reading the carried-over seed from the origin's final state.
-	assert.Equal("origin", contOutcome.State["tag"])
+	assert.Equal("origin", contOutcome.State.Value("tag"))
 }
 
 // TestForkflow_FanoutForkOfFork forks a partially-failed fan-out one failed branch at a time. The first
@@ -306,7 +306,7 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 	fork2Outcome, err := eng.Await(ctx, fork2)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, fork2Outcome.Status)
-	assert.Equal(true, fork2Outcome.State["joined"])
+	assert.Equal(true, fork2Outcome.State.Value("joined"))
 }
 
 // subgraphForkProxy builds a parent (A -> RunSub -> C) that calls a child subgraph (X -> Y), counting
@@ -372,7 +372,7 @@ func TestForkflow_AtSubgraphCaller(t *testing.T) {
 	originKey, outcome, err := eng.Run(ctx, "forksub.verify:428/parent", map[string]any{"seed": "orig"}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal("Y(orig)", outcome.State["subResult"])
+	assert.Equal("Y(orig)", outcome.State.Value("subResult"))
 	assert.Equal(int32(1), atomic.LoadInt32(&childRuns))
 
 	runSubKey := stepKeyByTask(t, eng, originKey, "RunSub")
@@ -384,7 +384,7 @@ func TestForkflow_AtSubgraphCaller(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
 	// The subgraph re-ran from scratch with the override.
-	assert.Equal("Y(forked)", forkOutcome.State["subResult"])
+	assert.Equal("Y(forked)", forkOutcome.State.Value("subResult"))
 	assert.Equal(int32(2), atomic.LoadInt32(&childRuns))
 
 	// The fork's history re-shows the subgraph (its fresh child).
@@ -402,7 +402,7 @@ func TestForkflow_AtSubgraphCaller(t *testing.T) {
 	origAfter, err := eng.Snapshot(ctx, originKey)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, origAfter.Status)
-	assert.Equal("Y(orig)", origAfter.State["subResult"])
+	assert.Equal("Y(orig)", origAfter.State.Value("subResult"))
 }
 
 // TestForkflow_InsideSubgraph forks at a step INSIDE a subgraph child. The clone re-roots at the parent,
@@ -422,7 +422,7 @@ func TestForkflow_InsideSubgraph(t *testing.T) {
 	originKey, outcome, err := eng.Run(ctx, "forksub.verify:428/parent", map[string]any{"seed": "orig"}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal("Y(orig)", outcome.State["subResult"])
+	assert.Equal("Y(orig)", outcome.State.Value("subResult"))
 	assert.Equal(int32(1), atomic.LoadInt32(&childRuns))
 
 	// Find inner step X inside the child subgraph via SubHistory.
@@ -446,7 +446,7 @@ func TestForkflow_InsideSubgraph(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, forkOutcome.Status)
 	// The inner step re-ran with the override and bubbled the new result up to the root.
-	assert.Equal("Y(forked)", forkOutcome.State["subResult"])
+	assert.Equal("Y(forked)", forkOutcome.State.Value("subResult"))
 	assert.Equal(int32(2), atomic.LoadInt32(&childRuns))
 
 	// The fork's history re-shows the subgraph (its re-run child).
@@ -464,7 +464,7 @@ func TestForkflow_InsideSubgraph(t *testing.T) {
 	origAfter, err := eng.Snapshot(ctx, originKey)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, origAfter.Status)
-	assert.Equal("Y(orig)", origAfter.State["subResult"])
+	assert.Equal("Y(orig)", origAfter.State.Value("subResult"))
 }
 
 // budgetRec records the most recent observed remaining time budget (ctx.Deadline) per task name.

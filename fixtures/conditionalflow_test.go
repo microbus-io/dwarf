@@ -69,7 +69,7 @@ func TestConditionalflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("high", outcome.State["branch"])
+		assert.Equal("high", outcome.State.Value("branch"))
 	})
 
 	t.Run("score_low_takes_low_branch", func(t *testing.T) {
@@ -79,7 +79,7 @@ func TestConditionalflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("low", outcome.State["branch"])
+		assert.Equal("low", outcome.State.Value("branch"))
 	})
 
 	t.Run("boundary_50_takes_high_branch", func(t *testing.T) {
@@ -89,6 +89,6 @@ func TestConditionalflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("high", outcome.State["branch"])
+		assert.Equal("high", outcome.State.Value("branch"))
 	})
 }

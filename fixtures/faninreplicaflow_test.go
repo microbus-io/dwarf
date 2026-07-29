@@ -144,9 +144,9 @@ func TestFanInReplicaflow(t *testing.T) {
 		}
 
 		// The fan-in produced the reduced result no matter which replica merged the cohort.
-		assert.Equal(60.0, out.State["finalSum"])
-		assert.Equal([]string{"b", "c", "d"}, sortedStateStrings(out.State["finalList"]))
-		assert.Equal([]string{"x", "y", "z"}, sortedStateStrings(out.State["finalSet"]))
+		assert.Equal(60.0, out.State.Value("finalSum"))
+		assert.Equal([]string{"b", "c", "d"}, sortedStateStrings(out.State.Value("finalList")))
+		assert.Equal([]string{"x", "y", "z"}, sortedStateStrings(out.State.Value("finalSet")))
 
 		// Every task ran exactly once; record the replica that executed each step.
 		hist, err := creators[i].History(ctx, k)

@@ -186,14 +186,14 @@ func (e *Engine) initMetrics() error {
 	reg, err := meter.RegisterCallback(
 		func(ctx context.Context, o metric.Observer) error {
 			return e.observeGauges(ctx, o, observableGauges{
-				queueDepth:   queueDepth,
-				stepsPending: stepsPending,
-				oldestAge:    oldestAge,
-				fairnessKeys: fairnessKeys,
-				concurrency:  concurrency,
-				peerReplicas: peerReplicas,
-				peerBlind:    peerBlind,
-				tallyAge:     tallyAge,
+				queueDepth:    queueDepth,
+				stepsPending:  stepsPending,
+				oldestAge:     oldestAge,
+				fairnessKeys:  fairnessKeys,
+				concurrency:   concurrency,
+				peerReplicas:  peerReplicas,
+				peerBlind:     peerBlind,
+				tallyAge:      tallyAge,
 				permitsAvail:  permitsAvail,
 				workersRes:    workersResident,
 				inFlightBytes: inFlightBytes,

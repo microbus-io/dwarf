@@ -77,9 +77,9 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 	_, outcome, err := e.Run(ctx, "c/wf", map[string]any{"pages": []string{"a", "b", "c"}}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal(3.0, outcome.State["pageCount"], "a task's own field must not be eaten by a same-named bookkeeping key")
-	assert.Equal("summary", outcome.State["page"])
-	assert.Equal(99.0, outcome.State["pageIndex"])
+	assert.Equal(3.0, outcome.State.Value("pageCount"), "a task's own field must not be eaten by a same-named bookkeeping key")
+	assert.Equal("summary", outcome.State.Value("page"))
+	assert.Equal(99.0, outcome.State.Value("pageIndex"))
 }
 
 // TestForEachStrip_NestedOuterSurvivesInnerFanIn pins the other half of the scoping. A step converging out of an
@@ -149,10 +149,10 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 	_, outcome, err := e.Run(ctx, "n/wf", map[string]any{"pages": []string{"p1", "p2"}}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status, outcome.Error)
-	assert.Equal(2.0, outcome.State["pagesSeen"])
+	assert.Equal(2.0, outcome.State.Value("pagesSeen"))
 	// Neither level's bookkeeping escapes to final_state; both were stripped at their OWN fan-in.
-	assert.NotContains(outcome.State, "page")
-	assert.NotContains(outcome.State, "chunk")
+	assert.False(outcome.State.Contains("page"))
+	assert.False(outcome.State.Contains("chunk"))
 }
 
 // TestForEachStrip_FailedFanOutStillStrips pins the case the strip exists for, which the scoping must not lose.
@@ -194,11 +194,11 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	assert.Equal(workflow.StatusFailed, outcome.Status)
 	// The surviving branches' private bookkeeping must NOT ride forward into the failed flow's final_state -
 	// otherwise a fan-out's terminal state would mean different things depending on how it ended.
-	assert.NotContains(outcome.State, "page")
-	assert.NotContains(outcome.State, "pageIndex")
-	assert.NotContains(outcome.State, "pageCount")
+	assert.False(outcome.State.Contains("page"))
+	assert.False(outcome.State.Contains("pageIndex"))
+	assert.False(outcome.State.Contains("pageCount"))
 	// The source array the branches were spawned from is still there (it is flow state, not bookkeeping).
-	assert.Contains(outcome.State, "pages")
+	assert.True(outcome.State.Contains("pages"))
 }
 
 // TestFailedFanOut_KeepsEveryBranchesIntermediateOutput pins that a fan-out which resolved with FAILURES reports
@@ -256,19 +256,19 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 
 	// Cell ran and COMPLETED in all three branches, so all three contributions survive - including branch b's,
 	// whose branch later failed at Enrich (Cell's own step completed; only Enrich failed).
-	cells, _ := outcome.State["cells"].([]any)
+	cells, _ := outcome.State.Value("cells").([]any)
 	assert.Equal(3, len(cells), "every branch's FIRST-step output must survive, not just the first branch's")
 	assert.Contains(cells, "cell:a")
 	assert.Contains(cells, "cell:b")
 	assert.Contains(cells, "cell:c")
 
 	// Enrich completed only in branches a and c; b's failed step contributes nothing (an error voids its changes).
-	enriched, _ := outcome.State["enriched"].([]any)
+	enriched, _ := outcome.State.Value("enriched").([]any)
 	assert.Equal(2, len(enriched))
 	assert.Contains(enriched, "enriched:a")
 	assert.Contains(enriched, "enriched:c")
 
 	// The per-branch bookkeeping still does not ride forward, and the source array still does.
-	assert.NotContains(outcome.State, "item")
-	assert.Contains(outcome.State, "items")
+	assert.False(outcome.State.Contains("item"))
+	assert.True(outcome.State.Contains("items"))
 }

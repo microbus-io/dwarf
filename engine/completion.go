@@ -92,7 +92,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 	merge := func(query string, args ...any) (workflow.State, int, bool, error) {
 		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
-			return nil, 0, false, errors.Trace(err)
+			return workflow.State{}, 0, false, errors.Trace(err)
 		}
 		defer rows.Close()
 
@@ -105,28 +105,28 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 			var stateJSON, changesJSON, refsJSON []byte
 			var lineageID int
 			if err := rows.Scan(&stateJSON, &changesJSON, &refsJSON, &lineageID); err != nil {
-				return nil, 0, false, errors.Trace(err)
+				return workflow.State{}, 0, false, errors.Trace(err)
 			}
 			if !found {
 				found = true
 				baseState, err = workflow.NewState(stateJSON)
 				if err != nil {
-					return nil, 0, false, errors.Trace(err)
+					return workflow.State{}, 0, false, errors.Trace(err)
 				}
 				baseRefs = staterefs.Parse(refsJSON)
 				baseLineage = lineageID
 			}
 			changes, err := workflow.NewState(changesJSON)
 			if err != nil {
-				return nil, 0, false, errors.Trace(err)
+				return workflow.State{}, 0, false, errors.Trace(err)
 			}
 			allChanges = append(allChanges, changes)
 		}
 		if err := rows.Err(); err != nil {
-			return nil, 0, false, errors.Trace(err)
+			return workflow.State{}, 0, false, errors.Trace(err)
 		}
 		if !found {
-			return nil, 0, false, nil
+			return workflow.State{}, 0, false, nil
 		}
 		// FLATTEN: final_state is a flow-boundary value (a dwarf_flows column that Continue feeds into the next
 		// turn, and that outlives this flow's steps - DeleteOnCompletion may reap them). A ref that escaped the
@@ -134,13 +134,13 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 		// It is not a regression either: a large field surviving to the end is copied into final_state today.
 		// resolveStateRefs mutates the state map in place, so it gets the live map.
 		if _, err := e.resolveStateRefs(ctx, db, shardNum, baseState, baseRefs, nil, workflowURL); err != nil {
-			return nil, 0, false, errors.Trace(err)
+			return workflow.State{}, 0, false, errors.Trace(err)
 		}
 
 		merged := baseState
 		for _, changes := range allChanges {
 			if err := merged.MergeReduce(changes, reducers); err != nil {
-				return nil, 0, false, errors.Trace(err)
+				return workflow.State{}, 0, false, errors.Trace(err)
 			}
 		}
 		merged.DelNils()
@@ -152,7 +152,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 		flowID,
 	)
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return workflow.State{}, 0, errors.Trace(err)
 	}
 	if found {
 		return merged, lineage, nil
@@ -163,7 +163,7 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 		flowID,
 	)
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return workflow.State{}, 0, errors.Trace(err)
 	}
 	if found {
 		return merged, lineage, nil
@@ -263,7 +263,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		return workflow.State{}, nil
 	}
 	if err != nil {
-		return nil, errors.Trace(err)
+		return workflow.State{}, errors.Trace(err)
 	}
 	spawnState, _ := workflow.NewState(spawnStateJSON)
 	spawnChanges, _ := workflow.NewState(spawnChangesJSON)
@@ -271,13 +271,13 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	// here - unlike the fan-in, which may pass a carried ref through. resolveStateRefs mutates the map in place.
 	_, err = e.resolveStateRefs(ctx, db, shardNum, spawnState, staterefs.Parse(spawnRefsJSON), nil, workflowURL)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return workflow.State{}, errors.Trace(err)
 	}
 	// The failed cohort's terminal state is built the SAME way convergence would (insertFanInStep): the spawn's
 	// state with its own delta folded via the reducers, as the base the completed members fold onto below.
 	merged := spawnState.Clone()
 	if err := merged.MergeReduce(spawnChanges, graph.Reducers()); err != nil {
-		return nil, errors.Trace(err)
+		return workflow.State{}, errors.Trace(err)
 	}
 
 	rows, err := db.QueryContext(ctx,
@@ -285,14 +285,14 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		flowID, cohortSpawnID,
 	)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return workflow.State{}, errors.Trace(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var status string
 		var changesJSON []byte
 		if err := rows.Scan(&status, &changesJSON); err != nil {
-			return nil, errors.Trace(err)
+			return workflow.State{}, errors.Trace(err)
 		}
 		// Only completed members contribute, matching insertFanInStep: a failed or cancelled branch's partial
 		// output is not a fact the flow can build on (an error voids the task's changes).
@@ -301,11 +301,11 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		}
 		changes, _ := workflow.NewState(changesJSON)
 		if err := merged.MergeReduce(changes, graph.Reducers()); err != nil {
-			return nil, errors.Trace(err)
+			return workflow.State{}, errors.Trace(err)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, errors.Trace(err)
+		return workflow.State{}, errors.Trace(err)
 	}
 	merged.DelNils()
 	return merged, nil
@@ -1162,7 +1162,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 
 	// Normalize the caller's resume data (a struct, map, or nil) into a State; an empty one stays "{}".
 	resumeDataJSON := []byte("{}")
-	if resumeState, _ := workflow.NewState(data); len(resumeState) > 0 {
+	if resumeState, _ := workflow.NewState(data); resumeState.Len() > 0 {
 		b, _ := json.Marshal(resumeState)
 		resumeDataJSON = b
 	}

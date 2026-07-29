@@ -77,7 +77,7 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 
 	// Both branches converge exactly once at the fan-in, in input-array order (append reducer).
 	var done []string
-	for _, v := range outcome.State["done"].([]any) {
+	for _, v := range outcome.State.Value("done").([]any) {
 		done = append(done, v.(string))
 	}
 	sort.Strings(done)

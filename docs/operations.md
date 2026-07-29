@@ -108,9 +108,9 @@ its own deadline — an HTTP status endpoint long-polling a flow that may run fo
 ```go
 type FlowOutcome struct {
     Status           string
-    State            map[string]any  // final_state when terminal; the interrupted step's merged snapshot when interrupted; empty while running/created
+    State            workflow.State  // final_state when terminal; the interrupted step's merged snapshot when interrupted; empty while running/created
     Error            string          // set when Status == "failed"
-    InterruptPayload map[string]any  // set when Status == "interrupted"
+    InterruptPayload workflow.State  // set when Status == "interrupted"
     CancelReason     string          // set when Status == "cancelled"
 }
 ```
