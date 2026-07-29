@@ -122,6 +122,24 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	state.AddTransitionChain(stateNames...)
 	h.graphs["bench/state"] = state
 
+	// The carry payload is STRUCTURED, and that is not a detail - it decides whether the workload can see
+	// the thing it exists to measure. `state`'s payload is one opaque incompressible string, which is right
+	// for MB/s (it must not TOAST-compress), and wrong here: a JSON string decodes to a Go string of about
+	// the same size, so an opaque blob has a decode expansion of ~1x and a carried-state measurement taken
+	// with one reads flat no matter what the engine does. Measured with `go run` against encoding/json:
+	// a 64KB string expands ~1x, while 800 small records (50KB of JSON) expand to 341KB in Go - 6.8x, since
+	// every element costs an interface, a boxed float64 and a map entry. Real carried documents - pages,
+	// rows, chunks - are the second shape. Element count, not byte count, is what drives it.
+	records := make([]map[string]any, 0, 1+payloadBytes/80)
+	for i := 0; len(records)*80 < payloadBytes; i++ {
+		records = append(records, map[string]any{
+			"id":    i,
+			"name":  payload[(i*37)%max(1, len(payload)-24):][:24],
+			"score": float64(i) * 1.5,
+			"ok":    i%2 == 0,
+		})
+	}
+
 	// carry: the payload is written ONCE - as the flow's initial state, so the ENTRY step's state column
 	// anchors it - and thereafter only carried. Every task writes a small counter and leaves the document
 	// alone. This is the complement of `state` above and measures the opposite thing: `state` rewrites the
@@ -147,8 +165,14 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 			return fmt.Errorf("carry: the carried document is missing at %s - a dropped carry, not a saving", f.StepKey())
 		}
 		if carryReadsDoc {
-			if n := len(f.GetString("doc")); n != payloadBytes {
-				return fmt.Errorf("carry: carried document is %d bytes, want %d", n, payloadBytes)
+			// Reading it is what forces the decode, which is the whole point of the -carry-read arm: the
+			// never-read arm should hold the document's BYTES and this one its expanded Go form.
+			var doc []map[string]any
+			if err := f.Get("doc", &doc); err != nil {
+				return fmt.Errorf("carry: reading the carried document: %w", err)
+			}
+			if len(doc) != len(records) {
+				return fmt.Errorf("carry: carried document has %d records, want %d", len(doc), len(records))
 			}
 		}
 		f.SetInt("steps", 1)
@@ -226,12 +250,12 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 		// no task having produced it, and so appears in no `changes` anywhere.
 		"carry": {
 			graphURL:     "bench/carry",
-			initialState: func() map[string]any { return map[string]any{"doc": payload} },
+			initialState: func() map[string]any { return map[string]any{"doc": records} },
 		},
 		"carryfanout": {
 			graphURL: "bench/carryfanout",
 			initialState: func() map[string]any {
-				return map[string]any{"doc": payload, "items": fanoutItems}
+				return map[string]any{"doc": records, "items": fanoutItems}
 			},
 		},
 	}
