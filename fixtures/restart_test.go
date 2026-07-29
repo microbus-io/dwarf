@@ -260,7 +260,7 @@ func TestRestartSurvival(t *testing.T) {
 		assert.NoError(e2.Resume(ctx, flowKey, nil))
 		final := enginetest.AwaitAndAssertComplete(t, e2, flowKey)
 		if final != nil {
-			assert.Equal("yes", final.State.Value("resumed"))
+			assert.Equal("yes", stateVal(final.State, "resumed"))
 		}
 		assert.Equal(int64(2), gateCalls.Load()) // Gate: once to interrupt (e1), once resumed (e2)
 		assert.Equal(int64(1), doneCalls.Load()) // Done ran once on engine 2

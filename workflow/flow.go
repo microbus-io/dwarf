@@ -128,40 +128,40 @@ func NewFlow() *Flow {
 
 // GetString returns a state field as a string. It returns "" if the field is absent, and panics if the
 // field holds a non-string.
-func (f *Flow) GetString(key string) string { return f.state.GetString(key) }
+func (f *Flow) GetString(name string) string { return f.state.GetString(name) }
 
 // GetStrings returns a state field as a string slice. It returns nil if the field is absent, and panics
 // if the field holds anything but an array of strings.
-func (f *Flow) GetStrings(key string) []string { return f.state.GetStrings(key) }
+func (f *Flow) GetStrings(name string) []string { return f.state.GetStrings(name) }
 
 // GetInt returns a state field as an int. It returns 0 if the field is absent, and panics if the field
 // holds a non-integer (a fractional number included).
-func (f *Flow) GetInt(key string) int { return f.state.GetInt(key) }
+func (f *Flow) GetInt(name string) int { return f.state.GetInt(name) }
 
 // GetFloat returns a state field as a float64. It returns 0 if the field is absent, and panics if the
 // field holds a non-number.
-func (f *Flow) GetFloat(key string) float64 { return f.state.GetFloat(key) }
+func (f *Flow) GetFloat(name string) float64 { return f.state.GetFloat(name) }
 
 // GetBool returns a state field as a bool. It returns false if the field is absent, and panics if the
 // field holds a non-boolean.
-func (f *Flow) GetBool(key string) bool { return f.state.GetBool(key) }
+func (f *Flow) GetBool(name string) bool { return f.state.GetBool(name) }
 
 // GetDuration returns a state field as a time.Duration. It returns 0 if the field is absent, and panics
 // if the field holds anything but a duration in nanoseconds.
-func (f *Flow) GetDuration(key string) time.Duration { return f.state.GetDuration(key) }
+func (f *Flow) GetDuration(name string) time.Duration { return f.state.GetDuration(name) }
 
 // Get unmarshals a state field into the target. Use this for complex types (structs, maps, etc.), and to
 // handle a type mismatch rather than fail the step on it - unlike the typed getters, Get reports one as an
 // error instead of panicking. An absent or cleared field leaves the target untouched and returns nil.
-func (f *Flow) Get(key string, target any) error {
-	_, err := f.state.Get(key, target)
+func (f *Flow) Get(name string, target any) error {
+	_, err := f.state.Get(name, target)
 	return err
 }
 
 // Has reports whether a state field exists. A cleared slot (JSON null) reads
 // as absent.
-func (f *Flow) Has(key string) bool {
-	return f.state.Has(key)
+func (f *Flow) Has(name string) bool {
+	return f.state.Has(name)
 }
 
 // ParseState unmarshals state fields into the target struct.
@@ -233,59 +233,59 @@ func (f *Flow) StepKey() string {
 
 // Set sets a state field and tracks the change. Use this for complex types (structs, maps, etc.).
 // It returns an error only if the value cannot be marshalled to JSON (a NaN, an +Inf, a channel).
-func (f *Flow) Set(key string, value any) error {
-	if err := f.state.Set(key, value); err != nil {
+func (f *Flow) Set(name string, value any) error {
+	if err := f.state.Set(name, value); err != nil {
 		return err
 	}
-	return f.changes.Set(key, value)
+	return f.changes.Set(name, value)
 }
 
 // SetString sets a state string field and tracks the change.
-func (f *Flow) SetString(key string, value string) {
-	f.state.SetString(key, value)
-	f.changes.SetString(key, value)
+func (f *Flow) SetString(name string, value string) {
+	f.state.SetString(name, value)
+	f.changes.SetString(name, value)
 }
 
 // SetStrings sets a state string slice field and tracks the change.
-func (f *Flow) SetStrings(key string, value []string) {
-	f.state.SetStrings(key, value)
-	f.changes.SetStrings(key, value)
+func (f *Flow) SetStrings(name string, value []string) {
+	f.state.SetStrings(name, value)
+	f.changes.SetStrings(name, value)
 }
 
 // SetInt sets a state int field and tracks the change.
-func (f *Flow) SetInt(key string, value int) {
-	f.state.SetInt(key, value)
-	f.changes.SetInt(key, value)
+func (f *Flow) SetInt(name string, value int) {
+	f.state.SetInt(name, value)
+	f.changes.SetInt(name, value)
 }
 
 // SetFloat sets a state float64 field and tracks the change.
-func (f *Flow) SetFloat(key string, value float64) {
-	f.state.SetFloat(key, value)
-	f.changes.SetFloat(key, value)
+func (f *Flow) SetFloat(name string, value float64) {
+	f.state.SetFloat(name, value)
+	f.changes.SetFloat(name, value)
 }
 
 // SetBool sets a state bool field and tracks the change.
-func (f *Flow) SetBool(key string, value bool) {
-	f.state.SetBool(key, value)
-	f.changes.SetBool(key, value)
+func (f *Flow) SetBool(name string, value bool) {
+	f.state.SetBool(name, value)
+	f.changes.SetBool(name, value)
 }
 
 // SetDuration sets a state time.Duration field and tracks the change (nanoseconds).
-func (f *Flow) SetDuration(key string, value time.Duration) {
-	f.state.SetDuration(key, value)
-	f.changes.SetDuration(key, value)
+func (f *Flow) SetDuration(name string, value time.Duration) {
+	f.state.SetDuration(name, value)
+	f.changes.SetDuration(name, value)
 }
 
 // Del removes the listed state fields. Each is recorded as a cleared value
 // (JSON null) in changes so the following merge drops it, and is removed from the
 // local state map so later reads in this task see it as absent.
-func (f *Flow) Del(keys ...string) {
-	for _, k := range keys {
-		f.deleteOne(k)
+func (f *Flow) Del(names ...string) {
+	for _, n := range names {
+		f.deleteOne(n)
 	}
 }
 
-// Clear removes every state field. Equivalent to Del on every current key: each is recorded as a cleared
+// Clear removes every state field. Equivalent to Del on every current field: each is recorded as a cleared
 // value (JSON null) in changes so the following merge drops it, and state is emptied. Useful at workflow
 // boundaries or anywhere a task wants a blank slate before populating it.
 func (f *Flow) Clear() {
@@ -300,19 +300,22 @@ func (f *Flow) Clear() {
 
 // deleteOne is the shared worker: writes a cleared (Go nil) tombstone to changes so the following merge
 // drops the field, and removes it from state so later reads in this task see it as absent.
-func (f *Flow) deleteOne(key string) {
+func (f *Flow) deleteOne(name string) {
 	if f.changes.IsZero() {
 		f.changes, _ = NewState()
 	}
-	f.changes.d[key] = nil // tombstone; isCleared treats a Go nil (or JSON null) as cleared
-	f.state.Del(key)
+	f.changes.d[name] = nil // tombstone; isCleared treats a Go nil (or JSON null) as cleared
+	f.state.Del(name)
 }
 
-// Snapshot captures a read-only copy of the flow's current state
-// (including any changes applied so far). Pass the returned snapshot to SetChanges
-// to record only the fields that differ.
-func (f *Flow) Snapshot() map[string]any {
-	return f.state.Map()
+// Snapshot captures an independent copy of the flow's current state (including any changes applied so far).
+// Pass the returned snapshot to SetChanges to record only the fields that differ.
+//
+// The copy is independent of the flow, so writing to the flow afterwards does not disturb it - which is
+// what makes it usable as a diff baseline. It does not materialize field values, so snapshotting a large
+// carried payload costs a map entry rather than the payload.
+func (f *Flow) Snapshot() State {
+	return f.state.Clone()
 }
 
 // SetChanges marshals the source struct back to state, comparing against the provided snapshot.
@@ -322,7 +325,7 @@ func (f *Flow) Snapshot() map[string]any {
 //
 // It returns an error if a field holds an unstorable value (see the note above SetInt), and that field
 // is not recorded.
-func (f *Flow) SetChanges(source any, snap map[string]any) error {
+func (f *Flow) SetChanges(source any, snap State) error {
 	if f.changes.IsZero() {
 		f.changes, _ = NewState()
 	}
@@ -563,7 +566,7 @@ func (f *Flow) SubgraphRequested() (url string, input State, ok bool) {
 
 // diffAndApply marshals each field of source, compares against the snapshot,
 // and writes changed fields to both state and changes.
-func (f *Flow) diffAndApply(source any, snapshot, state, changes map[string]any) error {
+func (f *Flow) diffAndApply(source any, snapshot State, state, changes map[string]json.RawMessage) error {
 	v := reflect.ValueOf(source)
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
@@ -583,20 +586,13 @@ func (f *Flow) diffAndApply(source any, snapshot, state, changes map[string]any)
 			return err
 		}
 		// Only record as change if different from snapshot
-		if snapshot != nil {
-			if prev, ok := snapshot[tag]; ok {
-				prevData, _ := json.Marshal(prev)
-				if string(prevData) == string(data) {
-					continue
-				}
-			}
+		// The snapshot holds the field's JSON, and data is the field's JSON, so the unchanged test is a
+		// direct byte comparison with nothing to decode on either side.
+		if prev := snapshot.GetJSON(tag); prev != nil && string(prev) == string(data) {
+			continue
 		}
-		var dv any
-		if err := json.Unmarshal(data, &dv); err != nil {
-			return errors.Trace(err)
-		}
-		state[tag] = dv
-		changes[tag] = dv
+		state[tag] = data
+		changes[tag] = data
 	}
 	return nil
 }

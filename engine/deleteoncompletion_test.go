@@ -135,7 +135,7 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 	assert.NoError(err)
 	if assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
-		assert.Equal(true, out.State.Value("done"))
+		assert.Equal(true, stateVal(out.State, "done"))
 	}
 
 	// Force a reap pass (the flow is due), then it is gone: Await/Snapshot 404, uniformly.
@@ -174,7 +174,7 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 	assert.NoError(err)
 	if assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
-		assert.Equal(true, out.State.Value("done"))
+		assert.Equal(true, stateVal(out.State, "done"))
 	}
 }
 
@@ -350,7 +350,7 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 					continue
 				}
 				out, err := e.Await(ctx, fk)
-				if err != nil || out == nil || out.Status != workflow.StatusCompleted || out.State.Value("done") != true {
+				if err != nil || out == nil || out.Status != workflow.StatusCompleted || stateVal(out.State, "done") != true {
 					bad.Add(1)
 				}
 			}

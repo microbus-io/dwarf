@@ -80,7 +80,7 @@ func TestErrorflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("final:normal", outcome.State.Value("finalResult"))
+		assert.Equal("final:normal", stateVal(outcome.State, "finalResult"))
 	})
 
 	t.Run("error_handled_path", func(t *testing.T) {
@@ -90,7 +90,7 @@ func TestErrorflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "errorflow.verify:428/error", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		finalResult, _ := outcome.State.Value("finalResult").(string)
+		finalResult, _ := stateVal(outcome.State, "finalResult").(string)
 		assert.True(strings.HasPrefix(finalResult, "final:recovered:triggered failure"))
 	})
 }

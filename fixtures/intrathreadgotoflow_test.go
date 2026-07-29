@@ -76,6 +76,6 @@ func TestIntrathreadgotoflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "intrathreadgotoflow.verify:428/intra-thread-goto", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("stamped/3", outcome.State.Value("result"))
+		assert.Equal("stamped/3", stateVal(outcome.State, "result"))
 	})
 }

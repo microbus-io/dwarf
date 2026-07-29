@@ -87,7 +87,7 @@ func TestInterruptpersistflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
 		// The pre-park write is already persisted on the interrupted flow's state.
-		assert.Equal("TICKET-1", outcome.State.Value("ticketID"))
+		assert.Equal("TICKET-1", stateVal(outcome.State, "ticketID"))
 		assert.Equal(1, creations)
 
 		// Resume re-dispatches the same step; the body replays from the top.
@@ -102,8 +102,8 @@ func TestInterruptpersistflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		// The id written before the park survived and reached the downstream task...
-		assert.Equal("TICKET-1", outcome.State.Value("ticketID"))
-		assert.Equal("TICKET-1", outcome.State.Value("seenTicketID"))
+		assert.Equal("TICKET-1", stateVal(outcome.State, "ticketID"))
+		assert.Equal("TICKET-1", stateVal(outcome.State, "seenTicketID"))
 		// ...and the guard held on re-entry, so the resource was created exactly once.
 		assert.Equal(1, creations)
 	})

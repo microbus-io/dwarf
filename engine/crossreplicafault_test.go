@@ -176,7 +176,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 
 	out := enginetest.AwaitAndAssertComplete(t, repB, fk)
 	if assert.NotNil(out) {
-		assert.Equal("yes", out.State.Value("done")) // state-correct despite the fenced first attempt
+		assert.Equal("yes", stateVal(out.State, "done")) // state-correct despite the fenced first attempt
 	}
 	assert.Equal(int64(2), runs.Load())  // ran once on A (fenced) + once on B (recovery): at-least-once
 	enginetest.AssertInvariants(t, repB) // the recovered world is structurally clean

@@ -104,6 +104,6 @@ func TestSubgraphfanoutflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "subgraphfanoutflow.verify:428/sub-fan-out", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("b/sub/d", outcome.State.Value("result"))
+		assert.Equal("b/sub/d", stateVal(outcome.State, "result"))
 	})
 }

@@ -146,7 +146,7 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	out, err := eng.Snapshot(ctx, flowKey)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusInterrupted, out.Status)
-	assert.Equal("A", out.InterruptPayload.Value("branch"))
+	assert.Equal("A", stateVal(out.InterruptPayload, "branch"))
 
 	// Resume resolves exactly that step (A); afterward only B remains interrupted, and Snapshot reports B -
 	// proving Snapshot tracked Resume's selection.
@@ -156,7 +156,7 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	assert.Equal(1, interruptedStepCount(t, eng, flowKey))
 	out, err = eng.Snapshot(ctx, flowKey)
 	assert.NoError(err)
-	assert.Equal("B", out.InterruptPayload.Value("branch"))
+	assert.Equal("B", stateVal(out.InterruptPayload, "branch"))
 
 	// Resume B; the flow completes.
 	assert.NoError(eng.Resume(ctx, flowKey, nil))
@@ -244,7 +244,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 		out, err := eng.Await(ctx, flowKey)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusInterrupted, out.Status)
-		n, _ := out.InterruptPayload.Value("n").(float64)
+		n, _ := stateVal(out.InterruptPayload, "n").(float64)
 		return int(n)
 	}
 
@@ -261,7 +261,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, final.Status)
 
 	results := map[string]bool{}
-	for _, r := range final.State.Value("results").([]any) {
+	for _, r := range stateVal(final.State, "results").([]any) {
 		results[fmt.Sprint(r)] = true
 	}
 	// The child Snapshot reported first got R1; the second got R2 - the token reached the child Snapshot

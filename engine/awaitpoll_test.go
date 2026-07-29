@@ -113,7 +113,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 		assert.NoError(r.err)
 		if r.out != nil {
 			assert.Equal(workflow.StatusCompleted, r.out.Status)
-			ok, _ := r.out.State.Value("ok").(bool)
+			ok, _ := stateVal(r.out.State, "ok").(bool)
 			assert.True(ok, "final_state should surface through the poll-fallback wake")
 		}
 	case <-time.After(3 * time.Second):
@@ -267,4 +267,12 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		assert.True(false, "Await never returned after the flow actually stopped")
 	}
+}
+
+// stateVal reads a field as an untyped value. It lives here rather than on State because Get already is
+// this, with a type the caller chooses; a one-line untyped read is a test convenience, not API.
+func stateVal(s workflow.State, name string) any {
+	var v any
+	_, _ = s.Get(name, &v)
+	return v
 }

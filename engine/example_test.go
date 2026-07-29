@@ -65,7 +65,7 @@ func Example() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(out.State.Value("greeting"))
+	fmt.Println(out.State.GetString("greeting"))
 }
 
 // Create makes and runs a flow, and accepts FlowOptions for scheduling, notifications, thread membership,

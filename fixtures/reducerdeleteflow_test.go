@@ -118,12 +118,12 @@ func TestReducerDeleteflow(t *testing.T) {
 
 		// The ordinal-0 delete of a reduced field is ignored (reducer identity); the seed survives and the
 		// ordinal-1 append folds onto it.
-		got, present := stringsOf(outcome.State.Value("log"))
-		if assert.True(present, "log should be present, got %#v", outcome.State.Value("log")) {
+		got, present := stringsOf(stateVal(outcome.State, "log"))
+		if assert.True(present, "log should be present, got %#v", stateVal(outcome.State, "log")) {
 			assert.Equal([]string{"seed", "b2"}, got)
 		}
 		// A cleared key never materializes as a null tombstone.
-		v, exists := outcome.State.Lookup("log")
+		v, exists := stateVal(outcome.State, "log"), outcome.State.Has("log")
 		assert.True(!exists || v != nil, "final_state must not carry a log:null tombstone")
 	})
 
@@ -139,11 +139,11 @@ func TestReducerDeleteflow(t *testing.T) {
 
 		// The ordinal-0 append accumulates ["seed","b2"], then the ordinal-1 delete is ignored (identity) -
 		// the accumulator survives intact.
-		got, present := stringsOf(outcome.State.Value("log"))
-		if assert.True(present, "log should be present, got %#v", outcome.State.Value("log")) {
+		got, present := stringsOf(stateVal(outcome.State, "log"))
+		if assert.True(present, "log should be present, got %#v", stateVal(outcome.State, "log")) {
 			assert.Equal([]string{"seed", "b2"}, got)
 		}
-		v, exists := outcome.State.Lookup("log")
+		v, exists := stateVal(outcome.State, "log"), outcome.State.Has("log")
 		assert.True(!exists || v != nil, "final_state must not carry a log:null tombstone")
 	})
 }

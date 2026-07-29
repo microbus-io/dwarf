@@ -84,7 +84,7 @@ func TestConcurrentContinueflow(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal(1.0, outcome.State.Value("counter"))
+	assert.Equal(1.0, stateVal(outcome.State, "counter"))
 
 	// From now on, any continuation turn's task parks until released.
 	armed.Store(true)
@@ -132,7 +132,7 @@ func TestConcurrentContinueflow(t *testing.T) {
 	cancel()
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
-		assert.Equal(2.0, out.State.Value("counter"), "the winning turn should have seen turn 1's counter=1")
+		assert.Equal(2.0, stateVal(out.State, "counter"), "the winning turn should have seen turn 1's counter=1")
 	}
 
 	// The thread holds exactly turn 1 plus the single winning continuation.

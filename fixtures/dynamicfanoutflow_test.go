@@ -71,7 +71,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(3.0, outcome.State.Value("processedCount"))
+		assert.Equal(3.0, stateVal(outcome.State, "processedCount"))
 	})
 
 	t.Run("single_element", func(t *testing.T) {
@@ -81,7 +81,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "dynamicfanoutflow.verify:428/dynamic-fan-out", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(1.0, outcome.State.Value("processedCount"))
+		assert.Equal(1.0, stateVal(outcome.State, "processedCount"))
 	})
 
 	t.Run("empty_list_completes_at_for_each_source", func(t *testing.T) {

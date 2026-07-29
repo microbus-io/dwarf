@@ -77,6 +77,6 @@ func TestFanoutflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "fanoutflow.verify:428/fan-out", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(true, outcome.State.Value("allMarked"))
+		assert.Equal(true, stateVal(outcome.State, "allMarked"))
 	})
 }

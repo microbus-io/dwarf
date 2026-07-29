@@ -111,7 +111,7 @@ func TestSubgraphfailflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		result, _ := outcome.State.Value("result").(string)
+		result, _ := stateVal(outcome.State, "result").(string)
 		assert.True(strings.HasPrefix(result, "recovered:"), "got %q", result)
 		assert.True(strings.Contains(result, "inner exploded"), "got %q", result)
 	})

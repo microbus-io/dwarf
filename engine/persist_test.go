@@ -69,7 +69,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	_, outcome, err := e.Run(ctx, "p/transient/wf", nil, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status, "a transient write error must not fail the flow")
-	assert.Equal("done", outcome.State.Value("out"))
+	assert.Equal("done", stateVal(outcome.State, "out"))
 	assert.Equal(int32(1), runs.Load(), "the WRITE is retried, never the task - the task must run exactly once")
 }
 

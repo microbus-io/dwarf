@@ -125,7 +125,7 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		var outs []string
-		for _, v := range outcome.State.Value("outs").([]any) {
+		for _, v := range stateVal(outcome.State, "outs").([]any) {
 			outs = append(outs, v.(string))
 		}
 		sort.Strings(outs)

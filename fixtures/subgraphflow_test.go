@@ -85,6 +85,6 @@ func TestSubgraphflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "subgraphflow.verify:428/parent", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("Z(Y(X(seed1)))", outcome.State.Value("result"))
+		assert.Equal("Z(Y(X(seed1)))", stateVal(outcome.State, "result"))
 	})
 }

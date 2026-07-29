@@ -83,8 +83,8 @@ func TestContinuecanonicalflow(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-	tags, ok := outcome.State.Value("tags").([]any)
-	if !assert.True(ok, "tags should be an array, got %#v", outcome.State.Value("tags")) {
+	tags, ok := stateVal(outcome.State, "tags").([]any)
+	if !assert.True(ok, "tags should be an array, got %#v", stateVal(outcome.State, "tags")) {
 		return
 	}
 	assert.Equal(1, len(tags), "the same element in a different spelling must dedupe, got %#v", tags)
@@ -98,6 +98,6 @@ func TestContinuecanonicalflow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	tags, _ = outcome.State.Value("tags").([]any)
+	tags, _ = stateVal(outcome.State, "tags").([]any)
 	assert.Equal(2, len(tags), "a distinct element must still be added, got %#v", tags)
 }

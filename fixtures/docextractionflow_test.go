@@ -114,7 +114,7 @@ func TestDocextractionflow(t *testing.T) {
 			map[string]any{"pdf": "mock-pdf-bytes"}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		doc, _ := outcome.State.Value("docTranscription").(string)
+		doc, _ := stateVal(outcome.State, "docTranscription").(string)
 		assert.True(doc != "")
 		lines := strings.Split(doc, "\n")
 		assert.True(len(lines) >= 5 && len(lines) <= 22)

@@ -107,6 +107,6 @@ func TestNestedfanoutflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "nestedfanoutflow.verify:428/nested", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("normal/30", outcome.State.Value("result"))
+		assert.Equal("normal/30", stateVal(outcome.State, "result"))
 	})
 }

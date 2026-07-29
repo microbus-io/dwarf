@@ -109,14 +109,14 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	if !assert.Equal(workflow.StatusInterrupted, parked.Status, "the flow must park at the interrupt") {
 		return
 	}
-	assert.Equal(uniCJK, parked.InterruptPayload.Value("question"), "interrupt_payload must round-trip CJK")
-	assert.Equal(uniAccents, parked.InterruptPayload.Value("detail"), "interrupt_payload must round-trip accents")
+	assert.Equal(uniCJK, stateVal(parked.InterruptPayload, "question"), "interrupt_payload must round-trip CJK")
+	assert.Equal(uniAccents, stateVal(parked.InterruptPayload, "detail"), "interrupt_payload must round-trip accents")
 	// The state carried to the interrupt point must be intact too.
-	assert.Equal(uniAccents, parked.State.Value("seed"), "the initial state must round-trip")
-	assert.Equal(uniCJK, parked.State.Value("cjk"))
-	assert.Equal(uniRTL, parked.State.Value("rtl"))
-	assert.Equal(uniAstral, parked.State.Value("astral"), "an astral-plane char is a surrogate pair in UTF-16")
-	assert.Equal(uniEscaped, parked.State.Value("escaped"))
+	assert.Equal(uniAccents, stateVal(parked.State, "seed"), "the initial state must round-trip")
+	assert.Equal(uniCJK, stateVal(parked.State, "cjk"))
+	assert.Equal(uniRTL, stateVal(parked.State, "rtl"))
+	assert.Equal(uniAstral, stateVal(parked.State, "astral"), "an astral-plane char is a surrogate pair in UTF-16")
+	assert.Equal(uniEscaped, stateVal(parked.State, "escaped"))
 
 	// --- resume_data: non-ASCII in, and the task reads it back out ---
 	if !assert.NoError(eng.Resume(ctx, flowKey, map[string]any{"reply": uniRTL})) {
@@ -129,12 +129,12 @@ func TestUnicoderoundtripflow(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal(uniAccents, outcome.State.Value("seed"), "final_state must round-trip the initial state")
-	assert.Equal(uniCJK, outcome.State.Value("cjk"))
-	assert.Equal(uniRTL, outcome.State.Value("rtl"))
-	assert.Equal(uniAstral, outcome.State.Value("astral"))
-	assert.Equal(uniEscaped, outcome.State.Value("escaped"))
-	assert.Equal(uniRTL, outcome.State.Value("answered"), "resume_data must round-trip back through the task")
+	assert.Equal(uniAccents, stateVal(outcome.State, "seed"), "final_state must round-trip the initial state")
+	assert.Equal(uniCJK, stateVal(outcome.State, "cjk"))
+	assert.Equal(uniRTL, stateVal(outcome.State, "rtl"))
+	assert.Equal(uniAstral, stateVal(outcome.State, "astral"))
+	assert.Equal(uniEscaped, stateVal(outcome.State, "escaped"))
+	assert.Equal(uniRTL, stateVal(outcome.State, "answered"), "resume_data must round-trip back through the task")
 
 	// --- the `graph` column: a corrupt graph fails to unmarshal long before this, but assert the
 	// display name explicitly so the failure names the cause rather than surfacing as a decode error ---
@@ -156,6 +156,6 @@ func TestUnicoderoundtripflow(t *testing.T) {
 		if !assert.NoError(err) {
 			continue
 		}
-		assert.Equal(uniCJK, full.State.Value("cjk"), "the step's stored state snapshot must round-trip")
+		assert.Equal(uniCJK, stateVal(full.State, "cjk"), "the step's stored state snapshot must round-trip")
 	}
 }

@@ -154,7 +154,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, out.Status)
-	got, _ := out.State.Value("got").(float64)
+	got, _ := stateVal(out.State, "got").(float64)
 	assert.Equal(7, int(got))
 }
 

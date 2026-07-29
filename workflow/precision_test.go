@@ -84,8 +84,8 @@ func TestFlow_PayloadIsValidatedCopiedAndUniform(t *testing.T) {
 
 		got, armed := f.InterruptRequested()
 		assert.True(armed)
-		assert.Equal("approve?", got.Value("question"))
-		_, injected := got.Lookup("injected")
+		assert.Equal("approve?", stateVal(got, "question"))
+		_, injected := stateVal(got, "injected"), got.Has("injected")
 		assert.False(injected)
 	})
 }

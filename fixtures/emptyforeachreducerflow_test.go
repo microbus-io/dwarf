@@ -80,8 +80,8 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "emptyforeachreducerflow.verify:428/empty-for-each-reducer", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(15.0, outcome.State.Value("sumOut"))        // 10 base + 5 delta, folded by ReducerAdd
-		assert.Equal(2.0, outcome.State.Value("processedCount")) // both branches ran through the fan-in
+		assert.Equal(15.0, stateVal(outcome.State, "sumOut"))        // 10 base + 5 delta, folded by ReducerAdd
+		assert.Equal(2.0, stateVal(outcome.State, "processedCount")) // both branches ran through the fan-in
 	})
 
 	t.Run("empty_reduces_identically", func(t *testing.T) {
@@ -91,7 +91,7 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "emptyforeachreducerflow.verify:428/empty-for-each-reducer", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(15.0, outcome.State.Value("sumOut"))        // same 10+5 as the non-empty run, not 5 (replace)
-		assert.Equal(0.0, outcome.State.Value("processedCount")) // no branches ran, but the fan-in still fired
+		assert.Equal(15.0, stateVal(outcome.State, "sumOut"))        // same 10+5 as the non-empty run, not 5 (replace)
+		assert.Equal(0.0, stateVal(outcome.State, "processedCount")) // no branches ran, but the fan-in still fired
 	})
 }

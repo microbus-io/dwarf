@@ -83,9 +83,9 @@ func TestGotoFanInFlow(t *testing.T) {
 		// The trunk source Goto's the fan-in; the flow converges and completes. Before the fix this FAILED the
 		// not-in-a-cohort guard.
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(true, outcome.State.Value("joined"), "the fan-in must run")
+		assert.Equal(true, stateVal(outcome.State, "joined"), "the fan-in must run")
 		// The source's own changes flowed through the direct fan-in.
-		assert.Equal("direct", outcome.State.Value("route"))
+		assert.Equal("direct", stateVal(outcome.State, "route"))
 	})
 
 	t.Run("non_empty_array_fans_out_normally", func(t *testing.T) {
@@ -94,9 +94,9 @@ func TestGotoFanInFlow(t *testing.T) {
 			map[string]any{"items": []string{"x", "y", "z"}}, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(true, outcome.State.Value("joined"))
-		assert.Equal("fanout", outcome.State.Value("route"))
-		got := toStringSlice(outcome.State.Value("processed"))
+		assert.Equal(true, stateVal(outcome.State, "joined"))
+		assert.Equal("fanout", stateVal(outcome.State, "route"))
+		got := toStringSlice(stateVal(outcome.State, "processed"))
 		sort.Strings(got)
 		assert.Equal([]string{"x", "y", "z"}, got, "every branch converged at the fan-in")
 	})
@@ -162,7 +162,7 @@ func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 	// All three cells must reach the outer fan-in. Before the fix, a Goto'ing cell bumped the outer cohort's
 	// arrival counter without inserting its inner fan-in step, so a cell was dropped and the outer fan-in could
 	// fire early - the result would be missing one or more cells while the flow still reported completed.
-	got := toStringSlice(outcome.State.Value("cellsSeen"))
+	got := toStringSlice(stateVal(outcome.State, "cellsSeen"))
 	sort.Strings(got)
 	assert.Equal([]string{"a", "b", "c"}, got, "every nested cell must converge on the outer fan-in")
 }

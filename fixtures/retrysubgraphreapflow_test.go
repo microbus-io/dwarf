@@ -116,7 +116,7 @@ func TestRetrySubgraphReapflow(t *testing.T) {
 	flowKey, outcome, err := eng.Run(ctx, "retrysubgraphreapflow.verify:428/parent", map[string]any{"seed": "s"}, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal("Z(Y(X))", outcome.State.Value("result"))
+	assert.Equal("Z(Y(X))", stateVal(outcome.State, "result"))
 
 	// Two children were spawned: iteration 1 (reaped on retry) and iteration 2 (the survivor).
 	keys := captured.keys()

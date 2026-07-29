@@ -139,6 +139,16 @@ matching one before working there:**
 
 - **Timestamps:** never bind a Go `time.Time` into SQL; write with `NOW_UTC()`/`DATE_ADD_MILLIS`. (`internal/migrations/CLAUDE.md`)
 - **MySQL JSON compare:** `json_col = '{}'` never matches on MySQL - use a per-driver `CAST(... AS CHAR)`. (`internal/migrations/CLAUDE.md`)
+- **Canonical JSON in storage is a PRECONDITION being kept, not a rule anything currently enforces.**
+  Nothing in the engine compares stored payload bytes today: `union` dedupes with `reflect.DeepEqual` over
+  *materialized* values (order-independent for maps), `Fingerprint` hashes `status|count|max(updated_at)`,
+  and no query compares one payload column with another. What canonicalization actually buys is **Go TYPE
+  normalization** - `Set` round-trips a value so a struct is stored as a `map[string]any`, because
+  `DeepEqual` between a struct and its decoded twin is false. That is the real mechanism behind the
+  `Continue`-`additionalState` bug; key ORDER never entered into it.
+  Keep writing canonical bytes anyway: it is what a **byte-comparing reducer** would need (comparing raw
+  arrays instead of materializing every element), and that is the standing plan for `union`/`append`. Break
+  it and that optimization is foreclosed, silently and much later. (`workflow/CLAUDE.md`)
 - **State delete:** `flow.Del`/`Set(k,nil)` writes a JSON `null` tombstone, which has **two spellings** - a
   Go nil, and the raw bytes `null` on a field still held as JSON - and `isCleared` must recognize both or a
   delete read back from a column silently stops taking effect. `State.Merge`/`MergeReduce`

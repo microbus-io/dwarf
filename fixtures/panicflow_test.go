@@ -107,7 +107,7 @@ func TestPanicflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("yes", outcome.State.Value("recovered"))
+		assert.Equal("yes", stateVal(outcome.State, "recovered"))
 	})
 
 	t.Run("mistyped_getter_fails_the_step_and_routes_to_onError", func(t *testing.T) {
@@ -123,8 +123,8 @@ func TestPanicflow(t *testing.T) {
 		}
 		// Not a wedged step, and not a task that silently proceeded on a 0 it never wrote.
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("yes", outcome.State.Value("recovered"))
-		_, wroteDelay := outcome.State.Lookup("delay")
+		assert.Equal("yes", stateVal(outcome.State, "recovered"))
+		_, wroteDelay := stateVal(outcome.State, "delay"), outcome.State.Has("delay")
 		assert.False(wroteDelay, "the task must not have proceeded past the mistyped read")
 	})
 }

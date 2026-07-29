@@ -93,12 +93,12 @@ func TestErrorchangesflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status) // the handler recovered the flow
-		assert.Equal("yes", outcome.State.Value("rescued"))
+		assert.Equal("yes", stateVal(outcome.State, "rescued"))
 
 		// The write the failing task made is gone - from the handler's state...
 		assert.False(handlerSawScratch, "the onError handler must not see the failed task's changes")
 		// ... and from the flow's final state.
-		_, inFinal := outcome.State.Lookup("scratch")
+		_, inFinal := stateVal(outcome.State, "scratch"), outcome.State.Has("scratch")
 		assert.False(inFinal, "a failed task's changes must not reach final_state")
 
 		// The error IS the channel to the handler: onErr carried the message through.
@@ -116,7 +116,7 @@ func TestErrorchangesflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusFailed, outcome.Status)
-		_, inFinal := outcome.State.Lookup("scratch")
+		_, inFinal := stateVal(outcome.State, "scratch"), outcome.State.Has("scratch")
 		assert.False(inFinal, "a failed task's changes must not reach final_state on the failStep path either")
 	})
 
@@ -131,6 +131,6 @@ func TestErrorchangesflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("half-written", outcome.State.Value("scratch"))
+		assert.Equal("half-written", stateVal(outcome.State, "scratch"))
 	})
 }

@@ -195,6 +195,15 @@ func openThreshold(successors int, inflation int) int {
 	return max(minField, min(threshold, budget/successors)) / inflation
 }
 
+// mentions reports whether a delta speaks about a field AT ALL - holding a value, or recording a delete.
+// The mint needs exactly this and Has alone is wrong for it: a task that DELETED a field has still rewritten
+// it, so its inherited ref must not be carried forward. Spelled here rather than on State because
+// "present, including a delete" is a confusing thing for a carrier to offer generally - a caller asking
+// about a field wants Has, or IsDeleted, and almost never the union of the two.
+func mentions(s workflow.State, field string) bool {
+	return s.Has(field) || s.IsDeleted(field)
+}
+
 // Mint decides which of a successor step's state fields are stored by reference rather than by value. It
 // returns the JSON to write into the successor's state column (the ref'd fields omitted) and into its refs
 // column.
@@ -228,24 +237,21 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 	// the cost state refs exists to avoid. Only fields headed for INLINE storage (or new-ref candidacy) are
 	// marshalled here.
 	raw := make(map[string]json.RawMessage, merged.Len())
-	for _, k := range merged.Names() {
+	for k := range merged.Names() {
 		if !inlineOnly[k] {
 			// A field the task did not rewrite, and which arrived as a ref, KEEPS that ref - it is never
 			// re-minted against this step, whose row does not hold the bytes. This is the one-hop guard, and it
 			// is unconditional precisely because the fan-out policy below is not size-based.
 			if anchor, isRef := inherited[k]; isRef {
-				if !changes.Contains(k) {
+				if !mentions(changes, k) {
 					refs[k] = anchor
 					continue
 				}
 			}
 		}
-		// FieldJSON, not a marshal of the decoded value: a field still held as raw bytes is handed back
-		// untouched, so the common case (a carried payload) is never expanded to be measured.
-		data, err := merged.FieldJSON(k)
-		if err != nil {
-			return nil, nil, errors.Trace(err)
-		}
+		// GetJSON, not a marshal of a decoded value: state stores fields as JSON, so sizing one costs
+		// nothing and a carried payload is never expanded merely to be measured.
+		data := merged.GetJSON(k)
 		raw[k] = data
 		if !inlineOnly[k] && len(data) >= candidateFloor(successors) {
 			candidates = append(candidates, candidate{k, len(data)})
@@ -276,13 +282,13 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 	// already handled above (rewritten -> re-anchored, or inline-only) is skipped; a tombstoned or
 	// member-overwritten field appears in changes/inlineOnly and is correctly left dropped.
 	for k, anchor := range inherited {
-		if merged.Contains(k) {
+		if mentions(merged, k) {
 			continue
 		}
 		if inlineOnly[k] {
 			continue
 		}
-		if changes.Contains(k) {
+		if mentions(changes, k) {
 			continue
 		}
 		refs[k] = anchor
@@ -310,11 +316,11 @@ func (l *Linker) Mint(merged workflow.State, changes workflow.State, inherited R
 // so the anchor's changes is a sound anchor and keeping the ref preserves the byte win.
 func CombinedReducerFields(state, changes workflow.State, reducers map[string]workflow.Reducer) map[string]bool {
 	out := map[string]bool{}
-	for k := range changes.All() {
+	for k := range changes.Names() {
 		if r := reducers[k]; r == "" || r == workflow.ReducerReplace {
 			continue
 		}
-		if state.Contains(k) {
+		if mentions(state, k) {
 			out[k] = true
 		}
 	}
@@ -338,7 +344,7 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workf
 	pinned := map[int]bool{}
 	for k, anchor := range refs {
 		byAnchor[anchor] = append(byAnchor[anchor], k)
-		if !merged.Contains(k) {
+		if !mentions(merged, k) {
 			pinned[anchor] = true
 		}
 	}
@@ -357,10 +363,8 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workf
 			continue
 		}
 		for _, k := range keys {
-			if v, ok := merged.Lookup(k); ok {
-				if data, err := json.Marshal(v); err == nil {
-					bytesOf[a] += len(data)
-				}
+			if data := merged.GetJSON(k); data != nil {
+				bytesOf[a] += len(data)
 			}
 		}
 		droppable = append(droppable, a)
@@ -375,10 +379,8 @@ func inlineExcessAnchors(raw map[string]json.RawMessage, refs Refs, merged workf
 	keepDroppable := max(0, maxAnchors-pinnedCount)
 	for _, a := range droppable[min(keepDroppable, len(droppable)):] {
 		for _, k := range byAnchor[a] {
-			if v, ok := merged.Lookup(k); ok {
-				if data, err := json.Marshal(v); err == nil {
-					raw[k] = data
-				}
+			if data := merged.GetJSON(k); data != nil {
+				raw[k] = data
 			}
 			delete(refs, k)
 		}
@@ -445,7 +447,7 @@ func (l *Linker) Resolve(ctx context.Context, state workflow.State, refs Refs, w
 		// not: bytes cannot be mutated in place by one branch's task, whereas a shared map or slice can, and
 		// each branch's own read decodes into its own copy. The encoding still never escapes - every State
 		// accessor materializes.
-		state.SetCanonicalJSON(field, value)
+		state.SetJSON(field, value)
 		materialized += len(value)
 	}
 	return materialized, nil

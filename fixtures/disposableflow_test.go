@@ -81,7 +81,7 @@ func TestDisposableflow(t *testing.T) {
 	assert.NoError(err)
 	if assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
-		assert.Equal("hello", out.State.Value("subResult"))
+		assert.Equal("hello", stateVal(out.State, "subResult"))
 	}
 
 	// Snapshot still serves the outcome during the window.
@@ -89,7 +89,7 @@ func TestDisposableflow(t *testing.T) {
 	assert.NoError(err)
 	if assert.NotNil(snap) {
 		assert.Equal(workflow.StatusCompleted, snap.Status)
-		assert.Equal("hello", snap.State.Value("subResult"))
+		assert.Equal("hello", stateVal(snap.State, "subResult"))
 	}
 
 	// It is nonetheless logically gone: History 404s (the full step detail is what a disposable flow discards)

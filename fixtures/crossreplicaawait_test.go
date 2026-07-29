@@ -93,6 +93,6 @@ func TestCrossReplicaAwait(t *testing.T) {
 		return
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
-	assert.Equal("done-by-eng2", outcome.State.Value("result"))
+	assert.Equal("done-by-eng2", stateVal(outcome.State, "result"))
 	assert.True(ranOnEng2.Load())
 }

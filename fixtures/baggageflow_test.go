@@ -90,7 +90,11 @@ func TestBaggageflow(t *testing.T) {
 	seenLoad := map[string]map[string]any{}
 	seenTask := map[string]map[string]any{}
 	bagOf := func(ctx context.Context) map[string]any {
-		return workflow.BaggageFrom(ctx).Map() // a plain copy; empty when no baggage was set
+		// Parse into a map is the explicit way to materialize a whole State - the cost is visible because
+		// the caller wrote the target. Empty when no baggage was set.
+		var m map[string]any
+		_ = workflow.BaggageFrom(ctx).Parse(&m)
+		return m
 	}
 	host := &baggageRecordingHost{
 		TestProxy: proxy,

@@ -133,7 +133,7 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 				if !assert.Equal(workflow.StatusCompleted, outcome.Status, "flow %s", flowKey) {
 					return
 				}
-				assert.Equal("eng2", outcome.State.Value("ranOn"), "the peer replica is the only one that can run it")
+				assert.Equal("eng2", stateVal(outcome.State, "ranOn"), "the peer replica is the only one that can run it")
 				stopped++
 			})
 		}

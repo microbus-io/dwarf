@@ -104,7 +104,7 @@ func TestFlow_SetTracksChanges(t *testing.T) {
 	f.Set("a", "1")
 	f.Set("b", "2")
 	assert.Equal(2, f.changes.Len())
-	assert.Equal("1", f.changes.Value("a")) // stored decoded, not as raw JSON bytes
+	assert.Equal("1", stateVal(f.changes, "a")) // stored decoded, not as raw JSON bytes
 }
 
 func TestFlow_ParseStateAndSetChanges(t *testing.T) {
@@ -131,9 +131,9 @@ func TestFlow_ParseStateAndSetChanges(t *testing.T) {
 
 	// Only score should be in changes (decoded to float64, the canonical JSON number form)
 	assert.Equal(1, f.changes.Len())
-	assert.Equal(float64(25), f.changes.Value("score"))
+	assert.Equal(float64(25), stateVal(f.changes, "score"))
 	// Extra field should be untouched
-	assert.Equal("untouched", f.state.Value("extra"))
+	assert.Equal("untouched", stateVal(f.state, "extra"))
 }
 
 func TestFlow_SetChangesNoChanges(t *testing.T) {
@@ -178,9 +178,8 @@ func TestFlow_Delete(t *testing.T) {
 	assert.Equal(0, f.GetInt("score"))
 	// Changes records a cleared tombstone for each deleted key.
 	for _, k := range []string{"name", "score"} {
-		v, ok := f.changes.Lookup(k)
-		assert.True(ok)
-		assert.True(isCleared(v))
+		assert.True(f.changes.IsDeleted(k), "changes must record %q as a delete, not drop it", k)
+		assert.False(f.changes.Has(k), "a delete holds no value")
 	}
 	// Unlisted field is unaffected.
 	assert.True(f.Has("active"))
@@ -202,9 +201,8 @@ func TestFlow_Clear(t *testing.T) {
 	// Every prior field has a cleared tombstone in changes.
 	assert.Equal(2, f.changes.Len())
 	for _, k := range []string{"name", "score"} {
-		v, ok := f.changes.Lookup(k)
-		assert.True(ok)
-		assert.True(isCleared(v))
+		assert.True(f.changes.IsDeleted(k), "changes must record %q as a delete, not drop it", k)
+		assert.False(f.changes.Has(k), "a delete holds no value")
 	}
 }
 
@@ -244,7 +242,7 @@ func TestFlow_Interrupt(t *testing.T) {
 	f := NewFlow()
 	f.Interrupt(map[string]any{"request": "ssn"}, nil)
 	assert.True(f.interrupt)
-	assert.Equal("ssn", f.interruptPayload.Value("request"))
+	assert.Equal("ssn", stateVal(f.interruptPayload, "request"))
 }
 
 func TestFlow_SingleParkGuard(t *testing.T) {
@@ -294,7 +292,7 @@ func TestFlow_SingleParkGuard(t *testing.T) {
 	yield, err = f.Interrupt(map[string]any{"request": "second"}, nil)
 	assert.False(yield)
 	assert.Error(err)
-	assert.Equal("first", f.interruptPayload.Value("request"))
+	assert.Equal("first", stateVal(f.interruptPayload, "request"))
 
 	// A second subgraph this dispatch is rejected and does not overwrite the first workflow URL.
 	f = NewFlow()
@@ -374,7 +372,7 @@ func TestFlow_MarshalUnmarshal(t *testing.T) {
 	assert.True(restored.retry)
 	assert.Equal(5*time.Second, restored.sleepDuration)
 	assert.True(restored.interrupt)
-	assert.Equal("ssn", restored.interruptPayload.Value("request"))
+	assert.Equal("ssn", stateVal(restored.interruptPayload, "request"))
 	assert.Equal(2, restored.attempt)
 	assert.Equal(time.Second, restored.backoffInitialDelay)
 	assert.Equal(2.0, restored.backoffDelayMultiplier)

@@ -23,21 +23,14 @@ import (
 	"strings"
 )
 
-// isCleared reports whether v represents a cleared state slot - a delete tombstone written by
-// flow.Del/Set(name, nil), or a JSON null carried in from a column or off the wire.
+// isCleared reports whether a stored field is a cleared slot - the delete tombstone flow.Del and
+// Set(name, nil) write, and the form a JSON null takes coming from a column or off the wire.
 //
-// A tombstone has TWO spellings and both must be recognised, because a field held as raw JSON has not been
-// through the decode that used to turn a JSON null into a Go nil. Missing the raw one is silent and nasty:
-// a delete read back from a changes column simply stops taking effect (DelNils leaves it, Has reports the
-// field present), so the delete is lost with nothing logged.
-func isCleared(v any) bool {
-	if v == nil {
-		return true
-	}
-	raw, ok := v.(json.RawMessage)
-	if !ok {
-		return false
-	}
+// A nil slice counts, and not only defensively: encoding/json marshals a nil json.RawMessage as `null`, so
+// a nil and the literal bytes `null` are the same value written two ways. Storing every field as JSON is
+// what collapses them - while values could be either decoded or raw, a tombstone had a Go-nil spelling too,
+// and a check that missed one made a delete read back from a changes column silently stop taking effect.
+func isCleared(raw json.RawMessage) bool {
 	raw = bytes.TrimSpace(raw)
 	return len(raw) == 0 || bytes.Equal(raw, []byte("null"))
 }

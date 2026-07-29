@@ -92,17 +92,17 @@ func TestReducerflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "reducerflow.verify:428/reducer", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(60.0, outcome.State.Value("finalSum"))
+		assert.Equal(60.0, stateVal(outcome.State, "finalSum"))
 
 		var list []string
-		for _, v := range outcome.State.Value("finalList").([]any) {
+		for _, v := range stateVal(outcome.State, "finalList").([]any) {
 			list = append(list, v.(string))
 		}
 		sort.Strings(list)
 		assert.Equal([]string{"b", "c", "d"}, list)
 
 		var set []string
-		for _, v := range outcome.State.Value("finalSet").([]any) {
+		for _, v := range stateVal(outcome.State, "finalSet").([]any) {
 			set = append(set, v.(string))
 		}
 		sort.Strings(set)

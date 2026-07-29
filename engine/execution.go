@@ -278,12 +278,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	}
 	graph := cg.graph
 
-	// Build the Flow carrier. The state column is held as RAW JSON per field and decoded only if the task
-	// actually reads that field - a step's state is a full input snapshot, so most fields on most steps are
-	// carried rather than read, and decoding them costs several times their byte length for the whole
-	// duration of the host call. StateFromCanonicalJSON rather than NewState because these bytes are the
-	// engine's own, hence canonical; caller-supplied JSON must keep going through NewState's decode.
-	state, _ := workflow.StateFromCanonicalJSON(stateJSON)
+	// Build the Flow carrier. A State built from JSON holds each field as JSON and decodes it only if
+	// something reads it - a step's state is a full input snapshot, so most fields on most steps are carried
+	// rather than read, and decoding them would cost several times their byte length for the whole duration
+	// of the host call.
+	state, _ := workflow.NewState(stateJSON)
 	// Materialize any field this step carries BY REFERENCE (see staterefs.go). Resolving here, once, is what
 	// keeps the ref encoding out of everything downstream: the carrier, `when` evaluation, forEach expansion,
 	// the transport to a remote task, and the transition machinery all work on literals and never learn refs
@@ -296,7 +295,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 		return errors.Trace(err)
 	}
-	priorChanges, _ := workflow.StateFromCanonicalJSON(priorChangesJSON)
+	priorChanges, _ := workflow.NewState(priorChangesJSON)
 	// The carrier's input is state + priorChanges, materialized: Merge accumulates (keeping a prior
 	// delete's tombstone), then DelNils enacts it so the carrier sees the key absent. Clone so `state`
 	// stays the pristine resolved snapshot the successor mint re-uses below.
@@ -1493,6 +1492,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// inlined into the fan-in step's own state, which becomes their anchor for everything downstream (the third
 	// of the three places an anchor's bytes can sit). A stale spawn ref for such a field is dropped with them.
 	memberWrites := map[string]bool{}
+	var memberChanges []workflow.State
 
 	// The cohort-exit steps whose successor_id must point at the fan-in step. Collected from this same
 	// cohort scan so the successor_id write can target them by primary key (step_id IN ...) below,
@@ -1542,12 +1542,16 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 			continue
 		}
 		changes, _ := workflow.NewState(changesJSON)
-		for k := range changes.All() {
+		for k := range changes.Names() {
 			memberWrites[k] = true
 		}
-		_ = merged.MergeReduce(changes, graph.Reducers())
+		memberChanges = append(memberChanges, changes)
 	}
 	rows.Close()
+	// One fold for the whole cohort, not one per member: a combining reducer decodes its accumulator and
+	// re-encodes the result, so folding per member re-encodes a value that grows as it goes - quadratic in
+	// the accumulated bytes across the cohort's width, and a fan-out is exactly where width is large.
+	_ = merged.MergeReduceAll(memberChanges, graph.Reducers())
 
 	// Materialize the fan-in snapshot: the folds preserved replace-field delete tombstones (accumulation);
 	// DelNils enacts them now, before the state is minted onto the fan-in step. Reduced fields are

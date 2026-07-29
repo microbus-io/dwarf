@@ -66,7 +66,7 @@ func TestSleepflow(t *testing.T) {
 
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(true, outcome.State.Value("marked"))
+		assert.Equal(true, stateVal(outcome.State, "marked"))
 		assert.True(elapsed >= sleepFor)
 	})
 }

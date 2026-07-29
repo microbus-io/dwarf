@@ -146,7 +146,7 @@ func TestFault_ExecuteTask(t *testing.T) {
 	e.seams.Inject(seamsJoin(FaultExecuteTask, "Work"))
 	if out := enginetest.BoundedRun(t, e, "fexec/handled"); assert.NotNil(out) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
-		assert.Equal("yes", out.State.Value("rescued"))
+		assert.Equal("yes", stateVal(out.State, "rescued"))
 	}
 	// Disarmed: the bare flow now completes.
 	if out := enginetest.BoundedRun(t, e, "fexec/bare"); assert.NotNil(out) {

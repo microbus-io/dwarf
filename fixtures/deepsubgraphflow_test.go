@@ -103,7 +103,7 @@ func TestDeepsubgraphflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
-		assert.Equal(float64(depth), outcome.InterruptPayload.Value("depth"))
+		assert.Equal(float64(depth), stateVal(outcome.InterruptPayload, "depth"))
 
 		// Resume on the root descends to the leaf (interruptedSubgraphChain) and bubbles completion back up.
 		if !assert.NoError(eng.Resume(ctx, flowKey, map[string]any{"answer": "ok"})) {
@@ -115,7 +115,7 @@ func TestDeepsubgraphflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		// State threaded correctly through every level: leaf, then wrapped by g3,g2,g1,g0.
-		assert.Equal("leaf(ok)<3><2><1><0>", outcome.State.Value("v"))
+		assert.Equal("leaf(ok)<3><2><1><0>", stateVal(outcome.State, "v"))
 	})
 
 	t.Run("cancel_deeply_interrupted_tree_from_root", func(t *testing.T) {

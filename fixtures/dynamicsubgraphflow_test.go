@@ -75,6 +75,6 @@ func TestDynamicsubgraphflow(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 		// InnerA: 5*2=10, InnerB: 10+3=13, Parent: "parent:13"
-		assert.Equal("parent:13", outcome.State.Value("result"))
+		assert.Equal("parent:13", stateVal(outcome.State, "result"))
 	})
 }

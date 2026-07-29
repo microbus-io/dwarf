@@ -87,6 +87,6 @@ func TestPerelementpipelineflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "perelementpipelineflow.verify:428/per-element-pipeline", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(3.0, outcome.State.Value("finalCount"))
+		assert.Equal(3.0, stateVal(outcome.State, "finalCount"))
 	})
 }

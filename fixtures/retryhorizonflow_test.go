@@ -106,7 +106,7 @@ func TestRetryHorizonflow(t *testing.T) {
 		// It must have retried at least once (horizon is not first-try) but still given up (not unbounded).
 		assert.True(attempts >= 1, "expected the horizon to allow retries, got attempt=%d", attempts)
 		assert.True(attempts <= 12, "expected the horizon to bound retries, got attempt=%d", attempts)
-		assert.True(outcome.State.Value("reachedDone") == nil, "Done must not run when Flaky exhausts its horizon")
+		assert.True(stateVal(outcome.State, "reachedDone") == nil, "Done must not run when Flaky exhausts its horizon")
 	})
 
 	t.Run("succeeds_within_horizon", func(t *testing.T) {
@@ -120,7 +120,7 @@ func TestRetryHorizonflow(t *testing.T) {
 		outcome, err := eng.Await(ctx, flowKey)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(true, outcome.State.Value("reachedDone"))
+		assert.Equal(true, stateVal(outcome.State, "reachedDone"))
 		assert.Equal(2, flakyAttempts(t, flowKey), "should have taken exactly 2 retries before success")
 	})
 }

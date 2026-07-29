@@ -138,10 +138,8 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 		}
 
 		merged := baseState
-		for _, changes := range allChanges {
-			if err := merged.MergeReduce(changes, reducers); err != nil {
-				return workflow.State{}, 0, false, errors.Trace(err)
-			}
+		if err := merged.MergeReduceAll(allChanges, reducers); err != nil {
+			return workflow.State{}, 0, false, errors.Trace(err)
 		}
 		merged.DelNils()
 		return merged, baseLineage, true, nil
@@ -288,6 +286,9 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		return workflow.State{}, errors.Trace(err)
 	}
 	defer rows.Close()
+	// Collected, then folded in ONE pass: a combining reducer re-encodes its accumulator, so folding per
+	// member re-encodes a growing value once per member - quadratic across a wide cohort.
+	var memberChanges []workflow.State
 	for rows.Next() {
 		var status string
 		var changesJSON []byte
@@ -300,11 +301,12 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 			continue
 		}
 		changes, _ := workflow.NewState(changesJSON)
-		if err := merged.MergeReduce(changes, graph.Reducers()); err != nil {
-			return workflow.State{}, errors.Trace(err)
-		}
+		memberChanges = append(memberChanges, changes)
 	}
 	if err := rows.Err(); err != nil {
+		return workflow.State{}, errors.Trace(err)
+	}
+	if err := merged.MergeReduceAll(memberChanges, graph.Reducers()); err != nil {
 		return workflow.State{}, errors.Trace(err)
 	}
 	merged.DelNils()

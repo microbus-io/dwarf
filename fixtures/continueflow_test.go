@@ -59,7 +59,7 @@ func TestContinueflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(1.0, outcome.State.Value("counter")) // JSON round-trip: int -> float64
+		assert.Equal(1.0, stateVal(outcome.State, "counter")) // JSON round-trip: int -> float64
 
 		// Turn 2: continue from the thread, no additional state.
 		flowKey2, err := eng.Continue(ctx, flowKey, map[string]any{})
@@ -71,7 +71,7 @@ func TestContinueflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(2.0, outcome.State.Value("counter"))
+		assert.Equal(2.0, stateVal(outcome.State, "counter"))
 	})
 }
 

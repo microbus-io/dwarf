@@ -100,12 +100,18 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 		}
 
 		if tr.ForEach != "" {
-			val, ok := flow.RawState().Lookup(tr.ForEach)
-			if !ok {
+			// Reading the source array materializes it - a forEach has to see the elements to spawn one
+			// branch each, so this is the one field on the step that is genuinely needed as a Go value.
+			// An absent or cleared source yields no elements (like an empty array), which routes straight to
+			// the fan-in; any non-array is an error.
+			var val any
+			present, gerr := flow.RawState().Get(tr.ForEach, &val)
+			if gerr != nil {
+				return nil, errors.Trace(gerr)
+			}
+			if !present {
 				continue
 			}
-			// State is decoded, so the source array is already a []any of decoded elements - no re-marshal
-			// needed. A null/absent source yields no elements (like an empty array); any non-array is an error.
 			var items []any
 			switch v := val.(type) {
 			case nil:

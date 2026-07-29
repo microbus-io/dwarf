@@ -18,7 +18,9 @@ package workflow
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/testarossa"
 )
@@ -191,14 +193,14 @@ func TestState_Len(t *testing.T) {
 	assert.Equal(1, s.Len())
 }
 
-func TestState_All(t *testing.T) {
+func TestState_Names(t *testing.T) {
 	assert := testarossa.For(t)
 
 	s, _ := NewState("a", 1, "b", 2, "c", 3)
 
-	seen := map[string]any{}
-	for k, v := range s.All() {
-		seen[k] = v
+	seen := map[string]int{}
+	for k := range s.Names() {
+		seen[k] = s.GetInt(k)
 	}
 	assert.Equal(3, len(seen))
 	assert.Equal(1, seen["a"])
@@ -207,11 +209,12 @@ func TestState_All(t *testing.T) {
 
 	// Early break stops iteration.
 	count := 0
-	for range s.All() {
+	for range s.Names() {
 		count++
 		break
 	}
 	assert.Equal(1, count)
+
 }
 
 func TestState_Delete(t *testing.T) {
@@ -280,16 +283,21 @@ func TestState_Clone(t *testing.T) {
 func TestState_CloneRestoresAfterFailedMerge(t *testing.T) {
 	assert := testarossa.For(t)
 
-	state, _ := NewState("items", []int{1, 2})
+	// A base that is not a list is the reachable append failure (see TestMergeReduce_ErrorPropagates).
+	state, _ := NewState("items", "not a list")
 	reducers := map[string]Reducer{"items": ReducerAppend}
 
 	safe := state.Clone()
-	err := state.MergeReduce(State{d: map[string]any{"items": "not an int"}}, reducers)
+	incoming, _ := NewState("items", 3)
+	err := state.MergeReduce(incoming, reducers)
 	assert.Error(err)
 
-	// Roll back to the pre-Merge snapshot.
+	// Roll back to the pre-Merge snapshot, then merge onto a list base successfully.
 	state = safe
-	err = state.MergeReduce(State{d: map[string]any{"items": []int{3, 4}}}, reducers)
+	assert.Equal("not a list", state.GetString("items"), "the failed merge left the snapshot intact")
+	state, _ = NewState("items", []int{1, 2})
+	ok, _ := NewState("items", []int{3, 4})
+	err = state.MergeReduce(ok, reducers)
 	assert.NoError(err)
 
 	var items []int
@@ -325,7 +333,7 @@ func TestState_MergeKeepsNilUntilDelNils(t *testing.T) {
 
 	// Merge accumulates: a nil incoming (a JSON-decoded null) is preserved as a tombstone, not dropped.
 	base, _ := NewState("a", 1, "b", 2)
-	err := base.Merge(State{d: map[string]any{"b": nil}})
+	err := base.Merge(mustS("b", nil))
 	assert.NoError(err)
 	assert.Equal(2, base.Len()) // "b" still present (as a tombstone)
 
@@ -345,7 +353,7 @@ func TestState_MergeReplaceReducerKeepsNil(t *testing.T) {
 	// enacted only by DelNils.
 	base, _ := NewState("a", 1, "b", 2)
 	reducers := map[string]Reducer{"b": ReducerReplace}
-	err := base.MergeReduce(State{d: map[string]any{"b": nil}}, reducers)
+	err := base.MergeReduce(mustS("b", nil), reducers)
 	assert.NoError(err)
 	assert.Equal(2, base.Len())
 	base.DelNils()
@@ -358,7 +366,7 @@ func TestState_MergeCombiningReducerIgnoresNil(t *testing.T) {
 	// A cleared incoming for a reducer-managed field is the reducer's identity: ignored, leaving the
 	// accumulator untouched (a branch deleting a reduced field does not wipe the cohort's contributions).
 	base, _ := NewState("items", []int{1, 2})
-	err := base.MergeReduce(State{d: map[string]any{"items": nil}}, map[string]Reducer{"items": ReducerAppend})
+	err := base.MergeReduce(mustS("items", nil), map[string]Reducer{"items": ReducerAppend})
 	assert.NoError(err)
 	var items []int
 	_, _ = base.Get("items", &items)
@@ -369,8 +377,8 @@ func TestState_MergeSequentialOrder(t *testing.T) {
 	assert := testarossa.For(t)
 
 	base, _ := NewState("k", "base")
-	assert.NoError(base.Merge(State{d: map[string]any{"k": "first"}}))
-	assert.NoError(base.Merge(State{d: map[string]any{"k": "last"}}))
+	assert.NoError(base.Merge(mustS("k", "first")))
+	assert.NoError(base.Merge(mustS("k", "last")))
 
 	var k string
 	_, _ = base.Get("k", &k)
@@ -466,32 +474,30 @@ func TestState_RawFieldIsNotDecodedUntilRead(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	s, err := StateFromCanonicalJSON([]byte(`{"doc":{"page":"one"},"n":3,"s":"x"}`))
+	s, err := NewState([]byte(`{"doc":{"page":"one"},"n":3,"s":"x"}`))
 	assert.NoError(err)
 
-	for _, k := range []string{"doc", "n", "s"} {
-		_, isRaw := s.d[k].(json.RawMessage)
-		assert.True(isRaw, "field %q must be held raw until something reads it", k)
-	}
+	// Every field is stored as its JSON, so GetJSON is a hand-back with nothing to encode.
+	assert.Equal(`{"page":"one"}`, string(s.GetJSON("doc")))
+	assert.Equal(`3`, string(s.GetJSON("n")))
 
 	// Reading materializes for the CALLER without materializing the STORAGE - there is no memoization, so a
 	// read cannot turn into a map write (which would be an unrecoverable throw under concurrent access).
 	assert.Equal(3, s.GetInt("n"))
 	assert.Equal("x", s.GetString("s"))
-	_, stillRaw := s.d["n"].(json.RawMessage)
-	assert.True(stillRaw, "a read must not rewrite the stored form")
+	assert.Equal(`3`, string(s.GetJSON("n")), "a read must not rewrite what is stored")
 
 	// A read hands back a decoded value, never the encoding.
-	_, leaked := s.Value("doc").(json.RawMessage)
+	_, leaked := stateVal(s, "doc").(json.RawMessage)
 	assert.False(leaked, "the storage form must never escape through an accessor")
-	doc, ok := s.Value("doc").(map[string]any)
+	doc, ok := stateVal(s, "doc").(map[string]any)
 	assert.True(ok)
 	assert.Equal("one", doc["page"])
 
 	// Two reads of one raw field yield independent values, so a caller mutating what it read cannot corrupt
 	// the State or another reader - the same guarantee decoding per branch gave.
-	a, _ := s.Value("doc").(map[string]any)
-	b, _ := s.Value("doc").(map[string]any)
+	a, _ := stateVal(s, "doc").(map[string]any)
+	b, _ := stateVal(s, "doc").(map[string]any)
 	a["page"] = "mutated"
 	assert.Equal("one", b["page"], "two reads of a raw field must not share a decoded map")
 }
@@ -504,19 +510,20 @@ func TestState_RawTombstoneIsCleared(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	s, err := StateFromCanonicalJSON([]byte(`{"gone":null,"kept":1}`))
+	s, err := NewState([]byte(`{"gone":null,"kept":1}`))
 	assert.NoError(err)
 
 	assert.False(s.Has("gone"), "a raw JSON null is a tombstone, not a value")
-	assert.True(s.Contains("gone"), "the delta still speaks about the field")
+	assert.True(s.IsDeleted("gone"), "the delta records it as a delete")
 	assert.True(s.Has("kept"))
 
 	// Merge preserves the tombstone (accumulation); DelNils enacts it (materialization).
 	base, _ := NewState("gone", "was here", "other", 2)
 	assert.NoError(base.Merge(s))
-	assert.True(base.Contains("gone"), "Merge accumulates - the pending delete survives")
+	assert.True(base.IsDeleted("gone"), "Merge accumulates - the pending delete survives")
 	base.DelNils()
-	assert.False(base.Contains("gone"), "DelNils enacts the delete")
+	assert.False(base.IsDeleted("gone"), "DelNils enacts the delete")
+	assert.False(base.Has("gone"))
 	assert.True(base.Has("kept"))
 	assert.True(base.Has("other"))
 }
@@ -527,9 +534,9 @@ func TestState_ReducerFoldsRawOperands(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	base, err := StateFromCanonicalJSON([]byte(`{"total":10,"list":["a"]}`))
+	base, err := NewState([]byte(`{"total":10,"list":["a"]}`))
 	assert.NoError(err)
-	incoming, err := StateFromCanonicalJSON([]byte(`{"total":5,"list":["b"]}`))
+	incoming, err := NewState([]byte(`{"total":5,"list":["b"]}`))
 	assert.NoError(err)
 
 	err = base.MergeReduce(incoming, map[string]Reducer{"total": ReducerAdd, "list": ReducerAppend})
@@ -546,45 +553,170 @@ func TestState_CanonicalJSONRoundTripsUntouched(t *testing.T) {
 
 	// Canonical: sorted keys at every level, which is what marshalling a decoded value produces.
 	const canonical = `{"a":{"x":1,"y":[1,2,3]},"b":"str","c":null}`
-	s, err := StateFromCanonicalJSON([]byte(canonical))
+	s, err := NewState([]byte(canonical))
 	assert.NoError(err)
 	out, err := s.MarshalJSON()
 	assert.NoError(err)
 	assert.Equal(canonical, string(out), "a carried document must survive byte-identical")
 
 	// FieldJSON hands the stored bytes straight back - the accessor Mint sizes fields with.
-	fj, err := s.FieldJSON("a")
-	assert.NoError(err)
+	fj := s.GetJSON("a")
 	assert.Equal(`{"x":1,"y":[1,2,3]}`, string(fj))
 }
 
-// TestState_SetCanonicalJSONIsNotAFastPathForSet pins hazard 1, the one that corrupts silently. Set
-// round-trips through JSON to CANONICALIZE, and that is load-bearing rather than incidental: reducers
-// compare marshalled bytes, and Go marshals a map with sorted keys but a struct in DECLARATION order. So a
-// struct stored via Set must come out spelled identically to its decoded twin - which is what lets a union
-// reducer recognise the two as one value instead of keeping both.
-func TestState_SetCanonicalJSONIsNotAFastPathForSet(t *testing.T) {
+// TestState_SetNormalizesGoType pins what Set's JSON round trip is actually for, which is NOT byte order.
+//
+// union dedupes with reflect.DeepEqual, and DeepEqual between a struct and its decoded twin is false - they
+// are different Go types. So a caller contributing a value as a struct must have it normalized to the same
+// map[string]any/float64 representation a column read produces, or the reducer keeps two copies of one
+// value. That is the mechanism behind the Continue-additionalState bug.
+//
+// Key ORDER is deliberately exercised here too, and deliberately does not matter: the struct's declaration
+// order is the reverse of sorted, and it dedupes anyway.
+func TestState_SetNormalizesGoType(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	// Declaration order here is deliberately the reverse of sorted order.
 	type item struct {
 		Z string `json:"z"`
 		A string `json:"a"`
 	}
 
-	viaSet, _ := NewState()
-	assert.NoError(viaSet.Set("it", item{Z: "z", A: "a"}))
-	setBytes, err := viaSet.FieldJSON("it")
+	// base holds the value as a column read produces it; incoming contributes the same value as a STRUCT.
+	base, err := NewState([]byte(`{"list":[{"a":"a","z":"z"}]}`))
 	assert.NoError(err)
-	assert.Equal(`{"a":"a","z":"z"}`, string(setBytes), "Set canonicalizes a struct to sorted keys")
+	incoming, _ := NewState()
+	assert.NoError(incoming.Set("list", []item{{Z: "z", A: "a"}}))
 
-	// The same value arriving as a column read is already canonical, and compares byte-equal to the above.
-	fromColumn, err := StateFromCanonicalJSON([]byte(`{"it":{"a":"a","z":"z"}}`))
+	assert.NoError(base.MergeReduce(incoming, map[string]Reducer{"list": ReducerUnion}))
+	out := base.GetJSON("list")
+	assert.Equal(`[{"a":"a","z":"z"}]`, string(out),
+		"a struct-contributed element must dedupe against its decoded twin, not be kept alongside it")
+
+	// The normalization is why: Set stored a map, not the struct.
+	var one []any
+	_, err = incoming.Get("list", &one)
 	assert.NoError(err)
-	colBytes, err := fromColumn.FieldJSON("it")
+	_, isMap := one[0].(map[string]any)
+	assert.True(isMap, "Set must store the decoded form, or DeepEqual cannot match it against a column read")
+}
+
+// TestState_NamesDoesNotDecode pins why Names exists rather than being sugar over All: iterating names must
+// not pay the decode All pays to materialize each value. The observable difference is that Names leaves the
+// stored form alone AND never needs it to be decodable - so a slot holding bytes that are not valid JSON
+// still enumerates, where All would yield nil for it.
+func TestState_NamesDoesNotDecode(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	s, err := NewState([]byte(`{"a":{"deep":[1,2,3]},"b":2,"c":null}`))
 	assert.NoError(err)
-	assert.Equal(string(setBytes), string(colBytes),
-		"a value stored through Set and the same value read back from a column must have ONE spelling, "+
-			"or a union reducer keeps both")
+
+	var names []string
+	for k := range s.Names() {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	assert.Equal([]string{"a", "b", "c"}, names, "Names enumerates every field, tombstones included")
+
+	// Enumerating names decodes nothing - a field whose value is never read is never decoded.
+	assert.Equal(`{"deep":[1,2,3]}`, string(s.GetJSON("a")))
+
+	// Early break stops iteration, as range-over-func requires.
+	count := 0
+	for range s.Names() {
+		count++
+		break
+	}
+	assert.Equal(1, count)
+
+	// A zero State yields nothing rather than panicking.
+	var zero State
+	for range zero.Names() {
+		t.Fatal("a zero State has no fields")
+	}
+}
+
+// stateVal reads a field as an untyped value. It lives here rather than on State because Get already is
+// this, with a type the caller chooses; a one-line untyped read is a test convenience, not API.
+func stateVal(s State, name string) any {
+	var v any
+	_, _ = s.Get(name, &v)
+	return v
+}
+
+// mustS builds a normalized State from name/value pairs - the shape every state in production has, since
+// they all arrive through NewState or a column read.
+func mustS(pairs ...any) State {
+	s, err := NewState(pairs...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// TestState_MergeReduceAllMatchesPerMember pins that folding a cohort in one pass is not a different
+// computation from folding it member by member. MergeReduceAll exists purely so a combining reducer stops
+// re-encoding an accumulator that grows as it goes; if it ever disagreed with MergeReduce on a result, the
+// optimization would be silently changing fan-in outcomes.
+func TestState_MergeReduceAllMatchesPerMember(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	reducers := map[string]Reducer{
+		"list": ReducerAppend, "set": ReducerUnion, "total": ReducerAdd,
+		"obj": ReducerMerge, "flag": ReducerOr, "txt": ReducerConcat,
+	}
+	members := func() []State {
+		return []State{
+			mustS("list", []int{1}, "set", []string{"a"}, "total", 1, "obj", map[string]any{"x": 1}, "flag", false, "txt", "a", "plain", "first"),
+			mustS("list", []int{2}, "set", []string{"a", "b"}, "total", 2, "obj", map[string]any{"y": 2}, "flag", true, "txt", "b", "plain", "second"),
+			mustS("list", []int{3}, "set", []string{"b", "c"}, "total", 3, "obj", map[string]any{"x": 9}, "flag", false, "txt", "c"),
+		}
+	}
+
+	oneByOne := mustS("list", []int{0}, "total", 10, "txt", "z")
+	for _, m := range members() {
+		assert.NoError(oneByOne.MergeReduce(m, reducers))
+	}
+	allAtOnce := mustS("list", []int{0}, "total", 10, "txt", "z")
+	assert.NoError(allAtOnce.MergeReduceAll(members(), reducers))
+
+	a, err := oneByOne.MarshalJSON()
+	assert.NoError(err)
+	b, err := allAtOnce.MarshalJSON()
+	assert.NoError(err)
+	assert.Equal(string(a), string(b), "one pass and per-member folding must agree, byte for byte")
+
+	// Spot-check that the fold actually combined rather than replaced, so an all-replace bug cannot pass.
+	assert.Equal(16, allAtOnce.GetInt("total"))
+	assert.Equal([]string{"a", "b", "c"}, allAtOnce.GetStrings("set"))
+	assert.Equal("second", allAtOnce.GetString("plain"), "an unreduced field is last-write-wins")
+}
+
+// TestState_TypedGettersPreserveTypeAcrossJSONStorage pins the contract that pays for storing values as
+// JSON: the Go type is not preserved by the STORE, so a typed read is what preserves it. An untyped read is
+// float64-domain, and that is the documented price rather than a defect.
+func TestState_TypedGettersPreserveTypeAcrossJSONStorage(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	s, _ := NewState()
+	s.SetInt("n", 42)
+	s.SetDuration("d", 1500)
+
+	assert.Equal(42, s.GetInt("n"), "a typed read returns the type asked for")
+	assert.Equal(time.Duration(1500), s.GetDuration("d"))
+
+	var untyped any
+	ok, err := s.Get("n", &untyped)
+	assert.True(ok)
+	assert.NoError(err)
+	assert.Equal(float64(42), untyped, "an untyped read is float64-domain - JSON has one number type")
+
+	// A typed target of the caller's choosing coerces, which is the escape from the above.
+	var asInt int
+	_, err = s.Get("n", &asInt)
+	assert.NoError(err)
+	assert.Equal(42, asInt)
 }

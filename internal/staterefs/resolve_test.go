@@ -75,9 +75,9 @@ func TestLinker_ResolveReadsBothColumns(t *testing.T) {
 
 	_, err := New("sqlite").Resolve(ctx, state, refs, nil, anchors.load)
 	assert.NoError(err)
-	assert.Equal("initial input", state.Value("fromState"), "a field whose bytes are only in the anchor's state column must resolve")
-	assert.Equal("task output", state.Value("fromChanges"))
-	assert.Equal("new", state.Value("shadowed"), "changes shadows state - it is the newer of the two")
+	assert.Equal("initial input", stateVal(state, "fromState"), "a field whose bytes are only in the anchor's state column must resolve")
+	assert.Equal("task output", stateVal(state, "fromChanges"))
+	assert.Equal("new", stateVal(state, "shadowed"), "changes shadows state - it is the newer of the two")
 }
 
 // TestLinker_ResolveOneRoundTripPerBatch pins the cost model the free tier is priced on. Several fields at
@@ -99,8 +99,8 @@ func TestLinker_ResolveOneRoundTripPerBatch(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(1, len(anchors.calls), "three fields across two anchors must cost ONE load, not three")
 	assert.Equal(2, len(anchors.calls[0]), "the batch asks for each DISTINCT anchor once")
-	assert.Equal("A", state.Value("a"))
-	assert.Equal("C", state.Value("c"))
+	assert.Equal("A", stateVal(state, "a"))
+	assert.Equal("C", stateVal(state, "c"))
 }
 
 // TestLinker_ResolveCachesBytesNotValues pins two things at once. A second resolve of the same field must not
@@ -125,9 +125,9 @@ func TestLinker_ResolveCachesBytesNotValues(t *testing.T) {
 	assert.NoError(err)
 
 	assert.Equal(1, len(anchors.calls), "the second resolve of a settled anchor must be served from cache")
-	firstMap, ok := first.Value("doc").(map[string]any)
+	firstMap, ok := stateVal(first, "doc").(map[string]any)
 	assert.True(ok, "a resolved field is decoded, never a raw JSON message")
-	secondMap, ok := second.Value("doc").(map[string]any)
+	secondMap, ok := stateVal(second, "doc").(map[string]any)
 	assert.True(ok)
 	// Mutating one branch's copy must not be visible to the other's.
 	firstMap["page"] = "mutated"
@@ -172,8 +172,8 @@ func TestLinker_ResolveWantSelects(t *testing.T) {
 
 	err := New("sqlite").ResolveReduced(ctx, state, refs, map[string]workflow.Reducer{"reduced": workflow.ReducerAppend}, anchors.load)
 	assert.NoError(err)
-	assert.Equal("R", state.Value("reduced"), "a field a reducer folds must be materialized, or the fold loses its base")
-	assert.False(state.Contains("carried"), "a merely-carried ref must cross the fan-in as a ref")
+	assert.Equal("R", stateVal(state, "reduced"), "a field a reducer folds must be materialized, or the fold loses its base")
+	assert.False(state.Has("carried"), "a merely-carried ref must cross the fan-in as a ref")
 
 	// No reducer registered for any ref'd field: nothing to fold, so nothing is read at all.
 	anchors.calls = nil

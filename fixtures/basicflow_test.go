@@ -61,6 +61,6 @@ func TestBasicflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "basicflow.verify:428/basic", nil, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("ABC", outcome.State.Value("path"))
+		assert.Equal("ABC", stateVal(outcome.State, "path"))
 	})
 }

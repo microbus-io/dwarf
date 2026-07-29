@@ -77,7 +77,7 @@ func TestRetryfanoutflow(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-		raw, ok := outcome.State.Value("results").([]any)
+		raw, ok := stateVal(outcome.State, "results").([]any)
 		if !assert.True(ok) {
 			return
 		}

@@ -114,14 +114,14 @@ func TestReducervariantsflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
 
-		assert.Equal(2.0, outcome.State.Value("rLo"))     // min(5,2,9)
-		assert.Equal(8.0, outcome.State.Value("rHi"))     // max(5,8,3)
-		assert.Equal(false, outcome.State.Value("rAll"))  // true AND true AND false
-		assert.Equal(true, outcome.State.Value("rAny"))   // false OR false OR true
-		assert.Equal("abc", outcome.State.Value("rWord")) // concat in B,C,D order
+		assert.Equal(2.0, stateVal(outcome.State, "rLo"))     // min(5,2,9)
+		assert.Equal(8.0, stateVal(outcome.State, "rHi"))     // max(5,8,3)
+		assert.Equal(false, stateVal(outcome.State, "rAll"))  // true AND true AND false
+		assert.Equal(true, stateVal(outcome.State, "rAny"))   // false OR false OR true
+		assert.Equal("abc", stateVal(outcome.State, "rWord")) // concat in B,C,D order
 
 		// merge: later contribution (D) wins on key collisions; union of keys.
-		obj, ok := outcome.State.Value("rObj").(map[string]any)
+		obj, ok := stateVal(outcome.State, "rObj").(map[string]any)
 		if !assert.True(ok) {
 			return
 		}

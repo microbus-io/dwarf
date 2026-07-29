@@ -78,7 +78,7 @@ func TestAliasflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("ABC", outcome.State.Value("path"))
+		assert.Equal("ABC", stateVal(outcome.State, "path"))
 	})
 
 	t.Run("alt_path_runs_s_bPrime_d", func(t *testing.T) {
@@ -88,7 +88,7 @@ func TestAliasflow(t *testing.T) {
 		_, outcome, err := eng.Run(ctx, "aliasflow.verify:428/alias", initialState, nil)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal("BD", outcome.State.Value("path"))
+		assert.Equal("BD", stateVal(outcome.State, "path"))
 	})
 
 	t.Run("history_distinguishes_b_and_bPrime_by_node_name", func(t *testing.T) {
@@ -146,4 +146,12 @@ func TestAliasflow(t *testing.T) {
 		assert.Equal(0, nodeNames["B"])
 		assert.Equal(0, nodeNames["C"])
 	})
+}
+
+// stateVal reads a field as an untyped value. It lives here rather than on State because Get already is
+// this, with a type the caller chooses; a one-line untyped read is a test convenience, not API.
+func stateVal(s workflow.State, name string) any {
+	var v any
+	_, _ = s.Get(name, &v)
+	return v
 }

@@ -99,6 +99,6 @@ func TestInterruptedfanoutflow(t *testing.T) {
 			return
 		}
 		assert.Equal(workflow.StatusCompleted, outcome.Status)
-		assert.Equal(3.0, outcome.State.Value("totalExecuted"))
+		assert.Equal(3.0, stateVal(outcome.State, "totalExecuted"))
 	})
 }
