@@ -156,6 +156,41 @@ func (e *Engine) joinFleet(ctx context.Context) {
 		})
 	}
 	wg.Wait()
+	// AND THEN WAIT FOR PEERS TO HAVE APPLIED, not merely to have read. Join's own wait covers DETECTION -
+	// two read cadences, so the reading after this replica's row landed must have seen it - but a peer
+	// applies what it read on its reconcile tick, which can be a whole tick later. Sizing this replica's
+	// pools in that gap is the one thing the announce-before-consume ordering exists to prevent, just one
+	// step further along: every peer knows the new count and none has shrunk to it yet, so the shard's
+	// server briefly sees the joiner's full share on top of shares nobody has given back.
+	//
+	// IT SHRINKS THE WINDOW; IT CANNOT CLOSE IT, and the distinction belongs here rather than in a comment
+	// that claims more. A peer's apply is local to its process, so no wait can prove it happened - which
+	// leaves one reachable worst case whatever the grace: every survivor still on the pre-join split (which
+	// sums to the whole budget) while this replica has grown into its post-join share. Measured over 25
+	// rollouts by TestPeerRollingRestart_FleetNeverExceedsTheShardBudget: peaks of 52 (joiner still on its
+	// bootstrap pool) and 60 = 48 + 12 (joiner grown, nobody shrunk), against a 48 budget. That is the
+	// engine's guarantee - budget plus one post-join share - and it is what that test asserts.
+	//
+	// Without the grace the same rollout failed a budget+bootstrap bound 10 times out of 10 under -race.
+	//
+	// Two ticks rather than one, because the apply is not instantaneous: it pushes a new ceiling to every
+	// open shard, and under a loaded host (or -race) that runs long. A peer cannot be OBSERVED to have
+	// applied - the pool size is local to its process - so a wait is the only instrument available.
+	e.sleepPeerGrace(ctx, 2*e.peerCadence()/reconcileTicksPerCadence)
+}
+
+// sleepPeerGrace waits d, or until ctx ends. Startup's own context governs it, so a cancelled startup does
+// not sit out the grace.
+func (e *Engine) sleepPeerGrace(ctx context.Context, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
 }
 
 // leaveFleet deletes this replica's row from every shard's registry, so peers recount without waiting out

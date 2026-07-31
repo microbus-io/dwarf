@@ -640,7 +640,21 @@ func TestPeers_PruneStandsDownAfterAGap(t *testing.T) {
 // stay far inside the grace. The interval arithmetic itself is pinned by
 // TestPeers_PacingMeasuresFromThePassStart, which drives it on a clock instead of a database.
 func TestPeers_RunReadsUntilTheContextEnds(t *testing.T) {
-	t.Parallel()
+	// NO t.Parallel, and it is the only test here without it. This one asserts an UPPER BOUND on lateness -
+	// that the loop is never blind, i.e. never goes 2 cadences without a reading - and an upper bound is the
+	// one shape co-running tests break: they cannot make the loop turn faster, only slower, so CPU
+	// oversubscription pushes a healthy loop past the grace and the failure reports the machine rather than
+	// the code. (The same starvation also resets healthySince, which the last assertion checks, so both of
+	// this test's real properties ride on the loop being scheduled.) An OUTCOME assertion tolerates
+	// parallelism because it merely waits longer; this does not. Same rule fixtures/CLAUDE.md applies to its
+	// reaction-latency fixtures, and the 25 sibling tests in this package - several driving their own
+	// real-clock Sonar loops - are exactly the competition it exists to avoid.
+	//
+	// Evidence, stated honestly because it is thinner than the rule: this was observed failing ONCE under
+	// the full parallel -race suite, and has not reproduced in 9 subsequent reps of the same command; it
+	// survives -count=10 -race alone. So the change is preventive - it follows from the shape of the
+	// assertion, not from a reproduction. Do not re-add t.Parallel to speed the package up; the seconds it
+	// buys are the margin this test measures in, and a flake this rare is one nobody will diagnose twice.
 	assert := testarossa.For(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

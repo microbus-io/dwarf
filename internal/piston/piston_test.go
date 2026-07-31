@@ -663,11 +663,23 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 	// genuinely outran its period, and on this workload nothing but the scheduler can do that. The bound sits
 	// ~6x under the broken build's floor and ~5x over the worst starvation seen (2 episodes, in a window
 	// whose sample count had itself collapsed from ~450 to 175 - the same contention, visible twice).
+	// A SAMPLE BUDGET, NOT A WALL-CLOCK ONE, and it fixes the bound above as much as the flakiness. Both
+	// counts scale with how many samples a window fits: the broken predicate's 61-103 episodes and the
+	// starved window's 2 were both measured per ~450 samples, so "fewer than 10" only means what it was
+	// calibrated to mean at that density. Budgeting wall clock makes the density an OUTCOME - a loaded
+	// machine fits fewer samples, the bound silently loosens, and the test keeps reporting pass while
+	// testing less (measured: ~450 samples collapsing to 175 under contention). Budgeting samples makes it
+	// an INPUT: load can only make this take longer, never make it weaker.
+	//
+	// The safety deadline is 30x the healthy duration, so it bounds a pathologically starved machine
+	// without ever binding on a merely busy one; the density assertion below is what refuses to conclude
+	// anything if it ever does fire.
+	const wantSamples = 450
 	stalled, _, _ := r.p.Liveness()
 	var busyEpisodes, busySamples, samples int
 	wasBusy := false
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
+	safety := time.Now().Add(15 * time.Second)
+	for samples < wantSamples && time.Now().Before(safety) {
 		n, b, _ := r.p.Liveness()
 		samples++
 		if b {
@@ -686,7 +698,9 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 	assert.True(busyEpisodes < 10,
 		"a piston that only fails must not read as busy across separate cycles (%d episodes, %d of %d samples)",
 		busyEpisodes, busySamples, samples)
-	assert.True(samples > 100, "the sampling has to be dense enough to catch a brief window")
+	assert.True(samples > 100,
+		"the sampling has to be dense enough to catch a brief window - only reachable if the safety deadline "+
+			"fired, i.e. this machine could not take %d samples in 15s (took %d)", wantSamples, samples)
 }
 
 // TestPiston_StealIsGatedOnAnEmptyOwnClass pins the fuse. Partitioning hands each replica a disjoint class

@@ -114,9 +114,21 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, wantOpen
 // every deploy. `Join` closes that by announcing, waiting two read cadences, and only then sizing, so a
 // joining replica's whole claim during the window is its tiny bootstrap pool.
 //
-// The bound asserted is therefore the budget PLUS one bootstrap pool, and the margin is zero by design:
-// three survivors at 16 plus a joiner at 4 is exactly 52. A regression in the ordering does not shave this
-// bound, it blows past it by 12.
+// THE BOUND IS THE BUDGET PLUS ONE POST-JOIN SHARE, and that is the engine's actual guarantee rather than
+// a slackened one. Join waits for peers to have DETECTED its row; each peer then applies the smaller pool
+// on its own reconcile tick, and a peer's apply cannot be observed from here - the pool size is local to
+// its process - so no wait can prove every peer has finished. joinFleet's grace shrinks that window but
+// cannot close it, which leaves one reachable worst case: every survivor still holding the pre-join split
+// (which sums to the whole budget) while the joiner has already grown into its post-join share.
+//
+// Measured, both halves of it: 52 when the joiner is still on its bootstrap pool, and 60 = 48 + 12 when it
+// has grown and no survivor has shrunk yet. 60 is a CEILING, not a tail - survivors are sized for R-1 so
+// they can never sum past the budget, and the joiner is sized for R.
+//
+// It still catches what this test exists for. A regression in the announce-before-consume ordering prices
+// the whole fleet at the R-1 split - 4 x 16 = 64 - which is above this bound, deterministically, on every
+// step of every rollout. The margin is small on purpose: a bound loose enough to be comfortable would
+// stop distinguishing the two.
 //
 // What is priced is the CEILING each pool may acquire, not the connections open at that moment - lowering a
 // limit closes nothing, so the surplus of a shrinking pool drains as connections are returned. The ceiling
@@ -190,7 +202,11 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 
 	close(samplerStop)
 	sampler.Wait()
-	assert.True(peak <= budget+startupBootstrapConns,
-		"the fleet claimed %d connections against a %d budget (+%d bootstrap) at some point in the rollout",
-		peak, budget, startupBootstrapConns)
+	// budget + one post-join share: see the header. Never budget+bootstrap - that prices only the window in
+	// which the joiner has not grown yet, and the joiner growing before its peers shrink is the case that
+	// actually occurs.
+	bound := budget + budget/replicas
+	assert.True(peak <= bound,
+		"the fleet claimed %d connections against a bound of %d (%d budget + one %d share) during the rollout",
+		peak, bound, budget, budget/replicas)
 }

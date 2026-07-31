@@ -313,6 +313,18 @@ being compared against a synthetic one, which reads as either decades of blindne
 tests that exercise real pacing — `Join`'s wait and `Run`'s loop — put the real clock back and shorten the
 scan interval instead.
 
+**`Run`'s loop test also drops `t.Parallel`, and it is the only test here that does.** It asserts an UPPER
+BOUND on lateness - the loop is never blind, never two cadences without a reading - and an upper bound is the
+one shape co-running tests break, because they can only make the loop turn slower, never faster. CPU
+oversubscription then pushes a healthy loop past the grace and the failure reports the machine. The same
+starvation resets `healthySince`, so both of that test's real properties ride on its goroutine being
+scheduled. An OUTCOME assertion tolerates parallelism (it just waits longer); this does not - the same rule
+`fixtures/CLAUDE.md` applies to its reaction-latency fixtures. The evidence is thinner than the rule and worth saying so: it
+survives `-count=10 -race` alone, was seen failing ONCE under the full parallel `-race` suite, and has not
+reproduced in 9 subsequent reps of that command. The change follows from the shape of the assertion - an
+upper bound against 24 parallel siblings, several driving their own real-clock loops - rather than from a
+reproduction.
+
 **Those two are the only tests a slow database can race, and both rules below were learned by it happening.**
 Every threshold in this package is a multiple of the scan interval, so shortening that interval shortens the
 grace the assertions are measured against:
