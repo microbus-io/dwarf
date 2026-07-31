@@ -24,6 +24,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -121,46 +122,6 @@ func gaugePresent(rm metricdata.ResourceMetrics, name string) bool {
 		}
 	}
 	return false
-}
-
-// TestCountRunningByTask_ExcludesParked pins that the dwarf_task_concurrency_running gauge counts only
-// active (parked=parkedNone) running steps, not parked subgraph callers. A parked caller is status=running
-// but holds no executing slot, so counting it would inflate task concurrency and contradict the saturation
-// index's documented purpose (its (status, parked, task_url) shape excludes parked rows).
-func TestCountRunningByTask_ExcludesParked(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
-
-	eng := NewEngineUnderTest(t)
-	eng.SetHost(noopHost{})
-	assert.NoError(eng.Startup(t.Context()))
-
-	db, err := eng.db.Shard(1)
-	if !assert.NoError(err) {
-		return
-	}
-	ins := func(taskURL, status string, parked int) {
-		// lease_expires is set far in the future so recoverExpiredLeases' lease recovery (which resets a
-		// running step whose lease has lapsed) cannot flip this forged running step back to pending
-		// between the insert and the count - the source of an intermittent "actual '0'" flake. A real
-		// running step likewise holds a live lease into the future.
-		_, err := db.ExecContext(ctx,
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms, parked, lease_expires) VALUES (?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?))",
-			1, 1, "tok", "T", taskURL, status, 1000, parked, 3600000,
-		)
-		assert.NoError(err)
-	}
-	ins("svc/x", workflow.StatusRunning, parkedNone)     // active caller - counts
-	ins("svc/y", workflow.StatusRunning, parkedSubgraph) // parked caller - must be excluded
-
-	counts, err := eng.countRunningByTask(ctx)
-	if !assert.NoError(err) {
-		return
-	}
-	assert.Equal(1, counts["svc/x"])
-	_, present := counts["svc/y"]
-	assert.False(present) // parked subgraph caller does not inflate concurrency
 }
 
 func TestMetrics_EmittedOnRun(t *testing.T) {
@@ -292,9 +253,10 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 		return
 	}
 
-	// The whole-cycle histogram records every cycle, including the ones that select nothing.
-	passes, ok := histCount(rm, "dwarf_refill_duration_seconds", nil)
-	assert.True(ok, "dwarf_refill_duration_seconds should be present")
+	// Every cycle is counted by its band_keys phase - there is no end-to-end cycle histogram, so the phases
+	// are what says a cycle happened at all as well as which part of it was slow.
+	passes, ok := histCount(rm, "dwarf_refill_query_duration_seconds", map[string]string{"phase": "band_keys", "shard": "1"})
+	assert.True(ok, "dwarf_refill_query_duration_seconds{phase=band_keys} should be present")
 	assert.True(passes >= 2, "expected at least the 2 forced cycles, got %d", passes)
 
 	// The per-shard query histogram is the one that isolates a straggler, so BOTH scan phases must be
@@ -535,4 +497,89 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 	assert.Equal(int64(0), steps, "no task is in a host call once the flow completed")
 	bytes, _ = gaugeValue(rm, "dwarf_state_in_flight_bytes")
 	assert.Equal(int64(0), bytes, "held bytes must return to zero - a nonzero reading here is a leaked bracket")
+}
+
+// TestMetrics_TerminatedCountsEveryTerminalStatus pins that dwarf_flows_terminated counts FAILED and
+// CANCELLED flows, not only completed ones.
+//
+// It regressed silently and cost nothing to miss: the instrument carried a `status` attribute and was
+// described as counting "flows that have reached a terminal status", while the only call site passed
+// StatusCompleted. Two things were wrong at once. `sum by (status)` invited a completed/failed/cancelled
+// breakdown and answered with completions alone, and the in-flight panel the dwarf_flows_started
+// description recommends - started minus terminated - drifted upward permanently by every flow that did
+// not finish cleanly, never recovering.
+//
+// Both halves are asserted per status rather than in aggregate, because a single total would pass against
+// a build that counted one of them twice.
+func TestMetrics_TerminatedCountsEveryTerminalStatus(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	proxy := NewTestProxy()
+
+	// A graph whose only task fails, with no onError, so the flow fails.
+	failing := workflow.NewGraph("Failing")
+	failing.SetEndpoint("boom", "termmetrics.verify:429/boom")
+	failing.AddTransition("boom", workflow.END)
+	proxy.HandleGraph("termmetrics.verify:429/failing", failing)
+	proxy.HandleTask("termmetrics.verify:429/boom", func(ctx context.Context, f *workflow.Flow) error {
+		return errors.New("intentional failure")
+	})
+
+	// A graph whose only task interrupts, parking the flow so Cancel has something live to cancel.
+	parking := workflow.NewGraph("Parking")
+	parking.SetEndpoint("wait", "termmetrics.verify:429/wait")
+	parking.AddTransition("wait", workflow.END)
+	proxy.HandleGraph("termmetrics.verify:429/parking", parking)
+	proxy.HandleTask("termmetrics.verify:429/wait", func(ctx context.Context, f *workflow.Flow) error {
+		_, _ = f.Interrupt(nil, nil)
+		return nil
+	})
+
+	eng := NewEngineUnderTest(t)
+	eng.SetHost(proxy)
+	eng.SetMeterProvider(mp)
+	assert.NoError(eng.Startup(t.Context()))
+
+	_, outcome, err := eng.Run(ctx, "termmetrics.verify:429/failing", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusFailed, outcome.Status)
+
+	cancelKey, err := eng.Create(ctx, "termmetrics.verify:429/parking", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	// Await returns on any stop, and `interrupted` is one - so this parks until the entry task has actually
+	// interrupted, which is what gives Cancel a live flow to cancel rather than a racing one.
+	parked, err := eng.Await(ctx, cancelKey)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusInterrupted, parked.Status)
+	assert.NoError(eng.Cancel(ctx, cancelKey, "test"))
+
+	var rm metricdata.ResourceMetrics
+	if !assert.NoError(reader.Collect(ctx, &rm)) {
+		return
+	}
+
+	failed, ok := sumCounter(rm, "dwarf_flows_terminated", "status", workflow.StatusFailed)
+	assert.True(ok, "dwarf_flows_terminated{status=failed} should be present")
+	assert.Equal(int64(1), failed, "a failed flow must be counted as terminated")
+
+	cancelled, ok := sumCounter(rm, "dwarf_flows_terminated", "status", workflow.StatusCancelled)
+	assert.True(ok, "dwarf_flows_terminated{status=cancelled} should be present")
+	assert.Equal(int64(1), cancelled, "a cancelled flow must be counted as terminated")
+
+	// The property the panel actually depends on: over a workload where nothing completed, starts and
+	// terminations still balance.
+	started, _ := sumCounter(rm, "dwarf_flows_started", "", "")
+	terminated, _ := sumCounter(rm, "dwarf_flows_terminated", "", "")
+	assert.Equal(started, terminated, "started minus terminated must not drift when flows fail or cancel")
 }

@@ -334,7 +334,7 @@ func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowTo
 	if err != nil {
 		return errors.Trace(err)
 	}
-	descendantFlowIDs, descendantCompositeIDs, err := e.allSubgraphFlows(ctx, shardNum, flowID)
+	descendantFlowIDs, descendantCompositeIDs, urlByFlowID, err := e.allSubgraphFlows(ctx, shardNum, flowID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -393,7 +393,16 @@ func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowTo
 	}
 
 	for i, cid := range allCompositeIDs {
-		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, allFlowIDs[i].(int)), "to", workflow.StatusCancelled)
+		fid := allFlowIDs[i].(int)
+		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fid), "to", workflow.StatusCancelled)
+		// Counted per flow, alongside the signal and on the same set, because every one of these was started
+		// (createWithGraph counts subgraph children too) and the in-flight panel is started minus terminated.
+		// The set is the flows that were non-terminal when the tree was scanned; one that terminalized in the
+		// window between that scan and this commit is excluded by the UPDATE's own status guard but still
+		// counted here, so a cancel racing a completion can over-count by one. That window is microseconds
+		// against a miscount that used to be EVERY failed and cancelled flow, so it is not worth a second
+		// round trip to close.
+		e.metricFlowTerminated(ctx, urlByFlowID[fid], workflow.StatusCancelled, shardNum)
 		e.signalStop(ctx, cid, workflow.StatusCancelled)
 	}
 	return nil
@@ -657,7 +666,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// while a sibling branch is still live would strand that sibling and any subgraph descendants it parked
 	// on: the interrupt/resume/cancel tree walks all skip a terminal flow, so nothing could ever release
 	// them. parentStepID>0 iff this flow is a subgraph child.
-	parentStepID, isSubgraphChild, err := e.dynamicSubgraphParent(ctx, db, flowID)
+	parentStepID, isSubgraphChild, flowWorkflowURL, err := e.dynamicSubgraphParent(ctx, db, flowID)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
@@ -777,6 +786,12 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// still stopped, so wake any Await on the child key (legal read-only introspection), locally and on peers,
 	// exactly as the top-level path below does. Without this signalStop, Await(childKey) blocks until its
 	// context deadline despite the child being terminal.
+	// Counted on BOTH branches below, because both are a flow reaching a terminal status and every flow was
+	// counted as started - a subgraph child included, since createWithGraph is the shared insert path. The
+	// child's failure additionally travels to its parent's flow.Subgraph call, but that is delivery, not a
+	// second termination.
+	e.metricFlowTerminated(ctx, flowWorkflowURL, workflow.StatusFailed, shardNum)
+
 	if isSubgraphChild {
 		e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), workflow.StatusFailed)
 		if reDispatchParent {
@@ -822,19 +837,21 @@ func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor,
 
 // dynamicSubgraphParent reports whether the given flow is a subgraph child, and if so which step called
 // it.
-func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowID int) (parentStepID int, isSubgraphChild bool, err error) {
+// workflowURL rides this read rather than costing one of its own: failStep needs it to label the flow's
+// termination, and this is the flow row it was already fetching.
+func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowID int) (parentStepID int, isSubgraphChild bool, workflowURL string, err error) {
 	var surgraphFlowID, surgraphStepID int
 	err = db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id, surgraph_step_id FROM dwarf_flows WHERE flow_id=?",
+		"SELECT surgraph_flow_id, surgraph_step_id, workflow_url FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&surgraphFlowID, &surgraphStepID)
+	).Scan(&surgraphFlowID, &surgraphStepID, &workflowURL)
 	if err != nil {
-		return 0, false, errors.Trace(err)
+		return 0, false, "", errors.Trace(err)
 	}
 	if surgraphFlowID == 0 || surgraphStepID == 0 {
-		return 0, false, nil
+		return 0, false, workflowURL, nil
 	}
-	return surgraphStepID, true, nil
+	return surgraphStepID, true, workflowURL, nil
 }
 
 // deliverSubgraphError terminalizes a subgraph child (when there is one, and it is not already terminal)
@@ -959,33 +976,38 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 // only - the same set the former level-by-level recursion produced (which likewise stopped descending at a
 // terminal node), one round-trip regardless of depth. root_flow_id gives tree membership; surgraph_flow_id
 // gives the parent/child structure the BFS walks.
-func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int) (flowIDs []any, compositeFlowIDs []string, err error) {
+//
+// urlByFlowID carries every scanned flow's workflow_url, keyed by flow id and covering the ROOT as well as
+// the returned descendants, so a caller terminalizing the tree can label each flow with its own workflow.
+// It rides the scan that was already happening: the column is one more in a projection, not a query.
+func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int) (flowIDs []any, compositeFlowIDs []string, urlByFlowID map[int]string, err error) {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, nil, errors.Trace(err)
 	}
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, flow_token, surgraph_flow_id, status FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
+		"SELECT flow_id, flow_token, surgraph_flow_id, status, workflow_url FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
 		flowID,
 	)
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, nil, errors.Trace(err)
 	}
 	type node struct {
-		token    string
-		terminal bool
+		token       string
+		terminal    bool
+		workflowURL string
 	}
 	byID := map[int]node{}
 	childrenByParent := map[int][]int{}
 	for rows.Next() {
 		var id, parent int
-		var token, status string
-		if err := rows.Scan(&id, &token, &parent, &status); err != nil {
+		var token, status, workflowURL string
+		if err := rows.Scan(&id, &token, &parent, &status, &workflowURL); err != nil {
 			rows.Close()
-			return nil, nil, errors.Trace(err)
+			return nil, nil, nil, errors.Trace(err)
 		}
 		term := status == workflow.StatusCompleted || status == workflow.StatusFailed || status == workflow.StatusCancelled
-		byID[id] = node{token: token, terminal: term}
+		byID[id] = node{token: token, terminal: term, workflowURL: workflowURL}
 		if parent != 0 {
 			childrenByParent[parent] = append(childrenByParent[parent], id)
 		}
@@ -994,7 +1016,7 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 	// A truncated read (mid-stream error) would make the tree walk act on a partial tree; this is a
 	// non-tx read (no Transact latch backstops it), so the check is explicit.
 	if err := rows.Err(); err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, nil, errors.Trace(err)
 	}
 
 	queue := []int{flowID}
@@ -1011,7 +1033,13 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 			queue = append(queue, child)
 		}
 	}
-	return flowIDs, compositeFlowIDs, nil
+	// Every flow in the tree, root included - not just the collected descendants - because the caller
+	// terminalizes the root too and each flow carries its own workflow name.
+	urlByFlowID = make(map[int]string, len(byID))
+	for id, n := range byID {
+		urlByFlowID[id] = n.workflowURL
+	}
+	return flowIDs, compositeFlowIDs, urlByFlowID, nil
 }
 
 // interruptedSubgraphChain walks down from a flow through interrupted subgraph steps to find the leaf. It

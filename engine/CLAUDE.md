@@ -2161,7 +2161,20 @@ immediately would put the shard's server over budget by roughly one replica's sh
 `Join` blocks two read cadences - a peer's read may have begun just before this replica's row was committed,
 so only the reading after it must see the row - which also gives a simultaneously-starting fleet's rows time
 to land, so what follows is a settled roster rather than a partial one. A partial one *under*-counts, which
-over-sizes pools. What the wait buys is peers having STOPPED ACQUIRING beyond their new cap, not connections
+over-sizes pools. **`Join`'s own wait covers peers DETECTING the row, and `joinFleet` adds a grace for them
+to APPLY what they read** - a peer shrinks its pool on its reconcile tick, up to a tick after the reading
+that told it to. Skipping that grace put a rollout over budget on every step (measured: a
+budget+bootstrap bound failed 10 of 10 rollouts under `-race`).
+
+**The grace SHRINKS the window and cannot close it.** A peer's apply is local to its process, so nothing
+here can prove it happened, which leaves one reachable worst case at any grace: every survivor still on the
+pre-join split - summing to the whole budget - while the joiner has grown into its post-join share. So the
+fleet's guarantee is **budget + one post-join share**, not budget + bootstrap; measured peaks of 52 and
+60 against a 48 budget, and pinned at that bound by
+`TestPeerRollingRestart_FleetNeverExceedsTheShardBudget`, which still catches an ordering regression
+because that prices the fleet at the R-1 split (64) instead.
+
+What the wait buys is peers having STOPPED ACQUIRING beyond their new cap, not connections
 already closed: lowering a pool's limit closes nothing, so any surplus drains as connections are returned.
 
 **Shutdown drains the Sonars LAST**, after the pistons, because this replica must stay registered while its
@@ -2586,9 +2599,9 @@ SDK, so unconfigured/standalone/test use pays nothing. Instruments are built onc
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
 scope distinguishes dwarf's metrics; **service identity lives in the provider's Resource, not in per-metric
 attributes** (no `service.name` on data points - cardinality explosion, off-spec). The only attributes attached are
-the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `task_url` (on
-`dwarf_task_concurrency_running`), `priority`, `park_type`, `shard` (on `dwarf_steps_write_retried`), and
-`column` (on the byte counters).
+the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `priority`,
+`park_type`, `role` (on the db-phase pair), `shard` (on `dwarf_steps_write_retried`), and `column` (on the
+byte counters).
 
 **8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
 (start path), `dwarf_flows_terminated` (completeFlow), `dwarf_steps_executed` (every terminal step
@@ -2599,15 +2612,20 @@ flow-level sibling of `dwarf_steps_unwedged`, counted at the same site as its er
 and the two persist alarms `dwarf_steps_write_retried` / `dwarf_steps_write_failed` (detailed under "Persisting
 a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Startup).
 
-**2 refiller counters + 2 refiller histograms**, built by the PISTONS (`internal/piston`) from the meter
+**3 refiller counters + 1 refiller histogram**, built by the PISTONS (`internal/piston`) from the meter
 this engine resolves once and hands each of them - one instrumentation scope per engine, whoever records
-into it. `initMetrics` deliberately does NOT build them: registering the same four names twice on one meter
+into it. `initMetrics` deliberately does NOT build them: registering the same names twice on one meter
 is a duplicate-instrument conflict, and the two copies had already drifted in description and bucket
-boundaries. They are `dwarf_refill_candidates_selected` / `_discarded`, `dwarf_refill_duration_seconds`
-(one shard's cycle, excluding the pace it slept beforehand) and `dwarf_refill_query_duration_seconds`
-{shard,phase}, where `phase` is now four values - `band_keys`, `fetch_steps`, and the two non-query phases
-`planning` and `pushing`. Recording planning matters because it is the one cost that scales with fairness-key
-CARDINALITY (the lottery re-rolls per slot over every key), and it was previously computed and dropped.
+boundaries. They are `dwarf_refill_candidates_selected` / `_discarded`, `dwarf_steps_stolen` and
+`dwarf_refill_query_duration_seconds` {shard,phase}, where `phase` is four values - `band_keys`,
+`fetch_steps`, and the two non-query phases `planning` and `pushing`. Recording planning matters because it
+is the one cost that scales with fairness-key CARDINALITY (the lottery re-rolls per slot over every key).
+
+**There is deliberately no end-to-end `dwarf_refill_duration_seconds`.** It existed to expose the MERGED
+pass's straggler tax as its gap over the per-shard query max - a quantity the per-shard decoupling deleted
+along with the barrier that produced it. What was left was a coarse duplicate of the four phases, which sum
+to the same cycle and additionally say WHICH part was slow. Do not add it back without a question it
+answers that the phase split does not.
 These exist because **the refiller was the one hot-path subsystem with no timing instrument at all**, so the
 question "what binds at the ceiling" could not be asked of it - and `docs/benchmark-cloud.md`'s
 straggler-wait explanation for the flat 3-shard arm was inference, never a measurement (it has since been
@@ -2617,10 +2635,11 @@ identical from outside (the rules below record how each resolved):
 - **One shard is slow** - `refill_query_duration{shard}` diverges *between* shards. Recorded per shard
   around each shard's own scan, timing query + row scan.
 - **The cross-shard fan-out wait is the cost** - this one WON (max-over-shards measured 2.02x at 6 shards)
-  and was then *removed* by the per-shard refiller decoupling, which dissolved the instrument's original
-  discriminator: `refill_duration` was the merged pass, and its gap over the per-shard query max was the
-  straggler tax; with no barrier there is no merged pass, and `refill_duration{shard}` is now simply each
-  shard's own cycle time (which sets its partition's supply rate, `capacity_slice/max(cycle, floor)`).
+  and was then *removed* by the per-shard refiller decoupling, which dissolved the instrument that measured
+  it: `dwarf_refill_duration_seconds` was the merged pass, and its gap over the per-shard query max was the
+  straggler tax. With no barrier there is no merged pass and no gap, so the instrument was retired rather
+  than left reporting a coarse duplicate of the phases (see above). A shard's own cycle time - which sets
+  its partition's supply rate, `capacity_slice/max(cycle, floor)` - is the sum of its four phases.
 - **The refiller oversupplies** - `discarded/selected` approaches 1. Every pass wholesale-replaces its
   shard's partition while being triggered after every `processStep` on that shard, so whenever it turns
   faster than the workers drain it throws away a batch it just paid to fetch. `Cache.Refill` returns the
@@ -2706,7 +2725,9 @@ worklist. These are the parts that would make a future change WRONG if unknown:
 **The oversupply hypothesis is dead** (`discarded/selected` measured 0-10%, never the ~100% it
 predicted). Do not re-propose it without new evidence.
 
-**12 counters** in total: the 8 event counters above plus two byte counters plus the two refiller counters,
+**17 counters** in total: the 8 event counters above, plus `dwarf_steps_offered` /
+`dwarf_steps_claim_preempted` / `dwarf_steps_claim_lost` / `dwarf_peer_changes`, plus the three the pistons
+own (`dwarf_refill_candidates_selected` / `_discarded`, `dwarf_steps_stolen`), plus the two byte counters,
 `dwarf_state_write_bytes` / `dwarf_state_read_bytes` (labels `workflow` + `column`, unit `By`) - payload
 bytes the engine writes to / reads from **step rows on the execution path**. The `column` label is the
 dwarf_steps column the bytes moved through (`state` snapshots, `changes` task-output deltas,
@@ -2733,12 +2754,19 @@ instrument name verbatim. So the instruments are named `dwarf_flows_started` etc
 references them as `dwarf_flows_started_total`. Do not bake `_total` into a counter's instrument name.
 
 **12 gauges, observable (async)** via a single `RegisterCallback`. The callback runs at metric-collection
-time and reads engine state: in-memory for
-`dwarf_steps_queue_depth` (cache length) and `dwarf_steps_fairness_keys` (read from `planner.LastBand()`,
-which reports a NEGATIVE band for "nothing to report" - no plan yet, or an idle fleet - so an idle engine
-never labels a series with a priority no caller can set); shard queries for `dwarf_steps_pending`
-and `dwarf_steps_oldest_pending_age_seconds` (per priority band) and `dwarf_task_concurrency_running` (running
-steps per task).
+time and reads engine state, and all of that is in-memory EXCEPT one query: `dwarf_steps_pending` and
+`dwarf_steps_oldest_pending_age_seconds` (per priority band) come from `observePendingByBand`, one statement
+per shard. Keeping the query-backed set to those two is deliberate - a scrape should not be load.
+
+**Two gauges were removed from here and should not come back without a new argument.**
+`dwarf_task_concurrency_running` {task_url} cost a SECOND query per shard per scrape - on every replica, to
+produce R copies of one cluster-wide number - carried the least bounded label in the set, and asked a
+question that belongs to the host: per-downstream concurrency turns on the account/tenant identity the
+engine structurally cannot see, which is the same rule that keeps backpressure out of the engine (see
+"Backpressure is the task's or host's job"). `dwarf_steps_fairness_keys` was a per-replica sample of the
+LAST plan's distinct-key count, read from `planner.LastBand()`; it drove no decision and alarmed on nothing
+- a scheduling diagnostic that had served its purpose. `LastBand` itself stays, because the piston's and the
+planner's own tests assert on it.
 
 **`dwarf_state_in_flight_bytes` / `_steps` are the HELD-STATE pair, and three things about them are
 load-bearing.** Two atomics on the Engine, bracketed in `processStep` around the `ExecuteTask` call.
@@ -2771,19 +2799,32 @@ in-flight state maps are a cost the engine cannot see", and the turnstile lets t
 goroutines for long tasks - so held state x crew size is a memory ceiling nothing else reports.
 
 **The gauges are of two kinds and they aggregate differently - do not paper over this.** `queue_depth`,
-`fairness_keys` and the two `state_in_flight` gauges are genuinely **per-replica** (read from this replica's
-memory): sum them. The three query-backed ones are
-**cluster-wide** by construction - they are computed by querying the SHARED shard databases, so every replica
-observes the *same* number. Summing them multiplies by the replica count (a 1,000-step backlog reads as 3,000
-on three replicas; a summed `oldest_pending_age` is meaningless outright), so they aggregate with `max`/`avg`.
-A per-replica reading of them is not obtainable from a shared database, and the engine does not pretend
-otherwise: each instrument's *description* states its kind, because that is what an operator building a panel
-actually reads. (`engine/CLAUDE.md` and `docs/observability.md` both claimed the blanket "per replica; sum at
-the backend" - a 3x overcount on the three that matter most for capacity.) The callback is
-`Unregister`ed first thing in `drainRuntime` so the OTEL reader can't query a closing database.
+the db-phase count and the two `state_in_flight` gauges are genuinely **per-replica** (read from this
+replica's memory): sum them. The two query-backed ones are **cluster-wide** by construction - they are
+computed by querying the SHARED shard databases, so every replica observes the *same* number. Summing them
+multiplies by the replica count (a 1,000-step backlog reads as 3,000 on three replicas; a summed
+`oldest_pending_age` is meaningless outright), so they aggregate with `max`/`avg`. A per-replica reading of
+them is not obtainable from a shared database, and the engine does not pretend otherwise: each instrument's
+*description* states its kind, because that is what an operator building a panel actually reads. The
+callback is `Unregister`ed first thing in `drainRuntime` so the OTEL reader can't query a closing database.
 
-**Fidelity choices:** `flows_terminated` fires only on `completed` (failed/cancelled are not counted here;
-`steps_executed{status=failed}` still covers the failed-step case). **Every path that starts a flow must call
+**There is no `_peak` companion to `dwarf_db_phase_workers`, and adding one back is a step backwards.** A
+high-water mark held since process start goes CONSTANT within hours on a long-lived replica, answering
+nothing about now, while `max_over_time` on the plain gauge gives a WINDOWED peak the backend computes for
+free. It also carried a footgun the gauge does not: the two roles peak at different moments, so summing
+them reported a mark that never occurred.
+
+**Fidelity choices:** `flows_terminated` counts ALL THREE terminal statuses - completed (`completeFlow`),
+failed (`failStep`, and the cohort-resolution path in `processStep` that fails a flow without going through
+it), and cancelled (`cancelSubtree`, per flow of the tree it terminalized). It once fired only on
+`completed`, which broke it in two ways at once: the `status` attribute had a single value, so
+`sum by (status)` silently answered a completed/failed/cancelled question with completions alone, and the
+in-flight panel this metric exists for - `flows_started` minus this - drifted upward permanently by every
+flow that did not finish cleanly. Both halves are pinned by
+`TestMetrics_TerminatedCountsEveryTerminalStatus`, which fails on all three of its assertions against the
+old behaviour. The cancel path counts the flows that were non-terminal when it scanned the tree, so a cancel
+racing a concurrent completion can over-count by one; that window is microseconds against a miscount that
+used to be every failed and cancelled flow, so it is not worth a round trip to close. **Every path that starts a flow must call
 `metricFlowStarted`** - `Create`, `Continue`, AND `Fork` (which builds its new root through its own
 `INSERT...SELECT` clone and so was silently missed): a fork's completion runs through the same `completeFlow`
 that increments `flows_terminated`, so a missing start makes the standard in-flight panel

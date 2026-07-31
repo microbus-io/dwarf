@@ -296,7 +296,6 @@ func gaugePoints(m metricdata.Metrics) []gaugeKV {
 var agreementGauges = map[string]bool{
 	"dwarf_steps_pending":                    true,
 	"dwarf_steps_oldest_pending_age_seconds": true,
-	"dwarf_task_concurrency_running":         true,
 	"dwarf_peer_replicas":                    true,
 	"dwarf_peer_blind_seconds":               true,
 }

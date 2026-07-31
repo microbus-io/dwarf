@@ -1254,6 +1254,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	e.metricStateReadBytes(ctx, workflowURL, "changes", txBytes.changesRead)
 
 	if flowFailed {
+		// This path fails a flow WITHOUT going through failStep - a completing last arriver resolving a cohort
+		// that carries failures - so it must count the termination itself, on both branches, exactly as
+		// failStep does. Missing it here would leave the in-flight panel drifting for precisely the fan-out
+		// failures the cohort accounting exists to get right.
+		e.metricFlowTerminated(ctx, workflowURL, workflow.StatusFailed, shardNum)
 		if flowFailedParentStepID != 0 {
 			// Subgraph child: the failure is delivered to the parent's flow.Subgraph call - but the child has
 			// still stopped, so wake any Await on the child key (legal read-only introspection), mirroring

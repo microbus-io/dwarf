@@ -113,9 +113,11 @@ over the symptom costs the diagnosis.
 infinite and the key **permanently unpickable** — silent starvation, no error anywhere. Normalizing at the
 boundary means no producer can reintroduce it.
 
-**`LastBand` reports a negative band for "nothing to report."** Its consumer labels a metric series with
-the value, so returning an idle fleet's `math.MaxInt` would publish a series named for a priority no caller
-can ever set.
+**`LastBand` reports a negative band for "nothing to report."** An idle fleet's real value is
+`math.MaxInt`, which reads as a genuine band — wrong in the direction of looking valid — so it is reported
+as a sentinel a caller can test for instead. Its readers are the piston's tests and this package's own;
+it fed a `dwarf_steps_fairness_keys` gauge that was removed as a scheduling diagnostic that had served
+its purpose, so treat the key count as a test observable rather than a shipped signal.
 
 ## Contracts a caller must hold
 

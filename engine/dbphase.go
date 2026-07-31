@@ -52,13 +52,7 @@ func (e *Engine) enterDBPhase(role string) func() {
 	if role == phaseExit {
 		idx = 1
 	}
-	n := e.dbPhaseWorkers[idx].Add(1)
-	for {
-		peak := e.dbPhaseWorkersPeak[idx].Load()
-		if n <= peak || e.dbPhaseWorkersPeak[idx].CompareAndSwap(peak, n) {
-			break
-		}
-	}
+	e.dbPhaseWorkers[idx].Add(1)
 	start := time.Now()
 	closed := false
 	return func() {

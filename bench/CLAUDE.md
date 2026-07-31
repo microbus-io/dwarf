@@ -140,12 +140,13 @@ held-state gauges (`dwarf_state_in_flight_bytes` / `_steps`).
 - **Counters carry attributes** as `name|k=v` alongside the bare-name total. Both are emitted: the total is
   what a throughput number reads off, the split is the only thing that shows one shard falling behind.
 - **Gauges every replica reports identically are MAXed, not summed** (`agreementGauges`) — cluster-wide
-  reads (`dwarf_steps_pending`, `oldest_pending_age`, `task_concurrency_running`) and per-replica readings
+  reads (`dwarf_steps_pending`, `oldest_pending_age`) and per-replica readings
   of a shared fact (`dwarf_peer_replicas`, `dwarf_peer_blind_seconds`). Summing them multiplied by the
-  replica count; that bug inflated those three in **every multi-replica artifact produced before it was
+  replica count; that bug inflated those in **every multi-replica artifact produced before it was
   fixed**, so distrust older cloud numbers that lean on backlog depth or oldest-age.
-- **`dwarf_refill_duration_seconds{shard}`'s COUNT is cycles per window** — i.e. piston RPS — and its sum
-  is the duty cycle. There is no separate revolutions instrument.
+- **`dwarf_refill_query_duration_seconds{shard,phase=band_keys}`'s COUNT is cycles per window** — i.e.
+  piston RPS, since a cycle scans exactly once — and the four phases summed are the duty cycle. There is
+  no revolutions instrument and no end-to-end cycle histogram; the phases are what reconstruct one.
 - **Per-shard cycle-duration spread is mostly POOL WAIT, not a slow shard.** Measured 28ms vs 125ms on
   hardware whose RTT differed by 0.036ms. Decompose against `pg_stat_statements` and the pool-wait gauges
   before calling a shard slow. Note the pgss/dbstats/RTT samplers watch `dsns[0]` only, so a multi-shard run

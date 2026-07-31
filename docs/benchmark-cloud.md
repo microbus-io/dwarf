@@ -388,7 +388,8 @@ shard reproduces to **1%** while every multi-shard arm swings **20–110%** betw
 runs — a two-shard arm ranged from ×1.94 down to ×0.92, i.e. worse than one shard.
 
 The mode is readable from the engine's own metrics. Within a run, count each shard's candidate-selection
-passes (`dwarf_refill_duration_seconds` count, one series per shard) and take busiest ÷ quietest. Runs
+passes (`dwarf_refill_query_duration_seconds{phase=band_keys}` count, one series per shard - a cycle
+scans exactly once) and take busiest ÷ quietest. Runs
 where the passes stay in one band (ratio ~1.5–3×) land in the fast mode; runs where one shard's pass time
 diverges (~400 ms against its peers' ~70 ms, ratio 5–10×) land 30–50% lower, with a rank correlation
 between imbalance and throughput as strong as −1.0 over five repeats. **Plan multi-shard capacity with
@@ -520,11 +521,14 @@ itself. Size for the [70–90% database CPU band](#database-size-vertical-scalin
 this does not arise.
 
 A worker inside a task holds no database connection, so worker count and database load are separate
-quantities. The engine adds a worker when no existing worker is free, work is waiting, **and** the shard
-still has capacity to admit database work. The last condition is what keeps growth from becoming
-connection contention: a database-bound backlog has no spare admission capacity, so it triggers no
-growth. No part of the rule refers to task duration, which is what lets one engine serve 5 ms lookups and
-30 s model calls on the same worker set.
+quantities. The engine adds a worker when taking a candidate left no other worker free — one condition,
+and it consults nothing about the database. What keeps growth from becoming connection contention is
+that the check is **blocking**, not a query: a worker waits for a turn at its shard *before* it picks a
+candidate up, and one waiting there holds no work, so it counts as free and the next check declines. A
+database-bound backlog therefore parks its workers at the turnstile and stops growing, while a
+task-bound one keeps growing because its workers are away in the task. No part of the rule refers to
+task duration, which is what lets one engine serve 5 ms lookups and 30 s model calls on the same worker
+set.
 
 The worker *maximum* is derived, not a round number: it is the largest count that keeps a synchronized
 completion storm — every in-flight task unblocking at once when a downstream recovers — inside the

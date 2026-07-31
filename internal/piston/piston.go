@@ -135,7 +135,6 @@ type ContextFunc func(context.Context) context.Context
 // instruments is this piston's metric set, swapped atomically as a group so a recording cycle never sees
 // half of one meter and half of another.
 type instruments struct {
-	cycleDuration metric.Float64Histogram
 	queryDuration metric.Float64Histogram
 	selected      metric.Int64Counter
 	discarded     metric.Int64Counter
@@ -393,8 +392,6 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 		return c
 	}
 	p.inst.Store(&instruments{
-		cycleDuration: hist("dwarf_refill_duration_seconds",
-			"Wall-clock duration of one shard's complete refill cycle, excluding the pace it slept beforehand."),
 		queryDuration: hist("dwarf_refill_query_duration_seconds",
 			"Duration of one phase of one shard's refill cycle, labelled by shard and by phase: the two queries "+
 				"(band_keys, fetch_steps) and the two in-memory phases (planning, pushing)."),
@@ -501,16 +498,17 @@ func (p *Piston) Cycle(ctx context.Context) pipeline.Result {
 // record translates a cycle's result into this piston's instruments.
 func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 	in := p.inst.Load()
-	shardAttr := attribute.Int("shard", p.shard)
-	// A FAILED cycle is deliberately excluded from the end-to-end histogram, while the per-phase durations
-	// below still record. A cycle that returned early on a scan or fetch error is a truncated one with no
-	// meaningful total, and folding it in would drag the percentiles toward an error path that is already
-	// logged; the same goes for the ~0 sample a cancellation during the pace produces, one per shard per
-	// shutdown. The phase timings are worth keeping either way - they show WHICH phase was slow on the way
-	// to failing.
-	if r.Err == nil {
-		in.cycleDuration.Record(ctx, r.Total.Seconds(), metric.WithAttributes(shardAttr))
-	}
+	// A STRING, not an Int, and the two must never be mixed. `shard` is emitted by the engine as well, and
+	// an OTLP-native backend distinguishes attribute TYPES - so the same key at two types is two different
+	// attributes there, which silently breaks any query grouping the piston's instruments against the
+	// engine's (the refiller's cost against the turnstile's queue is exactly that join). Prometheus renders
+	// both as the label string and hides the split, which is why it survived unnoticed.
+	shardAttr := attribute.String("shard", strconv.Itoa(p.shard))
+	// There is deliberately no end-to-end cycle histogram. One existed, and its job was to expose the MERGED
+	// pass's straggler tax as the gap over the per-shard query max - a quantity the per-shard decoupling
+	// deleted along with the barrier that produced it. What remained was a coarse duplicate of the four
+	// phases below, which sum to the same cycle and say WHICH part was slow. Do not add it back without a
+	// question it answers that the phase split does not.
 	if r.Tallying > 0 {
 		in.queryDuration.Record(ctx, r.Tallying.Seconds(),
 			metric.WithAttributes(shardAttr, attribute.String("phase", "band_keys")))
@@ -523,8 +521,8 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 	// historical reasons - it predates them - and renaming it would break the dashboards it is a public
 	// surface for, so the phase label carries the distinction instead. Recording them matters because
 	// planning is the one cost in the design that scales with fairness-key CARDINALITY (the lottery re-rolls
-	// per slot over every key), and left unrecorded it was visible only as cycleDuration minus the two query
-	// phases - which is to say, not measurable at all.
+	// per slot over every key), and because all four phases together are what reconstructs a cycle now that
+	// there is no end-to-end histogram of one.
 	if r.Planning > 0 {
 		in.queryDuration.Record(ctx, r.Planning.Seconds(),
 			metric.WithAttributes(shardAttr, attribute.String("phase", "planning")))
@@ -791,7 +789,7 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 		return nil, errors.Trace(err)
 	}
 	if stolen > 0 {
-		p.inst.Load().stolen.Add(ctx, int64(stolen), metric.WithAttributes(attribute.Int("shard", p.shard)))
+		p.inst.Load().stolen.Add(ctx, int64(stolen), metric.WithAttributes(attribute.String("shard", strconv.Itoa(p.shard))))
 		if seams := p.seams.Load(); seams.Enabled() {
 			seams.Checkpoint(ctx, CheckpointStole)
 			seams.Checkpoint(ctx, seamsJoin(CheckpointStole, strconv.Itoa(p.shard)))

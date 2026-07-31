@@ -221,12 +221,20 @@ moment a name drifted, and nothing here needs provider-level capability. Instrum
 surface that dashboards bind to — `TestPiston_RecordsItsInstruments` asserts them by name so a rename
 fails loudly.
 
+**The `shard` attribute must be a STRING, matching the engine's.** The owner emits `shard` on its own
+instruments too, and an OTLP-native backend distinguishes attribute *types*, so the same key at two types
+is two different attributes there — which breaks any query grouping this package's instruments against the
+engine's. That join is a real one: the refiller's cost read against the turnstile's queue. This shipped as
+`attribute.Int` here while the engine used `attribute.String`, and it went unnoticed because Prometheus
+renders both as the same label string and hides the split entirely. A test cannot catch it from inside this
+package — the conflict only exists across the two — so it is a rule rather than an assertion.
+
 **`refillBuckets`' LOW end is load-bearing and must not be raised.** A warm same-zone band scan measures
 ~0.29ms; the *same* query on the *same* data measures ~100ms once its Postgres statistics go stale and the
 plan flips to a sequential scan — the flip the `phase` label exists to expose. Boundaries starting at
 0.0005 file the healthy case in the first bucket and hide exactly that, which is what an earlier cut of
-this package did. The values match the engine's, deliberately: these are the same four instruments,
-and a histogram whose boundaries changed under a dashboard is a silent regression.
+this package did. The values are a public surface in their own right: a histogram whose boundaries changed
+under a dashboard is a silent regression, so treat them as fixed rather than as a tuning knob.
 
 ## Two seams, and why each is the exception
 

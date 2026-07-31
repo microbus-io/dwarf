@@ -590,7 +590,6 @@ func TestPiston_RecordsItsInstruments(t *testing.T) {
 		}
 	}
 	for _, name := range []string{
-		"dwarf_refill_duration_seconds",
 		"dwarf_refill_query_duration_seconds",
 		"dwarf_refill_candidates_selected",
 		"dwarf_refill_candidates_discarded",

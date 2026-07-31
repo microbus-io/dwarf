@@ -227,8 +227,8 @@ func (p *Planner) Plan(shard, capacity int) Plan {
 	entries := p.snapshot()
 	globalBand, keys := merge(entries)
 
-	// An idle fleet reports -1, not math.MaxInt: LastBand's consumer labels a metric with the band, and
-	// MaxInt would publish a series named for a priority no caller can ever set.
+	// An idle fleet reports -1, not math.MaxInt: a sentinel a reader can test for beats a priority no
+	// caller can ever set, which reads as a real band and is wrong in the direction of looking valid.
 	observed := globalBand
 	if len(keys) == 0 {
 		observed = -1
@@ -248,9 +248,10 @@ func (p *Planner) Plan(shard, capacity int) Plan {
 	return out
 }
 
-// LastBand reports the band and distinct-key count of the most recent plan, for metrics. A NEGATIVE
-// band means there is nothing to report - either nothing has been planned yet, or the last plan found
-// the fleet idle - and the caller should emit no sample rather than label one with the value.
+// LastBand reports the band and distinct-key count of the most recent plan, for a caller inspecting what
+// this planner last decided - which today is the piston's and this package's own tests. A NEGATIVE band
+// means there is nothing to report: either nothing has been planned yet, or the last plan found the fleet
+// idle. Treat that as "no answer" rather than as a band.
 func (p *Planner) LastBand() (band, keyCount int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

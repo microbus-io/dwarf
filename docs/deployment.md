@@ -126,7 +126,10 @@ eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal
 Each shard's pool derives from its `ShardSpec.VirtualCPUs`: open = **6× the database's CPU count, or 12×
 on a server of 32 vCPUs or more** (beyond that connections only queue inside the database, and on small
 servers actively harm throughput), with a warm idle core of half that. Large servers get the higher ratio
-because it is where the measured throughput knee sits with no measured increase in instability; smaller
+because it is where the measured throughput knee sits, and 32 vCPUs is the one instance size whose arms
+showed no increase in instability at it — read that as a judgement call rather than a safe/unsafe line,
+since 12× is ~6× more likely to collapse at *every* size measured and did collapse once in 14 arms at 64
+vCPUs. Smaller
 ones stay conservative because past their knee they collapse rather than plateau. An undeclared count assumes 2 vCPUs (a pool of
 12), which stays under the knee of even a 1-vCPU machine — so a zero-config engine cannot reach the
 collapse zone, but it also cannot use a large database: **declare `VirtualCPUs`.** `SetMaxOpenConns`
@@ -183,12 +186,13 @@ post-task database phase and `L` is the round-trip time it measures with a few `
 The worst shard's number wins.
 
 The pool **grows into that ceiling on demand**: it starts at a resident set sized by the connection
-budget (which is what dispatch is actually bound by) and adds a worker whenever none is free to take the
-next candidate, work is waiting, and the database still has admission capacity to spare. That last
-condition is what keeps growth from turning into contention — a worker occupies that capacity only
-across the phases that use a connection, never across the task itself, so a workload of long tasks grows
-to fit its own concurrency while a database-bound one stops growing at the point extra workers would only
-queue. Short-task deployments stay small; no knob either way.
+budget (which is what dispatch is actually bound by) and adds a worker whenever taking a candidate left
+none free. Growth stops itself under load without asking the database anything: before a worker picks up
+a candidate it waits for a turn at its shard, and a worker waiting for one is holding no work, so it
+counts as free and the next check declines to spawn. A worker takes a turn only for the calls that use a
+connection, never across the task itself, so a workload of long tasks grows to fit its own concurrency
+while a database-bound one stops growing at the point extra workers would only queue. Short-task
+deployments stay small; no knob either way.
 
 Reasons to call `SetWorkers(n)` anyway: **memory** (each in-flight step holds its state map, a size the
 engine cannot see — the ceiling can be tens of thousands), a deliberately smaller global bound, or
