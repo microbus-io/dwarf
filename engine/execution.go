@@ -65,6 +65,12 @@ func cohortLockStripe(shard, spawnStepID int) int {
 // or awaits one; the host call holds nothing. The crew wraps it in sync.OnceFunc and calls it again on the
 // way out, so every early return below is covered and a double call is a no-op.
 func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, releasePermit func()) (err error) {
+	// The ENTRY phase runs from here to the host call. Closed through the returned closure rather than at
+	// that one line, because every early return in between - a lost claim, a terminal flow, a failed load -
+	// must close it too, and a missed close leaks the count upward for the life of the process. Idempotent,
+	// so closing it explicitly at the boundary AND deferring costs nothing.
+	closeEntryPhase := e.enterDBPhase(phaseEnter)
+	defer closeEntryPhase()
 	// stepMarkedComplete is set once the step is flipped to `completed` below, before its forward
 	// progress (transitions / fan-in / flow completion) is committed in a separate transaction. If
 	// that later commit fails, the recovery defer rolls the step back so it re-dispatches.
@@ -360,6 +366,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	// function's scope would hold the permit across the persist half below, which DOES hold a connection
 	// and is deliberately gated by a debit instead.
 	releasePermit()
+	closeEntryPhase()
 	// Count what this worker holds for the duration of the host call. The window is the CALL, not this
 	// function: the carrier is live for the whole of processStep, but only here is the worker parked on
 	// something unbounded while holding no connection - which is what makes held state a memory question
@@ -403,6 +410,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	permitWaitStart := time.Now()
 	persistRelease, _ := e.permits.AcquireExit(shardNum)
 	defer persistRelease()
+	// The EXIT phase runs from here to the end of the step. One line rather than the two-sided guard entry
+	// needs, because there is no early return between this point and the function's end.
+	closeExitPhase := e.enterDBPhase(phaseExit)
+	defer closeExitPhase()
 	// Timed HERE rather than inside the permit set, which holds no metrics. Recorded on EVERY completion,
 	// not only the ones that waited: count is then completions and sum/count the mean, so the exit side
 	// becoming the constraint shows up as a shift in the distribution - where the free-permit gauge, being

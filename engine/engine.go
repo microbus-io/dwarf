@@ -206,6 +206,12 @@ type Engine struct {
 	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
 	// input, resolved at Startup.
 	workersDispatch int
+	// dbPhaseWorkers / dbPhaseWorkersPeak count how many workers are inside a metered DATABASE PHASE right
+	// now, and the high-water mark, indexed 0=enter 1=exit. See enterDBPhase for why neither is derivable
+	// from anything that already existed.
+	dbPhaseWorkers     [2]atomic.Int64
+	dbPhaseWorkersPeak [2]atomic.Int64
+
 	// shardRTTMs is each shard's round-trip time, probed once at Startup and HELD, so the worker ceiling
 	// can be re-derived whenever a shard's pool changes - the ceiling is a function of the pool.
 	shardRTTMs map[int]float64

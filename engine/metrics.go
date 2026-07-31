@@ -54,6 +54,7 @@ type engineMetrics struct {
 	stepsOffered        metric.Int64Counter
 	exitWait            metric.Float64Histogram
 	enterWait           metric.Float64Histogram
+	dbPhaseSeconds      metric.Float64Histogram
 	peerChanges         metric.Int64Counter
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
@@ -127,6 +128,14 @@ func (e *Engine) initMetrics() error {
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
 	}
+	dbPhaseSeconds, err := meter.Float64Histogram("dwarf_db_phase_seconds",
+		metric.WithUnit("s"),
+		metric.WithDescription("Wall-clock time a worker spent INSIDE a database phase, by role (enter/exit): admission to the host call for enter, the host call to the end of the step for exit. It is the phase's true residence, and it is measured rather than inferred because nothing else can supply it - the permit wait covers only the queue in FRONT of the phase, and summing a step's individual query times misses the connection wait and the Go-side work between them. Read it against dwarf_permit_enter_wait_seconds to tell a phase that is slow from one that is merely queued, and against the permit count to see whether that count is anywhere near the concurrency this workload actually needs."),
+		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10))
+	if err != nil {
+		errs = append(errs, errors.Trace(err))
+	}
+	m.dbPhaseSeconds = dbPhaseSeconds
 	m.exitWait = exitWait
 	m.enterWait = enterWait
 	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a cycle supplies only ~1.05-1.5x ahead of consumption, so partitions drain to empty between cycles) and is what keeps a sequential chain from paying a cycle per hop.")
@@ -174,6 +183,8 @@ func (e *Engine) initMetrics() error {
 	// is saturated all window without being sampled empty looks idle - dwarf_permit_exit_wait_seconds is the
 	// durable half of that pair.
 	permitsAvail := gauge("dwarf_permits_available", "Per-replica, per-shard, BY ROLE (enter/exit): database-work permits currently free. Work about to start and work being recorded draw on separate reservations, each a fixed multiple of that shard's connection pool, so neither can starve the other. It bounds how many workers may be in a step's database phases at once, which is what lets the worker crew grow for long tasks without the growth becoming pool contention. Sustained zero on a role means that half is the binding constraint - read the matching wait histogram to see how long its callers are actually queueing, since an instantaneous sample cannot tell a reservation that is saturated all window from one that is idle. Sustained near-full means neither is binding. A NEGATIVE value is only ever a live resize that shrank a ceiling below what is currently held; it self-corrects as those holders release.", "")
+	dbPhaseWorkers := gauge("dwarf_db_phase_workers", "Per-replica, BY ROLE (enter/exit): worker goroutines inside a metered database phase right now. This is the quantity that sets connection-pool pressure, and nothing else reports it - dwarf_workers_resident is the whole crew, and a worker parked in the host call still holds its candidate, so the crew's idle count cannot be differenced to get it. Read against the permit count for that role: the two should be close, and a sustained gap means the permits are not the binding constraint.", "")
+	dbPhaseWorkersPeak := gauge("dwarf_db_phase_workers_peak", "Per-replica, BY ROLE: the high-water mark of dwarf_db_phase_workers since this replica started. The instantaneous count is whatever the collection tick happened to catch; the peak is the pool pressure the phase actually reached. Monotonic within a process lifetime, so on a long-lived replica it is a lifetime watermark rather than a current signal - and the two roles peak at different moments, so they must not be summed.", "")
 	workersResident := gauge("dwarf_workers_resident", "Per-replica: worker goroutines that exist. It only ever grows (nothing retires a worker) and is bounded by the lease-margin ceiling. Read against dwarf_permits_available to tell the two long-task regimes apart: a crew far above the permit count with permits free is serving long tasks correctly, while a crew pinned at the ceiling is the one to alarm on. Sum across replicas.", "")
 	peerBlind := gauge("dwarf_peer_blind_seconds", "Per-replica, per-shard: how long since that shard's registry was last read successfully. Zero on a healthy Sonar. Past two read cadences the replica is BLIND there - it holds its last known fleet (the safe direction for pools) and stops partitioning that shard's candidates (the safe direction for work), so a nonzero value explains both at once and is the first thing to check when a shard's counts look frozen.", "s")
 	// The two in-flight state gauges are ONE reading and are near-useless apart: the quotient is the mean
@@ -196,12 +207,15 @@ func (e *Engine) initMetrics() error {
 				tallyAge:      tallyAge,
 				permitsAvail:  permitsAvail,
 				workersRes:    workersResident,
+				dbPhase:       dbPhaseWorkers,
+				dbPhasePeak:   dbPhaseWorkersPeak,
 				inFlightBytes: inFlightBytes,
 				inFlightSteps: inFlightSteps,
 			})
 		},
 		queueDepth, stepsPending, oldestAge, fairnessKeys, concurrency, peerReplicas, peerBlind, tallyAge,
 		permitsAvail, workersResident, inFlightBytes, inFlightSteps,
+		dbPhaseWorkers, dbPhaseWorkersPeak,
 	)
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
@@ -231,6 +245,8 @@ type observableGauges struct {
 	peerBlind    metric.Int64ObservableGauge
 	tallyAge     metric.Float64ObservableGauge
 	permitsAvail metric.Int64ObservableGauge
+	dbPhase      metric.Int64ObservableGauge
+	dbPhasePeak  metric.Int64ObservableGauge
 	workersRes   metric.Int64ObservableGauge
 	// The two in-flight state gauges are one reading; see their descriptions for why the quotient, not
 	// either alone, is what an operator reads.
@@ -260,6 +276,12 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	var enterBy, exitBy map[int]int64
 	if e.permits != nil {
 		enterBy, exitBy = e.permits.Snapshot()
+	}
+
+	for idx, role := range []string{phaseEnter, phaseExit} {
+		attrs := metric.WithAttributes(attribute.String("role", role))
+		o.ObserveInt64(g.dbPhase, e.dbPhaseWorkers[idx].Load(), attrs)
+		o.ObserveInt64(g.dbPhasePeak, e.dbPhaseWorkersPeak[idx].Load(), attrs)
 	}
 
 	// Peer readings, per shard: atomic reads of what each Sonar last published, so this costs no round trip
