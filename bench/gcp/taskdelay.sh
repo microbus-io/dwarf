@@ -26,7 +26,7 @@
 # The 0s arm is NOT predicted to be identical. Admission cannot bind where the candidate cache already
 # capped concurrency, but the completion path debits the same gate WITHOUT waiting, which throttles
 # admission under a completion storm and can shorten the pool's waiter queue. Read it against
-# dwarf_permits_available (printed below): sustained negative means the debit is binding, and a short-
+# dwarf_turnstile_available (printed below): sustained ZERO means admission is the binding constraint,
 # task improvement is as plausible as a null.
 #
 # CONTROLS, each earned by a corrupted campaign:
@@ -51,6 +51,18 @@
 #   MAX_OUTSTANDING (default 100000), COOLDOWN (default 30s), RTT_MAX_MS (gate, default 1.0),
 #   RTT_TRIES (default 10), RUN_ID, EXTRA (extra dwarf-bench flags).
 set -euo pipefail
+
+
+# PREFLIGHT: psql must exist. Every campaign here drops and creates its own database and gates on an idle
+# RTT probe, and BOTH go through psql - but the probe pipes stderr to /dev/null (it has to; a failed probe
+# is an ordinary outcome the gate retries). So on a host without psql the gate reads "no measurement" as
+# "RTT too high" and cools down forever, printing nothing that names the cause. Measured: a bare Debian
+# bench VM sat in that loop for 40 minutes on the first arm. Fail here instead, where the message is the
+# actual problem. provision.sh installs it; this is the guard for a host provisioned some other way.
+command -v psql >/dev/null 2>&1 || {
+  echo "ABORT: psql not found. Install it (Debian: sudo apt-get install -y postgresql-client)." >&2
+  exit 1
+}
 
 DSN="${DSN:?set DSN (one Cloud SQL instance, private IP)}"
 BENCH="${BENCH:-./dwarf-bench}"
@@ -204,7 +216,7 @@ def gauge(r, name):
 # that would be read confidently and be wrong. Admission latency (the Create call) is measured on every
 # create, and outstanding flows is what the long-task arms actually strain.
 print(f"{'delay':>6} {'n':>2} {'steps/s':>9} {'spread':>15} {'flows/s':>8} {'workers':>8} "
-      f"{'permits':>9} {'heapMB':>8} {'outstd':>8} {'admP99':>7} {'baseline':>9} {'vs base':>8}")
+      f"{'turnsAvl':>9} {'heapMB':>8} {'outstd':>8} {'admP99':>7} {'baseline':>9} {'vs base':>8}")
 means = {}
 for delay in sorted(arms, key=lambda d: (len(d), d)):
     rows = arms[delay]
@@ -215,7 +227,7 @@ for delay in sorted(arms, key=lambda d: (len(d), d)):
     heap = statistics.mean((r.get("host") or {}).get("heapAllocMB", 0) for r, _ in rows)
     outstd = statistics.mean(r.get("maxOutstandingObserved", 0) for r, _ in rows)
     adm = statistics.mean(r.get("createP99Ms", 0) for r, _ in rows)
-    perm = [gauge(r, "dwarf_permits_available") for r, _ in rows]
+    perm = [gauge(r, "dwarf_turnstile_available") for r, _ in rows]
     perm = statistics.mean(p for p in perm if p is not None) if any(p is not None for p in perm) else None
     base = BASELINE.get(delay)
     print(f"{delay:>6} {len(sp):>2} {means[delay]:>9.0f} {f'{min(sp):.0f}-{max(sp):.0f}':>15} "
@@ -240,8 +252,8 @@ Reading it:
   - long-task arms reach the 0s arm            -> throughput is independent of task duration
   - long-task arms still short, crew still small -> the crew is not growing; the gate is not the cause
   - long-task arms short with a LARGE crew     -> growth works, something else binds (check DB CPU)
-  - permits gauge sustained NEGATIVE           -> completions are suppressing admission (the storm
-                                                  signature); expect it under short tasks, not long
+  - turnstile available sustained ZERO         -> admission is saturated; expect it under short tasks,
+                                                  not long, since a task holds no turn
   - flows/s below commanded                    -> creation could not keep up; the arm measures the
                                                   generator, not the engine""")
 PY

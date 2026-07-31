@@ -24,7 +24,8 @@ import (
 )
 
 // The two database phases a worker passes through, named here only so the instrumentation below can label
-// them. The permits meter the same split; these are the OBSERVATION of it.
+// them. Nothing meters this split - the turnstile bounds database CALLS, not phases - so these are an
+// observation and nothing else.
 const (
 	phaseEnter = "enter"
 	phaseExit  = "exit"
@@ -41,7 +42,7 @@ const (
 //     it either. This is the quantity that sets connection-pool pressure, and it was invisible.
 //   - HOW LONG a phase actually takes. Measured on a 16-vCPU shard, entry residence ran to hundreds of
 //     milliseconds against ~1ms of its own database work - the rest being connection wait and Go-side work -
-//     which is not a ratio anyone would guess, and it is what says whether a permit count is anywhere near
+//     which is not a ratio anyone would guess, and it is what says whether the turn count is anywhere near
 //     the concurrency the workload really needs.
 //
 // The counts are per replica rather than per shard: a worker's phase is not shard-scoped in any way the

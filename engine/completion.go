@@ -684,9 +684,12 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// with no cohort to contend, so it takes nothing. Only this bottom level is locked; propagateCohortFailure's
 	// ancestor bumps walk UP and stay DB-serialized, which is what keeps the stripe leaf-only and cycle-free.
 	// A simple defer suffices here: nothing in this transaction or its post-commit tail re-locks the stripe.
+	//
+	// Parked on holding NO TURN, the same as the success path: every caller of this reaches it holding one,
+	// and a turn held across a mutex is the occupancy the stripe exists to remove, one level up.
 	if stepLineageID != 0 {
 		mu := &e.cohortLocks[cohortLockStripe(shardNum, stepLineageID)]
-		mu.Lock()
+		yieldHeldTurn(ctx, mu.Lock)
 		defer mu.Unlock()
 	}
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
@@ -1111,6 +1114,12 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
+
+	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
+	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
+	// and ahead of anything arriving after it.
+	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	defer doneTurn()
 
 	var flowStatus string
 	var surgraphFlowID int

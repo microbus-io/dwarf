@@ -38,10 +38,10 @@ import (
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/internal/peers"
-	"github.com/microbus-io/dwarf/internal/permits"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/internal/staterefs"
+	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/internal/workers"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -196,11 +196,11 @@ type Engine struct {
 	cache candidates.Cache
 	// crew runs processStep on the candidates it pops. The engine supplies both sizing numbers.
 	crew *workers.Crew
-	// permits bounds how many workers may be doing DATABASE work on each shard at once, which is what
-	// lets the crew grow freely for long tasks without the growth turning into pool contention. Both
-	// reservations are sized as a multiple of that shard's pool, so every path that changes a pool must
-	// re-size them - the same rule the worker ceiling, the cache and the refill interval already obey.
-	permits *permits.Set
+	// turnstiles orders access to each shard's connections by band and then by how long the job asking
+	// has been running, so that work already under way finishes ahead of work just starting. Sized at one
+	// turn per connection, so every path that changes a pool must re-size it - the same rule the worker
+	// ceiling, the cache and the refill interval already obey.
+	turnstiles *turnstile.Set
 	// drainStop is closed at the top of drainRuntime, before the crew is waited on.
 	drainStop chan struct{}
 	// workersDispatch is the resident (eagerly spawned) worker count and the candidate cache's sizing
@@ -517,13 +517,13 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	// (the fleet-change path) early-returns while the override pins the pools.
 	if e.started.Load() {
 		e.recomputeWorkerCeiling(e.lifetimeCtx)
-		// The permits are a function of the pool too, and for the same reason this path re-derives the
+		// The turnstiles are a function of the pool too, and for the same reason this path re-derives the
 		// ceiling: with an override set, recomputePools early-returns, so this is the only path left that
 		// can follow the pool. The override is an exact per-replica number and is never divided, so every
 		// shard takes the same count.
-		if e.permits != nil {
+		if e.turnstiles != nil {
 			for _, idx := range e.db.Indices() {
-				e.permits.Resize(idx, enterPermitsPerConn*n, exitPermitsPerConn*n)
+				e.turnstiles.Resize(idx, turnstilePassesPerConn*n)
 			}
 		}
 	}
@@ -716,9 +716,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)
 	e.shardsLock.Unlock()
-	// A fresh permit set per run, like the cache and the planner: counts left over from a previous
+	// A fresh turnstile set per run, like the cache and the planner: counts left over from a previous
 	// Startup would bound this one against pools it no longer has.
-	e.permits = permits.New()
+	e.turnstiles = turnstile.NewSet()
 	totalConns := 0
 	for _, idx := range e.db.Indices() {
 		db, dbErr := e.db.Shard(idx)
@@ -733,8 +733,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 			e.seams.Variable(seamsJoin(VariablePoolIdle, strconv.Itoa(idx)), idle)
 		}
 		// Sized here rather than in initRuntime because it is derived from the pool this loop just set,
-		// and the workers initRuntime starts must never see an unsized (admit-nothing) shard.
-		e.permits.Resize(idx, enterPermitsPerConn*open, exitPermitsPerConn*open)
+		// and the workers initRuntime starts must never see an unsized shard - which, this failing open,
+		// would dispatch entirely unordered rather than stalling.
+		e.turnstiles.Resize(idx, turnstilePassesPerConn*open)
 		e.lastAppliedR[idx] = replicas
 		totalConns += open
 	}
@@ -860,8 +861,23 @@ func (e *Engine) initRuntime() error {
 		// Sonar publishes, and that Sonar stamps this replica as SERVING the shard only when the piston says
 		// it is turning. Both are pure reads of live state, so neither captures anything that could go stale.
 		p.SetPartitionFunc(func() (int, int, bool) { return e.partitionOn(idx) })
+		// A cycle's two queries run in the one band above the common one. It is the piston's alone because
+		// it is the only caller that cannot flood it - it cycles on a derived period and takes two turns per
+		// cycle - and it needs to be there because candidate supply runs only 1.04-1.47x ahead of
+		// consumption: a cycle that queued behind the dispatch it feeds would starve the workers it fills for.
+		p.SetContextFunc(func(ctx context.Context) context.Context {
+			return e.turnstiles.ContextWithPriority(ctx, idx, priorityRefill)
+		})
 		if s := e.sonarFor(idx); s != nil {
 			s.SetEvidence(p.Liveness)
+			// The registry runs in the refiller's band, not outside the turnstile. Exempting it would rank
+			// it ABOVE every band - a bypasser takes a connection without queueing for one - and would put
+			// it outside the population the turn count bounds. Band 0 keeps both properties and costs it
+			// nothing: strict priority means it waits only for the NEXT turn to free rather than for the
+			// queue to drain, and it shares the band with one piston taking two turns per cycle.
+			s.SetTurnFunc(func(ctx context.Context) (context.Context, func()) {
+				return e.dbTurnAt(ctx, idx, priorityRefill)
+			})
 		}
 		if merr := p.SetMeter(e.meter); merr != nil {
 			e.logger.ErrorContext(e.lifetimeCtx, "Building piston instruments", "shard", idx, "error", merr)
@@ -880,11 +896,11 @@ func (e *Engine) initRuntime() error {
 	// a sibling worker in this replica reserved the step within the last ~second, its claim CAS may still
 	// be in flight, and the piston re-selected it because an uncommitted claim still reads `pending`, so
 	// issuing our own claim would cost a round trip to be told we lost.
-	crew, perr := workers.New(&e.cache, e.permits, func(ctx context.Context, shard, stepID int, release func()) error {
+	crew, perr := workers.New(&e.cache, e.turnstiles.Gate(priorityWorker), func(ctx context.Context, shard, stepID int, release func()) error {
 		if !e.claims.TryClaim(shard, stepID) {
 			e.metricStepClaimPreempted(ctx)
 			// Release explicitly rather than leaving it to the crew's backstop: a preempted candidate does
-			// no database work at all, so holding its permit until the callback returns would bound admission
+			// no database work at all, so holding its turn until the callback returns would bound admission
 			// on a step nobody is running.
 			release()
 			return nil
@@ -899,13 +915,13 @@ func (e *Engine) initRuntime() error {
 	// The crew measures how long entry blocked; the instrument is named here, because instrument names are
 	// a public surface and belong with the owner rather than with a package that gates anything.
 	e.crew.SetGateWaitObserver(func(shard int, waited time.Duration) {
-		e.metrics.enterWait.Record(e.lifetimeCtx, waited.Seconds(),
+		e.metrics.gateWait.Record(e.lifetimeCtx, waited.Seconds(),
 			metric.WithAttributes(attribute.String("shard", strconv.Itoa(shard))))
 	})
 	e.crew.SetLogger(e.logger)
 	e.crew.SetMax(maxWorkers)
 	// Start the resident set; the rest of the ceiling is spawned on demand whenever nobody is idle, work is
-	// waiting and a permit is free - the long-task case, where the resident set alone would cap throughput
+	// waiting and a turn is free - the long-task case, where the resident set alone would cap throughput
 	// because nobody is left to dispatch.
 	e.crew.Start(e.lifetimeCtx, resident)
 	// The pistons run on a CHILD of the lifetime ctx, because they must stop before it does: the lifetime
@@ -976,13 +992,13 @@ func (e *Engine) drainRuntime() {
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()
-	// Closing the cache releases workers parked waiting for work, and closing the permits releases those
-	// waiting on one; Drain then closes the crew to new goroutines and waits. All three halves are the
-	// crew's contract - see internal/workers. BOTH closes are required: a worker blocked on a permit is
-	// not blocked on the cache, so closing only the cache would leave the drain waiting on it forever.
+	// Closing the cache releases workers parked waiting for work, and closing the turnstiles releases
+	// those waiting for a turn; Drain then closes the crew to new goroutines and waits. All three halves
+	// are the crew's contract - see internal/workers. BOTH closes are required: a worker waiting for a
+	// turn is not blocked on the cache, so closing only the cache would leave the drain waiting forever.
 	e.cache.Close()
-	if e.permits != nil {
-		e.permits.Close()
+	if e.turnstiles != nil {
+		e.turnstiles.Close()
 	}
 	e.crew.Drain()
 	if e.recoveryStop != nil {

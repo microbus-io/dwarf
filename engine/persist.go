@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -67,7 +68,9 @@ var (
 // Returns nil when the write landed. errPersistFenced / errPersistDrained are terminal, benign, and the caller
 // simply returns. Any other error means the write kept failing and the caller must classify it - see
 // failOnPersistError.
-func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq int, write func() error) error {
+// yield hands back whatever the caller is holding for the duration of a wait that is not the database -
+// see the backoff below. Nil means the caller holds nothing.
+func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq int, write func() error, yield func(func())) error {
 	err := write()
 	if err == nil {
 		return nil
@@ -110,8 +113,24 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	}
 
 	for _, backoff := range e.persistBackoff {
-		select {
-		case <-e.drainStop:
+		// The sleep is not database work, so whatever admission the caller is holding goes back for its
+		// duration - up to ~7s across the whole ladder. Holding it would park a turn on a timer, which is
+		// the one thing the admission rule forbids, and it would do so during a database blip: exactly when
+		// the remaining turns are most contended.
+		drained := false
+		waited := func() {
+			select {
+			case <-e.drainStop:
+				drained = true
+			case <-time.After(backoff):
+			}
+		}
+		if yield != nil {
+			yield(waited)
+		} else {
+			waited()
+		}
+		if drained {
 			// Shutting down. drainStop is the ONLY signal available here: the lifetime ctx is deliberately
 			// left live until every worker has drained, so that in-flight database work always commits, which
 			// means a worker asleep in this backoff has nothing else to watch.
@@ -121,7 +140,6 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 			// happened at lease expiry anyway, only sooner.
 			e.releaseLease(ctx, db, stepID, leaseSeq)
 			return errPersistDrained
-		case <-time.After(backoff):
 		}
 		e.metricStepWriteRetried(ctx, shardNum)
 		err = write()
@@ -209,8 +227,8 @@ func sanitizeErrorMessage(msg string) string {
 // persistStep is persist plus the disposition every caller in processStep shares: a lost lease or a drain is a
 // benign no-op, lock contention goes to the recovery defer (never the classifier - terminalizing a flow because the
 // database was busy is exactly backwards), and anything else that would not land is classified.
-func (e *Engine) persistStep(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, write func() error) error {
-	err := e.persist(ctx, db, shardNum, stepID, leaseSeq, write)
+func (e *Engine) persistStep(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, write func() error, yield func(func())) error {
+	err := e.persist(ctx, db, shardNum, stepID, leaseSeq, write, yield)
 	switch {
 	case err == nil:
 		return nil
@@ -221,4 +239,19 @@ func (e *Engine) persistStep(ctx context.Context, db *sequel.DB, shardNum, stepI
 	default:
 		return errors.Trace(e.failOnPersistError(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
 	}
+}
+
+// persistYielding is persist for a caller holding a turn: it hands the turn back across the retry backoff,
+// which is a sleep rather than database work, and takes a fresh one before the next attempt.
+func (e *Engine) persistYielding(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq int, pass *turnstile.Pass, write func() error) error {
+	return e.persist(ctx, db, shardNum, stepID, leaseSeq, write, func(wait func()) {
+		yieldTurn(ctx, pass, wait)
+	})
+}
+
+// persistStepYielding is persistStep for a caller holding a turn - see persistYielding.
+func (e *Engine) persistStepYielding(ctx context.Context, db *sequel.DB, shardNum, stepID, leaseSeq, flowID int, flowToken, taskName string, pass *turnstile.Pass, write func() error) error {
+	return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, write, func(wait func()) {
+		yieldTurn(ctx, pass, wait)
+	})
 }

@@ -2296,16 +2296,17 @@ The worker count is split into two numbers, because they answer different questi
   first discarded - it pays connection setup); a failed probe falls back to the measured same-zone
   constant. Every input is engine-visible - **no task duration T anywhere**, which is exactly what makes
   this derivable where `N = M x T/db` is not.
-- **`permits` (how many workers may be doing DATABASE work on a shard at once)** = two separate
-  reservations, `enterPermitsPerConn x open` and `exitPermitsPerConn x open` (8 and 12). This is the gate
-  that lets the crew grow freely for long tasks without the growth turning into pool contention, and the
-  ENTER side is what regulates crew growth, by blocking rather than by being consulted. See
-  "Database-phase permits" below.
+- **`turnstiles` (how many database calls may be admitted on a shard at once)** = `turnstilePassesPerConn x
+  open`, eight turns per connection - deliberately MORE than the pool, so a queue forms in front of it (see
+  "Turn-taking on the database"; sizing it to the pool measured a 6x collapse). This is what lets the crew grow freely for long tasks without the
+  growth turning into pool contention, and the turn taken BEFORE a candidate is picked up is what regulates
+  crew growth - by blocking, not by being consulted. See "Turn-taking on the database" below.
 
 - **The pool grows on demand** (`internal/workers`): a worker that takes a candidate and finds **nobody
-  idle** adds one, keeping a standing reserve of one. The permit is what makes so easy a trigger safe — but
-  by BLOCKING, not by being queried: a worker waiting for a permit holds no candidate, so it counts idle and
-  the next check declines. The two are a single design and neither is separately tunable.
+  idle** adds one, keeping a standing reserve of one. The gate's turn is what makes so easy a trigger safe —
+  but by BLOCKING, not by being queried: a worker waiting for a turn has not popped, so it holds no
+  candidate, so it counts idle and the next check declines. The two are a single design and neither is
+  separately tunable.
 
   **DO NOT gate growth on every worker being simultaneously inside `ExecuteTask`.** That is a *sufficient*
   condition for "a replacement adds capacity" and nowhere near a necessary one, and the gap is quantifiable:
@@ -2324,14 +2325,14 @@ The worker count is split into two numbers, because they answer different questi
   connection - makes saturation read as idleness, so any DB-bound backlog grows the pool toward the ceiling
   with each new worker queueing on the same connections: **~20% throughput on a saturated 8-vCPU shard
   (2,902 vs 3,523 steps/s), ~1,300 workers where ~512 sufficed.** The crew maintains its own idleness
-  counter; what the caller owns is *when the permit is released*, backstopped by `sync.OnceFunc` plus an
+  counter; what the caller owns is *when the turn is returned*, backstopped by `sync.OnceFunc` plus an
   unconditional call, so a leak is unreachable rather than merely detected.
 
   Both directions stay pinned - `TestPoolSizing_PoolGrowsForLongTasks` and
   `TestPoolSizing_SaturationDoesNotGrowThePool`, the second being the one whose absence let the runaway ship.
   Shutdown is the crew's two-phase `Drain`, and the engine's half is closing the CACHE **and the PERMITS**
   first: a worker with nothing to run is parked on one of them, and only a close releases it. Closing the
-  cache alone leaves any worker blocked on a permit unreachable and `Drain` waits forever. See
+  cache alone leaves any worker waiting for a turn unreachable and `Drain` waits forever. See
   `internal/workers/CLAUDE.md`.
 - **`SetWorkers` pins the maximum** (deterministic tests use `SetWorkers(1)`, which also disables growth;
   benchmark sweeps; hosts wanting a smaller global bound, e.g. for memory - the in-flight state maps are
@@ -2346,173 +2347,142 @@ belongs in the host's `ExecuteTask` (a semaphore keyed on the real provider/acco
 when the downstream says no. The engine sizes workers for throughput, bounded only by what it can see:
 the lease margin.
 
-### Database-phase permits (`internal/permits`) — gate the PHASE, not the step
+### Turn-taking on the database (`internal/turnstile`) — order the wait, do not remove it
 
-**Gate the phases that hold a connection, and gate ADMISSION by blocking while gating COMPLETION by
-debit.** A worker's time splits into three regimes that want opposite policies:
-
-- **pre-task** (claim CAS, step read, flow/graph load) — holds or awaits a connection. New work, so it can
-  and should wait.
-- **the host call** (`ExecuteTask`) — holds no connection. Must be unbounded; this is the long-task case.
-- **post-task** (persist / transitions) — holds a connection, but the task has **already run**.
+**Every database call a step makes takes a turn at its shard's turnstile, and turns are served by band and
+then by how long the JOB asking has been running.** The claim is stamped once, when the candidate is picked
+up, and rides the context (`turnstile.Set.ContextWithPriority`) so every later call of that step presents
+the same age. A step already under way is therefore older than anything admitted while its task ran, and is
+served ahead of it — work in progress finishes rather than queueing behind work just starting.
 
 ```
 park for work                       <- holding NOTHING
   -> peek: which shard has work?
-  -> ACQUIRE permit (blocking)      <- admission
-  -> TryPopFrom that partition       (empty? release, retry)
-  -> claim CAS, flow/graph load
-  -> release permit
-  -> ExecuteTask                    <- unbounded, holds nothing
-  -> DEBIT permit (never blocks)    <- may drive the count NEGATIVE
-  -> persist / transitions
-  -> restore permit
+  -> Gate.Acquire: stamp the claim, take the FIRST turn (blocking)
+  -> TryPopFrom that partition       (empty? return the turn, retry)
+  -> claim CAS                       <- the turn covers exactly this
+  -> return the turn
+  -> flow/graph load                 <- its own turn, on the same claim
+  -> ExecuteTask                     <- unbounded, holds nothing, takes no turn
+  -> persist / transitions           <- its own turn, still on the pickup-time claim
 ```
 
-**Why this is derivable where `N = M x T/db` is not.** The recorded objection to duty-cycle sizing is to
-*estimating* `T/db` — a single fitted ratio is wrong for every class of a mixed workload (5ms lookups and
-30s model calls on one crew). The permit does not estimate: it **counts occupancy exactly**, one holder per
-worker actually touching the database, at the instant it is doing so. The duration ratio then enforces
-itself as a *consequence* rather than an input — a worker sleeping 8s holds no permit, a 5ms lookup holds
-one for 5ms — so no `T` appears anywhere, measured, fitted or assumed. Same rule as `workerCeiling`: bound
-what you can see (connections, round trips, current holders), never what you cannot (task duration).
+**Sizing is `turnstilePassesPerConn = 8`, and ONE TURN PER CONNECTION IS THE TRAP.** The turnstile does not
+remove the wait for a connection, and it does not empty the pool's queue — **a caller holding a turn still
+competes for a connection, and still waits when they are all busy.** What it changes is *who gets to
+compete, and in what order*: the population at the pool is bounded by the turn count, and admission into
+that competition is by band and then by age. So pool wait is expected at saturation, and is not evidence
+of anything being wrong.
 
-**It bounds QUEUE DEPTH, not rate, and that distinction is what makes it safe.** Workers wait for
-connections *inside* the permit, so the gate's throughput self-adjusts to whatever the pool can serve; at
-`P` permits the pool's waiter queue is bounded at `max(0, P - M)`. **Do NOT re-shape this as a RATE limiter**
-(tempting, because a rate needs no release, which would delete the leak risk and the acquire/release
-asymmetry across the callback boundary). Little's law runs the wrong way: `concurrency = rate x latency`, so
-fixing the rate lets concurrency track latency — when the database slows you keep admitting at the same rate
-and concurrency *grows*, exactly backwards, while a counter fixes concurrency and lets the rate fall out,
-which self-corrects. It is also circular: the duration a rate would need is `k.RTT + server + pool wait`, and
-pool wait is the very thing being controlled.
+**Sizing turns to the connection count was measured at a 6x collapse** — 281 steps/s against 1,687 for the
+gate it replaced, at 600 flows/s on a local Postgres. With exactly as many turns as connections there are
+exactly as many candidates for one, so every gap between a turn-holder finishing and the next waiter being
+woken, scheduled and asking the pool is idle connection time, on the critical path of all ~9.6 round trips a
+step makes. **The pool queue is not waste; it is what keeps connections busy** — the same margin
+`workersPerConnBudget` deliberately keeps, reached through a different door.
 
-**The completion path takes its permit from a DEDICATED reservation, and simply blocks on it.** A worker
-returning from `ExecuteTask` has already fired its side effects and holds a lease while it waits, so it
-must never queue behind an unbounded population — but with its own reservation it queues only behind other
-completions, which are themselves finishing. The wait is therefore bounded by the shard's service rate, and
-the worst case (every in-flight task unblocking at once) is bounded by `workerCeiling`, which is derived for
-exactly that scenario. No timeout, no forcing past zero, no priority rule.
+Above 8 the returns are small and unsettled: 10x and 12x measured 1,688 and 1,734 against 8x's 1,559, with
+per-connection service time identical across all three, so what the extra multiple buys is queue depth
+rather than throughput — and those arms differed by less than the rig's own RTT drift.
 
-**Why not one pool with a rule about who wins:** both rules were measured failing. Served evenly,
-completions lose permit races at random and queue behind admission (286 of them waited a full second, with
-transactions inflating 3ms → 54ms). Served with completions preferred, **dispatch starves**: when tasks are
-instant the completion queue never empties, so admission is held off continuously and short-task throughput
-collapsed **3x** (4,416 vs 7,964 steps/s, creation itself throttled to 714 of 800 commanded flows/s).
-Separate counts remove the choice instead of answering it.
+**A turn is held for ONE CALL, and that is what the count MEANS - not what makes it small.** A turn admits
+one round trip, so the multiple is how many round trips may be queued for the pool at once, not how many
+connections exist. Do not read the measured warning that
+1x-per-connection *entry* "was the only setting that fell behind the offered flow rate" (crew at 60,765
+against 70,783) as applying here: that was one permit held across a whole entry **phase** — claim, step
+read, flow and graph load, plus the Go work between them — which is why it needed an 8x multiple. What a
+per-call turn bounds is concurrent round trips, which is exactly what a connection is.
 
-**A drain returns `!ok`, and the step records anyway** — the outcome exists nowhere but in that goroutine,
-and the release is a no-op then.
+**A pass must ENCLOSE the connection, AND NOTHING ELSE.** A query hands back a cursor that keeps holding its
+connection until it is closed, so the turn must be held until the reading is done, and a transaction takes
+one turn for the whole `Transact` rather than one per statement inside it. Equally, it must be handed BACK
+across any wait that is not the database — `yieldTurn` does that around the subgraph `LoadGraph`, the
+persist retry backoff, and the cohort stripe mutex. The stripe is the sharpest of the three: its whole
+purpose is that a losing sibling waits holding no connection, and a turn is that occupancy one level up, so
+holding one there would put a whole cohort's losers into the very queue the stripe exists to keep them out
+of. Callers holding connections without turns and
+callers holding turns without connections deadlock each other, and neither side can break the cycle. This is
+why nothing wraps `sequel.DB` — the call site is what knows when the connection is released. See
+`internal/turnstile/CLAUDE.md`.
 
-**Sizing: `enterPermitsPerConn = 8`, `exitPermitsPerConn = 12`** — the two reservations are sized
-independently, each against what actually bounds it.
+**Two bands, and the second one is the piston's alone.** `priorityRefill` (0) is above `priorityCommon` (1),
+and bands are strict — a band is exhausted before the next is looked at. The piston has it because it is the
+only caller bounded by construction (a derived period, two turns per cycle per shard), so it cannot starve
+what sits below it; and it needs it because candidate supply runs only 1.04–1.47x ahead of consumption, so a
+cycle queueing behind the dispatch it feeds starves the workers it is filling for.
 
-**The permits CAP contention, they do not eliminate it, and that is the whole objective.** A step acquires
-a connection 9–11 times, so its tail is set by how many workers contend for that pool at once. At
-saturation the waiting **relocates** rather than shrinking — measured on a 16-vCPU shard at 8s tasks, 3/5
-pays 18ms of pool wait but 588–1,459ms at the permit, while 8/12 pays 39ms of pool wait and 81–103ms at the
-permit. What the cap buys is that the contending population is **bounded at all**, rather than growing with
-the crew. Do not judge a sizing by pool wait alone; read it against the two permit-wait histograms, or a
-tighter setting will look better while simply hiding the queue somewhere else.
+**Everything else shares one band and is separated by age alone. That is a decision, not an unfinished
+state.** Age ordering cannot starve — every claim eventually becomes the oldest — while a second band given
+to any caller that can arrive faster than it is served starves the band below it. That is the shape of the
+measured collapse that killed the single-permit-pool design (below), reached through a different door.
 
-**The 20x total is a CONSEQUENCE of two independent lower bounds, not a chosen number.** It is more than
-the 8x the cache allows, and the temptation to bring it back down is exactly the trap: doing so requires
-starving a side, and each floor is set by a different mechanism.
+**DO NOT split entering and completing work into two dedicated reservations — the age ordering is what makes
+one queue safe.** Counting them separately is the obvious defence, and it is only needed if the single queue
+has to choose who wins. **Both ways of choosing were measured failing**:
 
-- **Entry ≥ 8x — the candidate cache's own bound** (it holds `8 x conns` entries, so at most that many
-  workers can hold a candidate regardless of any permit). Matching it makes permit and cache bind at the
-  same point instead of one silently shadowing the other. Below it, entry — which **is** dispatch —
-  starves: measured at 3x on 8s tasks, 588–1,459ms mean enter wait and the largest backlog of any arm
-  (83–90k outstanding vs 8/12's 62–64k).
+- **Served evenly**, completions lost at random and queued behind admission: **286 of them waited a full
+  second**, with transactions inflating 3ms → 54ms.
+- **Served with completions given precedence**, entry starved — and entry IS dispatch — so short-task
+  throughput collapsed **3x (4,416 vs 7,964 steps/s)**, with creation itself throttled to 714 of 800
+  commanded flows/s.
 
-  **A tight permit costs GOROUTINES, by Little's law and not by any growth misfire.** The wait is residence
-  time, so sustaining a rate through it needs proportionally more workers: the same runs carried **82–87k
-  workers at 3/5 against 59–62k at 8/12**, which the ~1.6s of extra per-step permit wait predicts to within
-  the measurement. Do not read a large crew here as the growth trigger over-firing — see the asymmetry
-  below for what the trigger actually does.
-- **Exit ≥ ~7/4 × entry**, because `completionRoundTrips` = 7 of a step's ~11 round trips are on the exit
-  side. Under-provision that half and it becomes the new tail: measured locally at an even 4/4, once
-  transactions inflated ~25x, roughly **half of all completions could not get a permit**.
+Ordering by job age removes the choice rather than answering it: a completing step holds an older claim than
+anything admitted while its task ran, so it wins, and no population can starve because every claim
+eventually becomes the oldest. So if completions are measurably waiting, the reading is that the shard's
+connections are saturated by work at least as old — which no split can fix, because the two populations are
+not competing for different things.
 
-2:3 tracks the 4:7 closely. Both floors are properties of *other* mechanisms, so re-derive them if the
-cache's multiple or the per-step round-trip counts ever change.
+**THE GATE'S TURN IS THE CREW'S GROWTH BRAKE, and that is its real job.** `Crew.idle` counts goroutines not
+holding a candidate, and `considerGrowth` spawns only when a take left nobody idle. A worker blocked in
+`Gate.Acquire` has not popped yet, so it counts **idle**, so growth declines. The crew overshoots a
+saturated shard by exactly one worker, and that worker is first in line for the next turn.
 
-**THE GROWTH TRIGGER NEVER ASKS THE PERMITS ANYTHING.** `Crew.idle` counts goroutines *not holding a
-candidate*, and `considerGrowth` spawns only when a take left nobody idle — so the permits regulate growth
-by BLOCKING, not by reporting:
+**Do NOT move the gate's turn after the pop.** Two things break at once, and the first is severe:
 
-- **Blocked in `AcquireEnter`** — has not popped yet, so it counts **idle**, so growth declines. The crew
-  overshoots a saturated entry by exactly one worker, and that worker is first in line for the next permit.
-- **Blocked in `AcquireExit`** — holds its candidate from pop through `ExecuteTask` and persist, so it
-  counts **busy**. Exit pressure is invisible to `idle`.
+- **The crew runs away.** A worker that pops first and then blocks *holds* a candidate, so it counts busy,
+  so every take spawns a peer, bounded only by `workerCeiling` — which is derived deliberately huge for long
+  tasks. Measured by removing the wait from `Gate.Acquire`: the crew went **64 → 398** under saturation.
+  Pinned by `TestPoolSizing_SaturationDoesNotGrowThePool` and `TestCrew_SaturationDoesNotGrowThePool`, both
+  of which fail against a gate that does not wait.
+- **A candidate is stranded.** Work not yet taken is still visible to every other worker; taking it first
+  and blocking afterwards parks it inside a worker that cannot proceed with it, while the pop is what empties
+  the partition its peers are choosing between.
 
-**That exit blindness is real and is deliberately left open**, because the exit side is a *turnstile*, not
-a sink: a permit is held only for the persist phase. At 8/12 on a 16-vCPU shard that is 1,152 permits
-against a measured 43–47ms persist, ≈25,600 completions/s of capacity, and the campaign's `inTx` (concurrent
-transactions, by Little's law) read **303–321 — about 26% utilisation**. Exits queue in bursts (tasks that
-start together finish together, so `exitWait` reached 99–1,133ms), but the reservation cannot *bind* without
-the database write path itself having stopped. Growing into it therefore cannot produce the stall the
-blindness would otherwise permit.
+**Per shard, resolved by peek-then-acquire.** Connections are per shard, so turnstiles must be — but the pop
+is what chooses the partition, so the shard is not known until after a pop, which is the ordering above
+rules out. Hence: peek the shard, acquire, then pop **from that partition only**, returning the turn and
+retrying on a lost race. **Do NOT make the turnstiles GLOBAL** — that is the removed rate valve's error, a
+control keyed on the wrong resource: one shard's work would consume every turn and deepen exactly the pool
+queue this exists to keep empty.
 
-**A `permits.Available` reporting both reservations was built to close this, and removed.** It keyed on an
-*instantaneous* zero while the thing it proxied for is a *duration*, so at 26% mean utilisation with bursty
-completions it would have throttled growth routinely — in precisely the long-task regime where the crew must
-reach ~48,000. It also forced this package to summarise itself for a consumer that cannot know what it
-meters, and the natural summary is inverted: free ENTER permits are *anti-correlated* with health once exits
-are the constraint, since they are free because nothing is getting out. **Do not rebuild it.** If exit
-pressure is ever shown to bind, the signal is a sustained exit WAIT, and the bar is the same one every
-control loop here has had to clear.
+**Everything that takes a connection should take a turn.** A bypasser competes for connections without
+having queued for the right to, so it is served ahead of turn-holders that are older than it - which is
+precisely the ordering this exists to impose. It also puts the contending population back above the turn
+count. Anything still unstamped (peer beats, the reaper, recovery sweeps, the operation API) runs unordered
+by fail-open, which is the safe direction but is not the finished state.
 
-**Do NOT starve the enter side to feed the exit side.** Blocking on entry is what stops growth, so that
-reservation is what lets the crew grow at all — on the single-pool ladder, squeezing entry to 1x per
-connection left the crew at 60,765 workers against 70,783, and it was the only setting that fell behind the
-offered flow rate.
+**Fail open, and note the asymmetry with what it replaced.** An unstamped context, an unsized shard, an
+expired ctx and a closed set all let the caller through with a zero pass. **Do not "harden" this into
+failing closed.** A gate whose bound *is* the point must fail closed; this one only orders access to
+something the pool already bounds, so refusing to run would wedge a shard over a sizing mistake while
+letting it through merely costs ordering. The consequence to hold in mind is that a sizing mistake is
+therefore **silent**, visible only as ordering that is not happening.
 
-**Two things the ratio does NOT do, so do not argue from either.** It does not stop the backlog runaway at
-saturation — 2x entered it once in three runs, exactly as 8x did (a short-task arm at a saturating rate
-read 2,373 steps/s against 8,000 commanded, with `CPU:running` jumping 7% → 54% and pending exploding past
-50,000). And it cannot bound total database concurrency, because the **completion path debits without
-waiting**: under short tasks the exiting workers alone reached **651 concurrent persisters against 96
-permits**, so admission governs a minority of contenders in exactly the regime that queues hardest. The
-irreducible term is `completion rate x persist duration`, and only the second factor responds to this knob.
-
-**The 0s-delay arm is NOT a pure no-op, and do not treat a change there as a regression by itself.** The
-admission half cannot bind where cache capacity already did, but the **debit** half is live at every task
-duration: under short tasks every worker cycles acquire → release → debit → restore continuously, so persist
-load can drive the count negative and throttle admission — which shortens the pool's waiter queue. That is a
-real mechanism with a real sign, and pool wait is known to rate-limit the refiller, so a short-task
-*improvement* is as plausible an outcome as a null. Read the arm against `dwarf_permits_available`
-(sustained negative = the debit is binding) rather than assuming which way it should move.
-
-**Per shard, resolved by peek-then-acquire.** Connections are per shard, so permits must be — but the pop is
-what chooses the partition, so the shard is not known until after a pop, which is the ordering the design
-rejects (a permit must never be held across a blocking pop, and a popped-then-blocked candidate is stranded
-inside a worker that cannot run it). Hence: peek the shard, acquire, then pop **from that partition only**,
-releasing and retrying on a lost race. **Do NOT make the permits GLOBAL** — that is the removed rate valve's
-error, a control keyed on the wrong resource: one shard's work would consume every permit and deepen exactly
-the pool queue permits exist to protect.
-
-**Every path that changes a pool must re-size the permits**, the same standing rule the worker ceiling, the
-cache and the refill interval obey: `Startup`, `recomputePools`, and `SetMaxOpenConns` (the last is not
+**Every path that changes a pool must re-size the turnstiles**, the same standing rule the worker ceiling,
+the cache and the refill interval obey: `Startup`, `recomputePools`, and `SetMaxOpenConns` (the last is not
 optional — once an override is set `recomputePools` early-returns, so it is the only path left). `Resize`
-moves the available count by the **delta**, never to the new ceiling, or an in-flight holder's permit would
-be handed out twice.
+moves the available count by the **delta**, never to the new ceiling, or an in-flight holder's turn would be
+handed out twice.
 
-**Known watch-item: head-of-line blocking across shards.** If shard S's permits are exhausted, a worker
-blocks on S while shard T sits with work and free permits — the one place this design can idle capacity it
-already has. It is self-balancing with many workers, so this is a watch-item rather than a blocker, and it
-is roughly no worse than an ungated crew (those workers would instead be queued on S's connections).
-
-**It has a second facet that is easy to miss: it suppresses GROWTH too.** A worker blocked in `Acquire`
-counts as *idle* to the crew, which is right same-shard (it proceeds the moment a permit frees) and wrong
-across shards — so while S is exhausted, `considerGrowth` sees a non-zero idle count and declines to spawn
-for T even when T has both work and free permits. So the cost is not only the blocked workers; it is also
-that the crew stops growing for the healthy shard.
-
-The cheap mitigation, if it ever binds: take the permit **non-blockingly** first, and on failure re-peek for
-a shard with capacity before falling back to a blocking acquire. That needs a non-blocking `Acquire` variant
-on the permit set, which is not there today — do not add one speculatively; add it with the re-peek that
-uses it.
+**Known watch-item: head-of-line blocking across shards.** If shard S's turns are exhausted, a worker blocks
+on S while shard T sits with work and free turns — the one place this design can idle capacity it already
+has. It is self-balancing with many workers, so this is a watch-item rather than a blocker, and it is
+roughly no worse than an ungated crew (those workers would instead be queued on S's connections). It has a
+second facet that is easy to miss: a worker blocked in `Acquire` counts *idle* to the crew, which is right
+same-shard and wrong across shards — so while S is exhausted, `considerGrowth` declines to spawn for T even
+when T has both work and free turns. The cheap mitigation, if it ever binds, is a non-blocking acquire plus
+a re-peek for a shard with capacity; that variant does not exist today, and **do not add it speculatively —
+add it with the re-peek that uses it.**
 
 **New-flow placement is capacity-weighted (`pickShard`).** Placement is the engine's only load-balancing
 moment - flows are shard-pinned for life (subgraph affinity, thread continuations, forks) - so heterogeneous
@@ -2776,7 +2746,8 @@ load-bearing.** Two atomics on the Engine, bracketed in `processStep` around the
 - **The window is the HOST CALL, not `processStep`.** The carrier is live for the whole function, but only
   across the host call is a worker parked on something unbounded while holding no connection - which is what
   makes held state a memory question rather than a throughput one. The bracket is explicit rather than
-  deferred, for the same reason `releasePermit` is: a function-scoped defer would span the persist half. It
+  deferred, for the same reason the gate's turn is returned explicitly: a function-scoped defer would span
+  the persist half. It
   is safe unbracketed by a defer because `errors.CatchPanic` converts a host panic into a return rather than
   unwinding past it. Pinned by `TestMetrics_InFlightStateGauges`, whose after-release assertion fails against
   a missing subtraction (measured: 8,204 bytes still held).
@@ -2796,7 +2767,7 @@ load-bearing.** Two atomics on the Engine, bracketed in `processStep` around the
   distinguish "we removed the expansion" from "we did less work".
 
 They also close a blind spot that predates any of this: `SetWorkers`' own rationale concedes that "the
-in-flight state maps are a cost the engine cannot see", and the permits let the crew grow to thousands of
+in-flight state maps are a cost the engine cannot see", and the turnstile lets the crew grow to thousands of
 goroutines for long tasks - so held state x crew size is a memory ceiling nothing else reports.
 
 **The gauges are of two kinds and they aggregate differently - do not paper over this.** `queue_depth`,
@@ -3044,7 +3015,7 @@ design carried, where a `wakeTimer` send could race a close and panic a worker m
 ```
 close(reconcileStop); reconcileWorker.Wait() // in-memory only: nothing in flight to wait for
 closeMetrics()                               // the gauge callback must not query a closing database
-cache.close(); permits.Close()               // BOTH: a worker parks on one or waits on the other
+cache.close(); turnstiles.Close()            // BOTH: a worker parks on one or waits on the other
 workers.Wait()
 close(timerStop);    timerWorker.Wait()
 close(recoveryStop); recoveryWorker.Wait()

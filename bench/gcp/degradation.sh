@@ -35,6 +35,18 @@
 #   CHECKPOINTS (space-separated, overrides the axis ladder), WIDTH/KEYS (axis F shape).
 set -euo pipefail
 
+
+# PREFLIGHT: psql must exist. Every campaign here drops and creates its own database and gates on an idle
+# RTT probe, and BOTH go through psql - but the probe pipes stderr to /dev/null (it has to; a failed probe
+# is an ordinary outcome the gate retries). So on a host without psql the gate reads "no measurement" as
+# "RTT too high" and cools down forever, printing nothing that names the cause. Measured: a bare Debian
+# bench VM sat in that loop for 40 minutes on the first arm. Fail here instead, where the message is the
+# actual problem. provision.sh installs it; this is the guard for a host provisioned some other way.
+command -v psql >/dev/null 2>&1 || {
+  echo "ABORT: psql not found. Install it (Debian: sudo apt-get install -y postgresql-client)." >&2
+  exit 1
+}
+
 AXIS="${1:?usage: degradation.sh A|B|F}"
 DSN="${DSN:?set DSN}"
 BENCH="${BENCH:-./dwarf-bench}"

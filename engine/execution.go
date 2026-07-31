@@ -29,6 +29,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
+	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -59,12 +60,17 @@ func cohortLockStripe(shard, spawnStepID int) int {
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
 //
-// releasePermit hands back the admission permit the crew took on this worker's behalf. It is called on
-// exactly one line - immediately before the host's ExecuteTask - because that is where this worker stops
-// competing for a database connection. Everything before it (claim CAS, step read, flow/graph load) holds
-// or awaits one; the host call holds nothing. The crew wraps it in sync.OnceFunc and calls it again on the
-// way out, so every early return below is covered and a double call is a no-op.
-func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, releasePermit func()) (err error) {
+// THE CTX CARRIES THIS JOB'S PLACE IN LINE, stamped by the crew's gate at the moment the candidate was
+// picked up, and every database call below takes its turn on it (turnstile.WaitTurn). Because the stamp is
+// the pickup time and never moves, a step already under way outranks one just starting - which is what
+// makes a step that has begun finish rather than queue behind newly-admitted work.
+//
+// returnGateTurn hands back the turn the crew took on this worker's behalf. It is released as soon as the
+// claim CAS is done, because that is the only database work it was ever covering: the calls after it take
+// their own turns, and holding one turn across the whole entry phase would bound admission by phases
+// rather than by round trips. The crew wraps it in sync.OnceFunc and calls it again on the way out, so
+// every early return below is covered and a double call is a no-op.
+func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, returnGateTurn func()) (err error) {
 	// The ENTRY phase runs from here to the host call. Closed through the returned closure rather than at
 	// that one line, because every early return in between - a lost claim, a terminal flow, a failed load -
 	// must close it too, and a missed close leaks the count upward for the life of the process. Idempotent,
@@ -214,6 +220,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 			}
 		}
 	}
+	// The gate's turn covered the claim CAS and nothing after it. Handing it back here rather than at the
+	// host call keeps a turn worth one round trip rather than a whole phase, so the turn count means
+	// concurrent round trips: everything below takes its own turn on this job's own place in line.
+	returnGateTurn()
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -242,10 +252,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	var flowFairnessKey string
 	var flowFairnessWeight float64
 	var flowTimeBudgetMs int
+	flowPass := turnstile.WaitTurn(ctx)
 	err = db.QueryRowContext(ctx,
 		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=?",
 		flowID,
 	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs)
+	flowPass.Return()
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -260,10 +272,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	e.metricStateReadBytes(ctx, workflowURL, "subgraph_result", len(subgraphResultJSON))
 
 	if flowStatus == workflow.StatusCancelled || flowStatus == workflow.StatusFailed || flowStatus == workflow.StatusCompleted {
+		reapPass := turnstile.WaitTurn(ctx)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
 			flowStatus, parkedNone, stepID,
 		)
+		reapPass.Return()
 		return errors.Trace(err)
 	}
 
@@ -275,7 +289,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		parsed := &workflow.Graph{}
 		err = json.Unmarshal(graphJSON, parsed)
 		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+			// Its own turn: this is the entry phase, so the persist turn that covers every LATER failStep
+			// does not exist yet, and failStep runs a whole transaction. Without it the two failure paths
+			// would disagree about whether failing a step is ordered work.
+			fctx, doneTurn := e.dbTurn(ctx, shardNum)
+			err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+			doneTurn()
 			return errors.Trace(err)
 		}
 		// Derive the fan-in routing map once per flow and cache it with the graph; it is not persisted.
@@ -296,9 +315,20 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	// fields arrived as refs (and so must be carried, never re-anchored against this step). resolveStateRefs
 	// mutates the state map in place, so it gets the live backing map.
 	inheritedRefs := staterefs.Parse(stateRefsJSON)
+	// A turn of its own, and only when this step actually carries a ref: resolving reads anchor rows, but
+	// with nothing to resolve it touches no connection, so a step with no refs must not queue for a turn it
+	// would not use. Most steps carry none.
+	var refsPass turnstile.Pass
+	if len(inheritedRefs) > 0 {
+		refsPass = turnstile.WaitTurn(ctx)
+	}
 	refBytes, err := e.resolveStateRefs(ctx, db, shardNum, state, inheritedRefs, nil, workflowURL)
+	refsPass.Return()
 	if err != nil {
-		err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		// Its own turn, for the reason above: still the entry phase, so nothing covers this transaction.
+		fctx, doneTurn := e.dbTurn(ctx, shardNum)
+		err = e.failAndReturn(fctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
+		doneTurn()
 		return errors.Trace(err)
 	}
 	priorChanges, _ := workflow.NewState(priorChangesJSON)
@@ -360,17 +390,16 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		taskCtx, cancel = context.WithTimeout(taskCtx, time.Duration(timeBudgetMs)*time.Millisecond)
 		defer cancel()
 	}
-	// Hand the admission permit back: from here to the end of ExecuteTask this worker holds no database
-	// connection, so continuing to hold a permit would bound admission on a worker that is not competing
-	// for anything. This is the one line the release belongs on, and it is not deferred - a defer at this
-	// function's scope would hold the permit across the persist half below, which DOES hold a connection
-	// and is deliberately gated by a debit instead.
-	releasePermit()
+	// Belt and braces on the gate's turn, which was handed back at the claim CAS: this is the last line
+	// before the worker stops competing for a connection at all, so an early return between the two that
+	// somehow skipped it is caught here. The crew wraps the release in sync.OnceFunc, so the repeat costs
+	// nothing.
+	returnGateTurn()
 	closeEntryPhase()
 	// Count what this worker holds for the duration of the host call. The window is the CALL, not this
 	// function: the carrier is live for the whole of processStep, but only here is the worker parked on
 	// something unbounded while holding no connection - which is what makes held state a memory question
-	// rather than a throughput one. Bracketed rather than deferred for the same reason releasePermit is
+	// rather than a throughput one. Bracketed rather than deferred for the same reason returnGateTurn is
 	// not deferred; the release is safe unbracketed because CatchPanic converts a host panic into a return
 	// rather than unwinding past it, and a runtime throw takes the process with it either way.
 	//
@@ -393,32 +422,40 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	})
 	e.inFlightStateBytes.Add(-heldBytes)
 	e.inFlightStateSteps.Add(-1)
-	// The task has now RUN. Everything below records that fact, and it holds a connection to do so - so the
-	// persist half takes a permit from the EXIT reservation, which nothing entering a step can draw on.
+	// The task has now RUN. Everything below records that fact, and it holds a connection to do so, so it
+	// takes a turn like every other database call - but on THIS job's claim, stamped when the candidate was
+	// picked up and unchanged since. That is what keeps a finishing step ahead of a starting one: this
+	// job is by now older than anything admitted while its task ran, so it outranks them without any rule
+	// saying so.
 	//
-	// That dedication is what lets this simply block. Sharing one pool between the two populations forces a
-	// choice about who wins, and both answers were measured failing: served evenly, completions lose at
-	// random and queue behind admission; served with completions preferred, dispatch starves and short-task
-	// throughput collapses 3x. With its own reservation a completion waits only behind other completions,
-	// which are themselves finishing, so the wait is bounded by the shard's own service rate - and what
-	// bounds the worst case (every in-flight task unblocking at once) is workerCeiling, not this permit.
+	// A DEDICATED RESERVATION FOR COMPLETIONS IS WHAT THIS REPLACES, and the age ordering is why none is
+	// needed. Sharing one pool between the two populations used to force a choice about who wins, and both
+	// answers were measured failing: served evenly, completions lose at random and queue behind admission
+	// (286 of them waiting out a full 1s budget); served with completions preferred, dispatch starves and
+	// short-task throughput collapsed 3x (4,416 vs 7,964 steps/s). Ordering by age answers it without a
+	// rule, and without either population being able to starve - every claim eventually becomes the oldest.
 	//
-	// !ok means the engine is DRAINING, and the work is recorded anyway: the outcome exists nowhere but in
-	// this goroutine, and the release is a no-op then, so the deferred call is safe either way. The release
-	// is mandatory and has no crew-side backstop (unlike the entry permit, which the crew re-releases on the
-	// way out): a lost one shrinks this shard's exit reservation permanently.
-	permitWaitStart := time.Now()
-	persistRelease, _ := e.permits.AcquireExit(shardNum)
-	defer persistRelease()
+	// A turn is never refused, so a drain records the work anyway: the outcome exists nowhere but in this
+	// goroutine. The return is still mandatory - a lost one shrinks this shard's ceiling permanently - and
+	// has no crew-side backstop, the gate's turn having been handed back long ago.
+	turnWaitStart := time.Now()
+	persistPass := turnstile.WaitTurn(ctx)
+	// Through a CLOSURE, not `defer persistPass.Return()`: the pass is handed back and re-taken around every
+	// wait below that is not the database (yieldTurn), so the deferred call has to see whichever pass is
+	// current at the end, not the one that existed when the defer was written.
+	defer func() { persistPass.Return() }()
+	// Publish it, so a callee that must park on something other than the database - failStep on the cohort
+	// stripe - can hand it back without it being threaded through every signature in between.
+	ctx = withHeldTurn(ctx, &persistPass)
 	// The EXIT phase runs from here to the end of the step. One line rather than the two-sided guard entry
 	// needs, because there is no early return between this point and the function's end.
 	closeExitPhase := e.enterDBPhase(phaseExit)
 	defer closeExitPhase()
-	// Timed HERE rather than inside the permit set, which holds no metrics. Recorded on EVERY completion,
+	// Timed HERE rather than inside the turnstile, which holds no metrics. Recorded on EVERY completion,
 	// not only the ones that waited: count is then completions and sum/count the mean, so the exit side
-	// becoming the constraint shows up as a shift in the distribution - where the free-permit gauge, being
+	// becoming the constraint shows up as a shift in the distribution - where the free-turn gauge, being
 	// instantaneous, can miss a reservation that was saturated all window without being sampled empty.
-	e.metrics.exitWait.Record(ctx, time.Since(permitWaitStart).Seconds(),
+	e.metrics.turnWait.Record(ctx, time.Since(turnWaitStart).Seconds(),
 		metric.WithAttributes(attribute.String("shard", strconv.Itoa(shardNum))))
 
 	if execErr == nil && e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultExecuteTask, taskName)) {
@@ -528,7 +565,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		var subgraphGraph *workflow.Graph
 		lerr := errors.CatchPanic(func() error {
 			var e2 error
-			subgraphGraph, e2 = e.host.LoadGraph(loadCtx, subgraphURL)
+			// The host call holds no connection and is unbounded, so the turn goes back for its duration -
+			// otherwise one slow LoadGraph per worker parks the shard's turns on something that is not the
+			// database at all.
+			yieldTurn(ctx, &persistPass, func() {
+				subgraphGraph, e2 = e.host.LoadGraph(loadCtx, subgraphURL)
+			})
 			return e2
 		})
 		if lerr == nil && e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultLoadGraph, subgraphURL)) {
@@ -692,7 +734,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	// absorbed with zero re-execution, and a write that will never land is classified and terminalized rather
 	// than left to lease recovery, which would re-execute the task every `budget + leaseMargin`, forever.
 	var stepRowsAffected int64
-	err = e.persist(ctx, db, shardNum, stepID, leaseSeq, func() error {
+	err = e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
 		// FaultPersistErr makes this write fail with a synthetic NON-contention error, consumed per attempt -
 		// so InjectN(1) is a transient blip the retry must absorb with NO re-execution, and InjectN(large) is a
 		// permanent failure the classifier must terminalize rather than loop on.
@@ -768,7 +810,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 		fanInOfSource = cg.fanIn.For(taskName)
 	}
 	if isFanOutSource && fanInOfSource != "" && (cohortSize == 0 || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
-		return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
+		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
 			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 		})
 	}
@@ -783,7 +825,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 				errors.New("fan-out source '%s' is inside a cohort but has no fan-in node to converge on", taskName),
 				taskName)
 		}
-		return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
+		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
 			return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
 		})
 	}
@@ -803,7 +845,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 				errors.New("task '%s' is inside a fan-out cohort but matched no onward transition; every branch must reach a fan-in node", taskName),
 				taskName)
 		}
-		return e.persistStep(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, func() error {
+		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
 			return e.completeFlowSequential(ctx, shardNum, flowID, flowToken, workflowURL)
 		})
 	}
@@ -904,14 +946,18 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, rele
 	var cohortMu *sync.Mutex
 	if fanInArrivals > 0 && cohortSpawnID != 0 {
 		cohortMu = &e.cohortLocks[cohortLockStripe(shardNum, cohortSpawnID)]
-		cohortMu.Lock()
+		// Park on the stripe holding NO turn. The stripe exists precisely so a losing sibling waits without
+		// occupying a connection, and a turn is that occupancy one level up - holding one here would put a
+		// whole cohort's losers into the turnstile, which is the queue the stripe was built to keep them
+		// out of. Yielding restores the property the stripe is for.
+		yieldTurn(ctx, &persistPass, cohortMu.Lock)
 		defer func() {
 			if cohortMu != nil {
 				cohortMu.Unlock()
 			}
 		}()
 	}
-	err = e.persist(ctx, db, shardNum, stepID, leaseSeq, func() error {
+	err = e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
 		return db.Transact(ctx, func(tx *sequel.Tx) error {
 			newStepIDs = newStepIDs[:0]
 			flowFailed = false

@@ -74,16 +74,20 @@ type ProcessFunc func(ctx context.Context, shard, stepID int, release func()) er
 // Gate bounds how many goroutines may be working against whatever resource actually binds. The crew treats
 // it opaquely: take a permit before removing work from the cache, hand it back when the handler says so.
 //
-// AcquireEnter blocks, and reports !ok only when the gate CLOSES - one of the two stop signals. The crew
-// only ever ENTERS: whatever the gate does for work on its way out is the handler's business, not the
-// crew's.
+// Acquire blocks, and reports !ok only when the gate CLOSES - one of the two stop signals. The crew only
+// ever ENTERS: whatever the gate does for work on its way out is the handler's business, not the crew's.
+//
+// It returns a context, which the crew passes to the handler in place of the one it was given. That is how
+// a gate that carries per-unit-of-work state - an admission time, a band, whatever identifies this work to
+// the resource - gets it to the handler without the crew knowing any of it exists. A gate with nothing to
+// add returns the context unchanged.
 //
 // One method, and no capacity query, is the whole interface on purpose. The crew never asks whether the
 // gate has room; it lets a worker BLOCK and reads that instead, because a worker waiting for a permit holds
 // no candidate and so counts idle - which stops growth at its own next check. Saturation therefore needs no
 // reporting, and a gate that meters more than one thing needs no say in how it is summarised.
 type Gate interface {
-	AcquireEnter(shard int) (release func(), ok bool)
+	Acquire(ctx context.Context, shard int) (gated context.Context, release func(), ok bool)
 }
 
 // Crew is a grow-on-demand set of goroutines draining one candidate cache through one gate.
@@ -111,7 +115,7 @@ type Crew struct {
 	// states it covers is a worker that will take the next candidate without help, so none is a reason to
 	// add another goroutine:
 	//   - parked in WaitForWork,
-	//   - blocked in the gate's Acquire (it proceeds the moment a permit frees),
+	//   - blocked in the gate's Acquire (it proceeds the moment the gate lets it),
 	//   - SPAWNED BUT NOT YET RUNNING. spawn increments this BEFORE the goroutine exists, and it must:
 	//     counting only the park makes a freshly-started crew read as fully committed for the instant
 	//     before its workers reach it, so Start itself trips the trigger and over-spawns.
@@ -121,7 +125,7 @@ type Crew struct {
 	// connection - makes saturation read as idleness: measured at ~20% throughput on a saturated 8-vCPU
 	// shard (2,902 vs 3,523 steps/s), with ~1,300 goroutines where ~512 sufficed.
 	idle atomic.Int32
-	// gateWait is an optional observer of how long AcquireEnter blocked. A pointer-to-func in an atomic so
+	// gateWait is an optional observer of how long Acquire blocked. A pointer-to-func in an atomic so
 	// it can be set before Start without a lock and read on the hot path without one; nil means unset.
 	gateWait atomic.Pointer[func(shard int, waited time.Duration)]
 	// spawnLock guards spawnClosed and the resident count against the WaitGroup.Add inside spawn, so the
@@ -174,7 +178,7 @@ func (c *Crew) Resident() int { return int(c.resident.Load()) }
 func (c *Crew) Idle() int { return int(c.idle.Load()) }
 
 // SetLogger sets the logger. Nil restores the discarding default.
-// SetGateWaitObserver registers a callback invoked with how long each successful AcquireEnter blocked. It
+// SetGateWaitObserver registers a callback invoked with how long each successful Acquire blocked. It
 // is optional and unset by default (the crew emits no metrics - instrument names are a public surface, so
 // they belong to the owner), and it is called on EVERY acquire including the uncontended ones, so an
 // observer that counts sees acquires and one that sums sees the mean.
@@ -302,7 +306,7 @@ func (c *Crew) work(ctx context.Context) {
 			return // the cache closed
 		}
 		gateStart := time.Now()
-		release, ok := c.gate.AcquireEnter(shard)
+		gated, release, ok := c.gate.Acquire(ctx, shard)
 		if !ok {
 			return // the gate closed: draining
 		}
@@ -328,7 +332,7 @@ func (c *Crew) work(ctx context.Context) {
 		// call on the way out makes that leak unreachable rather than merely unlikely.
 		once := sync.OnceFunc(release)
 		err := errors.CatchPanic(func() error {
-			return c.process(ctx, j.Shard, j.StepID, once)
+			return c.process(gated, j.Shard, j.StepID, once)
 		})
 		once()
 		if err != nil {

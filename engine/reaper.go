@@ -62,6 +62,10 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 func (e *Engine) reapDueFlows(ctx context.Context) {
 	const reapBatch = 4096
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
+		// connections like any other caller instead of taking them from work already under way.
+		ctx, doneTurn := e.dbTurn(ctx, shard)
+		defer doneTurn()
 		for {
 			select {
 			case <-e.reaperStop:

@@ -113,6 +113,10 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 	var failures []error
 	// OnEach visits every open shard; the ones holding none of these keys return immediately.
 	_ = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
+		// connections like any other caller instead of taking them from work already under way.
+		ctx, doneTurn := e.dbTurn(ctx, shard)
+		defer doneTurn()
 		wanted := byShard[shard]
 		if len(wanted) == 0 {
 			return nil

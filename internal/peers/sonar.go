@@ -177,6 +177,8 @@ type Sonar struct {
 	pruneAfter time.Duration
 
 	evidence atomic.Pointer[EvidenceFunc]
+	// passTurn admits each pass to the owner's database metering - see SetTurnFunc.
+	passTurn atomic.Pointer[TurnFunc]
 	logger   atomic.Pointer[slog.Logger]
 	seams    atomic.Pointer[seamster.Seamster]
 
@@ -263,6 +265,34 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 // Without it a Sonar keeps its row alive and never claims to dispatch, which is exactly right for a replica
 // that holds connections but claims no work: it counts toward Replicas and toward nobody's partition.
 // Absence of evidence must never read as evidence.
+// TurnFunc admits a pass to whatever the owner meters its database with, returning the context the pass's
+// calls run on and the release to call when they are done - see SetTurnFunc.
+type TurnFunc func(context.Context) (context.Context, func())
+
+// SetTurnFunc supplies an admission step taken at the START of each pass and released at its end, so an
+// owner that orders access to its database can order this too, without this package knowing what the
+// ordering is. Nil (the default) admits every pass immediately.
+//
+// It returns a CONTEXT AND A RELEASE rather than just a context, because a derivation alone would be
+// inert: the owner has to be able to hold something for the duration of the pass and hand it back, and a
+// hook that only decorated the context would look wired while metering nothing.
+//
+// Whatever the owner puts there, IT MUST NOT BE ABLE TO STALL A PASS. A Sonar that cannot beat reads as
+// blind, and a blind Sonar makes its replica stop partitioning and hold its last fleet count - so anything
+// that throttled this in proportion to load would let load reshape the fleet. Ordering a pass ahead of
+// ordinary work is fine; making it queue behind ordinary work is not.
+//
+// Once per PASS rather than once per statement, because a pass is one unit of work: the beat and the read
+// that follows it describe the same moment, and re-deriving between them would present them as two
+// arrivals.
+func (s *Sonar) SetTurnFunc(fn TurnFunc) {
+	if fn == nil {
+		s.passTurn.Store(nil)
+		return
+	}
+	s.passTurn.Store(&fn)
+}
+
 func (s *Sonar) SetEvidence(fn EvidenceFunc) {
 	if fn == nil {
 		s.evidence.Store(nil)
@@ -494,6 +524,13 @@ func (s *Sonar) register(ctx context.Context) error {
 // first turn lands milliseconds after Run starts, long before the next beat would. The same early publish
 // applies when a replica STOPS serving, which is the direction that strands work.
 func (s *Sonar) pass(ctx context.Context) {
+	// Held for the whole pass: the beat and the read that follows it are one unit of work, and the read
+	// hands back rows that keep a connection until they are scanned.
+	if fn := s.passTurn.Load(); fn != nil {
+		var release func()
+		ctx, release = (*fn)(ctx)
+		defer release()
+	}
 	now := s.now()
 	s.lastPass = now
 	turns, dispatched := s.dispatchEvidence()

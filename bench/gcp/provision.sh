@@ -84,6 +84,25 @@ exists gc compute instances describe "$VM_NAME" --zone="$ZONE" ||
     --image-family=debian-12-arm64 --image-project=debian-cloud \
     --labels=app=dwarf-bench
 
+echo "== VM bootstrap (postgresql-client) =="
+# The campaign scripts drop/create their own per-run database and gate on an idle RTT probe, both through
+# psql, so a VM without it cannot run any of them. It is installed HERE rather than left to the operator
+# because the failure is silent and expensive: the RTT probe suppresses its own stderr (a failed probe is
+# an ordinary outcome the gate retries), so a missing psql reads as "RTT still too high" and the gate cools
+# down forever. Measured: 40 minutes parked on the first arm with nothing in the log naming the cause.
+#
+# Retried because SSH is not ready the instant the instance reports RUNNING.
+for i in $(seq 1 10); do
+  if gc compute ssh "$VM_NAME" --zone="$ZONE" --command \
+      'sudo apt-get update -qq >/dev/null 2>&1 && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client >/dev/null 2>&1 && command -v psql' 2>/dev/null; then
+    break
+  fi
+  echo "   ssh not ready yet ($i/10)"; sleep 15
+done
+gc compute ssh "$VM_NAME" --zone="$ZONE" --command 'command -v psql >/dev/null' 2>/dev/null || {
+  echo "WARNING: could not install postgresql-client on $VM_NAME - the campaign scripts will abort at their preflight." >&2
+}
+
 DB_IP="$(gc sql instances describe "$DB_INSTANCE" --format='value(ipAddresses[0].ipAddress)')"
 VM_IP="$(gc compute instances describe "$VM_NAME" --zone="$ZONE" \
   --format='value(networkInterfaces[0].accessConfigs[0].natIP)')"

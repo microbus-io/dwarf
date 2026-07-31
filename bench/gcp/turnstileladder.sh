@@ -3,34 +3,21 @@
 # Permit-multiplier ladder: how many workers should be allowed into a step's DATABASE phases at once,
 # as a multiple of that shard's connection pool? Runs ON the bench VM.
 #
-# WHY THIS SCRIPT EXISTS. The engine admits `permitsPerConn x pool` workers to the database phases and
-# blocks the rest. The shipped 8 was chosen to reproduce the concurrency the candidate cache already
-# allowed, so that adding the gate introduced no new database-concurrency regime. Measured on one
-# 16-vCPU shard (96 connections, so 768 permits) with 8 s tasks at a commanded 600 flows/s, that is
-# visibly too loose: the arms ran 1,369-6,824 steps/s across three identical runs, the pool sat at
-# 96 in use / 0 idle, and each blocked acquire waited 27-105 ms - with the SLOWEST arm the one that
-# waited longest. See bench/results/19-permits-20260728/.
+# WHY THIS SCRIPT EXISTS. The engine admits `turnstilePassesPerConn x pool` callers to the database at
+# once and orders the rest by band and then by how long the asking job has been running. The multiple is
+# NOT a bound on database concurrency - the pool is - it is how deep a queue is allowed to form in front
+# of the pool, and therefore how much of the contention is ordered rather than arbitrary.
 #
-# The mechanism this ladder tests: a step makes ~9-11 round trips, so at 8x every one of them queues
-# behind ~7 other permitted workers. That inflates the time a worker holds its slot, which raises the
-# number of workers concurrently in database phases, which lengthens the queue further. Tighter permits
-# trade admission concurrency for shorter per-query waits. The pool itself has room either way -
-# 96 connections at ~7.7 ms of database time per step is ~12,000 steps/s, twice the commanded rate -
-# so if a tighter multiplier serves the full rate, the looser one was buying nothing but queueing.
+# Sizing it to the pool (1x) is measured catastrophic: 281 steps/s against 1,687 for the gate it replaced,
+# a 6x collapse, because with as many turns as connections every handoff gap is idle connection time. The
+# open question is the other direction. Locally, 8x/10x/12x measured 1,559/1,688/1,734 steps/s with
+# IDENTICAL per-connection service time across all three - so the extra multiple bought queue depth, not
+# throughput - but those arms differed by less than that rig's own RTT drift (0.66-4.15 ms idle), which
+# is why they settle nothing and this runs on a rig that holds RTT steady.
 #
-# WHAT WOULD FALSIFY THE TIGHTENING: a low multiplier that fails to reach the commanded rate. At 1x the
-# permitted set equals the pool, so any worker holding a permit while NOT holding a connection (between
-# statements, or resolving state) idles a slot that another worker could have used. If 1x undershoots
-# while 2x and 4x do not, that idle-slot cost is real and bounds how tight this can go.
-#
-# Each arm is a SEPARATE BINARY built with a different permitsPerConn, because the multiplier is a
-# compile-time constant. Build them with:
-#   for n in 8 4 2 1; do
-#     sed -i '' "s/^\tpermitsPerConn = .*/\tpermitsPerConn = $n/" engine/poolsize.go
-#     GOOS=linux GOARCH=arm64 go build -o dwarf-bench-p$n ./bench
-#   done; git checkout engine/poolsize.go
-# The artifacts therefore record an IDENTICAL config for every arm - the multiplier lives only in the
-# label and the file name, so do not read the config block to tell arms apart.
+# WHAT WOULD SETTLE IT: a stressed arm where 10x serves materially more than 8x, or does not. 8x matches
+# workersPerConnBudget, so it is the multiple that keeps the contending population the same size the cache
+# and resident worker set are already derived for; 10x has to earn the extra queue.
 #
 # CONTROLS: rep-major interleave (8,4,2,1 / 8,4,2,1 / ...) so session drift hits every arm equally; an
 # idle RTT gate with cooldown before each arm, since RTT degrades across a session and correlates with
@@ -38,7 +25,7 @@
 #
 # Usage:
 #   DSN=postgres://... ./permitladder.sh
-# Knobs (env): BINS (default "8:./dwarf-bench-p8 4:./dwarf-bench-p4 2:./dwarf-bench-p2 1:./dwarf-bench-p1"),
+# Knobs (env): BINS (default "8:./dwarf-bench-t8 10:./dwarf-bench-t10"),
 #   OUT, REPS (3), RATE (600), DELAY (8s), WARMUP (150s), WINDOW (60s), VCPUS (16), CONC (128),
 #   MAX_OUTSTANDING (100000), COOLDOWN (30s), RTT_MAX_MS (1.0), RTT_TRIES (10), RUN_ID, EXTRA.
 set -euo pipefail
@@ -68,7 +55,7 @@ MAX_OUTSTANDING="${MAX_OUTSTANDING:-100000}"
 COOLDOWN="${COOLDOWN:-30s}"
 RTT_MAX_MS="${RTT_MAX_MS:-1.0}"
 RTT_TRIES="${RTT_TRIES:-10}"
-read -r -a BINS <<<"${BINS:-8:./dwarf-bench-p8 4:./dwarf-bench-p4 2:./dwarf-bench-p2 1:./dwarf-bench-p1}"
+read -r -a BINS <<<"${BINS:-8:./dwarf-bench-t8 10:./dwarf-bench-t10}"
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)}"
 RUN_ID="${RUN_ID//[^a-zA-Z0-9]/_}"
@@ -106,7 +93,7 @@ for rep in $(seq 1 "$REPS"); do
     tag="p${mult}-r${rep}"
     db="dwarf_pl_${RUN_ID}_p${mult}_r${rep}"
 
-    echo "-- ${tag}  (permitsPerConn ${mult}, ${bin})"
+    echo "-- ${tag}  (turnstilePassesPerConn ${mult}, ${bin})"
     rtt_gate "$(admin_dsn "$DSN")"
     adm=$(admin_dsn "$DSN")
     psq "$adm" "DROP DATABASE IF EXISTS ${db}" >/dev/null
@@ -117,7 +104,7 @@ for rep in $(seq 1 "$REPS"); do
       -open-loop -arrival-rate "$RATE" -max-outstanding "$MAX_OUTSTANDING"
       -task-delay "$DELAY" -window "$WINDOW" -warmup "$WARMUP"
       ${EXTRA:-}
-      -label "permitsPerConn ${mult} rep ${rep}, delay ${DELAY} @ ${RATE} flows/s"
+      -label "turnstilePassesPerConn ${mult} rep ${rep}, delay ${DELAY} @ ${RATE} flows/s"
       -out "${OUT}/r-${tag}.json")
     "$bin" "${args[@]}"
 
@@ -168,7 +155,7 @@ for mult in sorted(arms, reverse=True):
         passms.append(rf["sumSeconds"] / rf["count"] * 1000 if rf else 0)
         sels.append(r.get("engineCounters", {}).get("dwarf_refill_candidates_selected", 0) / r["windowSec"])
     perm = statistics.mean(sum(v for k, v in (r.get("gaugesAfter") or {}).items()
-                              if k.startswith("dwarf_permits_available")) for r in rows)
+                              if k.startswith("dwarf_turnstile_available")) for r in rows)
     print(f"{mult:>7}x {len(sp):>2} {means[mult]:>9.0f} {f'{min(sp):.0f}-{max(sp):.0f}':>15} "
           f"{means[mult]/commanded*100:>5.0f}% {statistics.mean(r['flowsPerSec'] for r in rows):>8.1f} "
           f"{statistics.mean(r['goroutines'] for r in rows):>8.0f} {perm:>10.0f} "

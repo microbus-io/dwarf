@@ -62,56 +62,53 @@ const (
 	// connection, so it must not inflate the cache/refill scan, which serves dispatch only.
 	workersPerConnBudget = 8
 
-	// The permits bound how many workers may be doing DATABASE work on one shard at a time, as a multiple
-	// of that shard's pool. They are what lets the crew grow freely for long tasks without the growth
-	// turning into contention: a worker holds a permit only across the phases that hold or await a
-	// connection, so a task sleeping 8s holds none and a 5ms lookup holds one for 5ms.
+	// turnstilePassesPerConn sizes each shard's turnstile: the number of turns that may be out at once,
+	// as a multiple of that shard's connection pool.
 	//
-	// enterPermitsPerConn and exitPermitsPerConn bound, per shard and as a multiple of that shard's pool,
-	// how many workers may be in a step's database phases at once - counted SEPARATELY for workers entering
-	// a step and workers recording a finished one, against dedicated reservations neither may draw from.
-	// The entry side stays UNDER the candidate cache's own bound (it holds 8 x conns entries, so at most
-	// that many workers can hold a candidate at once regardless of any permit), so entry is gated by this
-	// rather than by the cache. The exit side is not cache-bound at all - a worker recording a finished
-	// step is past the cache - which is why it is sized above it.
+	// IT IS 8x, AND A QUEUE AT THE POOL IS WHY. One turn per connection was the first cut and it is
+	// CATASTROPHIC: measured at 600 flows/s on a local Postgres, 281 steps/s against the 1,687 the previous
+	// gate managed on the same rig, a 6x collapse. With exactly as many turns as connections there are
+	// exactly as many candidates for a connection, so every gap between a turn-holder finishing and the next
+	// waiter being woken, scheduled and asking the pool is IDLE CONNECTION TIME - on the critical path of all
+	// ~9.6 round trips a step makes. The queue this was "fixing" is the same margin workersPerConnBudget
+	// deliberately keeps, and for the same reason: a resource with nobody queued for it runs below capacity.
 	//
-	// THE SPLIT IS THE POINT, and it was earned. A single pool has the two populations competing for the
-	// same permits, and neither ordering works: served evenly, completions lose at random and queue behind
-	// admission (measured: 286 of them waiting out a full 1s budget, transactions inflating 3ms -> 54ms);
-	// served with completions given precedence, ENTRY starves, and since entry is dispatch, short-task
-	// throughput collapsed 3x on a saturating rig (4,416 vs 7,964 steps/s, with creation itself throttled
-	// to 714 of 800 commanded flows/s). Dedicated reservations make both failures structurally impossible,
-	// so neither side needs a priority rule, and neither needs an escape hatch past its own bound.
+	// So the turnstile does not remove the wait for a connection and does not empty the pool's queue - a
+	// caller holding a turn still competes for one, and still waits when they are all busy. What it changes
+	// is WHO gets to compete and in what ORDER: the population at the pool is bounded by the turn count, and
+	// admission into it is by band and then by age.
 	//
-	// THE PERMITS CAP CONTENTION, THEY DO NOT ELIMINATE IT. A step acquires a connection 9-11 times, so
-	// what bounds its tail is how many workers are contending for that pool at once. At saturation the
-	// waiting RELOCATES rather than shrinking - measured on a 16-vCPU shard at 8s tasks, 3/5 pays 18ms of
-	// pool wait but 588-1,459ms at the permit, while 8/12 pays 39ms of pool wait and 81-103ms at the
-	// permit. What the cap buys is that the contending population is BOUNDED at all, instead of growing
-	// with the crew.
+	// 8 is the same multiple workersPerConnBudget uses, which is not a coincidence - it is what keeps the
+	// contending population at the size the cache and the resident worker set are already sized for. Raising
+	// it recovers a little more (10x and 12x measured 1,688 and 1,734 against 8x's 1,559) and grows the crew
+	// with it (480 -> 572 -> 686), but per-connection service time was identical across all of them, so what
+	// the multiple buys past 8 is queue depth rather than throughput. Treat the ordering between 8, 10 and 12
+	// as UNSETTLED: those arms differed by less than the rig's own RTT drift, and only the 1x collapse and
+	// the direction are established.
+	turnstilePassesPerConn = 8
+
+	// The turnstile bands. Lower is served first, and STRICTLY: a band is exhausted before the next is
+	// looked at, so a band may only be given to a source that cannot flood it. Within a band, order is by
+	// how long the job asking has been running.
 	//
-	// THE TOTAL (20x) IS A CONSEQUENCE OF TWO INDEPENDENT LOWER BOUNDS, NOT A CHOSEN NUMBER. Do not try
-	// to bring it down to the 8x the cache allows - that requires starving a side, and each side's floor
-	// is set by something different:
+	// priorityRefill is the only band above the common one, and it is reserved for the piston because the
+	// piston is the one caller bounded by construction - it cycles on a derived period and takes two turns
+	// per cycle per shard, so it cannot starve what sits below it. It is ahead of everything else because
+	// candidate supply runs only 1.04-1.47x ahead of consumption: a refill cycle that queues behind the
+	// dispatch it feeds starves the workers it is filling for.
 	//
-	//   - ENTRY >= 8x, the candidate cache's own bound (it holds 8 x conns entries, so at most that many
-	//     workers can hold a candidate regardless of any permit). Matching it makes permit and cache bind
-	//     at the same point instead of one silently shadowing the other. BELOW it, entry - which IS
-	//     dispatch - starves: measured at 3x on 8s tasks, 588-1,459ms mean enter wait and the largest
-	//     backlog of any arm (83-90k outstanding vs 8/12's 62-64k).
+	// Everything else shares priorityCommon and is separated by age alone. That is deliberate rather than
+	// unfinished: age ordering is starvation-free (every claim eventually becomes the oldest), while any
+	// second band handed to a caller that can arrive faster than it is served starves the band below it -
+	// which is the shape of the measured 3x short-task collapse that killed the single-permit-pool design.
+	// internal/turnstile/CLAUDE.md records the specific band that keeps being proposed - one for EXITING
+	// workers - and why it is not here.
 	//
-	//     A TIGHT PERMIT COSTS GOROUTINES, and by Little's law rather than by any growth misfire: the wait
-	//     is residence time, so sustaining a rate through it needs proportionally more workers. Same runs,
-	//     3/5 carried 82-87k workers against 8/12's 59-62k, which its ~1.6s of extra per-step wait
-	//     predicts to within the measurement. Do not read a large crew as the trigger over-firing.
-	//   - EXIT >= ~7/4 x entry, because completionRoundTrips = 7 of a step's ~11 round trips are on the
-	//     exit side. Under-provision that half and it becomes the new tail: measured locally at an even
-	//     4/4, once transactions inflated ~25x, roughly HALF of all completions could not get a permit.
-	//
-	// 2:3 tracks the 4:7 closely, and both floors are properties of other mechanisms - re-derive them if
-	// the cache's multiple or the per-step round-trip counts ever change.
-	enterPermitsPerConn = 8
-	exitPermitsPerConn  = 12
+	// The values are spaced, and are ordinals only: nothing reads the distance between them. A band can
+	// therefore be inserted between two in use without renumbering the callers of either.
+	priorityRefill = 0
+	priorityCommon = 10
+	priorityWorker = priorityCommon
 
 	// completionRoundTrips is the number of database round trips in a step's post-task phase: the
 	// standalone completed-UPDATE plus the transition transaction (lock-grab UPDATE, successor INSERT,
@@ -339,12 +336,11 @@ func (e *Engine) recomputePools() {
 		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
 			e.seams.Variable(seamsJoin(VariablePoolIdle, strconv.Itoa(idx)), idle)
 		}
-		// The permits follow the pool for the same reason the cache and the worker ceiling do: they bound
-		// concurrent database work as a multiple of the connections this replica actually holds, and the
-		// pool just changed. Resize moves the available count by the DELTA, so permits held by in-flight
-		// workers are never handed out twice.
-		if e.permits != nil {
-			e.permits.Resize(idx, enterPermitsPerConn*open, exitPermitsPerConn*open)
+		// The turnstile follows the pool for the same reason the cache and the worker ceiling do: it orders
+		// access to the connections this replica actually holds, and the pool just changed. Resize moves the
+		// available count by the DELTA, so a turn held by an in-flight worker is never handed out twice.
+		if e.turnstiles != nil {
+			e.turnstiles.Resize(idx, turnstilePassesPerConn*open)
 		}
 		postSplitConns += open
 	}

@@ -48,6 +48,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
+	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
@@ -128,6 +129,9 @@ func seamsJoin(parts ...string) string {
 // PartitionFunc reports the replica partition - see SetPartitionFunc.
 type PartitionFunc func() (replicas, ordinal int, ok bool)
 
+// ContextFunc derives the context a cycle's queries run on - see SetContextFunc.
+type ContextFunc func(context.Context) context.Context
+
 // instruments is this piston's metric set, swapped atomically as a group so a recording cycle never sees
 // half of one meter and half of another.
 type instruments struct {
@@ -152,9 +156,11 @@ type Piston struct {
 	// coupled - reading idle and the partition a microsecond apart cannot produce an inconsistent pair.
 	idle      atomic.Bool
 	partition atomic.Pointer[PartitionFunc]
-	logger    atomic.Pointer[slog.Logger]
-	inst      atomic.Pointer[instruments]
-	seams     atomic.Pointer[seamster.Seamster]
+	// cycleCtx derives the context each cycle's queries run on - see SetContextFunc.
+	cycleCtx atomic.Pointer[ContextFunc]
+	logger   atomic.Pointer[slog.Logger]
+	inst     atomic.Pointer[instruments]
+	seams    atomic.Pointer[seamster.Seamster]
 
 	// stealing is armed by a cycle that found nothing due in this replica's own residue class, and read by
 	// the NEXT cycle's predicate. Atomic because SetStealAfter and a test may touch the pair from another
@@ -315,6 +321,21 @@ func (p *Piston) SetPartitionFunc(fn PartitionFunc) {
 	p.partition.Store(&fn)
 }
 
+// SetContextFunc supplies a derivation applied to the context at the START of each cycle, so whatever the
+// caller needs its queries to carry - a priority, an admission time, a deadline - is on both of them
+// without this package knowing what any of it means. Nil (the default) leaves the context alone.
+//
+// Once per CYCLE rather than once per query, because the two queries of a cycle are one unit of work: what
+// a caller stamps is that unit, and re-deriving between them would make the fetch look like a newer arrival
+// than the scan it belongs to.
+func (p *Piston) SetContextFunc(fn ContextFunc) {
+	if fn == nil {
+		p.cycleCtx.Store(nil)
+		return
+	}
+	p.cycleCtx.Store(&fn)
+}
+
 // SetLogger sets the logger. Nil restores the discarding default.
 func (p *Piston) SetLogger(l *slog.Logger) {
 	if l == nil {
@@ -437,6 +458,9 @@ func (p *Piston) Run(ctx context.Context) {
 // NOT safe to call concurrently with Run, or with itself: the pipeline's cadence timestamps are
 // single-goroutine state. A caller that drives cycles by hand should idle the piston first.
 func (p *Piston) Cycle(ctx context.Context) pipeline.Result {
+	if fn := p.cycleCtx.Load(); fn != nil {
+		ctx = (*fn)(ctx)
+	}
 	r := p.pipe.Cycle(ctx)
 	p.record(ctx, r)
 	// A cycle that found nothing due still counts: it proves this piston looked and could have served.
@@ -636,6 +660,12 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	args := make([]any, 0, len(partArgs)+1)
 	args = append(args, partArgs...)
 	args = append(args, p.cache.Capacity())
+	// The turn must outlive the ROWS, not just the call: they hold the connection until Close. Deferring it
+	// FIRST is what gets that ordering - defers run last-in-first-out, so rows.Close below runs before this.
+	// A context nothing stamped yields a no-op pass, which is how a caller that does not order its database
+	// access pays nothing here.
+	pass := turnstile.WaitTurn(ctx)
+	defer pass.Return()
 	rows, err := p.db.QueryContext(ctx,
 		"SELECT fairness_key, MAX(rn) AS cnt,"+
 			" MAX(CASE WHEN rn=1 THEN age_ms ELSE NULL END) AS age_ms,"+
@@ -716,6 +746,9 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	// millisecond. Ordering on rn drops the per-row date arithmetic, the nullable scan, the intermediate
 	// struct and the sort. The age was a leftover from the engine's version, where it fed a cross-shard
 	// merge that does not exist here - the planner has already assigned the slots.
+	// Deferred before the query for the same reason as in ScanBand: the turn has to outlive the rows.
+	pass := turnstile.WaitTurn(ctx)
+	defer pass.Return()
 	rows, err := p.db.QueryContext(ctx,
 		"SELECT step_id, fairness_key FROM ("+
 			"SELECT step_id, fairness_key,"+

@@ -48,6 +48,12 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 		return "", errors.Trace(err)
 	}
 
+	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
+	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
+	// and ahead of anything arriving after it.
+	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	defer doneTurn()
+
 	// Resolve the fork step, its owning flow, and that flow's token (needed to walk the surgraph chain).
 	var leafFlowID int
 	var forkStepState, forkStepRefs []byte

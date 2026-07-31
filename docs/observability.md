@@ -73,9 +73,10 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_peer_replicas` | gauge | `shard` | replicas this one currently sees holding connections to that shard — the divisor its pool is sized by | `dwarf_peer_replicas` |
 | `dwarf_peer_blind_seconds` | gauge | `shard` | time since that shard's peer registry was last read successfully; zero when healthy | `dwarf_peer_blind_seconds` |
 | `dwarf_refill_tally_age_seconds` | gauge | — | how long ago the stalest shard still in this replica's planner reported | `dwarf_refill_tally_age_seconds` |
-| `dwarf_permit_enter_wait_seconds` | histogram | `shard` | time a worker waited for a permit to START a step; rises when dispatch queues behind dispatch | `dwarf_permit_enter_wait_seconds` |
-| `dwarf_permit_exit_wait_seconds` | histogram | `shard` | time a worker waited for a permit to RECORD a finished step; rises when completions queue behind completions. Which of the two rises says which half of the split to re-size | `dwarf_permit_exit_wait_seconds` |
-| `dwarf_permits_available` | gauge | `shard`, `role` | database-work permits free on that shard, by `role` (`enter` = work about to start, `exit` = work being recorded; each has its own reservation so neither starves the other). Sustained zero on either role means that side is the binding constraint | `dwarf_permits_available` |
+| `dwarf_turnstile_gate_wait_seconds` | histogram | `shard` | time a worker waited for its FIRST turn, taken before it picks a step up. It is the queue in front of dispatch, and the only wait a worker holds no work through | `dwarf_turnstile_gate_wait_seconds` |
+| `dwarf_turnstile_wait_seconds` | histogram | `shard` | time a worker waited for the turn that RECORDS a finished step. Work that has already run presents an older claim than anything admitted while it ran, so it is served first — a sustained wait here means the shard's connections are busy with work at least as old, not that completions are queued behind dispatch | `dwarf_turnstile_wait_seconds` |
+| `dwarf_turnstile_available` | gauge | `shard` | turns free on that shard. Turns are a fixed multiple of the connection pool, so this is how much admission is unspoken for; sustained zero means the shard's connections are the binding constraint | `dwarf_turnstile_available` |
+| `dwarf_turnstile_waiting` | gauge | `shard` | callers queued for a turn on that shard. Unlike the free count this has no ceiling, so it is the one that shows how DEEP a queue has become rather than merely that it is full; read the pair together | `dwarf_turnstile_waiting` |
 | `dwarf_workers_resident` | gauge | — | worker goroutines that exist; grows on demand, never shrinks | `dwarf_workers_resident` |
 | `dwarf_state_in_flight_bytes` | gauge | — | state payload this replica is holding across host calls right now, summed over the tasks currently inside a task call | `dwarf_state_in_flight_bytes` |
 | `dwarf_state_in_flight_steps` | gauge | — | tasks currently inside a task call — the denominator for the line above | `dwarf_state_in_flight_steps` |
@@ -104,7 +105,8 @@ replica count:**
 | `dwarf_steps_queue_depth` | **per-replica** (this replica's in-memory cache) | `sum` |
 | `dwarf_steps_fairness_keys` | **per-replica** (this replica's last refill) | `sum` |
 | `dwarf_refill_tally_age_seconds` | **per-replica** (this replica's planner) | `max` |
-| `dwarf_permits_available` | **per-replica** (this replica's gate) | `sum` |
+| `dwarf_turnstile_available` | **per-replica** (this replica's gate) | `sum` |
+| `dwarf_turnstile_waiting` | **per-replica** (this replica's gate) | `sum` |
 | `dwarf_workers_resident` | **per-replica** (this replica's crew) | `sum` |
 | `dwarf_state_in_flight_bytes` | **per-replica** (this replica's in-flight tasks) | `sum` |
 | `dwarf_state_in_flight_steps` | **per-replica** (this replica's in-flight tasks) | `sum` |

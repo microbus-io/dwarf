@@ -52,8 +52,8 @@ type engineMetrics struct {
 	stepsClaimLost      metric.Int64Counter
 	stepsClaimPreempted metric.Int64Counter
 	stepsOffered        metric.Int64Counter
-	exitWait            metric.Float64Histogram
-	enterWait           metric.Float64Histogram
+	turnWait            metric.Float64Histogram
+	gateWait            metric.Float64Histogram
 	dbPhaseSeconds      metric.Float64Histogram
 	peerChanges         metric.Int64Counter
 
@@ -114,30 +114,30 @@ func (e *Engine) initMetrics() error {
 	// drifted apart.
 	// Buckets span sub-millisecond (uncontended) to seconds (the exit side saturated): the whole question
 	// this answers is which of those a deployment is in.
-	enterWait, err := meter.Float64Histogram("dwarf_permit_enter_wait_seconds",
+	gateWait, err := meter.Float64Histogram("dwarf_turnstile_gate_wait_seconds",
 		metric.WithUnit("s"),
-		metric.WithDescription("Time a worker spent waiting for a database-work permit to START a step, per shard. The enter reservation is dedicated, so this rises only when dispatch is queueing behind other dispatch - it is the readout for the entry side becoming the binding constraint. Observed on every acquire, so count is acquires and sum/count is the mean wait. Read alongside dwarf_permit_exit_wait_seconds: which of the two is rising says which half of the split to re-size."),
+		metric.WithDescription("Time a worker spent waiting for its FIRST turn - the one taken before it picks a candidate up, per shard. It is the queue in front of dispatch, and the only turn a worker waits for while holding no work, which is also what stops the crew growing into a saturated shard. Observed on every successful acquire, INCLUDING the ones whose pop then lost the race and took nothing, so count is admissions rather than dispatches and sum/count is the mean wait. Read against dwarf_turnstile_wait_seconds: this one rising alone means work is being ADMITTED more slowly, both rising means the shard's connections are the constraint."),
 		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5))
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
 	}
-	exitWait, err := meter.Float64Histogram("dwarf_permit_exit_wait_seconds",
+	turnWait, err := meter.Float64Histogram("dwarf_turnstile_wait_seconds",
 		metric.WithUnit("s"),
-		metric.WithDescription("Time a worker spent waiting for a database-work permit to RECORD a finished step, per shard. The exit reservation is dedicated, so this rises only when completions are queueing behind other completions - it is the readout for the exit side becoming the binding constraint, and the number that decides whether the enter/exit split needs re-sizing. Observed on every completion, so count is completions and sum/count is the mean wait; near-zero throughout is the healthy state."),
+		metric.WithDescription("Time a worker spent waiting for the turn that RECORDS a finished step, per shard. A step that has run holds a claim stamped when it was picked up, so it is older than anything admitted while its task ran and is served ahead of it - which means a sustained wait here is not completions queueing behind dispatch but the shard's connections being saturated by other work at least as old. Observed on every completion, so count is completions and sum/count is the mean; near-zero throughout is the healthy state."),
 		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5))
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
 	}
 	dbPhaseSeconds, err := meter.Float64Histogram("dwarf_db_phase_seconds",
 		metric.WithUnit("s"),
-		metric.WithDescription("Wall-clock time a worker spent INSIDE a database phase, by role (enter/exit): admission to the host call for enter, the host call to the end of the step for exit. It is the phase's true residence, and it is measured rather than inferred because nothing else can supply it - the permit wait covers only the queue in FRONT of the phase, and summing a step's individual query times misses the connection wait and the Go-side work between them. Read it against dwarf_permit_enter_wait_seconds to tell a phase that is slow from one that is merely queued, and against the permit count to see whether that count is anywhere near the concurrency this workload actually needs."),
+		metric.WithDescription("Wall-clock time a worker spent INSIDE a database phase, by role (enter/exit): admission to the host call for enter, the host call to the end of the step for exit. It is the phase's true residence, and it is measured rather than inferred because nothing else can supply it - the turnstile wait covers only the queue in FRONT of each call, and summing a step's individual query times misses the connection wait and the Go-side work between them. Read it against dwarf_turnstile_gate_wait_seconds to tell a phase that is slow from one that is merely queued, and against the turn count to see whether that count is anywhere near the concurrency this workload actually needs."),
 		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10))
 	if err != nil {
 		errs = append(errs, errors.Trace(err))
 	}
 	m.dbPhaseSeconds = dbPhaseSeconds
-	m.exitWait = exitWait
-	m.enterWait = enterWait
+	m.turnWait = turnWait
+	m.gateWait = gateWait
 	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a cycle supplies only ~1.05-1.5x ahead of consumption, so partitions drain to empty between cycles) and is what keeps a sequential chain from paying a cycle per hop.")
 	m.stepsClaimPreempted = ctr("dwarf_steps_claim_preempted", "Counts popped candidates skipped without a claim attempt because a sibling worker in this replica already had one in flight for that step - round trips SAVED, the counterpart to dwarf_steps_claim_lost. The refiller re-selects a step whose claim is uncommitted (the selection predicate reads committed state), so this rises with the scan rate rather than with the replica count. Compare the two: a healthy engine converts what would have been lost claims into skips.")
 	m.peerChanges = ctr("dwarf_peer_changes", "Counts times a shard's observed replica count MOVED, by shard. In a settled fleet this must be ZERO for the whole run: every increment past the initial join re-divides that shard's connection pool and re-seats every replica's residue class of step ids, so a nonzero rate means the fleet is churning and the two divisors are chasing it. The usual cause is not a real join or departure but a stale registry row - a replica that died without deleting its row inflates the count until it ages out, and a crash-loop with random ids accumulates them faster than that.")
@@ -180,12 +180,13 @@ func (e *Engine) initMetrics() error {
 	tallyAge := gaugeF("dwarf_refill_tally_age_seconds", "Per-replica: how long ago the STALEST shard still in this replica's planner reported. Every shard plans from a merged view of every shard's LAST report, so a piston cycling slowly holds its peers' plans on a picture that old - the global priority band and the per-key slice rule are both computed from those mixed-freshness tallies. Expect roughly one cycle interval in a healthy fleet; sustained multiples name a shard whose piston has fallen behind its peers, which no throughput number can distinguish from a slow database. Single-shard deployments always read ~one interval and can ignore it.", "s")
 	// Per ROLE: entering and exiting work draw on separate reservations, and an operator reading one without
 	// the other cannot tell "dispatch is gated" from "completions are". Instantaneous, so a reservation that
-	// is saturated all window without being sampled empty looks idle - dwarf_permit_exit_wait_seconds is the
+	// is saturated all window without being sampled empty looks idle - dwarf_turnstile_wait_seconds is the
 	// durable half of that pair.
-	permitsAvail := gauge("dwarf_permits_available", "Per-replica, per-shard, BY ROLE (enter/exit): database-work permits currently free. Work about to start and work being recorded draw on separate reservations, each a fixed multiple of that shard's connection pool, so neither can starve the other. It bounds how many workers may be in a step's database phases at once, which is what lets the worker crew grow for long tasks without the growth becoming pool contention. Sustained zero on a role means that half is the binding constraint - read the matching wait histogram to see how long its callers are actually queueing, since an instantaneous sample cannot tell a reservation that is saturated all window from one that is idle. Sustained near-full means neither is binding. A NEGATIVE value is only ever a live resize that shrank a ceiling below what is currently held; it self-corrects as those holders release.", "")
-	dbPhaseWorkers := gauge("dwarf_db_phase_workers", "Per-replica, BY ROLE (enter/exit): worker goroutines inside a metered database phase right now. This is the quantity that sets connection-pool pressure, and nothing else reports it - dwarf_workers_resident is the whole crew, and a worker parked in the host call still holds its candidate, so the crew's idle count cannot be differenced to get it. Read against the permit count for that role: the two should be close, and a sustained gap means the permits are not the binding constraint.", "")
+	turnstileAvail := gauge("dwarf_turnstile_available", "Per-replica, per-shard: turns currently free at the shard's turnstile. Turns are a fixed multiple of that shard's connection pool, so this is how much of the admission budget is unspoken for right now. It is deliberately LARGER than the pool: a turn admits a caller to compete for a connection rather than reserving one, and with only as many turns as connections the pool runs below capacity for want of anyone queued for it (measured: a 6x throughput collapse). Sustained zero means the shard's connections are the binding constraint; read the wait histograms for how long callers are actually queueing, since an instantaneous sample cannot tell a turnstile saturated all window from an idle one. A NEGATIVE value is only ever a live resize that shrank the ceiling below what is currently held; it self-corrects as those holders return.", "")
+	turnstileWaiting := gauge("dwarf_turnstile_waiting", "Per-replica, per-shard: callers queued at the shard's turnstile right now. Unlike the free-turn count this has no ceiling, so it is the one that shows how deep a queue has become rather than merely that it is non-empty - and because a caller queues once per database call rather than once per step, it counts calls in flight, not workers. Read with dwarf_turnstile_available: available at zero with this climbing is a shard falling behind, while both near zero is an idle one.", "")
+	dbPhaseWorkers := gauge("dwarf_db_phase_workers", "Per-replica, BY ROLE (enter/exit): worker goroutines inside a metered database phase right now. This is the quantity that sets connection-pool pressure, and nothing else reports it - dwarf_workers_resident is the whole crew, and a worker parked in the host call still holds its candidate, so the crew's idle count cannot be differenced to get it. Read against dwarf_turnstile_available: a phase count far above the turns a shard has means most of those workers are queued rather than working.", "")
 	dbPhaseWorkersPeak := gauge("dwarf_db_phase_workers_peak", "Per-replica, BY ROLE: the high-water mark of dwarf_db_phase_workers since this replica started. The instantaneous count is whatever the collection tick happened to catch; the peak is the pool pressure the phase actually reached. Monotonic within a process lifetime, so on a long-lived replica it is a lifetime watermark rather than a current signal - and the two roles peak at different moments, so they must not be summed.", "")
-	workersResident := gauge("dwarf_workers_resident", "Per-replica: worker goroutines that exist. It only ever grows (nothing retires a worker) and is bounded by the lease-margin ceiling. Read against dwarf_permits_available to tell the two long-task regimes apart: a crew far above the permit count with permits free is serving long tasks correctly, while a crew pinned at the ceiling is the one to alarm on. Sum across replicas.", "")
+	workersResident := gauge("dwarf_workers_resident", "Per-replica: worker goroutines that exist. It only ever grows (nothing retires a worker) and is bounded by the lease-margin ceiling. Read against dwarf_turnstile_available to tell the two long-task regimes apart: a crew far above the turn count with turns free is serving long tasks correctly, while a crew pinned at the ceiling is the one to alarm on. Sum across replicas.", "")
 	peerBlind := gauge("dwarf_peer_blind_seconds", "Per-replica, per-shard: how long since that shard's registry was last read successfully. Zero on a healthy Sonar. Past two read cadences the replica is BLIND there - it holds its last known fleet (the safe direction for pools) and stops partitioning that shard's candidates (the safe direction for work), so a nonzero value explains both at once and is the first thing to check when a shard's counts look frozen.", "s")
 	// The two in-flight state gauges are ONE reading and are near-useless apart: the quotient is the mean
 	// state a task carries, and that is what says which of the two multipliers is loading this replica -
@@ -197,24 +198,25 @@ func (e *Engine) initMetrics() error {
 	reg, err := meter.RegisterCallback(
 		func(ctx context.Context, o metric.Observer) error {
 			return e.observeGauges(ctx, o, observableGauges{
-				queueDepth:    queueDepth,
-				stepsPending:  stepsPending,
-				oldestAge:     oldestAge,
-				fairnessKeys:  fairnessKeys,
-				concurrency:   concurrency,
-				peerReplicas:  peerReplicas,
-				peerBlind:     peerBlind,
-				tallyAge:      tallyAge,
-				permitsAvail:  permitsAvail,
-				workersRes:    workersResident,
-				dbPhase:       dbPhaseWorkers,
-				dbPhasePeak:   dbPhaseWorkersPeak,
-				inFlightBytes: inFlightBytes,
-				inFlightSteps: inFlightSteps,
+				queueDepth:       queueDepth,
+				stepsPending:     stepsPending,
+				oldestAge:        oldestAge,
+				fairnessKeys:     fairnessKeys,
+				concurrency:      concurrency,
+				peerReplicas:     peerReplicas,
+				peerBlind:        peerBlind,
+				tallyAge:         tallyAge,
+				turnstileAvail:   turnstileAvail,
+				turnstileWaiting: turnstileWaiting,
+				workersRes:       workersResident,
+				dbPhase:          dbPhaseWorkers,
+				dbPhasePeak:      dbPhaseWorkersPeak,
+				inFlightBytes:    inFlightBytes,
+				inFlightSteps:    inFlightSteps,
 			})
 		},
 		queueDepth, stepsPending, oldestAge, fairnessKeys, concurrency, peerReplicas, peerBlind, tallyAge,
-		permitsAvail, workersResident, inFlightBytes, inFlightSteps,
+		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps,
 		dbPhaseWorkers, dbPhaseWorkersPeak,
 	)
 	if err != nil {
@@ -236,18 +238,19 @@ func (e *Engine) closeMetrics() {
 
 // observableGauges bundles the gauge instruments handed to the collection callback.
 type observableGauges struct {
-	queueDepth   metric.Int64ObservableGauge
-	stepsPending metric.Int64ObservableGauge
-	oldestAge    metric.Int64ObservableGauge
-	fairnessKeys metric.Int64ObservableGauge
-	concurrency  metric.Int64ObservableGauge
-	peerReplicas metric.Int64ObservableGauge
-	peerBlind    metric.Int64ObservableGauge
-	tallyAge     metric.Float64ObservableGauge
-	permitsAvail metric.Int64ObservableGauge
-	dbPhase      metric.Int64ObservableGauge
-	dbPhasePeak  metric.Int64ObservableGauge
-	workersRes   metric.Int64ObservableGauge
+	queueDepth       metric.Int64ObservableGauge
+	stepsPending     metric.Int64ObservableGauge
+	oldestAge        metric.Int64ObservableGauge
+	fairnessKeys     metric.Int64ObservableGauge
+	concurrency      metric.Int64ObservableGauge
+	peerReplicas     metric.Int64ObservableGauge
+	peerBlind        metric.Int64ObservableGauge
+	tallyAge         metric.Float64ObservableGauge
+	turnstileAvail   metric.Int64ObservableGauge
+	turnstileWaiting metric.Int64ObservableGauge
+	dbPhase          metric.Int64ObservableGauge
+	dbPhasePeak      metric.Int64ObservableGauge
+	workersRes       metric.Int64ObservableGauge
 	// The two in-flight state gauges are one reading; see their descriptions for why the quotient, not
 	// either alone, is what an operator reads.
 	inFlightBytes metric.Int64ObservableGauge
@@ -271,11 +274,11 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	o.ObserveInt64(g.inFlightBytes, e.inFlightStateBytes.Load())
 	o.ObserveInt64(g.inFlightSteps, e.inFlightStateSteps.Load())
 
-	// The permit counts, taken as ONE snapshot rather than a read per shard: they are the quantity a storm
+	// The turn counts, taken as ONE snapshot rather than a read per shard: they are the quantity a storm
 	// moves fastest, and per-shard reads would report different instants as a mixed picture.
-	var enterBy, exitBy map[int]int64
-	if e.permits != nil {
-		enterBy, exitBy = e.permits.Snapshot()
+	var availBy, waitingBy map[int]int
+	if e.turnstiles != nil {
+		availBy, waitingBy = e.turnstiles.Snapshot()
 	}
 
 	for idx, role := range []string{phaseEnter, phaseExit} {
@@ -292,16 +295,13 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		if s := e.sonarFor(idx); s != nil {
 			o.ObserveInt64(g.peerBlind, int64(s.BlindFor().Seconds()), shard)
 		}
-		// Both reservations under one instrument, split by role: they are the same quantity measured on
-		// the two populations, and an operator reading one without the other cannot tell "dispatch is
-		// gated" from "completions are".
-		if n, ok := enterBy[idx]; ok {
-			o.ObserveInt64(g.permitsAvail, n, shard,
-				metric.WithAttributes(attribute.String("role", "enter")))
+		// Free turns and queued callers are one reading in two halves: the first saturates at zero and so
+		// cannot show how bad it has got, the second has no ceiling and so can.
+		if n, ok := availBy[idx]; ok {
+			o.ObserveInt64(g.turnstileAvail, int64(n), shard)
 		}
-		if n, ok := exitBy[idx]; ok {
-			o.ObserveInt64(g.permitsAvail, n, shard,
-				metric.WithAttributes(attribute.String("role", "exit")))
+		if n, ok := waitingBy[idx]; ok {
+			o.ObserveInt64(g.turnstileWaiting, int64(n), shard)
 		}
 	}
 
@@ -346,6 +346,26 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 	pendingPerShard := make([]map[int]int, len(indices))
 	agePerShard := make([]map[int]int, len(indices))
 	err = e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// THE COMMON BAND, NOT THE REFILLER'S - collection is ordered with ordinary work, not ahead of it.
+		// These are O(backlog) aggregates (a COUNT and a MIN over every due step), so at band 0 they
+		// preempt dispatch every time the metric reader ticks. Measured with a 50ms reader against a
+		// ~26,000-step backlog: 1,360 steps/s at band 0 against 1,559 at band 1. Read the DIRECTION, not
+		// the 13% - it is one pair on a rig whose RTT drifted 1.5-5.1ms across the session, and the band-0
+		// arm actually had the BETTER RTT of the two, which is what makes the sign trustworthy where the
+		// magnitude is not. A production reader ticks far slower, shrinking the tax without changing the
+		// shape.
+		//
+		// This is the band rule's second half, and it is the one that is easy to miss: a band may only be
+		// given to a source that cannot flood it, and floods are measured in COST, not in count. A handful
+		// of queries per tick is a small count and an unbounded scan.
+		//
+		// Being ordered here cannot hide a saturated engine either - a late gauge is still a correct gauge,
+		// and the reader tries again on its next tick. Contrast the Sonar, which does belong at band 0: its
+		// queries are a single-row upsert and a read of the small registry table, bounded by construction,
+		// and a Sonar that cannot beat goes BLIND, which changes how the fleet behaves rather than merely
+		// when it is observed.
+		ctx, doneTurn := e.dbTurn(ctx, shard)
+		defer doneTurn()
 		// parked=0 is what this gauge MEANS: a parked step is excluded from selection by construction, so
 		// counting one would report a backlog no worker will ever pick up. Every other due-pending query in
 		// the engine carries the predicate; this one was the lone exception. (No row is miscounted today -
@@ -414,6 +434,10 @@ func (e *Engine) countRunningByTask(ctx context.Context) (map[string]int, error)
 	indices, pos := e.shardOrdinals()
 	perShard := make([]map[string]int, len(indices))
 	err := e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// The common band like the rest of collection (see the gauge callback above for why not band 0),
+		// and deferred BEFORE the rows so the turn outlives the cursor they hold a connection with.
+		ctx, doneTurn := e.dbTurn(ctx, shard)
+		defer doneTurn()
 		rows, err := db.QueryContext(ctx,
 			"SELECT task_url, COUNT(*) FROM dwarf_steps WHERE status='"+workflow.StatusRunning+"' AND parked=? GROUP BY task_url",
 			parkedNone,

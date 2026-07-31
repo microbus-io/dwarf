@@ -67,6 +67,10 @@ func (e *Engine) recoveryLoop(ctx context.Context) {
 func (e *Engine) runRecoverySweep(ctx context.Context) {
 	e.recoverExpiredLeases(ctx)
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
+		// connections like any other caller instead of taking them from work already under way.
+		ctx, doneTurn := e.dbTurn(ctx, shard)
+		defer doneTurn()
 		e.recoverWedgedSubgraphParks(ctx, db, shard, e.parkWedgeThreshold)
 		e.recoverOrphanedSubgraphChildren(ctx, db, shard, e.parkWedgeThreshold)
 		e.detectOrphanedFlows(ctx, db, shard)
@@ -97,6 +101,10 @@ func (e *Engine) runRecoverySweep(ctx context.Context) {
 // transient DB error costs one deferred pass and needs no retry or backoff of its own.
 func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
+		// connections like any other caller instead of taking them from work already under way.
+		ctx, doneTurn := e.dbTurn(ctx, shard)
+		defer doneTurn()
 		res, err := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, updated_at=NOW_UTC() WHERE status='"+workflow.StatusRunning+"' AND parked=0 AND lease_expires<=NOW_UTC()",
 			workflow.StatusPending,

@@ -107,7 +107,22 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if err != nil {
 		return "", errors.Trace(err, http.StatusBadRequest)
 	}
+	// Creation takes a turn like any other database work, and it is the one caller that most needs to: it
+	// arrives at a rate the caller chooses rather than one dispatch sets, so left unordered it competes for
+	// connections against every step already running and wins a share that grows with the offered rate -
+	// admitting flows the replica has no capacity to execute.
+	//
+	// Its claim is stamped HERE, so its age is the moment this request arrived. That puts a create behind
+	// every step already under way and ahead of every one admitted after it, which is what keeps a burst of
+	// creation from overtaking the work it just created.
+	//
+	// The turn wraps createWithGraph rather than living inside it, because that helper is shared with the
+	// subgraph-spawn path, which is already holding a turn when it calls in. A turn taken while holding one
+	// is the nesting the enclosure rule forbids: with as many turns as connections, holders waiting on a
+	// second turn deadlock against each other.
+	ctx, doneTurn := e.dbTurn(ctx, shardNum)
 	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, state, threadID, threadToken, "", opts, 0, 0, 0, 0)
+	doneTurn()
 	return flowKey, errors.Trace(err)
 }
 
@@ -123,11 +138,15 @@ func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum,
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
 	}
+	// Its own turn: create resolves the thread BEFORE picking up the turn that covers the insert, so this
+	// read would otherwise be the one part of creation that jumps the queue.
+	tctx, doneTurn := e.dbTurn(ctx, shardNum)
 	var surgraphFlowID int
-	err = db.QueryRowContext(ctx,
+	err = db.QueryRowContext(tctx,
 		"SELECT thread_id, thread_token, surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
 	).Scan(&threadID, &threadToken, &surgraphFlowID)
+	doneTurn()
 	if err == sql.ErrNoRows {
 		return 0, 0, "", errors.New("thread not found", http.StatusNotFound)
 	}
@@ -339,6 +358,12 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+
+	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
+	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
+	// and ahead of anything arriving after it.
+	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	defer doneTurn()
 
 	var flowStatus string
 	var finalStateJSON []byte
@@ -601,6 +626,12 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		return errors.Trace(err)
 	}
 
+	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
+	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
+	// and ahead of anything arriving after it.
+	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	defer doneTurn()
+
 	var flowStatus string
 	var surgraphFlowID int
 	err = db.QueryRowContext(ctx,
@@ -640,6 +671,12 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
+
+	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
+	// calls has to know about turns. Its age is stamped here, so it queues behind work already running
+	// and ahead of anything arriving after it.
+	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	defer doneTurn()
 
 	// Test checkpoint: a breakpoint here freezes Delete just before its transaction (holding no lock, so a
 	// racing Resume can commit), letting a test drive the Delete-vs-Resume race in either order. Placed before

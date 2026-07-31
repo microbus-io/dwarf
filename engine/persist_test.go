@@ -190,7 +190,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 		err := e.persist(ctx, db, 1, 1, 5, func() error {
 			writeCalls++
 			return errors.New("injected non-contention write error")
-		})
+		}, nil)
 		assert.True(errors.Is(err, errPersistFenced), "a recovery-reset pending step must fence the extension, got: %v", err)
 		assert.Equal(1, writeCalls, "the write runs once; the retry loop must not start after the fence")
 		assert.True(leaseMsOut(t, db) > 100000, "lease_expires must be untouched on the reclaimed pending step (was %.0fms out)", before)
@@ -206,7 +206,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 		err := e.persist(ctx, db, 1, 1, 5, func() error {
 			writeCalls++
 			return errors.New("injected non-contention write error")
-		})
+		}, nil)
 		assert.False(errors.Is(err, errPersistFenced), "a completed step we own (transition retry) must NOT be fenced")
 		assert.True(writeCalls > 1, "the retry loop must run for a step we still own, got %d write(s)", writeCalls)
 		after := leaseMsOut(t, db)

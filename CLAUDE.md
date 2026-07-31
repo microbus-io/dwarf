@@ -102,11 +102,6 @@ matching one before working there:**
   an edge and a cadence), and the two-phase drain.
 - **`internal/candidates/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL - godoc only, no design doc.)
-- **`internal/permits/CLAUDE.md`** - the per-shard signed semaphore that bounds concurrent DATABASE work,
-  and so lets the worker crew grow for long tasks without the growth becoming pool contention: why the
-  count must go negative (and what that rules out), the per-shard waiting queues, and the delta resize.
-  (The sizing, the debit-on-completion rationale and the peek-then-acquire ordering stay in
-  `engine/CLAUDE.md` §"Database-phase permits".)
 - **`internal/staterefs/CLAUDE.md`** - storing a large carried state field once: the anchor-cost size policy
   (why fan-out width is the primary axis), the one-hop and both-column invariants, and why the Loader is a
   per-call batched callback rather than a bound connection. (The engine-side integration - flow-boundary

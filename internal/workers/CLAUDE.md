@@ -2,8 +2,8 @@
 
 > Load when: changing the growth trigger, the gate, the drain protocol, or what `Start`/`Drain` own.
 > Coupled with: `internal/candidates/CLAUDE.md` (the cache this drains, and why blocking on it is what
-> shutdown turns on), `internal/permits/CLAUDE.md` (the gate the engine supplies; the crew only ever ENTERS it), and `engine/CLAUDE.md` §"Worker
-> sizing" (where the resident count, the maximum and the permit count come from, and what the callback does).
+> shutdown turns on), `internal/turnstile/CLAUDE.md` (the gate the engine supplies; the crew only ever ENTERS it), and `engine/CLAUDE.md` §"Worker
+> sizing" (where the resident count, the maximum and the gate's own bound come from, and what the callback does).
 
 Workers are the **demand** side: a `Crew` of goroutines that pop candidates and hand each to one callback.
 The **supply** side — deciding which candidates exist to be popped — is `piston`/`pipeline`/`planner`.
@@ -27,7 +27,7 @@ extracting a worker crew, it is moving the engine into this package.
 So the callback is `func(ctx, shard, stepID, release func()) error`: *the crew decides which goroutine runs
 what and how many there are; the caller decides what processing means* — and, through `release`, **when its
 work stops holding the bounded resource**. That last half is the caller's because only it knows where its own
-off-resource call begins; the engine releases immediately before `ExecuteTask`.
+off-resource call begins; the engine returns it as soon as its first database call is done.
 
 Two consequences visible at the seam:
 
@@ -55,7 +55,7 @@ using; a worker that popped first and then blocked would strand a candidate insi
 proceed with it, having emptied the very partition its peers were choosing between.
 
 **`idle` means "not currently holding a candidate", which is wider than "parked", and the width is
-load-bearing.** It covers three states — parked in `WaitForWork`, blocked in `AcquireEnter`, and *spawned but not
+load-bearing.** It covers three states — parked in `WaitForWork`, blocked in `Acquire`, and *spawned but not
 yet running*. Each is a worker that will take the next candidate unaided, so none justifies another
 goroutine. The third is why `spawn` increments the counter **before** the goroutine exists: count only the
 park and a freshly-started crew reads as fully committed for the instant before its workers reach it, so
@@ -71,21 +71,20 @@ ceiling of 141,000 and a workload needing ~48,000 concurrent. Eight times the ta
 crew and *less* throughput.
 
 **Saturation stops growth WITHOUT the trigger ever asking about it, and that is why `Gate` has one method.**
-A worker blocked in `AcquireEnter` holds no candidate, so it counts *idle*, so the next check declines. The
+A worker blocked in `Acquire` holds no candidate, so it counts *idle*, so the next check declines. The
 overshoot is exactly **one** goroutine per saturation episode — and that one is first in line for the next
 permit, so it is not even waste. `TestCrew_SaturationDoesNotGrowThePool` pins the bound at 3 residents (two
 holding both permits, plus the reserve) and fails at `Max` against a build that reads saturation as a reason
-to keep spawning.
+to keep spawning — measured against a gate that does not block: the crew ran to 398 where 64 sufficed.
 
-**Do NOT reintroduce a capacity query on the gate.** It was there (`Gate.Available`, backed by
-`permits.Available`) and it bought nothing the blocking already gives, while forcing the gate to *summarise*
-itself for a consumer that cannot know what it meters. That summary is not obvious: with an enter/exit
-split, "has room" has two candidate answers, and picking the enter side alone makes free permits
-**anti-correlated** with health once the exit path is the constraint — free precisely *because* nothing is
-getting out. Reading the block instead of the count sidesteps the question rather than answering it wrongly.
+**Do NOT add a capacity query to the gate.** It buys nothing the blocking already gives, while forcing the
+gate to *summarise* itself for a consumer that cannot know what it meters — and that summary is rarely
+obvious. A gate metering two populations has two candidate answers to "has room" and no correct single one;
+worse, the tempting half can be **anti-correlated** with health, free precisely *because* nothing is getting
+out. Reading the block instead of the count sidesteps the question rather than answering it wrongly.
 
 **What the caller still owns is *when* the permit is released** — a genuine question only it can answer (the
-engine releases immediately before `ExecuteTask`) — and the crew backstops it with `sync.OnceFunc` plus an
+engine releases as soon as its first database call is done) — and the crew backstops it with `sync.OnceFunc` plus an
 unconditional call on the way out, so a leaked permit is **unreachable** rather than merely detected.
 
 ### The standing reserve is what makes ONE edge sufficient
@@ -169,11 +168,11 @@ lease-margin ceiling, re-derived on every fleet change — `SetMax` is live for 
 
 **Metrics.** The crew emits none. `Resident`/`Idle`/`Max` are exposed so an owner can build a gauge from
 them, which keeps instrument names — a public surface dashboards bind to — with the owner. The engine
-publishes `dwarf_workers_resident` from the first, and reads it against `dwarf_permits_available` (the
+publishes `dwarf_workers_resident` from the first, and reads it against `dwarf_turnstile_available` (the
 gate's own count) to tell the two long-task regimes apart: a crew far above the permit count *with permits
 free* is serving long tasks correctly, while a crew pinned at `Max` is the one to alarm on.
 
 **The gate.** Sized, closed, and given meaning by the owner. The crew never asks what it bounds — in the
-engine it is a multiple of that shard's connection pool, split into separate enter and exit reservations,
-and the release point is "immediately before the host call". All of those are engine facts the crew would be
+engine it is a multiple of that shard's connection pool, ordered by band and then by how long the asking job has been running,
+and the release point is "as soon as the first database call is done". All of those are engine facts the crew would be
 wrong to encode, which is why `Gate` is one blocking method and no accessor.

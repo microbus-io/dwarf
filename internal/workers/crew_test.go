@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/candidates"
-	"github.com/microbus-io/dwarf/internal/permits"
+	"github.com/microbus-io/dwarf/internal/turnstile"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
@@ -42,15 +42,24 @@ func newCache(t *testing.T) *candidates.Cache {
 	return c
 }
 
-// newGate returns the real permit set, sized for shard 1, closed at test end. These tests deliberately use
-// the production Gate rather than a fake: the crew's contract with it (Acquire blocks, blocking counts as
-// idle and so stops growth, close is a stop signal) is exactly what is under test.
-func newGate(t *testing.T, n int) *permits.Set {
+// newGate returns a real gate over a turnstile sized for shard 1, closed at test end. These tests
+// deliberately use the production Gate rather than a fake: the crew's contract with it (Acquire blocks,
+// blocking counts as idle and so stops growth, close is a stop signal) is exactly what is under test.
+func newGate(t *testing.T, n int) *turnstile.Gate {
 	t.Helper()
-	g := permits.New()
-	g.Resize(1, n, n)
-	t.Cleanup(g.Close)
-	return g
+	s := turnstile.NewSet()
+	s.Resize(1, n)
+	t.Cleanup(s.Close)
+	return s.Gate(1)
+}
+
+// newGateSet is newGate when the test needs to close the set itself, mid-run.
+func newGateSet(t *testing.T, n int) (*turnstile.Set, *turnstile.Gate) {
+	t.Helper()
+	s := turnstile.NewSet()
+	s.Resize(1, n)
+	t.Cleanup(s.Close)
+	return s, s.Gate(1)
 }
 
 // fill pushes n candidates onto shard 1 as a refill would.
@@ -130,7 +139,7 @@ func TestCrew_ProcessesEveryCandidate(t *testing.T) {
 // shard, a crew bloated to ~1,300 goroutines where ~512 sufficed).
 //
 // The property is that saturation must not grow the crew WITHOUT BOUND, and it is enforced with no capacity
-// query at all: the crew spawns one worker, that worker blocks in AcquireEnter, and blocking makes it count
+// query at all: the crew spawns one worker, that worker blocks in Acquire, and blocking makes it count
 // IDLE - which declines every subsequent check. So the overshoot is exactly one goroutine, permanently, and
 // it is the one first in line for the next permit.
 //
@@ -281,7 +290,7 @@ func TestCrew_ReleaseIsBackstopped(t *testing.T) {
 	assert := testarossa.For(t)
 	c := newCache(t)
 
-	gate := newGate(t, 2)
+	set, gate := newGateSet(t, 2)
 	var handled atomic.Int32
 	crew, err := New(c, gate, func(_ context.Context, shard, stepID int, release func()) error {
 		handled.Add(1)
@@ -299,8 +308,8 @@ func TestCrew_ReleaseIsBackstopped(t *testing.T) {
 
 	c.Close()
 	crew.Drain()
-	enter, _ := gate.Snapshot()
-	assert.Equal(int64(2), enter[1], "every permit is back")
+	avail, _ := set.Snapshot()
+	assert.Equal(2, avail[1], "every permit is back")
 }
 
 // TestCrew_MaxIsRespectedAndLive pins that growth stops at Max and that lowering Max stops further growth
@@ -367,7 +376,7 @@ func TestCrew_DrainRacesGrowthWithoutPanicking(t *testing.T) {
 	assert := testarossa.For(t)
 	c := newCache(t)
 
-	gate := newGate(t, 64)
+	set, gate := newGateSet(t, 64)
 	crew, err := New(c, gate, func(_ context.Context, shard, stepID int, release func()) error {
 		release()
 		time.Sleep(200 * time.Microsecond)
@@ -400,7 +409,7 @@ func TestCrew_DrainRacesGrowthWithoutPanicking(t *testing.T) {
 	// Drain while workers are still trying to spawn peers. Without the flag this panics.
 	close(stop)
 	c.Close()
-	gate.Close()
+	set.Close()
 	crew.Drain()
 }
 
@@ -411,7 +420,7 @@ func TestCrew_SpawnAfterDrainIsInert(t *testing.T) {
 	assert := testarossa.For(t)
 	c := newCache(t)
 
-	gate := newGate(t, 4)
+	set, gate := newGateSet(t, 4)
 	crew, err := New(c, gate, func(_ context.Context, _, _ int, release func()) error {
 		release()
 		return nil
@@ -422,7 +431,7 @@ func TestCrew_SpawnAfterDrainIsInert(t *testing.T) {
 	crew.SetMax(4)
 	crew.Start(context.Background(), 1)
 	c.Close()
-	gate.Close()
+	set.Close()
 	crew.Drain()
 
 	before := crew.Resident()
@@ -437,8 +446,7 @@ func TestCrew_ClosedGateReleasesWorkers(t *testing.T) {
 	assert := testarossa.For(t)
 	c := newCache(t)
 
-	gate := permits.New()
-	gate.Resize(1, 1, 1)
+	set, gate := newGateSet(t, 1)
 	entered := make(chan struct{}, 1)
 	hold := make(chan struct{})
 	crew, err := New(c, gate, func(_ context.Context, shard, stepID int, release func()) error {
@@ -466,7 +474,7 @@ func TestCrew_ClosedGateReleasesWorkers(t *testing.T) {
 	// whoever is waiting on a permit.
 	close(hold)
 	c.Close()
-	gate.Close()
+	set.Close()
 	crew.Drain() // hangs if the gate close is not a stop signal
 }
 
@@ -480,7 +488,7 @@ func TestCrew_HandlerErrorAndPanicKeepTheWorkerAlive(t *testing.T) {
 
 	var buf bytes.Buffer
 	var handled atomic.Int32
-	gate := newGate(t, 4)
+	set, gate := newGateSet(t, 4)
 	crew, err := New(c, gate, func(_ context.Context, shard, stepID int, release func()) error {
 		switch n := handled.Add(1); n {
 		case 1:
@@ -506,8 +514,8 @@ func TestCrew_HandlerErrorAndPanicKeepTheWorkerAlive(t *testing.T) {
 	c.Close()
 	crew.Drain()
 	assert.True(strings.Contains(buf.String(), "Processing candidate"))
-	enterBack, _ := gate.Snapshot()
-	assert.Equal(int64(4), enterBack[1], "the error and panic paths both gave their permit back")
+	enterBack, _ := set.Snapshot()
+	assert.Equal(4, enterBack[1], "the error and panic paths both gave their permit back")
 }
 
 // TestCrew_WorkArrivingWhileFullyCommittedStillGrows is what replaced the periodic growth check, and it
