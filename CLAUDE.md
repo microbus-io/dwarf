@@ -151,17 +151,19 @@ matching one before working there:**
   changes delta with the tombstone intact, then `DelNils` when the delta folds onto state. A cleared value on
   a *reducer*-managed field is *ignored* (the reducer's identity), never dropped. (`workflow/CLAUDE.md`; enforced
   at `execution.go`)
-- **Two unstorable values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt.** Nothing checks
-  storability on the write side, by decision, not oversight. Both are *silent* if let through: (1) an
-  integer-shaped value beyond **±2^53** - state numbers are float64-domain, so it comes back **rounded** (a wrong
-  id, no error anywhere); carry a large id as a string. (2) A **NUL** (`U+0000`) in a string - Postgres `JSONB`
+- **Two problem values are KNOWN and currently UNGUARDED - a deliberate, backlogged punt.** Nothing checks
+  storability on the write side, by decision, not oversight. (1) An integer-shaped value beyond **±2^53**.
+  **STORAGE IS EXACT** - raw-field storage means a carried field is never decoded, so it round-trips
+  byte-exact into the next step's `state`, `final_state`, a `Fork` and a `Continue`, and reading one does not
+  memoize the rounded form. The exposure is **per-READER, not per-field**: a read into an `any`
+  (`Get`/`Value`/`All`/`Map`/`Parse` into a map) rounds, while **`GetInt` does not** - it unmarshals straight
+  into an `int`, exact at any int64 magnitude. `boolexp` still rounds, because it re-marshals the symbols and
+  decodes them itself, so a `when` comparing a >2^53 id compares float64s regardless of storage. Carry a
+  large id as a string if it must be branched on. (2) A **NUL** (`U+0000`) in a string - Postgres `JSONB`
   rejects it (`SQLSTATE 22P05`) while the other dialects accept it, so it passes SQLite tests and fails on the
-  recommended production DB; base64-encode binary data. The float64 invariant still holds for every value the
-  engine itself produces (every stored number round-trips exactly through `float64`), which is what lets every
-  reader - including `boolexp` - treat numbers as `float64`; it is only *external/authored* oversized integers
-  that go uncaught. Do not add a guard (nor "fix" the integer with `UseNumber`) without revisiting the punt -
-  a write-side guard must run on the **raw caller bytes** before the decode (the decode already rounds past
-  2^53) and must not re-check the engine's own derived merges. (`workflow/CLAUDE.md`)
+  recommended production DB; base64-encode binary data. Do not add a guard (nor "fix" the integer with
+  `UseNumber`) without revisiting the punt - a write-side guard must run on the **raw caller bytes** before
+  any decode, and must not re-check the engine's own derived merges. (`workflow/CLAUDE.md`)
 - **Write-first transactions:** every flow-terminating transaction must UPDATE first, or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
 - **Lease fencing:** every post-execution write to the *dispatched* step must carry `AND lease_seq=?` (the

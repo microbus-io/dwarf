@@ -19,12 +19,21 @@
 # workersPerConnBudget, so it is the multiple that keeps the contending population the same size the cache
 # and resident worker set are already derived for; 10x has to earn the extra queue.
 #
-# CONTROLS: rep-major interleave (8,4,2,1 / 8,4,2,1 / ...) so session drift hits every arm equally; an
+# Each arm is a SEPARATE BINARY built with a different turnstilePassesPerConn, because the multiple is a
+# compile-time constant. Build them with:
+#   for n in 8 10 12; do
+#     sed -i '' "s/^\tturnstilePassesPerConn = .*/\tturnstilePassesPerConn = $n/" engine/poolsize.go
+#     GOOS=linux GOARCH=arm64 go build -o dwarf-bench-t$n ./bench
+#   done; git checkout engine/poolsize.go
+# The artifacts therefore record an IDENTICAL config for every arm - the multiple lives only in the label
+# and the file name, so do not read the config block to tell arms apart.
+#
+# CONTROLS: rep-major interleave (8,10,12 / 8,10,12 / ...) so session drift hits every arm equally; an
 # idle RTT gate with cooldown before each arm, since RTT degrades across a session and correlates with
 # throughput at rho ~= -0.90; a fresh database per run, dropped after.
 #
 # Usage:
-#   DSN=postgres://... ./permitladder.sh
+#   DSN=postgres://... ./turnstileladder.sh
 # Knobs (env): BINS (default "8:./dwarf-bench-t8 10:./dwarf-bench-t10"),
 #   OUT, REPS (3), RATE (600), DELAY (8s), WARMUP (150s), WINDOW (60s), VCPUS (16), CONC (128),
 #   MAX_OUTSTANDING (100000), COOLDOWN (30s), RTT_MAX_MS (1.0), RTT_TRIES (10), RUN_ID, EXTRA.
@@ -136,8 +145,8 @@ for path in sorted(glob.glob(os.path.join(out, "r-p*-r*.json"))):
 # Per-acquire wait is a WINDOW DELTA of two cumulative counters: sql.DBStats exposes totals since the
 # pool opened, so the raw value includes the warmup (150 s of it here) and understates the window.
 # WaitCount counts only acquisitions that BLOCKED, so this is the mean among waiters, not among all.
-print(f"{'permits':>8} {'n':>2} {'steps/s':>9} {'spread':>15} {'%cmd':>6} {'flows/s':>8} {'workers':>8} "
-      f"{'permitAvl':>10} {'waitMs':>7} {'blocked':>10} {'passMs':>7} {'sel/s':>7} {'outstd':>8}")
+print(f"{'turns':>8} {'n':>2} {'steps/s':>9} {'spread':>15} {'%cmd':>6} {'flows/s':>8} {'workers':>8} "
+      f"{'turnAvl':>10} {'waitMs':>7} {'blocked':>10} {'dutyMs':>7} {'sel/s':>7} {'outstd':>8}")
 means = {}
 for mult in sorted(arms, reverse=True):
     rows = arms[mult]
@@ -150,9 +159,12 @@ for mult in sorted(arms, reverse=True):
         dd = pool(a, "wait_duration_seconds") - pool(b, "wait_duration_seconds")
         waits.append(dd / dc * 1000 if dc else 0)
         blocked.append(dc)
-        h = {x["name"]: x for x in r.get("engineHistograms", []) if x.get("count")}
-        rf = h.get("dwarf_refill_duration_seconds")
-        passms.append(rf["sumSeconds"] / rf["count"] * 1000 if rf else 0)
+        # There is no end-to-end cycle histogram: a cycle scans band_keys exactly once, so that phase's
+        # COUNT is cycles, and the four phases summed are the working part of one cycle (its duty).
+        qs = [x for x in r.get("engineHistograms", [])
+              if x.get("count") and x["name"] == "dwarf_refill_query_duration_seconds"]
+        cyc = sum(x["count"] for x in qs if (x.get("attrs") or {}).get("phase") == "band_keys")
+        passms.append(sum(x["sumSeconds"] for x in qs) / cyc * 1000 if cyc else 0)
         sels.append(r.get("engineCounters", {}).get("dwarf_refill_candidates_selected", 0) / r["windowSec"])
     perm = statistics.mean(sum(v for k, v in (r.get("gaugesAfter") or {}).items()
                               if k.startswith("dwarf_turnstile_available")) for r in rows)
@@ -166,10 +178,10 @@ for mult in sorted(arms, reverse=True):
 print(f"\ncommanded {rate:.0f} flows/s = {commanded:.0f} steps/s.")
 print("""
 Reading it:
-  - a tighter multiplier reaching %cmd ~100 with a LOWER waitMs -> 8x was buying queueing, not work
-  - every multiplier equally short                             -> the pool, not the gate, is the limit
-  - the tightest arm short while a middle one is not           -> permitted-but-idle slots now bind:
-                                                                  the floor is between those two
-  - passMs/sel/s recovering as the multiplier falls            -> candidate supply was losing the pool,
-                                                                  which is the stall's actual mechanism""")
+  - 8x reaching %cmd ~100 with a LOWER waitMs than 10x/12x -> the extra turns bought queueing, not work
+  - every multiple equally short                           -> the pool, not the turnstile, is the limit
+  - a higher multiple serving materially more              -> the queue in front of the pool was too
+                                                              shallow to keep connections busy
+  - dutyMs/sel/s recovering as the multiple falls          -> candidate supply was losing the pool,
+                                                              which is the stall's actual mechanism""")
 PY

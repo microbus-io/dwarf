@@ -1,5 +1,9 @@
 # Writing tasks
 
+> **For developers** writing the code that runs inside a workflow. It covers the `workflow.Flow` carrier a
+> task receives: reading and writing state, the control signals, and handling failure. The graph that decides
+> *which* task runs is [Building graphs](graphs.md).
+
 A task is a function your host's `ExecuteTask` runs. It receives a `*workflow.Flow` — the carrier holding the
 step's state and control signals — does its work, writes outputs back onto the flow, and returns. This
 guide covers the Flow API a task uses.
@@ -83,26 +87,39 @@ f.SetString("payload", base64.StdEncoding.EncodeToString(raw))  // correct
 Nothing else about strings is constrained — tabs, newlines, other control characters, and emoji all
 round-trip fine. (Invalid UTF-8 needs no rule: `encoding/json` replaces it with `U+FFFD` on the way in.)
 
-### Large integers must be carried as strings
+### Large integers: exact in storage, rounded by untyped reads
 
-**Known limitation:** an integer stored in state must not exceed **2^53** (about 9.0e15). State round-trips
-through JSON, where a number is a `float64`, which holds integers exactly only up to that bound. A bigger
-integer comes back **rounded** in the next step, silently corrupting the value (a wrong id, with no error
-anywhere). Dwarf does **not** currently detect or reject this, so it is your responsibility: if a larger number
-is required, carry it as a **string**. A 64-bit database key, a Snowflake id, or a nanosecond timestamp all
-belong in state as strings (the same reason APIs that mint 64-bit ids publish an `id_str` alongside them).
+An integer beyond **2^53** (about 9.0e15) is **stored exactly** — it round-trips digit-for-digit into the
+next step's state, into `final_state`, and through `Fork` and `Continue`. Reading one does not damage it
+either. What matters is *how you read it back*:
 
 ```go
-f.SetInt("orderID", 1234567890123456789)   // WRONG: 1.2e18 comes back rounded to ...768
-f.SetString("orderID", "1234567890123456789") // correct: exact, digit for digit
+f.SetInt("orderID", 1234567890123456789)
+f.GetInt("orderID")                     // exact — reads straight into an int
 
-f.SetInt("qty", 3)                          // ordinary integers are unaffected
-f.SetInt("createdMs", time.Now().UnixMilli()) // ~1.7e12: fine
-f.SetInt("createdNs", time.Now().UnixNano())  // WRONG: ~1.7e18 rounds
-f.SetFloat("total", 1e300)                  // floats are unaffected at any magnitude
+var order struct{ ID int64 `json:"orderID"` }
+f.Get("orderID", &order.ID)             // exact — a typed target
+
+var loose any
+f.Get("orderID", &loose)                // ROUNDS to ...800 — untyped lands in a float64
 ```
 
-A `time.Duration` is nanoseconds, so `SetDuration` past ~104 days rounds the same way.
+**Typed accessors are exact at any magnitude.** `GetInt`, `GetFloat`, `GetString` and a `Get` into a typed
+target all decode straight into that type. **Untyped reads round**, because JSON's number type decodes into
+`float64` when there is nothing narrower to decode into: `Get` into an `any`, and the whole-state readers
+that produce maps.
+
+**One more place rounds, and it is easy to miss:** a `when` expression on a transition. Condition evaluation
+re-decodes state into untyped values, so a `when` comparing a >2^53 id compares floats no matter how the
+field was stored.
+
+```go
+g.AddTransition("A", "B").When("orderID == 1234567890123456789")  // unreliable at this magnitude
+```
+
+So: use typed accessors, and **carry the value as a string if you need to branch on it** — the same reason
+APIs that mint 64-bit ids publish an `id_str` alongside them. A `time.Duration` is nanoseconds, so a
+duration past ~104 days is in the same territory.
 
 ### Deltas, not totals, for reducer fields
 
@@ -199,7 +216,7 @@ On the first call the flow goes to `interrupted`, the payload is surfaced to who
 the engine fires the stop notification. When the operator calls `eng.Resume(ctx, flowKey, data)`, the task
 re-runs and `Interrupt` returns `(false, nil)` with the caller's data unmarshaled into your `&resume`
 pointer. The resume data is delivered through that pointer — it is **not** merged into state. See
-[Engine operations → Resume](operations.md#resume).
+[Driving flows → Resume](flows.md#resume).
 
 ### Subgraph
 
@@ -252,7 +269,7 @@ func charge(ctx context.Context, f *workflow.Flow) error {
 
 Baggage is set once at `Create` (as any JSON object — a struct or map), frozen on the flow, inherited by
 subgraphs and `Continue`, and delivered back as a `workflow.State` (the JSON-decoded form, numbers as
-float64). See [Engine operations → Create](operations.md#create-and-run).
+float64). See [Driving flows → Create](flows.md#create-and-run).
 
 ## Handling transient failures
 
@@ -278,6 +295,118 @@ default:
 
 The retry bound is wall-clock, not a count; see [Retry](#retry).
 
+### Keep payload data out of error text
+
+**An error message is not a private log line.** Whatever you return is stored on the flow and the step, and
+it comes back from the two readers that expose no state payloads at all:
+
+- **`List`** returns each flow's error and cancel reason on the summary.
+- **`History`** returns each step's error, alongside metadata — it deliberately omits `state` and `changes`,
+  but not the error.
+- **`Query.Search`** substring-matches the error text, so flows can be *found* by what their errors contain.
+
+An operator console built on `List` and `History` is normally the low-privilege surface — it shows what
+happened without showing what was in it. Error text is the one channel that crosses that line, so anything
+you interpolate is visible to everyone who can list flows, which is usually a wider group than those allowed
+to read workflow data.
+
+**Name the failure; don't quote the payload.**
+
+```go
+// Leaks: the card number and the email are now listable and searchable.
+return fmt.Errorf("declined card %s for %s: %w", cardNumber, customerEmail, err)
+
+// Fine: the failure is identifiable and the sensitive values stay in state.
+return fmt.Errorf("charge declined for customer %s: %w", customerID, err)
+```
+
+Reference data by an internal identifier you can look up, rather than by its value. Be careful with `%w` and
+`%v` on downstream errors too — an API client's error often quotes the request body it sent.
+
+**This costs you nothing in diagnosability, and it makes triage better.** Errors that name a *class*
+(`charge declined`, `upstream 503`) group across flows, which is what a search during an incident is
+actually for. Errors that embed unique payload values match one flow each, so they are simultaneously the
+least useful to search and the most sensitive to expose.
+
+One related surface: an error's structured properties ride into the `onErr` state field for handler routing,
+so they land in state like any other field rather than in the error column. Treat them with the same care
+you would give any state value.
+
+## Idempotency
+
+**Execution is at-least-once: your task may run more than once for the same step.** The engine guarantees
+that the flow's *persisted state* reflects exactly one execution — a late worker's writes are fenced off —
+but it cannot fence your side effects, because it does not own your downstream. Charging a card, sending an
+email, or posting to an API is yours to make safe.
+
+This is not an edge case to design around later. It happens whenever:
+
+- a replica dies, or is killed before its drain window finishes, and the step's lease lapses;
+- a task overruns its `TimeBudget` and a peer re-claims the step while the first is still running;
+- the database is unreachable long enough that the step's outcome cannot be recorded;
+- a database is restored from backup, re-dispatching everything that was in flight.
+
+**Two of those produce *concurrent* attempts, not merely sequential ones.** A slow task that loses its lease
+keeps running while its replacement starts, so a dedupe that reads before it writes can be raced by its own
+retry. Make the check and the effect atomic.
+
+### `StepKey()` is your idempotency key
+
+```go
+func chargeCard(ctx context.Context, f *workflow.Flow) error {
+    return payments.Charge(ctx, payments.Request{
+        Amount:         f.GetInt("amountCents"),
+        Customer:       f.GetString("customerID"),
+        IdempotencyKey: f.StepKey(),   // stable across every re-execution of this step
+    })
+}
+```
+
+`f.StepKey()` is `{shard}-{stepID}-{token}` and is **stable across every re-execution of one step** — a
+lease recovery, a `flow.Retry`, a re-dispatch after a database blip all rewind the same step row and hand
+back the same key. It is also unique per step, so two steps of one flow never collide.
+
+The other identifiers are the wrong choice, each for its own reason:
+
+| | Why not |
+|---|---|
+| `f.Attempt()` | **Changes on every retry** — using it as a key defeats deduplication entirely. It is for *bounding* retries and for logs. |
+| `f.FlowKey()` | Shared by every step in the flow, so two different steps would dedupe against each other. |
+| A value you generate | A fresh UUID per execution is a new key on every attempt — the same bug as `Attempt()`. |
+
+**A loop is not a retry.** A branch that revisits a task via `flow.Goto` creates a *new* step each time
+around, so each iteration gets its own `StepKey` and is correctly treated as separate work. Likewise `Fork`
+clones steps into new rows with new keys — a fork is a deliberate re-run and its side effects fire again.
+
+### If the downstream has no idempotency key
+
+Make the effect naturally repeatable, or record the effect atomically in a store you control:
+
+```go
+// A unique constraint on step_key turns "have I done this?" into one atomic write.
+_, err := db.ExecContext(ctx,
+    `INSERT INTO sent_emails (step_key, recipient) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    f.StepKey(), recipient)
+if err != nil {
+    return err
+}
+// ... then send. A duplicate attempt inserts nothing and can skip.
+```
+
+Prefer shapes that are repeatable by construction: `PUT` over `POST`, "set the balance to X" over "add X",
+upserts over inserts. An effect that is naturally idempotent needs no key at all.
+
+**Give an unavoidably non-idempotent effect its own task.** A step's outcome is durably recorded before its
+successor runs, so isolating the effect in a single-purpose task narrows the window in which a re-run can
+duplicate it, and keeps the surrounding logic free to be retried without restriction.
+
+### One thing you cannot rely on
+
+**A task's `flow.Set` writes are discarded when it returns an error.** Both failure paths agree: the
+`onError` handler receives the step's *input* state plus the error, never anything the failing attempt
+wrote. So you cannot record "I already did the side effect" by writing it into state and then returning an
+error — the record is dropped. Use an external store, as above.
+
 ## Timestamps
 
 `f.CreatedAt()` and `f.UpdatedAt()` are populated on every dispatch. Use `CreatedAt` to implement a
@@ -289,4 +418,4 @@ if time.Since(f.CreatedAt()) > 24*time.Hour {
 }
 ```
 
-Next: [Engine operations](operations.md).
+Next: [Driving flows](flows.md).

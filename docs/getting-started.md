@@ -1,5 +1,8 @@
 # Getting started
 
+> **For developers** meeting dwarf for the first time. It installs the module, explains the two callbacks you
+> must implement, and gets a flow running against the in-process test harness — no database required.
+
 ## Install
 
 ```bash
@@ -78,7 +81,7 @@ func TestGreeting(t *testing.T) {
 ```
 
 `Run` is `Create` + `Await` in one call. The `nil` last argument is `*workflow.FlowOptions`
-(scheduling and baggage) — see [Engine operations](operations.md).
+(scheduling and baggage) — see [Driving flows](flows.md).
 
 ## Wiring a real engine
 
@@ -99,12 +102,14 @@ func (h *myHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, e
 	return g, nil
 }
 
-func (h *myHost) ExecuteTask(ctx context.Context, taskName string, f *workflow.Flow) error {
-	return dispatch(ctx, taskName, f) // your local table / RPC / bus
+func (h *myHost) ExecuteTask(ctx context.Context, taskURL string, f *workflow.Flow) error {
+	return dispatch(ctx, taskURL, f) // your local table / RPC / bus
 }
+```
 
-// Optional method (a no-op for a single-replica host):
+That is the whole interface. Wire it up and start the engine:
 
+```go
 eng := dwarf.NewEngine()
 eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db:5432/dwarf"})
 eng.SetHost(&myHost{graphs: loadGraphRegistry()})

@@ -3309,7 +3309,7 @@ an opaque cursor encoding each shard's smallest-returned `flow_id`. `List` is st
 the whole call (the per-shard debug path is `ShardInfo` + `List(Shard=N)`).
 
 *Say this out loud in the public docs, do not quietly promise "newest first".* The Operations summary above, the
-`List` godoc, `Query.Limit`, and `docs/operations.md` all used to advertise a global newest-first order, which on a
+`List` godoc, `Query.Limit`, and `docs/flows.md` all used to advertise a global newest-first order, which on a
 two-shard fleet visibly is not: `List(Limit:100)` returns shard 1's 50 newest, then shard 2's 50 newest, so shard 2's
 newest flow follows shard 1's oldest returned one - a reverse-chronological UI renders that as an interleaving
 artifact. The fix is the **doc**, not the code: merging by `created_at` (the tempting one) is exactly what the
@@ -3326,7 +3326,7 @@ documented rather than clamped **on purpose**: truncating the assembled slice wo
 (`nextPerShard[s]`, set from the last row scanned per shard) past rows never handed to the caller, silently dropping
 them from the next page - the per-shard cursor is exactly why there is no global OFFSET to truncate against. A caller
 needing a strict total truncates its own copy (leaving the returned cursor untouched) or pages one shard at a time.
-The public `Query.Limit`/`List`/`Purge` godocs and `docs/operations.md` state this.
+The public `Query.Limit`/`List`/`Purge` godocs and `docs/flows.md` state this.
 
 **The shard set is immutable at runtime.** `SetShard` is construction-time only: it records index->DSN pairs before
 `Startup` (which opens+migrates exactly those shards) and is **rejected** on a running engine, so the set never

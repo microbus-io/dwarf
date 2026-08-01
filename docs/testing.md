@@ -1,5 +1,8 @@
 # Testing
 
+> **For developers** writing tests for their own workflows. It covers the in-process harness dwarf ships so
+> your test suite can run real flows with no database and no transport.
+
 Dwarf ships an in-process test harness so you can exercise real workflows — scheduling, fan-out, subgraphs,
 interrupts, retries — with no database to set up and no transport to stand up.
 
@@ -135,6 +138,6 @@ are written — see the `fixtures` package in the repository for worked examples
 
 ## Where examples live
 
-The repository's `fixtures` package contains ~60 end-to-end workflow tests built exactly this way — from
+The repository's fixture suite contains around a hundred end-to-end workflow tests built exactly this way — from
 `basicflow` up through `subgraphflow`, `dynamicfanoutflow`, and `fairnessflow`. They're the canonical,
 runnable reference for every feature.

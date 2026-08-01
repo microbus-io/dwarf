@@ -1,5 +1,9 @@
 # Benchmarks
 
+> **For developers and operators** comparing SQL dialects or shard counts on their own hardware. These are
+> single-host laptop-scale numbers — good for *relative* comparison, not for capacity planning. For
+> absolute numbers and the sizing formula, see [Cloud benchmarks](benchmark-cloud.md).
+
 `fixtures/benchmark_test.go` measures end-to-end flow throughput and latency through the **public API**
 (`Run` = create + await) against whatever SQL dialect `SEQUEL_TESTING_DSN` points at. It measures what code
 review cannot tell you: how many flows and steps per second each dialect sustains at each shard count, and the

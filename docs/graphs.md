@@ -1,5 +1,8 @@
 # Building graphs
 
+> **For developers** defining workflows. This is the graph-authoring API: the nodes, transitions, conditions
+> and reducers that decide what runs when. Writing the task bodies themselves is [Writing tasks](tasks.md).
+
 A `workflow.Graph` is the definition of a workflow. You build one in code and hand it to the engine via
 your host's `LoadGraph`. This guide covers the full graph-authoring API.
 
@@ -179,7 +182,7 @@ if err != nil {
 
 Read-only inspectors include `Name`, `EntryPoint`, `Nodes`, `Transitions`, `Reducers`, `URLOf`,
 `IsFanIn`, and `IsFanOutSource`. A graph carries only its definition; the fan-out-to-fan-in routing map
-is an engine-side optimization derived from the definition (see `internal/faninmap`), not part of the
+is an engine-side optimization derived from the definition at dispatch, not part of the
 graph. Graphs marshal to and from JSON (`MarshalJSON`/`UnmarshalJSON`), which is how the engine freezes a
 graph onto a flow.
 

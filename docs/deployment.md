@@ -1,5 +1,9 @@
 # Deployment
 
+> **For operators** standing dwarf up in production, and for developers doing the wiring. It covers choosing
+> and tuning a database, declaring shards, connection pools, workers, and running multiple replicas. Once it
+> is running, [Operating dwarf](operations.md) takes over.
+
 This guide covers running dwarf in production: choosing and tuning a database, sharding, connection pools,
 configuration, and running multiple replicas.
 
@@ -114,7 +118,9 @@ Rules:
 - The shard set is fixed for the engine's life: shards are opened and migrated at `Startup`, and
   `SetShard` is rejected after. Each flow key encodes its shard, so changing the set requires a
   coordinated restart of every replica (a maintenance window), not a live/piecemeal change.
-- New top-level flows pick a random shard; subgraph flows stay on the parent's shard.
+- New top-level flows are placed across shards in proportion to their declared `VirtualCPUs`, so a bigger
+  database receives proportionally more work; cordoned shards are skipped. Subgraph flows, thread
+  continuations and forks all stay on their originating shard.
 
 ```go
 eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable", VirtualCPUs: 8})

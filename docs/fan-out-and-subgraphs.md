@@ -1,5 +1,8 @@
 # Fan-out & subgraphs
 
+> **For developers** building workflows that branch. Both features here are graph-authoring plus task-side
+> API, so read [Building graphs](graphs.md) and [Writing tasks](tasks.md) first.
+
 Two features let a workflow do more than a straight line: **fan-out/fan-in** runs work in parallel and
 merges the results, and **subgraphs** call another workflow as a child.
 
@@ -85,8 +88,10 @@ results are stable. The reducers available are listed in [Concepts → Reducer](
 
 A few rules worth knowing:
 
-- **Fan-out siblings must share the same outgoing transition targets.** The engine evaluates transitions
-  from the last sibling to finish; `Validate()` enforces this so the result can't depend on finish order.
+- **All branches of one fan-out must converge on the same fan-in node**, and `Validate()` enforces it at
+  `Create`. The engine picks the convergence node from whichever sibling finishes last, so branches routed
+  to *different* fan-ins would make the result depend on finish order. Branches may take different
+  intermediate paths — only the fan-in they end at must agree.
 - **The per-branch bookkeeping (`item`, `itemIndex`, `itemCount`) does not survive the fan-out.** It is gone
   from the flow's state once the cohort is behind it — at the fan-in, and in the final state of a flow whose
   fan-out failed. (Otherwise one arbitrary branch's element would ride forward as the flow's own, picked by

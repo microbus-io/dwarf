@@ -50,9 +50,13 @@ fmt.Println(out.State.GetString("greeting")) // hello ada
   fairness within a band so one tenant can't starve another.
 - **Scales horizontally.** Run many replicas against sharded databases; they coordinate entirely through
   the databases they already share, with no message bus to run between them.
-- **OTEL-native observability.** Structured logs (`slog`), 15 `dwarf_*` metrics, and distributed tracing,
+- **OTEL-native observability.** Structured logs (`slog`), 33 `dwarf_*` instruments, and distributed tracing,
   all through standard providers you inject.
 - **Four SQL dialects.** PostgreSQL, MySQL/MariaDB, SQL Server, and SQLite (testing / single-instance).
+- **Free, and cheap at scale.** Apache 2.0 — no license tier, no vendor, no per-operation pricing. A single
+  4-vCPU engine host sustains [~9,400 steps/s](docs/benchmark-cloud.md) — **billions of steps a month** — and
+  the whole deployment is your own replicas plus a few ordinary SQL instances. No broker, no control plane,
+  nothing else to run or pay for, so the bill is a handful of cloud instances rather than a metered service.
 
 Dwarf depends only on [`sequel`](https://github.com/microbus-io/sequel) (SQL), plus the OpenTelemetry API.
 
@@ -89,7 +93,7 @@ type Host interface {
     LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error)
 
     // Required. Execute one task. The Flow carrier arrives with its input state populated; write outputs.
-    ExecuteTask(ctx context.Context, taskName string, flow *workflow.Flow) error
+    ExecuteTask(ctx context.Context, taskURL string, flow *workflow.Flow) error
 }
 ```
 
@@ -125,8 +129,8 @@ flowKey, err := eng.Create(ctx, "checkout", initialState, &workflow.FlowOptions{
 outcome, err := eng.Await(ctx, flowKey) // Create returns a running flow; there is no separate start call
 ```
 
-The live `Set*` methods (`SetMaxOpenConns`, `SetTimeBudget`, `SetDefaultPriority`) may
-be called after `Startup` for hot reconfiguration; the rest are construction-time only.
+The live `Set*` methods (`SetMaxOpenConns`, `SetTimeBudget`, `SetDefaultPriority`, `SetRefillInterval`)
+may be called after `Startup` for hot reconfiguration; the rest are construction-time only.
 
 ## Database support
 
@@ -141,20 +145,34 @@ See [docs/deployment.md](docs/deployment.md) for tuning, sharding, and connectio
 
 ## Documentation
 
-Full guides live in [`docs/`](docs/):
+Full guides live in [`docs/`](docs/), split by who they are written for — start at the
+[documentation index](docs/index.md) for the recommended reading order.
+
+**Building workflows:**
 
 - [Getting started](docs/getting-started.md) — install, wiring, your first flow
 - [Concepts](docs/concepts.md) — graph, task, flow, step, thread, reducer, lifecycle
 - [Building graphs](docs/graphs.md) — transitions, conditions, fan-out, error handling, reducers
 - [Writing tasks](docs/tasks.md) — the Flow carrier, state, control signals, baggage, error handling
-- [Engine operations](docs/operations.md) — create, run, inspect, resume, cancel, fork, continue, retain
+- [Driving flows](docs/flows.md) — create, run, inspect, resume, cancel, fork, continue, retain
 - [Detecting completion](docs/detecting-completion.md) — `Await` vs. orchestration, and how to deliver reliably
 - [Fan-out & subgraphs](docs/fan-out-and-subgraphs.md) — parallelism, dynamic `forEach`, calling sub-workflows
 - [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, retries, recovery
-- [Observability](docs/observability.md) — logs, metrics, tracing
-- [Deployment](docs/deployment.md) — database choice, sharding, config, multi-replica
-- [Benchmarks](docs/benchmark.md) — throughput & latency per dialect and shard count, and how to run them
 - [Testing](docs/testing.md) — `NewEngineUnderTest` and `TestProxy`
+
+**Running it in production:**
+
+- [Operating dwarf](docs/operations.md) — what the engine repairs itself, what needs you, what to watch
+- [Production checklist](docs/production-checklist.md) — the pre-flight list before you go live
+- [Runbook](docs/runbook.md) — symptom-indexed incident response
+- [Deployment](docs/deployment.md) — database choice, sharding, config, multi-replica
+- [Observability](docs/observability.md) — logs, metrics, tracing
+- [Upgrading](docs/upgrading.md) — redeploying your app, upgrading dwarf itself, graph evolution
+- [Resharding](docs/resharding.md) — adding, retiring and moving shards
+- [Backup and restore](docs/backup-and-restore.md) — what to back up, and what a restore does to flows
+- [Data handling](docs/data-handling.md) — what is stored, what is searchable, retention
+- [Benchmarks](docs/benchmark.md) — throughput & latency per dialect and shard count, and how to run them
+- [Cloud benchmarks](docs/benchmark-cloud.md) — the sizing formula, measured against managed PostgreSQL
 
 API reference: [pkg.go.dev/github.com/microbus-io/dwarf](https://pkg.go.dev/github.com/microbus-io/dwarf).
 

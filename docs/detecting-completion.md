@@ -1,5 +1,9 @@
 # Detecting flow completion
 
+> **For developers** whose application needs to know when a flow finished — to answer an HTTP request, send a
+> notification, or trigger downstream work. It explains why there is no completion callback and what to do
+> instead.
+
 The engine has **no stop-notification callback**. There are three ways to learn a flow's outcome, and they
 suit different situations:
 
@@ -141,5 +145,5 @@ knows it is about to wait, so it (or a step just ahead of it) reports "pending" 
 
 ---
 
-See also: [Engine operations](operations.md) · [Fan-out & subgraphs](fan-out-and-subgraphs.md) ·
+See also: [Driving flows](flows.md) · [Fan-out & subgraphs](fan-out-and-subgraphs.md) ·
 [Writing tasks](tasks.md) (control signals, `flow.Retry`).

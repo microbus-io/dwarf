@@ -1,5 +1,9 @@
 # Cloud benchmarks
 
+> **For operators** sizing a deployment. This is where the capacity numbers come from: the engine-to-database
+> vCPU ratio, the connection-pool constants, and the ceilings each resource hits. Every number here was
+> measured rather than derived, and the configuration that produced it is stated alongside.
+
 `bench/` (the standalone benchmark host in this repository) measures the engine against managed cloud
 PostgreSQL across a real network hop — the production shape the in-repo
 [laptop benchmarks](benchmark.md) deliberately cannot represent. Several hundred valid runs across many

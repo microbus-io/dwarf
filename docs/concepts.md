@@ -1,5 +1,8 @@
 # Concepts
 
+> **For everyone** — developers and operators alike. This is the shared vocabulary the rest of the
+> documentation assumes. Read it once and both the authoring guides and the operational ones read easily.
+
 A small vocabulary runs through all of dwarf. Learn these seven terms and the rest of the docs read easily.
 
 ## Graph
@@ -58,7 +61,7 @@ thread key; by default a flow is its own thread. `Continue` starts a new flow th
 flow's final state and identity, so you can model a chat or an iterative process as a chain of flows that
 share history.
 
-See [Continue](operations.md#continue-a-thread).
+See [Continue](flows.md#continue-a-thread).
 
 ## Reducer
 

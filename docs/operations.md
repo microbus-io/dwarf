@@ -1,236 +1,102 @@
-# Engine operations
+# Operating dwarf
 
-Every interaction with a flow is a method on `*engine.Engine`. They fall into a few groups: creating &
-running, inspecting, pausing & resuming, terminating & recovering, threading, and retention. Flows are
-addressed by their **flow key** (`{shard}-{flowID}-{token}`), returned at creation; steps by their **step
-key**.
+> **For operators** running dwarf in production. This is the orientation page: what the engine repairs on its
+> own and on what schedule, what genuinely needs a human, and where the rest of the operational documentation
+> lives. If you are writing workflow code rather than running it, start at [Driving flows](flows.md).
 
-## Creating and running
+Dwarf is a library, not a service. It runs inside your application's process, and everything durable about it
+lives in the SQL databases you point it at — there is no broker, no coordinator, and no state on disk beside
+the database. That shapes what operating it means: **you operate a fleet of application replicas and their
+databases**, and the engine's own moving parts are background loops inside those replicas.
 
-### Create and Run
+## What the engine repairs without you
 
-```go
-flowKey, err := eng.Create(ctx, workflowURL, initialState, opts)       // makes a running flow
-flowKey, outcome, err := eng.Run(ctx, workflowURL, initialState, opts) // Create + Await
-```
+Most of what looks alarming in a distributed system is already handled here, on a fixed schedule. Knowing the
+schedule is what tells you whether to intervene or wait — and the answer is usually wait.
 
-`Create` calls your host's `LoadGraph`, inserts the flow and its entry step, freezes the graph, and starts
-running it immediately — the flow is `running` when `Create` returns. `Run` does the whole round-trip and
-returns the new flow's key alongside its final `*workflow.FlowOutcome` (the key is the flow's identity, not
-part of the outcome — you need it for later `History`/`Resume`/`Fork`).
+| Situation | What happens | How long |
+|---|---|---|
+| A replica dies holding in-flight steps | Each step's lease lapses and the step returns to `pending` for another replica | Up to the flow's `TimeBudget` + 30s, then within the next 5-minute recovery sweep |
+| A database blip mid-write | The step's outcome write retries in place, holding its lease — the task does **not** re-run | 1s, 2s, 4s; longer outages fall through to lease recovery |
+| A replica joins or leaves | Every peer re-reads the shared registry and re-divides each database's connection budget | Registry read every 250ms; a dead replica stops counting after 40s |
+| A doorbell is missed between replicas | The owning replica's next selection cycle finds the work by scanning | Under a second at the derived cycle rate |
+| A flow marked for deletion | A background reaper removes the flow and its whole subgraph tree | Within ~1 minute |
+| A subgraph park that never released | A sweep re-drives the release, or cancels an orphaned child | Detected after 5 minutes, swept every 5 minutes |
 
-`initialState` is any JSON-marshalable value (typically `map[string]any`). `opts` is a
-`*workflow.FlowOptions` (nil for defaults):
+Two consequences worth internalising:
 
-```go
-&workflow.FlowOptions{
-    Priority:    10,                             // lower runs first; 0 uses the engine default
-    FairnessKey: "tenant-42",                    // fair-scheduling bucket
-    FairnessWeight: 4,                           // relative share within the key
-    Baggage:     map[string]any{"actor": "ada"}, // opaque host context; read with BaggageFrom(ctx)
-    ThreadKey:   "1-42-abc",                     // join an existing thread (any flow key in it)
-}
-```
+- **Execution is at-least-once.** A recovered step re-runs its task. That is the contract, not a failure —
+  tasks must be idempotent. What the engine guarantees is that the flow's *persisted state* reflects exactly
+  one execution, even when two workers overlap.
+- **A slow database is absorbed, not escalated.** An outage shorter than a step's lease is invisible: workers
+  wait it out and continue. You will see latency, not errors.
 
-Setting `ThreadKey` joins the new flow into an existing thread (identified by any flow key in that thread)
-while specifying its scheduling/baggage explicitly — the explicit-policy counterpart to `Continue`, which
-inherits the thread's policy. A nonexistent `ThreadKey` is rejected with a 404, and a *subgraph child's* key with a
-400 — a child runs on its own private thread so it cannot contaminate its parent's continuation chain, so address the
-root flow instead.
+## What actually needs you
 
-To run a single unit of work with the engine's durability and scheduling, declare a one-node workflow and
-create a flow for it like any other. A bare task is only ever a node in a graph, not an independently
-invocable unit.
+Four things, and everything else in this section of the docs is one of them.
 
-> `Run`'s Go `error` is reserved for infrastructure failures (database, context deadline). A *workflow*
-> failure surfaces as `outcome.Status == "failed"` with `outcome.Error` set — so you never have to
-> disambiguate "the workflow rejected my input" from "the engine is down."
+1. **An alarm fired.** Three counters are documented as "zero forever in a healthy engine," and a non-zero
+   reading means either a latent bug or a flow that needs manual recovery. → **[Runbook](runbook.md)**
+2. **You are deploying.** Redeploying your own application is an ordinary rolling restart; moving to a new
+   version of **dwarf** is not — while dwarf is v0.x it makes no compatibility promise, and schema migrations
+   run at startup. → **[Upgrading](upgrading.md)**
+3. **You are changing the shard set.** Shard membership is baked into every flow key, so this is a planned
+   maintenance operation, not a live resize. → **[Resharding](resharding.md)**
+4. **You need to answer for the data.** What the engine stores, what free-text search reaches, and how
+   retention is driven. → **[Data handling](data-handling.md)**
 
-### Detecting completion
+## What to watch
 
-The engine has **no** stop-notification callback. To learn a flow's outcome you **`Await`** it (below),
-**`Poll`** it when your own deadline is shorter than the flow's (below), or **compose** the notification into
-the workflow itself (an orchestrating graph whose follow-up tasks report the outcome). The three approaches
-and when to use each are covered in [Detecting flow completion](detecting-completion.md).
+The full instrument catalogue is in [Observability](observability.md). For a dashboard, the split that
+matters is between counters that should **never** move and counters that are merely informative.
 
-### Deferring work
+**Alarms — page on any non-zero rate:**
 
-`Create` runs a flow immediately — there is no separate start step and no creation-time delay (no `StartAt`).
-Deferral is expressed in author space:
+| Instrument | Means |
+|---|---|
+| `dwarf_steps_unwedged_total` | A step wedged and a sweep papered over it. The effect is repaired; the cause is not. |
+| `dwarf_flows_orphaned_total` | A running flow is stranded with every step terminal. **Detection only** — these need manual recovery. |
+| `dwarf_steps_write_failed_total` | A step's outcome could not be stored while the database was reachable, so the payload is at fault. |
 
-- **Wait until a wall-clock time (durably):** make the entry task a **gate** that calls `flow.Sleep(until)`
-  and returns; the real work is the next step. The delay is persisted on the step's `not_before`, so it
-  survives restarts — and the flow's status honestly reflects that it ran its gate, not that it's idle.
-- **Wait for an external signal:** make the entry task call `flow.Interrupt(...)`; the flow parks as
-  `interrupted`, and the caller resumes it with `Resume(ctx, flowKey, data)` when ready. (This replaces the
-  old "create now, start later" staging.)
+**Health — alert on sustained levels, not on any movement:**
 
-Recurring schedules (cron) are not an engine concern: run a separate scheduler that calls `Create`/`Run` on
-its schedule.
+| Instrument | Read it as |
+|---|---|
+| `dwarf_steps_oldest_pending_age_seconds` | The honest backlog signal. Rising means dispatch is not keeping up. Aggregate with `max`, never `sum`. |
+| `dwarf_steps_recovered_total` | Leases lost to crashes or overruns. A steady trickle means tasks are overrunning their budget. |
+| `dwarf_peer_replicas` | The fleet size each replica believes in. Should equal your actual replica count. |
+| `dwarf_turnstile_available` / `_waiting` | Read as a pair. Sustained zero available with a deep wait queue means database connections are the binding constraint. |
+| `dwarf_steps_stolen_total` | Non-zero names a peer that is alive but not dispatching its share. |
 
-### Await
+**One dashboard trap worth stating up front:** two of the gauges are computed by querying the shared
+database, so every replica reports the *same* number. Summing `dwarf_steps_pending` across three replicas
+shows a 1,000-step backlog as 3,000, and a summed `oldest_pending_age` is meaningless outright. The
+per-replica/cluster-wide split is tabulated in [Observability](observability.md).
 
-```go
-outcome, err := eng.Await(ctx, flowKey)
-```
+## Sizing and capacity
 
-Blocks until the flow stops — `completed`, `failed`, `cancelled`, or `interrupted` — and returns the
-outcome, or returns without it when the caller's context ends first. The wait is bounded by a short internal
-cadence rather than by anything the caller or the host has to arrange: a flow that stops on another replica
-wakes its waiters just as one that stops locally does, and nothing has to be delivered between replicas for
-that to happen.
+Sizing is measured rather than guessed, and the numbers live with the measurements:
 
-If the ctx deadline fires first, `Await` returns the error and the flow **keeps running** — it is durable and
-not bound to your call. You still hold the key, so you can `Await` again.
+- **[Deployment](deployment.md)** — choosing a database, declaring shard facts, connection pools, workers,
+  drain windows, and the disk-throughput requirement.
+- **[Cloud benchmarks](benchmark-cloud.md)** — the sizing formula and every constant behind it, measured
+  against managed PostgreSQL across a real network hop.
 
-**Give the ctx a deadline.** It is the only bound on the wait — a flow runs for as long as its work takes.
-Without one, `Await` blocks on a long fixed budget and then times out; that budget is a guard against blocking
-forever, not a wait to build on.
+The two rules to carry into a capacity plan: **1 engine vCPU per 6 database vCPUs** at a 70% database
+utilisation target, and **at least 3 replicas** for resiliency. They are separate constraints on different
+dimensions, not a single maximum. Both assume your tasks are cheap; a host dispatching tasks over a network
+transport pays more engine CPU per step and should measure its own.
 
-### Poll
+## Where to look next
 
-```go
-outcome, err := eng.Poll(ctx, flowKey)   // ctx timeout is NOT an error
-if !outcome.Stopped() {
-    // still running - answer now, ask again later
-}
-```
-
-`Poll` waits exactly like `Await`, but a **ctx timeout is not an error**: it returns the flow's current,
-non-terminal outcome, whose `Stopped()` reports `false`. That makes it the right call for a caller bounded by
-its own deadline — an HTTP status endpoint long-polling a flow that may run for hours — without hand-rolling a
-`Snapshot` loop. A genuine failure (unknown flow, database down) still returns an error.
-
-## The outcome
-
-`Snapshot`, `Await`, and `Run` all return a `*workflow.FlowOutcome`:
-
-```go
-type FlowOutcome struct {
-    Status           string
-    State            workflow.State  // final_state when terminal; the interrupted step's merged snapshot when interrupted; empty while running/created
-    Error            string          // set when Status == "failed"
-    InterruptPayload workflow.State  // set when Status == "interrupted"
-    CancelReason     string          // set when Status == "cancelled"
-}
-```
-
-The flow key is **not** on the outcome — it is delivered separately: you passed it to `Snapshot`/`Await`, or
-`Run` returns it alongside the outcome.
-
-Side-channel fields are populated only for the matching status.
-
-## Inspecting
-
-```go
-outcome,  err := eng.Snapshot(ctx, flowKey)            // current status + state, without blocking
-fp, status, err := eng.Fingerprint(ctx, flowKey)       // cheap change-detection token + status
-steps,    err := eng.History(ctx, flowKey)             // []workflow.FlowStep, the full execution record
-step,     err := eng.Step(ctx, stepKey)                // one step by key
-summaries, next, err := eng.List(ctx, query)           // paginated flow listing
-err := eng.HistoryMermaid(ctx, flowKey, w)             // write the execution DAG as a Mermaid diagram
-```
-
-`History` returns each step's task, depth, status, error, and timings — metadata only, **not** `state`/`changes`
-(those columns are deliberately not fetched); use `Step` to read a single step's `state`/`changes`. Subgraph-executing
-steps carry nested `SubHistory`. `List` takes a `workflow.Query` (status, workflow name, thread, task,
-fairness key, priority, time window, shard, free-text `Search`, `Limit`) and returns newest-first with an
-opaque pagination cursor as its second return; see [Retention](#retention) for the same query shape.
-
-**"Newest first" is per shard, not global.** On a single-shard engine — the default — a page is in one
-descending time order. On a multi-shard fleet each shard contributes its own newest flows and the page is
-grouped by shard, so shard 2's newest flow follows shard 1's oldest returned one. There is no cross-shard
-order to give: flow ids are per-shard sequences (a shard with fewer flows has lower ids, so they don't
-compare), and `created_at` would compare different database servers' clocks. If you need one ordered view,
-sort the page yourself — you decide what to trust — or page a single shard with `Query.Shard`.
-
-**`Query.Limit` is a per-shard cap, not a hard total.** It is divided across shards, so on a multi-shard
-fleet each shard returns up to `ceil(Limit/shards)` of its own newest flows and a page can hold as many as
-`shards * ceil(Limit/shards)` results (`Limit: 10` on 4 shards returns up to 12; `Limit: 1` returns up to 4).
-A single-shard engine returns at most `Limit`. This per-shard division is why pagination is a cursor rather
-than a global offset — each shard advances its own position independently. `Purge` divides `Limit` the same
-way. For a strict total, truncate the returned page yourself or query one shard at a time with `Query.Shard`.
-
-## Pausing and resuming
-
-A flow pauses in two distinct ways, and each has its own continuation operation — they are never
-auto-routed.
-
-### Resume
-
-Continues a flow paused by a task's `flow.Interrupt`. The data you pass is delivered to the task as the
-return value of its `Interrupt` call (it is **not** merged into state):
-
-```go
-err := eng.Resume(ctx, flowKey, map[string]any{"approved": true})
-```
-
-## Terminating, and recovering with Fork
-
-A terminal flow (`completed`/`failed`/`cancelled`) is **immutable** — it is never re-run in place. To
-recover or explore, `Fork` clones a terminal flow up to a chosen step into a *new*, self-contained flow and
-re-runs from there, optionally with state overrides; the original is never touched.
-
-```go
-err := eng.Cancel(ctx, flowKey, "superseded by newer order") // abort; surfaced as CancelReason
-
-// Re-run from a chosen step (its key comes from History) with an edit that lets it succeed.
-newFlowKey, err := eng.Fork(ctx, stepKey, map[string]any{"amount": 0})
-```
-
-`Cancel` aborts a running or interrupted flow (and its subgraph hierarchy). `Fork`'s step may be
-**any recorded step**, including one inside a subgraph; the clone re-runs from that step and bubbles back up
-to the root. The fork inherits the origin flow's scheduling and baggage, and does
-not auto-delete. Because the fork is an ordinary new flow, recover a partially-failed fan-out by forking one
-failed branch at a time.
-
-## Continue a thread
-
-`Continue` starts a new flow from the latest completed flow in a thread, carrying its final state and
-identity forward — the basis for multi-turn conversations and iterative processes:
-
-```go
-nextKey, err := eng.Continue(ctx, threadKey, additionalState)
-```
-
-The `threadKey` is any flow key in the thread (the original `Create` key works). The prior turn's final
-state passes through, merged with `additionalState` using the graph's reducers. `Continue` inherits the
-thread's policy from the latest completed flow — priority, fairness, time budget, and baggage. The new flow
-is returned already `running`. (To join a thread but set policy explicitly
-instead of inheriting it, use `Create`/`Run` with `FlowOptions.ThreadKey`.)
-
-## Retention
-
-The engine never auto-purges — every flow is potentially resurrectable (resume, continue, fork). Manage
-retention explicitly:
-
-```go
-err := eng.Delete(ctx, flowKey)          // schedule one flow (and its subtree) for deletion; refuses a running flow
-count, err := eng.Purge(ctx, query)      // schedule matching flows (except running) for deletion, capped at 4096
-```
-
-`Delete` and `Purge` **mark** flows for deletion (they do not delete inline); a background reaper removes each
-flow's whole subgraph subtree shortly after. The marked flow drops out of `List` and `History` immediately, so
-it is logically gone even though the row lingers briefly. `Purge` returns the count of roots marked.
-
-`Purge` takes the same `workflow.Query` as `List`. `OlderThan` / `NewerThan` are database-anchored and
-compose (e.g. "completed, older than 30 days"):
-
-```go
-eng.Purge(ctx, workflow.Query{
-    Status:    workflow.StatusCompleted,
-    OlderThan: 30 * 24 * time.Hour,
-})
-```
-
-A flow created with `FlowOptions.DeleteOnCompletion` schedules its own deletion when it completes successfully
-(failed/cancelled flows are kept). Its outcome stays observable via `Await`/`Snapshot` for a short grace window
-before the reaper removes it — so a fire-and-forget caller can still `Run` it and read the result.
-
-## Operational
-
-```go
-summaries, err := eng.ShardInfo(ctx)    // per-shard health and size
-```
-
-Next: [Fan-out & subgraphs](fan-out-and-subgraphs.md).
+| Document | For |
+|---|---|
+| [Production checklist](production-checklist.md) | Before you go live — the pre-flight list |
+| [Runbook](runbook.md) | An alarm is firing right now |
+| [Upgrading](upgrading.md) | Redeploying your app, upgrading dwarf itself, schema migrations |
+| [Resharding](resharding.md) | Changing the shard set |
+| [Backup and restore](backup-and-restore.md) | What to back up; what a restore does to flows |
+| [Data handling](data-handling.md) | What is stored, what is searchable, retention |
+| [Observability](observability.md) | Logs, metrics, traces |
+| [Deployment](deployment.md) | Database choice, pools, replicas, shutdown |
+| [Cloud benchmarks](benchmark-cloud.md) | Sizing formula and the measurements behind it |

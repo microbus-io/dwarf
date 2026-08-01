@@ -1,5 +1,9 @@
 # Observability
 
+> **For developers and operators.** Developers inject the three providers; operators read what comes out.
+> This is the full instrument catalogue and how to interpret each one. For which of them to alert on, see
+> [Operating dwarf](operations.md); for what to do when one fires, the [Runbook](runbook.md).
+
 Dwarf emits structured logs, OpenTelemetry metrics, and distributed traces. All three go through standard
 providers you inject — the engine owns no exporter and adds no network connections. With nothing injected,
 everything degrades to a no-op, so unconfigured and test use pays nothing.
@@ -48,7 +52,7 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 |---|---|---|---|---|
 | `dwarf_flows_started` | counter | `workflow`, `shard` | flows started. `shard` is where the flow was **placed**, so a skew across shards means work is not spread the way the capacity weights intended | `dwarf_flows_started_total` |
 | `dwarf_flows_terminated` | counter | `workflow`, `status`, `shard` | flows reaching a terminal status — **all three** of completed, failed and cancelled, which is what makes `started − terminated` a stable in-flight count rather than one that drifts up by every flow that did not finish cleanly | `dwarf_flows_terminated_total` |
-| `dwarf_steps_executed` | counter | `task_name`, `status`, `shard` | steps executed, by disposition. `shard` makes this per-shard dispatch throughput — a piston, a pool and a residue class are all per shard, so a fleet-wide total hides one shard falling behind | `dwarf_steps_executed_total` |
+| `dwarf_steps_executed` | counter | `task_name`, `status`, `shard` | steps executed, by disposition. `shard` makes this per-shard dispatch throughput — selection, the connection pool and the work split are all per shard, so a fleet-wide total hides one shard falling behind | `dwarf_steps_executed_total` |
 | `dwarf_steps_recovered` | counter | — | steps recovered after a lease expiry | `dwarf_steps_recovered_total` |
 | `dwarf_steps_unwedged` | counter | `park_type` | wedged subgraph parks recovered by the sweep (nonzero = latent bug) | `dwarf_steps_unwedged_total` |
 | `dwarf_flows_orphaned` | counter | `workflow` | running flows detected stranded by the orphan sweep — all steps terminal, no successor (nonzero = latent bug; detection-only, not recovered) | `dwarf_flows_orphaned_total` |
@@ -61,7 +65,7 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_steps_offered` | counter | — | steps admitted to the local cache by the doorbell rather than found by a scan | `dwarf_steps_offered_total` |
 | `dwarf_steps_claim_preempted` | counter | — | candidates skipped before any claim because a sibling worker on this replica already had one in flight — round trips SAVED | `dwarf_steps_claim_preempted_total` |
 | `dwarf_steps_claim_lost` | counter | — | candidates claimed that lost the CAS to a peer — round trips WASTED. Read against `_preempted`: a healthy engine converts what would have been lost into preempted | `dwarf_steps_claim_lost_total` |
-| `dwarf_steps_stolen` | counter | `shard` | steps selected from outside this replica's residue class because their owner was not serving them. Zero in a healthy fleet by construction; a sustained rate names a peer that is alive but not dispatching | `dwarf_steps_stolen_total` |
+| `dwarf_steps_stolen` | counter | `shard` | steps selected from outside this replica's own share of the work because the replica that owns that share was not serving it. Zero in a healthy fleet by construction; a sustained rate names a peer that is alive but not dispatching | `dwarf_steps_stolen_total` |
 | `dwarf_peer_changes` | counter | `shard` | times this replica observed that shard's replica count change. Zero in a settled fleet by construction, so nonzero during a steady-state window means the fleet churned | `dwarf_peer_changes_total` |
 | `dwarf_refill_query_duration_seconds` | histogram | `shard`, `phase` | one shard's candidate-selection query | `dwarf_refill_query_duration_seconds` |
 | `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
@@ -69,13 +73,13 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_steps_oldest_pending_age_seconds` | gauge | `priority` | age of the oldest due pending step | `dwarf_steps_oldest_pending_age_seconds` |
 | `dwarf_peer_replicas` | gauge | `shard` | replicas this one currently sees holding connections to that shard — the divisor its pool is sized by | `dwarf_peer_replicas` |
 | `dwarf_peer_blind_seconds` | gauge | `shard` | time since that shard's peer registry was last read successfully; zero when healthy | `dwarf_peer_blind_seconds` |
-| `dwarf_refill_tally_age_seconds` | gauge | — | how long ago the stalest shard still in this replica's planner reported | `dwarf_refill_tally_age_seconds` |
+| `dwarf_refill_tally_age_seconds` | gauge | — | how long ago the stalest shard still counted in this replica's selection last reported | `dwarf_refill_tally_age_seconds` |
 | `dwarf_turnstile_gate_wait_seconds` | histogram | `shard` | time a worker waited for its FIRST turn, taken before it picks a step up. It is the queue in front of dispatch, and the only wait a worker holds no work through | `dwarf_turnstile_gate_wait_seconds` |
 | `dwarf_turnstile_wait_seconds` | histogram | `shard` | time a worker waited for the turn that RECORDS a finished step. Work that has already run presents an older claim than anything admitted while it ran, so it is served first — a sustained wait here means the shard's connections are busy with work at least as old, not that completions are queued behind dispatch | `dwarf_turnstile_wait_seconds` |
 | `dwarf_turnstile_available` | gauge | `shard` | turns free on that shard. Turns are a fixed multiple of the connection pool, so this is how much admission is unspoken for; sustained zero means the shard's connections are the binding constraint | `dwarf_turnstile_available` |
 | `dwarf_turnstile_waiting` | gauge | `shard` | callers queued for a turn on that shard. Unlike the free count this has no ceiling, so it is the one that shows how DEEP a queue has become rather than merely that it is full; read the pair together | `dwarf_turnstile_waiting` |
 | `dwarf_db_phase_seconds` | histogram | `role` | wall clock a worker spent INSIDE a database phase — `enter` is dispatch up to the task call, `exit` is the task call to the end of the step. It is the phase's true residence, which neither the turn waits (the queue in FRONT of each call) nor the sum of query times (which misses connection wait and the Go-side work between them) can supply | `dwarf_db_phase_seconds` |
-| `dwarf_db_phase_workers` | gauge | `role` | worker goroutines inside a database phase right now. This is what sets connection-pool pressure, and nothing else reports it: `dwarf_workers_resident` is the whole crew, and a worker parked in a task call still holds its candidate | `dwarf_db_phase_workers` |
+| `dwarf_db_phase_workers` | gauge | `role` | worker goroutines inside a database phase right now. This is what sets connection-pool pressure, and nothing else reports it: `dwarf_workers_resident` counts every worker that exists, and a worker parked in a task call still holds its step | `dwarf_db_phase_workers` |
 | `dwarf_workers_resident` | gauge | — | worker goroutines that exist; grows on demand, never shrinks | `dwarf_workers_resident` |
 | `dwarf_state_in_flight_bytes` | gauge | — | state payload this replica is holding across host calls right now, summed over the tasks currently inside a task call | `dwarf_state_in_flight_bytes` |
 | `dwarf_state_in_flight_steps` | gauge | — | tasks currently inside a task call — the denominator for the line above | `dwarf_state_in_flight_steps` |
@@ -102,11 +106,11 @@ replica count:**
 | Gauge | Kind | Aggregate with |
 |---|---|---|
 | `dwarf_steps_queue_depth` | **per-replica** (this replica's in-memory cache) | `sum` |
-| `dwarf_refill_tally_age_seconds` | **per-replica** (this replica's planner) | `max` |
+| `dwarf_refill_tally_age_seconds` | **per-replica** (this replica's selection) | `max` |
 | `dwarf_turnstile_available` | **per-replica** (this replica's gate) | `sum` |
 | `dwarf_turnstile_waiting` | **per-replica** (this replica's gate) | `sum` |
 | `dwarf_db_phase_workers` | **per-replica** (this replica's workers) | `sum` |
-| `dwarf_workers_resident` | **per-replica** (this replica's crew) | `sum` |
+| `dwarf_workers_resident` | **per-replica** (this replica's workers) | `sum` |
 | `dwarf_state_in_flight_bytes` | **per-replica** (this replica's in-flight tasks) | `sum` |
 | `dwarf_state_in_flight_steps` | **per-replica** (this replica's in-flight tasks) | `sum` |
 | `dwarf_steps_pending` | **cluster-wide** (queries the shared database) | `max` |

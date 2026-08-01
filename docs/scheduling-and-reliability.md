@@ -1,5 +1,9 @@
 # Scheduling & reliability
 
+> **For developers and operators.** Developers set priority and fairness per flow and decide how tasks handle
+> failure; operators need the same model to read a backlog. The behaviour described here is what the
+> [Runbook](runbook.md) assumes you know.
+
 Dwarf decides *which* pending step runs next (scheduling) and recovers steps that a crashed worker left
 behind. Most of this is automatic; this guide explains the knobs you control and how errors are handled.
 
