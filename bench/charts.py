@@ -62,23 +62,59 @@ ax.set_ylim(0, 5000)
 ax.legend(loc="upper left", frameon=False, fontsize=9.5)
 finish(fig, ax, f"{OUT}/benchmark-cloud-tiers.png")
 
-# ---- 2. Latency: conn-held time vs RTT (the k measurement) ----
-rtt = [0.28, 0.82, 1.34, 2.35, 5.34]
-held = [8/1021.2*1000, 8/529.3*1000, 8/372.0*1000, 8/243.9*1000, 8/115.7*1000]
+# ---- 2. Latency: conn-held time vs RTT, at TWO pool sizes (the k and s measurements) ----
+# Two sweeps, and the pair is the point: the SLOPE (k, round trips per step) barely moves between them,
+# while the INTERCEPT (s, time actually inside the database) nearly doubles - s absorbs queueing, so it
+# grows with the pool. Carrying M=8 constants to an M=96 rig over-predicts throughput by 21-44%.
+rtt8 = [0.28, 0.82, 1.34, 2.35, 5.34]
+held8 = [8/1021.2*1000, 8/529.3*1000, 8/372.0*1000, 8/243.9*1000, 8/115.7*1000]
+rtt96 = [0.829, 1.313, 1.806, 2.800, 4.814]                       # campaign 27, linear, M=96
+held96 = [16.77, 22.19, 25.06, 35.63, 53.21]                      # every arm verified 96/96 in use
 fig, ax = plt.subplots(figsize=(7, 4.2))
 xs = [0, 5.6]
 ax.plot(xs, [12.1*x + 4.4 for x in xs], color=MUTED, linewidth=1.5, linestyle="--", zorder=1)
-ax.plot(rtt, held, color=S1, linewidth=0, marker="o", markersize=8, zorder=2,
-        markeredgecolor=SURFACE, markeredgewidth=1.5, label="measured (M=8, connection-bound)")
-ax.annotate("db = 12.1·RTT + 4.4 ms   (slope = k, the round-trips per step)",
-            (2.6, 12.1*2.6 + 4.4), xytext=(0, -26), textcoords="offset points",
-            color=INK2, fontsize=9.5, rotation=0)
+ax.plot(xs, [9.11*x + 9.49 for x in xs], color=MUTED, linewidth=1.5, linestyle="--", zorder=1)
+ax.plot(rtt8, held8, color=S1, linewidth=0, marker="o", markersize=8, zorder=3,
+        markeredgecolor=SURFACE, markeredgewidth=1.5, label="M=8   ·  db = 12.1·RTT + 4.4")
+ax.plot(rtt96, held96, color=S2, linewidth=0, marker="s", markersize=8, zorder=3,
+        markeredgecolor=SURFACE, markeredgewidth=1.5, label="M=96 ·  db = 9.11·RTT + 9.49")
+ax.annotate("slope k ≈ 9–12: round trips per step, a property of the code path",
+            (3.9, 12.1*3.9 + 4.4), xytext=(-8, 10), textcoords="offset points",
+            color=INK2, fontsize=9, ha="right")
+ax.annotate("intercept s doubles with the pool:\nit absorbs queueing inside the database",
+            (0.06, 9.49), xytext=(1.55, 6.5), textcoords="data", color=INK2, fontsize=9,
+            arrowprops=dict(arrowstyle="->", color=MUTED, lw=1))
 ax.set_title("Per-step database time is linear in round-trip latency")
 ax.set_xlabel("measured RTT to the database (ms)")
 ax.set_ylabel("connection-held time per step (ms)")
 ax.set_xlim(0, 5.7)
 ax.set_ylim(0, 75)
+ax.legend(loc="upper left", frameon=False, fontsize=9.5)
 finish(fig, ax, f"{OUT}/benchmark-cloud-latency.png")
+
+# ---- 2b. The operator-facing form: what RTT does to the CEILING at the derived pool ----
+# Same data as 2, expressed as throughput rather than occupancy, because that is the number an operator
+# is sizing against. The GENUINE-PLACEMENT points are the validation: if netem were not a faithful
+# stand-in for distance they would sit off the curve. They land within 2-6%.
+fig, ax = plt.subplots(figsize=(7, 4.2))
+xs = [x/100 for x in range(20, 520)]
+ax.plot(xs, [96/(9.11*x + 9.49)*1000 for x in xs], color=MUTED, linewidth=1.5, linestyle="--", zorder=1,
+        label="96 / (9.11·RTT + 9.49)")
+ax.plot(rtt96, [96/h*1000 for h in held96], color=S1, linewidth=0, marker="o", markersize=8, zorder=3,
+        markeredgecolor=SURFACE, markeredgewidth=1.5, label="injected latency (tc netem)")
+ax.plot([0.339, 0.378, 0.818], [7866, 7887, 5568], color=S3, linewidth=0, marker="D", markersize=8,
+        zorder=4, markeredgecolor=SURFACE, markeredgewidth=1.5,
+        label="genuine placements, two different instances")
+ax.annotate("two same-zone, same-tier instances —\n29% apart on placement alone",
+            (0.60, 6600), xytext=(1.35, 4400), textcoords="data", color=INK2, fontsize=9,
+            arrowprops=dict(arrowstyle="->", color=MUTED, lw=1))
+ax.set_title("Round-trip time sets the ceiling (16 vCPU, derived pool M=96)")
+ax.set_xlabel("measured RTT to the database (ms)")
+ax.set_ylabel("steps / second")
+ax.set_xlim(0, 5.2)
+ax.set_ylim(0, 9000)
+ax.legend(loc="lower left", frameon=False, fontsize=9.5)
+finish(fig, ax, f"{OUT}/benchmark-cloud-rtt-ceiling.png")
 
 # ---- 3. Workers x task delay (pre-fix engine, M=30) ----
 w0 = [(32, 443.5), (48, 558.9), (64, 641.8), (96, 696.6), (128, 707.2), (512, 744.1)]

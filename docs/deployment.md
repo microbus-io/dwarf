@@ -94,6 +94,47 @@ strongly workload-dependent — a carry-heavy or fan-out graph writes far more p
 one — which is exactly why the right disk size is something you measure rather than guess. When
 throughput is repeatable, the disk has enough headroom; provisioning past that point buys nothing.
 
+## Network distance to the database
+
+**Round-trip time to the database is a first-class sizing input, not a detail.** A saturated shard
+serves roughly
+
+```
+throughput  =  connections / (k × RTT + s)
+```
+
+where `k` is the number of database round trips one step makes — measured at **~9–12** — and `s` is the
+per-step time that is not a round trip. Because `k` multiplies RTT, **every 0.1 ms of extra distance
+costs about a millisecond of connection time on every step in the system.**
+
+This is not a rounding error. Two Cloud SQL instances of identical size, in the same region **and the
+same zone**, measured **0.32 ms and 0.82 ms** — and the second served **29% less throughput** on an
+identical build. Nothing about the engine or the database differed; only where the instance happened to
+land.
+
+**Three things are worth doing, in order of payoff:**
+
+1. **Put the database in the same zone as the engine**, not merely the same region. Cross-zone is the
+   single largest avoidable jump.
+2. **Connect over a private IP, and avoid a connection proxy** on the hot path. A proxy adds a hop to
+   every one of those `k` round trips.
+3. **Measure it, and keep measuring it.** Take the *minimum* of a dozen `SELECT 1`s on **one long-lived
+   connection** (a fresh connection per sample measures the handshake instead, and a proxy or container
+   socket measures the wrong path entirely).
+
+**On managed databases, the zone is the finest control you get.** Cloud SQL exposes no rack- or
+host-level placement, so the variation above is a lottery you can only re-roll by recreating the
+instance. If round-trip time turns out to bound your workload and you need better, the escape hatch is
+running PostgreSQL yourself on compute instances, where cloud providers *do* offer co-location controls
+(GCP's compact placement policies, for example) — at the cost of owning backups, failover and patching.
+That is a real trade, worth making only once you have measured that distance is what binds.
+
+**How to tell that it is.** Compare your ceiling against database CPU. If throughput flattens while the
+connection pool sits fully in use and the database still has substantial idle CPU, the limit is
+distance, not size — the connections are spending their time on the wire, and **adding connections to
+chase a CPU target that path cannot reach is how you find the over-connection collapse.** A bigger
+instance does not fix a long wire; a closer one does.
+
 ## Sharding
 
 Registering multiple shards with `SetShard` partitions flows across databases (or schemas) to scale write

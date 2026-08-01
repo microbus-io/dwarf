@@ -75,8 +75,8 @@ is negligible next to both. Every constant is measured:
 
 | Constant | Value | How measured |
 |---|---|---|
-| `k` — database round-trips per step | **~11** | the slope of connection-held time vs round-trip time in the [latency sweep](#latency-costs-connections-not-throughput) |
-| `s` — server-side execution + group-committed fsync | **~4.4 ms** | that sweep's intercept |
+| `k` — database round-trips per step | **~9–12** | the slope of connection-held time vs round-trip time in the [latency sweep](#round-trip-time-sets-the-ceiling); a property of the code path, so it travels — but a fan-out does more database work per step than the linear workload measured here |
+| `s` — server-side execution + commit, **plus queueing inside the database** | **~4.4 ms at `M=8`, ~9.5 ms at `M=96`** | the same sweep's intercept, at both pool sizes. **`s` grows with the pool and does not travel** — constants fitted at one `M` over-predict another by 21–44% |
 | `db` at low utilization, same-zone | **7–8 ms/step** | measured at `M=8`, a deliberately tiny pool that keeps the database far from saturation |
 | Connections the engine opens | **6 × database vCPUs**, or **12 ×** at 32 vCPUs and above | [the knee and the safe ratio](#connections-the-throughput-knee-and-the-safe-ratio-are-different-numbers) |
 | Steps ceiling, per database | **~555 to ~23,000 steps/s** for 1 to 64 vCPUs | [vertical scaling](#database-size-vertical-scaling-from-1-to-64-vcpus) |
@@ -120,6 +120,14 @@ leaves the diagonal is the whole chart: that is the load the instance actually s
 servable point lands at **70–90% database CPU**, and every arm above ~90% is either collapsed or running
 multi-second p99. Size to keep the database in that band and the connection arithmetic mostly takes care
 of itself.
+
+**⚠️ That band assumes a well-placed database, and it does not travel.** It was calibrated at ~0.3 ms
+round-trip time. On a longer path the connections run out *before* the CPU does: at 0.8 ms the same
+16-vCPU shard reaches its ceiling with the pool pinned at 96/96 and the database sitting at **51%
+CPU**, with 45% of it idle and unreachable. Chasing the 70–90% band there means adding connections to
+hit a number that path cannot produce — and over-connecting is the one failure mode that collapses
+rather than degrading. **Check round-trip time first**; if the ceiling arrives at low CPU, the limit is
+distance, not size. See [round-trip time sets the ceiling](#round-trip-time-sets-the-ceiling).
 
 **⚠️ The 32 and 64-vCPU points are bounds, not measured ceilings.** Database CPU at their best arms was
 49% and 24% — neither instance was ever driven to its own limit, because the 32-vCPU engine host driving
@@ -226,7 +234,7 @@ traffic on a single lock (113 concurrent waiters, the same as the baseline's 115
 arm split it across two independent locks (110 + 69). **Horizontal sharding across servers is the write
 scaling lever**; there is no way to buy it inside one instance.
 
-## Latency costs connections, not throughput
+## Round-trip time sets the ceiling
 
 ![Per-step database time vs round-trip latency](benchmark-cloud-latency.png)
 
@@ -249,10 +257,54 @@ A step makes ~11 of them (a freshly created step is dispatched without a re-read
 `k ≈ 11`** and treat the fitted 12.1 as the sweep's own configuration. The intercept is `s`, the
 server-side execution and commit time that remains when the network is free.
 
-The practical reading: per-connection throughput halves as `k·L` doubles — and total throughput recovers
-by raising `M` (until the knee), so latency is a **connections tax, not an absolute cap**. Cross-zone
-placement (~1.1 ms) roughly doubles `db` against same-zone; co-locating the engine with its shard's zone
-is the single cheapest win available.
+The practical reading at this pool size: per-connection throughput halves as `k·L` doubles, and total
+throughput recovers by raising `M` — so *while there is pool headroom*, latency is a connections tax.
+
+**⚠️ At the pool the engine actually derives, that headroom is gone and latency becomes a hard
+throughput cap.**
+
+![Round-trip time sets the ceiling at the derived pool](benchmark-cloud-rtt-ceiling.png)
+
+Repeating the sweep on a 16-vCPU shard at its derived `M=96` — every arm verified saturated at 96 of 96
+connections in use, two reps each:
+
+| added delay (ms) | measured RTT (ms) | steps/s | connection-held time (ms/step) |
+|---|---|---|---|
+| +0 | 0.83 | 5,724 | 16.8 |
+| +0.5 | 1.31 | 4,326 | 22.2 |
+| +1 | 1.81 | 3,831 | 25.1 |
+| +2 | 2.80 | 2,695 | 35.6 |
+| +4 | 4.81 | 1,805 | 53.2 |
+
+`db = 9.11·RTT + 9.49 ms`, so **4 ms of extra distance costs 3.2× the throughput** — and there is no `M`
+left to raise, because 96 is already the ratio the engine derives and the next step up trades a modest
+gain for the over-connection collapse. Latency is a connections tax only until the pool reaches its knee;
+past that it is the ceiling.
+
+**The intercept `s` is the term that does not travel.** It is 4.4 ms at `M=8` and **9.49 ms at `M=96`** —
+`s` absorbs queueing inside the database, so it grows with the pool. Carrying constants fitted at one
+pool size to another over-predicts throughput by 21–44%.
+
+**The slope `k` does travel**, because it counts round trips, which is a property of the code path rather
+than of the load. It measures 12.1 and 9.11 at the two pool sizes above, and — contrary to the obvious
+expectation — **a fan-out workload does not raise it**: width-16 fan-out measures **8.67** against the
+linear chain's 9.11, a gap inside that workload's own run-to-run spread. Plan with **`k ≈ 9–12`**
+regardless of graph shape. (The intuition that fan-outs cost more is about the wrong unit: a fan-out
+costs more per *flow*, but throughput is per *step*, and most of its steps are branches that create no
+successor at all.)
+
+**This is also why two of this document's own numbers disagree.** A 16-vCPU shard at pool 96 appears as
+both 7,491 steps/s (the [tier ladder](#database-size-vertical-scaling-from-1-to-64-vcpus)) and 5,355 (the
+[connection sweep](#connections-the-throughput-knee-and-the-safe-ratio-are-different-numbers)). One
+equation, two placements: evaluated at the RTTs those campaigns actually ran at, the model predicts
+7,739 and 5,659. **Same hardware, same build — 29% apart on distance alone.**
+
+Two consequences worth acting on. **Record RTT beside every throughput number**, or results are not
+comparable across sessions; `T(ref) = T · (k·RTT + s) / (k·RTT_ref + s)` normalizes them. And
+**co-locating the engine with its shard's zone is the single cheapest win available** — cross-zone
+(~1.1 ms) roughly doubles `db` against same-zone. Note that even *within* one zone, placement varied
+0.32–0.82 ms across instances, and on a managed database the zone is the finest control available; see
+[deployment](deployment.md#network-distance-to-the-database).
 
 ## Workers: throughput is `N/T` when workers bind
 
@@ -495,9 +547,12 @@ set is 384, so anything beyond that requires growth:
 
 Throughput tracks `flows ÷ task duration` exactly at every level: the engine holds 10,000 minutes-long
 tasks in flight against a 48-connection pool, and median flow latency is 60.0 s — the task duration
-itself, with no queueing. The same shape holds on a 16-vCPU shard, where the database-work allowance
-(a fixed multiple of that shard's 96 connections) reads **completely untouched at all three levels** — 10,000 workers
-parked in tasks consume none of it, which is why they cost the database nothing.
+itself, with no queueing. The same shape holds on a 16-vCPU shard, where the allowance for concurrent
+database work (a fixed multiple of that shard's 96 connections) reads **completely untouched at all
+three levels** — 10,000 workers parked in tasks consume none of it, which is why they cost the database
+nothing. `dwarf_turnstile_available` is the gauge to confirm this on your own workload: a worker inside
+a task holds no allowance and no connection, so a rising worker count with a flat gauge is the expected
+and healthy shape.
 
 **Seconds-long tasks: throughput is set by the database, not by the task.** The harder case is a task
 long enough to tie up a worker but short enough that the database still has to keep up. Open-loop at a
@@ -514,15 +569,28 @@ The full offered rate, three times, with a 0.03% spread — while holding 24,000
 the `300 flows/s × 80 s` the workload implies. **Task duration has dropped out of the throughput
 equation entirely**; what remains is `min(offered load, database capacity)`.
 
-**Near the instance's ceiling the same workload becomes run-to-run bimodal**, and it is worth knowing why
-before reading it as a task-duration effect. At a commanded 600 flows/s — around 80% of what this shard
-serves — the 8-second arm ranged from 1,369 to 6,824 steps/s across three otherwise identical runs. The
-worker count was large in every one; what differed was the database: the pool ran fully in use with
-**~50 ms of wait per connection acquired**, against 2 ms at half the rate, and the engine's own
-candidate-selection pass slowed from ~120 ms to ~320 ms and halved its rate. Long tasks put more workers
-in front of the same connections, so at saturation the supply of work to dispatch competes with the work
-itself. Size for the [70–90% database CPU band](#database-size-vertical-scaling-from-1-to-64-vcpus) and
-this does not arise.
+**Near the instance's ceiling the same workload used to be run-to-run bimodal. It no longer is.** At
+~80% of what one 16-vCPU shard serves, three otherwise identical 8-second runs land within **1.09× of
+each other** (3,004–3,285 steps/s), and the zero-delay control repeats to the step (4,501 / 4,501 /
+4,501). An earlier engine measured a **5.0×** range on the equivalent arm.
+
+The mechanism the spread came from is still visible — it simply stopped collapsing. Across 0 / 1 / 8
+second tasks at a fixed offered rate, the candidate-selection pass slows **2.9 ms → 48 ms**, its rate
+roughly halves, and connection wait rises **2.2 ms → 30 ms**. What changed is that this now degrades
+smoothly instead of falling off a cliff.
+
+It is worth being precise about which half of that was ever the problem, because the obvious reading is
+wrong: **the supply of work to dispatch was never the loser.** In the same 8-second arms the engine
+*discards* 38–42% of the candidates it selects — it is oversupplying by 40% even with 48 ms selection
+passes — so a slower scan costs nothing while workers remain the scarce side. Blocked workers hold no
+connection, so a long task cannot crowd the database: **database CPU is flat at 43–49% across all three
+arms** while the worker count grows 45×.
+
+What long tasks still cost at this load is *offered-rate* headroom rather than throughput. The
+8-second arm serves ~72% of the commanded flow rate while executing **92–101% of every flow it
+creates** — the engine keeps up with what arrives, and it is flow *creation* that throttles, competing
+for the same connections as the work already in flight. Below roughly half an instance's capacity the
+arms converge outright (see the table above); at 80% they do not.
 
 A worker inside a task holds no database connection, so worker count and database load are separate
 quantities. The engine adds a worker when taking a candidate left no other worker free — one condition,
@@ -598,9 +666,13 @@ memory-bounded hosts, and externally-constrained connection budgets.
   shard's cycle diverge is unresolved. Quote multi-shard numbers with their replicate range.
 - **Replica scaling is measured against one shard only, with replicas as engines inside one process.** No
   per-replica memory figure, and no hard-kill test of the stale-registration path.
-- **Where a long-task workload stops serving its offered load is not pinned.** Measured stable at half an
-  instance's capacity and bimodal at ~80% of it, with nothing in between; the knee is somewhere in that
-  gap, and it is a property of the database's spare capacity rather than of the tasks.
+- **The knee is now located, and it is a property of the database rather than of the tasks.** Sweeping the
+  offered rate on one 16-vCPU shard, throughput tracks what is offered to **99.6%** and departs from it
+  by **92.5%** one rung later — the knee is that narrow. Past it the arms are no longer bimodal (see
+  above), but they *are* non-monotonic: an over-driven rung can serve *less* than a harder-driven one
+  while carrying a deeper, older backlog, so a single over-ceiling arm is not a reliable ceiling
+  measurement. Read the share of generated steps that were executed, not steps/s, and treat any reading
+  above the rate ladder's own ceiling as a backlog drain rather than a result.
 - **Mixed short and long tasks on one engine are not measured.** Nothing about the sizing refers to task
   duration, so the expectation is that they compose — but the benchmark applies one task delay globally
   and cannot express the case.
