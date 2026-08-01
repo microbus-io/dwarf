@@ -148,10 +148,13 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "r-d*.json"))):
     openc = sum(v for k, v in g.items() if k.startswith("sequel_pool_open_connections"))
     c = r.get("engineCounters") or {}
     st, se = c.get("dwarf_flows_started"), c.get("dwarf_steps_executed")
+    # Steps per flow is NOT always 10: a fanout of width W is ~W+2. Hardcoding 10 made the fanout arms
+    # report exec/gen = 180%, which is 18/10 and says nothing about saturation.
+    spf = float(os.environ.get("STEPS_PER_FLOW", "10"))
     rows.setdefault(d, []).append(dict(
         steps=r["stepsPerSec"], rtt=doc["rtt"]["p50Ms"], inuse=inuse, openc=openc,
         occ=(inuse / r["stepsPerSec"] * 1000) if r["stepsPerSec"] else 0,
-        share=(se / (st * 10) * 100) if st and se else None,
+        share=(se / (st * spf) * 100) if st and se else None,
         cpu=r["host"]["cpuCores"]))
 
 for name, why in dropped:
@@ -162,16 +165,27 @@ if dropped:
 print(f"{'inject':>7} {'n':>2} {'rtt':>7} {'steps/s':>9} {'spread':>15} {'open':>5} {'inuse':>6} "
       f"{'ms/step':>8} {'exec/gen':>9} {'hostCPU':>8}")
 pts = []
+unsaturated = []
 for d in sorted(rows):
     v = rows[d]
     m = lambda k: statistics.mean(x[k] for x in v if x[k] is not None)
     sp = [x["steps"] for x in v]
-    pts.append((m("rtt"), m("steps"), m("inuse")))
+    # ONLY A SATURATED ARM IS A CEILING. An arm whose pool never filled was capped by the generator, and
+    # including it drags the slope toward zero - measured: two generator-capped fanout arms pulled the
+    # fit from k~7.1 (saturated pair) to k=7.45 while reporting a confident-looking R^2. Mark and exclude.
+    saturated = m("inuse") >= 0.95 * m("openc")
+    if saturated:
+        pts.append((m("rtt"), m("steps"), m("inuse")))
+    else:
+        unsaturated.append(d)
     print(f"{d:>6}m {len(v):>2} {m('rtt'):>7.3f} {m('steps'):>9.0f} "
           f"{f'{min(sp):.0f}-{max(sp):.0f}':>15} {m('openc'):>5.0f} {m('inuse'):>6.0f} "
-          f"{m('occ'):>8.2f} {m('share'):>8.1f}% {m('cpu'):>8.2f}")
+          f"{m('occ'):>8.2f} {m('share'):>8.1f}% {m('cpu'):>8.2f}"
+          f"{'' if saturated else '   <- NOT SATURATED, excluded from fit'}")
 
 # occupancy = k*RTT + s, least squares over the arms. M cancels: it is the same pool everywhere.
+if unsaturated:
+    print(f"\nEXCLUDED from the fit (pool never filled): {sorted(unsaturated)} ms")
 if len(pts) >= 2:
     xs = [p[0] for p in pts]
     ys = [p[2] / p[1] * 1000 for p in pts]          # in_use / steps_per_sec -> ms of occupancy per step

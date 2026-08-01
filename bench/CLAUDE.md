@@ -12,10 +12,45 @@ was actually made here, cost a run, and produced a number someone nearly believe
 
 **RTT out-predicts every variable under test.** On a local Docker Postgres, measured Spearman
 ρ(rtt, steps/s) = **−0.90** across a replica ladder: a run at 0.5ms did 1431 steps/s and one at 1.5ms did
-404, in the *same* arm. Before attributing anything to a code change, check the RTT sampler. The cost model
-that explains it is `db_time = k·L + s` with **k ≈ 9.6 round trips, s ≈ 3.3ms** re-derived locally (the
-cloud campaign's k ≈ 11-12, s ≈ 4.4ms), and throughput ≈ `pool / db_time`. A ceiling can therefore be
-predicted from RTT alone, and a run at 78% of it is a *database* result, not an engine one.
+404, in the *same* arm. Before attributing anything to a code change, check the RTT sampler.
+
+**The model, and the only form of it worth quoting.** A SATURATED shard obeys
+
+    occupancy_ms = k·RTT_ms + s          throughput = M / occupancy
+
+where `M` is the pool, `k` the round trips one step makes, and `s` everything per-step that is not a
+round trip (server execution, WAL, queueing at the pool). Both terms are MEASURED, and the two behave
+completely differently:
+
+- **`k` is roughly portable** — a property of the code path. Measured **12.1** (netem sweep, M=8,
+  2026-07-11) and **9.11** (netem sweep, M=96, `linear`, 2026-08-01, R² high, residuals uncurved).
+  Quote it as **~9-12**, never a single digit.
+- **`s` is NOT portable and is the bigger trap.** 4.4 ms at M=8 against **9.49 ms** at M=96 — it absorbs
+  pool contention, so it grows with the pool. Carrying M=8 constants to an M=96 rig over-predicts
+  throughput by **21-44%**. Re-derive `s` per configuration or do not use the model.
+- **Workload shape was EXPECTED to move `k` and MEASURED NOT TO — do not re-assert it without new data.**
+  The intuition is that a fan-out does more database work, so its `k` should be larger. Measured
+  (2026-08-01, same rig, same M=96): `linear` **9.11**, `fanout` width 16 **8.67** - slightly LOWER, and
+  the 5% gap sits well inside the fanout arms' own spread (up to 34% between reps, against 0.3-4% for
+  linear). **Treat `k ~= 9` as shape-independent until someone measures otherwise.**
+
+  The reason the intuition misleads is worth keeping: a fan-out does more work per FLOW but throughput is
+  quoted per STEP, and most of its steps are *branches*. A branch inserts no successor, writes no
+  `successor_id` and advances no `step_id` (a fan-out flow sits at `step_id=0`), so it is CHEAPER in
+  round trips than a linear step; the expensive spawn and fan-in are 2 steps in 18.
+
+**Use it to NORMALIZE, which is what makes campaigns on different rigs comparable at all:**
+
+    T(ref) = T(measured) · (k·RTT_measured + s) / (k·RTT_ref + s)
+
+Placement is a lottery you do not control (Cloud SQL exposes only the zone), and two same-zone instances
+measured **0.32 ms and 0.82 ms — a 29% throughput difference on identical hardware and an identical
+build**. That single fact reconciles the two conflicting 16-vCPU/pool-96 numbers in
+`docs/benchmark-cloud.md` (7,491 and 5,355): one equation, two RTTs. **Always record RTT beside any
+throughput number, and normalize before comparing across sessions.**
+
+Validation that the netem arms are a faithful stand-in for real distance: genuine-placement runs land
+within **2-6%** of the injected curve.
 
 **Throwaway databases degrade the server.** 65 accumulated bench databases (3.5GB) pushed real RTT from
 0.76ms to 2.26ms and R=1 throughput from 885 to 345 — a 2.5x drift that biases LATE phases against EARLY

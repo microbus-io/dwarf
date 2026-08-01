@@ -2054,6 +2054,32 @@ guidance table, the shard-per-server production topology, and the per-server con
 `internal/database/CLAUDE.md`. The engine-side concern is the connection **pool sizing** — the *formula*, which is
 engine policy — below.
 
+**THE CEILING EQUATION, AND WHY THE POOL IS ONLY HALF OF IT.** A saturated shard serves
+`M / (k·RTT + s)` steps/s: `M` connections divided by how long one step OCCUPIES one. `k` is the round
+trips a step makes (**~9-12**, a code-path property), `s` is the per-step time that is not a round trip
+(server execution, WAL, queueing at the pool). Three consequences that govern engine changes:
+
+- **Workers are NOT a term.** A worker inside `ExecuteTask` holds no connection, so adding workers cannot
+  move this - it moves the queue. That is the same fact `workersPerConnBudget`'s deliberate overshoot
+  rests on, reached from the other direction, and it is why a "grow the crew" fix for a throughput
+  problem is always wrong.
+- **`k` is the ONLY term the engine controls, and it MULTIPLIES RTT.** At ~10 round trips, 0.1 ms of RTT
+  costs ~1 ms of occupancy on EVERY step. That is what makes the round-trip collapsing work
+  throughput-critical rather than cosmetic - the single-round-trip claim+read via `RETURNING`/`OUTPUT`,
+  the `priority`/`fairness_key`/`time_budget_ms` denormalization that keeps selection off `dwarf_flows`,
+  `enqueueStepDue` skipping the PK lookup, dropping `completeFlowSequential`'s redundant step UPDATE.
+  **Adding a round trip to the hot path costs `RTT × throughput`, permanently. Price any new one this
+  way.**
+- **RTT is an operator fact the engine cannot see or influence**, and it is not small: two same-zone
+  Cloud SQL instances measured **0.32 ms and 0.82 ms**, a **29% throughput difference** on identical
+  hardware and build. Never treat an absolute throughput number as portable across rigs without it.
+
+`k` was expected to vary with WORKLOAD SHAPE and measured not to: `linear` 9.11 against `fanout` 8.67 on
+one rig at one pool, a gap inside the fanout arms' own spread. The intuition that a fan-out costs more
+per step is the wrong unit - it costs more per FLOW, while most of its STEPS are branches that insert no
+successor and advance no `step_id`. Constants, their portability, and the normalization formula are in
+`bench/CLAUDE.md`; the operator-facing version is in `docs/benchmark-cloud.md` and `docs/deployment.md`.
+
 **Connection pool sizing - fact-derived per shard (`poolsize.go`).** The operator provides facts on
 `ShardSpec` and the engine owns the measured constants (cloud benchmark campaign, `docs/benchmark-cloud.md`):
 
