@@ -28,6 +28,18 @@ completely differently:
 - **`s` is NOT portable and is the bigger trap.** 4.4 ms at M=8 against **9.49 ms** at M=96 — it absorbs
   pool contention, so it grows with the pool. Carrying M=8 constants to an M=96 rig over-predicts
   throughput by **21-44%**. Re-derive `s` per configuration or do not use the model.
+
+  How steeply it grows, measured at FIXED RTT (~4.2 ms, 16 vCPU, 2026-08-01): `s` = 6.6 / 8.1 / 12.1 /
+  18.4 / 32.9 / **97.7** ms at M = 100 / 200 / 300 / 400 / 500 / 600. It is also inflated by RTT
+  INDEPENDENTLY of the pool — a transaction spans `BEGIN…COMMIT`, so distance lengthens how long it holds
+  rows and locks. Two arms at the same server-side concurrency disagree because of it: B=72 at 4.19 ms
+  gives `s`=12.08 and 5,970 steps/s, B=73 at 0.33 ms gives `s`=**9.54** and **7,658**. Slope at the
+  knee: **+1.45 ms of `s` per ms of RTT at 16 vCPU, ~2.2 at 32 vCPU**.
+
+- 🔑 **NEVER FIT `k` FROM A LADDER THAT MOVES THE POOL WITH THE RTT.** Doing so makes M a linear function
+  of `(k·RTT+s)`, so `s`-growth is absorbed into the apparent slope: such a ladder fit **11.40**, which a
+  lightly-loaded fixed-RTT arm then refuted arithmetically (M=100 at 4.13 ms occupies 44.14 ms, so
+  `k < 10.70` or `s` is negative). Fit `k` at FIXED pool, or bound it from a low-M fixed-RTT arm.
 - **Workload shape was EXPECTED to move `k` and MEASURED NOT TO — do not re-assert it without new data.**
   The intuition is that a fan-out does more database work, so its `k` should be larger. Measured
   (2026-08-01, same rig, same M=96): `linear` **9.11**, `fanout` width 16 **8.67** - slightly LOWER, and
@@ -51,6 +63,37 @@ throughput number, and normalize before comparing across sessions.**
 
 Validation that the netem arms are a faithful stand-in for real distance: genuine-placement runs land
 within **2-6%** of the injected curve.
+
+**`sequel.SimulateRTT` IS THE WRONG INSTRUMENT for anything about connection occupancy** — use netem. It
+pauses *before* the operation reaches the database, and for a DB-level statement `database/sql` acquires
+the pooled connection *inside* that operation, so the pause holds no connection at all. It is faithful
+only inside a transaction (the connection is held from `BeginTx`). Since RTT's whole effect on throughput
+is that it occupies connections, the bias runs the wrong way: the pool looks less binding than it is.
+
+**CONNECTIONS BUY BACK DISTANCE — partially, and with a hard ceiling.** Raising the pool as RTT grows
+held throughput at **93-100%** of base across 0.14 → 5.07 ms (16 vCPU), a **5.05x** recovery at 5 ms
+against what the shipped pool would have served. But that compares to base at the shipped 6x; knee to
+knee, a 4.3 ms path still delivers only **79%**. The useful invariant is `B = T·s/1000`, the backends
+actually inside Postgres (Little's law), which gives
+
+    M*(RTT) = B* · (1 + k·RTT / s)
+
+⚠️ **This does NOT separate into `B*(vCPU) · f(RTT)` — the test was run and it failed.** Predicting the
+32-vCPU knee at 4 ms from the 16-vCPU RTT correction gave 573 (separable) or 662 (tier-specific `s*`);
+the measurement was **>900 with the knee never reached** and DB CPU at only 65%. Bigger tiers are hurt
+disproportionately: they start from a smaller `s` (8.73 ms at 32 vCPU vs 12.73 at 16), so `k·RTT`
+dominates sooner, *and* their `s` inflates faster with distance. **At distance, add shards rather than
+grow one** — full compensation at 4 ms would have needed ~1,163 connections on one instance.
+
+Two scaling results that contradict the shipped ratio's shape (all at short RTT, n=1):
+**`B* = 15.0·vCPU^0.72`** — sublinear, so per-vCPU sizing over-connects large instances — and the optimal
+multiplier therefore **FALLS** with instance size (**11.2x / 8.8x / 6.9x** at 8 / 16 / 32 vCPU) where the
+shipped rule rises. 6x nonetheless captures 90-94% of peak at every tier; the last 6-10% costs roughly a
+doubling of connections.
+
+**DB CPU at the knee is RTT-invariant but TIER-dependent**: 61.6 / 65.1 / 66.3% across 0.4 / 1.2 / 4.3 ms
+at 16 vCPU, against **76.9 / 66.3 / 51.6%** at 8 / 16 / 32 vCPU. One "size to N% CPU" target cannot serve
+all tiers, and on 16 vCPU the 70-90% band straddles the collapse edge rather than the optimum.
 
 **Throwaway databases degrade the server.** 65 accumulated bench databases (3.5GB) pushed real RTT from
 0.76ms to 2.26ms and R=1 throughput from 885 to 345 — a 2.5x drift that biases LATE phases against EARLY

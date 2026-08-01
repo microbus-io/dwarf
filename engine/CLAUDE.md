@@ -2103,6 +2103,32 @@ successor and advance no `step_id`. Constants, their portability, and the normal
   8 -> 32 across one campaign as more arms landed, and the 64-vCPU collapse arrived last, in a six-arm
   confirmation run made after 32 had already shipped. Moving it again needs new ARMS, not a re-reading of
   these. `docs/benchmark-cloud.md` publishes the same table; keep the two in step.
+
+  ⚠️ **THE RATIO IS INDEXED TO THE WRONG VARIABLE, and both of its values are conservative.** Every
+  campaign behind it ran at 0.13-0.38 ms, so it never saw the axis that dominates: a connection held
+  while a packet is in flight does the server no good, and the load a server actually sees is
+  `M · s/(k·RTT+s)`. Measured 2026-08-01 (`bench/results/28-...`), pool knees at short RTT are
+  **11.2x / 8.8x / 6.9x** at 8 / 16 / 32 vCPU - the multiplier FALLS with instance size where this rule
+  rises, and 6x sits below the knee at every size (capturing 90-94% of peak; the rest costs ~2x the
+  connections). At distance the knee moves far more than any tier difference: **25x at 4.3 ms on 16
+  vCPU**, where 6x leaves two-thirds of the instance unreachable (33% DB CPU with the pool pinned 96/96).
+  Raising the pool with RTT held throughput at 93-100% across 0.14 -> 5.07 ms.
+
+  **Three findings constrain any replacement**, and none of them is a simple ratio. `B*` - the backends
+  actually inside Postgres at the knee, `T·s/1000` - is **sublinear in cores (`15.0·vCPU^0.72`)**, so
+  per-vCPU sizing over-connects large instances. The RTT correction is **not separable** from the tier: a
+  32-vCPU instance at 4 ms never reached its knee by 900 connections against a predicted 573-662, because
+  a bigger tier starts from a smaller `s` (8.73 vs 12.73 ms) *and* its `s` inflates faster with distance
+  (~2.2 vs 1.45 ms per ms). And **DB CPU at the knee is tier-dependent** (76.9 / 66.3 / 51.6%), so no
+  single CPU target serves all sizes. **Full compensation has a ceiling**: 4 ms on 32 vCPU would need
+  ~1,163 connections, so past ~1.5-2 ms a large instance cannot be compensated at all and the answer is
+  more shards, not a bigger one.
+
+  All of the above is **n=1**, and three arms collapsed stochastically - including a 32-vCPU arm that
+  collapsed at 430 while running clean at 550 and 900. So it justifies REPLACING the axis, not the
+  constants: any new sizing needs the same ~15-arms-per-cell bar before it ships, and must fail open to
+  the vCPU-only ratio when the RTT probe fails (a probe already exists - `probeRTT`, spent today only on
+  `workerCeiling`).
 - **The fleet is known BEFORE any worker dispatches, so pools are sized right the first time - there is no
   async grace window.** Reading the registry needs open connections, so `Startup` opens the shards at a small
   **bootstrap** pool (`startupBootstrapConns`, 4 - enough to register the row, probe the RTT and read the fleet,
