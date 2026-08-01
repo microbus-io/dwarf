@@ -18,7 +18,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -41,6 +43,13 @@ func collectCounters(reader *sdkmetric.ManualReader) map[string]int64 {
 	var rm metricdata.ResourceMetrics
 	err := reader.Collect(ctx, &rm)
 	if err != nil {
+		// NEVER swallow this. The engine's async gauge callback queries the shard databases, so under
+		// saturation it queues for a connection like everything else and can exceed the timeout - the
+		// scrape fails exactly when it is most wanted. Silently returning nil then produces an artifact
+		// with empty counters, `stepsPerSec` 0 and `valid: true`, which reads as a real measurement of
+		// zero throughput. Measured 2026-08-01: 2 of 9 arms of a GCP turnstile ladder at 8 s tasks with
+		// 36,000 workers against a pinned 96/96 pool.
+		fmt.Fprintf(os.Stderr, "WARNING: metric collection failed (%v) - this arm will be marked invalid\n", err)
 		return nil
 	}
 	out := map[string]int64{}
@@ -116,6 +125,13 @@ func collectHistograms(reader *sdkmetric.ManualReader) []histSample {
 	var rm metricdata.ResourceMetrics
 	err := reader.Collect(ctx, &rm)
 	if err != nil {
+		// NEVER swallow this. The engine's async gauge callback queries the shard databases, so under
+		// saturation it queues for a connection like everything else and can exceed the timeout - the
+		// scrape fails exactly when it is most wanted. Silently returning nil then produces an artifact
+		// with empty counters, `stepsPerSec` 0 and `valid: true`, which reads as a real measurement of
+		// zero throughput. Measured 2026-08-01: 2 of 9 arms of a GCP turnstile ladder at 8 s tasks with
+		// 36,000 workers against a pinned 96/96 pool.
+		fmt.Fprintf(os.Stderr, "WARNING: metric collection failed (%v) - this arm will be marked invalid\n", err)
 		return nil
 	}
 	var out []histSample
@@ -235,6 +251,13 @@ func collectGauges(reader *sdkmetric.ManualReader) map[string]float64 {
 	var rm metricdata.ResourceMetrics
 	err := reader.Collect(ctx, &rm)
 	if err != nil {
+		// NEVER swallow this. The engine's async gauge callback queries the shard databases, so under
+		// saturation it queues for a connection like everything else and can exceed the timeout - the
+		// scrape fails exactly when it is most wanted. Silently returning nil then produces an artifact
+		// with empty counters, `stepsPerSec` 0 and `valid: true`, which reads as a real measurement of
+		// zero throughput. Measured 2026-08-01: 2 of 9 arms of a GCP turnstile ladder at 8 s tasks with
+		// 36,000 workers against a pinned 96/96 pool.
+		fmt.Fprintf(os.Stderr, "WARNING: metric collection failed (%v) - this arm will be marked invalid\n", err)
 		return nil
 	}
 	out := map[string]float64{}

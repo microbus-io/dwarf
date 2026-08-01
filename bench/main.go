@@ -322,7 +322,23 @@ func run() error {
 				k, res.FlowsPerSec, res.StepsPerSec, res.MBPerSec, res.P50ms, res.P95ms, res.P99ms,
 				res.Host.CPUCores, res.Host.CPUPct, res.Host.StepsPerCore,
 				res.Host.NetRxMBps, res.Host.NetTxMBps, res.Errors)
-			if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
+			// A MISSING collection must invalidate the run, and this check has to come first. Every
+			// counter test below reads a map, and an EMPTY map answers 0 to all of them - so a window
+			// whose closing collection produced nothing passes every reliability check and is written
+			// out as `valid: true` with stepsPerSec = 0. That is worse than a loud failure: it is a
+			// plausible-looking measurement of zero throughput. Measured 2026-08-01, 2 of 9 arms of a
+			// GCP turnstile ladder, which then reported its BEST turn multiple as its worst purely by
+			// averaging those zeros in. Signature is gaugesBefore present with gaugesAfter absent -
+			// the opening snapshot succeeded and the closing one did not, which points at the collection
+			// racing engine teardown.
+			// len, not nil: the collectors always return a non-nil map, and `omitempty` is what turns an
+			// EMPTY one into `null` in the artifact - so nil-checking here would never fire.
+			if len(res.EngineCounters) == 0 || len(res.GaugesAfter) == 0 {
+				art.Valid = false
+				art.Invalidity = fmt.Sprintf("at concurrency %d: end-of-window metric collection failed "+
+					"(counters=%d gaugesAfter=%d) - every derived rate in this arm is meaningless",
+					k, len(res.EngineCounters), len(res.GaugesAfter))
+			} else if res.EngineCounters["dwarf_steps_recovered"] != 0 || res.EngineCounters["dwarf_steps_unwedged"] != 0 || res.Errors != 0 {
 				art.Valid = false
 				art.Invalidity = fmt.Sprintf("at concurrency %d: errors=%d recovered=%d unwedged=%d",
 					k, res.Errors, res.EngineCounters["dwarf_steps_recovered"], res.EngineCounters["dwarf_steps_unwedged"])
