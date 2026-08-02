@@ -54,6 +54,12 @@ type gaugeSampler struct {
 	stop chan struct{}
 	done chan struct{}
 
+	// trace, when set, is called every traceEvery with the reading just taken. It rides the sampler that
+	// already exists rather than collecting on its own: an independent ticker would pay a second Collect
+	// per line, and worse, would report numbers the artifact's own means were not computed from.
+	trace      func(elapsed time.Duration, gauges map[string]float64, heapMB float64)
+	traceEvery time.Duration
+
 	mu       sync.Mutex
 	sums     map[string]float64
 	peaks    map[string]float64
@@ -66,11 +72,21 @@ type gaugeSampler struct {
 // is deliberate: the edge-snapshot hazard belongs to the instrument KIND, not to any one instrument, so a
 // subset would have to be extended by whoever next discovers their gauge reads zero.
 func startGaugeSampler(readers []*sdkmetric.ManualReader) *gaugeSampler {
+	return startGaugeSamplerTracing(readers, 0, nil)
+}
+
+// startGaugeSamplerTracing is startGaugeSampler plus a periodic callback with the live reading. every<=0 or
+// a nil trace is the untraced sampler, so a caller that wants no line pays nothing for the option.
+func startGaugeSamplerTracing(readers []*sdkmetric.ManualReader, every time.Duration,
+	trace func(elapsed time.Duration, gauges map[string]float64, heapMB float64)) *gaugeSampler {
+
 	s := &gaugeSampler{
-		stop:  make(chan struct{}),
-		done:  make(chan struct{}),
-		sums:  map[string]float64{},
-		peaks: map[string]float64{},
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		sums:       map[string]float64{},
+		peaks:      map[string]float64{},
+		trace:      trace,
+		traceEvery: every,
 	}
 	go s.run(readers)
 	return s
@@ -80,6 +96,8 @@ func (s *gaugeSampler) run(readers []*sdkmetric.ManualReader) {
 	defer close(s.done)
 	ticker := time.NewTicker(gaugeSampleInterval)
 	defer ticker.Stop()
+	begun := time.Now()
+	nextTrace := begun
 	for {
 		select {
 		case <-s.stop:
@@ -106,6 +124,13 @@ func (s *gaugeSampler) run(readers []*sdkmetric.ManualReader) {
 			}
 			s.n++
 			s.mu.Unlock()
+
+			if s.trace != nil && s.traceEvery > 0 {
+				if now := time.Now(); !now.Before(nextTrace) {
+					nextTrace = now.Add(s.traceEvery)
+					s.trace(now.Sub(begun), g, heap)
+				}
+			}
 		}
 	}
 }

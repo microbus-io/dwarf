@@ -213,6 +213,52 @@ document instead of passing it along. Storage is identical in both arms, so a by
 this flag means the workload is not carrying what it thinks it is; what it does move is the in-flight
 held-state gauges (`dwarf_state_in_flight_bytes` / `_steps`).
 
+## Measuring a crew that only shrinks when load falls
+
+**A constant `-task-delay` cannot see it, and that is a property of the arm rather than of the engine.** The
+crew grows while tasks are long and comes back down once they are not, so an arm that holds the exec term
+fixed for its whole window grows to a plateau and reports the plateau — whatever would have happened next.
+Both questions need load to change *within* one run: does the crew come back down, and does throughput
+recover to what the same rig does with no delay at all.
+
+`-task-burst D -task-quiet D` alternates `-task-delay` with zero on that cycle. The quiet half is **not
+idle** — flows keep arriving at the same rate, tasks simply stop sleeping — so only the exec term moves and
+the comparison stays controlled. Both flags are needed; half a cycle is not a cycle, and either alone leaves
+the delay constant. The schedule is a pure function of elapsed time (`taskProfile.delayAt`), so there is no
+driver goroutine whose phase would drift under the load being measured, and one profile is anchored once and
+shared by every replica so a multi-replica fleet is in the same phase.
+
+Size the window to span **several** cycles, and set `-stats-interval` to a fraction of the burst: the answer
+is a shape over time, and both the window-edge snapshots and the window mean report a burst arm as something
+in between.
+
+**`-stats-interval` prints the readout, and `crew` is the column it exists for.** It rides the gauge sampler
+that already ticks at 50 ms rather than collecting on its own, so the line and the artifact's means come from
+the same readings. `delayMs` beside it says which half of the cycle a line belongs to. It reads
+`dwarf_workers_resident`, not `runtime.NumGoroutine` — the process also holds the load generator, which is a
+rounding error against 36,000 workers and most of the count against 800 (both columns are printed).
+
+⚠️ **GAUGES HAVE NO BARE-NAME TOTAL — sum across the attribute sets.** Counters emit `name` alongside
+`name|k=v`; gauges emit only the attributed series (`dwarf_turnstile_available|shard=1`,
+`dwarf_steps_pending|priority=100`). Reading the bare name gets a confident **0.0**, which is what three of
+five gauge columns in this readout printed on a run executing hundreds of steps a second, and it would read
+identically on a rig. `gaugeTotal` is the helper; use it for anything new here.
+
+## Profiling a run
+
+`-pprof DIR` writes a CPU profile for the whole run and a heap profile at the end, named from `-label`.
+
+It exists because the headline cost — microseconds of engine CPU per step rising as the crew grows — is a
+whole-**process** number and this process also contains the load generator. No counter in the artifact
+separates them; a profile does.
+
+**Pass ONE `-concurrency` value when attributing.** The CPU profile spans every step of a sweep, so profiling
+one averages arms that differ in the quantity under test and produces a profile of nothing in particular.
+Profiling starts before engine startup and migrations deliberately — they are process CPU like anything else,
+and a profile that began after them would under-report. The heap profile is taken after a GC, so it is live
+bytes; read it against the goroutine count rather than expecting it to explain RSS, since **stacks are not
+heap** and the crew is mostly stacks.
+
 ## Reading an artifact
 
 - **Counters carry attributes** as `name|k=v` alongside the bare-name total. Both are emitted: the total is
@@ -238,7 +284,9 @@ held-state gauges (`dwarf_state_in_flight_bytes` / `_steps`).
 `-linear-steps` (chain depth — under partitioning, depth changes the share of FLOWS a slow replica blocks
 without changing the share of STEPS), `-refill-interval-ms` (pin the cycle period; **mandatory** in any
 ladder that varies replica count, since the derived interval is a function of R and would otherwise
-masquerade as a partitioning cost), `-fairness-keys`, `-vcpus`, `-max-open-conns`.
+masquerade as a partitioning cost), `-fairness-keys`, `-vcpus`, `-max-open-conns`, `-task-burst`/`-task-quiet` (alternate the exec term within a
+run — the only way to see the crew shrink), `-stats-interval` (periodic readout), `-pprof` (CPU + heap
+profiles).
 
 Test-only knobs the bench CANNOT reach: `Engine.Seams()` and `Engine.DB()` panic outside a test binary, so
 fault injection and `sequel`'s `SimulateRTT` are available to fixtures but not here. Reaching them from a

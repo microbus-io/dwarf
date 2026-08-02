@@ -78,6 +78,10 @@ func run() error {
 		workloadName = flag.String("workload", "linear", "workload: linear, fanout, state, carry, carryfanout, llm, mixed")
 		payload      = flag.Int("payload", 64*1024, "payload size in bytes - rewritten every step by `state`, written once and then carried by `carry`/`carryfanout`")
 		taskDelay    = flag.Duration("task-delay", 0, "per-task sleep simulating remote executor latency (the exec term)")
+		taskBurst    = flag.Duration("task-burst", 0, "bursty profile: apply -task-delay for this long, then drop it to zero for -task-quiet, repeating. 0 (with -task-quiet) keeps -task-delay constant for the whole run. A constant delay cannot see a crew that only shrinks once load FALLS - see taskProfile")
+		taskQuiet    = flag.Duration("task-quiet", 0, "bursty profile: the quiet half of the cycle, during which tasks do not sleep. Flows keep arriving at the same rate, so only the exec term moves")
+		pprofDir     = flag.String("pprof", "", "write a CPU profile for the whole run and a heap profile at the end into this directory. Run ONE arm at a time when attributing, since the CPU profile spans every -concurrency step")
+		statsEvery   = flag.Duration("stats-interval", 0, "print a stats line this often during each measurement window (0 = off). The crew column is what a burst arm is for")
 		taskJitter   = flag.Duration("task-jitter", 0, "additional uniform random [0,d) per-task sleep - de-synchronizes fan-out siblings so a cohort's branches do not all complete at once")
 		// 0 on either override means "let the engine derive it" - the self-tuned path a production host
 		// takes, and the only way to measure the derivation itself (workers from the lease margin, the
@@ -112,6 +116,15 @@ func run() error {
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
 	flag.Parse()
+
+	// The CPU profile spans the WHOLE run, so an attribution run passes one -concurrency value; see
+	// startProfiling. Started before anything else so engine startup and migrations are in it too - they
+	// are process CPU like any other, and a profile that began after them would quietly under-report.
+	stopProfile, err := startProfiling(*pprofDir, *label)
+	if err != nil {
+		return err
+	}
+	defer stopProfile()
 
 	if len(dsns) == 0 {
 		// Out-of-the-box smoke run: a throwaway on-disk SQLite database.
@@ -153,10 +166,17 @@ func run() error {
 	// One graph/task registry and one byte counter, shared by every replica's host (registered through the
 	// public API only - the path a production host takes).
 	sharedBytes := &atomic.Int64{}
+	// One profile, anchored once and copied by value into every replica's host, so a multi-replica run has
+	// every replica in the SAME phase of the cycle. Anchoring per host would stagger them and blur the
+	// transition the burst exists to make sharp.
+	profile := taskProfile{delay: *taskDelay, on: *taskBurst, off: *taskQuiet, start: time.Now()}
+	// The window functions read this rather than take two more parameters; runStep already carries ten, and
+	// the readout is a property of the RUN rather than of any one window.
+	tracing.every, tracing.profile = *statsEvery, profile
 	regHost := &benchHost{
 		graphs:       map[string]*workflow.Graph{},
 		tasks:        map[string]func(context.Context, *workflow.Flow) error{},
-		taskDelay:    *taskDelay,
+		profile:      profile,
 		taskJitter:   *taskJitter,
 		bytesWritten: sharedBytes,
 	}
@@ -182,7 +202,7 @@ func run() error {
 		host := &benchHost{
 			graphs:       regHost.graphs,
 			tasks:        regHost.tasks,
-			taskDelay:    *taskDelay,
+			profile:      profile,
 			taskJitter:   *taskJitter,
 			bytesWritten: sharedBytes,
 		}
@@ -257,6 +277,10 @@ func run() error {
 			"workload":     *workloadName,
 			"payloadBytes": *payload,
 			"taskDelayMs":  taskDelay.Milliseconds(),
+			// Recorded even when zero: an artifact that does not say whether the exec term was constant
+			// cannot be compared with one where it alternated, and the two measure different things.
+			"taskBurstMs": taskBurst.Milliseconds(),
+			"taskQuietMs": taskQuiet.Milliseconds(),
 			// The workload's own shape knobs. Without them a -fanout-width or -linear-steps sweep produces
 			// artifacts that are byte-identical in configuration and wildly different in what they measured.
 			"fanOutWidth":    *fanOutWidth,

@@ -34,13 +34,15 @@ type benchHost struct {
 	graphs map[string]*workflow.Graph
 	tasks  map[string]func(ctx context.Context, f *workflow.Flow) error
 
-	// taskDelay simulates remote-executor latency plus task run time (the "exec" term of the sizing
-	// model): every task sleeps this long before running its body. taskJitter adds a uniform random
-	// [0, jitter) on top, which DE-SYNCHRONIZES fan-out siblings: without it a cohort's branches are
-	// dispatched together, run for identical durations, and therefore all complete at the same instant,
-	// piling onto the shared cohort-arrival row at once. Spreading arrivals is how a contention
-	// hypothesis about that row is tested causally.
-	taskDelay  time.Duration
+	// profile is remote-executor latency plus task run time (the "exec" term of the sizing model): every
+	// task sleeps for whatever it returns before running its body. It is a PROFILE rather than a constant
+	// so a run can raise and drop the exec term partway through - see taskProfile for why a fixed delay
+	// cannot measure a crew that only shrinks once load falls.
+	profile taskProfile
+	// taskJitter adds a uniform random [0, jitter) on top, which DE-SYNCHRONIZES fan-out siblings: without
+	// it a cohort's branches are dispatched together, run for identical durations, and therefore all
+	// complete at the same instant, piling onto the shared cohort-arrival row at once. Spreading arrivals
+	// is how a contention hypothesis about that row is tested causally.
 	taskJitter time.Duration
 
 	// bytesWritten counts the state payload bytes tasks wrote, for MB-throughput accounting. A shared
@@ -57,7 +59,7 @@ func (h *benchHost) ExecuteTask(ctx context.Context, taskURL string, f *workflow
 	if task == nil {
 		return errors.New("unknown task %q", taskURL)
 	}
-	delay := h.taskDelay
+	delay := h.profile.delayAt(time.Now())
 	if h.taskJitter > 0 {
 		delay += time.Duration(rand.Int64N(int64(h.taskJitter)))
 	}
