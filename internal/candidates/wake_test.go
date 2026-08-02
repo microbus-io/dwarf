@@ -106,6 +106,79 @@ func TestCandidateCache_OneRefillStrandsNoCandidate(t *testing.T) {
 	wg.Wait()
 }
 
+// TestCandidateCache_WakesGoInArrivalOrder pins that waiters are woken FIFO.
+//
+// THIS DEPENDS ON AN IMPLEMENTATION DETAIL, WHICH IS WHY IT IS PINNED HERE. sync.Cond's documented contract
+// promises only that Signal "wakes one goroutine waiting on c, if there is any" - nothing about WHICH one,
+// and it explicitly disclaims scheduling order against goroutines contending for c.L. FIFO comes from the
+// runtime's ticket-based notifyList (runtime/sema.go): a waiter takes a monotonically increasing ticket on
+// arrival, and notifyListNotifyOne wakes the holder of the next one in sequence. That is a strong property
+// and it has been stable for many releases, but it is not something the API owes us, so this test is the
+// canary: a Go release that relaxed it would fail HERE rather than silently starving the crew's retirement
+// check months later.
+//
+// Note the scope of the guarantee, which is narrower than it first looks. FIFO governs which waiter is
+// SELECTED and readied; it says nothing about which then wins c.L, and Signal's own doc warns that a
+// goroutine merely locking c.L may barge ahead. Selection is what the no-starvation argument needs, so
+// waking one at a time - a single candidate per round, with the crew fully re-parked before the next - is
+// what makes the order observable at all.
+func TestCandidateCache_WakesGoInArrivalOrder(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	const crew = 16
+	c := &Cache{}
+	c.Init(crew)
+	var order []int
+	var mu sync.Mutex
+	var total atomic.Int64
+	var wg sync.WaitGroup
+	// Spawned one at a time, each parked before the next starts, so arrival order IS spawn order and the
+	// expected wake sequence is known rather than inferred.
+	for w := range crew {
+		wg.Go(func() {
+			for {
+				shard, ok := c.WaitForWork()
+				if !ok {
+					return
+				}
+				if _, ok, _ := c.TryPopFrom(shard); ok {
+					mu.Lock()
+					order = append(order, w)
+					mu.Unlock()
+					total.Add(1)
+				}
+			}
+		})
+		if !assert.True(settle(func() bool { return parked(c) == w+1 }), "worker %d parks before the next", w) {
+			break
+		}
+	}
+
+	for i := range crew {
+		c.Refill(1, []Job{{StepID: i + 1, Shard: 1}}, 0)
+		// Back to a FULLY parked crew, not one short: the worker that took the candidate loops round and
+		// re-parks, taking a fresh ticket at the BACK of the queue - which is the mechanism that makes the
+		// expected order a plain rotation rather than a single worker serving everything.
+		if !assert.True(settle(func() bool { return total.Load() == int64(i+1) && parked(c) == crew }),
+			"round %d must be served and the crew fully re-parked", i) {
+			break
+		}
+	}
+
+	mu.Lock()
+	got := append([]int(nil), order...)
+	mu.Unlock()
+	want := make([]int, crew)
+	for i := range want {
+		want[i] = i
+	}
+	assert.Equal(want, got, "waiters must be woken in arrival order")
+
+	c.Close()
+	wg.Wait()
+}
+
 // TestCandidateCache_WakesRotateAcrossTheParkedCrew pins that waiters are served FIFO, which is not a detail
 // of sync.Cond a caller may take or leave: internal/workers retires a surplus worker on a check it can only
 // reach by WAKING, so a wake protocol that kept re-waking the same few would starve the rest of that check

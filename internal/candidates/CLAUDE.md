@@ -79,13 +79,34 @@ distinguishes the two protocols from outside. `TestCandidateCache_OneRefillStran
 safety (a refill that wakes *nobody* hangs it); `BenchmarkCache_RefillWake` is where the rest of the
 evidence lives.
 
-**`sync.Cond` is FIFO, and that is load-bearing rather than incidental.** Signals rotate through the parked
-crew oldest-first, so every worker is woken periodically even when the batch is far smaller than the crew.
-Two things depend on it: work still spreads across the whole crew rather than starving a tail, and the
-crew's retirement rule — which a worker can only reach by waking — still reaches the surplus. Switching to
-a LIFO handoff (the standard thread-pool trick, and what `internal/turnstile`'s per-waiter channels would
-be) would deliberately starve cold workers, and would take both of those with it. That is a real design,
-but it is not this one, and it must not arrive as a side effect of a wake change.
+### The FIFO wake is load-bearing AND is not a guarantee — treat it as a pinned assumption
+
+Signals rotate through the parked crew oldest-first, so every worker is woken periodically even when the
+batch is far smaller than the crew. Two things depend on that: work spreads across the whole crew rather
+than starving a tail, and `internal/workers` retires a surplus worker on a check it can **only reach by
+waking**, so a protocol that kept re-waking the same few would stop the crew ever shrinking.
+
+**`sync.Cond` does not promise it.** The documented contract is only that `Signal` "wakes one goroutine
+waiting on c, if there is any" — nothing about *which* one, and it explicitly disclaims ordering against
+goroutines contending for `c.L`. The behaviour comes from the runtime's **ticket-based `notifyList`**
+(`runtime/sema.go`): a waiter takes a monotonically increasing ticket on arrival, and `notifyListNotifyOne`
+wakes the holder of the next ticket in sequence. Strong, and stable for many releases — but not owed to us.
+
+So it is **pinned rather than assumed**: `TestCandidateCache_WakesGoInArrivalOrder` spawns waiters one at a
+time (each parked before the next starts, so arrival order is known) and asserts the wake sequence is
+exactly that order. A Go release that relaxed it fails there, loudly, instead of silently starving the
+crew's retirement check months later. Do not delete that test as testing-the-standard-library; the thing it
+guards is ours.
+
+**The scope is narrower than it first looks.** FIFO governs which waiter is *selected and readied*. It says
+nothing about which then wins `c.L` — `Signal`'s own doc warns a goroutine merely locking `c.L` may barge
+ahead of a woken one. Selection is all the no-starvation argument needs, so nothing here rests on the wider
+claim.
+
+**A LIFO handoff would take both properties with it.** Reusing hot workers and letting cold ones starve out
+is the standard thread-pool trick, and it is what mirroring `internal/turnstile`'s per-waiter channels would
+amount to. That is a real design with real merits, but it is not this one, and it must not arrive as a side
+effect of a wake change.
 
 **The floor is the band a partition is serving for the current window, and it is FROZEN there** — set by
 the `Refill` that planned it (or by an `Offer` into an empty partition), `math.MaxInt` when empty. It is

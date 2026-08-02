@@ -400,9 +400,9 @@ func (c *Crew) spawn() {
 //
 // A worker reaches this only by WAKING, and the cache wakes one waiter per candidate rather than
 // broadcasting - so a batch smaller than the crew leaves most of it parked on any given refill. That is
-// survivable because the cache's waiters are served FIFO: signals rotate oldest-first, so the surplus is
-// woken periodically and still gets its verdict. A LIFO handoff would starve cold workers and take
-// retirement with it.
+// survivable only because its waiters are woken oldest-first, which rotates the surplus round to its
+// verdict. That ordering is an implementation detail of sync.Cond rather than a promise of it, and this
+// rule is why it matters; internal/candidates pins it with a test rather than assuming it.
 func (c *Crew) work(ctx context.Context) {
 	// spawn already counted this goroutine as idle, so the loop's invariant on entry - and at the top of
 	// every iteration - is "this worker is counted idle". Every return below sits inside that region, so one

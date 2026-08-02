@@ -175,13 +175,16 @@ every pass where the wake was consumed without work: a lost pop race, or a parti
 wake and the pop. Top-of-loop costs nothing and misses neither. **No test here discriminates the two
 placements**, so do not read the suite's silence as licence to move it.
 
-**What a worker can only reach by WAKING, so the shrink rule is coupled to `Cache.Refill`'s wake protocol.**
-Refill wakes one waiter per candidate rather than broadcasting, which means a batch far smaller than the
-crew leaves most of it parked on any given refill. That is survivable *only* because `sync.Cond` is FIFO:
-signals rotate oldest-first, so every worker is woken periodically and the surplus still gets its verdict —
-just once per `parked/batch` refills instead of every one, which is a few seconds at the derived cycle
-against a two-minute window. A **LIFO** handoff would deliberately starve cold workers and take retirement
-with it. See `internal/candidates/CLAUDE.md`; do not change that protocol without re-reading this.
+**A worker reaches its verdict only by WAKING, which couples the shrink rule to `Cache.Refill`'s wake
+protocol.** Refill wakes one waiter per candidate rather than broadcasting, so a batch far smaller than the
+crew leaves most of it parked on any given refill. That is survivable *only* because waiters are woken
+oldest-first: the surplus comes round periodically and still gets its verdict — once per `parked/batch`
+refills instead of every one, a few seconds at the derived cycle against a two-minute window.
+
+**That ordering is an implementation detail of `sync.Cond`, not a promise of it**, and the retirement rule
+is the reason it matters — a **LIFO** handoff would starve cold workers of the check itself and the crew
+would never shrink. It is pinned in `internal/candidates` rather than assumed here; read that package's
+notes before touching the wake protocol, and do not "simplify" its FIFO test away.
 
 The one state neither placement covers is a worker parked in a cache that never wakes it again. That is
 accepted, not overlooked: such a crew costs nothing but its stacks, and it shrinks on the first work that
