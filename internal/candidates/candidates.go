@@ -324,8 +324,9 @@ func (c *Cache) PeekShard() (shard int, ok bool) {
 	return shard, p != nil
 }
 
-// Refill replaces one shard's partition with batch at the given priority floor and wakes all waiters. The
-// floor is stamped onto every batch job, which is what keeps the partition's floor exact.
+// Refill replaces one shard's partition with batch at the given priority floor and wakes up to ONE WAITER
+// PER ADMITTED CANDIDATE - never all of them, since a wake beyond the batch cannot be given anything to do.
+// The floor is stamped onto every batch job, which is what keeps the partition's floor exact.
 //
 // The replacement is WHOLESALE, and the empty case must not be short-circuited. An empty batch is the
 // scan's statement that nothing is due on that shard, so every candidate still cached there is a dead hint

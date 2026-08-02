@@ -33,7 +33,10 @@
 # line carries the delay in force when it was taken, so each line classifies itself.
 #
 # CONTROLS, each earned by a corrupted campaign (see taskdelay.sh, which this follows):
-#   1. REP-MAJOR INTERLEAVE across the three arms, so session drift hits all three equally.
+#   1. REP-MAJOR INTERLEAVE across the three arms, ROTATED each rep (Latin square), so session drift hits
+#      all three equally instead of loading onto whichever runs last. It matters more here than in a ladder:
+#      `burst` is the arm under test, and a fixed order would put it in the most-fatigued slot of every rep.
+#      A fixed order alone once produced a clean-looking replica ladder whose entire signal was position.
 #   2. AN IDLE RTT GATE WITH COOLDOWN before every arm. RTT correlates with throughput at rho ~= -0.90 and
 #      degrades across a session; an arm that starts degraded is a reading of server fatigue.
 #   3. A FRESH DATABASE PER ARM, dropped after. A leftover dwarf_peers row inflates the observed replica
@@ -99,6 +102,13 @@ mkdir -p "$OUT"
 # Naming them here keeps the loop and the summary reading the same list.
 ARMS=(steady0 steadyN burst)
 
+# rotate echoes ARMS rotated left by $1, which is what makes the order a Latin square across reps.
+rotate() { # $1 = offset
+  local n=${#ARMS[@]} i out=()
+  for ((i = 0; i < n; i++)); do out+=("${ARMS[$(((i + $1) % n))]}"); done
+  echo "${out[@]}"
+}
+
 echo "run id: ${RUN_ID}  (databases: dwarf_bu_${RUN_ID}_<arm>_r<rep>)"
 echo "arms: ${ARMS[*]}  reps: ${REPS}  commanded: ${RATE} flows/s  shard: ${VCPUS} vCPU"
 echo "burst profile: ${DELAY} for ${BURST}, then 0 for ${QUIET}; window ${WINDOW}, readout every ${STATS}"
@@ -155,7 +165,9 @@ arm_args() { # $1 = arm
 echo
 echo "== ${REPS} rep(s) x ${#ARMS[@]} arms, ${WINDOW} window, open-loop at ${RATE} flows/s =="
 for rep in $(seq 1 "$REPS"); do
-  for arm in "${ARMS[@]}"; do
+  read -r -a order <<<"$(rotate $((rep - 1)))"
+  echo "-- rep ${rep} order: ${order[*]}"
+  for arm in "${order[@]}"; do
     tag="${arm}-r${rep}"
     db="dwarf_bu_${RUN_ID}_${arm}_r${rep}"
 
@@ -174,7 +186,7 @@ for rep in $(seq 1 "$REPS"); do
       -window "$WINDOW" -warmup "$WARMUP" -stats-interval "$STATS"
       ${PPROF:+-pprof "$PPROF"}
       ${EXTRA:-}
-      -label "${arm} rep ${rep} @ ${RATE} flows/s"
+      -label "${arm} rep ${rep} @ ${RATE} flows/s run ${RUN_ID}"
       -out "${OUT}/r-${tag}.json")
     # The readout goes to a log as well as the terminal: it is the ONLY record of the crew's shape over
     # time, and the artifact does not carry it.

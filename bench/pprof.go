@@ -57,17 +57,27 @@ func startProfiling(dir, label string) (stop func(), err error) {
 		f.Close()
 		return nil, errors.Trace(err)
 	}
+	// Failures WARN rather than returning quietly. That is this harness's own most expensive lesson: metric
+	// collection used to fail silently, which turned a corrupt run into a confident measurement of zero
+	// rather than into an error. A missing profile is far less dangerous than that - nothing downstream
+	// averages it in - but the failure mode is the same shape, and silence costs whoever goes looking for
+	// the file an hour of confusion at the end of a run that is expensive to repeat.
 	return func() {
 		pprof.StopCPUProfile()
-		f.Close()
+		if cerr := f.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: cpu profile %s may be truncated: %v\n", cpuPath, cerr)
+		}
 		heapPath := filepath.Join(dir, "heap-"+name+".pprof")
 		hf, herr := os.Create(heapPath)
 		if herr != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: heap profile not written: %v\n", herr)
 			return
 		}
 		defer hf.Close()
 		runtime.GC() // live heap, not "whatever had not been collected"
-		_ = pprof.WriteHeapProfile(hf)
+		if werr := pprof.WriteHeapProfile(hf); werr != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: heap profile %s incomplete: %v\n", heapPath, werr)
+		}
 	}, nil
 }
 
