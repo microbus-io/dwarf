@@ -48,6 +48,11 @@ type stallProxy struct {
 }
 
 // newStallProxy relays to the host:port named in dsn, returning the proxy and dsn rewritten to reach it.
+//
+// The host sits between the credentials and whatever ends them, and WHAT ends them is dialect-shaped: a path
+// on PostgreSQL (`…@host:5432/db?…`) but a query string on SQL Server (`…@host:1433?database=…`), which names
+// its database in a parameter and so has no path at all. Ending the host at the first `/` alone therefore found
+// no host on SQL Server and skipped the arm entirely.
 func newStallProxy(t *testing.T, dsn string) (*stallProxy, string) {
 	t.Helper()
 	assert := testarossa.For(t)
@@ -55,18 +60,42 @@ func newStallProxy(t *testing.T, dsn string) (*stallProxy, string) {
 	if !assert.True(at >= 0, "no credentials@host in the base DSN") {
 		return nil, dsn
 	}
-	slash := strings.Index(dsn[at:], "/")
-	if !assert.True(slash > 0, "no /database in the base DSN") {
+	end := len(dsn)
+	if i := strings.IndexAny(dsn[at+1:], "/?"); i >= 0 {
+		end = at + 1 + i
+	}
+	if !assert.True(end > at+1, "no host:port after the credentials in the base DSN") {
 		return nil, dsn
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if !assert.NoError(err) {
 		return nil, dsn
 	}
-	p := &stallProxy{addr: ln.Addr().String(), upstream: dsn[at+1 : at+slash], ln: ln}
+	p := &stallProxy{addr: ln.Addr().String(), upstream: dsn[at+1 : end], ln: ln}
 	t.Cleanup(p.close)
 	go p.serve()
-	return p, dsn[:at+1] + p.addr + dsn[at+slash:]
+	return p, dsn[:at+1] + p.addr + dsn[end:]
+}
+
+// TestStallProxy_FindsTheHostInEitherDSNShape pins the rewrite against both shapes a server DSN takes, because
+// getting it wrong on one of them does not fail the outage arm - it SKIPS it, silently, on that dialect alone.
+// Runs on every dialect (it opens a listener and rewrites a string; it never connects).
+func TestStallProxy_FindsTheHostInEitherDSNShape(t *testing.T) {
+	for _, tc := range []struct{ name, dsn, upstream, tail string }{
+		{"path", "postgres://u:p@127.0.0.1:5432/dwarf_%d?sslmode=disable", "127.0.0.1:5432", "/dwarf_%d?sslmode=disable"},
+		{"query", "sqlserver://u:p@127.0.0.1:1433?database=dwarf_%d", "127.0.0.1:1433", "?database=dwarf_%d"},
+		{"bare", "sqlserver://u:p@127.0.0.1:1433", "127.0.0.1:1433", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := testarossa.For(t)
+			p, proxied := newStallProxy(t, tc.dsn)
+			if !assert.NotNil(p) {
+				return
+			}
+			assert.Equal(tc.upstream, p.upstream, "the host must end where the DSN's own syntax ends it")
+			assert.Equal(tc.dsn[:strings.LastIndex(tc.dsn, "@")+1]+p.addr+tc.tail, proxied)
+		})
+	}
 }
 
 func (p *stallProxy) serve() {
