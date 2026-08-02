@@ -275,8 +275,8 @@ func (c *Cache) WaitForWork() (shard int, ok bool) {
 //
 // THE TWO CASES ARE DELIBERATELY NOT DISTINGUISHED HERE, because the caller must treat them identically:
 // retry the park. It is WaitForWork that reports a close, and a worker that returned on an empty partition
-// instead of looping would erode the crew under exactly the contention that caused the race - silently,
-// since nothing retires a worker any other way.
+// instead of looping would erode the crew under exactly the contention that caused the race - on a signal
+// that says nothing about whether that worker was surplus.
 //
 // needRefill signals that this partition has drained to its low-water mark, exactly as Pop's does.
 func (c *Cache) TryPopFrom(shard int) (j Job, ok bool, needRefill bool) {

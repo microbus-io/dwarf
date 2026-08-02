@@ -34,6 +34,9 @@ limitations under the License.
 // a candidate adds a peer if NOBODY is left idle. So the crew holds a standing reserve of one, and that
 // reserve is what makes a single edge trigger sufficient - see considerGrowth.
 //
+// It SHRINKS the same way - locally, with no coordinator: a worker that has held a candidate for too little
+// of its own recent wall clock retires on a coin flip, never below Min. See considerRetirement.
+//
 // The gate belongs to the caller: the crew holds *a* gate without knowing what it gates, takes a permit
 // before removing work from the cache, and hands it back when the handler says so. It is deliberately NOT
 // consulted by the growth rule; blocking on it is what the rule reads instead, since a worker waiting for a
@@ -46,6 +49,7 @@ package workers
 import (
 	"context"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,8 +109,13 @@ type Crew struct {
 	// max is the ceiling the crew may grow to, read on every spawn decision rather than captured so a
 	// caller that re-derives it takes effect at once. See SetMax.
 	max atomic.Int32
-	// resident is how many goroutines exist. It only ever GROWS - nothing retires a worker. It is
-	// BOOKKEEPING plus the cap check, not a decision input: what governs growth is idleness and the gate.
+	// min is the floor retirement may not cross - the resident set Start was given. Not a setter: it is
+	// what the caller already said it wants running unconditionally.
+	min atomic.Int32
+	// resident is how many goroutines exist. It is BOOKKEEPING plus the two bound checks, not a decision
+	// input: what governs growth is idleness and the gate, and what governs retirement is a worker's own
+	// busy fraction. EVERY exit decrements it - see work. It must, or a crew that retired most of its
+	// goroutines would still believe it holds them and would never spawn again.
 	resident atomic.Int32
 	// idle is how many goroutines are NOT currently holding a candidate. Zero means the crew is fully
 	// committed - nobody is left to take the next one - which is the growth signal.
@@ -142,6 +151,33 @@ type Crew struct {
 	// worker taking the last free candidate - and the new goroutine needs the same lifetime as its peers.
 	runCtx context.Context
 
+	// The retirement policy, set in New. Plain fields, not atomics, because they are written once before any
+	// goroutine exists and only read afterwards - a same-package test rewrites them before Start, which
+	// happens-before every worker that reads them. They are POLICY, not configuration: there is no setter,
+	// because the rule self-scales and Min and Max already bound it from both ends.
+
+	// retireWindow is how long a worker measures itself over before it may decide. Also the debounce that
+	// makes a shrink partial: survivors re-measure a changed world before anyone decides again.
+	retireWindow time.Duration
+	// retireThreshold is the busy fraction at or above which a worker keeps its place. It sets the
+	// equilibrium directly - crew settles at required_concurrency / threshold.
+	retireThreshold float64
+	// retireChance is the probability a worker under the threshold actually goes. Below 1 so one shared
+	// verdict cannot take the whole surplus at once.
+	retireChance float64
+
+	// The crew's two ambient dependencies, injected for the same reason anything else here is: a seam inside
+	// pure logic would mean a dependency should have been injected instead. There is no I/O to fault, so
+	// these are the only things a test cannot otherwise control. Same lifetime rule as the policy above -
+	// written in New, read by workers.
+
+	// now is the ONLY source of time in this package, instrumentation included. Injected so a test can drive
+	// the retirement window in discrete rounds rather than waiting out wall clock.
+	now func() time.Time
+	// roll draws the retirement coin, in [0,1). Injected so a test can make a partial shrink exact instead
+	// of statistical. MUST be safe for concurrent use - every worker calls it, unsynchronized.
+	roll func() float64
+
 	// logger is swapped atomically because SetLogger may be called while goroutines are running.
 	logger atomic.Pointer[slog.Logger]
 }
@@ -158,21 +194,35 @@ func New(cache *candidates.Cache, gate Gate, process ProcessFunc) (*Crew, error)
 	if process == nil {
 		return nil, errors.New("process is required")
 	}
-	c := &Crew{cache: cache, gate: gate, process: process}
+	c := &Crew{
+		cache:           cache,
+		gate:            gate,
+		process:         process,
+		retireWindow:    2 * time.Minute,
+		retireThreshold: 0.5,
+		retireChance:    0.25,
+		now:             time.Now,
+		roll:            rand.Float64, // the global source: safe for concurrent use, unlike a *rand.Rand
+	}
 	c.SetLogger(nil)
 	return c, nil
 }
 
 // SetMax caps how far the crew may grow. Live: it is read on every spawn decision rather than captured,
 // so a caller that re-derives it (from a connection budget, a fleet count, anything) takes effect at once.
-// It never retires goroutines that already exist - lowering it stops growth, it does not shrink the crew.
+//
+// It retires nothing itself - lowering it stops growth rather than forcing a shrink. A crew above a lowered
+// Max comes down only as its own workers measure themselves surplus, and only as far as Min.
 func (c *Crew) SetMax(n int) { c.max.Store(int32(max(0, n))) }
 
 // Max is the current ceiling.
 func (c *Crew) Max() int { return int(c.max.Load()) }
 
-// Resident is how many goroutines exist.
+// Resident is how many goroutines exist. It rises on demand and falls as workers retire, never below Min.
 func (c *Crew) Resident() int { return int(c.resident.Load()) }
+
+// Min is the floor retirement may not cross, set by Start.
+func (c *Crew) Min() int { return int(c.min.Load()) }
 
 // Idle is how many goroutines are not currently holding a candidate.
 func (c *Crew) Idle() int { return int(c.idle.Load()) }
@@ -202,6 +252,8 @@ func (c *Crew) SetLogger(l *slog.Logger) {
 // resident is separate from Max because they answer different questions. The resident set is what the
 // caller wants running unconditionally - sized from whatever throughput it expects to sustain - while Max
 // is the ceiling growth may reach, which is typically far larger and deliberately never spawned up front.
+// It is ALSO Min, the floor retirement may not cross - which is what makes a caller passing resident == Max
+// (a pinned crew) opt out of both growth and retirement without having to say so.
 //
 // The stop signals are the cache and the gate, not ctx, and that is not an oversight. A goroutine with no
 // candidate to run is blocked in one of them, which nothing but a close will release; and ctx here is the
@@ -214,6 +266,7 @@ func (c *Crew) Start(ctx context.Context, resident int) {
 	c.spawnLock.Unlock()
 	c.resident.Store(0)
 	c.idle.Store(0)
+	c.min.Store(int32(max(0, resident)))
 	for range resident {
 		c.spawn()
 	}
@@ -266,6 +319,50 @@ func (c *Crew) considerGrowth() {
 	}
 }
 
+// considerRetirement is the mirror of considerGrowth: a worker that has spent less than the threshold of its
+// own recent wall clock HOLDING A CANDIDATE retires on a coin flip. It is called at the top of every
+// iteration - see work for why that placement, and not the bottom.
+//
+// window and busy are the caller's own locals, so there is NO SHARED STATE here: no surplus counter, no
+// coordinator, no resize to serialize against. A worker decides about itself and leaves by returning.
+//
+// DO NOT re-key this on items handled instead of time. Per-worker throughput is total/crew, so the
+// actuation would move its own signal; and it is duration-confounded, since a worker on 8s tasks handles
+// ~7.5 items/min BY DESIGN against thousands for a no-op one - so a fixed item rate retires precisely the
+// crew that grow-on-demand deliberately created. A busy FRACTION is neither: that worker reads ~100% busy.
+//
+// DO NOT drop either control. The coin flip is what keeps one shared verdict from taking the whole surplus
+// at once, and the window is what makes the survivors re-measure before anyone decides again.
+func (c *Crew) considerRetirement(window *time.Time, busy *time.Duration) bool {
+	elapsed := c.now().Sub(*window)
+	if elapsed < c.retireWindow {
+		return false
+	}
+	fraction := float64(*busy) / float64(elapsed)
+	*window = c.now()
+	*busy = 0
+	if fraction >= c.retireThreshold || c.roll() >= c.retireChance {
+		return false
+	}
+	return c.retire()
+}
+
+// retire gives up this goroutine's place if the crew is above Min, reporting whether it may go.
+//
+// The check and the decrement are ONE step under spawnLock, and they must be: every worker measures the same
+// load and reaches the same verdict at the same instant, so an unreserved check lets an arbitrary number of
+// them read "above Min" together and step straight through it. Sharing the lock with spawn is the point -
+// the two are the same decision in opposite directions.
+func (c *Crew) retire() bool {
+	c.spawnLock.Lock()
+	defer c.spawnLock.Unlock()
+	if c.resident.Load() <= c.min.Load() {
+		return false
+	}
+	c.resident.Add(-1)
+	return true
+}
+
 // spawn adds one goroutine unless the crew is draining or already at Max. The lock makes the resident
 // count and the WaitGroup.Add atomic with respect to Drain, which sets spawnClosed before it waits.
 func (c *Crew) spawn() {
@@ -295,29 +392,54 @@ func (c *Crew) spawn() {
 //
 // The peeked shard can go stale while the acquire blocks, which is why the pop is non-blocking and its
 // failure is ordinary rather than exceptional.
+//
+// RETIREMENT IS EVALUATED AT THE TOP, so a worker decides on every pass - after a job, after losing a pop,
+// and on waking from a park however long (the window is wall clock, so a long park reads as a near-zero
+// fraction). DO NOT move it to the bottom: there it reaches only workers that got and finished a candidate,
+// which covers everybody solely because the cache BROADCASTS on refill. Should a refill ever hand off to one
+// waiter per candidate, the surplus stops waking and a bottom-of-loop check would measure only the workers
+// there is no interest in retiring.
 func (c *Crew) work(ctx context.Context) {
 	// spawn already counted this goroutine as idle, so the loop's invariant on entry - and at the top of
-	// every iteration - is "this worker is counted idle". Both returns below sit inside that region, so one
+	// every iteration - is "this worker is counted idle". Every return below sits inside that region, so one
 	// deferred decrement covers every exit without ever double-counting.
-	defer c.idle.Add(-1)
+	//
+	// resident is decremented on the way out too, and it MUST be: it gates spawning, so a crew that retired
+	// most of its goroutines while still believing it held them would never grow again. Retirement is the one
+	// exit that has already accounted for itself, under spawnLock - hence the flag rather than a second Add.
+	counted := true
+	defer func() {
+		c.idle.Add(-1)
+		if counted {
+			c.resident.Add(-1)
+		}
+	}()
+	// Per worker, starting now: a freshly spawned goroutine gets a full window of grace before it can judge
+	// itself - it was spawned because somebody needed it.
+	window, busy := c.now(), time.Duration(0)
 	for {
+		if c.considerRetirement(&window, &busy) {
+			counted = false
+			return
+		}
 		shard, ok := c.cache.WaitForWork()
 		if !ok {
 			return // the cache closed
 		}
-		gateStart := time.Now()
+		gateStart := c.now()
 		gated, release, ok := c.gate.Acquire(ctx, shard)
 		if !ok {
 			return // the gate closed: draining
 		}
 		if f := c.gateWait.Load(); f != nil {
-			(*f)(shard, time.Since(gateStart))
+			(*f)(shard, c.now().Sub(gateStart))
 		}
 		j, ok, _ := c.cache.TryPopFrom(shard)
 		if !ok {
 			// Another worker took the peeked entry, or the partition drained while we waited. CONTINUE,
-			// never return: resident never decrements, so a worker that returned here would erode the crew
-			// under exactly the contention that caused the race, and silently. Still idle - nothing was
+			// never return: leaving here would shrink the crew under exactly the contention that caused the
+			// race, on a signal that says nothing about whether this worker is surplus - which is what
+			// considerRetirement is for, and it runs at the top of the next pass. Still idle - nothing was
 			// taken - so the counter is left alone.
 			release()
 			continue
@@ -331,10 +453,15 @@ func (c *Crew) work(ctx context.Context) {
 		// leak a permit permanently and decay admission until it stopped. OnceFunc plus an unconditional
 		// call on the way out makes that leak unreachable rather than merely unlikely.
 		once := sync.OnceFunc(release)
+		// The busy clock brackets exactly the region where this worker HOLDS A CANDIDATE - the same region
+		// idle is decremented across. It excludes the park and the wait for a permit, which are what a
+		// surplus worker is made of.
+		held := c.now()
 		err := errors.CatchPanic(func() error {
 			return c.process(gated, j.Shard, j.StepID, once)
 		})
 		once()
+		busy += c.now().Sub(held)
 		if err != nil {
 			c.logger.Load().ErrorContext(ctx, "Processing candidate",
 				"stepID", j.StepID, "shard", j.Shard, "error", err)

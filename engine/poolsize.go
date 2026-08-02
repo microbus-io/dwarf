@@ -354,9 +354,12 @@ func (e *Engine) recomputePools() {
 	// exactly when the fleet is busiest. This is the same "never size the cache from more than the replica can
 	// claim" rule the worker ceiling is kept away from, arrived at through a different door.
 	//
-	// The RESIDENT worker count is deliberately NOT resized: it is a bounded, non-compounding over-provision
-	// (surplus workers queue on the pool and the growth trigger counts workers OFFSITE, not saturation), and
-	// shrinking it needs a worker-retirement protocol whose only prize is goroutine stacks.
+	// The RESIDENT worker count is deliberately NOT resized, because the crew shrinks ITSELF: a worker that
+	// spent too little of its own recent wall clock holding a candidate retires on a coin flip, so the surplus
+	// this smaller budget creates finds itself idle and goes, down to the floor Start was given. Pushing a new
+	// resident count here would be a second, coarser actuator on a quantity that already self-corrects - and
+	// one that would have to serialize against a shrink in flight. The cache and the ceiling below do not
+	// self-correct, which is why they are re-derived and this is not.
 	dispatch := max(64, workersPerConnBudget*postSplitConns)
 	e.cache.Resize(min(dispatch, int(e.workers.Load())))
 	// The refill scan floor is measured against the cache's capacity, so it follows the same split -

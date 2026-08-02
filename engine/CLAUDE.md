@@ -2339,15 +2339,19 @@ The worker count is split into two numbers, because they answer different questi
     through a different door. Pinned by `TestPoolSizing_CacheFollowsTheReplicaSplit` (768 -> 128 on an 8-vCPU
     shard at R=8). `Cache.Resize` trims the tail; a trimmed candidate stays `pending` and is re-selected, exactly
     as one pushed past the bound by an `Offer` head-insert already is.
-  - The **resident worker set** is deliberately left over-provisioned. The surplus workers merely queue on the
-    pool - bounded, and *non-compounding* now that the growth trigger counts workers OFFSITE rather than
-    saturation - so the entire prize for shrinking it is goroutine stacks (~3MB at 384 workers). Buying that
-    needs a worker-retirement protocol (a surplus counter, a retirement check on the hot loop, resize
-    serialization, and an interaction with the pool's drain ordering). That is a control
-    protocol added to the worker lifecycle for a memory saving, which is the trade the removed rate valve lost.
-    If a large-R deployment ever shows the goroutine count actually hurting, the design to build is a **surplus
-    counter** (retire the first N workers to reach a safe point), never per-worker indices - indices are what
-    make a shrink-then-grow race produce duplicate ids.
+  - The **resident worker set is not re-derived, and it does not need to be** - the crew shrinks itself. Each
+    worker times what fraction of its own recent wall clock it spent HOLDING a candidate and retires on a coin
+    flip when that falls under the threshold, never below the resident set `Start` was given
+    (`internal/workers`). So a fleet change that halves the pools does not have to resize anything: the
+    surplus workers find themselves idle against the smaller budget and go, at `required_concurrency /
+    threshold`. **Do not add a resident-count push to `recomputePools`** - it would be a second, coarser
+    actuator on a quantity that already self-corrects, and it would have to serialize against a shrink in
+    flight. What `recomputePools` re-derives is the cache and the ceiling, which do NOT self-correct.
+    **The resident floor is deliberately left at the Startup value** (derived at R=1), so a large-R fleet keeps
+    an over-provisioned floor. That is the safe direction and the same bounded, non-compounding over-provision
+    `workersPerConnBudget` keeps on purpose: surplus workers queue on the pool, and the growth trigger counts
+    workers OFFSITE rather than saturation. The prize for tightening it further is goroutine stacks, and the
+    shrink rule collects those without any protocol on the hot path.
 - **`workers` (the MAXIMUM the pool may grow to)** = `workerCeiling` = `M x margin / txTime x safety`,
   the largest pool that keeps a **synchronized completion storm** inside the crash-recovery lease margin.
   The storm: every in-flight task blocks on one downstream (an LLM provider outage) and is released at

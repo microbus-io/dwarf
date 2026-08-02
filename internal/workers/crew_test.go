@@ -336,7 +336,8 @@ func TestCrew_MaxIsRespectedAndLive(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	assert.Equal(3, crew.Resident(), "growth stops at Max")
 
-	// Lowering Max stops growth but never shrinks: retiring a goroutine would need a whole protocol.
+	// Lowering Max stops growth; it does not force a shrink. A crew above a lowered Max comes down only as
+	// its own workers measure themselves surplus - here they are all inside the handler, so none does.
 	crew.SetMax(1)
 	assert.Equal(3, crew.Resident(), "lowering Max does not retire existing workers")
 
@@ -561,6 +562,379 @@ func TestCrew_WorkArrivingWhileFullyCommittedStillGrows(t *testing.T) {
 		"work arriving while fully committed must still be served, got %d in task", inTask.Load())
 
 	close(hold)
+	c.Close()
+	crew.Drain()
+}
+
+// feed keeps shard 1 supplied until the returned stop is called. It is not scaffolding for its own sake:
+// retirement is evaluated when a worker comes round the top of its loop, so a surplus worker decides only
+// because SOMETHING wakes it - in the engine, a piston's cycle refilling the partition. A test that let the
+// cache go quiet would be measuring a crew that never gets asked, which is the one state the rule cannot
+// cover and does not claim to.
+//
+// ONE candidate per refill is the setting the shrink tests want. Refill broadcasts, so every worker wakes
+// and comes round to its check, but only one can pop - so the rest reach the check having taken nothing,
+// and no pop ever leaves idle at zero. That is what keeps GROWTH out of a measurement about shrinking.
+func feed(c *candidates.Cache, n int) (stop func()) {
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			fill(c, n)
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	// stop WAITS for the goroutine, so a caller that has stopped the supply can rely on no further candidate
+	// arriving. round below depends on exactly that.
+	return sync.OnceFunc(func() { close(done); <-stopped })
+}
+
+// fakeClock is the crew's injected time source under test. Advancing it is what turns retirement from
+// something a test waits out into something it drives: with the clock still, a worker's window can only
+// elapse when the test says so, so each Advance past the window is exactly ONE verdict per worker (the
+// verdict resets that worker's window to the same still instant, so the next pass reads zero elapsed).
+//
+// It is an atomic because every worker reads it and the test writes it.
+type fakeClock struct{ nanos atomic.Int64 }
+
+func newFakeClock() *fakeClock {
+	f := &fakeClock{}
+	f.nanos.Store(time.Now().UnixNano())
+	return f
+}
+
+func (f *fakeClock) Now() time.Time          { return time.Unix(0, f.nanos.Load()) }
+func (f *fakeClock) Advance(d time.Duration) { f.nanos.Add(int64(d)) }
+
+// retireOn wires a crew to a still clock with a 1-minute window, and returns it. Nothing retires until a
+// test advances past the window, so growth phases are unperturbed by the rule under test.
+func retireOn(crew *Crew) *fakeClock {
+	clk := newFakeClock()
+	crew.now = clk.Now
+	crew.retireWindow = time.Minute
+	return clk
+}
+
+// round drives exactly ONE retirement verdict per worker, and returns the replacement supply stop.
+//
+// The quiesce is not tidiness, it is the correctness of the round. A worker caught inside the busy bracket
+// when the clock jumps banks the WHOLE jump as busy time, reads a fraction of 1, and silently skips the
+// verdict this round was meant to give it - which shows up much later as a count short by one. So: stop the
+// supply (feed's stop waits, so nothing more can arrive), let the crew drain and park, and only then move
+// time. Supply resumes afterwards because a parked worker reaches its check only when something wakes it.
+func round(t *testing.T, crew *Crew, c *candidates.Cache, clk *fakeClock, stop func()) func() {
+	t.Helper()
+	stop()
+	settled := 0
+	if !eventually(func() bool {
+		if crew.Idle() != crew.Resident() {
+			settled = 0
+			return false
+		}
+		// Held across consecutive samples, so a worker merely between the cache and the bracket cannot read
+		// as parked.
+		settled++
+		return settled >= 3
+	}) {
+		t.Fatalf("crew never quiesced: %d idle of %d resident", crew.Idle(), crew.Resident())
+	}
+	clk.Advance(2 * time.Minute)
+	return feed(c, 1)
+}
+
+// settles waits for the crew to stop changing size and returns where it came to REST.
+//
+// Every assertion about a shrink must be made on the resting size, never on a value the crew merely passes
+// through. A build with a broken floor descends past the right answer on its way to zero, and a build that
+// never resets a worker's window lets every pass be a fresh verdict - both visit the correct count in
+// transit, so an assertion that only has to observe it once passes against either.
+func settles(crew *Crew) int {
+	last, stable := -1, 0
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if n := crew.Resident(); n != last {
+			last, stable = n, 0
+		} else if stable++; stable >= 25 {
+			return n
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return crew.Resident()
+}
+
+// blocker is a process func that parks in the handler while armed, so a test can hold the whole crew inside
+// the busy region and advance the clock underneath it. Disarmed, the handler returns at once and accrues
+// exactly zero busy time against a still clock - which is what a surplus worker looks like, exactly.
+type blocker struct {
+	ch     atomic.Pointer[chan struct{}]
+	inTask atomic.Int32
+	peak   atomic.Int32
+}
+
+func (b *blocker) arm() { ch := make(chan struct{}); b.ch.Store(&ch) }
+func (b *blocker) release() {
+	if ch := b.ch.Swap(nil); ch != nil {
+		close(*ch)
+	}
+}
+
+func (b *blocker) process(_ context.Context, _, _ int, release func()) error {
+	release()
+	ch := b.ch.Load()
+	if ch == nil {
+		return nil
+	}
+	n := b.inTask.Add(1)
+	for {
+		p := b.peak.Load()
+		if n <= p || b.peak.CompareAndSwap(p, n) {
+			break
+		}
+	}
+	<-*ch
+	b.inTask.Add(-1)
+	return nil
+}
+
+// TestCrew_SurplusRetiresAndTheCrewGrowsAgain is the whole retirement cycle, and its third phase is the one
+// that matters most. resident gates spawning, so a crew that retired goroutines without decrementing it
+// would believe it still held them and WOULD NEVER GROW AGAIN - silently, and only once load returned. Max
+// is deliberately set to what phase 1 grows to, so that bug is what phase 3 measures: without the decrement
+// the crew sits pinned at Min with resident reading Max, and the peak never leaves 2.
+//
+// Growth is asserted on the peak count inside the handler rather than on Resident for the same reason:
+// Resident is the very bookkeeping the failure corrupts, so an assertion on it passes against the build
+// this test exists to catch.
+func TestCrew_SurplusRetiresAndTheCrewGrowsAgain(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	c := newCache(t)
+
+	var b blocker
+	b.arm()
+	crew, err := New(c, newGate(t, 64), b.process)
+	if !assert.NoError(err) {
+		return
+	}
+	crew.SetMax(16)
+	clk := retireOn(crew)
+	crew.retireChance = 1 // the coin is not what this test is about
+
+	stop := feed(c, 64)
+	defer stop()
+	crew.Start(context.Background(), 2)
+
+	// Phase 1 - workers park in the handler still holding their candidate, so nobody is idle and the crew
+	// grows to its ceiling. The clock is still, so nothing can retire while it does.
+	assert.True(eventually(func() bool { return crew.Resident() == 16 }),
+		"long tasks must grow the crew to Max, got %d", crew.Resident())
+	assert.True(eventually(func() bool { return b.inTask.Load() == 16 }),
+		"those must be real goroutines in the handler, got %d", b.inTask.Load())
+	b.release()
+
+	// Phase 2 - the same offered work, now instant, so every worker accrues zero busy against a still clock.
+	// One round is one verdict each, and with a certain coin that is the whole surplus.
+	stop = round(t, crew, c, clk, stop)
+	assert.Equal(2, settles(crew), "an idle surplus must come to rest at Min")
+
+	// Phase 3 - load returns, with Max still binding at 16 and the clock still (so no further verdicts).
+	b.peak.Store(0)
+	b.arm()
+	stop()
+	stop = feed(c, 64)
+	assert.True(eventually(func() bool { return b.peak.Load() >= 8 }),
+		"a crew that has retired must still be able to grow, peaked at %d", b.peak.Load())
+	b.release()
+
+	stop()
+	c.Close()
+	crew.Drain()
+	assert.Equal(0, crew.Resident(), "every exit decrements resident, drain included")
+}
+
+// TestCrew_LongTasksDoNotRetire is why the rule measures TIME rather than items, and it is the negative half
+// without which the whole design is unsound. These workers handle a handful of candidates per window against
+// thousands for a no-op worker, so any "items handled below X" rule retires precisely the crew that
+// grow-on-demand deliberately created for long tasks. A busy FRACTION is duration-independent.
+//
+// The whole crew is held inside the handler while the clock moves under it, so every worker's busy time IS
+// its elapsed window - a fraction of exactly 1, with no sleeping and nothing to race.
+func TestCrew_LongTasksDoNotRetire(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	c := newCache(t)
+
+	var b blocker
+	b.arm()
+	crew, err := New(c, newGate(t, 64), b.process)
+	if !assert.NoError(err) {
+		return
+	}
+	crew.SetMax(8)
+	clk := retireOn(crew)
+	crew.retireChance = 1
+	crew.retireThreshold = 1 // only a worker busy for its ENTIRE window survives, which is the claim
+
+	fill(c, 8)
+	crew.Start(context.Background(), 2)
+	assert.True(eventually(func() bool { return b.inTask.Load() == 8 }),
+		"every worker is inside a long task, got %d", b.inTask.Load())
+
+	// A whole window passes with every worker holding its candidate. This is the one place the clock moves
+	// WITHOUT quiescing first, and deliberately: banking the jump as busy time is precisely the reading
+	// under test.
+	clk.Advance(2 * time.Minute)
+	b.release()
+
+	assert.True(eventually(func() bool { return crew.Idle() == 8 }), "every worker came back round")
+	assert.Equal(8, settles(crew), "a crew busy for its whole window must not retire")
+
+	c.Close()
+	crew.Drain()
+}
+
+// TestCrew_RetirementNeverGoesBelowMin pins the guard that keeps a quiet engine from shrinking to nothing
+// and then stalling on the first arrival. Every worker here reads surplus and the coin always says go, so
+// Min is the only thing holding the crew up.
+func TestCrew_RetirementNeverGoesBelowMin(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	c := newCache(t)
+
+	var b blocker
+	b.arm()
+	crew, err := New(c, newGate(t, 64), b.process)
+	if !assert.NoError(err) {
+		return
+	}
+	crew.SetMax(32)
+	clk := retireOn(crew)
+	crew.retireChance = 1
+	crew.retireThreshold = 1 // every worker reads surplus
+
+	stop := feed(c, 64)
+	defer stop()
+	crew.Start(context.Background(), 6)
+	assert.Equal(6, crew.Min(), "Start's resident set is Min")
+	assert.True(eventually(func() bool { return crew.Resident() == 32 }), "grow well above Min first")
+	b.release()
+
+	// Several rounds, each a verdict for every survivor. The first takes the whole surplus; the rest find
+	// the crew already at Min and must take nobody. The assertion is on where it RESTS, because a build
+	// without the guard descends straight past 6 on its way to zero.
+	for range 3 {
+		stop = round(t, crew, c, clk, stop)
+		assert.Equal(6, settles(crew), "retirement must come to rest at Min and never cross it")
+	}
+
+	stop()
+	c.Close()
+	crew.Drain()
+}
+
+// TestCrew_TheCoinFlipCanDeclineRetirement pins that the probability is genuinely consulted rather than
+// decorative. A build that ignored it would pass every other test here.
+func TestCrew_TheCoinFlipCanDeclineRetirement(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	c := newCache(t)
+
+	var b blocker
+	b.arm()
+	crew, err := New(c, newGate(t, 64), b.process)
+	if !assert.NoError(err) {
+		return
+	}
+	crew.SetMax(8)
+	clk := retireOn(crew)
+	crew.retireThreshold = 1 // every worker reads surplus...
+	crew.retireChance = 0    // ...and the coin never lets one go.
+
+	stop := feed(c, 64)
+	defer stop()
+	// Start SMALL and grow, so the crew sits well above Min - otherwise Min would be what held it up and
+	// this would pass against a build that ignored the coin entirely.
+	crew.Start(context.Background(), 2)
+	assert.True(eventually(func() bool { return crew.Resident() == 8 }),
+		"the crew must grow above Min first, got %d", crew.Resident())
+	b.release()
+
+	var rounds atomic.Int32
+	crew.roll = func() float64 { rounds.Add(1); return 0 } // 0 is the LOWEST roll there is, and 0 >= 0
+	for range 3 {
+		stop = round(t, crew, c, clk, stop)
+	}
+	assert.True(eventually(func() bool { return rounds.Load() >= 8 }),
+		"workers must have reached the coin at all, got %d rolls", rounds.Load())
+	assert.Equal(8, settles(crew), "a zero chance must retire nobody")
+
+	stop()
+	c.Close()
+	crew.Drain()
+}
+
+// TestCrew_TheCoinFlipShrinksOnlyPartOfTheSurplus is what the coin is FOR, and it is unobservable without
+// both injections. Every worker measures the same load and reaches the same verdict at the same instant, so
+// a deterministic rule takes the entire surplus in one go and the next arrival finds nobody but Min. The
+// flip turns that one verdict into a partial shrink, and the window then makes the survivors re-measure a
+// changed world before anyone decides again.
+//
+// The clock makes a round discrete - exactly one verdict per worker per Advance - and the injected coin
+// makes the proportion exact rather than statistical, so this asserts counts and not tendencies. Growth is
+// kept out by feeding one candidate at a time: no pop can leave idle at zero.
+func TestCrew_TheCoinFlipShrinksOnlyPartOfTheSurplus(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	c := newCache(t)
+
+	var b blocker
+	b.arm()
+	crew, err := New(c, newGate(t, 64), b.process)
+	if !assert.NoError(err) {
+		return
+	}
+	crew.SetMax(16)
+	clk := retireOn(crew)
+	crew.retireThreshold = 1 // every worker reads surplus, every round
+	crew.retireChance = 0.25
+
+	// Exactly one roll in four comes up under the chance. Concurrency-safe and order-independent: what the
+	// assertions below turn on is how many rolls were drawn, never which worker drew which.
+	var rolls atomic.Int64
+	crew.roll = func() float64 {
+		if rolls.Add(1)%4 == 0 {
+			return 0.1 // under 0.25 - this worker goes
+		}
+		return 0.9
+	}
+
+	stop := feed(c, 64)
+	defer stop()
+	crew.Start(context.Background(), 4)
+	assert.True(eventually(func() bool { return crew.Resident() == 16 }), "grow to Max first")
+	b.release()
+
+	// Round one: 16 verdicts, a quarter of them fatal. The crew must come down - and must NOT collapse.
+	stop = round(t, crew, c, clk, stop)
+	assert.True(eventually(func() bool { return rolls.Load() >= 16 }),
+		"every worker must reach the coin, got %d rolls", rolls.Load())
+	assert.Equal(12, settles(crew), "one verdict must take a QUARTER of the surplus and then STOP")
+	assert.True(crew.Resident() > crew.Min(),
+		"and must leave the crew well above Min - a cliff is what the coin exists to prevent")
+
+	// Round two: the survivors re-measure and a quarter of THOSE go. That is the hysteresis - a shrink is
+	// spread across rounds, each priced on a fresh measurement, rather than settled in one.
+	stop = round(t, crew, c, clk, stop)
+	assert.True(eventually(func() bool { return rolls.Load() >= 28 }),
+		"every survivor must reach the coin again, got %d rolls", rolls.Load())
+	assert.Equal(9, settles(crew), "the next round takes a quarter of the survivors")
+
+	stop()
 	c.Close()
 	crew.Drain()
 }
