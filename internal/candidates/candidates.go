@@ -41,11 +41,14 @@ type Job struct {
 // partitions, so a worker blocked on an empty cache wakes when ANY partition fills - N separate
 // cond vars would let a worker sleep through another shard's refill.
 type Cache struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	parts  map[int]*partition
-	size   int // global capacity, twice the worker count (see Init/Resize); the refillers' plan bound
-	closed bool
+	mu    sync.Mutex
+	cond  *sync.Cond
+	parts map[int]*partition
+	size  int // global capacity, twice the worker count (see Init/Resize); the refillers' plan bound
+	// waiting is how many callers are parked in cond.Wait right now, maintained around both Wait sites.
+	// Refill wakes at most this many, because a wake beyond it is a call that finds nobody - see wake.
+	waiting int
+	closed  bool
 }
 
 // partition is one shard's slice of the cache. Its floor is DERIVED - the head item's priority, or
@@ -199,7 +202,9 @@ func (c *Cache) Resize(workers int) {
 func (c *Cache) Pop() (j Job, ok bool, needRefill bool) {
 	c.mu.Lock()
 	for c.totalLen() == 0 && !c.closed {
+		c.waiting++
 		c.cond.Wait()
+		c.waiting--
 	}
 	best, _ := c.bestPartition()
 	if best == nil {
@@ -261,7 +266,9 @@ func (c *Cache) WaitForWork() (shard int, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for c.totalLen() == 0 && !c.closed {
+		c.waiting++
 		c.cond.Wait()
+		c.waiting--
 	}
 	if c.closed {
 		return 0, false
@@ -362,8 +369,22 @@ func (c *Cache) Refill(shard int, batch []Job, floor int) (discarded int) {
 	// needs it to be.
 	p.items = batch
 	p.lastFill = len(batch)
+	// Read under the lock; a waiter Signal has already picked cannot leave Wait until we release, so this
+	// cannot undercount the ones about to go.
+	wake := min(len(batch), c.waiting)
 	c.mu.Unlock()
-	c.cond.Broadcast()
+	// ONE WAKE PER CANDIDATE, not a broadcast. A refill admits at most the cache's capacity, so a broadcast
+	// wakes the WHOLE parked crew to hand out that many jobs and the rest contend on the single mutex and
+	// re-park: useful work per wake is fixed while the herd grows with the crew. Go has no wake-N, and a
+	// Signal loop IS wake-N.
+	//
+	// Under-waking cannot strand a candidate, which is what makes the bound safe: a waiter only parks when it
+	// finds the cache EMPTY, so a woken worker that loses its race re-checks and keeps going rather than
+	// parking on top of work. The floor on parallelism is therefore whoever is already awake, and this adds
+	// one worker per candidate on top of that.
+	for range wake {
+		c.cond.Signal()
+	}
 	return discarded
 }
 

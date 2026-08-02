@@ -395,10 +395,14 @@ func (c *Crew) spawn() {
 //
 // RETIREMENT IS EVALUATED AT THE TOP, so a worker decides on every pass - after a job, after losing a pop,
 // and on waking from a park however long (the window is wall clock, so a long park reads as a near-zero
-// fraction). DO NOT move it to the bottom: there it reaches only workers that got and finished a candidate,
-// which covers everybody solely because the cache BROADCASTS on refill. Should a refill ever hand off to one
-// waiter per candidate, the surplus stops waking and a bottom-of-loop check would measure only the workers
-// there is no interest in retiring.
+// fraction). DO NOT move it to the bottom: there it reaches only workers that got and FINISHED a candidate,
+// missing every pass whose wake was consumed without work.
+//
+// A worker reaches this only by WAKING, and the cache wakes one waiter per candidate rather than
+// broadcasting - so a batch smaller than the crew leaves most of it parked on any given refill. That is
+// survivable because the cache's waiters are served FIFO: signals rotate oldest-first, so the surplus is
+// woken periodically and still gets its verdict. A LIFO handoff would starve cold workers and take
+// retirement with it.
 func (c *Crew) work(ctx context.Context) {
 	// spawn already counted this goroutine as idle, so the loop's invariant on entry - and at the top of
 	// every iteration - is "this worker is counted idle". Every return below sits inside that region, so one

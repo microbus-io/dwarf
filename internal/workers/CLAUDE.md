@@ -170,14 +170,18 @@ So a worker decides on **every pass**: after finishing a job, after losing a pop
 however long — the window is wall clock, so a worker that parked ten minutes and woke reads a fraction near
 zero.
 
-**The bottom of the loop reaches the same equilibrium, only slower — and that equivalence rests entirely on
-`Cache.Refill` broadcasting.** At the bottom a worker decides only after actually getting and finishing a
-candidate; that still covers everybody *because every refill wakes every worker*, so work spreads across the
-whole crew and each one gets its turn. Should refill ever hand off to one waiter per candidate instead, the
-surplus stops waking, stops getting candidates, and a bottom-of-loop check would measure **only the workers
-there is no interest in retiring**. Top-of-loop costs nothing and does not depend on the cache's wake
-semantics. **No test here discriminates the two placements** — precisely because under `Broadcast` they
-converge — so do not read the suite's silence as licence to move it.
+At the bottom a worker would decide only after actually getting and finishing a candidate, so it would miss
+every pass where the wake was consumed without work: a lost pop race, or a partition replaced between the
+wake and the pop. Top-of-loop costs nothing and misses neither. **No test here discriminates the two
+placements**, so do not read the suite's silence as licence to move it.
+
+**What a worker can only reach by WAKING, so the shrink rule is coupled to `Cache.Refill`'s wake protocol.**
+Refill wakes one waiter per candidate rather than broadcasting, which means a batch far smaller than the
+crew leaves most of it parked on any given refill. That is survivable *only* because `sync.Cond` is FIFO:
+signals rotate oldest-first, so every worker is woken periodically and the surplus still gets its verdict —
+just once per `parked/batch` refills instead of every one, which is a few seconds at the derived cycle
+against a two-minute window. A **LIFO** handoff would deliberately starve cold workers and take retirement
+with it. See `internal/candidates/CLAUDE.md`; do not change that protocol without re-reading this.
 
 The one state neither placement covers is a worker parked in a cache that never wakes it again. That is
 accepted, not overlooked: such a crew costs nothing but its stacks, and it shrinks on the first work that

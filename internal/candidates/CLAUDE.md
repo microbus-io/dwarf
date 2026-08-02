@@ -38,6 +38,55 @@ Two consequences to keep straight:
 All four selection paths share `bestPartition`, so the lowest-floor rule exists in exactly one place; two
 copies of it would drift, and the drift would be invisible (both would still dispatch *something*).
 
+## Waking: ONE SIGNAL PER CANDIDATE, never a broadcast
+
+`Refill` wakes `min(len(batch), waiting)` waiters one at a time; `Offer` signals once for its single
+candidate; **`Close` broadcasts, and must** — every waiter has to leave.
+
+A refill admits at most the cache's capacity, so a broadcast wakes the whole parked crew to hand out that
+many jobs, and useful work per wake is fixed while the herd grows with the crew. Go has no wake-N, and a
+`Signal` loop *is* wake-N.
+
+**Measured** (`BenchmarkCache_RefillWake`, medians of 5, 200 refills of 64 candidates, ns/op):
+
+| crew | 64 | 256 | 808 | 2048 | 8192 |
+|---|---|---|---|---|---|
+| broadcast | 47.8k | 61.7k | 182k | 534k | 1,306k |
+| signal-N | 48.5k | 60.2k | 59.5k | 61.8k | 60.6k |
+
+Signal-N is **flat across a 128x crew range**; broadcast is linear in the crew above ~256. The two are a
+wash at 64-256, so this is **not** a win at any crew size — it begins where the crew exceeds the batch,
+which is exactly where a wake stops being able to do useful work.
+
+**The cost is a convoy, not a spin, and the wrong model here leads to the wrong metric.** The losers of a
+broadcast never get far enough to spin: they wake, queue on the single mutex, and by the time each acquires
+it the batch is drained, so they re-park inside `WaitForWork`'s loop without ever returning. `takes per
+candidate` therefore sits at 1.05-1.10 under *both* protocols — it is the control that makes the wall-clock
+gap attributable to overhead, not the instrument that exposes the herd. Only the clock sees it.
+
+**Under-waking cannot strand a candidate**, which is what makes the bound safe. A waiter parks only when it
+finds the cache EMPTY, and `WaitForWork`/`Pop` re-check `totalLen()` in a loop — so a woken worker that
+loses its race does not park on top of work, it goes round again. The floor on progress is therefore ONE
+worker, not one per candidate. The cap is read under the lock, where a waiter `Signal` has already picked
+cannot yet leave `Wait`, so it cannot undercount the ones on their way out.
+
+**The bound is a PERFORMANCE property and is not unit-testable — do not go looking for the test.** Two
+measurements say so. A woken worker with a fast handler comes round, finds the cache still non-empty and
+takes another without re-parking, so a batch of 64 is routinely drained by a handful of workers (measured:
+7) however many were signalled — which is why waking once per refill instead of once per candidate passes
+the entire suite. And the losers of a broadcast never return from `WaitForWork` either, so no count
+distinguishes the two protocols from outside. `TestCandidateCache_OneRefillStrandsNoCandidate` pins the
+safety (a refill that wakes *nobody* hangs it); `BenchmarkCache_RefillWake` is where the rest of the
+evidence lives.
+
+**`sync.Cond` is FIFO, and that is load-bearing rather than incidental.** Signals rotate through the parked
+crew oldest-first, so every worker is woken periodically even when the batch is far smaller than the crew.
+Two things depend on it: work still spreads across the whole crew rather than starving a tail, and the
+crew's retirement rule — which a worker can only reach by waking — still reaches the surplus. Switching to
+a LIFO handoff (the standard thread-pool trick, and what `internal/turnstile`'s per-waiter channels would
+be) would deliberately starve cold workers, and would take both of those with it. That is a real design,
+but it is not this one, and it must not arrive as a side effect of a wake change.
+
 **The floor is the band a partition is serving for the current window, and it is FROZEN there** — set by
 the `Refill` that planned it (or by an `Offer` into an empty partition), `math.MaxInt` when empty. It is
 `Pop`'s key for choosing which partition to drain, and `Offer`'s bar for what it will admit.
