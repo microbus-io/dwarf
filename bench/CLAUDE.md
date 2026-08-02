@@ -230,7 +230,14 @@ shared by every replica so a multi-replica fleet is in the same phase.
 
 Size the window to span **several** cycles, and set `-stats-interval` to a fraction of the burst: the answer
 is a shape over time, and both the window-edge snapshots and the window mean report a burst arm as something
-in between.
+in between. `bench/gcp/burst.sh` is the runner — three arms (`steady0` the recovery target, `steadyN` the
+plateau, `burst` the one under test), and it tees the readout per arm because **the artifact records a gauge
+mean and peak but no trough, and the trough is the entire question**.
+
+**The retirement window is a shipped 2-minute constant with no knob**, so the quiet half has to outlast
+several of them. The crew decays about a quarter per round, so ~3 rounds (6 min) to lose half and ~7 (14
+min) to lose seven eighths; a quiet half under ~6 min measures the onset only, and one that shows a flat
+crew is as likely to be too short as to be a finding.
 
 **`-stats-interval` prints the readout, and `crew` is the column it exists for.** It rides the gauge sampler
 that already ticks at 50 ms rather than collecting on its own, so the line and the artifact's means come from
