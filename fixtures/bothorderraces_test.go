@@ -53,7 +53,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		assert.NoError(g.Validate())
 		proxy.HandleGraph(prefix+"/g", g)
 		proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-		e := engine.NewEngineUnderTest(t)
+		e := engine.NewEngineUnderTest(t.Name())
 		e.SetHost(proxy)
 		assert.NoError(e.Startup(t.Context()))
 		return e, prefix + "/g"
@@ -63,6 +63,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
 		e, url := newEngine(t, "cfvc1")
+		defer e.Shutdown(ctx)
 
 		// Freeze the worker just before completeFlow's transaction (A is already marked completed).
 		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
@@ -85,6 +86,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
 		e, url := newEngine(t, "cfvc2")
+		defer e.Shutdown(ctx)
 
 		// Freeze at the same window, then release completion FIRST so the flow completes.
 		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
@@ -130,10 +132,9 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 			<-gateBlock // on resume, hold the flow running so Delete deterministically sees a running flow
 			return nil
 		})
-		e := engine.NewEngineUnderTest(t)
+		e := engine.NewEngineUnderTest(t.Name())
 		e.SetHost(proxy)
 		assert.NoError(e.Startup(t.Context()))
-		t.Cleanup(func() { close(gateBlock) })
 		return e, gateBlock
 	}
 
@@ -154,7 +155,11 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 	t.Run("resume_first", func(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
-		e, _ := newGate(t, "dvr1")
+		e, gateBlock := newGate(t, "dvr1")
+		defer e.Shutdown(ctx)
+		// Unblock the held task BEFORE the engine drains: deferred funcs unwind LIFO, so this
+		// close runs first and Shutdown never waits out a worker parked in the task body.
+		defer close(gateBlock)
 		fk := createInterrupted(t, e, "dvr1/g")
 
 		// Freeze both operations before their transactions, then launch them.
@@ -184,7 +189,11 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 	t.Run("delete_first", func(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
-		e, _ := newGate(t, "dvr2")
+		e, gateBlock := newGate(t, "dvr2")
+		defer e.Shutdown(ctx)
+		// Unblock the held task BEFORE the engine drains: deferred funcs unwind LIFO, so this
+		// close runs first and Shutdown never waits out a worker parked in the task body.
+		defer close(gateBlock)
 		fk := createInterrupted(t, e, "dvr2/g")
 
 		e.Seams().Break(engine.CheckpointResumeBeforeFlowWrite)
@@ -230,7 +239,6 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	yGate := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(yGate) }) }
-	t.Cleanup(release)
 
 	proxy := engine.NewTestProxy()
 	// Parent: one subgraph caller. Its Call step is the shared ancestor both child branches interrupt up to.
@@ -275,7 +283,11 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	})
 	proxy.HandleTask("cip/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	// Release IY here, AFTER the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and one
+	// still parked on yGate would never return.
+	defer release()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

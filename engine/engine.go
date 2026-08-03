@@ -176,16 +176,10 @@ type Engine struct {
 	// testConnCapDefault; 0 disables it. Only ever consulted when testHashedID != "".
 	testConnCap int
 	// testHashedID is the hashed test database id when the engine is in test mode (NewEngineUnderTest,
-	// keyed by t.Name() or a SetTestName override), empty in production. It becomes Config.TestID at Open,
-	// wrapping each shard in an isolated test database. Written once during single-threaded startup before
-	// started.Store(true), read only after started.Load()==true, so the atomic started flag is the
-	// happens-before barrier.
+	// keyed by the test name it was given), empty in production. It becomes Config.TestID at Open, wrapping
+	// each shard in an isolated test database. Written once at construction, read only after
+	// started.Load()==true, so the atomic started flag is the happens-before barrier.
 	testHashedID string
-	// t is the testing.TB when the engine was built with NewEngineUnderTest, nil in production. When set,
-	// Startup registers a t.Cleanup that Shutdowns the engine at test end (so a test needs no explicit
-	// defer e.Shutdown), and SetTestName is permitted. Written once at construction, read once in Startup
-	// (single-threaded), so it needs no synchronization.
-	t testing.TB
 
 	// Candidate cache and worker pool. `workers` is the pool's MAXIMUM (the lease-margin ceiling, or an
 	// explicit SetWorkers); the pool is grow-on-demand: initRuntime spawns `workersResident` = the
@@ -747,16 +741,6 @@ func (e *Engine) Startup(ctx context.Context) error {
 
 	if err := e.initRuntime(); err != nil {
 		return errors.Trace(err)
-	}
-	// A NewEngineUnderTest engine tears itself down at test end: register the Shutdown as a t.Cleanup so a
-	// test needs no explicit defer e.Shutdown (an explicit one still works - Shutdown is idempotent). Use
-	// t.Context(), not the caller's ctx: it stays valid until just before cleanups run, whereas the
-	// caller's ctx may already be cancelled by then. Registered only on the success path, after
-	// initRuntime flips started, so a failed Startup schedules no teardown.
-	if e.t != nil {
-		e.t.Cleanup(func() {
-			e.Shutdown(e.t.Context())
-		})
 	}
 	return nil
 }

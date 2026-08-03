@@ -52,7 +52,6 @@ func TestPriorityflow(t *testing.T) {
 	holderRunning := make(chan struct{})
 	releaseHolder := make(chan struct{})
 	release := func() { releaseOnce.Do(func() { close(releaseHolder) }) }
-	defer release() // an early return must not leave the worker held, or Shutdown drains forever
 
 	proxy.HandleTask("priorityflow.verify:428/record", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetBool("hold") {
@@ -69,7 +68,11 @@ func TestPriorityflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
+	// one still holding this would never return.
+	defer release()
 	eng.SetHost(proxy)
 	eng.SetWorkers(1)
 	assert.NoError(eng.Startup(t.Context()))

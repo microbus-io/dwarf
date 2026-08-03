@@ -48,7 +48,6 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	release := make(chan struct{})
 	var once sync.Once
 	releaseGC := func() { once.Do(func() { close(release) }) }
-	defer releaseGC()
 
 	const (
 		parentURL = "s2cohort.verify:0/parent"
@@ -110,7 +109,11 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 		return nil
 	})
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
+	// one still holding this would never return.
+	defer releaseGC()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

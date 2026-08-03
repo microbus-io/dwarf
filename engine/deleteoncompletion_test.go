@@ -93,7 +93,8 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, 20*time.Millisecond)
 	assert.NoError(e.Startup(t.Context()))
@@ -122,7 +123,8 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due ~immediately, but only the manual reap fires
 	assert.NoError(e.Startup(t.Context()))
@@ -165,7 +167,8 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour)
 	assert.NoError(e.Startup(t.Context()))
@@ -205,7 +208,8 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour)
 	assert.NoError(e.Startup(t.Context()))
@@ -241,7 +245,8 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 		return errors.New("boom")
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -289,7 +294,8 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, 20*time.Millisecond)
 	assert.NoError(e.Startup(t.Context()))
@@ -329,7 +335,8 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	e.SetWorkers(8)
 	// Keep grace at the production default and the reaper effectively off, so no flow is removed mid-test

@@ -48,7 +48,8 @@ func TestQuery_WorkflowName(t *testing.T) {
 	proxy.HandleTask("q.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
 	proxy.HandleTask("q.verify:0/b", func(context.Context, *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(ctx))
 
@@ -114,7 +115,8 @@ func TestQuery_StatusFilter(t *testing.T) {
 	proxy.HandleGraph("qs.verify:0/g", g)
 	proxy.HandleTask("qs.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(ctx))
 
@@ -168,7 +170,8 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 	proxy.HandleTask("q.esc:0/a", func(context.Context, *workflow.Flow) error { return nil })
 	proxy.HandleTask("q.esc:0/b", func(context.Context, *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(ctx))
 

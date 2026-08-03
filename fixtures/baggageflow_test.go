@@ -110,7 +110,8 @@ func TestBaggageflow(t *testing.T) {
 		},
 	}
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(host)
 	assert.NoError(eng.Startup(t.Context()))
 

@@ -82,10 +82,9 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		})
 		proxy.HandleTask(prefix+"/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-		e = engine.NewEngineUnderTest(t)
+		e = engine.NewEngineUnderTest(t.Name())
 		e.SetHost(proxy)
 		assert.NoError(e.Startup(t.Context()))
-		t.Cleanup(func() { close(callBlock) })
 		return e, prefix + "/parent", callResumed, callBlock
 	}
 
@@ -105,7 +104,11 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 	t.Run("completion_first", func(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
-		e, url, callResumed, _ := newEngine(t, "csvc1")
+		e, url, callResumed, callBlock := newEngine(t, "csvc1")
+		defer e.Shutdown(ctx)
+		// Unblock the held Call task BEFORE the engine drains: defers unwind LIFO, so this close runs
+		// first and Shutdown never waits out a worker parked in the task body.
+		defer close(callBlock)
 
 		// Freeze the child's worker just before its completeFlow transaction (X is already marked completed, the
 		// caller is running+parkedSubgraph).
@@ -136,7 +139,11 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 	t.Run("cancel_first", func(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
-		e, url, _, _ := newEngine(t, "csvc2")
+		e, url, _, callBlock := newEngine(t, "csvc2")
+		defer e.Shutdown(ctx)
+		// Unblock the held Call task BEFORE the engine drains: defers unwind LIFO, so this close runs
+		// first and Shutdown never waits out a worker parked in the task body.
+		defer close(callBlock)
 
 		// Freeze the child at the same window.
 		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)

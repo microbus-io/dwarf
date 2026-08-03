@@ -79,7 +79,8 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	})
 	proxy.HandleTask("nocohort/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

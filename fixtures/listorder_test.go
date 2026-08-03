@@ -47,7 +47,8 @@ func TestList_NewestFirstIsPerShardNotGlobal(t *testing.T) {
 	proxy.HandleGraph("listorder/g", g)
 	proxy.HandleTask("listorder/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 2}))

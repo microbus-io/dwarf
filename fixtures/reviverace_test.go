@@ -60,7 +60,8 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	})
 	proxy.HandleTask("rvc/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

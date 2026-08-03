@@ -142,7 +142,8 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	proxy.HandleTask("metricsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("metricsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
@@ -221,7 +222,8 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	proxy.HandleGraph("refillmetrics/g", g)
 	proxy.HandleTask("refillmetrics/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetMeterProvider(mp))
 	assert.NoError(e.SetWorkers(0)) // nothing dispatches: the backlog stays put
@@ -299,7 +301,8 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 	proxy.HandleGraph("forkmetric.verify:428/g", g)
 	proxy.HandleTask("forkmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
@@ -361,7 +364,8 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	proxy.HandleGraph("orphanmetric.verify:428/g", g)
 	proxy.HandleTask("orphanmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
@@ -442,7 +446,8 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
@@ -540,7 +545,8 @@ func TestMetrics_TerminatedCountsEveryTerminalStatus(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))

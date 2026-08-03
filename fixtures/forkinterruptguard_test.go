@@ -57,7 +57,8 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	proxy.HandleTask("forkguard.verify:0/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("forkguard.verify:0/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

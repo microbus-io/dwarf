@@ -91,7 +91,8 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 	})
 	proxy.HandleTask("fcfan/j", func(ctx context.Context, f *workflow.Flow) error { jCalls.Add(1); return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetWorkers(4))
 	e.SetHost(proxy)
 	reader := withManualReader(e)
@@ -151,7 +152,8 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 	proxy.HandleTask("fcsub/x", func(ctx context.Context, f *workflow.Flow) error { xCalls.Add(1); return nil })
 	proxy.HandleTask("fcsub/y", func(ctx context.Context, f *workflow.Flow) error { yCalls.Add(1); return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(proxy)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
@@ -177,6 +179,7 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	e, reader, calls := newFaultBatteryEngine(t, "fcrep", nil)
+	defer e.Shutdown(t.Context())
 
 	// Baseline (no fault): reference final_state and a clean world.
 	baseKey, baseOut := batteryRun(t, e, "fcrep/g")
@@ -215,7 +218,8 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	proxy.HandleGraph("fcwake/g", g)
 	proxy.HandleTask("fcwake/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
@@ -284,7 +288,8 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	proxy.HandleTask("fcdeep/l3-leaf", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("fcdeep/root-call", subgraphTask("fcdeep/l1"))
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))

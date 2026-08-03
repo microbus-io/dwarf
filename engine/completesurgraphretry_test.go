@@ -68,7 +68,8 @@ func TestCompleteFlow_TransientReviveErrorIsRetriedNotLost(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))

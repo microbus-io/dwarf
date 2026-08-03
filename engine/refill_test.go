@@ -46,7 +46,8 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 	proxy.HandleGraph("msd/g", g)
 	proxy.HandleTask("msd/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
@@ -88,7 +89,8 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	proxy.HandleGraph("notrigger/g", g)
 	proxy.HandleTask("notrigger/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.Startup(t.Context()))
 
@@ -113,7 +115,8 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(NewTestProxy()))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
@@ -206,7 +209,8 @@ func TestRefillInterval_DeepBacklogLiveness(t *testing.T) {
 	proxy.HandleGraph("refillfloorliveness.verify:428/one", g)
 	proxy.HandleTask("refillfloorliveness.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	e.SetWorkers(1)                                            // capacity 2, against a backlog of 10
 	assert.NoError(e.SetRefillInterval(50 * time.Millisecond)) // the over-limiting regime; must still drain, just slower
@@ -248,7 +252,8 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 
 	// SetWorkers(0): nothing dispatches, so every created flow's entry step stays `pending` and the scan
 	// sees a real backlog. It also idles the pistons, so nothing races these hand-driven queries.
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.SetWorkers(0))
 	assert.NoError(e.Startup(t.Context()))

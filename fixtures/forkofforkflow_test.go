@@ -78,7 +78,8 @@ func TestForkOfForkflow(t *testing.T) {
 	})
 	proxy.HandleTask("forkoffork.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 

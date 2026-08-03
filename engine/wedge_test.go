@@ -99,7 +99,8 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
@@ -198,7 +199,8 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
@@ -306,7 +308,8 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
@@ -419,7 +422,8 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.SetLogger(slog.New(capture)))
 	assert.NoError(e.Startup(t.Context()))
@@ -510,7 +514,8 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 	proxy.HandleGraph("orphanwin.verify:0/solo", solo)
 	proxy.HandleTask("orphanwin.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.SetLogger(slog.New(capture)))
 	assert.NoError(e.Startup(t.Context()))

@@ -60,7 +60,8 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))
@@ -102,7 +103,8 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))
@@ -151,7 +153,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 	// pending step needs both <= NOW) leaves it alone for the test.
 	setup := func(t *testing.T, status string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
-		e := NewEngineUnderTest(t)
+		e := NewEngineUnderTest(t.Name())
 		e.SetHost(NewTestProxy())
 		e.persistBackoff = shortPersistBackoff
 		assert.NoError(e.Startup(t.Context()))
@@ -182,6 +184,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 	t.Run("pending_is_fenced_and_lease_untouched", func(t *testing.T) {
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusPending)
+		defer e.Shutdown(ctx)
 
 		before := leaseMsOut(t, db)
 		assert.True(before > 100000)
@@ -201,6 +204,7 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 	t.Run("completed_is_extended_not_fenced", func(t *testing.T) {
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusCompleted)
+		defer e.Shutdown(ctx)
 
 		var writeCalls int
 		err := e.persist(ctx, db, 1, 1, 5, func() error {
@@ -238,7 +242,8 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	// A long backoff, so the worker is provably ASLEEP in the retry loop when the drain lands. If it did not
 	// select on drainStop, Shutdown would block for this long.

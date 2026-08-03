@@ -57,7 +57,6 @@ func TestConcurrentContinueflow(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseTask := func() { releaseOnce.Do(func() { close(release) }) }
-	defer releaseTask()
 
 	graph := workflow.NewGraph("Counting")
 	graph.SetEndpoint("Increment", "concurrentcontinue.verify:428/increment")
@@ -74,7 +73,11 @@ func TestConcurrentContinueflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
+	// one still holding this would never return.
+	defer releaseTask()
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 

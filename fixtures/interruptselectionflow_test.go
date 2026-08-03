@@ -125,7 +125,8 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	})
 	proxy.HandleTask("snapresume.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	// Several workers so B's gate-block doesn't starve A on a single worker.
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(proxy)
@@ -221,7 +222,8 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))

@@ -124,7 +124,8 @@ func TestSoakflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	eng.SetShard(engine.ShardSpec{Index: 1})
 	eng.SetShard(engine.ShardSpec{Index: 2})

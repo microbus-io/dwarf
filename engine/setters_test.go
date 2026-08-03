@@ -34,7 +34,8 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(noopHost{})
 	assert.NoError(e.Startup(t.Context()))
 
@@ -99,7 +100,8 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	proxy.HandleGraph("prio/g", g)
 	proxy.HandleTask("prio/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e2 := NewEngineUnderTest(t)
+	e2 := NewEngineUnderTest(t.Name())
+	defer e2.Shutdown(t.Context())
 	assert.NoError(e2.SetHost(proxy))
 	assert.NoError(e2.SetDefaultPriority(7))
 	assert.NoError(e2.Startup(t.Context()))

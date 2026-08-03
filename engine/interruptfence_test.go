@@ -73,7 +73,8 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	e.SetTimeBudget(200 * time.Millisecond)
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so lease recovery re-dispatches fast
@@ -124,7 +125,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	// not_before/lease_expires are far future so the engine's own poll/recovery leave the rows alone.
 	setup := func(t *testing.T, leafStatus string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
-		e := NewEngineUnderTest(t)
+		e := NewEngineUnderTest(t.Name())
 		e.SetHost(NewTestProxy())
 		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
@@ -175,6 +176,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	t.Run("pending_leaf_fences_the_chain_interrupt", func(t *testing.T) {
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusPending)
+		defer e.Shutdown(ctx)
 
 		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.NoError(err) // fenced -> abandon quietly
@@ -206,6 +208,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	t.Run("failed_chain_write_is_retryable_not_fenced", func(t *testing.T) {
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusRunning)
+		defer e.Shutdown(ctx)
 		e.seams.Inject(FaultInterruptChainWrite)
 		defer e.seams.Withdraw(FaultInterruptChainWrite)
 
@@ -227,6 +230,7 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 	t.Run("running_leaf_interrupts_the_chain", func(t *testing.T) {
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusRunning)
+		defer e.Shutdown(ctx)
 
 		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.NoError(err)

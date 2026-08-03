@@ -57,7 +57,8 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.testConnCap = 0 // assert the real derived sizes, not the test-mode cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // budget 48
@@ -105,7 +106,8 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.testConnCap = 0
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
@@ -153,12 +155,14 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 	ctx := context.Background()
 
 	// Two engines sharing one test database - which is all a fleet is.
-	worker := NewEngineUnderTest(t)
+	worker := NewEngineUnderTest(t.Name())
+	defer worker.Shutdown(ctx)
 	assert.NoError(worker.SetHost(noopHost{}))
 	assert.NoError(worker.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(worker.Startup(t.Context()))
 
-	peer := NewEngineUnderTest(t)
+	peer := NewEngineUnderTest(t.Name())
+	defer peer.Shutdown(ctx)
 	assert.NoError(peer.SetHost(noopHost{}))
 	assert.NoError(peer.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(peer.Startup(ctx))

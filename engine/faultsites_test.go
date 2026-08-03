@@ -59,7 +59,8 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	var runs int
 	proxy.HandleTask("ftbreset/a", func(ctx context.Context, f *workflow.Flow) error { runs++; return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -107,7 +108,8 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	proxy.HandleTask("ftbspawn/call", subgraphTask("ftbspawn/child"))
 	proxy.HandleTask("ftbspawn/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(proxy)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
@@ -166,7 +168,8 @@ func TestFaultSite_CancelCommit(t *testing.T) {
 	proxy := NewTestProxy()
 	registerGate(proxy, "ftbcancel")
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
@@ -196,7 +199,8 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	proxy := NewTestProxy()
 	registerGate(proxy, "ftbresume")
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
@@ -226,6 +230,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	e, reader, _ := newFaultBatteryEngine(t, "ftbfork", nil)
+	defer e.Shutdown(ctx)
 
 	// A completed origin to fork from.
 	originKey, out := batteryRun(t, e, "ftbfork/g")
@@ -284,7 +289,8 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 		return errors.New("child boom")
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
@@ -360,7 +366,8 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 		return errors.New("leaf boom")
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	assert.NoError(e.SetWorkers(4))
 	e.SetHost(proxy)
 	reader := withManualReader(e)
@@ -419,7 +426,8 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	proxy.HandleGraph("ftbreapsel/g", g)
 	proxy.HandleTask("ftbreapsel/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
 	assert.NoError(e.Startup(t.Context()))

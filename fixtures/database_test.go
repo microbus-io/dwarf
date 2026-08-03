@@ -44,7 +44,8 @@ func TestDatabase_TestModeCreatesSchema(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(enginetest.NoopHost{})
 	assert.NoError(e.Startup(t.Context()))
 
@@ -81,7 +82,8 @@ func TestSetShard(t *testing.T) {
 	assert.Error(pre.SetShard(engine.ShardSpec{Index: -1})) // negative index
 
 	// Sparse indices: 2 and 99 need not be contiguous.
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(oneTaskHost{})
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 2}))
 	assert.NoError(e.SetShard(engine.ShardSpec{Index: 99}))
@@ -117,7 +119,8 @@ func TestDatabase_ShardOutOfRange(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(enginetest.NoopHost{})
 	assert.NoError(e.Startup(t.Context()))
 
@@ -133,7 +136,8 @@ func TestDatabase_EachShardSingleShard(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(enginetest.NoopHost{})
 	assert.NoError(e.Startup(t.Context()))
 

@@ -33,7 +33,7 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 	newEngine := func(t *testing.T) (*engine.Engine, *engine.TestProxy) {
 		assert := testarossa.For(t)
 		proxy := engine.NewTestProxy()
-		eng := engine.NewEngineUnderTest(t)
+		eng := engine.NewEngineUnderTest(t.Name())
 		eng.SetHost(proxy)
 		assert.NoError(eng.Startup(t.Context()))
 		return eng, proxy
@@ -56,6 +56,7 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 	t.Run("branch_propagates_child_error_cohort_fails_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 		eng, proxy := newEngine(t)
+		defer eng.Shutdown(ctx)
 		buildInner(proxy)
 
 		g := workflow.NewGraph("Outer")
@@ -92,6 +93,7 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 	t.Run("branch_recovers_child_error_flow_completes", func(t *testing.T) {
 		assert := testarossa.For(t)
 		eng, proxy := newEngine(t)
+		defer eng.Shutdown(ctx)
 		buildInner(proxy)
 
 		g := workflow.NewGraph("Outer2")

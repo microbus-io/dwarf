@@ -39,7 +39,8 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	proxy := engine.NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
@@ -91,7 +92,8 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	proxy := engine.NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
@@ -165,7 +167,8 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	proxy := engine.NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
@@ -216,7 +219,8 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	proxy := engine.NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))

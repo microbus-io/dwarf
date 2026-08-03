@@ -89,7 +89,8 @@ func TestReducerDeleteflow(t *testing.T) {
 	proxy.HandleGraph("reducerdelete.verify:428/delete-first", buildGraph("DeleteFirst", true))
 	proxy.HandleGraph("reducerdelete.verify:428/append-first", buildGraph("AppendFirst", false))
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 

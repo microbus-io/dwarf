@@ -42,7 +42,8 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 	proxy.HandleGraph("fopt/g", g)
 	proxy.HandleTask("fopt/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

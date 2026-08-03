@@ -104,7 +104,7 @@ func newFaultBatteryEngine(t *testing.T, prefix string, cfg func(*Engine)) (*Eng
 	proxy := NewTestProxy()
 	calls := map[string]*int{"a": new(int), "b": new(int)}
 	stateLinear(proxy, prefix, calls)
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
 	e.SetHost(proxy)
 	e.SetMeterProvider(mp)
 	if cfg != nil {
@@ -155,6 +155,7 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		t.Run(tc.label, func(t *testing.T) {
 			assert := testarossa.For(t)
 			e, reader, calls := newFaultBatteryEngine(t, "fbat", nil)
+			defer e.Shutdown(t.Context())
 
 			// Baseline (no fault): capture the reference final_state and prove a clean world.
 			baseKey, baseOut := batteryRun(t, e, "fbat/g")
@@ -188,6 +189,7 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 			e.SetTimeBudget(200 * time.Millisecond)
 			e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so it expires quickly
 		})
+		defer e.Shutdown(ctx)
 
 		baseKey, baseOut := batteryRun(t, e, "fbatlease/g")
 		assert.Equal(workflow.StatusCompleted, baseOut.Status)

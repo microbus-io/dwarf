@@ -73,10 +73,12 @@ func TestTwoReplicaflow(t *testing.T) {
 	// Both replicas share one isolated database via a common test-DB key (each built with
 	// NewEngineUnderTest(t), which keys by t.Name()), so the suite runs this contention on whatever
 	// dialect SEQUEL_TESTING_DSN names (in-memory SQLite by default).
-	eng1 := engine.NewEngineUnderTest(t)
+	eng1 := engine.NewEngineUnderTest(t.Name())
+	defer eng1.Shutdown(ctx)
 	eng1.SetHost(proxy1)
 	assert.NoError(eng1.SetWorkers(4))
-	eng2 := engine.NewEngineUnderTest(t)
+	eng2 := engine.NewEngineUnderTest(t.Name())
+	defer eng2.Shutdown(ctx)
 	eng2.SetHost(proxy2)
 	assert.NoError(eng2.SetWorkers(4))
 	assert.NoError(eng1.Startup(ctx))
@@ -148,10 +150,12 @@ func TestTwoReplicaflow(t *testing.T) {
 		// This pair shares its own isolated database, distinct from the outer pair's, via the subtest's
 		// t.Name() key (NewEngineUnderTest keys by it) - so it too runs on the SEQUEL_TESTING_DSN dialect,
 		// not SQLite only.
-		awaiter := engine.NewEngineUnderTest(t)
+		awaiter := engine.NewEngineUnderTest(t.Name())
+		defer awaiter.Shutdown(ctx)
 		awaiter.SetHost(pa)
 		assert.NoError(awaiter.SetWorkers(0))
-		worker := engine.NewEngineUnderTest(t)
+		worker := engine.NewEngineUnderTest(t.Name())
+		defer worker.Shutdown(ctx)
 		worker.SetHost(pb)
 		assert.NoError(worker.SetWorkers(2))
 		assert.NoError(awaiter.Startup(ctx))

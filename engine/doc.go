@@ -25,8 +25,8 @@ limitations under the License.
 //
 // Build an engine with NewEngine and the Set* methods, register a Host (see SetHost), then Startup (opens
 // the database, runs migrations, starts workers). Shutdown drains the workers and closes the database. In
-// tests, NewEngineUnderTest wires per-test isolated SQLite databases and a t.Cleanup shutdown, so a test
-// just configures the engine and calls Startup (see NewEngineUnderTest).
+// tests, NewEngineUnderTest wires isolated, auto-dropped SQLite databases keyed by a test name, so a test
+// just configures the engine, calls Startup, and defers Shutdown (see NewEngineUnderTest).
 //
 //	eng := engine.NewEngine()
 //	eng.SetShard(ShardSpec{Index: 1, DSN: "postgres://user:pass@host:5432/dwarf"})

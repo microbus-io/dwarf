@@ -62,7 +62,8 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 	run := func(t *testing.T, width int) int {
 		assert := testarossa.For(t)
 
-		e := engine.NewEngineUnderTest(t)
+		e := engine.NewEngineUnderTest(t.Name())
+		defer e.Shutdown(ctx)
 		proxy := engine.NewTestProxy()
 		e.SetHost(proxy)
 		e.SetWorkers(1) // determinism: one worker, so no sibling races and no contention retries

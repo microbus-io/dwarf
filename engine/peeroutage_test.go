@@ -208,7 +208,8 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, worstReplica
 	// by construction rather than by arranging for four separate faults to coincide.
 	fleet := &restartFleet{}
 	for range replicas {
-		e := NewEngineUnderTest(t)
+		e := NewEngineUnderTest(t.Name())
+		defer e.Shutdown(t.Context())
 		e.testConnCap = 0 // assert the real derived sizes, not the test-mode cap
 		assert.NoError(e.SetHost(noopHost{}))
 		assert.NoError(e.SetWorkers(1))

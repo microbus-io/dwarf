@@ -68,7 +68,8 @@ func TestFanInDirectCancel_NoExtendCancelledFlow(t *testing.T) {
 	proxy.HandleTask("fidc/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("fidc/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

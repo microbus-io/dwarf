@@ -149,7 +149,7 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 	// resident crews small - this test asserts on pool arithmetic, and a derived crew per replica would
 	// spawn hundreds of goroutines that none of it depends on.
 	build := func() *Engine {
-		e := NewEngineUnderTest(t)
+		e := NewEngineUnderTest(t.Name())
 		e.testConnCap = 0 // assert the real derived sizes, not the test-mode cap
 		assert.NoError(e.SetHost(noopHost{}))
 		assert.NoError(e.SetWorkers(1))
@@ -157,12 +157,22 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 		return e
 	}
 
+	// Every engine this test starts is shut down at the end, including the replacements the rollout leaves
+	// running. A leaked one keeps its dwarf_peers row and its connections, so a later run of this test in the
+	// same process joins a fleet that still counts it and prices itself over budget.
 	fleet := &restartFleet{}
+	var started []*Engine
+	defer func() {
+		for _, e := range started {
+			e.Shutdown(ctx) // idempotent: the rollout already shut the originals down
+		}
+	}()
 	originals := make([]*Engine, 0, replicas)
 	for range replicas {
 		e := build()
 		fleet.add(e)
 		originals = append(originals, e)
+		started = append(started, e)
 		assert.NoError(e.Startup(ctx))
 	}
 	awaitFleetSettled(t, fleet, shard, replicas, budget/replicas)
@@ -196,6 +206,7 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 
 		fresh := build()
 		fleet.add(fresh)
+		started = append(started, fresh)
 		assert.NoError(fresh.Startup(ctx), "replacement %d failed to start", i)
 		awaitFleetSettled(t, fleet, shard, replicas, budget/replicas)
 	}

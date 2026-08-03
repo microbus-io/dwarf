@@ -60,7 +60,8 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -155,7 +156,8 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -216,7 +218,8 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 	proxy.HandleTask("cvt/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("cvt/b", func(ctx context.Context, f *workflow.Flow) error { bRan++; return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -278,12 +281,13 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
-	// Release X AFTER Startup so this cleanup runs BEFORE the engine's Shutdown cleanup (LIFO): Shutdown drains
+	// Release X here, AFTER the Shutdown defer, so it unwinds FIRST (defers are LIFO): Shutdown drains
 	// workers, so a worker still blocked in X must be unblocked first or the drain deadlocks.
-	t.Cleanup(func() { close(xRelease) })
+	defer close(xRelease)
 
 	// Freeze the caller after it parked, before createSubgraphFlow inserts the child.
 	e.seams.Break(CheckpointAfterCallerPark)
@@ -354,7 +358,8 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 

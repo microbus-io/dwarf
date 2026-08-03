@@ -55,7 +55,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 	newEngine := func(t *testing.T) (*engine.Engine, *engine.TestProxy) {
 		assert := testarossa.For(t)
 		proxy := engine.NewTestProxy()
-		eng := engine.NewEngineUnderTest(t)
+		eng := engine.NewEngineUnderTest(t.Name())
 		eng.SetHost(proxy)
 		assert.NoError(eng.Startup(t.Context()))
 		return eng, proxy
@@ -64,6 +64,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 	t.Run("populated_cohort", func(t *testing.T) {
 		assert := testarossa.For(t)
 		eng, proxy := newEngine(t)
+		defer eng.Shutdown(ctx)
 
 		graph := workflow.NewGraph("CarryRef")
 		graph.SetEndpoint("Anchor", "carryref.verify:429/anchor")
@@ -125,6 +126,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 	t.Run("empty_cohort_fires_fan_in_direct", func(t *testing.T) {
 		assert := testarossa.For(t)
 		eng, proxy := newEngine(t)
+		defer eng.Shutdown(ctx)
 
 		// An empty forEach routes straight to the fan-in via fireFanInDirect - the other mint site with the same
 		// discarded-carried-ref hazard. The carried document must still reach Collect.
@@ -162,6 +164,7 @@ func TestStaterefs_CarriedRefAcrossFanInWhenSpawnOnlyCarries(t *testing.T) {
 	t.Run("nested_fanout_carries_through_both_fan_ins", func(t *testing.T) {
 		assert := testarossa.For(t)
 		eng, proxy := newEngine(t)
+		defer eng.Shutdown(ctx)
 
 		// Seed -forEach-> Cell -forEach-> Chunk -> JoinChunk -> JoinCell. The document is carried from the entry
 		// step through BOTH cohorts. At the inner fan-in (JoinChunk) the spawn is Cell, which only carries the

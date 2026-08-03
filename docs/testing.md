@@ -8,15 +8,15 @@ interrupts, retries — with no database to set up and no transport to stand up.
 
 ## The two pieces
 
-- **`engine.NewEngineUnderTest(t)`** constructs an engine wired for testing: an isolated SQLite in-memory
-  database (per test, and per shard for multi-shard tests) keyed by `t.Name()`, with migrations run at
-  `Startup` and cleanup registered via `t.Cleanup` — no DSN, no teardown code. You still call `Startup(ctx)`
-  yourself (it registers the auto-shutdown), so any `Set*` configuration goes in between. It accepts any
-  `testing.TB`, so it also serves benchmarks (`*testing.B`) and fuzz targets (`*testing.F`) — those default
-  to a silent logger, while a `*testing.T` logs to stderr at Error for CI clues (`DWARF_TEST_LOG_LEVEL`
-  overrides — `info`/`debug` for the flow-status play-by-play, `silent`/`off` to quiet it).
-  `Engine.SetTestName(name)` overrides the `t.Name()` key — give several engines the same name to share one
-  database, or distinct names to isolate them.
+- **`engine.NewEngineUnderTest(name)`** constructs an engine wired for testing: an isolated SQLite in-memory
+  database (per name, and per shard for multi-shard tests), auto-dropped, with migrations run at `Startup` —
+  no DSN. It takes a plain name rather than a `testing.TB`, so a harness with no `*testing.T` to hand over
+  reaches it the same way a Go test does; pass `t.Name()` from a test. You call `Startup(ctx)` yourself, so
+  any `Set*` configuration goes in between, and you own teardown: `defer eng.Shutdown(ctx)`. The name is the
+  isolation key — give several engines the same name to share one database, or distinct names to isolate
+  them. It logs to stderr at Error for CI clues (`DWARF_TEST_LOG_LEVEL` overrides — `info`/`debug` for the
+  flow-status play-by-play, `silent`/`off` to quiet it); a benchmark or fuzz target silences it outright with
+  `SetLogger(slog.New(slog.DiscardHandler))`, since per-iteration logging would swamp the measurement.
 - **`engine.TestProxy`** is an in-memory implementation of the `Host` interface. Register graphs and task
   functions on it, then register it with `SetHost(proxy)` — its `LoadGraph`/`ExecuteTask` back the
   required methods, and its peer methods are no-ops.
@@ -42,7 +42,8 @@ func TestCheckout(t *testing.T) {
         return nil
     })
 
-    eng := dwarf.NewEngineUnderTest(t)
+    eng := dwarf.NewEngineUnderTest(t.Name())
+    defer eng.Shutdown(ctx)
     eng.SetHost(proxy)
     eng.Startup(ctx)
 
@@ -63,7 +64,8 @@ Apply any `Set*` settings between `NewEngineUnderTest` and `Startup` — workers
 priority:
 
 ```go
-eng := dwarf.NewEngineUnderTest(t)
+eng := dwarf.NewEngineUnderTest(t.Name())
+defer eng.Shutdown(ctx)
 eng.SetHost(proxy)
 eng.SetWorkers(1) // serialize dispatch to assert ordering
 for i := 1; i <= 4; i++ {
@@ -122,18 +124,19 @@ is — they coordinate through the database, so there is no relay to wire betwee
 ```go
 proxy1, proxy2 := engine.NewTestProxy(), engine.NewTestProxy()
 // register the same graphs/tasks on both...
-eng1 := engine.NewEngineUnderTest(t) // both keyed by t.Name() → one shared isolated database
+eng1 := engine.NewEngineUnderTest(t.Name()) // one name → one shared isolated database
+defer eng1.Shutdown(ctx)
 eng1.SetHost(proxy1)
-eng2 := engine.NewEngineUnderTest(t)
+eng2 := engine.NewEngineUnderTest(t.Name())
+defer eng2.Shutdown(ctx)
 eng2.SetHost(proxy2)
 eng1.Startup(ctx)
 eng2.Startup(ctx)
 ```
 
-Both engines share one isolated database because they key by the same `t.Name()` — no explicit DSN needed
-(use `SetTestName` if you want a specific shared key, or distinct keys to isolate them). Note that sharing a
-database is exactly what makes them count each other as peers, so two engines meant to be *separate*
-deployments need distinct keys. This is how the engine's own cross-replica `Await` and step-recovery tests
+Both engines share one isolated database because they were given the same name — no explicit DSN needed. Note
+that sharing a database is exactly what makes them count each other as peers, so two engines meant to be
+*separate* deployments need distinct names. This is how the engine's own cross-replica `Await` and step-recovery tests
 are written — see the `fixtures` package in the repository for worked examples.
 
 ## Where examples live

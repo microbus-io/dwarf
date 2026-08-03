@@ -66,7 +66,8 @@ func TestTaskdeadlineflow(t *testing.T) {
 		}
 	})
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	eng.SetTimeBudget(budget)
 	assert.NoError(eng.Startup(t.Context()))

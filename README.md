@@ -30,8 +30,9 @@ proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.F
     return nil
 })
 
-eng := dwarf.NewEngineUnderTest(t) // SQLite in-memory, auto-cleanup
-eng.SetHost(proxy)                 // TestProxy implements the Host interface
+eng := dwarf.NewEngineUnderTest(t.Name()) // SQLite in-memory, auto-dropped
+defer eng.Shutdown(ctx)
+eng.SetHost(proxy) // TestProxy implements the Host interface
 eng.Startup(ctx)
 
 _, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil) // Run returns (flowKey, outcome, err)

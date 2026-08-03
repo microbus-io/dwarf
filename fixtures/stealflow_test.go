@@ -86,15 +86,15 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 		return p
 	}
 
-	healthy = engine.NewEngineUnderTest(t)
+	healthy = engine.NewEngineUnderTest(t.Name())
 	healthy.SetHost(build("healthy"))
 	assert.NoError(healthy.SetWorkers(4))
-	crippled = engine.NewEngineUnderTest(t)
+	crippled = engine.NewEngineUnderTest(t.Name())
 	crippled.SetHost(build("crippled"))
 	assert.NoError(crippled.SetWorkers(crippledWorkers))
 	// Await-only: it holds connections and divides the pools, but claims no work and so earns no residue
 	// class. Its creations are the fleet's only scan-discovered work.
-	creator = engine.NewEngineUnderTest(t)
+	creator = engine.NewEngineUnderTest(t.Name())
 	creator.SetHost(build("creator"))
 	assert.NoError(creator.SetWorkers(0))
 
@@ -291,7 +291,8 @@ func TestStealTwoBadApplesflow(t *testing.T) {
 		return p
 	}
 	mk := func(replica string, workers int, delay time.Duration) *engine.Engine {
-		e := engine.NewEngineUnderTest(t)
+		e := engine.NewEngineUnderTest(t.Name())
+		defer e.Shutdown(ctx)
 		e.SetHost(build(replica, delay))
 		assert.NoError(e.SetWorkers(workers))
 		return e

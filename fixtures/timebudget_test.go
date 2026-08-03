@@ -71,7 +71,8 @@ func TestTimeBudget_FrozenAtCreate(t *testing.T) {
 	proxy.HandleGraph("timebudget/graph", g)
 	proxy.HandleTask("timebudget/task", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
@@ -119,7 +120,8 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 		return nil
 	})
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 	assert.NoError(e.SetTimeBudget(1 * time.Second)) // tiny default
@@ -179,7 +181,8 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 		return nil
 	})
 
-	e := engine.NewEngineUnderTest(t)
+	e := engine.NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 	assert.NoError(e.SetTimeBudget(30 * time.Second))

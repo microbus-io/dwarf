@@ -152,7 +152,7 @@ scope are load-bearing:
 
 - **Per process, not per call.** Several engines in ONE test must resolve to the SAME databases - that is
   how a multi-replica fixture gives its peer engines shared state - and a test wanting separate ones says so
-  by passing a distinct name (`SetTestName`).
+  by passing a distinct name to `NewEngineUnderTest`.
 - **It does NOT distinguish `-count=N` iterations, and nothing needs it to.** They run in one process, so
   the nonce is the same for all of them; they are also sequential (a count round's parent blocks on its
   parallel children before the next starts), and sequel reference-counts the handles on a testing database

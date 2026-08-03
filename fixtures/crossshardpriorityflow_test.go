@@ -72,7 +72,8 @@ func TestCrossShardPriorityflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assertSetup := testarossa.For(t)
 	assertSetup.NoError(eng.SetHost(proxy))
 	// Three shards, so placement spreads the flows and the global band must be merged from three

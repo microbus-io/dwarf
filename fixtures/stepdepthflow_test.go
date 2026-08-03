@@ -79,7 +79,8 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 	proxy.HandleTask("depthsub.verify:428/inner", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("depthsub.verify:428/inner2", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -150,7 +151,8 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	proxy.HandleTask("depthfanin.verify:428/deep", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("depthfanin.verify:428/j", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4)) // so the gated shallow branch doesn't starve the deep one
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))

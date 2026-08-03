@@ -26,58 +26,48 @@ import (
 	"github.com/microbus-io/dwarf/internal/piston"
 
 	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 )
 
-// This file is the engine's test-support surface. NewEngineUnderTest and SetTestName wire an engine for
-// isolated testing; DB and Seams expose the two internals a black-box test (one in another package, e.g.
-// fixtures) legitimately needs - the shard set for row inspection and the instrumentation seams for
-// deterministic race control. Both are guarded on e.t, so they are usable only on an engine built via
-// NewEngineUnderTest and panic on a production engine; no other internal is exported. A test that needs to
-// drive an unexported method or forge internal columns directly (failStep, the refiller, pool sizing, ...)
-// stays a white-box test in package engine, where it reaches those directly - it is not a candidate for a
-// cross-package move, and that is why the exported surface here is only these two accessors.
+// This file is the engine's test-support surface. NewEngineUnderTest wires an engine for isolated testing;
+// DB and Seams expose the two internals a black-box test (one in another package, e.g. fixtures)
+// legitimately needs - the shard set for row inspection and the instrumentation seams for deterministic
+// race control. Both are guarded on testing.Testing(), so they panic in a production binary; no other
+// internal is exported. A test that needs to drive an unexported method or forge internal columns directly
+// (failStep, the refiller, pool sizing, ...) stays a white-box test in package engine, where it reaches
+// those directly - it is not a candidate for a cross-package move, and that is why the exported surface
+// here is only these two accessors.
 
-// NewEngineUnderTest constructs an engine wired for testing: per-test isolated, auto-dropped databases
-// (keyed by t.Name()) plus automatic teardown - the subsequent Startup registers a t.Cleanup that
-// Shutdowns the engine at test end, so a test needs no explicit defer e.Shutdown. It lets a test
-// configure the engine (SetHost, SetShard, ...) and drive Startup itself:
+// NewEngineUnderTest constructs an engine wired for testing: isolated, auto-dropped databases keyed by the
+// given test name. It takes no testing.TB - a name is all it needs, so a host driving the engine under its
+// own harness (one with no *testing.T to hand over) reaches it the same way a Go test does. The caller
+// configures the engine (SetHost, SetShard, ...), drives Startup, and owns teardown:
 //
-//	e := NewEngineUnderTest(t)
+//	e := NewEngineUnderTest(t.Name())
+//	defer e.Shutdown(ctx)
 //	e.SetHost(h)
-//	e.Startup(ctx)          // registers the cleanup; a later defer e.Shutdown(ctx) is optional
+//	e.Startup(ctx)
 //
-// It accepts any testing.TB, so it also serves *testing.B and *testing.F. When several engines must share
-// one isolated database (a multi-replica test), give each the same t (they all key by t.Name()); when a
-// test needs several engines in SEPARATE databases, or a benchmark reused across passes needs a distinct
-// key each time, override the key with SetTestName.
+// The name is the isolation key: engines given the SAME name share one set of isolated databases (which is
+// how a multi-replica test gives its peer engines shared state), and engines given DIFFERENT names are
+// independent deployments. So a test standing up several INDEPENDENT engines gives each its own name
+// (t.Name()+"#"+suffix), and a benchmark reused across warmup/measure passes gives each pass a fresh one.
 //
-// Logging default: a *testing.T logs to stderr at Error, so a CI failure surfaces the engine-level alarms
-// (wedge sweeps / poll / refill faults) without the Info-level play-by-play noise (stderr, not t.Log,
-// because a `go test` timeout panic drops buffered t.Log output but not stderr). A benchmark or fuzz target
-// (*testing.B / *testing.F) defaults to SILENT, since per-iteration logging would dominate the measurement /
-// flood the fuzz output. DWARF_TEST_LOG_LEVEL overrides the level (e.g. "info" or "debug" for the
-// flow-status play-by-play; "silent" or "off" to force the discard logger); any explicit level un-silences a
-// benchmark/fuzz. SetLogger before Startup takes over entirely.
-func NewEngineUnderTest(t testing.TB) *Engine {
-	t.Helper()
+// Logging default: stderr at Error, so a CI failure surfaces the engine-level alarms (wedge sweeps / poll /
+// refill faults) without the Info-level play-by-play noise (stderr, not t.Log, because a `go test` timeout
+// panic drops buffered t.Log output but not stderr). DWARF_TEST_LOG_LEVEL overrides the level (e.g. "info"
+// or "debug" for the flow-status play-by-play; "silent" or "off" for the discard logger). A benchmark or
+// fuzz target silences the engine itself with SetLogger, since per-iteration logging would dominate the
+// measurement / flood the fuzz output; SetLogger before Startup takes over entirely either way.
+func NewEngineUnderTest(testName string) *Engine {
 	e := NewEngine()
-	e.t = t
-	// Silent by default for the high-volume harnesses; a plain test gets Error-to-stderr. The env var wins
-	// either way, and "silent"/"off" forces discard.
-	silent := false
-	switch t.(type) {
-	case *testing.B, *testing.F:
-		silent = true
-	}
 	level := slog.LevelError
+	silent := false
 	if s := os.Getenv("DWARF_TEST_LOG_LEVEL"); s != "" {
 		switch s {
 		case "silent", "off":
 			silent = true
 		default:
-			silent = false
 			_ = level.UnmarshalText([]byte(s))
 		}
 	}
@@ -86,39 +76,21 @@ func NewEngineUnderTest(t testing.TB) *Engine {
 	} else {
 		_ = e.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	}
-	// SetTestName owns the key; e.t is set above so it cannot reject, and a fresh engine is never started.
-	if err := e.SetTestName(t.Name()); err != nil {
-		t.Fatal(err)
-	}
-	return e
-}
-
-// SetTestName sets the test-database key for an engine built with NewEngineUnderTest, overriding the
-// t.Name() default the constructor installs. Construction-time only (rejected once started), and rejected
-// on an engine not under test (e.t == nil). Use it to give several engines in one test SEPARATE isolated
-// databases (a distinct key each, so they are independent deployments rather than one shared fleet), or to
-// give a benchmark reused across passes a fresh key per pass.
-func (e *Engine) SetTestName(name string) error {
-	if e.t == nil {
-		return errors.New("SetTestName requires an engine created with NewEngineUnderTest")
-	}
-	if e.started.Load() {
-		return errSetAfterStartup("test name")
-	}
 	// database.TestID hashes the name to a short, bounded id (the SQL identifier limit) and salts it with a
 	// per-PROCESS nonce, so concurrent `go test` runs of one package do not derive the same database name and
 	// drop it out from under each other. A non-empty testHashedID becomes Config.TestID at Open, which
-	// switches the ShardSet's open path onto the isolated-test path; it is set before initRuntime flips
-	// started, so it is in place before any shard opens.
-	e.testHashedID = database.TestID(name)
-	return nil
+	// switches the ShardSet's open path onto the isolated-test path; it is set on a fresh engine, so it is in
+	// place long before any shard opens.
+	e.testHashedID = database.TestID(testName)
+	return e
 }
 
 // DB exposes the engine's shard set so a black-box test in another package can inspect flow/step rows
 // directly. Test-only: it panics outside a test binary (!testing.Testing()), so production code never reaches
-// the shards through it. The guard is testing.Testing() rather than e.t != nil so it also serves a test that
-// builds its engine with the raw NewEngine (e.g. restart_test, which needs a real file DSN and no test-DB
-// harness) - such an engine has e.t == nil but is still a legitimate test engine.
+// the shards through it. The guard is testing.Testing() rather than "was this built by NewEngineUnderTest"
+// so it also serves a test that builds its engine with the raw NewEngine (e.g. restart_test, which needs a
+// real file DSN and no test-DB harness) - such an engine is not in test mode but is still a legitimate test
+// engine.
 func (e *Engine) DB() *database.ShardSet {
 	if !testing.Testing() {
 		panic("Engine.DB is a test-only accessor; it is not available outside a test binary")

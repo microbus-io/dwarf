@@ -85,7 +85,8 @@ func TestTracing_SpansEmittedOnRun(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	eng.SetTracerProvider(tp)
 	assert.NoError(eng.Startup(t.Context()))

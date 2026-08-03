@@ -72,7 +72,8 @@ func TestLeaseFence_FailStep(t *testing.T) {
 
 	t.Run("stale_lease_is_noop", func(t *testing.T) {
 		assert := testarossa.For(t)
-		e := NewEngineUnderTest(t)
+		e := NewEngineUnderTest(t.Name())
+		defer e.Shutdown(ctx)
 		e.SetHost(NewTestProxy())
 		assert.NoError(e.Startup(t.Context()))
 		setup(t, e, 5) // the owner holds generation 5
@@ -89,7 +90,8 @@ func TestLeaseFence_FailStep(t *testing.T) {
 
 	t.Run("current_lease_fails", func(t *testing.T) {
 		assert := testarossa.For(t)
-		e := NewEngineUnderTest(t)
+		e := NewEngineUnderTest(t.Name())
+		defer e.Shutdown(ctx)
 		e.SetHost(NewTestProxy())
 		assert.NoError(e.Startup(t.Context()))
 		setup(t, e, 5)
@@ -187,7 +189,8 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
@@ -260,7 +263,8 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
@@ -322,7 +326,8 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	proxy.HandleTask("lfrr/a", func(ctx context.Context, f *workflow.Flow) error { aCalls.Add(1); return nil })
 	proxy.HandleTask("lfrr/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
@@ -437,7 +442,8 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 		}
 	})
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
@@ -516,7 +522,8 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
@@ -583,14 +590,15 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 		return nil
 	})
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
 	assert.NoError(eng.Startup(t.Context()))
-	// Release the leaked "crashed" execution at teardown, BEFORE the engine's Shutdown cleanup drains workers (LIFO
-	// cleanup: this runs first), so the blocked worker returns and Shutdown does not wait out its lease.
-	t.Cleanup(func() { close(aRelease) })
+	// Release the leaked "crashed" execution at teardown, BEFORE the Shutdown defer drains workers (defers
+	// are LIFO, so this one runs first), so the blocked worker returns and Shutdown does not wait out its lease.
+	defer close(aRelease)
 
 	flowKey, outcome := zombieDispatch(t, eng, "lr/g", "A", &aCalls, aStarted, aRelease)
 	if !assert.NotNil(outcome) {
@@ -643,7 +651,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 	// statuses under lease generation 5, lease far future so the engine's own recovery poll leaves it alone.
 	setup := func(t *testing.T, flowStatus, stepStatus string) (*Engine, *sequel.DB) {
 		assert := testarossa.For(t)
-		e := NewEngineUnderTest(t)
+		e := NewEngineUnderTest(t.Name())
 		e.SetHost(NewTestProxy())
 		assert.NoError(e.Startup(t.Context()))
 		db, err := e.db.Shard(1)
@@ -672,6 +680,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 	t.Run("cancelled_step_is_not_refailed", func(t *testing.T) {
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusCancelled, workflow.StatusCancelled)
+		defer e.Shutdown(ctx)
 
 		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("boom"), "T")
 		assert.NoError(err)
@@ -687,6 +696,7 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 	t.Run("completed_step_can_still_fail", func(t *testing.T) {
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusRunning, workflow.StatusCompleted)
+		defer e.Shutdown(ctx)
 
 		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("could not persist transition"), "T")
 		assert.NoError(err)

@@ -67,7 +67,6 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 
 	proxy := NewTestProxy()
 	release := make(chan struct{})
-	defer close(release)
 
 	done := workflow.NewGraph("Done")
 	done.SetEndpoint("Done", "latchresolve.verify:0/done")
@@ -87,7 +86,11 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
+	// one still holding this would never return.
+	defer close(release)
 	assert.NoError(e.SetHost(proxy))
 	// Two shards, so the resolver's per-shard grouping is exercised rather than assumed.
 	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
@@ -136,7 +139,8 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 	proxy.HandleGraph("latchchunk.verify:0/done", g)
 	proxy.HandleTask("latchchunk.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.Startup(t.Context()))
 
@@ -191,7 +195,8 @@ func TestLatchResolve_RecentStopScanIsOnlyAnOptimization(t *testing.T) {
 	proxy.HandleGraph("latchrecent.verify:0/done", g)
 	proxy.HandleTask("latchrecent.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.Startup(t.Context()))
 

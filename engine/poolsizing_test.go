@@ -37,18 +37,14 @@ import (
 // 1-vCPU tier) the resulting pool of 12 still sits under the measured knee (that tier peaked at M=16
 // and only collapsed from M=32). The derived budgets are per database, so the observed replica count
 // splits them; the override is a per-replica exact number and is never divided.
-// startSolo starts e as an ISOLATED single-replica engine, keyed by a unique per-engine test-DB name.
-// Several independent engines in one test function otherwise share one registry (NewEngineUnderTest keys
-// the test DB by t.Name() alone) and would count each other, dividing the pools they are asserting on. Use this
-// when a test spins up multiple engines that are meant to be separate deployments, not one fleet.
-func startSolo(t *testing.T, e *Engine, key string) {
+// newSolo builds an ISOLATED single-replica engine, keyed by a unique per-engine test-DB name. Several
+// independent engines in one test function otherwise share one test database (every NewEngineUnderTest
+// keyed by t.Name() alone lands in the same one), so they share one dwarf_peers registry and count each
+// other, dividing the pools they are asserting on. Use this when a test spins up multiple engines that are
+// meant to be separate deployments, not one fleet.
+func newSolo(t *testing.T, key string) *Engine {
 	t.Helper()
-	assert := testarossa.For(t)
-	// e must be a NewEngineUnderTest engine; SetTestName overrides its t.Name() key with a per-engine
-	// unique one so these independent engines land in separate databases and never count each other.
-	assert.NoError(e.SetTestName(t.Name() + "#" + key))
-	assert.NoError(e.Startup(context.Background()))
-	// Startup registered the t.Cleanup shutdown (e was built with NewEngineUnderTest).
+	return NewEngineUnderTest(t.Name() + "#" + key)
 }
 
 // probedRTT is the round-trip time Startup measured for one shard, read under the lock its writer takes.
@@ -199,7 +195,8 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
@@ -243,7 +240,8 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.testConnCap = 0 // assert the real derived sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
@@ -290,7 +288,8 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
@@ -344,7 +343,8 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.Startup(t.Context()))
 	resident := int32(e.crew.Resident())
@@ -378,7 +378,8 @@ func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
@@ -418,7 +419,8 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 		return nil // instant: the task never parks, so the pool has no reason to grow
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(proxy))
 	// A deliberately tiny pool makes the connection the binding resource: workers WILL queue on it.
 	assert.NoError(e.SetMaxOpenConns(2))
@@ -518,7 +520,8 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // budget 48
 	assert.NoError(e.Startup(t.Context()))
@@ -566,7 +569,8 @@ func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derived budget 48
@@ -625,7 +629,8 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	proxy.HandleGraph("shutdownrace/g", g)
 	proxy.HandleTask("shutdownrace/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e2 := NewEngineUnderTest(t)
+	e2 := NewEngineUnderTest(t.Name())
+	defer e2.Shutdown(ctx)
 	e2.SetHost(proxy)
 	// Startup registers a t.Cleanup Shutdown; shutting down early here is idempotent.
 	assert.NoError(e2.Startup(t.Context()))
@@ -677,7 +682,8 @@ func TestPoolSizing_LiveOverride(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
 	assert.NoError(e.SetHost(noopHost{}))
 	for i := 1; i <= 2; i++ {
@@ -733,9 +739,10 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	// Zero-config: one default shard (undeclared CPUs -> the assumed 2-vCPU pool of 12). The max is the
 	// ceiling (large - set by the 30s margin, not by the task); the resident set and cache follow the
 	// connection budget: max(64, 8 x 12) = 96.
-	e := NewEngineUnderTest(t)
+	e := newSolo(t, "e")
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	startSolo(t, e, "e")
+	assert.NoError(e.Startup(context.Background()))
 	assert.Equal(96, e.workersDispatch, "resident/dispatch set stays connection-derived")
 	assert.Equal(192, e.cache.Capacity(), "cache is 2x the dispatch count, never 2x the ceiling")
 	// The max is the ceiling DERIVED from this shard's own probed RTT, not a fixed large number. A constant
@@ -750,11 +757,12 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 
 	// An 8-vCPU shard (pool 48) + a 2-vCPU shard (pool 12): dispatch = max(64, 8*60) = 480, and the
 	// ceiling is keyed on the WORST shard (the 2-vCPU pool of 12), never the aggregate.
-	e2 := NewEngineUnderTest(t)
+	e2 := newSolo(t, "e2")
+	defer e2.Shutdown(t.Context())
 	assert.NoError(e2.SetHost(noopHost{}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 2, VirtualCPUs: 2}))
-	startSolo(t, e2, "e2")
+	assert.NoError(e2.Startup(context.Background()))
 	assert.Equal(480, e2.workersDispatch)
 	assert.True(int(e2.workers.Load()) < workerCeiling(48, 0.3), "the smallest pool sets the ceiling")
 
@@ -762,19 +770,21 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	// operator asked for that many workers, and no-op tasks never park, so growth would never take the
 	// pool there on its own. (The derived maximum - the lease-margin ceiling - is the opposite: never
 	// spawned up front, filled on demand.)
-	eBig := NewEngineUnderTest(t)
+	eBig := newSolo(t, "eBig")
+	defer eBig.Shutdown(t.Context())
 	assert.NoError(eBig.SetHost(noopHost{}))
 	assert.NoError(eBig.SetWorkers(300)) // > the zero-config dispatch count of 96
-	startSolo(t, eBig, "eBig")
+	assert.NoError(eBig.Startup(context.Background()))
 	assert.Equal(int32(300), int32(eBig.crew.Resident()), "an explicit SetWorkers is spawned in full")
 	assert.Equal(192, eBig.cache.Capacity(), "but the cache still follows the dispatch count")
 
 	// Explicit SetWorkers pins, regardless of shards.
-	e3 := NewEngineUnderTest(t)
+	e3 := newSolo(t, "e3")
+	defer e3.Shutdown(t.Context())
 	assert.NoError(e3.SetHost(noopHost{}))
 	assert.NoError(e3.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e3.SetWorkers(2))
-	startSolo(t, e3, "e3")
+	assert.NoError(e3.Startup(context.Background()))
 	assert.Equal(2, int(e3.workers.Load()))
 }
 
@@ -795,7 +805,8 @@ func TestPoolSizing_CacheFollowsTheReplicaSplit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // open = 6 x 8 = 48 at R=1
 	assert.NoError(e.Startup(t.Context()))
@@ -829,7 +840,8 @@ func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // derives 48 at R=1
 	assert.NoError(e.Startup(t.Context()))
@@ -852,7 +864,8 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// eng1 starts solo and registers itself. Small heartbeat so its recount converges within the test.
-	eng1 := NewEngineUnderTest(t)
+	eng1 := NewEngineUnderTest(t.Name())
+	defer eng1.Shutdown(ctx)
 	assert.NoError(eng1.SetHost(noopHost{}))
 	assert.NoError(eng1.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(eng1.Startup(ctx))
@@ -865,7 +878,8 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	// eng2 starts against the SAME databases (shared test-DB key, both keyed by t.Name()). At its Startup
 	// it reads eng1's row, so R=2 is known BEFORE it dispatches - it opens at 24, never over-connecting on
 	// a partial count.
-	eng2 := NewEngineUnderTest(t)
+	eng2 := NewEngineUnderTest(t.Name())
+	defer eng2.Shutdown(ctx)
 	assert.NoError(eng2.SetHost(noopHost{}))
 	assert.NoError(eng2.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(eng2.Startup(ctx))
@@ -891,7 +905,8 @@ func TestPoolSizing_StartupOverridePins(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.SetMaxOpenConns(40))

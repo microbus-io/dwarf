@@ -124,7 +124,7 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 		return nil
 	})
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
 	eng.SetHost(proxy)
 	for i := 1; i <= numShards; i++ {
 		eng.SetShard(engine.ShardSpec{Index: i})
@@ -157,6 +157,7 @@ func TestSuperflow_Sequential(t *testing.T) {
 		t.Run("happy_path_"+itoa(shards)+"shard", func(t *testing.T) {
 			assert := testarossa.For(t)
 			eng, _, visits := superflowSetup(t, shards)
+			defer eng.Shutdown(t.Context())
 
 			state := map[string]any{"items": []string{"x", "y", "z"}, "behaviors": map[string]any{}}
 			_, outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
@@ -181,6 +182,7 @@ func TestSuperflow_Subgraph(t *testing.T) {
 		t.Run("subgraph_branch_"+itoa(shards)+"shard", func(t *testing.T) {
 			assert := testarossa.For(t)
 			eng, _, visits := superflowSetup(t, shards)
+			defer eng.Shutdown(t.Context())
 
 			state := map[string]any{"items": []string{"x"}, "useSubgraph": true, "behaviors": map[string]any{}}
 			_, outcome, err := eng.Run(ctx, "superflow.verify:428/super", state, nil)
@@ -198,6 +200,7 @@ func TestSuperflow_Goto(t *testing.T) {
 	ctx := context.Background()
 
 	eng, _, visits := superflowSetup(t, 1)
+	defer eng.Shutdown(t.Context())
 
 	t.Run("goto_to_taskZ", func(t *testing.T) {
 		assert := testarossa.For(t)
@@ -222,6 +225,7 @@ func TestSuperflow_OnError(t *testing.T) {
 		t.Run("forEach_branch_errors_"+itoa(shards)+"shard", func(t *testing.T) {
 			assert := testarossa.For(t)
 			eng, _, visits := superflowSetup(t, shards)
+			defer eng.Shutdown(t.Context())
 
 			state := map[string]any{
 				"items":     []string{"x", "y"},
@@ -242,6 +246,7 @@ func TestSuperflow_Sleep(t *testing.T) {
 	ctx := context.Background()
 
 	eng, _, visits := superflowSetup(t, 1)
+	defer eng.Shutdown(t.Context())
 
 	t.Run("sleep_in_forEach_branch", func(t *testing.T) {
 		assert := testarossa.For(t)

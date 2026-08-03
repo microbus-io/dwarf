@@ -42,7 +42,8 @@ func TestContinueflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -89,7 +90,8 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 	proxy.HandleGraph("continuepolicy.verify:428/g", g)
 	proxy.HandleTask("continuepolicy.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
@@ -133,7 +135,8 @@ func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
 	proxy.HandleGraph("threadjoin.verify:428/g", g)
 	proxy.HandleTask("threadjoin.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 

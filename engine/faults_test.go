@@ -133,7 +133,8 @@ func TestFault_ExecuteTask(t *testing.T) {
 	handled.AddTransition("Rescue", workflow.END)
 	proxy.HandleGraph("fexec/handled", handled)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -164,7 +165,8 @@ func TestFault_PanicExecuteTask(t *testing.T) {
 	g.AddTransition("Boom", workflow.END)
 	proxy.HandleGraph("fpanic/g", g)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -189,7 +191,8 @@ func TestFault_LoadGraph(t *testing.T) {
 	proxy.HandleGraph("floadg/g", g)
 	proxy.HandleTask("floadg/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -213,7 +216,8 @@ func TestFault_TransitionCommit(t *testing.T) {
 	calls := map[string]*int{"a": new(int), "b": new(int)}
 	linear2(proxy, "ftrans", calls)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -238,7 +242,8 @@ func TestFault_Contention(t *testing.T) {
 	calls := map[string]*int{"a": new(int), "b": new(int)}
 	linear2(proxy, "fcont", calls)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -263,7 +268,8 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 	var runs int
 	proxy.HandleTask("fcfc/a", func(ctx context.Context, f *workflow.Flow) error { runs++; return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -292,7 +298,8 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	var runs atomic.Int32
 	proxy.HandleTask("flease/a", func(ctx context.Context, f *workflow.Flow) error { runs.Add(1); return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	e.SetTimeBudget(200 * time.Millisecond)
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so it expires quickly
@@ -327,7 +334,8 @@ func TestFault_DropSignalStop(t *testing.T) {
 	proxy.HandleGraph("fsig/g", g)
 	proxy.HandleTask("fsig/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -350,7 +358,8 @@ func TestFault_DropDoorbell(t *testing.T) {
 	proxy.HandleGraph("fdoor/g", g)
 	proxy.HandleTask("fdoor/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -388,7 +397,8 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 		return nil
 	})
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -433,7 +443,8 @@ func TestFault_ReapMidTree(t *testing.T) {
 	proxy.HandleGraph("freap/g", g)
 	proxy.HandleTask("freap/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
 	assert.NoError(e.Startup(t.Context()))
@@ -468,7 +479,8 @@ func TestFault_RefillScanErr(t *testing.T) {
 	proxy.HandleGraph("frefill/g", g)
 	proxy.HandleTask("frefill/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
 
@@ -491,7 +503,8 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	e.SetHost(NewTestProxy())
 	assert.NoError(e.SetWorkers(0)) // no workers, so nothing drains the cache underneath the assertion
 	assert.NoError(e.Startup(t.Context()))

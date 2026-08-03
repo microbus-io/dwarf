@@ -38,14 +38,15 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	ctx := context.Background()
 
 	proxy := engine.NewTestProxy()
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	assert.NoError(eng.Startup(t.Context()))
 
 	// A blocked task holds the flow running past the end of Run's ctx. Released at test teardown before the
-	// engine drains (registered after Startup, so LIFO ordering runs it before the engine's shutdown cleanup).
+	// engine drains (declared after the Shutdown defer, so LIFO unwinding runs this one first).
 	block := make(chan struct{})
-	t.Cleanup(func() { close(block) })
+	defer close(block)
 
 	// Run's ctx bounds the WHOLE call - create then await - so a wall-clock deadline short enough to expire the
 	// await also expires the create on a slow server, and the test then measures a create failure (empty

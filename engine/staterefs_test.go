@@ -81,7 +81,8 @@ func TestStateRefs_ResolveReadsBothColumns(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
@@ -134,7 +135,8 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
@@ -216,7 +218,8 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
@@ -276,7 +279,8 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 	ctx := context.Background()
 	assert := testarossa.For(t)
 
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
 	proxy := NewTestProxy()
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))

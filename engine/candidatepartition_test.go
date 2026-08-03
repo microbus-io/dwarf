@@ -75,7 +75,8 @@ func TestPartition_ResidueClassesCoverEveryStepExactlyOnce(t *testing.T) {
 func TestPartition_AppliedFromRegistry(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
@@ -114,7 +115,8 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	e := NewEngineUnderTest(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))

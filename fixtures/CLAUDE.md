@@ -5,24 +5,32 @@
 
 ### SQLite Testing Support
 
-**`engine.NewEngineUnderTest(t testing.TB)`** is the sole test-mode entry point. It stashes `t` on the engine,
-hashes `t.Name()` into `testHashedID` (via `SetTestName`, which owns that hashing), and installs a logger
-default; then the test configures the engine (`SetHost`, `SetShard`, …) and calls `Startup` itself, which
-registers the `t.Cleanup` shutdown — so no explicit `defer Shutdown` is needed. It takes any `testing.TB`, so
-the same constructor serves `*testing.B` and `*testing.F`.
+**`engine.NewEngineUnderTest(testName string)`** is the sole test-mode entry point. It hashes the name into
+`testHashedID` and installs a logger default; then the test configures the engine (`SetHost`, `SetShard`, …)
+and calls `Startup` itself.
 
-- **Overriding the key: `SetTestName(name)`.** The default key is `t.Name()`. A test needing several engines in
-  **separate** isolated databases (independent deployments, not one shared fleet) gives each a distinct key
-  (`startSolo` uses `t.Name()+"#"+key`); a benchmark reused across warmup/measure passes gives each pass a fresh
-  key (`b.Name()+"-"+seq`). `SetTestName` is construction-time only and rejects an engine not built with
-  `NewEngineUnderTest` (`e.t == nil`). There is no `*testing.T`-free hook anymore — a host under an external
-  harness that needs shared isolation drives `NewEngineUnderTest` with its own `testing.TB`.
-- **Logger default.** A `*testing.T` logs to **stderr at Error** (the CI alarms: wedge/poll/refill faults;
-  stderr not `t.Log`, since a `go test` timeout panic drops buffered `t.Log` but not stderr). A
-  `*testing.B`/`*testing.F` defaults to **silent** (per-iteration logging would dominate the measurement /
-  flood the fuzz output). `DWARF_TEST_LOG_LEVEL` overrides the level (`info`/`debug` for the flow-status
-  play-by-play; `silent`/`off` forces discard); any explicit level un-silences a benchmark/fuzz. `SetLogger`
-  before `Startup` takes over entirely.
+- **It takes a NAME, not a `testing.TB`, and nothing may reintroduce one.** A host driving the engine under
+  its own harness has no `*testing.T` to hand over, and a name is all the constructor needs from one - so
+  test mode is reachable by anything that can spell a string, not only by a Go test. The consequences are
+  the caller's: a test passes `t.Name()`, and **teardown is `defer eng.Shutdown(ctx)`** at the call site.
+  The engine registers no `t.Cleanup` anywhere.
+- **The name IS the isolation key, and it is the ONLY one** - there is no separate setter to override it
+  with. A test needing several engines in **separate** isolated databases (independent deployments, not one
+  shared fleet) names each one (`newSolo` in `engine/poolsizing_test.go` uses `t.Name()+"#"+key`); a
+  benchmark reused across warmup/measure passes names each pass (`b.Name()+"-"+seq`); a multi-replica
+  fixture gives every peer the SAME `t.Name()`, which is how they land in one database and become a fleet.
+- **`defer eng.Shutdown(ctx)` goes IMMEDIATELY after the constructor, and the ordering is load-bearing.**
+  Defers unwind LIFO, so registering it first makes it unwind LAST - after every later `defer` that releases a
+  held task. A test holding a worker on a channel therefore closes that channel in a defer declared **below**
+  the Shutdown one, or the drain waits forever on a worker that can never return (this is why several
+  fixtures carry an explicit note at their `defer close(release)`). A `t.Cleanup` release is worse still: it
+  runs after ALL defers, including the shutdown.
+- **Logger default: stderr at Error** (the CI alarms: wedge/poll/refill faults; stderr not `t.Log`, since a
+  `go test` timeout panic drops buffered `t.Log` but not stderr). `DWARF_TEST_LOG_LEVEL` overrides the level
+  (`info`/`debug` for the flow-status play-by-play; `silent`/`off` forces discard). The constructor sees only
+  a name, so it cannot tell a benchmark from a test: **a benchmark or fuzz target silences the engine** with
+  `SetLogger(slog.New(slog.DiscardHandler))` (`fixtures/benchmark_test.go`) - per-iteration logging otherwise
+  dominates the measurement / floods the fuzz output. `SetLogger` before `Startup` takes over entirely.
 
 The `testHashedID` switches the open path into test mode: `openDatabaseShard`
 resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN` (the same variable
@@ -57,7 +65,7 @@ SEQUEL_TESTING_DSN='sqlserver://sa:PASS@127.0.0.1:1433?database=dwarftest_%d&enc
 **SQL Server needs `&encrypt=disable` against a container's self-signed certificate.** The stock image's cert has a
 *negative serial number*, which Go's `crypto/x509` refuses to parse, so every connection dies with
 `TLS Handshake failed: x509: negative serial number` before a single query runs. It looks like a dwarf failure (the
-tests fail in `t.Cleanup`, dropping the test database) and is not one.
+tests fail at teardown, dropping the test database) and is not one.
 
 Worth doing before shipping anything dialect-sensitive: SQLite serializes writes and has the weakest planner, so it
 hides exactly the bugs the others catch - MySQL's `RowsAffected` counting *changed* rather than *matched* rows, its
@@ -66,9 +74,9 @@ claim path, and Postgres's real MVCC lock ordering. Expect the run to be slower 
 
 #### Per-test engine + parallel execution (connection-budget control)
 
-**The suite runs `t.Parallel()`.** Each fixture stands up its own engine (`engine.NewEngineUnderTest(t)` +
-`SetHost(proxy)` + `Startup`, a fresh `proxy := engine.NewTestProxy()` per test) against its own isolated database
-(`t.Name()`), and `Startup` registers a `t.Cleanup` shutdown - so nothing is shared across tests and the
+**The suite runs `t.Parallel()`.** Each fixture stands up its own engine (`engine.NewEngineUnderTest(t.Name())`
++ `defer eng.Shutdown(ctx)` + `SetHost(proxy)` + `Startup`, a fresh `proxy := engine.NewTestProxy()` per test)
+against its own isolated database (keyed by that `t.Name()`) - so nothing is shared across tests and the
 config that mattered (the timing knobs, the peer registry key) is per-engine. There is **no** shared/`TestMain`-built
 engine. The suite parallelizes cleanly because the isolation is per-test, not because the tests were written to
 cooperate.
@@ -212,6 +220,6 @@ For the last two, name the event instead:
   own pre-park read and the wake path under test never runs.
 - **A task that holds, rather than a task that is slow.** To keep a worker occupied while the test sets up,
   block the task on a channel and have it report when it has the worker - never a fixed delay long enough to
-  cover the setup. Release with a `defer` and a `sync.Once`, NOT a `t.Cleanup`: cleanups unwind after
-  deferred funcs, so a cleanup frees the worker only after Startup's own Shutdown cleanup is already waiting
-  on it, and the suite deadlocks.
+  cover the setup. Release with a `defer` and a `sync.Once`, declared **after** `defer eng.Shutdown(ctx)` so
+  it unwinds first - NOT a `t.Cleanup`, and not a defer above the shutdown one. Both of those free the worker
+  only once the drain is already waiting on it, and the suite deadlocks.

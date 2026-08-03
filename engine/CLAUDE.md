@@ -2294,10 +2294,11 @@ also **stamped on every flow/step INSERT** (creator) **and overwritten by the cl
 provenance there ("which replica created/ran this row"), deliberately unindexed.
 
 **A note on tests sharing the registry (`peers.go` / `poolsizing_test.go`).** Because the count is now DB-backed, two
-engines that share a test database (`NewEngineUnderTest` keyed by the same `t.Name()`, or `SetTestName` with a shared name) share one `dwarf_peers` and count
-each other - which is exactly right for a genuine multi-replica test (`fixtures/crossreplicaawait_test.go`), and
-exactly wrong for a single test that spins up several *independent* engines to assert their solo pool sizes. The
-latter (`TestPoolSizing_DerivedWorkers`) uses `startSolo`, a unique per-engine test-DB key, so each reads R=1. The
+engines given the same `NewEngineUnderTest` name (typically `t.Name()`) share one test database, so they share one
+`dwarf_peers` and count each other - which is exactly right for a genuine multi-replica test
+(`fixtures/crossreplicaawait_test.go`), and exactly wrong for a single test that spins up several *independent*
+engines to assert their solo pool sizes. The latter (`TestPoolSizing_DerivedWorkers`) uses `newSolo`, which names
+each engine `t.Name()+"#"+key`, so each reads R=1. The
 sizing tests drive fleet size by writing fake peer rows (`addPeerRow`/`delPeerRow`, which wait for the Sonars to
 observe the change) rather than through signals.
 - **`VirtualCPUs = 0` (undeclared) assumes `defaultVirtualCPUs = 2`** (pool 12). The vCPU count is a fact

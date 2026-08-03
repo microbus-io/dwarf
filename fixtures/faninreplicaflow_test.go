@@ -100,10 +100,12 @@ func TestFanInReplicaflow(t *testing.T) {
 	// NewEngineUnderTest(t), which keys by t.Name()), so pointing SEQUEL_TESTING_DSN at a real server
 	// exercises this cross-replica cohort on that dialect's actual row-locking/MVCC; the default is a
 	// shared in-memory SQLite database.
-	eng1 := engine.NewEngineUnderTest(t)
+	eng1 := engine.NewEngineUnderTest(t.Name())
+	defer eng1.Shutdown(ctx)
 	eng1.SetHost(proxy1)
 	assert.NoError(eng1.SetWorkers(4))
-	eng2 := engine.NewEngineUnderTest(t)
+	eng2 := engine.NewEngineUnderTest(t.Name())
+	defer eng2.Shutdown(ctx)
 	eng2.SetHost(proxy2)
 	assert.NoError(eng2.SetWorkers(4))
 	assert.NoError(eng1.Startup(ctx))

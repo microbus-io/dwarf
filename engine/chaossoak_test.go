@@ -62,7 +62,8 @@ func TestChaosSoak(t *testing.T) {
 	proxy := NewTestProxy()
 	registerChaosGraphs(t, proxy)
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(8))
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)
@@ -350,7 +351,8 @@ func TestChaosSoak_Faults(t *testing.T) {
 	proxy := NewTestProxy()
 	registerChaosGraphs(t, proxy)
 
-	eng := NewEngineUnderTest(t)
+	eng := NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetWorkers(8))
 	eng.SetHost(proxy)
 	eng.SetMeterProvider(mp)

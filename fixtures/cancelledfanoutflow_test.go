@@ -61,14 +61,11 @@ func TestCancelledfanoutflow(t *testing.T) {
 	// short), and the hold is what keeps a second branch from starting behind the first (a fixed branch
 	// duration has to outlast the Cancel round trip, which is equally unbounded). With the worker held and
 	// growth disabled by SetWorkers(1), exactly one branch can ever have run when the cancel lands.
-	// Released with a defer rather than a t.Cleanup: deferred funcs run BEFORE any registered cleanup, and
-	// Startup registers the engine's Shutdown as one. A cleanup here would run AFTER that Shutdown (they
-	// unwind LIFO and Startup's is registered later), so the drain would wait forever on the very worker
-	// this is holding.
+	// The release is deferred at the engine below rather than here, so it unwinds BEFORE the Shutdown
+	// defer (LIFO); the drain would otherwise wait forever on the very worker this is holding.
 	var executedOnce sync.Once
 	inFlight := make(chan struct{})
 	release := make(chan struct{})
-	defer close(release)
 
 	branch := func(ctx context.Context, f *workflow.Flow) error {
 		executed.Add(1)
@@ -92,7 +89,11 @@ func TestCancelledfanoutflow(t *testing.T) {
 		return nil
 	})
 
-	eng := engine.NewEngineUnderTest(t)
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	// Released here, after the Shutdown defer, so it unwinds FIRST: Shutdown drains the workers, and
+	// one still holding this would never return.
+	defer close(release)
 	eng.SetHost(proxy)
 	eng.SetWorkers(1)
 	assert.NoError(eng.Startup(t.Context()))

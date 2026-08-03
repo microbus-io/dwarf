@@ -28,8 +28,8 @@ That's the whole contract. The engine never learns *how* a task is reached — w
 ## Your first flow (test harness)
 
 The fastest way to see dwarf run is the in-process test harness. `engine.TestProxy` implements the `Host`
-interface against in-memory registries, and `engine.NewEngineUnderTest(t)` builds an engine against an
-isolated SQLite database whose `Startup` registers automatic cleanup.
+interface against in-memory registries, and `engine.NewEngineUnderTest(name)` builds an engine against an
+isolated, auto-dropped SQLite database.
 
 ```go
 package example
@@ -68,7 +68,8 @@ func TestGreeting(t *testing.T) {
 	})
 
 	// 3. Wire and start the engine.
-	eng := dwarf.NewEngineUnderTest(t)
+	eng := dwarf.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
 	eng.SetHost(proxy)
 	eng.Startup(ctx)
 

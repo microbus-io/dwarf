@@ -74,10 +74,12 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 
 	// Both replicas key their test databases off the same t.Name(), so they share one isolated database
 	// per shard - which is what makes them peers rather than two independent engines.
-	eng1 := engine.NewEngineUnderTest(t)
+	eng1 := engine.NewEngineUnderTest(t.Name())
+	defer eng1.Shutdown(ctx)
 	assert.NoError(eng1.SetHost(proxy1))
 	assert.NoError(eng1.SetWorkers(0))
-	eng2 := engine.NewEngineUnderTest(t)
+	eng2 := engine.NewEngineUnderTest(t.Name())
+	defer eng2.Shutdown(ctx)
 	assert.NoError(eng2.SetHost(proxy2))
 	assert.NoError(eng2.SetWorkers(4))
 	for shard := 1; shard <= shards; shard++ {
@@ -86,13 +88,6 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 	}
 	assert.NoError(eng1.Startup(ctx))
 	assert.NoError(eng2.Startup(ctx))
-	// Shut BOTH engines down before anything else unwinds. Startup registers a cleanup per engine and
-	// t.Cleanup is LIFO, so without this a peer's databases are dropped while the other engine still holds
-	// connections to them, and the DROP waits on those live sessions.
-	t.Cleanup(func() {
-		eng1.Shutdown(context.Background())
-		eng2.Shutdown(context.Background())
-	})
 
 	// Placement is a weighted random pick, so create until every shard holds at least one flow rather than
 	// assuming a spread. The bound fails loudly instead of looping if placement ever stops covering them.
