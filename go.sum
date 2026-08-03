@@ -63,6 +63,8 @@ github.com/microbus-io/sequel v1.11.0 h1:Eps5o4k+QM0VkDFBXCxamEkIQ4ALjL0Qlvr4wf/
 github.com/microbus-io/sequel v1.11.0/go.mod h1:uRHsZ2rPPrPDTCOHjDevDs59bu+MLWyyMBycRe9Rxy0=
 github.com/microbus-io/sequel v1.11.1 h1:CdGIiEnthTUkfCOAn+1AcQL29gXoTkvjbUJCya19/tg=
 github.com/microbus-io/sequel v1.11.1/go.mod h1:uRHsZ2rPPrPDTCOHjDevDs59bu+MLWyyMBycRe9Rxy0=
+github.com/microbus-io/sequel v1.11.2 h1:L3I5EkZLGEWzVKblagb8FZQZJ/HoGW4IeC1+n2o5zdE=
+github.com/microbus-io/sequel v1.11.2/go.mod h1:uRHsZ2rPPrPDTCOHjDevDs59bu+MLWyyMBycRe9Rxy0=
 github.com/microbus-io/testarossa v0.7.3 h1:CsLpfjFG1/+rl0FqT1jJpjBiXZBydEe7CZOnQWbob9A=
 github.com/microbus-io/testarossa v0.7.3/go.mod h1:VNzOPk+3EQSXb4bmV7ZXC1wOAOPKock3H/eYJqxUqBg=
 github.com/modocache/gover v0.0.0-20171022184752-b58185e213c5/go.mod h1:caMODM3PzxT8aQXRPkAt8xlV/e7d7w8GM5g0fa5F0D8=
