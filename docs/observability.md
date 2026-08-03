@@ -192,8 +192,8 @@ scrape, and two of them answer questions no `dwarf_*` metric can:
 | `sequel_pool_open_connections` | gauge | `database` | open connections (in use plus idle) |
 | `sequel_pool_in_use_connections` | gauge | `database` | connections currently in use |
 | `sequel_pool_idle_connections` | gauge | `database` | idle connections |
-| `sequel_pool_wait_count` | gauge | `database` | **cumulative** count of connections waited for |
-| `sequel_pool_wait_duration_seconds` | gauge | `database` | **cumulative** time blocked waiting for a connection |
+| `sequel_pool_waits` | counter | `database` | connections waited for |
+| `sequel_pool_wait_duration_seconds` | counter | `database` | time blocked waiting for a connection |
 | `sequel_query_duration` | histogram | `db.operation.name`, `db.system.name`, `status` | query duration |
 | `sequel_transaction_duration` | histogram | `db.system.name`, `outcome` | `Transact` duration, **including retries** |
 | `sequel_lock_contention` | counter | `db.system.name`, `db.operation.name` | operations that failed on lock contention or deadlock |
@@ -206,9 +206,10 @@ compete for a connection, it does not reserve one. Pool wait at saturation is th
 this is the number that says how much of it there is. It also silently rate-limits candidate selection, so
 it is worth watching whenever throughput moves for no visible reason.
 
-**`wait_count` and `wait_duration_seconds` are cumulative totals published as gauges** (they come straight
-from Go's `sql.DBStats`, which only ever increases). Take `rate()` or `increase()` over them; a raw value is
-a since-process-start total, and averaging it across replicas is meaningless.
+**The two wait instruments are cumulative counters** - they come straight from Go's `sql.DBStats`, which only
+ever increases, so they are observable counters rather than gauges and a Prometheus exporter appends `_total`
+to both. Take `rate()` or `increase()` over them; a raw value is a since-process-start total, and averaging it
+across replicas is meaningless.
 
 **The `database` label is the DSN's database name, not the shard index** — it falls back to the driver name
 when the DSN has none. In the recommended shard-per-server topology every shard often holds a database of
