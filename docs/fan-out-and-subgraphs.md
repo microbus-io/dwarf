@@ -92,6 +92,14 @@ A few rules worth knowing:
   `Create`. The engine picks the convergence node from whichever sibling finishes last, so branches routed
   to *different* fan-ins would make the result depend on finish order. Branches may take different
   intermediate paths — only the fan-in they end at must agree.
+- **A `withGoto` or `onError` edge out of the fan-out node bypasses the fan-out, so it must not rejoin it.**
+  Taking one means no branches are spawned at all, so `Validate()` accepts it only where that holds together:
+  to `END`, straight to the fan-in node (which then runs once on the source's own state, exactly as an empty
+  array does), or onto a path that never reaches the fan-in. Routing it into a *branch*, or onto a path that
+  later leads back into the fan-in, is rejected at `Create` — the fan-in would be waiting on a set of branches
+  that was never created. This is what makes the "fan out over the array, or end the flow when there is
+  nothing left to do" loop expressible: give the source an `AddTransitionGoto(source, END)` alongside its
+  `AddTransitionForEach`, and the task picks per round.
 - **The per-branch bookkeeping (`item`, `itemIndex`, `itemCount`) does not survive the fan-out.** It is gone
   from the flow's state once the cohort is behind it — at the fan-in, and in the final state of a flow whose
   fan-out failed. (Otherwise one arbitrary branch's element would ride forward as the flow's own, picked by

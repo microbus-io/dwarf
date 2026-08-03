@@ -974,6 +974,32 @@ fan-in target comes from the routing map the engine derives per flow at dispatch
 any graph the engine accepted: `Validate` (run at `Create`) requires a fan-out source to converge on a `SetFanIn`
 node. It is a defensive fallback, not the documented behavior of an empty array.
 
+**An explicit route to END beats the empty-cohort convergence, and the two are told apart by `routedToEnd`, not
+by the cohort size.** A fan-out source is free to also carry a `Goto`/`onError` edge to `END` - "fan out over
+the array, or end the flow when the task decides there is nothing left to do" is the shape every task-driven
+loop takes. Both that and a genuinely empty array leave `cohortSize` at 0, because the END candidate is filtered
+out of `realTasks`, so a `cohortSize == 0` test alone reads a deliberate termination as an empty cohort and sends
+the flow to the fan-in. Where the fan-in loops back to the source - which is the whole point of the shape - that is
+not a wrong-but-quiet outcome: the flow never terminates and writes a step row per lap (**measured: 21,735 steps in
+~6 seconds** before an external deadline killed it). Pinned by `fixtures/fanoutgotoendflow_test.go`, which asserts
+the step COUNT and not merely the terminal status, since a loop that ends only when something outside gives up
+still reports `completed` in the shapes where it eventually does.
+
+**An override edge out of a fan-out source pushes NO lineage frame, because the runtime spawns no cohort for
+one.** `isPushTransition` is already false for a `Goto`/`onError`, so `Graph.validateLineage` mirrors it (the
+`tr.WithGoto, tr.OnError, tr.Switch` arm; why that arm sits below the fan-in arm is argued at the fan-in arm
+itself, and `Switch` is inert there - a fan-out source cannot carry a switch edge). What the mirror buys is that
+each of these is settled at `Create` rather than at dispatch:
+
+- **Permitted:** the override may go to `END` (the loop above), STRAIGHT to the source's own fan-in (the source
+  IS the spawn, so `fireFanInDirect` converges on its own state), or onto any path that never reaches the fan-in.
+- **Rejected:** it may not route into one of the branches, nor onto a path that later transitions INTO the
+  fan-in. Neither spawns a cohort, so that arrival lands with `cohortSpawnID == 0` - the trunk case fails the
+  step on the not-in-a-cohort guard, and a nested source bumps arrivals on its OUTER spawn and silently drops
+  the branch. A graph frozen before the check still hits those runtime guards, which is what they are for.
+
+Pinned by `TestLineage_GotoEndFromFanOutSource` and `TestLineage_OverrideRejoiningFanInRejected`.
+
 **A branch sees its flow's state, plus its element.** Each `forEach` branch's local `state` is the flow state with
 three injected fields: `<as>` (the element), `<as>Index` (its position), `<as>Count` (the cohort size). Nothing is
 removed. **There was once a "branch state strip"** - the engine deleted the source array from each branch's local

@@ -746,6 +746,85 @@ func TestLineage_EndWithUnpoppedFrame(t *testing.T) {
 	assert.Contains(err.Error(), "unpopped fan-out frames")
 }
 
+func TestLineage_GotoEndFromFanOutSource(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// A node that is both a forEach fan-out source and a goto-to-END exit: "fan out over the array, or end
+	// the flow when the task decides there is nothing to do". The goto is a runtime override the task body
+	// chooses, not a branch of the fan-out, so it pushes no frame and END is reached with an empty stack.
+	g := NewGraph("GotoEndFromFanOut")
+	g.AddTransitionForEach("decide", "work", "items", "item")
+	g.AddTransition("work", "join")
+	g.AddTransitionGoto("decide", END)
+	g.AddTransition("join", "decide")
+	g.SetFanIn("join")
+	assert.NoError(g.Validate())
+
+	// An onError edge is an override for the same reason and behaves the same way. (A switch edge cannot
+	// arise here at all: a node mixing switch with a forEach success-path edge is rejected earlier.)
+	g2 := NewGraph("OnErrorEndFromFanOut")
+	g2.AddTransitionForEach("decide", "work", "items", "item")
+	g2.AddTransition("work", "join")
+	g2.AddTransitionOnError("decide", END)
+	g2.AddTransition("join", END)
+	g2.SetFanIn("join")
+	assert.NoError(g2.Validate())
+
+	// Straight to the source's own fan-in is the other permitted target: the source is the spawn, so the
+	// fan-in converges on its own state - the "if the array is empty, goto the fan-in" shape.
+	g3 := NewGraph("GotoFanInFromFanOut")
+	g3.AddTransitionForEach("decide", "work", "items", "item")
+	g3.AddTransition("work", "join")
+	g3.AddTransitionGoto("decide", "join")
+	g3.AddTransition("join", END)
+	g3.SetFanIn("join")
+	assert.NoError(g3.Validate())
+}
+
+// An override edge out of a fan-out source spawns no cohort, so it may not lead back into the fan-in that
+// cohort would have converged on. Rejected here rather than at dispatch, where the arrival lands with no
+// cohort to arrive at: the trunk case fails the step, and a nested source mis-attributes the arrival to its
+// outer cohort. Routing into one of the branches is the same mistake reached from the other side - the
+// branch is then reachable both with and without the fan-out frame.
+func TestLineage_OverrideRejoiningFanInRejected(t *testing.T) {
+	assert := testarossa.For(t)
+
+	// goto -> an intermediate node that then transitions into the fan-in.
+	g := NewGraph("GotoRejoinsFanIn")
+	g.AddTransitionForEach("decide", "work", "items", "item")
+	g.AddTransition("work", "join")
+	g.AddTransitionGoto("decide", "skip")
+	g.AddTransition("skip", "join")
+	g.AddTransition("join", END)
+	g.SetFanIn("join")
+	err := g.Validate()
+	assert.Error(err)
+	assert.Contains(err.Error(), "no fan-out frame to pop")
+
+	// onError -> a handler that then transitions into the fan-in.
+	g2 := NewGraph("OnErrorRejoinsFanIn")
+	g2.AddTransitionForEach("decide", "work", "items", "item")
+	g2.AddTransition("work", "join")
+	g2.AddTransitionOnError("decide", "recover")
+	g2.AddTransition("recover", "join")
+	g2.AddTransition("join", END)
+	g2.SetFanIn("join")
+	err = g2.Validate()
+	assert.Error(err)
+	assert.Contains(err.Error(), "no fan-out frame to pop")
+
+	// goto -> one of the fan-out's own branches, which the branch would then reach with two lineage stacks.
+	g3 := NewGraph("GotoIntoBranch")
+	g3.AddTransitionForEach("decide", "work", "items", "item")
+	g3.AddTransition("work", "join")
+	g3.AddTransitionGoto("decide", "work")
+	g3.AddTransition("join", END)
+	g3.SetFanIn("join")
+	err = g3.Validate()
+	assert.Error(err)
+	assert.Contains(err.Error(), "two different lineage stacks")
+}
+
 func TestLineage_DivergentStacksAtSameNode(t *testing.T) {
 	assert := testarossa.For(t)
 

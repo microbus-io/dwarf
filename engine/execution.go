@@ -781,7 +781,11 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 
 	var realTasks []nextStep
+	routedToEnd := false
 	for _, t := range nextTasks {
+		if t.taskName == workflow.END {
+			routedToEnd = true
+		}
 		if t.taskName != "" && t.taskName != workflow.END {
 			realTasks = append(realTasks, t)
 		}
@@ -805,24 +809,36 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// leaves cohortSize at 1, so the plain cohort path below would otherwise mis-attribute the fan-in arrival -
 	// the trunk case fails the not-in-a-cohort guard, and a nested source bumps arrivals on its OUTER spawn and
 	// silently drops the branch. The shape is legal, not rejected.
+	//
+	// routedToEnd is what keeps that convenience from swallowing a deliberate termination. An explicit route to
+	// END and "no candidates at all" both leave cohortSize at 0, but only the second is the empty-cohort shape:
+	// a task on a fan-out source that calls Goto(END) - "fan out over the array, or end the flow when there is
+	// nothing to do" - has asked to terminate, and converging on the fan-in instead sends the flow back around
+	// the loop that reaches the source again, writing a step per lap until something outside kills it.
 	fanInOfSource := ""
 	if isFanOutSource {
 		fanInOfSource = cg.fanIn.For(taskName)
 	}
-	if isFanOutSource && fanInOfSource != "" && (cohortSize == 0 || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
+	if isFanOutSource && fanInOfSource != "" &&
+		((cohortSize == 0 && !routedToEnd) || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
 		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
 			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
 		})
 	}
 	if isFanOutSource && cohortSize == 0 {
-		// An empty forEach with NO fan-in to converge on (fanInOfSource == ""). Only a TRUNK source
-		// (lineage_id == 0) may complete the flow; a fan-out source that is itself a cohort MEMBER (a nested
-		// fan-out) would terminalize the flow while its outer siblings are still running. (Unreachable for a
-		// validated graph - Validate requires a fan-out source to converge on a SetFanIn node - so this is
-		// defense in depth for a graph frozen before that check.)
+		// Either a fan-out source that routed to END, or an empty forEach with NO fan-in to converge on
+		// (fanInOfSource == ""). Only a TRUNK source (lineage_id == 0) may complete the flow; a fan-out source
+		// that is itself a cohort MEMBER (a nested fan-out) would terminalize the flow while its outer siblings
+		// are still running. (Unreachable for a validated graph - Validate requires a fan-out source to converge
+		// on a SetFanIn node, and rejects a route to END that leaves the outer frame unpopped - so this is
+		// defense in depth for a graph frozen before those checks.)
 		if lineageID != 0 {
+			reason := "has no fan-in node to converge on"
+			if routedToEnd {
+				reason = "routed to END without converging on its fan-in node"
+			}
 			return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
-				errors.New("fan-out source '%s' is inside a cohort but has no fan-in node to converge on", taskName),
+				errors.New("fan-out source '%s' is inside a cohort but %s", taskName, reason),
 				taskName)
 		}
 		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {

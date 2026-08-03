@@ -579,6 +579,14 @@ func (g *Graph) validateLineage() error {
 					)
 				}
 				fanOutToFanIn[fanOutSource] = tr.To
+			// A goto/onError/switch edge is a runtime override the task body chooses, not a structural
+			// branch of the fan-out, so it pushes no frame: the cohort it would push is one the engine
+			// never spawns. Without this arm a fan-out source can route nowhere but its own branches -
+			// its `goto END` inherits the source's own frame and trips the END check below - which
+			// rejects "fan out over the array, or end the flow when the task decides there is nothing
+			// to do". The arm must stay BELOW the fan-in arm; see that comment for why.
+			case tr.WithGoto, tr.OnError, tr.Switch:
+				nextStack = fromStack
 			case fromIsFanOut:
 				nextStack = append(stackCopy(fromStack), from)
 			default:
