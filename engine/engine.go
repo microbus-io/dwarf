@@ -720,7 +720,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 			continue
 		}
 		replicas := e.replicasOn(idx)
-		idle, open := shardPool(specs[idx], override, replicas) // zero-value spec = the default shard's sizing
+		idle, open := shardPool(specs[idx], override, replicas, rtts[idx]) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
 		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production

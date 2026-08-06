@@ -24,9 +24,9 @@ after `Startup`. `SetMaxOpenConns`, `SetTimeBudget`, and `SetDefaultPriority` ar
 | `SetMaxOpenConns(n)` | derived | Expert override: pins every shard's pool exactly (benchmarks, external poolers). Normally unset - each shard's pool derives from its `VirtualCPUs` |
 
 Provide `ShardSpec.VirtualCPUs` (the database server's CPU count - a fact off its spec sheet) and the
-engine derives the shard's connection budget (the measured knee - 12x CPUs on a server of 32 vCPUs or more,
-6x below that - beyond which connections only queue, and on smaller servers actively destabilize or collapse
-throughput) and its new-flow placement weight
+engine derives the shard's connection budget (the measured knee, beyond which connections only queue, and
+on smaller servers actively destabilize or collapse throughput - sized from the CPU count together with
+the round-trip time measured at startup) and its new-flow placement weight
 (capacity-proportional across heterogeneous shards). Leave `VirtualCPUs` unset and the engine assumes 2
 — the floor of every current-generation RDS class, and small enough that the resulting pool is still
 safe on the 1-vCPU machines Cloud SQL offers. Declare it: it is a fact off the machine's spec sheet, and
@@ -170,19 +170,53 @@ eng.SetShard(engine.ShardSpec{Index: 2, DSN: "postgres://user:pass@db-b.internal
 
 ## Connection pool
 
-Each shard's pool derives from its `ShardSpec.VirtualCPUs`: open = **6× the database's CPU count, or 12×
-on a server of 32 vCPUs or more** (beyond that connections only queue inside the database, and on small
-servers actively harm throughput), with a warm idle core of half that. Large servers get the higher ratio
-because it is where the measured throughput knee sits, and 32 vCPUs is the one instance size whose arms
-showed no increase in instability at it — read that as a judgement call rather than a safe/unsafe line,
-since 12× is ~6× more likely to collapse at *every* size measured and did collapse once in 14 arms at 64
-vCPUs. Smaller
-ones stay conservative because past their knee they collapse rather than plateau. An undeclared count assumes 2 vCPUs (a pool of
-12), which stays under the knee of even a 1-vCPU machine — so a zero-config engine cannot reach the
-collapse zone, but it also cannot use a large database: **declare `VirtualCPUs`.** `SetMaxOpenConns`
-is an expert override that pins every shard's pool exactly — for benchmarking sweeps or
-externally-constrained connection budgets — and is otherwise best left unset. The measurements behind
-these constants are in the [cloud benchmarks](benchmark-cloud.md).
+Each shard's pool derives from two things: its `ShardSpec.VirtualCPUs`, and the round-trip time the engine
+measures to that database at startup. The idle core is half the open ceiling.
+
+The second axis is the less obvious one. **A connection held while a packet is in flight does the database
+no good**, so a pool sized from CPU count alone leaves a distant server idle — a 16-vCPU database 4.8 ms
+away ran at **33% CPU** with a CPU-derived pool, two thirds of it unreachable. Sizing for distance as well
+held throughput at **93–100% of the same-zone peak out to 5 ms**. So connections per vCPU **fall as the
+database grows** (bigger servers need proportionally fewer, because what they can usefully run at once
+grows more slowly than their core count) and **rise with distance**:
+
+| database | same zone (0.25 ms) | 1 ms | 2 ms and beyond |
+|---|---|---|---|
+| 1 vCPU | 14.6× | 18.0× | 22.5× |
+| 2 vCPU | 12.2× | 15.3× | 19.4× |
+| 4 vCPU | 10.2× | 13.2× | 17.1× |
+| 8 vCPU | 8.6× | 11.7× | 15.4× |
+| 16 vCPU | 7.3× | 10.4× | 13.7× |
+| 32 vCPU | 6.4× | 9.6× | 12.5× |
+| 64 vCPU | 5.3× | 7.9× | 10.3× |
+| 128 vCPU | 4.4× | 6.5× | 8.4× |
+
+Round-trip times between two columns are interpolated, so a 0.9 ms path lands 60% of the way from the
+0.75 ms ratio to the 1 ms one. Sizes between two rows take the larger server's (smaller) ratio — a
+24-vCPU database is sized as a 32-vCPU one — because the curve is not linear in CPU count and rounding
+that way under-connects rather than over-connects. Every value also sits ~10% below the knee measured or
+projected for it. The bias is deliberate throughout: under-connecting costs throughput roughly in
+proportion, while over-connecting can collapse a database outright.
+
+**Confidence is not uniform across that table.** Only the 16-vCPU row is validated end to end. The 32-vCPU
+row reproduces the single knee measured for it; 64 and above are projected and take the conservative
+branch; and the rows under 8 vCPU are the least reliable — those databases run out of CPU before they run
+out of concurrency, and past their knee they collapse rather than plateau. If you run a small database
+near its limit, measure it.
+
+**Compensation stops at 2 ms**, and past roughly there the answer is more shards rather than a bigger one:
+reaching a 32-vCPU server's same-zone peak across a 4 ms path would take ~1,163 connections. For context,
+same-zone round trips run **0.05–0.96 ms** and cross-AZ same-region about **1.1 ms** — both inside the
+compensated range — while cross-region (10–40 ms) is far outside it.
+
+An undeclared count assumes 2 vCPUs (a pool of 24 same-zone). That is the floor of every
+current-generation RDS class, so the guess cannot undershoot there — but on a genuinely 1-vCPU machine it
+overshoots that tier's measured peak, and it cannot use a large database either way: **declare
+`VirtualCPUs`.** It is a fact off the server's spec sheet, and it is the single most valuable thing you
+can tell the engine. `SetMaxOpenConns` is an expert override that pins every shard's pool exactly —
+for benchmarking sweeps, externally-constrained connection budgets, or a connection pooler in front of the
+database — and bypasses both axes above. It is otherwise best left unset. The measurements behind these
+constants are in the [cloud benchmarks](benchmark-cloud.md).
 
 > **Declare it correctly.** `VirtualCPUs` is trusted, not verified — the engine has no way to check it
 > and does not try. Declaring *more* CPUs than the database has sizes the pool past that machine's knee,

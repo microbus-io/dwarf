@@ -55,11 +55,28 @@ type stepResult struct {
 	// The pair with P50/P99 is the point of open-loop: admission latency is how fast the engine ACCEPTS
 	// work (a DB insert), separable from end-to-end which is dominated by backlog wait. A rising
 	// admission latency under a growing backlog is the engine's own backpressure showing through.
-	CreateP50ms    float64          `json:"createP50Ms,omitzero"`
-	CreateP99ms    float64          `json:"createP99Ms,omitzero"`
-	MaxOutstanding int              `json:"maxOutstandingObserved,omitzero"` // peak in-flight flows seen during the window
-	Goroutines     int              `json:"goroutines"`                      // at the end of the window: the engine's pool is most of this
-	EngineCounters map[string]int64 `json:"engineCounters"`                  // dwarf_* deltas over the window
+	CreateP50ms    float64 `json:"createP50Ms,omitzero"`
+	CreateP99ms    float64 `json:"createP99Ms,omitzero"`
+	MaxOutstanding int     `json:"maxOutstandingObserved,omitzero"` // peak in-flight flows seen during the window
+	// ThrottledMs is creator-milliseconds spent parked on the -max-outstanding cap during the window.
+	//
+	// THE CAP IS A RUNAWAY GUARD ON ROW COUNT AND RUN LENGTH, NOT AN OOM GUARD. Pending steps are rows,
+	// which Postgres writes to disk - a deep backlog costs disk and scan time, never resident memory,
+	// and no campaign here has taken database memory near saturation. (The one real memory risk, parking
+	// a caller per flow, is avoided outright: completion latency is sampled by a bounded Await pool.)
+	// So it earns its place only on a FLAT-OUT run (-arrival-rate 0), where nothing else bounds
+	// creation.
+	//
+	// UNDER A COMMANDED RATE IT MUST NOT BIND, and an arm where it did is not a measurement of the rate
+	// it was asked for: admission falls to whatever completions allow, and because parking skips the
+	// arrival ticker the dropped ticks are never made up. main.go invalidates such an arm. Measured: a
+	// 20,000 cap turned a commanded 7,000 steps/s into ~5,500 offered and 4,328 executed, with a wait
+	// profile that reads exactly like the over-connection collapse (CPU:running 37-42%, WAL share down
+	// to 45%) - the same instance on the same build served the full 7,000 at 11% CPU:running once the
+	// cap was lifted. Nothing in the artifact named the cap as the cause; that is why this field exists.
+	ThrottledMs    int              `json:"admissionThrottledMs,omitzero"`
+	Goroutines     int              `json:"goroutines"`     // at the end of the window: the engine's pool is most of this
+	EngineCounters map[string]int64 `json:"engineCounters"` // dwarf_* deltas over the window
 	// EngineHists carries the dwarf_* histogram distributions over the window, one row per instrument per
 	// attribute set - notably dwarf_refill_query_duration_seconds per shard per phase, which is what
 	// separates "one shard is slow" from "the cross-shard fan-out wait is expensive" from "the refiller is
@@ -236,6 +253,10 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		measCreated atomic.Int64 // ... within the measurement window (for arrival accounting)
 		errCount    atomic.Int64
 		peakOut     atomic.Int64
+		// Milliseconds a creator spent parked on the outstanding cap DURING the measurement window.
+		// Nonzero means the fuse blew, and with a commanded arrival rate that makes the arm a
+		// measurement of the cap rather than of the rate it was asked for - see ThrottledMs.
+		throttledMs atomic.Int64
 		latMu       sync.Mutex
 		createLat   []time.Duration // admission latency (every create, while measuring)
 		doneLat     []time.Duration // end-to-end latency (sampled)
@@ -266,6 +287,14 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 			for !stop.Load() {
 				if outstanding() >= int64(maxOutstanding) {
 					time.Sleep(time.Millisecond) // backpressure: let completions drain the backlog
+					// Parking here SKIPS the arrival ticker, whose channel holds one slot - so every
+					// tick generated while parked is dropped and admission can never make the rate up
+					// afterwards. That is intended for a FUSE (flat-out runs, where the cap is the
+					// governor) and fatal for a commanded rate, so the time is recorded and main.go
+					// invalidates the arm when a rate was commanded.
+					if measuring.Load() {
+						throttledMs.Add(1)
+					}
 					continue
 				}
 				if arrival != nil {
@@ -361,6 +390,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		CreateP50ms:    percentileMs(createLat, 0.50),
 		CreateP99ms:    percentileMs(createLat, 0.99),
 		MaxOutstanding: int(peakOut.Load()),
+		ThrottledMs:    int(throttledMs.Load()),
 		Goroutines:     runtime.NumGoroutine(),
 		EngineCounters: deltas,
 		EngineHists:    histogramDeltas(histBefore, histAfter),

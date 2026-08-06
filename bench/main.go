@@ -366,6 +366,18 @@ func run() error {
 				art.Valid = false
 				art.Invalidity = fmt.Sprintf("at concurrency %d: errors=%d recovered=%d unwedged=%d",
 					k, res.Errors, res.EngineCounters["dwarf_steps_recovered"], res.EngineCounters["dwarf_steps_unwedged"])
+			} else if *arrivalRate > 0 && res.ThrottledMs > 0 {
+				// The -max-outstanding fuse bound while a rate was COMMANDED, so this arm measured the
+				// cap and not the rate. It is the same failure class as the missing-collection check
+				// above - a plausible-looking number that is not the measurement anyone asked for - and
+				// it is worth marking loudly because nothing else in the artifact names the cause: the
+				// symptoms (depressed throughput, inflated RTT sampler, a CPU-burn wait profile) read
+				// exactly like an over-connection collapse. Raise -max-outstanding and re-run.
+				art.Valid = false
+				art.Invalidity = fmt.Sprintf("at concurrency %d: -max-outstanding=%d bound for %dms of the "+
+					"window against a commanded %d flows/s (admitted %.0f/s) - this arm measured the cap, "+
+					"not the commanded rate",
+					k, *maxOutstanding, res.ThrottledMs, *arrivalRate, res.FlowsPerSec)
 			}
 		}
 	}

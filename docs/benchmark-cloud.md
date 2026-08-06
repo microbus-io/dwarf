@@ -146,8 +146,14 @@ invisible in an average and because a connection ratio chosen for throughput mak
 | WAL share of backend waits | ~69% | **~14%** |
 | `CPU:running` share | ~6% | **~80%** |
 
-The backends stop committing and burn CPU instead. It recovers on its own — a mode, not a wedge — but a
-minute in it is an incident. It appeared **only past saturation**, never on an instance with headroom.
+The backends stop committing and burn CPU instead. It appeared **only past saturation**, never on an
+instance with headroom, and a minute in it is an incident.
+
+**Do not count on it clearing while load continues.** The expectation is that it self-recovers once the
+workload abates enough for the database to catch up — but that has **not been tested**, and what has been
+observed points the other way: every degraded arm in the RTT campaigns ran its full 120-second
+measurement window without recovering under sustained load. Treat it as a state that persists until the
+offered rate drops, and leave headroom rather than relying on it to clear itself.
 
 ### Connections: the throughput knee and the safe ratio are different numbers
 
@@ -176,18 +182,16 @@ state above, across the vertical-scaling session:
 | 64 vCPU | 0 / 7 | 1 / 14 |
 | **total** | **1 / 47 (2%)** | **5 / 43 (12%)** |
 
-A ~6× higher chance of a ~15× throughput drop, to buy 5–14% of peak. **So the engine picks the ratio by
-instance size**: 6× below 32 vCPUs, 12× at 32 and above — the smallest size whose arms showed no increase
-in instability at the higher ratio. An operator raising it by hand with `SetMaxOpenConns` should know
-which of the two numbers they are choosing.
+A ~6× higher chance of a ~15× throughput drop, to buy 5–14% of peak — **which is why the shipped ratio
+sits below the throughput knee at every size** rather than on it. (What the engine actually derives is in
+[deployment](deployment.md#connection-pool): a ratio per instance size *and* per round-trip time, since a
+later campaign found distance to be the axis this one never varied. These arms all ran at 0.13–0.38 ms.)
 
-**Read that threshold as a judgement call, not a safe/unsafe line.** 12× collapsed once in 14 arms at
-64 vCPU, so the higher ratio is not *free* above 32 — it is ~6× more likely to collapse at every size
-measured, and 32 vCPU is simply the one cell where it did not. No cell above reaches 15 arms, which is
-about what a 7–22% event needs before zero is distinguishable from luck. A deployment that would rather
-not meet the collapse mode at all can override the pool with `SetMaxOpenConns` — note it pins a per-replica
-connection count outright rather than a ratio, so divide the budget you want by your replica count — and
-give up 5–14% of peak.
+**No cell above reaches 15 arms**, which is about what a 7–22% event needs before zero is distinguishable
+from luck — so read the table as evidence that the higher ratio is riskier at every size, not as a
+safe/unsafe line drawn at any particular one. A deployment that would rather not meet the collapse mode at
+all can override the pool with `SetMaxOpenConns` — note it pins a per-replica connection count outright
+rather than a ratio, so divide the budget you want by your replica count — and give up 5–14% of peak.
 
 Connection ratios can only be compared open-loop, by interleaved A/B against the **same** instance:
 closed-loop load never reaches the collapse state, and two same-spec instances differ by more than the

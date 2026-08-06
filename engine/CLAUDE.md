@@ -2109,52 +2109,88 @@ successor and advance no `step_id`. Constants, their portability, and the normal
 **Connection pool sizing - fact-derived per shard (`poolsize.go`).** The operator provides facts on
 `ShardSpec` and the engine owns the measured constants (cloud benchmark campaign, `docs/benchmark-cloud.md`):
 
-- **`ShardSpec.VirtualCPUs` drives each shard's pool** at the measured knee, `idle = open/2` (warm core).
-  The ratio is **12x at 32 vCPUs or more, 6x below** (`connsPerVCPUFor`), and STABILITY places that
-  threshold, not throughput. 12x is the throughput knee from 16 vCPUs up (+11.7%/+5.0%/+14.0% at 16/32/64),
-  but counted over an open-loop campaign it also introduces a collapse mode. Arms that entered it, per
-  cell: 8 vCPU **1/13 vs 2/11**, 16 vCPU **0/13 vs 2/9**, 32 vCPU **0/14 vs 0/9**, 64 vCPU **0/7 vs 1/14**
-  (6x vs 12x), totalling **1/47 (2%) against 5/43 (12%)**. The collapse is not a slowdown - active backends
-  spike (177 vs a normal 140), the WAL share of their waits falls ~69% -> ~14%, CPU:running rises
-  ~6% -> ~80%, and throughput drops ~15x (8,629 -> 486 steps/s) until it recovers on its own. Roughly 10%
-  of peak throughput does not buy that risk. Below 32 the older cliff argument also still holds: a 1-vCPU
-  instance loses 55% past its knee and a 4-vCPU one 35%.
+- **Two declared facts and one probe drive each shard's pool**, `idle = open/2` (warm core).
+  `ShardSpec.VirtualCPUs` and the shard's Startup-probed RTT index `poolRatio`, a tier x RTT-bucket table
+  of connections per vCPU (`connsPerVCPUFor`); the resulting whole-database budget is split by that
+  shard's replica count. The cell-by-cell derivation, and which cells rest on measurement, live in
+  `poolsize.go` - what follows is the part that radiates.
 
-  ⚠️ **The threshold is NOT "12x is free above 32", and the 64-vCPU cell is why.** 12x collapses there at
-  1/14 (7%) - about the rate that placed the threshold at 32 to begin with - so the "free" claim rests on
-  32's 0/9 alone while the size ABOVE it shows a collapse, and the totals say 12x is ~6x more likely to
-  collapse at every size measured. It stands because the gain is 5-14% of peak against a rare,
-  self-recovering mode, not because large instances were shown immune. **Do not place a stability
-  threshold from any count under ~15 arms per cell** - every cell above is under it, this threshold moved
-  8 -> 32 across one campaign as more arms landed, and the 64-vCPU collapse arrived last, in a six-arm
-  confirmation run made after 32 had already shipped. Moving it again needs new ARMS, not a re-reading of
-  these. `docs/benchmark-cloud.md` publishes the same table; keep the two in step.
+  **A vCPU-only ratio is indexed to the wrong variable.** A connection held while a packet is in flight
+  does the server no good, so the load a database sees is the duty cycle `M · s/(k·RTT+s)`, not `M`:
+  a 16-vCPU shard at 4.8 ms ran **33% DB CPU with its pool pinned 96/96**, two thirds of the instance
+  unreachable. Compensating held throughput at **93-100% of base across 0.14 -> 5.07 ms**. Two
+  monotonicities fall out and are pinned by `TestPoolSizing_RatioFallsWithSizeAndRisesWithDistance`: the
+  ratio **falls with instance size** (`B*`, the backends inside Postgres at the knee, is sublinear in
+  cores - `15.0·vCPU^0.72`, predicting 67.3/110.9/182.7 against a measured 67.4/110.3/183.2) and **rises
+  with distance**.
 
-  ⚠️ **THE RATIO IS INDEXED TO THE WRONG VARIABLE, and both of its values are conservative.** Every
-  campaign behind it ran at 0.13-0.38 ms, so it never saw the axis that dominates: a connection held
-  while a packet is in flight does the server no good, and the load a server actually sees is
-  `M · s/(k·RTT+s)`. Measured 2026-08-01 (`bench/results/28-...`), pool knees at short RTT are
-  **11.2x / 8.8x / 6.9x** at 8 / 16 / 32 vCPU - the multiplier FALLS with instance size where this rule
-  rises, and 6x sits below the knee at every size (capturing 90-94% of peak; the rest costs ~2x the
-  connections). At distance the knee moves far more than any tier difference: **25x at 4.3 ms on 16
-  vCPU**, where 6x leaves two-thirds of the instance unreachable (33% DB CPU with the pool pinned 96/96).
-  Raising the pool with RTT held throughput at 93-100% across 0.14 -> 5.07 ms.
+  **The RTT axis interpolates; the tier axis rounds UP.** `M*` is smooth in RTT, so a bucket edge is an
+  artifact of storing a curve as a table and a 0.9 ms path takes 60% of the way from the 0.75 column to
+  the 1.00 one. It is *not* smooth in vCPUs - `B*` is a power law and the rows are an octave apart - so a
+  24-vCPU shard takes the 32-vCPU row, under-connecting ~5% rather than guessing between two curves.
+  Everything else also errs small, because under-connecting costs throughput roughly linearly while
+  over-connecting collapses: every cell is derated 10% off its knee, and a failed probe lands in the first
+  column rather than on an assumed distance - the same posture `defaultRTTMs` takes for `workerCeiling`.
 
-  **Three findings constrain any replacement**, and none of them is a simple ratio. `B*` - the backends
-  actually inside Postgres at the knee, `T·s/1000` - is **sublinear in cores (`15.0·vCPU^0.72`)**, so
-  per-vCPU sizing over-connects large instances. The RTT correction is **not separable** from the tier: a
-  32-vCPU instance at 4 ms never reached its knee by 900 connections against a predicted 573-662, because
-  a bigger tier starts from a smaller `s` (8.73 vs 12.73 ms) *and* its `s` inflates faster with distance
-  (~2.2 vs 1.45 ms per ms). And **DB CPU at the knee is tier-dependent** (76.9 / 66.3 / 51.6%), so no
-  single CPU target serves all sizes. **Full compensation has a ceiling**: 4 ms on 32 vCPU would need
-  ~1,163 connections, so past ~1.5-2 ms a large instance cannot be compensated at all and the answer is
-  more shards, not a bigger one.
+  ⚠️ **ONLY THE 16-vCPU ROW IS VALIDATED; EVERY OTHER ROW IS EXTRAPOLATION OF VARYING QUALITY.** Anchored
+  on that tier's 0.38 ms knee the model predicts its unseen 1.23 ms knee at **199 against a measured 200**;
+  32 vCPU reproduces its single knee (218 vs 220) with no second point; 64/96/128 have no knee measurement
+  at all. **Below 8 vCPU the model is not merely unmeasured but refuted** - those tiers saturate CPU first
+  (84/85/100% DB CPU at peak at 4/2/1 vCPU against 51.6% at 32), so a contention law over-predicts their
+  backends by 2.5-4x, and at 2 vCPU it puts the ceiling at 1,037 steps/s when **1,101 was measured at a
+  smaller pool**. The table derives them anyway, deliberately, so a rig can find where that breaks. **Two
+  cells sit closest to a measured failure and are what such a rig should watch**: 8 vCPU derives 69 while
+  the one 8-vCPU arm that ever collapsed did so at **M=70** (bracketed by healthy arms at M=50 and M=90,
+  n=1), and 1 vCPU derives 14 against a peak at **M=16** and a collapse from **M=32**.
 
-  All of the above is **n=1**, and three arms collapsed stochastically - including a 32-vCPU arm that
-  collapsed at 430 while running clean at 550 and 900. So it justifies REPLACING the axis, not the
-  constants: any new sizing needs the same ~15-arms-per-cell bar before it ships, and must fail open to
-  the vCPU-only ratio when the RTT probe fails (a probe already exists - `probeRTT`, spent today only on
-  `workerCeiling`).
+  ⚠️ **`defaultVirtualCPUs` CARRIES THE NARROWEST MARGIN IN THE ENGINE** and is the one default whose cost
+  is not bounded by construction. An undeclared shard assumes 2 vCPUs and derives 24 at the reference
+  distance - above the 1-vCPU tier's measured peak of 16, below its collapse at 32, and widening with RTT
+  while the machine does not grow. The RDS floor argument still holds (every current-generation class
+  starts at 2, so the guess cannot undershoot there); it is Cloud SQL's 1-vCPU and shared-core tiers where
+  it can overshoot.
+
+  ⚠️ **COUNT BACKENDS, NOT CONNECTIONS, before calling a large-RTT cell an over-connection.** The 2.00 ms
+  cell for 32 vCPU is 398 connections against an observed collapse at 430 - but at that distance only
+  ~41% are inside the database at once, so it is **~163 backends, fewer than the 183 the healthy knee
+  carried** and far from the collapsed arm's 414. Any cap belongs on backends or on the operator's
+  configured `max_connections`, never on a connection count read without its RTT. **There is no such cap
+  today** - a 128-vCPU shard at 2 ms derives ~1,081, which exceeds some defaults; the engine trusts
+  declared facts here exactly as it does for an over-declared `VirtualCPUs`.
+
+  ⚠️ **COLLAPSE IS AN EVENT, NOT A THRESHOLD, so no cell here is a safety boundary.** A 32-vCPU shard
+  collapsed at M=430 then ran **clean at M=550 and M=900**; the 8-vCPU collapse above sits below its own
+  knee. **Do not place a stability boundary from any count under ~15 arms per cell** - every cell behind
+  this table is n=1, so each derating is placed below a measured *throughput* knee, which is the only
+  thing the arms can support. The collapse is not a slowdown: active backends spike (177 vs a normal
+  140), `LWLock:BufferContent` triples-to-sevenfolds, `CPU:running` rises ~6% -> ~80%, and throughput
+  drops ~15x. The memory/swap explanation is **refuted** - neither `IO:DataFileRead` nor
+  `IO:BufFileRead` appears in any collapsed arm's top six.
+
+  ⚠️ **DO NOT ASSUME IT CLEARS WHILE LOAD CONTINUES.** The expectation is that it self-recovers once the
+  workload abates enough for the database to catch up, and that is **untested**. What IS observed
+  contradicts the stronger claim: every degraded arm across the 8- and 16-vCPU pool sweeps ran its full
+  120s window without recovering under a sustained offered rate. Both entry paths - too few connections
+  (starvation) and too many (contention) - deepen the backlog, and a deep backlog makes the refiller's
+  O(pending) band scan expensive, which is what holds the system there (refill duty cycle measured 18%
+  clean against 55-96% in every failing arm). Until someone runs the drop-the-rate arm, size for headroom
+  rather than for recovery.
+
+  **`s` is the mechanism, and WAL is why the large tiers take the conservative branch.** A transaction
+  spans `BEGIN..COMMIT`, so distance lengthens how long it holds rows and locks: `s` rises **+1.45 ms per
+  ms of RTT at 16 vCPU, ~2.2 at 32**, and two arms at the same backend count but different distance
+  differ 27% in `s` and 22% in throughput. `LWLock:WALWrite` is **64-75% of all waits at every knee
+  measured** (75.1/64.4/68.5% at 8/16/32) and WAL is one serialized writer per instance, so `s` cannot
+  keep falling with cores; 64 vCPU and up hold the 32-vCPU curve rather than extrapolate it down.
+  **Full compensation has a ceiling** regardless: 4 ms on 32 vCPU would need ~1,163 connections, so past
+  ~1.5-2 ms a large instance cannot be compensated at all (hence `poolRTTCapMs`) and the answer is more
+  shards, not a bigger one. Same-zone RTT spans **0.053-0.96 ms** and cross-AZ same-region is ~1.1 ms -
+  both inside the compensated range; cross-region (10-40 ms) is far outside it.
+
+  🔑 **NEVER FIT `k` FROM A LADDER THAT MOVES THE POOL WITH THE RTT.** `M` then becomes a linear function
+  of `(k·RTT+s)` and any growth of `s` with pool size is absorbed into the apparent slope - such a ladder
+  fits 11.40, which a lightly-loaded fixed-RTT arm refutes arithmetically (M=100 at 4.13 ms occupies
+  44.14 ms, so `k` < 10.70 or `s` is negative). **9.11** stands, fit at fixed pool.
 - **The fleet is known BEFORE any worker dispatches, so pools are sized right the first time - there is no
   async grace window.** Reading the registry needs open connections, so `Startup` opens the shards at a small
   **bootstrap** pool (`startupBootstrapConns`, 4 - enough to register the row, probe the RTT and read the fleet,

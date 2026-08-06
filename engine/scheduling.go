@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"maps"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/pipeline"
@@ -40,10 +41,10 @@ const (
 	sustainedDrainPerVCPU = 720
 	// sustainedDrainPerConn is the same measurement expressed per CONNECTION - the quantity the connection
 	// channel below actually wants, measured roughly flat across connection counts, instance sizes and
-	// backlog volumes. It is stated as its own constant rather than as sustainedDrainPerVCPU/connsPerVCPU
-	// because the connection-per-vCPU RATIO is no longer a single number (see connsPerVCPUFor), so dividing
-	// by it would silently mean a different thing on either side of that threshold - and the per-connection
-	// drain does not vary with how many connections the pool was allotted.
+	// backlog volumes. It is stated as its own constant rather than as sustainedDrainPerVCPU divided by a
+	// connection ratio, because that ratio varies with both instance size and distance (see
+	// connsPerVCPUFor), so dividing by it would silently mean a different thing per tier and per shard -
+	// and the per-connection drain does not vary with how many connections the pool was allotted.
 	//
 	// It is flat across connection counts, instance sizes and backlog volumes on a disk with IOPS headroom,
 	// which is the deployment the operator guidance asks for - NOT across disks. A throttled disk drains
@@ -105,6 +106,7 @@ func (e *Engine) recomputeRefillIntervals() {
 	for idx, spec := range e.shardSpecs {
 		specs[idx] = spec
 	}
+	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
 	for idx, p := range e.pistons {
 		if override > 0 {
@@ -122,7 +124,7 @@ func (e *Engine) recomputeRefillIntervals() {
 		// This shard's own replica count: the pool it drains through was divided by that one, so deriving the
 		// period from any other shard's fleet would measure the buffer against the wrong drain rate.
 		replicas := e.replicasOn(idx)
-		_, pool := shardPool(spec, pinned, replicas)
+		_, pool := shardPool(spec, pinned, replicas, rtts[idx])
 		p.SetInterval(deriveRefillInterval(share, spec.VirtualCPUs, pool, replicas))
 		p.SetMinGap(pipeline.DefaultMinGap)
 	}

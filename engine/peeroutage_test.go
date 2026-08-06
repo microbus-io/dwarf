@@ -50,7 +50,7 @@ type stallProxy struct {
 // newStallProxy relays to the host:port named in dsn, returning the proxy and dsn rewritten to reach it.
 //
 // The host sits between the credentials and whatever ends them, and WHAT ends them is dialect-shaped: a path
-// on PostgreSQL (`…@host:5432/db?…`) but a query string on SQL Server (`…@host:1433?database=…`), which names
+// on PostgreSQL (`...@host:5432/db?...`) but a query string on SQL Server (`...@host:1433?database=...`), which names
 // its database in a parameter and so has no path at all. Ending the host at the first `/` alone therefore found
 // no host on SQL Server and skipped the arm entirely.
 func newStallProxy(t *testing.T, dsn string) (*stallProxy, string) {
@@ -194,11 +194,6 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, worstReplica
 		vCPUs    = 8
 		replicas = 4
 	)
-	// Derived from the policy, not restated: the invariant under test is how the budget DIVIDES across a
-	// fleet, which must hold whatever ratio connsPerVCPUFor picks for this size.
-	budget := connsPerVCPUFor(vCPUs) * vCPUs
-	share := budget / replicas
-
 	proxy, proxied := newStallProxy(t, base)
 	if proxy == nil {
 		return 0, replicas, 0
@@ -217,6 +212,11 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, worstReplica
 		fleet.add(e)
 		assert.NoError(e.Startup(t.Context()))
 	}
+	// Derived from the policy at the distance the fleet ACTUALLY probed, not restated and not assumed: the
+	// invariant under test is how the budget DIVIDES, which must hold whatever ratio the size and the
+	// measured round trip pick for it. Read after Startup, since that is what probes.
+	budget := shardBudget(vCPUs, probedRTT(fleet.snapshot()[0], shard))
+	share := budget / replicas
 	awaitFleetSettled(t, fleet, shard, replicas, share)
 
 	// Sample from before the outage until after the fleet has re-settled. Every reading is pure memory - a
@@ -313,7 +313,7 @@ func TestPeerOutage_FleetWideStallGrowsNoPool(t *testing.T) {
 	worstOpen, worstReplicas, blindPartitions := runFleetOutage(t, 4*time.Second)
 	assert.Equal(0, blindPartitions,
 		"a blind replica must select everything rather than trust a residue class it can no longer justify")
-	assert.Equal(connsPerVCPUFor(8)*8/4, worstOpen,
+	assert.Equal(shardBudget(8, defaultRTTMs)/4, worstOpen,
 		"a replica grew its pool to %d during the outage: an unanswered reading was taken for a smaller fleet", worstOpen)
 	assert.Equal(4, worstReplicas,
 		"a replica published a fleet of %d during the outage: a reading that did not happen is not an observation of absence", worstReplicas)

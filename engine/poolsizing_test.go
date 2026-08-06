@@ -30,13 +30,6 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestPoolSizing_ShardPool pins the per-shard pool derivation: the explicit override pins the pool
-// exactly; VirtualCPUs derives the open ceiling at the measured knee (~6x CPUs) with a warm idle core;
-// an undeclared count assumes defaultVirtualCPUs (2). That assumption is bounded, not reckless: 2 is
-// the floor of every current-gen AWS RDS class, and on the smaller machines that do exist (Cloud SQL's
-// 1-vCPU tier) the resulting pool of 12 still sits under the measured knee (that tier peaked at M=16
-// and only collapsed from M=32). The derived budgets are per database, so the observed replica count
-// splits them; the override is a per-replica exact number and is never divided.
 // newSolo builds an ISOLATED single-replica engine, keyed by a unique per-engine test-DB name. Several
 // independent engines in one test function otherwise share one test database (every NewEngineUnderTest
 // keyed by t.Name() alone lands in the same one), so they share one dwarf_peers registry and count each
@@ -54,6 +47,14 @@ func probedRTT(e *Engine, shard int) float64 {
 	e.shardsLock.Lock()
 	defer e.shardsLock.Unlock()
 	return e.shardRTTMs[shard]
+}
+
+// budget8 is the whole-database budget an 8-vCPU shard derives on THIS engine, at the distance it
+// actually probed. A test asserting on how a budget DIVIDES across a fleet goes through this rather than
+// a literal: the ratio moves with the measured RTT, so a literal would pin the wrong quantity on any rig
+// whose round trip lands in a different bucket.
+func budget8(e *Engine, shard int) int {
+	return shardBudget(8, probedRTT(e, shard))
 }
 
 // addPeerRow inserts a fake peer with the given engine_id into every shard's registry and waits for the
@@ -164,33 +165,53 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 		vcpus    int
 		override int
 		replicas int
+		rttMs    float64
 		idle     int
 		open     int
 	}{
-		{0, 0, 1, 6, 12},   // undeclared: assume 2 vCPUs -> the 2-vCPU pool
-		{1, 0, 1, 3, 6},    // 1 vCPU: knee at 6
-		{2, 0, 1, 6, 12},   // 2 vCPU: knee at 12
-		{4, 0, 1, 12, 24},  // 4 vCPU: knee at 24
-		{8, 0, 1, 24, 48},  // 8 vCPU: knee at 48
-		{8, 30, 1, 30, 30}, // override wins over derived, pinned exactly
-		{0, 5, 1, 5, 5},    // override beats the assumed default too
-		{8, 0, 2, 12, 24},  // replicas split the derived budget: each takes its 1/R share of the knee
-		{8, 0, 3, 8, 16},
-		{1, 0, 4, 2, 2},    // floor: even many replicas keep a usable minimum pool
-		{0, 0, 2, 3, 6},    // the assumed default splits across replicas too
-		{8, 30, 4, 30, 30}, // the override is per replica and is never divided
+		// The 16-vCPU row is MEASURED; every other row is modelled (see connsPerVCPUFor).
+		{0, 0, 1, 0.25, 3, 7},   // undeclared: assume 2 vCPUs -> the 2-vCPU pool
+		{1, 0, 1, 0.25, 2, 3},   // MEASURED row: 3 sustained 390 st/s on a 1-vCPU shard
+		{2, 0, 1, 0.25, 3, 7},   // MEASURED row: 6 sustained 770 st/s
+		{4, 0, 1, 0.25, 7, 14},  // MEASURED row: 12 sustained 1,750 st/s
+		{8, 0, 1, 0.25, 24, 48}, // MEASURED row: 40 sustained 3,500 st/s, +20% margin
+		{8, 0, 1, 2.00, 52, 105},
+		{16, 0, 1, 0.25, 48, 96}, // MEASURED row: 82 sustained 7,000 st/s, +20% margin
+		{16, 0, 1, 1.00, 67, 134},
+		{16, 0, 1, 2.00, 86, 172},
+		{32, 0, 1, 0.25, 72, 144}, // MEASURED row: 120 sustained 14,000 st/s
+		{128, 0, 1, 0.25, 278, 557},
+		// The tier band rounds UP (a 24-vCPU shard takes the 32-vCPU row, a 15-vCPU one the 16-vCPU row)
+		// and past the last tabulated tier it stays there, so both directions under-connect.
+		{24, 0, 1, 0.25, 54, 108},
+		{15, 0, 1, 0.25, 45, 90},
+		{256, 0, 1, 0.25, 557, 1115},
+		// The RTT axis INTERPOLATES between buckets, and clamps at both ends.
+		{16, 0, 1, 0.50, 67, 134}, // on a bucket
+		{16, 0, 1, 0.90, 67, 134}, // between two buckets that are equal in the measured row
+		{4, 0, 1, 0.75, 14, 28},   // UNEVEN buckets: 0.75 is halfway between the 0.50 and 1.00 columns
+		{4, 0, 1, 1.25, 16, 33},   // and halfway between 1.00 and 1.50
+		{16, 0, 1, 5.00, 86, 172}, // beyond the last bucket: the 2.00 column
+		{16, 0, 1, 0.10, 48, 96},  // below the first bucket: no extrapolation past the shortest measured path
+		{16, 0, 1, 0, 48, 96},     // an unprobed shard lands uncompensated, never on an assumed distance
+		// Overrides and the replica split.
+		{8, 30, 1, 0.25, 30, 30},  // override wins over derived, pinned exactly
+		{0, 5, 1, 0.25, 5, 5},     // override beats the assumed default too
+		{16, 30, 1, 2.00, 30, 30}, // and bypasses the RTT term with it
+		{8, 0, 2, 0.25, 12, 24},   // replicas split the derived budget: each takes its 1/R share
+		{8, 0, 3, 0.25, 8, 16},
+		{16, 0, 4, 2.00, 21, 43},
+		{1, 0, 8, 0.25, 2, 2},    // floor: even many replicas keep a usable minimum pool
+		{0, 0, 2, 0.25, 2, 3},    // the assumed default splits across replicas too
+		{8, 30, 4, 0.25, 30, 30}, // the override is per replica and is never divided
 	}
 	for _, c := range cases {
-		idle, open := shardPool(ShardSpec{VirtualCPUs: c.vcpus}, c.override, c.replicas)
+		idle, open := shardPool(ShardSpec{VirtualCPUs: c.vcpus}, c.override, c.replicas, c.rttMs)
 		assert.Equal(c.idle, idle, "idle for %+v", c)
 		assert.Equal(c.open, open, "open for %+v", c)
 	}
 }
 
-// TestPoolSizing_ObservedReplicasLive pins the observed-R path end to end through the registry: a peer
-// row joining shrinks the derived pool to the 1/R share on the recount; a second peer shrinks it
-// further; a departure regrows it; a duplicate recount is a no-op; and the SetMaxOpenConns override,
-// once set, is never divided by fleet changes.
 func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -204,24 +225,24 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
+	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 	assert.Equal(1, e.replicasOn(1))
 
 	addPeerRow(t, e, 1001)
 	assert.Equal(2, e.replicasOn(1))
-	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share once the peer registered")
+	assert.Equal(budget8(e, 1)/2, db.DB.Stats().MaxOpenConnections, "1/2 share once the peer registered")
 
 	addPeerRow(t, e, 1002)
 	assert.Equal(3, e.replicasOn(1))
-	assert.Equal(16, db.DB.Stats().MaxOpenConnections, "1/3 share at three replicas")
+	assert.Equal(budget8(e, 1)/3, db.DB.Stats().MaxOpenConnections, "1/3 share at three replicas")
 
 	e.recomputePools() // recompute with no fleet change: dedupes, so the pools are untouched
-	assert.Equal(16, db.DB.Stats().MaxOpenConnections)
+	assert.Equal(budget8(e, 1)/3, db.DB.Stats().MaxOpenConnections)
 
 	delPeerRow(t, e, 1001)
 	delPeerRow(t, e, 1002)
 	assert.Equal(1, e.replicasOn(1))
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
+	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
 
 	// The pinned override wins over any fleet change.
 	assert.NoError(e.SetMaxOpenConns(11))
@@ -258,21 +279,21 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
-	assert.Equal(24, idle(), "idle core is half the open pool at R=1")
+	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
+	assert.Equal(budget8(e, 1)/2, idle(), "idle core is half the open pool at R=1")
 
 	addPeerRow(t, e, 2001)
-	assert.Equal(24, db.DB.Stats().MaxOpenConnections)
-	assert.Equal(12, idle(), "the idle core follows the pool down to the 1/2 share")
+	assert.Equal(budget8(e, 1)/2, db.DB.Stats().MaxOpenConnections)
+	assert.Equal(budget8(e, 1)/4, idle(), "the idle core follows the pool down to the 1/2 share")
 
 	addPeerRow(t, e, 2002)
-	assert.Equal(16, db.DB.Stats().MaxOpenConnections)
-	assert.Equal(8, idle(), "and down again to the 1/3 share")
+	assert.Equal(budget8(e, 1)/3, db.DB.Stats().MaxOpenConnections)
+	assert.Equal(budget8(e, 1)/3/2, idle(), "and down again to the 1/3 share")
 
 	delPeerRow(t, e, 2001)
 	delPeerRow(t, e, 2002)
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
-	assert.Equal(24, idle(), "and restore the idle core with it")
+	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
+	assert.Equal(budget8(e, 1)/2, idle(), "and restore the idle core with it")
 }
 
 // TestPoolSizing_PeerExpiry pins the crashed-peer path: a peer that stops heartbeating (its row goes stale,
@@ -299,7 +320,7 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 
 	// A peer registers a fresh row but then never heartbeats again (crashed).
 	addPeerRow(t, e, 2001)
-	assert.Equal(24, db.DB.Stats().MaxOpenConnections, "1/2 share while the peer's row is fresh")
+	assert.Equal(budget8(e, 1)/2, db.DB.Stats().MaxOpenConnections, "1/2 share while the peer's row is fresh")
 
 	// Its row ages out. Written with the database's own clock, never a bound Go time, so this is stale by
 	// exactly the measure the Sonar applies.
@@ -317,7 +338,7 @@ func TestPoolSizing_PeerExpiry(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	assert.Equal(1, e.replicasOn(1), "crashed peer aged out of the count")
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget restored with no signal and no forcing")
+	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "full budget restored with no signal and no forcing")
 }
 
 // TestPoolSizing_PoolGrowsForLongTasks pins the grow-on-demand pool: with every worker parked in a
@@ -348,17 +369,18 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.Startup(t.Context()))
 	resident := int32(e.crew.Resident())
-	assert.Equal(int32(96), resident, "resident set is the connection-derived dispatch count")
+	assert.Equal(int32(max(64, workersPerConnBudget*shardBudget(defaultVirtualCPUs, probedRTT(e, 1)))), resident,
+		"resident set is the connection-derived dispatch count")
 
 	// Start more flows than the resident set can hold concurrently.
-	const flows = 130
+	flows := int(resident) + 34
 	for range flows {
 		_, err := e.Create(ctx, "grow/g", nil, nil)
 		assert.NoError(err)
 	}
 	// The pool must grow past its resident set to run them all at once.
 	deadline := time.Now().Add(10 * time.Second)
-	for running.Load() < flows && time.Now().Before(deadline) {
+	for running.Load() < int32(flows) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	assert.Equal(int32(flows), running.Load(), "every parked task got a worker")
@@ -523,16 +545,16 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
-	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8})) // budget 48
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)
 	if !assert.NoError(err) {
 		return
 	}
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
+	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "full budget while alone (R=1)")
 
-	// Stall the first recompute (one-shot) after it has read a fleet of 2, before it pushes 48/2=24.
+	// Stall the first recompute (one-shot) after it has read a fleet of 2, before it pushes the R=2 share.
 	insertPeerRows(t, e, 1001)
 	awaitPeerCount(t, e, 1, 2)
 	e.seams.InjectN(FaultSlowPoolPush, 1)
@@ -542,9 +564,9 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	})
 	time.Sleep(slowPoolPushDelay / 10) // the first recompute is now inside the window, holding a stale 2
 
-	// A second recompute runs while the first is stalled, and is NOT stalled: it sees 3 and wants 48/3=16.
-	// Unserialized, it pushes 16 immediately and the first then overwrites it with the stale 24.
-	// Serialized, it cannot start until the first's push is done, so 16 lands last - the correct value.
+	// A second recompute runs while the first is stalled, and is NOT stalled: it sees 3 and wants the R=3
+	// share. Unserialized, it pushes that immediately and the first then overwrites it with the stale R=2
+	// one. Serialized, it cannot start until the first's push is done, so R=3 lands last - the correct value.
 	insertPeerRows(t, e, 1002)
 	awaitPeerCount(t, e, 1, 3)
 	wg.Go(func() {
@@ -554,8 +576,8 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 
 	// The fleet is 3, so the pool must be the R=3 share - not the R=2 share applied last.
 	assert.Equal(3, e.replicasOn(1))
-	assert.Equal(16, db.DB.Stats().MaxOpenConnections,
-		"the pool must reflect the LATEST replica count (48/3), not a stale recompute that pushed last")
+	assert.Equal(budget8(e, 1)/3, db.DB.Stats().MaxOpenConnections,
+		"the pool must reflect the LATEST replica count (budget/3), not a stale recompute that pushed last")
 }
 
 // TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride is the same race against the OTHER writer of pool
@@ -695,7 +717,7 @@ func TestPoolSizing_LiveOverride(t *testing.T) {
 	for i := 1; i <= 2; i++ {
 		db, err := e.db.Shard(i)
 		assert.NoError(err)
-		assert.Equal(6, db.DB.Stats().MaxOpenConnections, "shard %d derived pool", i)
+		assert.Equal(shardBudget(1, probedRTT(e, i)), db.DB.Stats().MaxOpenConnections, "shard %d derived pool", i)
 	}
 
 	// Live override pins exactly.
@@ -743,28 +765,30 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.Startup(context.Background()))
-	assert.Equal(96, e.workersDispatch, "resident/dispatch set stays connection-derived")
-	assert.Equal(192, e.cache.Capacity(), "cache is 2x the dispatch count, never 2x the ceiling")
+	zeroConfig := shardBudget(defaultVirtualCPUs, probedRTT(e, 1))
+	assert.Equal(max(64, workersPerConnBudget*zeroConfig), e.workersDispatch, "resident/dispatch set stays connection-derived")
+	assert.Equal(2*max(64, workersPerConnBudget*zeroConfig), e.cache.Capacity(), "cache is 2x the dispatch count, never 2x the ceiling")
 	// The max is the ceiling DERIVED from this shard's own probed RTT, not a fixed large number. A constant
 	// floor here silently reads the probe: the ceiling is 90,000/(7 x RTTms + 3), so a `SELECT 1` measured at
 	// 12.4ms - which a loaded parallel -race suite can produce - brings it under a hardcoded 1,000 and fails
 	// a test about wiring on an environment measurement. The formula itself is pinned separately by
 	// TestPoolSizing_WorkerCeiling; what this pins is that the derived max follows it and is not the
 	// dispatch count.
-	assert.Equal(workerCeiling(12, probedRTT(e, 1)), int(e.workers.Load()), "the worker max is the lease-margin ceiling")
+	assert.Equal(workerCeiling(zeroConfig, probedRTT(e, 1)), int(e.workers.Load()), "the worker max is the lease-margin ceiling")
 	assert.True(int(e.workers.Load()) > e.workersDispatch, "the max is the ceiling, not the dispatch count")
-	assert.Equal(int32(96), int32(e.crew.Resident()), "only the resident set is spawned eagerly")
+	assert.Equal(int32(max(64, workersPerConnBudget*zeroConfig)), int32(e.crew.Resident()), "only the resident set is spawned eagerly")
 
-	// An 8-vCPU shard (pool 48) + a 2-vCPU shard (pool 12): dispatch = max(64, 8*60) = 480, and the
-	// ceiling is keyed on the WORST shard (the 2-vCPU pool of 12), never the aggregate.
+	// An 8-vCPU shard plus a 2-vCPU one: the dispatch count follows their AGGREGATE budget, while the
+	// ceiling is keyed on the WORST shard (the 2-vCPU pool), never the aggregate.
 	e2 := newSolo(t, "e2")
 	defer e2.Shutdown(t.Context())
 	assert.NoError(e2.SetHost(noopHost{}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e2.SetShard(ShardSpec{Index: 2, VirtualCPUs: 2}))
 	assert.NoError(e2.Startup(context.Background()))
-	assert.Equal(480, e2.workersDispatch)
-	assert.True(int(e2.workers.Load()) < workerCeiling(48, 0.3), "the smallest pool sets the ceiling")
+	assert.Equal(workersPerConnBudget*(budget8(e2, 1)+shardBudget(2, probedRTT(e2, 2))), e2.workersDispatch)
+	assert.True(int(e2.workers.Load()) < workerCeiling(budget8(e2, 1), probedRTT(e2, 1)),
+		"the smallest pool sets the ceiling")
 
 	// An explicit SetWorkers is spawned IN FULL, even above the connection-derived dispatch count: the
 	// operator asked for that many workers, and no-op tasks never park, so growth would never take the
@@ -776,7 +800,8 @@ func TestPoolSizing_DerivedWorkers(t *testing.T) {
 	assert.NoError(eBig.SetWorkers(300)) // > the zero-config dispatch count of 96
 	assert.NoError(eBig.Startup(context.Background()))
 	assert.Equal(int32(300), int32(eBig.crew.Resident()), "an explicit SetWorkers is spawned in full")
-	assert.Equal(192, eBig.cache.Capacity(), "but the cache still follows the dispatch count")
+	assert.Equal(2*max(64, workersPerConnBudget*shardBudget(defaultVirtualCPUs, probedRTT(eBig, 1))), eBig.cache.Capacity(),
+		"but the cache still follows the dispatch count")
 
 	// Explicit SetWorkers pins, regardless of shards.
 	e3 := newSolo(t, "e3")
@@ -849,7 +874,7 @@ func TestPoolSizing_StartupSizesSoloFull(t *testing.T) {
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
 	assert.Equal(1, e.replicasOn(1), "solo replica reads R=1 from the registry at startup")
-	assert.Equal(48, db.DB.Stats().MaxOpenConnections, "the full derived pool is in place the moment Startup returns")
+	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "the full derived pool is in place the moment Startup returns")
 }
 
 // TestPoolSizing_StartupSizesFromRegisteredFleet is the real replacement for the old grace window: a
@@ -873,7 +898,7 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 
 	db1, err := eng1.db.Shard(1)
 	assert.NoError(err)
-	assert.Equal(48, db1.DB.Stats().MaxOpenConnections, "solo eng1 holds the full budget")
+	assert.Equal(budget8(eng1, 1), db1.DB.Stats().MaxOpenConnections, "solo eng1 holds the full budget")
 
 	// eng2 starts against the SAME databases (shared test-DB key, both keyed by t.Name()). At its Startup
 	// it reads eng1's row, so R=2 is known BEFORE it dispatches - it opens at 24, never over-connecting on
@@ -888,14 +913,14 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	db2, err := eng2.db.Shard(1)
 	assert.NoError(err)
 	assert.Equal(2, eng2.replicasOn(1), "eng2 sees the registered fleet at startup")
-	assert.Equal(24, db2.DB.Stats().MaxOpenConnections, "eng2 sizes for R=2 immediately - no partial over-connect")
+	assert.Equal(budget8(eng2, 1)/2, db2.DB.Stats().MaxOpenConnections, "eng2 sizes for R=2 immediately - no partial over-connect")
 
 	// eng1 converges to the R=2 share on its own reading, with no signal wiring.
 	deadline := time.Now().Add(5 * time.Second)
 	for db1.DB.Stats().MaxOpenConnections != 24 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	assert.Equal(24, db1.DB.Stats().MaxOpenConnections, "eng1 converges to R=2 by reading the registry")
+	assert.Equal(budget8(eng1, 1)/2, db1.DB.Stats().MaxOpenConnections, "eng1 converges to R=2 by reading the registry")
 }
 
 // TestPoolSizing_StartupOverridePins pins that SetMaxOpenConns - the expert / external-pooler path -

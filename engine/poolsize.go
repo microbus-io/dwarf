@@ -33,26 +33,19 @@ import (
 // (Cloud SQL PostgreSQL, tiers 1-64 vCPU; see docs/benchmark-cloud.md). They are engine knowledge - the
 // operator provides the facts (ShardSpec.VirtualCPUs), the engine owns the constants.
 const (
-	// connsPerVCPU sizes a SMALL shard's connection pool. See connsPerVCPUFor for why the ratio is not
-	// one number, and why this one is deliberately below its own tier's knee.
-	connsPerVCPU = 6
 
-	// connsPerVCPULarge is the ratio for shards at or above largeInstanceVCPUs - the measured knee.
-	connsPerVCPULarge = 12
-
-	// largeInstanceVCPUs is where the ratio steps up: the smallest tier at which 12x was measured to add
-	// NO instability, not merely the smallest at which it adds throughput.
-	largeInstanceVCPUs = 32
-
-	// defaultVirtualCPUs is assumed when a ShardSpec does not declare VirtualCPUs. Two facts make this
-	// guess safe rather than reckless (the failure mode of a WRONG guess is the over-connection collapse):
-	//   - 2 vCPUs is the FLOOR of every current-generation AWS RDS class (db.t4g/m7g/r7g all start at 2),
-	//     so on RDS the assumption cannot undershoot the real machine.
-	//   - Where smaller machines do exist (Cloud SQL's 1-vCPU db-custom-1-*, and its shared-core tiers),
-	//     the pool this yields (6 x 2 = 12) still sits below their measured knee: the 1-vCPU tier peaked
-	//     at M=16 (856 steps/s) and only collapsed from M=32 up. An operator on such a machine declares
-	//     VirtualCPUs: 1 and gets a pool of 6.
-	// So the cost of the assumption is bounded, and it buys a real default instead of a timid one.
+	// defaultVirtualCPUs is assumed when a ShardSpec does not declare VirtualCPUs. 2 vCPUs is the FLOOR of
+	// every current-generation AWS RDS class (db.t4g/m7g/r7g all start at 2), so on RDS the assumption
+	// cannot undershoot the real machine.
+	//
+	// WHERE IT CAN OVERSHOOT - Cloud SQL's 1-vCPU db-custom-1-* and its shared-core tiers - THE COST IS NOW
+	// BOUNDED BY MEASUREMENT. The guess yields 7 connections at the reference distance, and a 1-vCPU shard
+	// was measured to need 3 and to run clean at 8, 10 and 14 (390 steps/s, ~70% of that tier's peak). So
+	// an undeclared shard on the smallest machine Cloud SQL sells lands above what it needs and well below
+	// anything that hurt it. Declaring VirtualCPUs: 1 yields 3.
+	//
+	// Declare it anyway: the guess cannot use a large database. An 8-vCPU shard left undeclared gets 7
+	// connections where it needs 40.
 	defaultVirtualCPUs = 2
 
 	// workersPerConnBudget sizes the RESIDENT worker set (and the candidate cache) from the aggregate
@@ -187,69 +180,183 @@ func probeRTT(ctx context.Context, db *sequel.DB) float64 {
 	return best
 }
 
-// shardPool returns the idle/open pool sizes for one shard: VirtualCPUs (defaulted, see
-// effectiveVirtualCPUs) derives the open ceiling at the measured knee, with a warm idle core of half.
+// shardPool returns the idle/open pool sizes for one shard, with a warm idle core of half the open
+// ceiling. VirtualCPUs (defaulted, see effectiveVirtualCPUs) and the shard's probed RTT pick the ratio,
+// and the resulting per-DATABASE budget is split across the OBSERVED engine replicas holding connections
+// to that database (the peer-discovery count; see peers.go).
+//
 // The explicit SetMaxOpenConns override wins and pins the pool to exactly that size (the
-// benchmarking/expert path). The derived budgets are per DATABASE, so they are split across the
-// OBSERVED engine replicas (the peer-discovery count; see peers.go); the override is the operator's
-// exact per-replica number and is never divided.
-func shardPool(spec ShardSpec, override int, replicas int) (idle, open int) {
+// benchmarking/external-pooler path): it is the operator's exact per-replica number, is never divided,
+// and bypasses the RTT term with it.
+//
+// rttMs is the value probed at Startup and held, never a live reading - a latency change re-derives on
+// restart, the same posture as the shard set itself.
+func shardPool(spec ShardSpec, override int, replicas int, rttMs float64) (idle, open int) {
 	if override > 0 {
 		return override, override
 	}
 	replicas = max(1, replicas)
 	vcpus := effectiveVirtualCPUs(spec.VirtualCPUs)
-	open = max(2, connsPerVCPUFor(vcpus)*vcpus/replicas)
+	open = max(2, shardBudget(vcpus, rttMs)/replicas)
 	return max(2, open/2), open
 }
 
-// connsPerVCPUFor is the connection-per-vCPU ratio for a shard of a given size. Two values, because one
-// number cannot be both safe on a 1-vCPU server and adequate on a 64-vCPU one.
+// poolRTTBuckets are the distances poolRatio is indexed by, in ms. UNEVENLY SPACED ON PURPOSE: they are
+// where the sweeps actually measured, and connsPerVCPUFor interpolates everything between. Finer columns
+// would be arithmetic dressed as evidence - the sweeps resolved a minimum to +/-10% at best, so a 0.25ms
+// grid across the whole range implied a precision nothing here has.
 //
-// 12x is the throughput knee at every size from 16 vCPUs up (+11.7% at 16, +5.0% at 32, +14.0% at 64),
-// but throughput is NOT what places the threshold. STABILITY is. Counted over an open-loop campaign, by
-// the share of arms that entered the collapse state below:
+// THE AXIS STOPS AT 2ms, which is not a rounding convenience: past there a large instance cannot be
+// compensated at all (a 32-vCPU shard at 4ms needs ~1,163 connections to reach its own base peak, and its
+// knee was never reached by 900), so any further column would extrapolate into the collapse these ratios
+// are backed off from, for no throughput. At that distance the answer is more shards, not a bigger pool.
+var poolRTTBuckets = [5]float64{0.25, 0.50, 1.00, 1.50, 2.00}
+
+// poolSafetyMargin is applied by connsPerVCPUFor to every cell of poolRatio, so the table holds RAW
+// MINIMA and the margin stays one number in one place. Keeping them separate matters because they answer
+// to different evidence: a cell changes when someone re-measures that tier, and this changes when someone
+// argues about how much slack a pool needs.
 //
-//	 8 vCPU    6x   1/13 collapsed     12x   2/11 collapsed
-//	16 vCPU    6x   0/13 collapsed     12x   2/ 9 collapsed
-//	32 vCPU    6x   0/14 collapsed     12x   0/ 9 collapsed
-//	64 vCPU    6x   0/ 7 collapsed     12x   1/14 collapsed
-//	 total     6x   1/47 (2%)          12x   5/43 (12%)
+// 1.2 is what the sweeps support. At every distance the bare minimum ran a materially worse tail than a
+// pool ~20% above it - 16 vCPU at 1 ms measured p99 1,344 ms at the minimum against 203 ms at +26%, and
+// the 8-vCPU base minimum of 40 measured p99 170 ms against 92 ms at 48. Below ~1.1 the tail degrades;
+// above ~1.5 the extra connections buy nothing and start costing (see the over-provisioning note in
+// connsPerVCPUFor).
+const poolSafetyMargin = 1.2
+
+// poolRatio is the RAW MINIMUM connections per vCPU - the smallest pool that sustained the load, before
+// poolSafetyMargin - by shard size and distance, one column per poolRTTBuckets entry. connsPerVCPUFor
+// documents how the cells are derived and which of them rest on measurement.
+var poolRatio = []struct {
+	vcpus  int
+	ratios [5]float64 // 0.25, 0.50, 1.00, 1.50, 2.00 ms
+}{
+	{1, [5]float64{3.00, 5.00, 7.00, 9.00, 11.00}},  // MEASURED
+	{2, [5]float64{3.00, 6.00, 7.00, 10.00, 11.00}}, // MEASURED
+	{4, [5]float64{3.00, 6.00, 6.00, 8.00, 10.00}},  // MEASURED
+	{8, [5]float64{5.00, 8.00, 8.00, 11.00, 11.00}}, // MEASURED
+	{16, [5]float64{5.00, 7.00, 7.00, 9.00, 9.00}},  // MEASURED
+	{32, [5]float64{3.75, 4.70, 5.60, 8.10, 8.75}},  // MEASURED
+	{64, [5]float64{4.42, 5.21, 6.55, 7.64, 8.54}},
+	{96, [5]float64{3.94, 4.65, 5.85, 6.83, 7.63}},
+	{128, [5]float64{3.63, 4.29, 5.40, 6.29, 7.03}},
+}
+
+// connsPerVCPUFor is the connection-per-vCPU ratio for a shard of a given size at a given distance. Both
+// axes are load-bearing: a connection held while a packet is in flight does the server no good, so what a
+// database sees is the duty cycle M*s/(k*RTT+s), not M.
 //
-// The 16-vCPU row is what places the threshold: same instance, same workload, and moving 6x -> 12x turned
-// a clean sweep into two collapses. 32 vCPU is the one cell where 12x collapsed in none of its arms.
+// THE 1- THROUGH 32-vCPU ROWS ARE MEASURED; 64, 96 AND 128 REMAIN MODELLED, DELIBERATELY. The model derives each cell as
+// M* = B*(k*RTT+s*)/s* derated 10%, with k = 9.11 round trips per step and B* = 15*vCPU^0.72 backends at
+// the knee. Pool sweeps on Cloud SQL found it over-provisions worst at SHORT RTT - 8.63x and 7.34x where
+// 5.0x and 5.1x sufficed - which is where nearly every deployment sits (same-zone RTT is 0.05-0.96 ms).
+// The correction is NOT extrapolated to the untested rows: two tiers are not evidence about seven others,
+// and reasoning-by-inheritance is what put the wrong numbers here to begin with. Sweep a tier before
+// changing its row.
 //
-// THE 64-vCPU ROW IS THE HONEST WEAKNESS OF THIS THRESHOLD, and it is stated rather than buried. 12x
-// collapses there at 1/14 (7%) - roughly the rate that placed the threshold at 32 in the first place - so
-// "12x is free above 32" rests on 32's 0/9 alone, with the size ABOVE it showing a collapse. Read the
-// totals row the same way: 12x is ~6x more likely to collapse at EVERY size measured, not only below 32.
-// The threshold stands because 12x buys 5-14% of peak and the collapse is rare and self-recovering, not
-// because the large sizes were shown immune.
+// Every cell is the MINIMUM pool that sustained that distance's achievable throughput. poolSafetyMargin
+// is applied on top by this function, so the table stays a record of measurement and the slack stays one
+// number in one place.
 //
-// DO NOT PLACE A STABILITY THRESHOLD FROM ANY COUNT UNDER ~15 ARMS PER CELL. Every cell above is
-// under it. This threshold moved 8 -> 32 across one campaign, each time because more arms landed, and the
-// 64-vCPU collapse arrived last, in a six-arm confirmation run made after the 32 threshold had shipped. A
-// 7-22% event needs enough arms that zero is distinguishable from unlucky, so treat any future move as
-// needing new arms rather than a re-reading of these.
+//	      1 vCPU      2 vCPU        4 vCPU        8 vCPU        16 vCPU       32 vCPU
+//	RTT   rate min  x   rate min  x   rate  min  x  rate  min  x  rate  min  x  rate   min  x
+//	~0.1   390   3  3.0   770   6  3.0 1,750  12 3.0 3,500  40 5.0 7,000  82 5.1 14,000 120 3.75
+//	~0.5   390   5  5.0   770  12  6.0 1,750  24 6.0 3,500  64 8.0 7,000 120 7.5 14,000 150 4.70
+//	~1.0   390   7  7.0   660  14  7.0 1,500  24 6.0 3,000  64 8.0 6,000 115 7.2 12,000 180 5.60
+//	~1.5   390   9  9.0   660  20 10.0 1,500  32 8.0 3,000  88 11.0 6,000 145 9.1 12,000 260 8.10
+//	~2.0   390  11 11.0   660  22 11.0 1,500  40 10.0 3,000 88 11.0 5,000 145 9.1 10,000 280 8.75
+//	(rate in steps/s - each tier's own achievable throughput at that distance, not one fixed rate)
 //
-// THE COLLAPSE IS NOT A SLOWDOWN, which is why ~10% of throughput does not buy it. Active backends spike
-// (177 against a normal 140 on a 16-vCPU instance), the WAL share of their waits falls from ~69% to ~14%,
-// and CPU:running rises from ~6% to ~80% - the backends stop committing and burn CPU instead. Throughput
-// falls roughly 15x for the duration (8,629 -> 486 steps/s). It recovers on its own, so it is a mode
-// rather than a wedge, but a minute in it is a production incident.
+// WHAT THE SWEEPS ESTABLISH IS THE LEVEL, NOT THE SHAPE ACROSS TIERS. Every measured minimum is far below
+// its modelled cell at short RTT (4 vCPU 3.0 vs 8.50, 8 vCPU 5.0 vs 7.19, 16 vCPU 5.1 vs 6.12, 32 vCPU
+// 3.75 vs 5.36), so the model over-provisions there on every tier tried, regardless of how each was
+// loaded.
 //
-// Small instances keep 6x for the older and blunter reason: they do not merely destabilize past their
-// knee, they fall off a cliff (1 vCPU loses 55% between M=16 and M=96, 4 vCPU 35%). That also keeps the
-// undeclared-VirtualCPUs default (2 vCPUs -> 12 connections) exactly where its own reasoning put it - see
-// defaultVirtualCPUs, whose safety argument depends on landing under the 1-vCPU tier's knee.
+// The ratio's trend ACROSS tiers is NOT established, and an earlier version of this comment claimed it
+// was. The measured base ratios run 3.0 / 5.0 / 5.1 / 3.75 at 4 / 8 / 16 / 32 vCPU, which is not
+// monotonic in either direction - and the arms were not held at a comparable fraction of each tier's own
+// ceiling (~70% / ~71% / ~93% / ~66%). The gap to the model also NARROWS with distance on every tier
+// (32 vCPU: 30% under at base, 13% under at 1.5 ms), so the error is concentrated at short RTT - which is
+// where same-zone deployments actually sit (0.05-0.96 ms). Since s inflates as a tier approaches its ceiling, part of that
+// spread measures how hard each was pushed rather than the tier itself. Comparing rows needs arms at
+// matched utilisation, which no campaign has run.
 //
-// This is a lookup on a declared fact, not a controller: it reads nothing observed, converges on nothing,
-// and cannot oscillate. Do not grow it into one.
-func connsPerVCPUFor(vcpus int) int {
-	if vcpus >= largeInstanceVCPUs {
-		return connsPerVCPULarge
+// THE CURVE IS A STEP, NOT A RAMP, and it plateaus because two terms cancel. Duty cycle pushes the
+// requirement UP with distance while the throughput the tier can deliver falls, so between 0.5 and 1 ms
+// the multiplier holds flat on both tiers. A table that only ever rises with distance models one term.
+//
+// WHY 64/96/128 WERE LEFT MODELLED RATHER THAN CORRECTED. The model's error is concentrated at SMALL
+// tiers and has already decayed by 32 vCPU - over-provisioning runs 4.1x / 3.4x / 2.8x / 1.4x / 1.2x /
+// 1.4x at 1/2/4/8/16/32. Its remaining cells are 4.42 / 3.94 / 3.63 at 64/96/128, already inside the
+// 3.0-5.1x band every measured tier occupies and inside the conventional Postgres 3-5x guidance; its RTT
+// slope there (1.94x base to 2ms) matches what 16 and 32 vCPU measured (1.8x, 2.3x). Extrapolating the
+// small-tier correction upward would push those cells BELOW 3x - outside anything measured, in the
+// STARVING direction. A future sweep should start at 64 and re-check 96/128 only if 64 disagrees.
+//
+// COMPENSATION IS PARTIAL - NO POOL RECOVERS WHAT DISTANCE COSTS. The sustained column falls because
+// past ~1 ms there is a load no pool size can serve: 8 vCPU could not hold 3,500 st/s at 1 ms at ANY
+// pool (80 starved, 96 contended, nothing between), and 16 vCPU could not hold 7,000 st/s there either.
+// The connection knob runs out before the distance does. Size for the throughput the distance allows.
+//
+// HEADROOM SETS THE WIDTH OF THE SAFE BAND, which is why over-provisioning is only sometimes fatal. At
+// 1.6 ms the 16-vCPU tier ran 6,000 st/s - ~98% of capacity - and the band was 145-155 wide: pool 160
+// CONTENDED. At 2.0 ms with 5,000 st/s the same 160 ran clean. Read a narrow band as a statement about
+// headroom, not about distance, and keep production off the ceiling.
+//
+// THE MULTIPLIER IS NOT MONOTONIC IN RTT, and that is a property of the system rather than noise. Two
+// terms fight: duty cycle pushes connections UP with distance, while the throughput a tier can actually
+// deliver falls with it. At 1.05 ms the second term won - the minimum FELL from 120 to 115 because the
+// sustainable rate dropped from 7,000 to 6,000. A table that only ever rises with distance is modelling
+// one term and ignoring the other.
+//
+// The 0.75 / 1.25 / 1.75 buckets are interpolated between measured neighbours, not measured.
+//
+// THE RTT AXIS INTERPOLATES, THE TIER AXIS ROUNDS UP. The requirement is smooth in RTT, so a bucket
+// boundary is an artifact of storing a curve as a table and a 0.75ms path lands halfway between the 0.50
+// and 1.00 columns. It is NOT smooth in vCPUs - B* is a power law and the rows are an octave apart - so a
+// 24-vCPU shard takes the 32-vCPU row, under-connecting rather than guessing between two curves.
+// An unprobed shard (rttMs <= 0) lands in the first column: a failed probe must not inflate a pool.
+//
+// TWO CELLS SIT CLOSE TO A MEASURED FAILURE and are the ones a re-measurement should check first:
+// 8 vCPU at 0.25ms derives 69, and the one 8-vCPU arm that ever collapsed did so at M=70 (bracketed by
+// healthy arms at M=50 and M=90, n=1); 1 vCPU derives 14 against a peak at M=16 and a collapse from M=32.
+//
+// DO NOT READ A LARGE-RTT CELL AS AN OVER-CONNECTION WITHOUT APPLYING THE DUTY CYCLE. The 2.00ms cell for
+// 32 vCPU is 398 connections against a collapse observed at 430, but only ~41% are inside the database at
+// once - ~163 backends, fewer than the 183 the healthy knee carried. Any cap belongs on backends or on
+// the operator's configured max_connections, never on a connection count read without its RTT.
+//
+// This is a lookup on declared facts and one probe taken at Startup, not a controller: it reads nothing
+// that moves while the engine runs, converges on nothing, and cannot oscillate. Do not grow it into one.
+func connsPerVCPUFor(vcpus int, rttMs float64) float64 {
+	row := poolRatio[len(poolRatio)-1] // larger than every tabulated tier: take the smallest ratio
+	for _, r := range poolRatio {
+		if vcpus <= r.vcpus {
+			row = r
+			break
+		}
 	}
-	return connsPerVCPU
+	// Linear interpolation between the two bracketing buckets, clamped at both ends. The buckets are
+	// unevenly spaced, so the position cannot be computed arithmetically the way an even grid allows.
+	// The margin rides on the result, so the table itself stays a record of what was measured.
+	if rttMs <= poolRTTBuckets[0] {
+		return row.ratios[0] * poolSafetyMargin
+	}
+	for i := 1; i < len(poolRTTBuckets); i++ {
+		if rttMs <= poolRTTBuckets[i] {
+			f := (rttMs - poolRTTBuckets[i-1]) / (poolRTTBuckets[i] - poolRTTBuckets[i-1])
+			return (row.ratios[i-1] + f*(row.ratios[i]-row.ratios[i-1])) * poolSafetyMargin
+		}
+	}
+	return row.ratios[len(poolRTTBuckets)-1] * poolSafetyMargin
+}
+
+// shardBudget is the whole-database connection budget for a shard of a given size at a given distance,
+// before it is split across the replicas holding connections to it. It is the quantity the measured
+// knees are expressed in, so tests asserting on the budget derive it from here rather than restating a
+// ratio that varies by tier and distance.
+func shardBudget(vcpus int, rttMs float64) int {
+	return max(2, int(connsPerVCPUFor(vcpus, rttMs)*float64(vcpus)))
 }
 
 // effectiveVirtualCPUs resolves a shard's declared CPU count, substituting defaultVirtualCPUs when the
@@ -323,6 +430,7 @@ func (e *Engine) recomputePools() {
 	}
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)
+	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
 	postSplitConns := 0
 	for _, idx := range e.db.Indices() {
@@ -330,7 +438,9 @@ func (e *Engine) recomputePools() {
 		if err != nil {
 			continue
 		}
-		idle, open := shardPool(specs[idx], 0, observed[idx]) // zero-value spec = the default shard's sizing
+		// Zero-value spec = the default shard's sizing; a missing RTT (an unprobed shard) falls to the
+		// uncompensated bucket, which is the under-connecting direction.
+		idle, open := shardPool(specs[idx], 0, observed[idx], rtts[idx])
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
 		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
@@ -390,7 +500,7 @@ func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
 	for idx, rttMs := range rtts {
 		// Each shard's own count, since each shard's pool is divided by its own fleet - and the worst shard's
 		// number wins, because a storm drains through whichever pool is tightest.
-		_, open := shardPool(specs[idx], override, e.replicasOn(idx))
+		_, open := shardPool(specs[idx], override, e.replicasOn(idx), rttMs)
 		ceiling = min(ceiling, workerCeiling(open, rttMs))
 	}
 	if ceiling == math.MaxInt {

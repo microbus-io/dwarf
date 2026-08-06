@@ -107,28 +107,26 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, wantOpen
 // claim on one shard's server never exceeds that server's budget, at any instant of the rollout.
 //
 // The rollout is the case that can break it, because it moves the count in BOTH directions within a second
-// or two. A replica leaving RAISES every survivor's share (three replicas of a 48-connection budget take 16
-// each, not 12), and the replacement then has to fit inside a budget its peers have not given back yet. If
-// it sized its pool from the fleet it is joining before its peers had read its row, the shard's server
-// would see four replicas' worth of a three-replica split - over budget by a full share, on every step of
-// every deploy. `Join` closes that by announcing, waiting two read cadences, and only then sizing, so a
-// joining replica's whole claim during the window is its tiny bootstrap pool.
+// or two. A replica leaving RAISES every survivor's share (three replicas take budget/3 each, not
+// budget/4), and the replacement then has to fit inside a budget its peers have not given back yet. If it
+// sized its pool from the fleet it is joining before its peers had read its row, the shard's server would
+// see four replicas' worth of a three-replica split - over budget by a full share, on every step of every
+// deploy. `Join` closes that by announcing, waiting two read cadences, and only then sizing, so a joining
+// replica's whole claim during the window is its tiny bootstrap pool.
 //
 // THE BOUND IS THE BUDGET PLUS ONE POST-JOIN SHARE, and that is the engine's actual guarantee rather than
 // a slackened one. Join waits for peers to have DETECTED its row; each peer then applies the smaller pool
 // on its own reconcile tick, and a peer's apply cannot be observed from here - the pool size is local to
 // its process - so no wait can prove every peer has finished. joinFleet's grace shrinks that window but
 // cannot close it, which leaves one reachable worst case: every survivor still holding the pre-join split
-// (which sums to the whole budget) while the joiner has already grown into its post-join share.
-//
-// Measured, both halves of it: 52 when the joiner is still on its bootstrap pool, and 60 = 48 + 12 when it
-// has grown and no survivor has shrunk yet. 60 is a CEILING, not a tail - survivors are sized for R-1 so
-// they can never sum past the budget, and the joiner is sized for R.
+// (which sums to the whole budget) while the joiner has already grown into its post-join share. That is a
+// CEILING, not a tail - survivors are sized for R-1 so they can never sum past the budget, and the joiner
+// is sized for R.
 //
 // It still catches what this test exists for. A regression in the announce-before-consume ordering prices
-// the whole fleet at the R-1 split - 4 x 16 = 64 - which is above this bound, deterministically, on every
-// step of every rollout. The margin is small on purpose: a bound loose enough to be comfortable would
-// stop distinguishing the two.
+// the whole fleet at the R-1 split - R x budget/(R-1), or 4/3 of the budget at R=4 - which is above this
+// bound (5/4 of it), deterministically, on every step of every rollout. The margin is small on purpose: a
+// bound loose enough to be comfortable would stop distinguishing the two.
 //
 // What is priced is the CEILING each pool may acquire, not the connections open at that moment - lowering a
 // limit closes nothing, so the surplus of a shrinking pool drains as connections are returned. The ceiling
@@ -141,10 +139,6 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 		vCPUs    = 8
 		replicas = 4
 	)
-	// The whole per-database budget, whatever the fleet size. Derived from the policy rather than restated,
-	// so the ratio threshold cannot silently invalidate the bound this test asserts.
-	budget := connsPerVCPUFor(vCPUs) * vCPUs
-
 	// Every replica of the fleet shares one registry, which is all a fleet is. SetWorkers(1) keeps the
 	// resident crews small - this test asserts on pool arithmetic, and a derived crew per replica would
 	// spawn hundreds of goroutines that none of it depends on.
@@ -175,6 +169,10 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 		started = append(started, e)
 		assert.NoError(e.Startup(ctx))
 	}
+	// The whole per-database budget, whatever the fleet size. Derived from the policy at the distance the
+	// fleet ACTUALLY probed rather than restated, so neither a ratio change nor a slower rig can silently
+	// invalidate the bound this test asserts.
+	budget := shardBudget(vCPUs, probedRTT(originals[0], shard))
 	awaitFleetSettled(t, fleet, shard, replicas, budget/replicas)
 
 	// Price the fleet continuously from here, so the assertion covers the transitions rather than the
