@@ -185,7 +185,7 @@ func (p *stallProxy) close() {
 // Sampling spans the recovery because that is where a storm would actually land: when the server answers
 // again, every row is momentarily stale by the length of the outage. A pair of before-and-after readings
 // would miss a transient spike there entirely, which is the whole failure mode.
-func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, worstReplicas, blindPartitions int) {
+func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, settledOpen, worstReplicas, blindPartitions int) {
 	t.Helper()
 	assert := testarossa.For(t)
 	base := os.Getenv("SEQUEL_TESTING_DSN")
@@ -196,7 +196,7 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, worstReplica
 	)
 	proxy, proxied := newStallProxy(t, base)
 	if proxy == nil {
-		return 0, replicas, 0
+		return 0, 0, replicas, 0
 	}
 
 	// One fleet, every replica reaching the server only through the proxy - so the stall below is fleet-wide
@@ -212,12 +212,17 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, worstReplica
 		fleet.add(e)
 		assert.NoError(e.Startup(t.Context()))
 	}
-	// Derived from the policy at the distance the fleet ACTUALLY probed, not restated and not assumed: the
-	// invariant under test is how the budget DIVIDES, which must hold whatever ratio the size and the
-	// measured round trip pick for it. Read after Startup, since that is what probes.
-	budget := shardBudget(vCPUs, probedRTT(fleet.snapshot()[0], shard))
-	share := budget / replicas
-	awaitFleetSettled(t, fleet, shard, replicas, share)
+	awaitFleetSettled(t, fleet, shard, replicas, vCPUs)
+
+	// The largest pool any replica holds once settled at the full fleet. The invariant is that the outage
+	// makes nothing GROW past this, so it is read from the fleet rather than restated as a constant - each
+	// replica sizes from the RTT it probed itself, and a literal would be wrong on any rig whose round trip
+	// differs from the one it was written on.
+	for _, e := range fleet.snapshot() {
+		if db, err := e.db.Shard(shard); err == nil {
+			settledOpen = max(settledOpen, db.DB.Stats().MaxOpenConnections)
+		}
+	}
 
 	// Sample from before the outage until after the fleet has re-settled. Every reading is pure memory - a
 	// published count, a published partition, an applied pool ceiling - so the sampler keeps running at full
@@ -261,7 +266,7 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, worstReplica
 		}
 	}
 	proxy.resume()
-	awaitFleetSettled(t, fleet, shard, replicas, share)
+	awaitFleetSettled(t, fleet, shard, replicas, vCPUs)
 	close(samplerStop)
 	sampler.Wait()
 
@@ -271,7 +276,7 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, worstReplica
 		worstReplicas = min(worstReplicas, s.replicas)
 	}
 	assert.True(len(samples) > 1000, "the sampler only took %d readings, too few to have covered the outage", len(samples))
-	return worstOpen, worstReplicas, blindPartitions
+	return worstOpen, settledOpen, worstReplicas, blindPartitions
 }
 
 // TestPeerOutage_FleetWideStallGrowsNoPool takes the database away from a whole fleet and pins that nothing
@@ -310,11 +315,12 @@ func TestPeerOutage_FleetWideStallGrowsNoPool(t *testing.T) {
 	if !strings.Contains(os.Getenv("SEQUEL_TESTING_DSN"), "://") {
 		t.Skip("needs a real database server: set SEQUEL_TESTING_DSN")
 	}
-	worstOpen, worstReplicas, blindPartitions := runFleetOutage(t, 4*time.Second)
+	worstOpen, settledOpen, worstReplicas, blindPartitions := runFleetOutage(t, 4*time.Second)
 	assert.Equal(0, blindPartitions,
 		"a blind replica must select everything rather than trust a residue class it can no longer justify")
-	assert.Equal(shardBudget(8, defaultRTTMs)/4, worstOpen,
-		"a replica grew its pool to %d during the outage: an unanswered reading was taken for a smaller fleet", worstOpen)
+	assert.Equal(settledOpen, worstOpen,
+		"a replica grew its pool to %d (settled at %d) during the outage: an unanswered reading was taken for a smaller fleet",
+		worstOpen, settledOpen)
 	assert.Equal(4, worstReplicas,
 		"a replica published a fleet of %d during the outage: a reading that did not happen is not an observation of absence", worstReplicas)
 }

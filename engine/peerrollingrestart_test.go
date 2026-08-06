@@ -72,17 +72,37 @@ func (f *restartFleet) ceiling(shard int) int {
 }
 
 // awaitFleetSettled waits for every replica to agree on the fleet size and to hold the pool that size
-// implies. Agreement is what makes the assertions either side of it meaningful: a per-replica reading
-// that has not converged yet would let a stale pool pass for a settled one.
-func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, wantOpen int) {
+// implies FOR THAT REPLICA. Agreement on the count is what makes the assertions either side of it
+// meaningful: a per-replica reading that has not converged yet would let a stale pool pass for a settled
+// one.
+//
+// THE EXPECTED POOL IS DERIVED PER REPLICA, NOT SHARED, and that is a property of the sizing rather than
+// a looseness in the test. Each replica sizes from the RTT it measured itself, so two replicas the same
+// distance from one database still differ by probe jitter - 0.25 vs 0.35 ms was measured across four
+// processes on one VM, which is 48 against 56 connections at 8 vCPU. Asserting one number for the fleet
+// therefore fails on a real server for no defect, and would fail differently on a loopback database than
+// in CI. It is also the CORRECT behaviour to assert: with M = budget(RTT)/R the RTT term cancels out of
+// each replica's contribution to busy backends (B*/R apiece), so the database sees the intended total
+// however the fleet is spread.
+//
+// It reproduces shardPool's arithmetic deliberately. The formula itself is pinned against explicit RTT
+// inputs by TestPoolSizing_ShardPool; what these fleet tests isolate is the R-DIVISION and the join/leave
+// ordering, which needs the per-replica expectation to be exact rather than a tolerance nobody can
+// justify.
+func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, vcpus int) {
 	t.Helper()
 	assert := testarossa.For(t)
+	// The engine probes once at Startup and holds it, so this is stable for the life of the replica.
+	wantFor := func(e *Engine) int {
+		_, open := shardPool(ShardSpec{Index: shard, VirtualCPUs: vcpus}, int(e.maxOpenConns.Load()), wantR, probedRTT(e, shard))
+		return open
+	}
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		settled := true
 		for _, e := range fleet.snapshot() {
 			db, err := e.db.Shard(shard)
-			if err != nil || e.replicasOn(shard) != wantR || db.DB.Stats().MaxOpenConnections != wantOpen {
+			if err != nil || e.replicasOn(shard) != wantR || db.DB.Stats().MaxOpenConnections != wantFor(e) {
 				settled = false
 				break
 			}
@@ -98,7 +118,8 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, wantOpen
 			open = db.DB.Stats().MaxOpenConnections
 		}
 		assert.Equal(wantR, e.replicasOn(shard), "replica %d never settled on a fleet of %d", i, wantR)
-		assert.Equal(wantOpen, open, "replica %d never settled on a pool of %d", i, wantOpen)
+		assert.Equal(wantFor(e), open, "replica %d never settled on its own derived pool (rtt %.3fms)",
+			i, probedRTT(e, shard))
 	}
 }
 
@@ -169,11 +190,16 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 		started = append(started, e)
 		assert.NoError(e.Startup(ctx))
 	}
-	// The whole per-database budget, whatever the fleet size. Derived from the policy at the distance the
-	// fleet ACTUALLY probed rather than restated, so neither a ratio change nor a slower rig can silently
-	// invalidate the bound this test asserts.
-	budget := shardBudget(vCPUs, probedRTT(originals[0], shard))
-	awaitFleetSettled(t, fleet, shard, replicas, budget/replicas)
+	awaitFleetSettled(t, fleet, shard, replicas, vCPUs)
+
+	// The per-database budget the bound below is priced against. Taken as the MAX across the fleet rather
+	// than from one replica: each sizes from the RTT it measured itself, so the budgets differ slightly and
+	// only the largest bounds what any replica can claim. Derived from the policy at the distances actually
+	// probed rather than restated, so neither a ratio change nor a slower rig can silently invalidate this.
+	budget := 0
+	for _, e := range fleet.snapshot() {
+		budget = max(budget, shardBudget(vCPUs, probedRTT(e, shard)))
+	}
 
 	// Price the fleet continuously from here, so the assertion covers the transitions rather than the
 	// settled points either side of them - the settled points are exactly where nothing is at risk.
@@ -200,13 +226,13 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 	for i, old := range originals {
 		assert.NoError(old.Shutdown(ctx))
 		fleet.remove(old)
-		awaitFleetSettled(t, fleet, shard, replicas-1, budget/(replicas-1))
+		awaitFleetSettled(t, fleet, shard, replicas-1, vCPUs)
 
 		fresh := build()
 		fleet.add(fresh)
 		started = append(started, fresh)
 		assert.NoError(fresh.Startup(ctx), "replacement %d failed to start", i)
-		awaitFleetSettled(t, fleet, shard, replicas, budget/replicas)
+		awaitFleetSettled(t, fleet, shard, replicas, vCPUs)
 	}
 
 	close(samplerStop)
