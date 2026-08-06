@@ -413,9 +413,9 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 //
 // It publishes nothing about this replica's liveness itself - Liveness is a pure read an owner samples on
 // its own cadence, which is what keeps how often that is published independent of how long a cycle takes.
-// The independence is a correctness requirement rather than tidiness: phase one's `rn <= capacity` cut
-// early-stops only on Postgres 15+, so on MySQL/SQL Server/SQLite a deep backlog is still O(backlog),
-// measured in the tens of seconds at a few million due rows. A liveness signal gated on a cycle RETURNING
+// The independence is a correctness requirement rather than tidiness: the band scan is O(due rows at the
+// band) on every dialect - see ScanBand - so a deep backlog runs it for tens of seconds at a few million
+// due rows, and nothing in the query early-stops. A liveness signal gated on a cycle RETURNING
 // would let one such scan drop a perfectly healthy replica out of its own fleet - which should mean "the
 // process is stuck", nothing less.
 func (p *Piston) Run(ctx context.Context) {
@@ -632,13 +632,19 @@ func (p *Piston) stealGrace() time.Duration {
 }
 
 // ScanBand implements pipeline.Source. It returns this shard's minimum due priority band and one
-// aggregate row per fairness key at that band - O(distinct keys), never O(backlog).
+// aggregate row per fairness key at that band.
 //
-// The per-key count is CAPPED at the cache capacity rather than exact: it is MAX(rn) under an
-// `rn <= capacity` cut, not COUNT(*) OVER. The cap is lossless, since no key can be assigned more than
-// the whole batch, and it is what lets the scan stop touching a key's rows past capacity instead of
-// counting the whole partition - the O(backlog) cost that made a single-key flood scan millions of rows
-// every cycle.
+// It RETURNS O(distinct keys) rows but COSTS O(due rows at the band), on every dialect. The window
+// function ranks every matching row before the outer `rn <= capacity` cut discards any, so the cap bounds
+// the reported COUNT and nothing else - not the scan, and not the wire either, since the GROUP BY emits
+// one row per key whether or not the cut fires. Measured on PostgreSQL at ~0.004-0.005ms per due row over
+// a fixed floor, and 4x the backlog on one shard made the scan 2.85x slower - super-linear, because a
+// slower scan deepens the backlog it is scanning. Sharding divides this term; nothing in the query does.
+//
+// The per-key count is CAPPED at the cache capacity rather than exact: MAX(rn) under the `rn <= capacity`
+// cut, not COUNT(*) OVER. Capping is what the planner needs - the count becomes the key's remaining
+// demand, and no key can be assigned more than the whole batch - so the cap is lossless there even though
+// it buys nothing on the scan.
 //
 // The partition filters the ROWS this replica tallies but deliberately NOT the MIN(priority) subquery:
 // the band is a cluster-wide fact, so mining it from one replica's slice would let replicas disagree on
@@ -710,14 +716,16 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 }
 
 // FetchSteps implements pipeline.Source. It loads, per chosen fairness key, up to perKey of this shard's
-// oldest due steps at the given band, keyed and ordered oldest-first - the order the plan replay expects.
+// oldest due steps at the given band, keyed and ordered oldest-first WITHIN each key - which is all the
+// plan replay reads. Rows are grouped by key rather than sorted across keys.
 //
 // perKey is a UNIFORM cap, the max per-key demand across this shard's slice rather than each key's exact
-// demand, which keeps the fetch one IN-list query (an exact per-key cap would need a per-key
-// VALUES/LATERAL join, non-trivial across four dialects). The cost is at most len(keys)*perKey rows, and
-// both factors are bounded by the cache capacity - so the fetch is bounded by capacity^2 regardless of
-// how many fairness keys exist. That independence from key cardinality is the whole point: at high
-// cardinality perKey is ~1, so the fetch is ~capacity.
+// demand. The chosen keys travel as ONE json-encoded parameter and are joined back to rows in SQL, so the
+// bind count is FIXED at four or five however many keys the plan chose - see fetchQuery.
+//
+// Cost is O(len(keys) x perKey) rows examined on pgx/mysql/mssql, where the per-key cap is a LIMIT on an
+// ordered index scan and therefore stops it. SQLite has no lateral join, so it ranks every due row of every
+// chosen key and cuts afterwards - O(due rows at the band), the same shape ScanBand has everywhere.
 //
 // The band is bound (priority=?), not re-mined from a MIN subquery: the plan committed to this band, and
 // re-mining could pick a lower one that arrived between phases and mismatch the chosen keys. A bound
@@ -728,36 +736,15 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 		return nil, nil
 	}
 	part, partArgs := p.partitionPredicate()
-	args := make([]any, 0, len(keys)+len(partArgs)+2)
-	args = append(args, band)
-	for _, k := range keys {
-		args = append(args, k)
+	stmt, args, err := fetchQuery(p.db.DriverName(), band, keys, perKey, part, partArgs)
+	if err != nil {
+		return nil, errors.Trace(err)
 	}
-	args = append(args, partArgs...)
-	args = append(args, perKey)
-	placeholders := strings.Repeat("?,", len(keys)-1) + "?"
-	// rn IS the oldest-first ordinal - the window already ranks each key by (created_at, step_id) - so
-	// ordering by it makes the result exactly right BY CONSTRUCTION. This used to select
-	// DATE_DIFF_MILLIS(NOW_UTC(), created_at) instead and re-sort each key in Go by age descending with a
-	// step_id tiebreak, which agrees only incidentally: age is the same ordering read backwards through
-	// millisecond-truncated arithmetic, so it lands on the step_id tiebreak for anything created inside one
-	// millisecond. Ordering on rn drops the per-row date arithmetic, the nullable scan, the intermediate
-	// struct and the sort. The age was a leftover from the engine's version, where it fed a cross-shard
-	// merge that does not exist here - the planner has already assigned the slots.
-	// Deferred before the query for the same reason as in ScanBand: the turn has to outlive the rows.
+	// The turn must outlive the ROWS, not just the call, so this is deferred before the query - same
+	// ordering argument as in ScanBand.
 	pass := turnstile.WaitTurn(ctx)
 	defer pass.Return()
-	rows, err := p.db.QueryContext(ctx,
-		"SELECT step_id, fairness_key FROM ("+
-			"SELECT step_id, fairness_key,"+
-			" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
-			" FROM dwarf_steps"+
-			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
-			" AND priority=? AND fairness_key IN ("+placeholders+")"+
-			part+
-			") t WHERE rn<=? ORDER BY fairness_key, rn",
-		args...,
-	)
+	rows, err := p.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -777,7 +764,9 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	for rows.Next() {
 		var stepID int
 		var key string
-		if err := rows.Scan(&stepID, &key); err != nil {
+		// Every dialect's query projects (fairness_key, step_id) in that order - see fetchQuery, which
+		// keeps the projection uniform precisely so this loop is shared.
+		if err := rows.Scan(&key, &stepID); err != nil {
 			return nil, errors.Trace(err)
 		}
 		if replicas > 1 && stepID%replicas != ordinal {

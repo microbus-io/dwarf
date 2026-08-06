@@ -35,9 +35,8 @@ in the pipeline, so the loop holds no timing policy of its own.
 ## `Liveness` — a counter, and why publishing is somebody else's job
 
 **How often this replica's liveness is published must not depend on how long a cycle takes**, and that was
-a real bug when the two shared a goroutine. Phase one's `rn <= capacity` cut early-stops only on **Postgres
-15+**; on MySQL, SQL Server and SQLite a deep backlog is still O(backlog), measured in the **tens of
-seconds** at a few million due rows. A signal gated on a cycle *returning* lets one such scan drop a
+a real bug when the two shared a goroutine. The band scan is O(due rows at the band) on **every** dialect
+(see below), measured in the **tens of seconds** at a few million due rows. A signal gated on a cycle *returning* lets one such scan drop a
 **healthy** replica out of its own fleet — shrinking every peer's pool divisor and reshuffling every
 ordinal — exactly the outcome that should mean "the process is stuck, nothing less." Reporting rather than
 publishing removes the coupling by construction: the reader samples on its own clock.
@@ -92,7 +91,23 @@ circumstance a dispatching piston meets constantly. Here it is a configured **mo
 ## The two queries
 
 They implement `pipeline.Source`, which is the whole reason the piston owns the pipeline — nothing else
-has the handle. Their per-query rationale lives in their doc comments; the cross-cutting rule is:
+has the handle. Their per-query rationale lives in their doc comments; the cross-cutting rules are:
+
+**The band scan costs O(due rows at the band), and `rn <= capacity` does not change that — do not
+re-derive it as a fix.** The cut filters *after* the window function has ranked every matching row, so it
+bounds the reported count, not the scan, and not the wire either (the `GROUP BY` emits one row per key
+regardless). Two A/Bs on PostgreSQL at fan-out width 1024 / 256 keys / 6 shards cut the cap — one of them
+genuinely 18 → 6 rows per key per shard — and moved phase time **not at all** (50.2 → 50.6 ms; 46.2 →
+47.8 ms, both inside noise). That is the measurement identifying the window function as the cost. PostgreSQL
+15's WindowAgg run condition does not rescue it either: with `PARTITION BY` present the node stops
+*evaluating* past the cut but still pulls every remaining tuple to find the partition boundary, so only the
+single-partition-at-plan-time case can stop the node outright. The fitted cost is **~0.004–0.005 ms per due
+row** over a floor, and 4× the backlog on one shard made the scan **2.85× slower** while costing 34% of
+throughput (3,640 → 2,404 steps/s) — super-linear, because a slower scan deepens the backlog it scans.
+Sharding divides the variable term (185 → 69 ms mean as backlog/shard fell 16,384 → 2,730); nothing inside
+the query does. A single fairness key is the degenerate case — the `PARTITION BY` collapses to one
+partition over the whole due backlog — and it puts a fan-out workload into a **bistable** regime: healthy
+~2,400 steps/s or collapsed ~550, never between.
 
 **The partition filters the ROWS this replica tallies but deliberately NOT the `MIN(priority)` subquery.**
 The band is a cluster-wide fact, so mining it from one replica's slice would let replicas disagree about
@@ -205,13 +220,98 @@ completed step is ~9.6 — in real terms 7.6% of round trips, on a run already a
 allowed**. The missing throughput was the slow database, not the steal. Do not build the debounce without
 evidence that names a cost the grace does not already bound.
 
-**`FetchSteps` orders on `rn`, not on a recomputed age.** The window already ranks each key by
-`(created_at, step_id)`, so `ORDER BY fairness_key, rn` is oldest-first *by construction*. An earlier cut
-selected `DATE_DIFF_MILLIS(NOW_UTC(), created_at)` and re-sorted each key in Go by age descending — the same
-ordering read backwards through millisecond-truncated arithmetic, agreeing only incidentally (anything
-created inside one millisecond fell through to the `step_id` tiebreak, which is also what its test
-exercised). The age was a leftover from the engine's version, where it fed a cross-shard merge that does not
-exist here: the planner has already assigned the slots.
+**`FetchSteps` orders each key oldest-first, never on a recomputed age.** Both shapes get it by
+construction — `(created_at, step_id)` is the lateral's `ORDER BY` and the window's ranking alike. An
+earlier cut selected `DATE_DIFF_MILLIS(NOW_UTC(), created_at)` and re-sorted each key in Go by age
+descending — the same ordering read backwards through millisecond-truncated arithmetic, agreeing only
+incidentally (anything created inside one millisecond fell through to the `step_id` tiebreak, which is also
+what its test exercised). The age was a leftover from the engine's version, where it fed a cross-shard merge
+that does not exist here: the planner has already assigned the slots. Note the ordering is per key only —
+rows are grouped by key, not sorted across them, which is all `assemble` reads.
+
+## `FetchSteps` passes its keys as ONE json bind, and that is a correctness bound
+
+**One bind per key overruns SQL Server's hard ceiling of 2,100 parameters per statement at ~2,095 keys.**
+The key count is bounded only by the candidate cache's capacity — twice the worker count — so a
+192-connection pool at `workersPerConnBudget = 8` plans at **3,072**, and a per-tenant fairness key with a
+few thousand active tenants puts `len(plan.Keys)` right there. SQLite's own ceiling
+(`SQLITE_MAX_VARIABLE_NUMBER`) is 32,766 on a current build but **999** before 3.32.
+
+The failure is quiet, which is what makes it worth a doc section. A failed fetch is the pipeline's "push
+nothing, clear nothing" path — the tally already succeeded and is still true — so the shard goes on
+publishing an honest band claim while supplying zero candidates, every cycle, for as long as the workload's
+cardinality holds. It logs through `Run`, but there is no error counter; the metric signature is
+`fetch_steps` recording a normal duration with `selected` at zero on one shard. Pinned by
+`TestFetchQuery_BindCountIsFixed`.
+
+### The lateral's early stop is worth 256x, measured
+
+The `rn <= perKey` cut runs **after** the window function has ranked every row, so it bounds the rows
+returned and not the rows read. PostgreSQL 18.1, 400k due rows over 4 fairness keys at one band, `perKey=8`,
+`EXPLAIN (ANALYZE, BUFFERS)`:
+
+| shape | rows read | buffers | time |
+|---|---|---|---|
+| window + `rn<=?` | **400,000** | 7,408 | 64.4 ms |
+| `LIMIT` in `CROSS JOIN LATERAL` | **32** | 13 | **0.252 ms** |
+
+**PostgreSQL 15's WindowAgg run condition does not rescue the first shape, and the plan says so out loud** —
+it prints `Run Condition: (row_number() OVER w1 <= 8)` and *still* reports `rows=400000` out of the index
+scan. With `PARTITION BY` present the node stops evaluating past the cut but must keep pulling tuples to
+find the partition boundary; only the single-partition-at-plan-time case can stop the node outright. Do not
+re-derive a per-key cap as a fix for scan cost on any dialect: the cap is what the *planner* needs, and on
+the ranking shape it buys nothing on the scan.
+
+The gap widens with the backlog, since the old shape is proportional to it and the new one is flat.
+
+### The lateral join is NOT available on two of the four dialects
+
+| dialect | key list | per-key cap | cost |
+|---|---|---|---|
+| pgx | `jsonb_array_elements_text` (1 bind) | `LIMIT` in `CROSS JOIN LATERAL` | O(keys × perKey) |
+| mssql | `OPENJSON` (1 bind) | `TOP` in `CROSS APPLY` | O(keys × perKey) |
+| sqlite | `json_each` (1 bind) | `WHERE rn<=?` after the window | O(due rows at the band) |
+| mysql | `IN`-list (**one bind per key**) | `WHERE rn<=?` after the window | O(due rows at the band) |
+
+**mysql is the one branch that still binds per key, and both halves of that are load-bearing.**
+
+*No lateral*, because the driver name covers MySQL **and** MariaDB and MariaDB has no lateral derived tables
+at any version — `MDEV-19078` is open, and 10.11 rejects `CROSS JOIN LATERAL` outright. (MariaDB's "lateral
+derived optimization" is an internal split-materialization strategy, not the keyword; the name invites exactly
+this mistake.) CI runs `mysql:8`, so a lateral would pass every pipeline and fail on half of a supported
+production dialect — the ambiguity `internal/staterefs` names when it says a value keyed on this driver name
+cannot tell the two engines apart, except here it is not moot.
+
+*No `JSON_TABLE` either*, and this one shipped as a bug before it was caught. MySQL 8 gives the extracted
+column the **server's** default collation while `dwarf_steps.fairness_key` carries the **database's**, so the
+join predicate raises `Error 1267: Illegal mix of collations` — measured on MySQL 8.4 with a
+`utf8mb4_0900_ai_ci` server against a `utf8mb4_general_ci` database. **MariaDB cannot reproduce it** (it has
+no `utf8mb4_0900` family), so it passes every MariaDB run and fails on the engine CI uses; a local MariaDB is
+not a proxy for MySQL here. A bind parameter is immune: its collation is COERCIBLE, so the column's wins.
+That makes the `IN`-list the *safe* shape on this dialect rather than merely the old one — and it keeps the
+supported-version floor where it was, since nothing needs `JSON_TABLE`.
+
+One bind per key is sound *here specifically*: MySQL's ceiling is 65,535 placeholders against a key count
+bounded by the cache capacity (twice the worker count, a few thousand on a large pool) — better than 20x of
+margin. The overflow this file exists to fix is SQL Server's hard 2,100, which no other dialect approaches.
+Pinned by `TestFetchQuery_BindCountIsFixed`, which asserts the mysql exception explicitly rather than skipping
+it.
+
+**A `LATERAL` for MySQL-only was measured and is not currently worth its machinery.** MySQL 8.0.14+ does have
+one, and at 400k due rows over 4 keys it took the fetch from **581ms to 200ms (2.9x)** — real, but two orders
+off what the same shape gives Postgres, because MySQL plans the lateral's `ORDER BY created_at, step_id` as
+**`Using filesort`** rather than reading it off the index, so it sorts each key's whole run and the `LIMIT`
+bounds only the output. Taking it would also require distinguishing MySQL from MariaDB at runtime — a
+server-version probe this codebase has deliberately avoided. Revisit if the filesort can be eliminated, which
+is where the large remaining factor is.
+
+So mysql and sqlite keep `ScanBand`'s cost shape, and closing that for them needs a different mechanism than
+the one that closed it for pgx and mssql.
+
+**The mssql argument order is not copyable.** `CROSS APPLY` puts `TOP (?)`'s cap *before* the band, where
+every other dialect binds the cap last. `TestFetchQuery_PlaceholdersMatchArgs` counts `?` against `len(args)`
+for every dialect crossed with every partition shape (none / strict / stealing, which contribute 0, 2 and 6
+binds), because a hand-ordered arg slice is exactly the thing review does not catch.
 
 ## Metrics take a `Meter`, not a `MeterProvider`
 
