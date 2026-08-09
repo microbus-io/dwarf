@@ -41,14 +41,15 @@ are all in `internal/pipeline/CLAUDE.md`. What belongs *here* are the three cons
 
 - **Two concurrent connections per shard** while a scan and a fetch overlap. Structural and visible at this
   level, where a goroutine hidden inside `ScanBand` would have concealed it.
-- **CADENCE IS PER LOOP, and nothing here may key off "the" period.** `SetInterval`/`SetMinGap` set both, as
-  a convenience for an owner deriving one number — that is not a claim the two agree, and the moment they
-  diverge a shared threshold is right for at most one loop. So `Liveness` compares each loop's `WorkingFor`
+- **CADENCE IS PER LOOP, and nothing here may key off "the" period.** The only setters are
+  `SetTallyCadence`/`SetSupplyCadence`, one per loop, and there is deliberately no combined knob over both:
+  the two are derived from different quantities (the supply loop paces against the drain it fills for, the
+  tally loop against a scan outrunning its own interval), so one number over both expresses a cadence no
+  owner means. Consequently every threshold here asks the LOOP: `Liveness` compares each loop's `WorkingFor`
   against **its own** `Period()`, and `stealGrace` takes the **longer** of the two (reaching one's own work
   is a full round trip: a scan to tally it, then a supply cycle to fetch it — the slower loop is what bounds
   how fast a healthy owner gets there, and keying off the faster one under-states the grace, which admits a
-  healthy peer's work). `Piston.Interval()`/`MinGap()` report the knob an owner last set, not a loop's
-  effective cadence. Pinned by `TestPiston_CadenceIsPerLoop`, which sets the two loops apart deliberately.
+  healthy peer's work). Pinned by `TestPiston_CadenceIsPerLoop`, which sets the two loops apart deliberately.
 - **`Liveness`'s turn count is the MINIMUM of the two loops'** — see below.
 - **The steal must not acquire a flag one loop writes and the other reads** — see below. Anything shared
   between them is sampled at an arbitrary phase of the other's cadence, and the phases are not independent:
@@ -578,7 +579,7 @@ package borrows (the cache partition), which no injection into `pipeline` would 
 the point rather than the call.
 
 **`pipeline` gets none, and that is not an oversight.** Every fault a test could want of a cycle is
-reachable through its two source interfaces — which are this type — or through `SetInterval`/`SetMinGap`,
+reachable through its two source interfaces — which are this type — or through the per-loop cadence setters,
 and `TallyResult`/`SupplyResult` give a caller everything a counting checkpoint would. The rule that separates the two
 cases: a seam inside **pure logic** is a signal a dependency should have been injected instead; a seam at
 an **I/O boundary** is reaching the one thing that cannot be injected away. Do not add one to `planner`

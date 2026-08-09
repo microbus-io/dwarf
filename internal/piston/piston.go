@@ -290,31 +290,37 @@ func (p *Piston) Liveness() (turns uint64, busy, idle bool) {
 	return turns, busy, p.idle.Load()
 }
 
-// SetInterval sets BOTH loops' cycle period, start of one cycle's work to the next. See
-// pipeline.Tallier.SetInterval.
+// SetTallyCadence and SetSupplyCadence pace the two loops SEPARATELY, and there is deliberately no setter
+// for both at once.
 //
-// It is one knob over two independently paced loops, which is a convenience for an owner that derives a
-// single number - not a statement that the two must agree. NOTHING INSIDE THIS PACKAGE MAY ASSUME THEY DO:
-// anything reasoning about a loop's cadence asks that loop for its own Period(), because the day the two
-// diverge a shared threshold is right for at most one of them.
-func (p *Piston) SetInterval(d time.Duration) {
-	p.tallier.SetInterval(d)
-	p.supplier.SetInterval(d)
+// The loops are independent by design - the whole reason the piston has two - so "the" cycle period is not a
+// quantity that exists here. A single knob over both would let an owner express a cadence it does not mean,
+// and would tempt anything inside this package into keying a threshold off whichever loop the facade
+// happened to report; both are mistakes this API is shaped to make unavailable. Anything reasoning about how
+// often a loop comes round asks that loop, through Period().
+//
+// Both are live: the values are read once per cycle rather than captured, so an owner re-deriving them takes
+// effect on the very next cycle of each loop without a restart.
+func (p *Piston) SetTallyCadence(interval, minGap time.Duration) {
+	p.tallier.SetInterval(interval)
+	p.tallier.SetMinGap(minGap)
 }
 
-// Interval is the cycle period both loops were last SET to, for an owner reading back its own knob. It is
-// not a loop's effective cadence - ask the loop.
-func (p *Piston) Interval() time.Duration { return p.tallier.Interval() }
-
-// SetMinGap sets BOTH loops' minimum quiet time between cycles. See pipeline.Tallier.SetMinGap and the
-// caveat on SetInterval.
-func (p *Piston) SetMinGap(d time.Duration) {
-	p.tallier.SetMinGap(d)
-	p.supplier.SetMinGap(d)
+// TallyCadence is the tally loop's configured pacing.
+func (p *Piston) TallyCadence() (interval, minGap time.Duration) {
+	return p.tallier.Interval(), p.tallier.MinGap()
 }
 
-// MinGap is the quiet time both loops were last SET to; see Interval.
-func (p *Piston) MinGap() time.Duration { return p.tallier.MinGap() }
+// SetSupplyCadence paces the supply loop; see SetTallyCadence.
+func (p *Piston) SetSupplyCadence(interval, minGap time.Duration) {
+	p.supplier.SetInterval(interval)
+	p.supplier.SetMinGap(minGap)
+}
+
+// SupplyCadence is the supply loop's configured pacing.
+func (p *Piston) SupplyCadence() (interval, minGap time.Duration) {
+	return p.supplier.Interval(), p.supplier.MinGap()
+}
 
 // SetPartitionFunc supplies the replica partition: the (replicas, ordinal) pair that restricts this
 // replica's selection to its own residue class of step ids, so replicas sharing a database select

@@ -110,12 +110,16 @@ so a starting loop looks immediately rather than paying a cadence delay at start
 an interval-only rule computes a non-positive wait and the next cycle starts immediately — a 100% duty
 cycle in the one regime the rate limit exists for. The gap makes it unrepresentable.
 
-**On the Supplier it is not a fuse at all but the BINDING supply rate, on every dialect, whenever the
-derived interval falls below it** — which is any pinned `SetWorkers`, since the interval is
-`capacity/(headroom x drain)` and a pinned worker count shrinks the capacity while the drain still comes off
-the connection budget. Measured at 17.8ms derived against a 20ms floor, i.e. the floor set the rate; the
-same arm discarded 85% of what it selected. Anything re-deriving the Supplier's cadence must move this knob
-too, not just the interval. It is *additionally* load-bearing on mysql and sqlite, where `FetchSteps` keeps
+**A CONSTANT gap on the Supplier is not a fuse at all but the BINDING supply rate, wherever the derived
+interval falls under it.** **A caller that pins this loop's gap above its interval is setting the supply
+rate, whether or not it means to** — and it does so silently, since nothing here can tell a gap meant as a
+fuse from one meant as a rate. So the Supplier's gap is derived from the Supplier's own period and clamped
+to never exceed the constant, which keeps it a fuse at both ends: it cannot become the rate at a short
+period, and it cannot throttle a shard whose period is long. Measured at the derived cadence with a flat
+constant governing instead: **85% discard and +42% host CPU**, against a 17.8ms period held at the 20ms
+floor. The arithmetic and the clamp live in `engine/CLAUDE.md`.
+
+The gap is *additionally* load-bearing on mysql and sqlite, where `FetchSteps` keeps
 the ranking shape: it is flat only on pgx and mssql, where the per-key cap is a `LIMIT` inside a lateral
 join. mysql and sqlite kept the ranking shape (MariaDB has no lateral at any
 version, and MySQL 8's `JSON_TABLE` trips a cross-collation comparison — see `internal/piston/CLAUDE.md`),

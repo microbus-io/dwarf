@@ -58,12 +58,28 @@ const (
 	// and peers plan it a cycle after that. Priority ORDER is never inverted regardless, since every cycle
 	// plans the global minimum band; what this bounds is when better work starts, not whether it wins.
 	refillIntervalCap = 1 * time.Second
+	// supplyGapDivisor turns the supply loop's derived period into its quiet-time fuse.
+	//
+	// THE GAP IS A FRACTION OF THE DRAIN TIME, not a constant, because a constant cannot stay a fuse. The
+	// period is the time the workers take to drain one buffer's worth (see deriveRefillInterval), and a fixed
+	// 20ms gap silently BECOMES the supply rate wherever that period lands under it - which is any pinned
+	// SetWorkers, where it under-supplies a small cache against its own drain. It is applied under a
+	// min(DefaultMinGap, ...) so it only ever SCALES THE GAP DOWN - the measured-good 20ms stands wherever the
+	// period is 60ms or longer, and the divisor bites only below that. Raising it instead would throttle
+	// supply on precisely the slowest shards (333ms at the 1s refillIntervalCap, where a 900ms fetch would
+	// cost a 1.233s period against 1s), which is the opposite of what the fuse is for. Three is not a tuned
+	// number: it is the coarsest divisor that stays clear of the period at the derived low end.
+	//
+	// The TALLY loop keeps the flat constant. It fills no buffer, so it has no drain to derive from, and its
+	// fuse is against a scan that outruns its own interval - a different quantity entirely.
+	supplyGapDivisor = 3
 )
 
 // deriveRefillInterval computes ONE shard's cycle period:
 //
 //	bufferShare = capacity/N        the most one cycle can hand this partition
-//	drain       = min(sustainedDrainPerConn * poolConns, sustainedDrainPerVCPU * vCPUs/R)
+//	drain       = min(sustainedDrainPerConn * min(poolConns, dispatchers),
+//	                  sustainedDrainPerVCPU * vCPUs/R)
 //	T           = bufferShare / (headroom * drain)
 //
 // The drain takes the TIGHTER of two channels, since sustained throughput cannot exceed either: this
@@ -77,9 +93,16 @@ const (
 // It stays a formula rather than the ~67ms it evaluates to at the reference config, because bufferShare
 // tracks the cache-sizing constants: a change to worker or cache sizing rescales the period with it,
 // instead of leaving a pinned number that exceeds what the buffer can cover.
-func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas int) time.Duration {
-	drain := float64(sustainedDrainPerConn) * float64(poolConns) // connection channel
-	if virtualCPUs > 0 {                                         // cap by the CPU ceiling, when it is known
+func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas, dispatchers int) time.Duration {
+	// WORKERS BOUND THE DRAIN, and leaving them out is what makes a pinned SetWorkers derive a nonsense
+	// period. They are what CONSUMES candidates: one worker cannot drain a connection budget's worth however
+	// many connections exist, and it holds no connection while its task runs. Without this term the buffer
+	// shrinks with the worker count (capacity is twice it) while the assumed drain does not, so the period
+	// collapses - measured at 0.28ms for SetWorkers(1) against a 30-connection pool, i.e. far under the gap,
+	// which then silently becomes the supply rate instead of the fuse it is meant to be. A worker that never
+	// waits for a connection drains at the same per-connection rate, which is why one constant serves both.
+	drain := float64(sustainedDrainPerConn) * float64(min(poolConns, max(1, dispatchers)))
+	if virtualCPUs > 0 { // cap by the CPU ceiling, when it is known
 		drain = min(drain, float64(sustainedDrainPerVCPU)*float64(virtualCPUs)/float64(max(1, replicas)))
 	}
 	if bufferShare <= 0 || drain <= 0 {
@@ -98,7 +121,15 @@ func (e *Engine) recomputeRefillIntervals() {
 	// max(1, ...) because a cache smaller than the shard count divides to zero, which reaches the degenerate
 	// guard and answers with the 1s cap - backwards for a tiny cache, which drains instantly and wants
 	// frequent scans. The case is a small cache, not an unknown one.
-	share := max(1, e.cache.Capacity()/n)
+	capacity := e.cache.Capacity() // read ONCE: share and dispatchers are two views of one number
+	share := max(1, capacity/n)
+	// The workers draining THIS shard's partition, which is share/2 because the cache is sized as twice the
+	// whole crew - read back off it rather than re-derived, so it cannot drift from what the buffer was built
+	// for. EVERY term here is per-shard (the pool is this shard's, the vCPU ceiling is this shard's), and the
+	// drain must be too: one crew pops across all N partitions, so crediting the whole of it to each one
+	// over-states the drain by exactly N and collapses the period - 1.04ms on 8 shards, against the 8.33ms the
+	// worker term exists to hold, i.e. straight back into the over-supply regime it was added to close.
+	dispatchers := max(1, share/2)
 	override := time.Duration(e.refillIntervalOverride.Load())
 	pinned := int(e.maxOpenConns.Load()) // >0 when SetMaxOpenConns pins every shard's pool
 	e.shardsLock.Lock()
@@ -110,11 +141,13 @@ func (e *Engine) recomputeRefillIntervals() {
 	e.shardsLock.Unlock()
 	for idx, p := range e.pistons {
 		if override > 0 {
-			p.SetInterval(override)
-			// The gap is the fuse against a 100%-duty-cycle scan loop, and a bench sweep measuring below it
-			// is the one caller entitled to say so explicitly. Only lowered, never raised: a 500ms pinned
-			// interval keeps the ordinary 20ms gap.
-			p.SetMinGap(min(pipeline.DefaultMinGap, override))
+			// The gap is the fuse against a 100%-duty-cycle loop, and a bench sweep measuring below it is the
+			// one caller entitled to say so explicitly. Only lowered, never raised: a 500ms pinned interval
+			// keeps the ordinary 20ms gap. An override pins BOTH loops - it exists to measure the refiller
+			// unpaced, and pacing half of it would measure neither arm.
+			gap := min(pipeline.DefaultMinGap, override)
+			p.SetTallyCadence(override, gap)
+			p.SetSupplyCadence(override, gap)
 			continue
 		}
 		// Pass the shard's ACTUAL pool (shardPool resolves the SetMaxOpenConns pin) and its RAW declared
@@ -125,7 +158,8 @@ func (e *Engine) recomputeRefillIntervals() {
 		// period from any other shard's fleet would measure the buffer against the wrong drain rate.
 		replicas := e.replicasOn(idx)
 		_, pool := shardPool(spec, pinned, replicas, rtts[idx])
-		p.SetInterval(deriveRefillInterval(share, spec.VirtualCPUs, pool, replicas))
-		p.SetMinGap(pipeline.DefaultMinGap)
+		derived := deriveRefillInterval(share, spec.VirtualCPUs, pool, replicas, dispatchers)
+		p.SetTallyCadence(derived, pipeline.DefaultMinGap)
+		p.SetSupplyCadence(derived, min(pipeline.DefaultMinGap, derived/supplyGapDivisor))
 	}
 }

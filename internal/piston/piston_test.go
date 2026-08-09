@@ -70,8 +70,8 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.SetInterval(0)
-	p.SetMinGap(0)
+	p.SetTallyCadence(0, 0)
+	p.SetSupplyCadence(0, 0)
 	return &rig{p: p, db: db, planner: pl, cache: cache}
 }
 
@@ -276,7 +276,8 @@ func TestPiston_PartitionSplitsSelectionAcrossReplicas(t *testing.T) {
 	// 4 x DefaultMinGap = 80ms, which six inserts plus two fetches outrun on a slow dialect (measured
 	// failing on MySQL 8 and SQL Server, passing on the rest). Pinning the interval makes the grace 2s,
 	// an order of magnitude clear of this fixture's own setup, without leaving the production default.
-	r.p.SetInterval(500 * time.Millisecond)
+	r.p.SetTallyCadence(500*time.Millisecond, 0)
+	r.p.SetSupplyCadence(500*time.Millisecond, 0)
 
 	var all []int
 	for i := range 6 {
@@ -321,7 +322,8 @@ func TestPiston_PartitionDoesNotNarrowTheBand(t *testing.T) {
 
 	// Same grace argument as TestPiston_PartitionSplitsSelectionAcrossReplicas: the residue class only
 	// excludes while nothing has aged, so the grace has to dominate this fixture's own setup.
-	r.p.SetInterval(500 * time.Millisecond)
+	r.p.SetTallyCadence(500*time.Millisecond, 0)
+	r.p.SetSupplyCadence(500*time.Millisecond, 0)
 
 	best := r.insertStep(t, 1, 1, "urgent", 1) // band 1, will belong to one ordinal only
 	r.insertStep(t, 2, 7, "bulk", 1)
@@ -349,7 +351,8 @@ func TestPiston_RunDispatchesAndReportsItsTurns(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t)
-	r.p.SetInterval(5 * time.Millisecond)
+	r.p.SetTallyCadence(5*time.Millisecond, 0)
+	r.p.SetSupplyCadence(5*time.Millisecond, 0)
 
 	turns, busy, idle := r.p.Liveness()
 	assert.Equal(uint64(0), turns, "nothing has turned yet")
@@ -409,9 +412,8 @@ func TestPiston_RunSuppliesWhileTheScanIsStalled(t *testing.T) {
 	assert.NoError(r.p.TallyCycle(context.Background()).Err)
 
 	// Now stall the tally loop and let Run drive both. Only the supply loop can make progress.
-	r.p.SetInterval(time.Hour)
-	r.p.supplier.SetInterval(time.Millisecond)
-	r.p.supplier.SetMinGap(time.Millisecond)
+	r.p.SetTallyCadence(time.Hour, 0)
+	r.p.SetSupplyCadence(time.Millisecond, time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -444,7 +446,8 @@ func TestPiston_IdleWithdrawsAgainstARunningLoop(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t)
-	r.p.SetInterval(time.Millisecond)
+	r.p.SetTallyCadence(time.Millisecond, 0)
+	r.p.SetSupplyCadence(time.Millisecond, 0)
 	r.insertStep(t, 1, 5, "alpha", 1)
 
 	var entered atomic.Int32
@@ -517,7 +520,8 @@ func TestPiston_RunStopsOnCancel(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t)
-	r.p.SetInterval(30 * time.Second) // would hang if cancellation were ignored
+	r.p.SetTallyCadence(30*time.Second, 0)
+	r.p.SetSupplyCadence(30*time.Second, 0) // would hang if cancellation were ignored
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -683,7 +687,8 @@ func TestPiston_NewValidates(t *testing.T) {
 	assert.Equal(1, r.p.Shard())
 	assert.Equal(pipeline.DefaultInterval, func() time.Duration {
 		p, _ := New(1, r.db, r.planner, r.cache)
-		return p.Interval()
+		i, _ := p.TallyCadence()
+		return i
 	}(), "a fresh piston inherits the pipeline's paced default")
 
 	_, err := New(0, r.db, r.planner, r.cache)
@@ -740,10 +745,15 @@ func TestPiston_SettersAreLive(t *testing.T) {
 	assert := testarossa.For(t)
 	r := newRig(t)
 
-	r.p.SetInterval(77 * time.Millisecond)
-	assert.Equal(77*time.Millisecond, r.p.Interval())
-	r.p.SetMinGap(11 * time.Millisecond)
-	assert.Equal(11*time.Millisecond, r.p.MinGap())
+	// Set the two loops APART, which also pins that neither setter reaches the other's pacer.
+	r.p.SetTallyCadence(77*time.Millisecond, 11*time.Millisecond)
+	r.p.SetSupplyCadence(31*time.Millisecond, 7*time.Millisecond)
+	ti, tg := r.p.TallyCadence()
+	assert.Equal(77*time.Millisecond, ti)
+	assert.Equal(11*time.Millisecond, tg)
+	si, sg := r.p.SupplyCadence()
+	assert.Equal(31*time.Millisecond, si, "the supply loop keeps its own interval")
+	assert.Equal(7*time.Millisecond, sg, "and its own gap")
 	r.p.SetLogger(nil)
 	assert.NotNil(r.p.logger.Load(), "a nil logger restores the discarding default, never nil")
 	assert.NoError(r.p.SetMeter(nil), "a nil meter restores no-op instruments")
@@ -761,9 +771,8 @@ func TestPiston_CadenceIsPerLoop(t *testing.T) {
 
 	// The SUPPLY loop is the slow one here, which is the case a tallier-only derivation gets wrong. Both
 	// values sit above DefaultMinGap so the floor is not what is being measured.
-	r.p.SetInterval(50 * time.Millisecond)
-	r.p.SetMinGap(0)
-	r.p.supplier.SetInterval(time.Second)
+	r.p.SetTallyCadence(50*time.Millisecond, 0)
+	r.p.SetSupplyCadence(time.Second, 0)
 
 	assert.Equal(50*time.Millisecond, r.p.tallier.Period(), "the tally loop keeps its own short period")
 	assert.Equal(time.Second, r.p.supplier.Period(), "the supply loop keeps its own long one")
@@ -774,8 +783,8 @@ func TestPiston_CadenceIsPerLoop(t *testing.T) {
 		"the steal grace must follow the slower loop; keying off the tallier would give %v", 4*50*time.Millisecond)
 
 	// And the floor still applies per loop when a caller pins the cadence to zero.
-	r.p.SetInterval(0)
-	r.p.supplier.SetInterval(0)
+	r.p.SetTallyCadence(0, 0)
+	r.p.SetSupplyCadence(0, 0)
 	assert.Equal(pipeline.DefaultMinGap, r.p.tallier.Period(), "a zeroed loop floors at the constant")
 	assert.Equal(4*pipeline.DefaultMinGap, r.p.stealGrace(), "so the grace can never reach zero")
 }
@@ -989,8 +998,8 @@ func TestPiston_FetchPrefersItsOwnClass(t *testing.T) {
 	r := newRig(t)
 	// Ordinal 0 of 2: this replica owns EVEN step ids, so odd ones are foreign.
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
-	r.p.SetInterval(500 * time.Millisecond)
-	r.p.SetMinGap(0)
+	r.p.SetTallyCadence(500*time.Millisecond, 0)
+	r.p.SetSupplyCadence(500*time.Millisecond, 0)
 	r.p.SetStealAfter(4) // grace = 2s
 
 	for range 8 {
@@ -1042,8 +1051,8 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	// young foreign step belongs to its owner" by exactly one id. FetchSteps is driven directly here, so the
 	// interval paces nothing and only feeds stealGrace; 2s leaves the setup an order of magnitude of room
 	// while staying well under the 5s backdate the last phase uses to age a step PAST the grace.
-	r.p.SetInterval(500 * time.Millisecond)
-	r.p.SetMinGap(0)
+	r.p.SetTallyCadence(500*time.Millisecond, 0)
+	r.p.SetSupplyCadence(500*time.Millisecond, 0)
 	r.p.SetStealAfter(4) // grace = 2s
 
 	for range 8 {

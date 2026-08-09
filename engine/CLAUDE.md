@@ -747,7 +747,30 @@ and that is the whole distinction: an interval set from measured *consumption* o
 that. Static arithmetic cannot. It lives on the same "every path that changes a pool must re-derive what
 depends on it" rule as the dispatch count and the cache, because it is measured against the cache's
 capacity. The arithmetic: workers drain a partition at `drain = sustainedDrainPerVCPU·vCPUs/R` candidates/s
-and a pass hands it at most `capacity/N = 96·vCPUs/R`, so `T = bufferShare/(headroom·drain)`. Substituting
+and a pass hands it at most `capacity/N = 96·vCPUs/R`, so `T = bufferShare/(headroom·drain)` — which is
+exactly **the time the workers take to drain ONE buffer's worth**, since `headroom = 2` and the buffer is
+`2 x` the drain. Read it that way and the whole formula is one sentence: *refill when half the partition
+has been consumed.*
+
+**THE WORKER COUNT BOUNDS THE DRAIN, and omitting it makes a pinned `SetWorkers` derive nonsense.** Workers
+are what consume candidates, so `drain = min(sustainedDrainPerConn·min(conns, dispatchers), CPU channel)`:
+one worker cannot drain a connection budget's worth however many connections exist. Without the term the
+buffer shrinks with the worker count (capacity is twice it) while the assumed drain does not, and the period
+collapses — measured at **0.28ms for `SetWorkers(1)` against a 30-connection pool**, an order of magnitude
+under the gap, which then silently becomes the supply rate. With it, the period settles at
+`1/sustainedDrainPerConn` ≈ 8.3ms once workers are the binding channel, independent of the buffer — and
+independent of the SHARD COUNT, because the crew credited to a shard's drain is its own partition's share of
+it (`share/2`), never the whole replica's.
+
+**The SUPPLY loop's gap is `min(DefaultMinGap, period/3)` — derived, and clamped so it is ONLY EVER
+LOWERED.** A flat constant cannot stay a fuse: wherever the derived period lands under it, it *is* the supply
+rate. But the divisor alone inverts the same failure at the other end — at the 1s `refillIntervalCap` a
+`/3` gap is **333ms**, so a 900ms fetch would take 1.233s start-to-start against 1s, throttling supply on
+precisely the slowest shards. The `min` keeps the measured-good 20ms exactly wherever the period is ≥60ms
+and lets the divisor bite only below that, which is the whole point of carrying one. Three is not tuned: it
+is the coarsest divisor that stays clear of the period at the derived low end. The TALLY loop keeps the flat
+constant unclamped: it fills no buffer, so it has no drain
+to derive from, and its fuse is against a scan outrunning its own interval — a different quantity. Substituting
 the engine's own constants (`6·vCPUs/R` conns, `8x` dispatch workers, `2x` cache; `sustainedDrainPerVCPU` =
 **720**, the MEASURED sustained drain of ~120 steps/s/conn × the 6 conns/vCPU, not `capacityWeight`'s 450
 placement peak) gives `96/(2·720)` ≈ **67ms with vCPUs and R cancelling** - capacity and drain both scale in
