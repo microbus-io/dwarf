@@ -275,9 +275,14 @@ heap** and the crew is mostly stacks.
   of a shared fact (`dwarf_peer_replicas`, `dwarf_peer_blind_seconds`). Summing them multiplied by the
   replica count; that bug inflated those in **every multi-replica artifact produced before it was
   fixed**, so distrust older cloud numbers that lean on backlog depth or oldest-age.
-- **`dwarf_refill_query_duration_seconds{shard,phase=band_keys}`'s COUNT is cycles per window** — i.e.
-  piston RPS, since a cycle scans exactly once — and the four phases summed are the duty cycle. There is
-  no revolutions instrument and no end-to-end cycle histogram; the phases are what reconstruct one.
+- **`dwarf_refill_query_duration_seconds`'s COUNT is cycles per window — of WHICHEVER LOOP emits that
+  phase, and there are two.** `band_keys` comes from the piston's Tallier, `planning`/`fetch_steps`/
+  `pushing` from its Supplier, and the two are paced independently, so the counts are unrelated: measured
+  76 against 8,215 in one 60s window, a 108x gap. **DO NOT SUM THE FOUR PHASES** — the total is two
+  unrelated clocks added together and reconstructs no single object; there is no "a cycle" left to
+  reconstruct, and no end-to-end cycle histogram (`engine/CLAUDE.md` records why one was retired).
+  Read `fetch_steps`' count as the SUPPLY rate (what reaches the workers) and `band_keys`' as how often
+  the fairness tally refreshes.
 - **Per-shard cycle-duration spread is mostly POOL WAIT, not a slow shard.** Measured 28ms vs 125ms on
   hardware whose RTT differed by 0.036ms. Decompose against `pg_stat_statements` and the pool-wait gauges
   before calling a shard slow. Note the pgss/dbstats/RTT samplers watch `dsns[0]` only, so a multi-shard run

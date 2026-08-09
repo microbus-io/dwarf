@@ -2206,14 +2206,17 @@ successor and advance no `step_id`. Constants, their portability, and the normal
   drops ~15x. The memory/swap explanation is **refuted** - neither `IO:DataFileRead` nor
   `IO:BufFileRead` appears in any collapsed arm's top six.
 
-  ⚠️ **DO NOT ASSUME IT CLEARS WHILE LOAD CONTINUES.** The expectation is that it self-recovers once the
-  workload abates enough for the database to catch up, and that is **untested**. What IS observed
-  contradicts the stronger claim: every degraded arm across the 8- and 16-vCPU pool sweeps ran its full
-  120s window without recovering under a sustained offered rate. Both entry paths - too few connections
-  (starvation) and too many (contention) - deepen the backlog, and a deep backlog makes the refiller's
-  O(pending) band scan expensive, which is what holds the system there (refill duty cycle measured 18%
-  clean against 55-96% in every failing arm). Until someone runs the drop-the-rate arm, size for headroom
-  rather than for recovery.
+  ⚠️ **A DEGRADED ARM CAN RECOVER UNDER SUSTAINED LOAD, AND A 120s WINDOW IS TOO SHORT TO SEE IT.** On a
+  16-vCPU shard at 0.073ms RTT a stall lasting ~30s cleared itself with the offered rate unchanged, draining
+  a 25,459-step backlog; the same rate measured 3,835-7,001 steps/s across 120s windows and **6,837 at 98%
+  of command across a 300s one**. So the run-to-run spread that reads as bimodality is substantially a
+  WINDOW-LENGTH artifact - a transient either lands inside the window or does not. Always state the window
+  beside a throughput number, and do not read a single short degraded arm as a stable state.
+  Both entry paths - too few connections (starvation) and too many (contention) - deepen the backlog, and a
+  deep backlog is what carries the system into the stall (refill duty cycle measured 18% clean against
+  55-96% in every failing arm). **Size for headroom anyway**: recovery is not instant, the drop-the-rate arm
+  is still unrun, and at a sustained rate ABOVE the ceiling the backlog pins at the caller's outstanding
+  bound and does not drain at all (600s at 8,000 commanded held ~99,500 pending for its last 300s).
 
   **`s` is the mechanism, and WAL is why the large tiers take the conservative branch.** A transaction
   spans `BEGIN..COMMIT`, so distance lengthens how long it holds rows and locks: `s` rises **+1.45 ms per

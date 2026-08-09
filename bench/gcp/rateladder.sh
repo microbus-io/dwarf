@@ -45,6 +45,12 @@ command -v psql >/dev/null 2>&1 || {
 
 DSN="${DSN:?set DSN (one Cloud SQL instance, private IP)}"
 BENCH="${BENCH:-./dwarf-bench-t8}"
+# RATES is in FLOWS/s, not steps/s - the two differ by the workload's chain length, and STEPS_PER_FLOW is
+# what converts them. Set BOTH together or the exec/gen share below is quietly wrong: it is the ratio the
+# header calls "the number to read", and it divides by this. linear is -linear-steps (default 10); fanout
+# is -fanout-width + 2 (the spawn and the fan-in), so width 16 is 18.
+WORKLOAD="${WORKLOAD:-linear}"
+STEPS_PER_FLOW="${STEPS_PER_FLOW:-10}"
 RATES="${RATES:-700 800 1000 1200}"
 REPS="${REPS:-1}"
 DELAY="${DELAY:-0}"
@@ -94,16 +100,16 @@ echo
 for rep in $(seq 1 "$REPS"); do
   for rate in $RATES; do
     db="dwarf_rl_${RUN_ID}_r${rate}_${rep}"
-    echo "-- rate ${rate} flows/s  rep ${rep}"
+    echo "-- ${WORKLOAD} rate ${rate} flows/s (~$((rate * STEPS_PER_FLOW)) steps/s)  rep ${rep}"
     rtt_gate "$ADMIN"
     psq "$ADMIN" "DROP DATABASE IF EXISTS ${db}"
     psq "$ADMIN" "CREATE DATABASE ${db}"
     # shellcheck disable=SC2206  # word splitting is the intended parse of EXTRA
     "$BENCH" -dsn "${DSN%/*}/${db}?sslmode=disable" \
-      -workload linear -vcpus "$VCPUS" -concurrency "$CONC" \
+      -workload "$WORKLOAD" -vcpus "$VCPUS" -concurrency "$CONC" \
       -task-delay "$DELAY" -open-loop -arrival-rate "$rate" \
       -max-outstanding "$MAX_OUTSTANDING" -warmup "$WARMUP" -window "$WINDOW" \
-      -label "rate ${rate} flows/s rep ${rep}" -out "${OUT}/r-rate${rate}-r${rep}.json" \
+      -label "${WORKLOAD} rate ${rate} flows/s rep ${rep}" -out "${OUT}/r-rate${rate}-r${rep}.json" \
       ${EXTRA:-}
     psq "$ADMIN" "DROP DATABASE IF EXISTS ${db}"
     sleep "${COOLDOWN%s}"
@@ -112,33 +118,54 @@ done
 
 echo
 echo "== summary =="
-python3 - "$OUT" <<'PY'
+python3 - "$OUT" "$STEPS_PER_FLOW" <<'PY'
 import json, glob, sys, statistics
+spf = int(sys.argv[2])          # steps per flow: converts the commanded FLOW rate to a step rate
+def hist(j, phase):
+    """Mean duration and cycle count for one refill phase, summed over shards.
+
+    The two phases come from DIFFERENT loops on independent cadences since the tally/supply split, so
+    band_keys' count is Tallier cycles and fetch_steps' is Supplier cycles. Never add them together.
+    """
+    n, s = 0, 0.0
+    for h in (j["results"][0].get("engineHistograms") or []):
+        if h["name"] == "dwarf_refill_query_duration_seconds" and (h.get("attrs") or {}).get("phase") == phase:
+            n += h["count"]; s += h["sumSeconds"]
+    return (s / n * 1000 if n else float("nan")), n
 rows = {}
 for f in glob.glob(sys.argv[1] + "/r-rate*.json"):
     j = json.load(open(f)); r = j["results"][0]; c = r.get("engineCounters") or {}
     rate = int(f.split("-rate")[1].split("-")[0])
     st, se = c.get("dwarf_flows_started"), c.get("dwarf_steps_executed")
+    sel, dis = c.get("dwarf_refill_candidates_selected"), c.get("dwarf_refill_candidates_discarded")
+    tms, tn = hist(j, "band_keys"); fms, fn = hist(j, "fetch_steps")
     rows.setdefault(rate, []).append(dict(
         steps=r["stepsPerSec"], flows=r["flowsPerSec"], rtt=j["rtt"]["p50Ms"],
-        share=(se / (st * 10) * 100) if st and se else None,
+        share=(se / (st * spf) * 100) if st and se else None,
         pending=(r["gauges"]["gaugesMean"] or {}).get("dwarf_steps_pending|priority=100"),
         oldest=(r["gauges"]["gaugesMean"] or {}).get("dwarf_steps_oldest_pending_age_seconds|priority=100"),
+        tally=tms, fetch=fms, tallyn=tn, fetchn=fn,
+        disc=(100 * dis / sel) if sel else None,
         cpu=r["host"]["cpuCores"], adm=r["createP99Ms"]))
-print(f"{'rate':>6} {'n':>2} {'steps/s':>9} {'%cmd':>6} {'flows/s':>8} {'exec/gen':>9} "
-      f"{'pending':>9} {'oldest':>8} {'rtt':>6} {'admP99':>8} {'hostCPU':>8}")
+print(f"{'rate':>6} {'n':>2} {'steps/s':>9} {'%cmd':>6} {'exec/gen':>9} {'pending':>9} {'oldest':>8} "
+      f"{'tallyMs':>8} {'tallyN':>7} {'fetchMs':>8} {'fetchN':>7} {'disc%':>6} {'rtt':>6} {'hostCPU':>8}")
 for rate in sorted(rows):
     v = rows[rate]
     m = lambda k: statistics.mean(x[k] for x in v if x[k] is not None) if any(x[k] is not None for x in v) else float("nan")
-    print(f"{rate:>6} {len(v):>2} {m('steps'):>9.0f} {100*m('steps')/(rate*10):>5.0f}% {m('flows'):>8.1f} "
-          f"{m('share'):>8.1f}% {m('pending'):>9.0f} {m('oldest'):>7.1f}s {m('rtt'):>6.2f} "
-          f"{m('adm'):>8.0f} {m('cpu'):>8.2f}")
+    print(f"{rate:>6} {len(v):>2} {m('steps'):>9.0f} {100*m('steps')/(rate*spf):>5.0f}% "
+          f"{m('share'):>8.1f}% {m('pending'):>9.0f} {m('oldest'):>7.1f}s "
+          f"{m('tally'):>8.1f} {m('tallyn'):>7.0f} {m('fetch'):>8.1f} {m('fetchn'):>7.0f} "
+          f"{m('disc'):>5.0f}% {m('rtt'):>6.2f} {m('cpu'):>8.2f}")
 print("""
 Reading it:
   - exec/gen ~100% with %cmd < 100  -> the GENERATOR was short; the engine served all it was offered
   - exec/gen < 100%                 -> the engine or database is at its ceiling; this is the knee
   - pending flat, oldest bounded    -> the backlog is draining in age order (oldest ~= pending/steps)
   - oldest growing rung over rung   -> the queue is no longer draining; past the ceiling
+  - tallyMs climbing with pending   -> the band scan's O(due rows) cost; the split exists so this no
+                                       longer paces supply, so fetchN should NOT fall as tallyMs rises
+  - disc% is supply/drain, not cache size: the period is derived FROM the buffer, so capacity cancels.
+    Designed ~50% at saturation (headroom 2.0); far above that prices sustainedDrainPerConn, not the cache.
 Then run bench/gcp/dbcpu.sh on the artifacts: flat throughput with CPU well under the tier means the
 ceiling is not CPU (on this rig, ~60% of 16 vCPU at saturation).""")
 PY
