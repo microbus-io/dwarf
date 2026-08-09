@@ -116,8 +116,24 @@ without fragmentation or excessive write amplification.
    well-ordered - no mid-tree page splits.
 2. **Small transient sections.** The `pending`/`running` sections churn but stay small (proportional to active work,
    not history); page reuse is efficient.
-3. **Partial indexes for PostgreSQL.** Where only non-terminal statuses are queried, Postgres uses a partial index
-   filtered to `status IN ('pending','running')`. MySQL and SQL Server use the full composite (no partial support).
+3. **Partial indexes where the dialect has them.** Where only non-terminal statuses are queried, the index is
+   filtered to `status IN ('pending','running')` on **pgx, sqlite and mssql** - SQL Server calls them *filtered*
+   indexes and the schema does use them, see the `-- DRIVER: mssql` blocks and the filtered-index hazard in
+   "Status predicates are inlined literals" below. **MySQL alone has no partial index support** and takes the
+   full composite.
+4. **A column used ONLY in a partial predicate still belongs in the KEY.** On a dialect that filters, that column
+   is constant inside the index, so it reads as dead weight in the key and the temptation is to drop it. Do not.
+   **MySQL's copy of the same index is full**, and that column is the only thing that lets a scan *seek past* the
+   rows the predicate would have excluded - drop it and MySQL filters them one row at a time, silently, and on
+   that dialect only. The asymmetry is what makes this a rule rather than a judgement call: keeping it costs a
+   few bytes per entry on the dialects that filter (a constant column compresses well), dropping it costs a full
+   walk of the excluded population on the one that cannot express the filter at all. **Keep the KEY identical
+   across all four dialects and let only the PREDICATE diverge** - the same split already used for `INCLUDE`
+   versus trailing key columns.
+   Corollary, and it is the sharp edge: **adding a column to a filtered predicate obliges every query that wants
+   the index to compare that column against an INLINED literal**, for exactly the reason status does (below).
+   `parked` is compared as a bound `parked=?` today (`execution.go`), so a future `parked=0` predicate would
+   silently defeat the filtered index on SQL Server and SQLite until those sites inline it.
 
 ### Index Catalog
 
