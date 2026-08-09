@@ -68,6 +68,13 @@ type Tally struct {
 // case (hold no candidates), so distinguishing them would be surface with no consumer. For a log line,
 // compare GlobalBand against the band just tallied.
 type Plan struct {
+	// Tallied is whether this shard has a live tally here - orthogonal to Slots, and the one distinction
+	// a caller genuinely acts on differently. All four empty-Slots cases above are POSITIVE statements
+	// made by a shard that reported; Tallied=false says the shard is not in the planner at all, which is
+	// UNKNOWN. A caller holding candidates for this shard must not throw them away on an unknown: they
+	// are the last good information anyone has, and a shard whose scan blipped will be back within a
+	// cycle. It is false before a shard's first Tally and after any Clear.
+	Tallied bool
 	// GlobalBand is the best (lowest) band any live shard has due work at, or math.MaxInt when the
 	// fleet has nothing due. Slots is drawn entirely from this band - there is no spill.
 	GlobalBand int
@@ -218,8 +225,10 @@ func (p *Planner) Clear(shard int) {
 // Plan returns what one shard should dispatch this cycle, drawn from the global band and capped at
 // capacity slots across the whole fleet.
 //
-// Call it after this shard's own Tally for the cycle: planning first means planning against your own
-// previous report, which at best wastes a cycle and at worst claims a band you no longer hold.
+// A caller that both tallies and plans in one pass calls Tally first: planning first means planning against
+// your own previous report, which at best wastes a cycle and at worst claims a band you no longer hold. A
+// caller whose planning runs on its own cadence plans from whatever report stands, and reads Plan.Tallied to
+// learn whether one stands at all.
 //
 // Every shard rolls its own plan from its own snapshot. The lottery is independent per caller, which
 // changes nothing in expectation and needs no coordination.
@@ -237,7 +246,14 @@ func (p *Planner) Plan(shard, capacity int) Plan {
 	p.lastBand, p.lastKeys = observed, len(keys)
 	p.mu.Unlock()
 
-	out := Plan{GlobalBand: globalBand}
+	// Tallied comes from the SNAPSHOT, never from a fresh lookup. Re-reading the map here would let it
+	// disagree with the Slots computed from `entries` - and the damaging direction is the quiet one: a shard
+	// ABSENT at snapshot but re-tallied a moment later reports Tallied=true with no Slots, which the caller
+	// reads as the positive statement "nothing here is dispatchable" and acts on by CLEARING a healthy cache
+	// partition. (The reverse - present at snapshot, cleared before the lookup - is benign: the caller sees
+	// Tallied=false and holds everything.) Deriving it from `entries` makes the pair consistent by
+	// construction rather than by a lock discipline someone has to keep.
+	out := Plan{GlobalBand: globalBand, Tallied: tallied(entries, shard)}
 	if len(keys) == 0 || capacity <= 0 {
 		return out
 	}
@@ -256,6 +272,18 @@ func (p *Planner) LastBand() (band, keyCount int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.lastBand, p.lastKeys
+}
+
+// tallied reports whether one shard was present in the snapshot the plan was computed from - see
+// Plan.Tallied. A linear scan because entries is one element per OPEN SHARD, single digits in every
+// deployment, and sorted, so this is cheaper than any index that would have to be built to serve it.
+func tallied(entries []entry, shard int) bool {
+	for _, e := range entries {
+		if e.shard == shard {
+			return true
+		}
+	}
+	return false
 }
 
 // snapshot returns the current tallies in shard order. The lock covers the map copy only, never the

@@ -236,20 +236,30 @@ func AwaitVisits(t *testing.T, seams *seamster.Seamster, n int, timeout time.Dur
 	}
 }
 
-// AwaitShardCycles blocks until every shard's piston has completed `extra` further pushing cycles, counted
-// from the moment of the call.
+// AwaitShardCycles blocks until every shard's piston has SCANNED and then PUSHED `extra` further times,
+// counted from the moment of the call.
 //
 // A pushing cycle is the point at which that shard's cache partition has been reconciled against the plan,
 // so this is how a test waits for the fleet's cached hints to agree with what the planner actually chose.
-// There is no wall-clock stand-in for it, and that is the whole reason the checkpoint exists: each piston
+// There is no wall-clock stand-in for it, and that is the whole reason the checkpoints exist: each piston
 // turns on its own cadence, so one starved or slow shard holds an unreconciled partition for as long as it
 // likes while its peers turn normally - the asymmetric case, which no uniform delay reproduces or waits out.
 //
-// TWO cycles, not one, is the usual ask: a cycle already in flight when the work committed may have scanned
-// before it existed, so its push proves nothing about it. The second is the one whose scan is guaranteed to
-// have seen it.
+// TWO of each, not one: a cycle already in flight when the work committed may have started before it
+// existed, so it proves nothing about it. The second is the one guaranteed to have seen it.
+//
+// IT WAITS ON BOTH LOOPS, IN THAT ORDER, AND COUNTING PUSHES ALONE IS NOT ENOUGH. The piston scans and
+// pushes on independent cadences, so a push says only "the partition matches the plan" - and the plan is
+// built from whatever tally the planner already held, which may predate the work entirely. N pushes can
+// therefore all resolve a stale tally. Waiting for the SCANS first is what puts the work into the plan; the
+// pushes that follow are what put the plan into the partition.
 func AwaitShardCycles(t *testing.T, e Engine, shards, extra int) {
 	t.Helper()
+	// Every shard scans before any shard's pushes are awaited, so no shard can satisfy its push count
+	// against a plan built before a peer had reported.
+	for shard := 1; shard <= shards; shard++ {
+		AwaitVisits(t, e.Seams(), extra, time.Minute, seamsJoin(piston.CheckpointTallyDone, strconv.Itoa(shard)))
+	}
 	for shard := 1; shard <= shards; shard++ {
 		AwaitVisits(t, e.Seams(), extra, time.Minute, seamsJoin(piston.CheckpointCycleDone, strconv.Itoa(shard)))
 	}

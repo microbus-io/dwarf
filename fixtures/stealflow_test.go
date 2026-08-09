@@ -111,8 +111,9 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 // the channel and one before them by the count.
 //
 // It is a rendezvous rather than a poll because no duration is the right one to wait: the steal fires on
-// the first cycle after the gate arms and the grace elapses, which is a function of the pipeline's cadence,
-// the peer's degradation and the backlog, none of which the test controls.
+// the first cycle where the grace has elapsed and this replica's own class ran short of the batch, which is
+// a function of the pipeline's cadence, the peer's degradation and the backlog, none of which the test
+// controls.
 func awaitSteal(t *testing.T, e *engine.Engine, work func()) bool {
 	t.Helper()
 	ch := e.Seams().Waiter(engine.CheckpointRefillStole)
@@ -189,15 +190,15 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 // or a regression: a healthy fleet must keep dispatching from its OWN classes, or the residue partition
 // stops excluding anything and every replica is back to racing its peers for the same rows.
 //
-// It is measured over the window where the gate's condition is unambiguously met - a backlog deep enough
+// It is measured over the window where a healthy fleet's own classes are unambiguously full - a backlog deep enough
 // that BOTH classes can fill their batch - and over CYCLES rather than a duration, so a loaded suite makes
 // the backlog deeper rather than the measurement noisier. That framing is the whole point of the shape
 // below, and the reason for each half:
 //
-//   - DEEP, because at MODERATE load the gate legitimately opens with no replica at fault: classes empty
-//     between arrivals while everything ages past the grace, so a light workload measures the grace rather
-//     than the gate. Under -race, which slows execution ~10x, that regime stole on up to 17 cycles of a
-//     31-cycle drain - i.e. the light-load number carries no signal about the gate at all.
+//   - DEEP, because at MODERATE load a replica legitimately reaches outside its class with nobody at fault:
+//     classes empty between arrivals while everything ages past the grace, so a light workload measures the
+//     grace rather than the fill order. Under -race, which slows execution ~10x, that regime stole on up to
+//     17 cycles of a 31-cycle drain - i.e. the light-load number carries no signal at all.
 //   - CYCLES, because CheckpointRefillStole fires once per FETCH that took a foreign row, and a pending
 //     step is re-fetched every cycle until someone claims it. The raw count is therefore bounded by the
 //     LENGTH of the drain, not by the steps in it, and a loaded suite lengthens the drain: an absolute
@@ -205,11 +206,12 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 //     with nothing wrong).
 //
 // The residual is not zero and is not expected to be: the fleet still passes through moderate load on its
-// way in and out of the deep phase, and the count also picks up cycles where this replica's partition pair
-// was momentarily unavailable, which makes every row it fetched read as foreign. Both are bounded, and a
-// build whose gate never held off would steal on essentially every cycle that fetched anything - which is
-// the regression this guards. The gate itself is pinned deterministically in internal/piston, where the
-// armed flag is directly observable rather than inferred.
+// way in and out of the deep phase. It is NOT inflated by an unavailable partition pair - that resolves to a
+// zero pair, the ranking is skipped and nothing is counted stolen (pinned by
+// TestPiston_PartitionPairIsValidated). A build that reached outside its class whenever it merely COULD
+// would steal on essentially every cycle that fetched anything, which is the regression this guards. The
+// mechanism itself is pinned deterministically in internal/piston against real rows
+// (TestPiston_FetchPrefersItsOwnClass), where the ranking is observable rather than inferred from counts.
 func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 	t.Parallel()
 	const name = "stealhealthy.verify:428"
@@ -220,7 +222,7 @@ func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 	// its own batch". Created up front, and not awaited until the measurement is over.
 	keys := createFlows(t, creator, name, 200)
 
-	// Two cycles of settling before the window opens: the gate arms from the PREVIOUS cycle's tally, and
+	// Two cycles of settling before the window opens: a replica only reaches outside its class for slots its own class could not fill, and
 	// the cycle before this work landed saw an empty shard, so the first one after it is legitimately still
 	// armed.
 	enginetest.AwaitShardCycles(t, healthy, 1, 2)

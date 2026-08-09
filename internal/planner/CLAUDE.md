@@ -77,6 +77,16 @@ band, or with nothing due, holds none of the planned keys and falls out of `slic
 own. A caller that wants the distinction for a log line compares `Plan.GlobalBand` against the band it just
 tallied. Do not add an enum back for the three-way distinction — no caller can act on it differently.
 
+**`Plan.Tallied` is NOT that enum, and the difference is that a caller genuinely acts on it.** All four
+cases above are *positive statements made by a shard that reported*; `Tallied=false` says the shard is not
+in the map at all — it cleared, or has not reported yet — which is **unknown**, a fifth thing entirely. The
+consumer is `internal/pipeline`'s Supplier: an empty plan from a reporting shard clears that shard's cache
+partition (nothing is dispatchable, so every hint is dead), while an untallied shard must leave it exactly
+as it found it, because throwing away live candidates on a database blip idles that shard's workers for a
+cycle. It has to be explicit because the caller's scanning and pushing loops turn independently: the pushing
+one keeps going while a scan is failing, so it must be able to tell *absent* from *empty-handed* without
+asking.
+
 **Participation is DECLARED, never inferred: there is no timeout, and no shard is ever dropped for being
 quiet.** Each cycle a shard either `Tally`s what it saw or `Clear`s because it could not look.
 
@@ -121,8 +131,11 @@ its purpose, so treat the key count as a test observable rather than a shipped s
 
 ## Contracts a caller must hold
 
-**`Tally` before `Plan`, every cycle.** Planning first means planning against your own previous report —
-at best a wasted cycle, at worst claiming a band you no longer hold. The two are deliberately *not* folded
+**A caller that BOTH tallies and plans must tally first.** Planning first means planning against your own
+previous report — at best a wasted cycle, at worst claiming a band you no longer hold. A caller whose
+planning runs on a *separate* cadence from its tallying does not violate this and cannot honour it: it plans
+from whatever report stands, many times per tally, and `Plan.Tallied` is what tells it whether one stands at
+all. That is the shape `internal/pipeline` uses. The two are deliberately *not* folded
 into one call: tests need to seed a *peer's* tally to fabricate a competing shard, so both entry points
 have to exist anyway and the fold would buy less than it costs in clarity.
 

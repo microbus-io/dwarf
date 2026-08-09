@@ -210,11 +210,16 @@ For the last two, name the event instead:
   count each time. Call it from the test goroutine: `t.Fatalf`
   inside a task handler kills the engine goroutine that would have driven the checkpoint, so the suite
   wedges instead of reporting.
-- **`enginetest.AwaitShardCycles(t, e, shards, extra)`** - wait for each shard's partition to be reconciled
-  against the plan. TWO cycles, not one: a cycle already in flight when the work committed may have scanned
-  before it existed. This is also how a **negative** assertion closes its window - the thing being denied is
-  almost always a DISPATCH, and a cycle is the dispatcher looking for exactly the pending candidate that
-  would carry it. It gets longer on a busy machine, where a duration gets weaker.
+- **`enginetest.AwaitShardCycles(t, e, shards, extra)`** - wait for each shard to SCAN and then PUSH. TWO of
+  each, not one: a cycle already in flight when the work committed may have started before it existed. **It
+  waits on both of the piston's loops, in that order, and counting pushes alone is not enough** - the two
+  run on independent cadences, so a push says only "the partition matches the plan", and the plan is built
+  from whatever tally the planner already held, which may predate the work entirely. The scans are what put
+  the work into the plan; the pushes are what put the plan into the partition. This is also how a
+  **negative** assertion closes its
+  window - the thing being denied is almost always a DISPATCH, and a cycle is the dispatcher looking for
+  exactly the pending candidate that would carry it. It gets longer on a busy machine, where a duration gets
+  weaker.
 - **`CheckpointAwaitParked`** - an `Await` is on the latch board and about to block. Any test about a
   BLOCKED caller being woken needs this; the board is polled, so a late-registering Await is answered by its
   own pre-park read and the wake path under test never runs.

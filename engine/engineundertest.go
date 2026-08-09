@@ -249,6 +249,8 @@ const (
 	// cadence, so a test that needs the fleet's partitions to agree with the plan before it asserts dispatch
 	// ORDER must wait for a cycle per shard; no amount of elapsed time substitutes, because one starved
 	// piston is exactly the case that breaks it.
+	FaultRefillFetchErr       = piston.FaultFetchErr       // make a shard's FetchSteps fail without touching the database
+	CheckpointRefillTallyDone = piston.CheckpointTallyDone // a shard's piston published a tally from a real scan
 	CheckpointRefillCycleDone = piston.CheckpointCycleDone // a shard's piston reconciled its cache partition
 	CheckpointRefillStole     = piston.CheckpointStole     // a shard's piston selected steps from OUTSIDE its residue class
 )

@@ -142,15 +142,22 @@ where." Selection queries every shard concurrently and proceeds only when the la
   planner rather than at load (on PostgreSQL, stale table statistics can flip this query between an index scan
   and a sequential scan — measured on one rig at 0.3 ms versus 100 ms on identical data). `ANALYZE` on
   `dwarf_steps`, or more aggressive autovacuum settings for it, is the fix.
-- Summed across its four `phase` values, the same metric reconstructs a whole selection cycle; there is no
-  separate end-to-end histogram, because the phase split says both that a cycle happened and which part of
-  it was slow.
+- Do **not** sum the phases. Selection runs as two independently paced loops — one scanning the priority
+  band, one turning the resulting plan into cached candidates — so `band_keys` and the other three phases are
+  measured on different clocks and their sum describes nothing. Read each phase on its own; the rate at which
+  candidates reach the workers is set by the second loop, and a slow `band_keys` no longer holds it back.
 
 `dwarf_refill_candidates_discarded` over `dwarf_refill_candidates_selected` is the selection **waste ratio**.
 Each pass replaces the cache wholesale, so anything the workers had not yet picked up is dropped and
-re-selected later — always safe, never lost work, but a ratio approaching 1 means selection is running far
-ahead of what the workers can consume and most of its database round-trips are being thrown away. A ratio
-near 0 means the opposite: selection is the slower half.
+re-selected later — always safe, never lost work, but a high ratio means selection is running far ahead of
+what the workers can consume and most of its database round-trips are being thrown away. A ratio near 0
+means the opposite: selection is the slower half.
+
+A **sustained high ratio is a cadence question, not a fault**: selection paces itself from your declared
+`VirtualCPUs` and connection budget, so a workload whose steps drain more slowly than that implies will be
+over-supplied. It costs database work rather than correctness — no step is lost — but if it is large and
+persistent, the selection interval is the knob, and a shard whose real throughput is far below its declared
+capacity is the usual cause.
 
 ## Tracing
 

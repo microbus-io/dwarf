@@ -18,6 +18,8 @@ package piston
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -269,6 +271,12 @@ func TestPiston_PartitionSplitsSelectionAcrossReplicas(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
+	// The class is strict only while nothing has aged past the STEAL GRACE - the predicate is relaxed on
+	// every query now, and age is what admits. The rig pins interval and gap to 0, so the grace floors at
+	// 4 x DefaultMinGap = 80ms, which six inserts plus two fetches outrun on a slow dialect (measured
+	// failing on MySQL 8 and SQL Server, passing on the rest). Pinning the interval makes the grace 2s,
+	// an order of magnitude clear of this fixture's own setup, without leaving the production default.
+	r.p.SetInterval(500 * time.Millisecond)
 
 	var all []int
 	for i := range 6 {
@@ -310,6 +318,10 @@ func TestPiston_PartitionDoesNotNarrowTheBand(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
+
+	// Same grace argument as TestPiston_PartitionSplitsSelectionAcrossReplicas: the residue class only
+	// excludes while nothing has aged, so the grace has to dominate this fixture's own setup.
+	r.p.SetInterval(500 * time.Millisecond)
 
 	best := r.insertStep(t, 1, 1, "urgent", 1) // band 1, will belong to one ordinal only
 	r.insertStep(t, 2, 7, "bulk", 1)
@@ -373,6 +385,106 @@ func TestPiston_RunDispatchesAndReportsItsTurns(t *testing.T) {
 	assert.Equal(turns, again, "looking twice reports the same turns twice")
 }
 
+// TestPiston_RunSuppliesWhileTheScanIsStalled pins what the two loops are FOR, over the real loops and a
+// real database.
+//
+// The band scan costs O(due rows at the band) on every dialect, so a deep backlog can stretch it far past
+// the cycle period. A single loop would let that scan set the rate candidates reach the workers - supplying
+// least exactly when the backlog is deepest. Here the tally loop is pinned to an interval it will not come
+// round on again within the test, standing in for a scan that is still running, and the supply loop must go
+// on filling the partition from the tally already in the planner regardless.
+//
+// A fused build fails this outright: with one loop, no push can happen until the scan does.
+func TestPiston_RunSuppliesWhileTheScanIsStalled(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t)
+
+	want := []int{
+		r.insertStep(t, 1, 5, "k", 1),
+		r.insertStep(t, 2, 5, "k", 1),
+	}
+
+	// One tally by hand, so the planner holds this shard's band - the scan's whole contribution.
+	assert.NoError(r.p.TallyCycle(context.Background()).Err)
+
+	// Now stall the tally loop and let Run drive both. Only the supply loop can make progress.
+	r.p.SetInterval(time.Hour)
+	r.p.supplier.SetInterval(time.Millisecond)
+	r.p.supplier.SetMinGap(time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); r.p.Run(ctx) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && r.cache.Len() < len(want) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	assert.Equal(want, drain(r.cache), "the supply loop filled the partition while the scan was stalled")
+}
+
+// TestPiston_IdleWithdrawsAgainstARunningLoop pins going idle against a cycle ALREADY IN FLIGHT, which is
+// the only interleaving that matters and the one SetIdle alone cannot cover.
+//
+// SetIdle clears what is there when it runs. A loop that entered its cycle before that - past its own idle
+// check - finishes afterwards and re-enters the shard it just withdrew, or re-pushes the partition it just
+// emptied. Both loops then park, and the stale tally stands FOREVER: every live piston on the replica finds
+// none of its own keys at that band and dispatches nothing, which is the exact wedge SetIdle exists to
+// prevent. The band scan runs for seconds on a deep backlog, so the window is not a sliver.
+//
+// The context func is the hook: it is applied at the START of a cycle, so blocking in it holds BOTH loops
+// demonstrably past their idle checks and inside a cycle - no sleep guesses what a real one would. Both,
+// not whichever calls first: the tally loop is the one that re-enters the shard, and blocking only the
+// supply loop reproduces nothing.
+func TestPiston_IdleWithdrawsAgainstARunningLoop(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t)
+	r.p.SetInterval(time.Millisecond)
+	r.insertStep(t, 1, 5, "alpha", 1)
+
+	var entered atomic.Int32
+	var once sync.Once
+	bothIn, release := make(chan struct{}), make(chan struct{})
+	r.p.SetContextFunc(func(ctx context.Context) context.Context {
+		if entered.Add(1) >= 2 {
+			once.Do(func() { close(bothIn) })
+		}
+		<-release // a closed channel lets every later cycle straight through
+		return ctx
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); r.p.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	<-bothIn // both loops are inside a cycle, past their idle checks
+	r.p.SetIdle(true)
+	close(release) // and now they complete, re-tallying and re-pushing over the withdrawal
+
+	// The withdrawal must still take, and must STAY taken.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && (r.planner.Plan(1, 8).Tallied || r.cache.Len() > 0) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	assert.False(r.planner.Plan(1, 8).Tallied, "an idle shard must not be left in the planner")
+
+	// Asserted from a PEER's point of view too, which is where the wedge is felt: with shard 1 gone, a peer
+	// holding only band 9 is the best band in the fleet and is released to dispatch. A stale band-5 claim
+	// from the idle shard would outrank it forever.
+	time.Sleep(50 * time.Millisecond) // settle past any further in-flight cycle
+	r.planner.Tally(2, 9, []planner.Tally{{Key: "beta", Weight: 1, Count: 1}})
+	plan := r.planner.Plan(2, 8)
+	assert.Equal(9, plan.GlobalBand, "the idle shard's band claim must not come back")
+	assert.True(len(plan.Slots) > 0, "so the live shard is released to dispatch")
+	assert.Equal(0, r.cache.Len(), "and the partition stays empty")
+}
+
 // TestPiston_RunIdleTurnsNothing pins the idle mode over the real loop: it selects nothing at all and
 // reports itself idle, so an owner can keep the replica counted for the connections it holds while
 // excluding it from anything that divides work.
@@ -422,11 +534,12 @@ func TestPiston_RunStopsOnCancel(t *testing.T) {
 	assert.True(stopped, "Run must return promptly on cancellation")
 }
 
-// TestPiston_NewValidates pins that a wiring mistake is caught at construction.
 // TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy pins the one seam this package consults, and the
-// reason it earns its place: the pipeline's scan-error policy - clear this shard from planning, leave its
-// cache partition ALONE - is otherwise reachable only by breaking a real database mid-run. The two halves
-// are asymmetric on purpose (an error means "unknown", not "nothing is due"), so both are asserted.
+// reason it earns its place: the scan-error policy - clear this shard from planning, leave its cache
+// partition ALONE - is otherwise reachable only by breaking a real database mid-run. The two halves are
+// asymmetric on purpose (an error means "unknown", not "nothing is due") and now sit in DIFFERENT loops -
+// the Tallier clears, the Supplier spares - so both are asserted, and the supply loop is turned SEVERAL
+// times to prove it keeps sparing rather than merely happening to run once.
 func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -434,8 +547,9 @@ func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
 	r := newRig(t)
 	r.insertStep(t, 1, 5, "alpha", 1)
 
-	// A healthy cycle first, so there is a tally to clear and a partition to preserve.
-	assert.NoError(r.p.Cycle(ctx).Err)
+	// A healthy round trip first, so there is a tally to clear and a partition to preserve.
+	_, sup := r.p.Cycle(ctx)
+	assert.NoError(sup.Err)
 	band, keys := r.planner.LastBand()
 	assert.Equal(5, band)
 	assert.Equal(1, keys)
@@ -450,12 +564,18 @@ func TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy(t *testing.T) {
 	_, _, err := r.p.ScanBand(ctx, 1)
 	assert.Error(err)
 
-	// And through a whole cycle: the shard clears itself from planning, but its candidates survive.
-	seams.Inject(FaultScanErr)
-	res := r.p.Cycle(ctx)
-	assert.Error(res.Err, "the cycle reports the failure rather than returning it")
-	assert.Equal(held, r.cache.Len(), "a FAILED scan must not wholesale-replace a healthy partition")
-	assert.Equal(pipeline.NoBand, res.GlobalBand, "the cleared shard no longer claims a band")
+	// And through the loops: the Tallier clears itself from planning, and every Supplier cycle after it
+	// leaves the candidates alone, because a cleared shard means UNKNOWN rather than "nothing is due".
+	seams.InjectN(FaultScanErr, 4)
+	tal := r.p.TallyCycle(ctx)
+	assert.Error(tal.Err, "the cycle reports the failure rather than returning it")
+	for range 3 {
+		sup = r.p.SupplyCycle(ctx)
+		assert.NoError(sup.Err, "an untallied shard is not the Supplier's error to report")
+		assert.False(sup.Reconciled, "and nothing was reconciled")
+		assert.Equal(held, r.cache.Len(), "a FAILED scan must not wholesale-replace a healthy partition")
+		assert.Equal(pipeline.NoBand, sup.GlobalBand, "the cleared shard no longer claims a band")
+	}
 }
 
 // TestPiston_SeamsDefaultInert pins that a piston nobody handed seams to consults nothing - the
@@ -491,7 +611,8 @@ func TestPiston_IdleWithdrawsTheShard(t *testing.T) {
 	r := newRig(t)
 	r.insertStep(t, 1, 5, "alpha", 1)
 
-	assert.NoError(r.p.Cycle(ctx).Err)
+	_, sup := r.p.Cycle(ctx)
+	assert.NoError(sup.Err)
 	assert.True(r.cache.Len() > 0, "the cycle populated the partition")
 	band, _ := r.planner.LastBand()
 	assert.Equal(5, band, "and claimed its band in the shared planner")
@@ -516,6 +637,7 @@ func TestPiston_PartitionPairIsValidated(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
+	r.p.SetSeams(seamster.New(true)) // so CheckpointStole visits are countable
 	for i := 1; i <= 6; i++ {
 		r.insertStep(t, i, 5, "k", 1)
 	}
@@ -538,9 +660,21 @@ func TestPiston_PartitionPairIsValidated(t *testing.T) {
 			assert.Equal(6, tallies[0].Count, "%s: no rows excluded", tc.name)
 		}
 		assert.Equal(5, band, "%s reports the real band", tc.name)
+
+		// The FETCH must fail open on the same pairs, and - the part a weaker second read gets wrong - it
+		// must also RANK as if unpartitioned. An out-of-range ordinal disables the SQL predicate correctly
+		// while leaving a ranking built from that bad pair with nothing in tier 0, so every kept step counts
+		// as taken from a peer. That shows up as stolen candidates the fetch never stole.
+		before := r.p.seams.Load().Visits(CheckpointStole)
+		got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 6)
+		assert.NoError(err, "%s must not error the fetch", tc.name)
+		assert.Equal(6, len(got["k"]), "%s: the fetch must select everything too", tc.name)
+		assert.Equal(before, r.p.seams.Load().Visits(CheckpointStole),
+			"%s: a fail-open pair must rank as unpartitioned, so nothing is reported stolen", tc.name)
 	}
 }
 
+// TestPiston_NewValidates pins that a wiring mistake is caught at construction.
 func TestPiston_NewValidates(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -562,7 +696,7 @@ func TestPiston_NewValidates(t *testing.T) {
 	assert.Error(err, "cache is required")
 }
 
-// TestPiston_RecordsItsInstruments pins the four metrics a cycle emits, BY NAME. The names are a public
+// TestPiston_RecordsItsInstruments pins the instrument names the two loops emit, BY NAME. The names are a public
 // surface that dashboards bind to, so this test failing on a rename is the point of it.
 func TestPiston_RecordsItsInstruments(t *testing.T) {
 	t.Parallel()
@@ -577,9 +711,11 @@ func TestPiston_RecordsItsInstruments(t *testing.T) {
 	r.cache.Refill(1, []candidates.Job{{StepID: 9999, Shard: 1}}, 100)
 	r.insertStep(t, 1, 5, "k", 1)
 
-	res := r.p.Cycle(ctx)
-	assert.NoError(res.Err)
-	r.p.record(ctx, res)
+	tal, sup := r.p.Cycle(ctx)
+	assert.NoError(tal.Err)
+	assert.NoError(sup.Err)
+	r.p.recordTally(ctx, tal)
+	r.p.recordSupply(ctx, sup)
 
 	var rm metricdata.ResourceMetrics
 	assert.NoError(reader.Collect(ctx, &rm))
@@ -613,16 +749,52 @@ func TestPiston_SettersAreLive(t *testing.T) {
 	assert.NoError(r.p.SetMeter(nil), "a nil meter restores no-op instruments")
 }
 
+// TestPiston_CadenceIsPerLoop pins that nothing derived from "the cycle period" keys off ONE loop while
+// covering both. The two loops are paced independently by design, so a shared threshold is right for at
+// most one of them - and while an owner happens to set both to the same value, keying off the wrong one is
+// invisible. This asserts the property directly, so it stays true when the cadences diverge.
+func TestPiston_CadenceIsPerLoop(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t)
+	r.p.SetStealAfter(4)
+
+	// The SUPPLY loop is the slow one here, which is the case a tallier-only derivation gets wrong. Both
+	// values sit above DefaultMinGap so the floor is not what is being measured.
+	r.p.SetInterval(50 * time.Millisecond)
+	r.p.SetMinGap(0)
+	r.p.supplier.SetInterval(time.Second)
+
+	assert.Equal(50*time.Millisecond, r.p.tallier.Period(), "the tally loop keeps its own short period")
+	assert.Equal(time.Second, r.p.supplier.Period(), "the supply loop keeps its own long one")
+
+	// The grace measures how long a HEALTHY owner takes to reach its own work, which is a full round trip -
+	// so it follows the LONGER loop, not whichever one the facade happens to report.
+	assert.Equal(4*time.Second, r.p.stealGrace(),
+		"the steal grace must follow the slower loop; keying off the tallier would give %v", 4*50*time.Millisecond)
+
+	// And the floor still applies per loop when a caller pins the cadence to zero.
+	r.p.SetInterval(0)
+	r.p.supplier.SetInterval(0)
+	assert.Equal(pipeline.DefaultMinGap, r.p.tallier.Period(), "a zeroed loop floors at the constant")
+	assert.Equal(4*pipeline.DefaultMinGap, r.p.stealGrace(), "so the grace can never reach zero")
+}
+
 // TestPiston_FailingCyclesReportNoLiveness pins the distinction the whole dispatch-evidence design rests
-// on: a piston whose every cycle FAILS must report itself as not serving, so its owner can stop handing it
+// on: a piston whose every SCAN fails must report itself as not serving, so its owner can stop handing it
 // work that nobody would then select.
 //
-// It is easy to get wrong in a way that looks right. A failing cycle is still briefly inside its queries -
-// building the error, recording the phase, logging it - so a busy flag meaning "a cycle is in flight" reads
-// true a small but nonzero fraction of the time (measured ~1.2% with a scan that fails instantly), and a
-// reader sampling on its own clock catches that within seconds. It then keeps a broken piston looking alive
-// for good, which is exactly the stranding the evidence exists to prevent. Busy therefore means a cycle has
-// been working LONGER THAN ONE PERIOD, which a failing cycle never is.
+// The supply loop goes on turning perfectly happily here - it plans from an empty planner, pushes nothing,
+// and reports no error at all - so a turn count taken from IT would read a piston that cannot see its own
+// shard as fully alive. That is why the count is the MINIMUM of the two loops; the mirror case, where every
+// fetch fails and the scan is healthy, is TestPiston_FailingFetchesReportNoLiveness.
+//
+// The busy half is easy to get wrong in a way that looks right. A failing cycle is still briefly inside its
+// queries - building the error, recording the phase, logging it - so a busy flag meaning "a cycle is in
+// flight" reads true a small but nonzero fraction of the time (measured ~1.2% with a scan that fails
+// instantly), and a reader sampling on its own clock catches that within seconds. It then keeps a broken
+// piston looking alive for good, which is exactly the stranding the evidence exists to prevent. Busy
+// therefore means a loop has been working LONGER THAN ONE PERIOD, which neither loop is here.
 func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -632,11 +804,12 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 	r.p.SetSeams(sm)
 	r.insertStep(t, 1, 5, "k", 1) // rig default interval is 0 - the degenerate case the floor covers
 
-	// A healthy cycle first: it completes, so the turn count is the evidence.
+	// A healthy ROUND TRIP first - both loops, since the turn count is their minimum and a tally alone would
+	// leave it pinned at whatever the supply loop has managed.
 	before, _, _ := r.p.Liveness()
 	r.p.Cycle(ctx)
 	after, busy, _ := r.p.Liveness()
-	assert.Equal(before+1, after, "a completed cycle is a turn")
+	assert.Equal(before+1, after, "a completed round trip is a turn")
 	assert.False(busy, "and it is not still working")
 
 	// From here every scan fails. Sample hard while the loop runs: the turn count must not move and busy
@@ -703,26 +876,76 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 			"fired, i.e. this machine could not take %d samples in 15s (took %d)", wantSamples, samples)
 }
 
-// TestPiston_StealIsGatedOnAnEmptyOwnClass pins the fuse. Partitioning hands each replica a disjoint class
-// of step ids, which is what stops peers racing for the same rows - but a replica that is SLOW rather than
-// dead keeps its class while being unable to serve it, and nobody else will look at those steps. Stealing
-// closes that, and the gate is what keeps it from costing anything the rest of the time: a replica holding
-// work of its OWN never steals, so a uniformly loaded fleet adds no overlapping selection at all.
-func TestPiston_StealIsGatedOnAnEmptyOwnClass(t *testing.T) {
+// TestPiston_FailingFetchesReportNoLiveness pins the OTHER half of the dispatch evidence, and it is the half
+// a per-loop turn count gets wrong.
+//
+// A piston whose every FETCH fails is invisible from outside: it scans honestly, publishes a real tally,
+// claims its band, and logs nothing a reader can see - while its partition takes zero candidates. So it
+// looks fully alive, keeps its residue class, and the work in that class is selected by nobody. That is the
+// same stranding a failing SCAN causes, reached from the opposite direction, which is why the turn count is
+// the MINIMUM of the two loops rather than either one of them.
+//
+// It fails against a build that counts tallies alone: the tally loop turns freely here.
+func TestPiston_FailingFetchesReportNoLiveness(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	sm := seamster.New(true)
+	r.p.SetSeams(sm)
+	r.insertStep(t, 1, 5, "k", 1)
+
+	// A healthy round trip first: both loops turn, so the minimum moves.
+	before, _, _ := r.p.Liveness()
+	r.p.Cycle(ctx)
+	after, _, _ := r.p.Liveness()
+	assert.Equal(before+1, after, "a completed round trip is a turn")
+
+	// From here every fetch fails while every scan keeps succeeding.
+	sm.InjectN(FaultFetchErr, 1<<20)
+	for range 20 {
+		tal, sup := r.p.Cycle(ctx)
+		assert.NoError(tal.Err, "the scan is healthy throughout - that is the point")
+		assert.Error(sup.Err, "and every fetch fails")
+	}
+
+	stalled, busy, idle := r.p.Liveness()
+	assert.Equal(after, stalled,
+		"a piston that cannot fetch must not report turns, however well it scans (was %d, now %d)", after, stalled)
+	assert.False(busy, "and it is not merely slow")
+	assert.False(idle)
+
+	// The tally loop really was turning throughout, so the frozen count is the MINIMUM doing its job rather
+	// than both loops having stopped.
+	assert.True(r.p.tallyTurns.Load() > r.p.supplyTurns.Load(),
+		"the tally loop kept turning (%d) while the supply loop did not (%d)",
+		r.p.tallyTurns.Load(), r.p.supplyTurns.Load())
+
+	// And it recovers on the first cycle that can fetch again, with no cooldown.
+	sm.Withdraw(FaultFetchErr)
+	r.p.Cycle(ctx)
+	recovered, _, _ := r.p.Liveness()
+	assert.True(recovered > stalled, "recovery costs exactly one round trip")
+}
+
+// TestPiston_StealPredicateIsAlwaysRelaxed pins that there is no gate: the residue class is relaxed on
+// every query, and only the AGE terms decide whether a foreign step is admitted at all.
+//
+// Nothing arms this. An earlier design gated the relaxation on a flag armed when the previous scan's own
+// class came up short, and the flag's meaning depended on which clause that scan had run - so it meant one
+// thing after a strict scan and another after a relaxed one. The fill order in rankByResidue asks the same
+// question exactly and currently instead, which is why the flag is gone.
+func TestPiston_StealPredicateIsAlwaysRelaxed(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t)
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
 
-	// Not armed: the strict residue class, whatever the grace is set to.
-	sql, args := r.p.partitionPredicate()
-	assert.Equal(" AND step_id % ? = ?", sql, "an unarmed piston partitions strictly")
-	assert.Equal(2, len(args))
-
-	// Armed by a cycle that found nothing due in this replica's own class.
-	r.p.stealing.Store(true)
-	sql, args = r.p.partitionPredicate()
-	assert.Contains(sql, "OR not_before <=", "an idle replica relaxes the class")
+	sql, args := func() (string, []any) {
+		rep, ord := r.p.resolvePartition()
+		return r.p.partitionPredicate(rep, ord, r.p.stealGrace())
+	}()
+	assert.Contains(sql, "OR not_before <=", "the class is relaxed with nothing having to arm it")
 	// Two tiers plus the strict term: own class, then the neighbour's after one grace, then anyone's after
 	// two. Six binds - (replicas, ordinal), (replicas, neighbour, -grace), (-2*grace).
 	assert.Equal(6, len(args))
@@ -733,52 +956,71 @@ func TestPiston_StealIsGatedOnAnEmptyOwnClass(t *testing.T) {
 	// The relaxation only ever ADMITS rows - the strict term survives intact, so no class is stranded.
 	assert.Contains(sql, "step_id % ? = ?")
 
-	// Zero periods disables it outright, even while armed.
+	// Zero periods disables it outright, which is the strict-partitioning escape hatch.
 	r.p.SetStealAfter(0)
-	sql, _ = r.p.partitionPredicate()
+	sql, _ = func() (string, []any) {
+		rep, ord := r.p.resolvePartition()
+		return r.p.partitionPredicate(rep, ord, r.p.stealGrace())
+	}()
 	assert.Equal(" AND step_id % ? = ?", sql, "stealAfter=0 restores strict partitioning")
 	r.p.SetStealAfter(defaultStealAfter)
 
-	// Nothing to steal when there is no partition to relax: a solo replica already selects everything.
+	// Nothing to relax when there is no partition: a solo replica already selects everything.
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 1, 0, true })
-	sql, _ = r.p.partitionPredicate()
+	sql, _ = func() (string, []any) {
+		rep, ord := r.p.resolvePartition()
+		return r.p.partitionPredicate(rep, ord, r.p.stealGrace())
+	}()
 	assert.Equal("", sql, "stealing must not resurrect a partition the pair disabled")
 }
 
-// TestPiston_StealArmsFromTheCycleItSaw pins where the gate comes from: NoBand means nothing was due in
-// this replica's own class, which is a property of the DATABASE backlog rather than of anything the piston
-// did - so it stays true while a peer is stalled and clears itself the moment this class refills.
-func TestPiston_StealArmsFromTheCycleItSaw(t *testing.T) {
+// TestPiston_FetchPrefersItsOwnClass pins the fill order, which is what replaced the gate: among steps the
+// grace ADMITTED, this replica's own class is ranked first, its designated neighbour's second, everyone
+// else's last - and the fetch keeps only the per-key cap off the top.
+//
+// The over-fetch is what makes this possible and is not an optimisation. The query returns rows oldest
+// first, and the oldest admitted rows are precisely the stalled peer's, so fetching only perKey would come
+// back ENTIRELY foreign and leave the ranking nothing of this replica's own to prefer - failing in exactly
+// the case the mechanism exists for.
+func TestPiston_FetchPrefersItsOwnClass(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
+	// Ordinal 0 of 2: this replica owns EVEN step ids, so odd ones are foreign.
 	r.p.SetPartitionFunc(func() (int, int, bool) { return 2, 0, true })
+	r.p.SetInterval(500 * time.Millisecond)
+	r.p.SetMinGap(0)
+	r.p.SetStealAfter(4) // grace = 2s
 
-	// An empty shard: nothing due anywhere, so certainly nothing in our class.
-	res := r.p.Cycle(ctx)
-	assert.Equal(pipeline.NoBand, res.Band)
-	assert.True(r.p.stealing.Load(), "a cycle that found nothing due arms the steal")
-
-	// Enough work arrives in THIS replica's class to FILL its batch, and the next cycle disarms. The bar is
-	// the batch, not mere presence: with continuous arrivals a replica keeping up still finds a step or two
-	// due on every scan, so "any work at all" would leave the gate shut while a peer's class backed up
-	// unboundedly beside it - measured as zero steals against an open-loop bench with a crippled peer.
-	// Ordinal 0 of 2 owns the even ids, so 20 inserts yield ~10 own steps against a rig capacity of 8.
-	for range 20 {
+	for range 8 {
 		r.insertStep(t, 1, 5, "k", 1)
 	}
-	r.p.Cycle(ctx)
-	assert.False(r.p.stealing.Load(), "a replica that can fill its own batch must not steal")
+	own, foreign := r.idsByResidue(t, 2, 0)
+	assert.True(len(own) > 0 && len(foreign) > 0, "the fixture needs both classes populated")
 
-	// A FAILED cycle leaves the flag alone: an error means "unknown", not "nothing is due" - the same
-	// distinction the pipeline draws when it clears the shard from planning but spares its cache partition.
-	sm := seamster.New(true)
-	r.p.SetSeams(sm)
-	sm.InjectN(FaultScanErr, 1)
-	res = r.p.Cycle(ctx)
-	assert.Error(res.Err)
-	assert.False(r.p.stealing.Load(), "a failed cycle must not arm the steal by accident")
+	// Age EVERYTHING past the grace, so admission cannot be what orders the result - only the ranking can.
+	// The oldest rows are therefore a mix of both classes, and the SQL would hand back the foreign ones
+	// first if nothing re-ranked them. Backdated with the DATABASE clock, never a bound Go time.
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000)")
+	assert.NoError(err)
+
+	// Asking for exactly this replica's own count must yield its own class and nothing else.
+	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, len(own))
+	assert.NoError(err)
+	assert.Equal(own, got["k"], "own-class steps rank ahead of admitted foreign ones")
+
+	// Asking for more than it owns fills the remainder from the foreign classes, own first, and each tier
+	// stays oldest-first inside itself.
+	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 8)
+	assert.NoError(err)
+	assert.Equal(append(append([]int{}, own...), foreign...), got["k"],
+		"the shortfall is filled from foreign classes, behind every own-class step")
+
+	// And the per-key cap is honoured despite the over-fetch, so the plan gets what it asked for.
+	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 2)
+	assert.NoError(err)
+	assert.Equal(2, len(got["k"]), "the over-fetch is trimmed back to the plan's per-key cap")
 }
 
 // TestPiston_StealTakesOnlyLongDueForeignSteps drives the relaxed predicate against real SQL, which is the
@@ -810,27 +1052,23 @@ func TestPiston_StealTakesOnlyLongDueForeignSteps(t *testing.T) {
 	own, foreign := r.idsByResidue(t, 2, 0)
 	assert.True(len(own) > 0 && len(foreign) > 0, "the fixture needs both classes populated")
 
-	// Strict: only our own class is visible.
-	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
-	assert.NoError(err)
-	assert.Equal(own, got["k"], "strict partitioning sees only this replica's class")
-
-	// Armed, but every step is freshly due - younger than the grace - so a healthy owner's work is left
-	// alone. This is the moderate-load case the grace exists for: spare capacity is common in a healthy
-	// fleet, and the gate alone would re-enable overlapping selection fleet-wide.
+	// Every step is freshly due - younger than the grace - so a healthy owner's work is left alone even
+	// though this replica is asking for far more than its own class holds. This is the moderate-load case
+	// the grace exists for, and it is the ONLY thing covering it: the fill order cannot, because a batch is
+	// sized to cache capacity rather than to what is due, so every replica in an under-saturated fleet has
+	// spare slots it would otherwise fill from healthy peers.
 	//
 	// Re-stamped rather than trusted to still be young: this makes "freshly due" true at the instant of the
 	// fetch rather than a bet on how long the setup above took, so only the fetch's own round trip is
 	// charged against the grace. Same database clock as the ageing UPDATE below, never a bound Go time.
-	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC()")
+	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC()")
 	assert.NoError(err)
-	r.p.stealing.Store(true)
-	got, err = r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
+	got, err := r.p.FetchSteps(ctx, 1, 5, []string{"k"}, 100)
 	assert.NoError(err)
 	assert.Equal(own, got["k"], "a young foreign step belongs to its owner")
 
 	// Age the foreign steps past the grace: a stalled owner's class ages without bound, and only then is it
-	// taken. Backdated with the DATABASE clock, never a bound Go time.
+	// admitted. Backdated with the DATABASE clock, never a bound Go time.
 	_, err = r.db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET not_before=DATE_ADD_MILLIS(NOW_UTC(), -5000) WHERE step_id % 2 = 1")
 	assert.NoError(err)

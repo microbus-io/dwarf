@@ -499,7 +499,17 @@ claim time rather than dispatched, so a parked step in a stale cache entry never
 the workers, decide *what* runs. Each shard's piston cycles against its own database on its own clock,
 with **no barrier anywhere** between shards (a merged pass returned when the slowest shard did - an
 order-statistics tax measured at 2.02x by 6 shards, on the path that is the engine's throughput ceiling).
-One cycle is `sleep -> tallying -> planning -> fetching -> pushing` (`internal/pipeline`). (1) **Aggregate
+Each piston runs **two independently paced loops** (`internal/pipeline`), meeting only at the planner: a
+**Tallier** (`sleep -> tallying`) and a **Supplier** (`sleep -> planning -> fetching -> pushing`). They are
+separate because the band scan costs O(due rows at the band) and therefore grows with the backlog, so
+fusing them let the scan set the rate at which candidates reached the workers - supplying least exactly
+when the backlog was deepest (measured: the scan was ~90% of a 634ms cycle at ~500k pending, capping supply
+at 353 steps/s against ~3,340 for a Supplier alone at 67ms). What goes stale instead is the fairness tally,
+which is the cheap thing to be stale about; strict *priority* is the real concession, since a peer-created
+better band is seen up to one Tallier iteration late. The full accounting, and the two traps the split
+forced (`Plan.Tallied`, and the rule that both refill queries run the identical residue predicate), are in
+`internal/pipeline/CLAUDE.md` and
+`internal/piston/CLAUDE.md`. (1) **Aggregate
 scan** (`piston.ScanBand`): the shard returns *one row per fairness key* at its strict-minimum `priority`
 band - the key's due **count CAPPED at cache capacity** (`MAX(rn)` under a `rn <= capacity` cut, not
 `COUNT(*) OVER`; see "The phase-1 scan count is CAPPED, not exact" below) plus the age and
@@ -927,10 +937,12 @@ invisible to both (see the lease-extension guard in `persist.go`).
 **The pistons need no error clamp either.** A scan or fetch can fail on the same transient DB error that the
 poll's clamp used to cover, and swallowing it would be the mirror wedge: the shard's partition refills
 **empty** and its workers block in `Pop`. Under the trigger design that needed an explicit re-poll; now the
-next cycle is at most one interval away unconditionally, so the retry *is* the cadence. What a cycle does do
-on a scan error is `planner.Clear` (this shard stops claiming a band it cannot serve) while leaving the
-cache partition intact - an error means "unknown", not "nothing is due". A fetch error clears neither: the
-tally already succeeded and is still true.
+next cycle is at most one interval away unconditionally, so the retry *is* the cadence. What a scan error
+does is `planner.Clear` (this shard stops claiming a band it cannot serve) while leaving the cache
+partition intact - an error means "unknown", not "nothing is due". With the two loops split, the second
+half is the *Supplier's* to honour rather than a consequence of returning early, and it reads the
+distinction off `Plan.Tallied`. A fetch error clears neither: the tally already succeeded and is still
+true.
 
 *The trade from removing the early wake, restated:* `flow.Sleep(until)` and retry backoffs land within a
 cycle interval of their deadline rather than on a precise wake. At the derived ~67ms that is as good as the
@@ -1271,7 +1283,10 @@ deep-backlog scan (still O(backlog) on any dialect lacking the run-condition ear
 healthy replica in a loaded fleet out of the divisor at once. The duration qualifier is load-bearing rather
 than incidental: "a cycle is in flight" reads true ~1.2% of the time even when every scan fails instantly,
 which a reader sampling on a cadence catches within seconds - so a piston serving NOTHING would hold its
-residue class forever. See `internal/piston/CLAUDE.md`. Registration does NOT stamp it - intent is not evidence - so a
+residue class forever. The COUNT behind it is the MINIMUM of the piston's two loops, because either alone
+reports a piston that serves nothing as fully alive: one whose every SCAN fails turns its supply loop
+happily against an empty planner, and one whose every FETCH fails tallies honestly and claims its band while
+taking zero candidates. Both hold a residue class nobody else selects. See `internal/piston/CLAUDE.md`. Registration does NOT stamp it - intent is not evidence - so a
 replica earns it on its first cycle, and the beat rides the read cadence when that evidence flips so the
 window is a read interval rather than a beat interval. An await-only replica (`SetWorkers(0)`) holds
 connections, so it counts toward the pool divisor, but it claims nothing: giving it a residue class means
@@ -1312,7 +1327,8 @@ of a core - *worse than removing that replica from the divisor entirely* (494-50
 worker) and a latency cripple (+10ms RTT) produced the same cap, so the coupling belongs to the partition,
 not to how a replica goes slow. With the steal: **458-501**, at 0.4-5.4% claim loss.
 
-The mechanism, its gate, its two tiers and the measurements behind each are in `internal/piston/CLAUDE.md`.
+The mechanism - an age grace that ADMITS foreign steps plus a fill order that ranks this replica's own
+class ahead of them - and the measurements behind each are in `internal/piston/CLAUDE.md`.
 Three things stay the engine's:
 
 - **The pair the piston partitions on is still `partitionOn(shard)`** - the steal relaxes that pair's
@@ -2539,7 +2555,8 @@ why nothing wraps `sequel.DB` — the call site is what knows when the connectio
 
 **Two bands, and the second one is the piston's alone.** `priorityRefill` (0) is above `priorityCommon` (1),
 and bands are strict — a band is exhausted before the next is looked at. The piston has it because it is the
-only caller bounded by construction (a derived period, two turns per cycle per shard), so it cannot starve
+only caller bounded by construction (a derived period, and two loops taking one turn each per cycle against
+a turn count of 8x the connections), so it cannot starve
 what sits below it; and it needs it because candidate supply runs only 1.04–1.47x ahead of consumption, so a
 cycle queueing behind the dispatch it feeds starves the workers it is filling for.
 
@@ -2742,9 +2759,12 @@ is the one cost that scales with fairness-key CARDINALITY (the lottery re-rolls 
 
 **There is deliberately no end-to-end `dwarf_refill_duration_seconds`.** It existed to expose the MERGED
 pass's straggler tax as its gap over the per-shard query max - a quantity the per-shard decoupling deleted
-along with the barrier that produced it. What was left was a coarse duplicate of the four phases, which sum
-to the same cycle and additionally say WHICH part was slow. Do not add it back without a question it
-answers that the phase split does not.
+along with the barrier that produced it. What was left was a coarse duplicate of the four phases, which say
+WHICH part was slow. Do not add it back without a question it answers that the phase split does not.
+
+**DO NOT SUM THE FOUR PHASES.** `band_keys` is emitted by the piston's tally loop and
+`planning`/`fetch_steps`/`pushing` by its supply loop, on independent cadences - so their sum is the total
+of two unrelated clocks and reconstructs no single object. There is no "a cycle" to reconstruct.
 These exist because **the refiller was the one hot-path subsystem with no timing instrument at all**, so the
 question "what binds at the ceiling" could not be asked of it - and `docs/benchmark-cloud.md`'s
 straggler-wait explanation for the flat 3-shard arm was inference, never a measurement (it has since been
@@ -2758,7 +2778,10 @@ identical from outside (the rules below record how each resolved):
   it: `dwarf_refill_duration_seconds` was the merged pass, and its gap over the per-shard query max was the
   straggler tax. With no barrier there is no merged pass and no gap, so the instrument was retired rather
   than left reporting a coarse duplicate of the phases (see above). A shard's own cycle time - which sets
-  its partition's supply rate, `capacity_slice/max(cycle, floor)` - is the sum of its four phases.
+  its partition's supply rate, `capacity_slice/max(supply period, floor)` - is set by the SUPPLY loop alone
+  and has nothing to do with the band scan. Summing the four phases overstates it by the scan, which is the
+  larger term by one to two orders of magnitude at depth (measured: a 1.6-2.1s scan against a 20-67ms supply
+  period), so the sum answers ~0.5 steps/s per shard where the real figure is ~50.
 - **The refiller oversupplies** - `discarded/selected` approaches 1. Every pass wholesale-replaces its
   shard's partition while being triggered after every `processStep` on that shard, so whenever it turns
   faster than the workers drain it throws away a batch it just paid to fetch. `Cache.Refill` returns the
@@ -2841,8 +2864,13 @@ worklist. These are the parts that would make a future change WRONG if unknown:
   because `GROUP BY` is cheap. General rule: re-derive the cost split after any change that moves the
   baseline.
 
-**The oversupply hypothesis is dead** (`discarded/selected` measured 0-10%, never the ~100% it
-predicted). Do not re-propose it without new evidence.
+**The oversupply hypothesis was measured dead in the FUSED build** (`discarded/selected` 0-10%, never the
+~100% it predicted) **and is alive in the split one.** With the scan no longer pacing the supply loop, the
+`MinGap` floor became the binding supply rate, and the same rig measured **85% discard and +42% host CPU**
+at the derived cadence. Pacing the supply loop against the measured drain (~190ms there, against a derived
+17.8ms that fell below the 20ms floor) cut the fetches 4.4x and kept the throughput. So a high waste ratio
+now names a supply loop running ahead of the workers, which is a cadence-derivation question rather than a
+dead hypothesis - see `deriveRefillInterval`, which was calibrated when the scan capped it.
 
 **17 counters** in total: the 8 event counters above, plus `dwarf_steps_offered` /
 `dwarf_steps_claim_preempted` / `dwarf_steps_claim_lost` / `dwarf_peer_changes`, plus the three the pistons

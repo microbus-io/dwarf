@@ -858,7 +858,8 @@ func (e *Engine) initRuntime() error {
 			// it ABOVE every band - a bypasser takes a connection without queueing for one - and would put
 			// it outside the population the turn count bounds. Band 0 keeps both properties and costs it
 			// nothing: strict priority means it waits only for the NEXT turn to free rather than for the
-			// queue to drain, and it shares the band with one piston taking two turns per cycle.
+			// queue to drain, and it shares the band with one piston whose two loops take one turn each per
+			// cycle, against a turn count of 8x the connections.
 			s.SetTurnFunc(func(ctx context.Context) (context.Context, func()) {
 				return e.dbTurnAt(ctx, idx, priorityRefill)
 			})

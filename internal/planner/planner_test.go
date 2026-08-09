@@ -18,6 +18,7 @@ package planner
 
 import (
 	"math"
+	"sync"
 	"testing"
 
 	"github.com/microbus-io/testarossa"
@@ -288,4 +289,50 @@ func TestPlanner_CapacityBounds(t *testing.T) {
 	assert.Equal(7, len(p.Plan(1, 7).Slots))
 	assert.Equal(0, len(p.Plan(1, 0).Slots))
 	assert.Equal(0, len(p.Plan(1, -1).Slots))
+}
+
+// TestPlanner_TalliedAgreesWithSlotsUnderConcurrency pins that Plan.Tallied and Plan.Slots describe the SAME
+// snapshot, which is what lets a caller act on the pair.
+//
+// They are read by different goroutines than the ones writing them - the caller's tally loop and its supply
+// loop run on independent cadences - so a Tallied read from a FRESH map lookup rather than from the snapshot
+// can disagree with the Slots computed beside it. The damaging direction is quiet: a shard absent at the
+// snapshot but re-tallied a moment later reports Tallied=true with no Slots, which reads as the positive
+// statement "nothing here is dispatchable" and gets acted on by clearing a healthy cache partition.
+//
+// The direction assertable from outside is its mirror - winning slots is only possible for a shard that was
+// in the snapshot - and it fails against a build that re-reads the map, because Clear can land in between.
+func TestPlanner_TalliedAgreesWithSlotsUnderConcurrency(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	p := New()
+
+	// A peer holds the same band throughout, so shard 1 always has keys to win slots at.
+	p.Tally(2, 5, []Tally{{Key: "k", Weight: 1, AgeMs: 100, Count: 8}})
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			p.Tally(1, 5, []Tally{{Key: "k", Weight: 1, AgeMs: 100, Count: 8}})
+			p.Clear(1)
+		}
+	}()
+
+	for range 20000 {
+		plan := p.Plan(1, 8)
+		if len(plan.Slots) > 0 && !plan.Tallied {
+			assert.True(false, "a shard that won %d slots must have been in the snapshot that granted them", len(plan.Slots))
+			break
+		}
+	}
+	close(stop)
+	wg.Wait()
 }

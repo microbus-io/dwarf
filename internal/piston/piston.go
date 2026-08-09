@@ -14,34 +14,37 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package piston supplies step candidates from one shard. One piston works one shard, firing the same
-// cycle over and over against its own database on its own clock, with no barrier against its peers; an
+// Package piston supplies step candidates from one shard. One piston works one shard, firing the same two
+// cycles over and over against its own database on its own clock, with no barrier against its peers; an
 // engine with N shards runs N of them.
 //
 // A piston is a CONSUMER of its database, never the owner: the handle is passed in already open and is
-// closed by whoever opened it, so there is no Open, no Close, and no say over pool sizes. It owns the
-// supply cycle, the two queries behind it, and its instruments; it borrows the planner and the candidate
+// closed by whoever opened it, so there is no Open, no Close, and no say over pool sizes. It owns the two
+// supply loops, the two queries behind them, and its instruments; it borrows the planner and the candidate
 // cache, both shared with every other piston on the replica.
 //
-// Run blocks and drives the cycle until its context ends:
+// Run blocks and drives both loops until its context ends, each on its own goroutine and its own cadence:
 //
-//	cycle (paced by the pipeline) -> record -> repeat
+//	tally  (paced by the pipeline) -> record -> repeat
+//	supply (paced by the pipeline) -> record -> repeat
 //
-// Liveness reports whether that loop is turning, for an owner that publishes this replica's liveness
+// Liveness reports whether the piston is turning, for an owner that publishes this replica's liveness
 // somewhere the fleet can see it.
 //
-// SetIdle(true) skips the cycle entirely, which is the await-only replica: it keeps holding connections,
+// SetIdle(true) skips both loops entirely, which is the await-only replica: it keeps holding connections,
 // but claims no work and reports itself idle. Going idle withdraws the shard from the shared planner and
 // empties its cache partition, so nothing is left claiming a band this piston no longer reports on.
 //
-// Every Set* is live: the owner may re-derive any of them while Run is in flight.
+// Every Set* is live: the owner may re-derive any of them while Run is in flight. SetIdle is the one that
+// takes both loops to do properly - see its own doc.
 package piston
 
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strconv"
-	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -79,52 +82,10 @@ const idlePoll = time.Second
 //
 // Four is not a delicate number, and the measurements say why: a healthy fleet's oldest due step sits at
 // 0-1s while a stalled owner's class ages to 23-41s, against a ~67ms derived period. Anything from ~2 to
-// ~10 periods separates those cleanly. It is a small multiple because the gate - not this - is what keeps
-// a busy fleet from stealing at all; this only has to outlast the time a HEALTHY owner takes to reach its
-// own work, which is a cycle or two by construction.
+// ~10 periods separates those cleanly. It is a small multiple because it only has to outlast the time a
+// HEALTHY owner takes to reach its own work, which is a cycle or two by construction - the FILL ORDER, not
+// this, is what keeps a replica with work of its own from taking anyone else's.
 const defaultStealAfter = 4
-
-// FaultScanErr makes ScanBand fail without touching the database - see SetSeams. The name is exported so
-// the owning application's fault catalogue can alias it rather than re-spell the string.
-const FaultScanErr = "refillScanErr"
-
-// CheckpointCycleDone fires once per cycle that PUSHED - see SetSeams. Exported for the same catalogue
-// reason as FaultScanErr.
-//
-// It is fired only when the cycle reached its push, which is exactly when this shard's cache partition has
-// been reconciled against the plan: the two error paths (a failed tally, a failed fetch) return before
-// pushing and deliberately leave the partition alone, while an empty plan pushes nothing and CLEARS it. So
-// a visit means "this shard's partition now reflects the plan", which is the thing a test can neither
-// observe from outside nor wait out on a clock - each piston turns on its own cadence, and a shard whose
-// goroutine is starved or blocked on a slow round trip can hold an unreconciled partition arbitrarily long
-// while its peers turn normally.
-//
-// Fired BOTH unscoped and scoped by shard (a scoped fire does not wake an unscoped waiter, so a waiter for
-// "any shard cycled" and one for "shard 3 cycled" need separate fires). Counting scoped visits is the way
-// to wait for a SPECIFIC shard, since with several shards the unscoped count says nothing about which.
-const CheckpointCycleDone = "refillCycleDone"
-
-// CheckpointStole fires once per fetch that took at least one step from OUTSIDE this replica's residue
-// class - see SetSeams. Exported for the same catalogue reason as FaultScanErr.
-//
-// It earns its place on the same boundary rule as CheckpointCycleDone: it reports an effect on state the
-// package borrows, at the moment the effect happens, and no clock substitutes for it. A test proving that a
-// slow peer's work is picked up cannot wait out a duration - the steal fires on the first cycle after the
-// gate arms and the grace elapses, which is a function of the pipeline's cadence, the peer's degradation
-// and the backlog, none of which the test controls. Without it the only assertion available is "the flows
-// eventually finished", which passes just as well against a build where stealing does nothing and the
-// dispatch-window eviction did the work several seconds later - i.e. it cannot tell the mechanism under
-// test from the mechanism it replaces.
-//
-// Fired BOTH unscoped and scoped by shard, for the same reason CheckpointCycleDone is.
-const CheckpointStole = "refillStole"
-
-// seamsJoin builds a targeted seam name: a base name, then the entity it targets, joined with ":". A consult
-// site and the test that arms it both call it, so neither can spell the join the other does not. A targeted
-// name and the bare one are DIFFERENT seams, so a site wanting both fires both.
-func seamsJoin(parts ...string) string {
-	return strings.Join(parts, ":")
-}
 
 // PartitionFunc reports the replica partition - see SetPartitionFunc.
 type PartitionFunc func() (replicas, ordinal int, ok bool)
@@ -141,15 +102,27 @@ type instruments struct {
 	stolen        metric.Int64Counter
 }
 
-// Piston runs one shard's supply cycle and heartbeat.
+// Piston runs one shard's two supply loops and its heartbeat.
 //
-// Run must be driven by a single goroutine. Every Set* is safe to call from another one, at any time.
+// Run spawns a goroutine per loop and blocks until both return. Every Set* is safe to call from another
+// one, at any time.
 type Piston struct {
-	shard   int
-	db      *sequel.DB
-	planner *planner.Planner
-	cache   *candidates.Cache
-	pipe    *pipeline.Pipeline
+	shard int
+	// shardAttr labels every instrument this piston records, built once because the shard is immutable
+	// after New and the alternative is rebuilding it up to seven times per round trip.
+	//
+	// A STRING, not an Int, and the two must never be mixed. `shard` is emitted by the engine as well, and
+	// an OTLP-native backend distinguishes attribute TYPES - so the same key at two types is two different
+	// attributes there, which silently breaks any query grouping the piston's instruments against the
+	// engine's (the refiller's cost against the turnstile's queue is exactly that join). Prometheus renders
+	// both as the label string and hides the split, which is why it survived unnoticed.
+	shardAttr attribute.KeyValue
+
+	db       *sequel.DB
+	planner  *planner.Planner
+	cache    *candidates.Cache
+	tallier  *pipeline.Tallier
+	supplier *pipeline.Supplier
 
 	// Live configuration, each independently atomic. There is no grouped snapshot because nothing here is
 	// coupled - reading idle and the partition a microsecond apart cannot produce an inconsistent pair.
@@ -161,21 +134,27 @@ type Piston struct {
 	inst     atomic.Pointer[instruments]
 	seams    atomic.Pointer[seamster.Seamster]
 
-	// stealing is armed by a cycle that found nothing due in this replica's own residue class, and read by
-	// the NEXT cycle's predicate. Atomic because SetStealAfter and a test may touch the pair from another
-	// goroutine, not because the cycle path is concurrent - it is not.
-	stealing atomic.Bool
-	// lastTally is the total due-step count this replica's own residue class reported on the last scan,
-	// against which the steal gate measures spare capacity.
-	lastTally atomic.Int64
 	// stealAfter is how many cycle periods a foreign step must have been due before this replica takes it.
 	// Zero disables stealing outright, which is what an owner sets when it wants the residue class enforced
 	// strictly.
 	stealAfter atomic.Int32
-	// turns counts successful cycles, monotonically. A COUNTER rather than a flag the reader clears: a
-	// consuming getter would make any second caller - a metric, a test - silently swallow the evidence and
-	// leave a healthy piston reading as stalled. Holding "since I last looked" is the reader's business.
-	turns atomic.Uint64
+	// tallyTurns and supplyTurns count each loop's successful cycles, monotonically and independently -
+	// neither loop ever writes the other's. Liveness reports their MINIMUM, because a turn has to mean this
+	// piston can both LOOK at its shard and SERVE it, and the two failures are symmetric:
+	//
+	//   - every SCAN failing clears this shard from planning and selects nothing, while the supply loop
+	//     turns happily on an empty plan;
+	//   - every FETCH failing leaves the tally honest and the band claimed, while the partition takes zero
+	//     candidates - the quiet shape the bind-count overflow produces.
+	//
+	// Either alone therefore reads a piston that serves nothing as fully alive, and it then holds a residue
+	// class nobody else will select. The minimum stalls when either loop does, which is the whole point.
+	//
+	// COUNTERS rather than a flag the reader clears: a consuming getter would make any second caller - a
+	// metric, a test - silently swallow the evidence and leave a healthy piston reading as stalled. Holding
+	// "since I last looked" is the reader's business.
+	tallyTurns  atomic.Uint64
+	supplyTurns atomic.Uint64
 }
 
 // New returns a piston for one shard over an already-open database handle. The planner and cache are
@@ -193,13 +172,18 @@ func New(shard int, db *sequel.DB, plan *planner.Planner, cache *candidates.Cach
 	if cache == nil {
 		return nil, errors.New("cache is required")
 	}
-	p := &Piston{shard: shard, db: db, planner: plan, cache: cache}
+	p := &Piston{shard: shard, db: db, planner: plan, cache: cache,
+		shardAttr: attribute.String("shard", strconv.Itoa(shard))}
 	p.stealAfter.Store(defaultStealAfter)
-	pipe, err := pipeline.New(shard, p, plan, cache)
+	tallier, err := pipeline.NewTallier(shard, p, plan)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	p.pipe = pipe
+	supplier, err := pipeline.NewSupplier(shard, p, plan, cache)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	p.tallier, p.supplier = tallier, supplier
 	p.SetLogger(nil)
 	p.SetMeter(nil)
 	p.SetSeams(nil)
@@ -227,7 +211,10 @@ func (p *Piston) Shard() int { return p.shard }
 // bad case. The cache partition goes for the same reason an empty plan clears it: nothing here is
 // dispatchable, so every cached candidate is a dead hint a worker would pop and burn a claim round-trip on.
 //
-// Both are the same positive statement an empty plan makes, so both use the same two calls.
+// Both are the same positive statement an empty plan makes, so both use the same two calls. They are the
+// PROMPT half only: a cycle already in flight can re-tally or re-push after them, so each loop withdraws
+// again on its way into idle - see runTallier. This setter alone is not sufficient, and is not the thing to
+// reach for if that withdrawal ever needs strengthening.
 func (p *Piston) SetIdle(idle bool) {
 	p.idle.Store(idle)
 	if idle {
@@ -240,8 +227,9 @@ func (p *Piston) SetIdle(idle bool) {
 func (p *Piston) Idle() bool { return p.idle.Load() }
 
 // SetStealAfter sets how many cycle periods a step outside this replica's residue class must have been DUE
-// before this replica selects it anyway - and only while its own class is empty. Zero or negative disables
-// stealing, restoring strict residue partitioning.
+// before this replica will select it at all - and even then only for the slots its own class could not
+// fill, since the fetch ranks admitted steps by residue distance. Zero or negative disables stealing,
+// restoring strict residue partitioning.
 //
 // WHAT IT IS FOR. Partitioning hands each replica a disjoint class of step ids, which is what keeps peers
 // from racing for the same rows - but it also means a replica that is slow rather than DEAD keeps its class
@@ -252,7 +240,7 @@ func (p *Piston) Idle() bool { return p.idle.Load() }
 // produced the same cap, so it is a property of the partitioning rather than of how a replica goes slow.
 //
 // It fails open on every axis: stealing only ever ADMITS rows, the claim CAS still grants every step, and a
-// replica holding work of its own never steals at all.
+// replica whose own class can fill its batch ranks every foreign row behind its own and keeps none of them.
 func (p *Piston) SetStealAfter(periods int) {
 	if periods < 0 {
 		periods = 0
@@ -264,8 +252,8 @@ func (p *Piston) SetStealAfter(periods int) {
 func (p *Piston) StealAfter() int { return int(p.stealAfter.Load()) }
 
 // Liveness reports whether this piston is turning, for an owner that publishes the fact somewhere the
-// fleet can see it: the count of cycles completed so far, whether one is running right now, and whether
-// the piston is idling.
+// fleet can see it: the count of tally cycles completed so far, whether either loop is working right now,
+// and whether the piston is idling.
 //
 // A COUNTER rather than a "since you last asked" flag, and that is the load-bearing part. A consuming
 // getter would create a contract - call it exactly once per publication, from exactly one caller - and any
@@ -273,37 +261,60 @@ func (p *Piston) StealAfter() int { return int(p.stealAfter.Load()) }
 // as stalled. Holding the previous count is the reader's business, so this is a pure read that may be
 // called any number of times.
 //
-// A cycle inside its QUERIES counts, because a scan can legitimately run for tens of seconds on a deep
+// The count is the MINIMUM of the two loops' own counts, because a turn has to mean this piston can both
+// LOOK at its shard and SERVE it. Taking it from either loop alone reads a piston that serves nothing as
+// fully alive - see tallyTurns.
+//
+// A loop inside its QUERIES counts, because a scan can legitimately run for tens of seconds on a deep
 // backlog where the executor cannot early-stop, and a piston in the middle of one is plainly still serving.
 // It is deliberately the queries and not the whole cycle: a cycle spends most of a healthy wall clock
 // asleep in its pace, so counting that would make busy permanently true and turn this into "the loop is
-// alive" - which a piston whose every scan FAILS would satisfy just as well, keeping a residue class of
-// steps it never selects. That is the exact stranding the evidence exists to prevent.
+// alive".
 func (p *Piston) Liveness() (turns uint64, busy, idle bool) {
-	// Busy means a cycle has been in its queries LONGER THAN ONE CYCLE PERIOD, not merely that one is. A
+	// Busy means a loop has been in its queries LONGER THAN ONE CYCLE PERIOD, not merely that one is. A
 	// cycle that fails instantly is also briefly in its queries, and a reader sampling on its own clock
 	// catches that often enough to keep a broken piston looking alive for good - the exact stranding this
 	// evidence exists to prevent. A scan that outruns the period is the case busy is for, and a scan that
 	// does not will have completed and advanced the turn count long before any reader looks.
 	//
-	// FLOORED AT MinGap, because the period can legitimately be zero - a bench sweep measuring the unlimited
-	// arm pins it there, and so does any caller driving cycles by hand - and a zero threshold is the bool
-	// this predicate exists to replace. MinGap is already this package's fuse for that same degenerate
-	// regime, so it is the floor that already means "shorter than this is not a cycle worth pacing".
-	return p.turns.Load(), p.pipe.WorkingFor() > max(p.Interval(), pipeline.DefaultMinGap), p.idle.Load()
+	// EITHER loop counts: both hold a connection while they work, so a piston stuck in either is one nobody
+	// should be redistributing work away from yet.
+	//
+	// EACH LOOP IS COMPARED AGAINST ITS OWN PERIOD, never against a shared one. The two are paced
+	// independently, so a single threshold is right for at most one of them: measure the supply loop against
+	// a longer tally period and a genuinely stuck fetch reads idle, measure it the other way and a healthy
+	// scan reads busy. Period() floors at the DefaultMinGap constant, which is what keeps this a duration
+	// predicate rather than the bool it exists to replace when a caller pins the cadence to zero.
+	busy = p.tallier.WorkingFor() > p.tallier.Period() || p.supplier.WorkingFor() > p.supplier.Period()
+	turns = min(p.tallyTurns.Load(), p.supplyTurns.Load())
+	return turns, busy, p.idle.Load()
 }
 
-// SetInterval sets the cycle period, start of one cycle's scan to the next. See pipeline.SetInterval.
-func (p *Piston) SetInterval(d time.Duration) { p.pipe.SetInterval(d) }
+// SetInterval sets BOTH loops' cycle period, start of one cycle's work to the next. See
+// pipeline.Tallier.SetInterval.
+//
+// It is one knob over two independently paced loops, which is a convenience for an owner that derives a
+// single number - not a statement that the two must agree. NOTHING INSIDE THIS PACKAGE MAY ASSUME THEY DO:
+// anything reasoning about a loop's cadence asks that loop for its own Period(), because the day the two
+// diverge a shared threshold is right for at most one of them.
+func (p *Piston) SetInterval(d time.Duration) {
+	p.tallier.SetInterval(d)
+	p.supplier.SetInterval(d)
+}
 
-// Interval is the current cycle period.
-func (p *Piston) Interval() time.Duration { return p.pipe.Interval() }
+// Interval is the cycle period both loops were last SET to, for an owner reading back its own knob. It is
+// not a loop's effective cadence - ask the loop.
+func (p *Piston) Interval() time.Duration { return p.tallier.Interval() }
 
-// SetMinGap sets the minimum quiet time between cycles. See pipeline.SetMinGap.
-func (p *Piston) SetMinGap(d time.Duration) { p.pipe.SetMinGap(d) }
+// SetMinGap sets BOTH loops' minimum quiet time between cycles. See pipeline.Tallier.SetMinGap and the
+// caveat on SetInterval.
+func (p *Piston) SetMinGap(d time.Duration) {
+	p.tallier.SetMinGap(d)
+	p.supplier.SetMinGap(d)
+}
 
-// MinGap is the current minimum quiet time between cycles.
-func (p *Piston) MinGap() time.Duration { return p.pipe.MinGap() }
+// MinGap is the quiet time both loops were last SET to; see Interval.
+func (p *Piston) MinGap() time.Duration { return p.tallier.MinGap() }
 
 // SetPartitionFunc supplies the replica partition: the (replicas, ordinal) pair that restricts this
 // replica's selection to its own residue class of step ids, so replicas sharing a database select
@@ -320,13 +331,14 @@ func (p *Piston) SetPartitionFunc(fn PartitionFunc) {
 	p.partition.Store(&fn)
 }
 
-// SetContextFunc supplies a derivation applied to the context at the START of each cycle, so whatever the
-// caller needs its queries to carry - a priority, an admission time, a deadline - is on both of them
-// without this package knowing what any of it means. Nil (the default) leaves the context alone.
+// SetContextFunc supplies a derivation applied to the context at the START of each cycle, on both loops, so
+// whatever the caller needs its queries to carry - a priority, an admission time, a deadline - is on both
+// of them without this package knowing what any of it means. Nil (the default) leaves the context alone.
 //
-// Once per CYCLE rather than once per query, because the two queries of a cycle are one unit of work: what
-// a caller stamps is that unit, and re-deriving between them would make the fetch look like a newer arrival
-// than the scan it belongs to.
+// Once per CYCLE rather than once per query, which for the supply loop means the plan and the fetch share
+// one stamp: re-deriving between them would make the fetch look like a newer arrival than the plan it is
+// resolving. The two LOOPS are stamped separately, and that is correct - they are separate units of work
+// on separate clocks, and stamping them together would be claiming a coupling the split removed.
 func (p *Piston) SetContextFunc(fn ContextFunc) {
 	if fn == nil {
 		p.cycleCtx.Store(nil)
@@ -400,7 +412,7 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 		discarded: ctr("dwarf_refill_candidates_discarded",
 			"Counts cached step candidates thrown away un-popped by a wholesale refill - the refiller's waste signal. The steps stay pending and are re-selected, so this is cost, not loss."),
 		stolen: ctr("dwarf_steps_stolen",
-			"Counts candidates this replica selected from OUTSIDE its own residue class, because its own class was empty and the step had been due for several cycle periods - i.e. its owner was not taking it. Zero in a healthy fleet by construction: a replica holding its own work never steals. A sustained nonzero rate names a peer that is alive in the registry but not serving its share, which nothing else reports - and it is the quantity to read dwarf_steps_claim_lost against, since stealing trades exclusivity for coverage."),
+			"Counts candidates this replica selected from OUTSIDE its own residue class, because its own class could not fill the batch and the step had been due for several cycle periods - i.e. its owner was not taking it. Zero in a healthy fleet by construction: a replica holding its own work never steals. A sustained nonzero rate names a peer that is alive in the registry but not serving its share, which nothing else reports - and it is the quantity to read dwarf_steps_claim_lost against, since stealing trades exclusivity for coverage."),
 	})
 	if len(errs) > 0 {
 		return errors.Trace(errs[0])
@@ -408,38 +420,108 @@ func (p *Piston) SetMeter(m metric.Meter) error {
 	return nil
 }
 
-// Run drives the piston until ctx is cancelled. It blocks; a caller runs it in a goroutine and waits on
-// its own WaitGroup.
+// Run drives both of the piston's loops until ctx is cancelled - one goroutine each, on independent
+// cadences - and blocks until both have returned. A caller runs it in a goroutine and waits on its own
+// WaitGroup.
+//
+// TWO LOOPS RATHER THAN ONE, because the band scan is O(due rows at the band) on every dialect (see
+// ScanBand) and nothing in the query early-stops. A single loop would let a deep backlog's scan set the
+// whole cycle's period and therefore the rate candidates reach the workers - supplying least exactly when
+// the backlog is deepest. Kept apart, the supply loop turns at its own cadence on whatever the planner
+// already holds while a long scan runs beside it, and what a slow scan costs is the FRESHNESS of the
+// fairness tally, which is the cheap thing to be stale about.
 //
 // It publishes nothing about this replica's liveness itself - Liveness is a pure read an owner samples on
 // its own cadence, which is what keeps how often that is published independent of how long a cycle takes.
-// The independence is a correctness requirement rather than tidiness: the band scan is O(due rows at the
-// band) on every dialect - see ScanBand - so a deep backlog runs it for tens of seconds at a few million
-// due rows, and nothing in the query early-stops. A liveness signal gated on a cycle RETURNING
-// would let one such scan drop a perfectly healthy replica out of its own fleet - which should mean "the
-// process is stuck", nothing less.
+// The independence is a correctness requirement rather than tidiness: a liveness signal gated on a cycle
+// RETURNING would let one deep-backlog scan drop a perfectly healthy replica out of its own fleet - which
+// should mean "the process is stuck", nothing less.
 func (p *Piston) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); p.runTallier(ctx) }()
+	go func() { defer wg.Done(); p.runSupplier(ctx) }()
+	wg.Wait()
+}
+
+// runTallier reports what this shard has due, over and over, on the tally loop's own cadence.
+func (p *Piston) runTallier(ctx context.Context) {
+	// TRUE to start: this exists to undo what a COMPLETED cycle re-inserted, and a loop that has not run one
+	// has nothing to undo - SetIdle already withdrew on its way to making this loop idle. Starting false
+	// instead makes an already-idle piston wipe state on its first iteration, racing whatever its owner set
+	// up in the meantime.
+	withdrawn := true
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		// An idle piston runs no cycle on either loop, so its turn count never moves and Liveness reports it
+		// idle - which is how a reader tells the two populations apart without trusting anything the replica
+		// says about itself. Re-checked on the idle poll so a live SetIdle(false) resumes within one poll.
+		//
+		// THE LOOP WITHDRAWS, not just SetIdle, and that is what makes going idle safe against a cycle
+		// already in flight. SetIdle can only clear what is there when it runs; a scan that started before it
+		// - and the band scan runs for seconds on a deep backlog - publishes its tally AFTER, re-entering the
+		// shard nothing will ever report on again. Withdrawing here, past the point the cycle has returned,
+		// undoes that whatever the interleaving was. Once per transition, since Clear on an absent shard is a
+		// no-op but there is no reason to do it every poll.
 		if p.idle.Load() {
-			// An idle piston runs no cycle, so its turn count never moves and Liveness reports it idle -
-			// which is how a reader tells the two populations apart without trusting anything the replica
-			// says about itself. Re-checked on the idle poll so a live SetIdle(false) resumes dispatching
-			// within one interval.
+			if !withdrawn {
+				p.planner.Clear(p.shard)
+				withdrawn = true
+			}
 			if !p.sleep(ctx, idlePoll) {
 				return
 			}
 			continue
 		}
-		r := p.Cycle(ctx)
+		withdrawn = false
+		r := p.TallyCycle(ctx)
 		if r.Err != nil && ctx.Err() == nil {
-			p.logger.Load().ErrorContext(ctx, "Refill cycle", "shard", p.shard, "error", r.Err)
+			p.logger.Load().ErrorContext(ctx, "Refill tally", "shard", p.shard, "error", r.Err)
 		}
 		if r.Err == nil {
-			// This shard's partition now reflects the plan - see CheckpointCycleDone. Gated on the error so
-			// a visit cannot mean "looked and gave up": neither error path pushed, so neither reconciled.
+			// A scan completed and its tally is in the planner - see CheckpointTallyDone.
+			if seams := p.seams.Load(); seams.Enabled() { // Enabled gates the assembled name in production
+				seams.Checkpoint(ctx, CheckpointTallyDone)
+				seams.Checkpoint(ctx, seamsJoin(CheckpointTallyDone, strconv.Itoa(p.shard)))
+			}
+		}
+	}
+}
+
+// runSupplier fills this shard's cache partition from the plan, over and over, on the supply loop's own
+// cadence.
+func (p *Piston) runSupplier(ctx context.Context) {
+	withdrawn := true // see runTallier
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		// Empties the partition on the way into idle, for the same reason the tally loop clears the shard:
+		// a fetch already in flight when SetIdle ran pushes its batch AFTER the emptying, and the hints it
+		// leaves are for work this piston will never claim. Each loop withdraws what IT owns - the Tallier
+		// this shard's participation in planning, this its cache partition - the same seam the error policy
+		// splits on.
+		if p.idle.Load() {
+			if !withdrawn {
+				p.cache.Refill(p.shard, nil, pipeline.NoBand)
+				withdrawn = true
+			}
+			if !p.sleep(ctx, idlePoll) {
+				return
+			}
+			continue
+		}
+		withdrawn = false
+		r := p.SupplyCycle(ctx)
+		if r.Err != nil && ctx.Err() == nil {
+			p.logger.Load().ErrorContext(ctx, "Refill supply", "shard", p.shard, "error", r.Err)
+		}
+		if r.Reconciled {
+			// This shard's partition now reflects the plan - see CheckpointCycleDone. Gated on the push
+			// rather than on the error, so a visit cannot mean "looked and gave up": both hold-everything
+			// paths leave the partition alone and only one of them is an error.
 			if seams := p.seams.Load(); seams.Enabled() { // Enabled gates the assembled name in production
 				seams.Checkpoint(ctx, CheckpointCycleDone)
 				seams.Checkpoint(ctx, seamsJoin(CheckpointCycleDone, strconv.Itoa(p.shard)))
@@ -448,94 +530,96 @@ func (p *Piston) Run(ctx context.Context) {
 	}
 }
 
-// Cycle runs exactly ONE supply cycle - paced as always - records it, and returns what happened. Run is
-// this in a loop; a caller drives it directly when it wants a cycle at a moment of its own choosing rather
-// than on the piston's cadence.
+// Cycle runs exactly one tally cycle and then one supply cycle - each paced as always - and returns both
+// results. It is the HAND-DRIVEN shape, for a caller that wants a full round trip at a moment of its own
+// choosing; Run does not do this, it turns the two loops independently.
 //
-// NOT safe to call concurrently with Run, or with itself: the pipeline's cadence timestamps are
+// NOT safe to call concurrently with Run, or with itself: each loop's cadence timestamps are
 // single-goroutine state. A caller that drives cycles by hand should idle the piston first.
-func (p *Piston) Cycle(ctx context.Context) pipeline.Result {
+func (p *Piston) Cycle(ctx context.Context) (pipeline.TallyResult, pipeline.SupplyResult) {
+	tr := p.TallyCycle(ctx)
+	sr := p.SupplyCycle(ctx)
+	return tr, sr
+}
+
+// SupplyCycle runs exactly ONE supply cycle - paced as always - records it, and returns what happened.
+// runSupplier is this in a loop.
+//
+// NOT safe to call concurrently with Run or with itself; see Cycle.
+func (p *Piston) SupplyCycle(ctx context.Context) pipeline.SupplyResult {
 	if fn := p.cycleCtx.Load(); fn != nil {
 		ctx = (*fn)(ctx)
 	}
-	r := p.pipe.Cycle(ctx)
-	p.record(ctx, r)
-	// A cycle that found nothing due still counts: it proves this piston looked and could have served.
-	// Gating on candidates instead would make a quiet fleet look like it had no dispatchers at all.
+	r := p.supplier.Cycle(ctx)
+	p.recordSupply(ctx, r)
+	// A cycle that pushed nothing still counts: an untallied shard and an outranked one are both honest
+	// outcomes, and only a FAILED fetch means this piston could not serve what it was asked to.
 	if r.Err == nil {
-		p.turns.Add(1)
-	}
-	// Arm or disarm the steal from what this cycle SAW, for the next one to act on - see stealGrace.
-	//
-	// SHORTFALL, not emptiness. An earlier cut armed on Band == NoBand - nothing due in this replica's own
-	// class at all - and that is too strict for any workload with CONTINUOUS arrivals: a healthy replica
-	// keeping up with its share still finds a step or two due on almost every scan, so the gate never armed
-	// while its peer's class backed up unboundedly beside it. Measured against a 50 flows/s open-loop bench
-	// with one crippled peer: zero steals, and the fleet stayed at the same ~177 steps/s the unfixed build
-	// managed. Emptiness only looked sufficient because a BURST workload drains a class to nothing.
-	//
-	// What matters is whether this replica could serve more than its class is offering, which is exactly the
-	// tally against the batch it was about to fill. It is a property of the database backlog rather than of
-	// anything this piston did, so it stays true while a peer is stalled and clears itself the moment this
-	// replica's own class can fill its own batch again - which is also why the one-cycle lag is harmless
-	// and, being hysteresis, mildly useful.
-	//
-	// A FAILED cycle leaves the flag alone. An error means "unknown", not "nothing is due" - the same
-	// distinction the pipeline draws when it clears the shard from planning but spares its cache partition.
-	//
-	// While stealing, the scan the gate reads is itself the RELAXED one, so the tally counts what this
-	// replica can now see rather than what its own class holds - and a replica filling its batch by stealing
-	// therefore disarms, scans strictly next cycle, finds the shortfall again and re-arms. That alternation
-	// is deliberate rather than tolerated: it steals on every other cycle while re-checking its own class in
-	// between, so recovery is noticed within one period and no separate re-probe is needed. Reading the strict
-	// tally instead would need a second query per cycle to learn a fact that costs nothing to rediscover.
-	if r.Err == nil {
-		p.stealing.Store(p.lastTally.Load() < int64(p.cache.Capacity()))
+		p.supplyTurns.Add(1)
 	}
 	return r
 }
 
-// record translates a cycle's result into this piston's instruments.
-func (p *Piston) record(ctx context.Context, r pipeline.Result) {
-	in := p.inst.Load()
-	// A STRING, not an Int, and the two must never be mixed. `shard` is emitted by the engine as well, and
-	// an OTLP-native backend distinguishes attribute TYPES - so the same key at two types is two different
-	// attributes there, which silently breaks any query grouping the piston's instruments against the
-	// engine's (the refiller's cost against the turnstile's queue is exactly that join). Prometheus renders
-	// both as the label string and hides the split, which is why it survived unnoticed.
-	shardAttr := attribute.String("shard", strconv.Itoa(p.shard))
-	// There is deliberately no end-to-end cycle histogram. One existed, and its job was to expose the MERGED
-	// pass's straggler tax as the gap over the per-shard query max - a quantity the per-shard decoupling
-	// deleted along with the barrier that produced it. What remained was a coarse duplicate of the four
-	// phases below, which sum to the same cycle and say WHICH part was slow. Do not add it back without a
-	// question it answers that the phase split does not.
-	if r.Tallying > 0 {
-		in.queryDuration.Record(ctx, r.Tallying.Seconds(),
-			metric.WithAttributes(shardAttr, attribute.String("phase", "band_keys")))
+// TallyCycle runs exactly ONE tally cycle - paced as always - records it, and returns what happened.
+// runTallier is this in a loop.
+//
+// NOT safe to call concurrently with Run or with itself; see Cycle.
+func (p *Piston) TallyCycle(ctx context.Context) pipeline.TallyResult {
+	if fn := p.cycleCtx.Load(); fn != nil {
+		ctx = (*fn)(ctx)
 	}
+	r := p.tallier.Cycle(ctx)
+	p.recordTally(ctx, r)
+	// A cycle that found nothing due still counts: it proves this piston looked and could have served.
+	// Gating on candidates instead would make a quiet fleet look like it had no dispatchers at all.
+	if r.Err == nil {
+		p.tallyTurns.Add(1)
+	}
+	return r
+}
+
+// recordTally translates a tally cycle's result into this piston's instruments.
+//
+// There is deliberately no end-to-end cycle histogram. One existed, and its job was to expose the MERGED
+// pass's straggler tax as the gap over the per-shard query max - a quantity the per-shard decoupling
+// deleted along with the barrier that produced it. What remained was a coarse duplicate of the four phases
+// this and recordSupply emit, which sum to the same work and say WHICH part was slow. Do not add it back
+// without a question it answers that the phase split does not.
+func (p *Piston) recordTally(ctx context.Context, r pipeline.TallyResult) {
+	if r.Tallying > 0 {
+		p.inst.Load().queryDuration.Record(ctx, r.Tallying.Seconds(),
+			metric.WithAttributes(p.shardAttr, attribute.String("phase", "band_keys")))
+	}
+}
+
+// recordSupply translates a supply cycle's result into this piston's instruments.
+func (p *Piston) recordSupply(ctx context.Context, r pipeline.SupplyResult) {
+	in := p.inst.Load()
 	if r.Fetching > 0 {
 		in.queryDuration.Record(ctx, r.Fetching.Seconds(),
-			metric.WithAttributes(shardAttr, attribute.String("phase", "fetch_steps")))
+			metric.WithAttributes(p.shardAttr, attribute.String("phase", "fetch_steps")))
 	}
 	// The two non-query phases are recorded on the same histogram. The instrument's name says "query" for
 	// historical reasons - it predates them - and renaming it would break the dashboards it is a public
 	// surface for, so the phase label carries the distinction instead. Recording them matters because
 	// planning is the one cost in the design that scales with fairness-key CARDINALITY (the lottery re-rolls
-	// per slot over every key), and because all four phases together are what reconstructs a cycle now that
-	// there is no end-to-end histogram of one.
+	// per slot over every key), and because the phases together are what reconstructs a cycle now that there
+	// is no end-to-end histogram of one. Planning sits on the hot loop - once per supply cycle, an order of
+	// magnitude more often than a scan at the reference cadence - so it is the phase to watch as fairness-key
+	// cardinality grows.
 	if r.Planning > 0 {
 		in.queryDuration.Record(ctx, r.Planning.Seconds(),
-			metric.WithAttributes(shardAttr, attribute.String("phase", "planning")))
+			metric.WithAttributes(p.shardAttr, attribute.String("phase", "planning")))
 	}
 	if r.Pushing > 0 {
 		in.queryDuration.Record(ctx, r.Pushing.Seconds(),
-			metric.WithAttributes(shardAttr, attribute.String("phase", "pushing")))
+			metric.WithAttributes(p.shardAttr, attribute.String("phase", "pushing")))
 	}
 	if r.Selected > 0 {
-		in.selected.Add(ctx, int64(r.Selected), metric.WithAttributes(shardAttr))
+		in.selected.Add(ctx, int64(r.Selected), metric.WithAttributes(p.shardAttr))
 	}
 	if r.Discarded > 0 {
-		in.discarded.Add(ctx, int64(r.Discarded), metric.WithAttributes(shardAttr))
+		in.discarded.Add(ctx, int64(r.Discarded), metric.WithAttributes(p.shardAttr))
 	}
 }
 
@@ -556,16 +640,15 @@ func (p *Piston) record(ctx context.Context, r pipeline.Result) {
 // STEALING relaxes the class - see stealGrace - and it is a RELAXATION, never a restriction: the clause
 // can only ever admit rows, so no residue class can be stranded by it and the claim CAS still arbitrates
 // every step it admits.
-func (p *Piston) partitionPredicate() (string, []any) {
-	fn := p.partition.Load()
-	if fn == nil {
+//
+// The PAIR and the GRACE are both passed IN rather than read here, and for the same reason: everything that
+// selects rows and everything that then RANKS them must work from one reading. A caller that loads the pair
+// again would be free to rank by a pair the query did not filter by - see resolvePartition.
+func (p *Piston) partitionPredicate(replicas, ordinal int, grace time.Duration) (string, []any) {
+	if replicas < 2 {
 		return "", nil
 	}
-	replicas, ordinal, ok := (*fn)()
-	if !ok || replicas < 2 || ordinal < 0 || ordinal >= replicas {
-		return "", nil
-	}
-	if grace := p.stealGrace(); grace > 0 {
+	if grace > 0 {
 		// TWO TIERS, by distance: the NEIGHBOUR's class after one grace, ANYONE's after two.
 		//
 		// A single tier - anyone's class after one grace - works, and phase-9 measured it curing both
@@ -594,44 +677,89 @@ func (p *Piston) partitionPredicate() (string, []any) {
 	return " AND step_id % ? = ?", []any{replicas, ordinal}
 }
 
-// stealGrace is how long a step outside this replica's residue class must have been DUE before this
-// replica will select it anyway, or zero when stealing is off.
+// resolvePartition loads this replica's (replicas, ordinal) pair and validates it, returning a zero pair
+// whenever partitioning must not apply. EVERY consumer takes it from here, and takes it ONCE per query: the
+// predicate that selects rows and the ranking that then orders them are only consistent if they work from
+// the same reading, and the pair changes as the fleet does.
 //
-// TWO conditions, and each covers the other's blind spot - neither alone is sufficient:
+// The pair is VALIDATED, not trusted, because both bad shapes are worse than not partitioning. replicas=0
+// emits `step_id % 0`, which errors on every query - so the scan fails, the Tallier clears this shard, and
+// it stays out of planning for as long as the func keeps saying so. An ordinal at or past replicas is
+// quieter and worse: the predicate matches nothing, so the piston reports NoBand while genuinely holding
+// work, with no error anywhere to notice. replicas=1 is a solo replica, where the predicate matches
+// everything and is pure overhead. Today's caller happens to guard all three, but the fail-open posture is
+// this package's promise, so it is enforced here.
 //
-//   - THE GATE (armed here): the last cycle found nothing due in this replica's OWN class. A replica with
-//     its own work never steals, so a uniformly loaded fleet - every class full - adds no overlap at all,
-//     whatever the grace is. This is the fuse, and it is self-limiting by construction: a replica that
-//     steals is one that had nothing else to do, so the worst case is a lost claim round trip it was not
-//     going to spend anyway.
-//   - THE GRACE: at MODERATE load every replica can have spare capacity while the fleet is perfectly
-//     healthy, and there the gate alone would re-enable overlapping selection fleet-wide. A healthy owner
-//     dispatches its own class within a cycle or two, so requiring several cycles of due-age leaves its
-//     work alone; a stalled owner's class ages without bound (measured: 23-41s against a ~67ms cycle,
-//     while a healthy fleet's oldest due step sits at 0-1s). The two regimes are three orders of magnitude
-//     apart, which is why the exact multiple is not delicate.
-//
-// An ABSOLUTE age threshold was rejected for this: normal queueing delay under load is seconds, so any
-// constant either never fires or disables partitioning under exactly the load it exists for. The gate is
-// what makes an age term usable at all, by restricting it to replicas that are already idle.
-func (p *Piston) stealGrace() time.Duration {
-	if !p.stealing.Load() {
-		return 0
+// A HALF-VALIDATED read is worse than no validation, which is why there is exactly one of these. An
+// out-of-range ordinal correctly disables the SQL predicate, so the query selects everything - but a ranking
+// built from that same bad pair puts nothing in tier 0 and counts every kept step as taken from a peer,
+// flooding dwarf_steps_stolen and firing CheckpointStole for steals that never happened.
+func (p *Piston) resolvePartition() (replicas, ordinal int) {
+	fn := p.partition.Load()
+	if fn == nil {
+		return 0, 0
 	}
+	r, o, ok := (*fn)()
+	if !ok || r < 2 || o < 0 || o >= r {
+		return 0, 0
+	}
+	return r, o
+}
+
+// stealGrace is how long a step outside this replica's residue class must have been DUE before this
+// replica will select it anyway, or zero when stealing is off. BOTH queries call it, and they must: the
+// plan is built from the tally, so a fetch selecting from a different population than the scan counted asks
+// for rows it cannot see. Nothing gates it, so the two cannot disagree.
+//
+// A GRACE AND A FILL ORDER, and each covers the other's blind spot - neither alone is sufficient:
+//
+//   - THE GRACE (here): a foreign step must have been due for several cycle periods before it is even
+//     ADMITTED. A healthy owner dispatches its own class within a cycle or two, so its work is never
+//     eligible; a stalled owner's class ages without bound (measured: 23-41s against a ~67ms cycle, while a
+//     healthy fleet's oldest due step sits at 0-1s). The two regimes are three orders of magnitude apart,
+//     which is why the exact multiple is not delicate. Without it, every replica in an under-saturated
+//     fleet would fill its spare slots from healthy peers, because a batch is sized to cache capacity
+//     rather than to what is due.
+//   - THE FILL ORDER (FetchSteps): among ADMITTED rows, this replica's own class is taken first, then its
+//     neighbour's, then anyone's. So a replica reaches outside its class only for the slots its own class
+//     could not fill - exact, current, and per slot.
+//
+// An ABSOLUTE age threshold was rejected for the grace: normal queueing delay under load is seconds, so any
+// constant either never fires or admits everything under exactly the load it exists for. Deriving it from
+// the cycle period is what keeps it proportionate to how fast a healthy owner reaches its own work.
+func (p *Piston) stealGrace() time.Duration {
 	n := p.stealAfter.Load()
 	if n <= 0 {
 		return 0
 	}
-	// Floored at the CONSTANT DefaultMinGap, not at the configured MinGap, and that distinction is the point:
-	// a caller may legitimately pin both the interval and the gap to zero (a bench sweep, a hand-driven
-	// cycle), and deriving the floor from a configurable that can itself be zeroed yields a zero grace -
-	// which would steal every foreign step the instant it came due, with no fuse at all. Same degenerate
-	// regime MinGap exists to fuse, reached through the one door MinGap cannot cover.
-	period := max(p.pipe.Interval(), p.pipe.MinGap(), pipeline.DefaultMinGap)
-	return time.Duration(n) * period
+	// The LONGER of the two loops' periods, because reaching a step of one's own takes a full round trip -
+	// a scan to tally it, then a supply cycle to fetch it - so the loop that comes round least often is what
+	// bounds how quickly a HEALTHY owner gets to its own work. Keying off either loop alone under-states that
+	// the moment the two are paced differently, and an under-stated grace admits a healthy peer's work.
+	// Period() carries the DefaultMinGap floor, without which a caller pinning the cadence to zero would get
+	// a zero grace and take every foreign step the instant it came due, with no fuse at all.
+	return time.Duration(n) * max(p.tallier.Period(), p.supplier.Period())
 }
 
-// ScanBand implements pipeline.Source. It returns this shard's minimum due priority band and one
+// residueTier ranks an admitted step by how far it is from this replica: 0 its own class, 1 its designated
+// neighbour's, 2 anyone else's. It mirrors the three terms of partitionPredicate's relaxed clause, and
+// FetchSteps sorts on it so a replica takes foreign work only for slots its own class could not fill.
+//
+// Everything is tier 0 when partitioning does not apply, which makes the sort a no-op for a solo replica.
+func residueTier(stepID, replicas, ordinal int) int {
+	if replicas < 2 {
+		return 0
+	}
+	switch stepID % replicas {
+	case ordinal:
+		return 0
+	case (ordinal + 1) % replicas:
+		return 1
+	}
+	return 2
+}
+
+// ScanBand implements pipeline.BandSource. It returns this shard's minimum due priority band and one
 // aggregate row per fairness key at that band.
 //
 // It RETURNS O(distinct keys) rows but COSTS O(due rows at the band), on every dialect. The window
@@ -660,7 +788,8 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	if p.seams.Load().IsFault(FaultScanErr) {
 		return pipeline.NoBand, nil, errors.New("injected fault: " + FaultScanErr)
 	}
-	part, partArgs := p.partitionPredicate()
+	replicas, ordinal := p.resolvePartition()
+	part, partArgs := p.partitionPredicate(replicas, ordinal, p.stealGrace())
 	args := make([]any, 0, len(partArgs)+1)
 	args = append(args, partArgs...)
 	args = append(args, p.cache.Capacity())
@@ -704,18 +833,10 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 	if err := rows.Err(); err != nil {
 		return 0, nil, errors.Trace(err)
 	}
-	// Recorded for the steal gate, which asks whether this replica's own class can fill the batch it is
-	// about to plan. Set here rather than derived by the caller because this is the only place the tallies
-	// and the scan that produced them are both in hand.
-	total := int64(0)
-	for _, t := range tallies {
-		total += int64(t.Count)
-	}
-	p.lastTally.Store(total)
 	return band, tallies, nil
 }
 
-// FetchSteps implements pipeline.Source. It loads, per chosen fairness key, up to perKey of this shard's
+// FetchSteps implements pipeline.StepSource. It loads, per chosen fairness key, up to perKey of this shard's
 // oldest due steps at the given band, keyed and ordered oldest-first WITHIN each key - which is all the
 // plan replay reads. Rows are grouped by key rather than sorted across keys.
 //
@@ -735,8 +856,26 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	if len(keys) == 0 || perKey <= 0 {
 		return nil, nil
 	}
-	part, partArgs := p.partitionPredicate()
-	stmt, args, err := fetchQuery(p.db.DriverName(), band, keys, perKey, part, partArgs)
+	// FaultFetchErr fails the fetch without touching the database, so a test can drive the one failure that
+	// is invisible from outside: a piston that tallies honestly and serves nothing - see FaultFetchErr.
+	if p.seams.Load().IsFault(FaultFetchErr) {
+		return nil, errors.New("injected fault: " + FaultFetchErr)
+	}
+	// ONE reading of the pair and ONE of the grace, feeding the predicate that selects, the multiple that
+	// over-fetches, and the ranking that orders - so none of the three can work from a different fleet than
+	// the others. The grace is the same one the scan ran on; nothing gates it, so the two cannot disagree.
+	replicas, ordinal := p.resolvePartition()
+	grace := p.stealGrace()
+	part, partArgs := p.partitionPredicate(replicas, ordinal, grace)
+	// Over-fetch, so the ranking below has own-class rows to prefer: the query returns oldest first and the
+	// oldest admitted rows are the stalled peer's. ONLY when foreign rows can be admitted at all - with the
+	// class strict, every admitted row is already this replica's own, and a multiple would fetch four times
+	// the plan's demand purely to discard three quarters of it.
+	overFetch := 1
+	if grace > 0 {
+		overFetch = max(1, min(replicas, 4))
+	}
+	stmt, args, err := fetchQuery(p.db.DriverName(), band, keys, perKey*overFetch, part, partArgs)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -750,17 +889,6 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	}
 	defer rows.Close()
 	out := map[string][]int{}
-	// Count what came from OUTSIDE this replica's class. The pair is re-read rather than threaded down from
-	// partitionPredicate because it is a lock-free load either way, and reading it here keeps the count
-	// honest if the fleet changed mid-cycle. Zero unless stealing armed and actually took something, so a
-	// healthy fleet records nothing at all.
-	replicas, ordinal := 0, 0
-	if fn := p.partition.Load(); fn != nil {
-		if r, o, ok := (*fn)(); ok && r > 1 {
-			replicas, ordinal = r, o
-		}
-	}
-	stolen := 0
 	for rows.Next() {
 		var stepID int
 		var key string
@@ -769,22 +897,55 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 		if err := rows.Scan(&key, &stepID); err != nil {
 			return nil, errors.Trace(err)
 		}
-		if replicas > 1 && stepID%replicas != ordinal {
-			stolen++
-		}
 		out[key] = append(out[key], stepID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	stolen := p.rankByResidue(out, perKey, replicas, ordinal)
 	if stolen > 0 {
-		p.inst.Load().stolen.Add(ctx, int64(stolen), metric.WithAttributes(attribute.String("shard", strconv.Itoa(p.shard))))
+		p.inst.Load().stolen.Add(ctx, int64(stolen), metric.WithAttributes(p.shardAttr))
 		if seams := p.seams.Load(); seams.Enabled() {
 			seams.Checkpoint(ctx, CheckpointStole)
 			seams.Checkpoint(ctx, seamsJoin(CheckpointStole, strconv.Itoa(p.shard)))
 		}
 	}
 	return out, nil
+}
+
+// rankByResidue applies the fill order to a fetch: within each key it sorts the admitted steps by how far
+// they are from this replica, then trims to the per-key cap the plan asked for. It returns how many of the
+// KEPT steps came from outside this replica's class, which is what dwarf_steps_stolen counts.
+//
+// The sort is STABLE, so oldest-first survives inside each tier - the fetch returns rows in
+// (created_at, step_id) order and only the tier boundaries move. Ordering across tiers is the one place
+// this design trades away strict oldest-first, and it is bounded: a row only reaches a foreign tier after
+// its owner has demonstrably ignored it for a grace or two.
+//
+// Counting the stolen steps AFTER the trim, not before, is what keeps the metric honest. The fetch
+// deliberately over-fetches, so a healthy replica pulls foreign rows it then ranks last and discards -
+// counting those would report stealing that never happened.
+func (p *Piston) rankByResidue(out map[string][]int, perKey, replicas, ordinal int) int {
+	stolen := 0
+	for key, list := range out {
+		if replicas > 1 {
+			sort.SliceStable(list, func(i, j int) bool {
+				return residueTier(list[i], replicas, ordinal) < residueTier(list[j], replicas, ordinal)
+			})
+		}
+		if len(list) > perKey {
+			list = list[:perKey]
+		}
+		if replicas > 1 {
+			for _, stepID := range list {
+				if stepID%replicas != ordinal {
+					stolen++
+				}
+			}
+		}
+		out[key] = list
+	}
+	return stolen
 }
 
 // sleep waits d or until ctx is done, reporting false if the context ended. A method for containment

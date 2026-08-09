@@ -1,6 +1,6 @@
 # Dwarf `internal/piston` — the engine's per-shard cylinder
 
-> Load when: changing `Run`, `Liveness`, the two `Source` queries, the steal, the idle mode, or the
+> Load when: changing `Run`, `Liveness`, either source query, the steal, the idle mode, or the
 > instruments.
 > Coupled with: `internal/pipeline/CLAUDE.md` (the cycle this drives and its error policy),
 > `internal/planner/CLAUDE.md` (`Tally`/`Clear`), `internal/migrations/CLAUDE.md` (the `dwarf_steps`
@@ -21,16 +21,39 @@ It **owns** the pipeline, the two queries behind it, and its instruments. It **b
 the candidate cache, both shared with every other piston on the replica. It publishes nothing about this
 replica anywhere — `Liveness` is a pure read for whoever does.
 
-## `Run` — one loop
+## `Run` — TWO loops, one goroutine each
 
 ```
-cycle (paced by the pipeline) -> record -> repeat
+tally  (paced by the pipeline) -> record -> repeat
+supply (paced by the pipeline) -> record -> repeat
 ```
 
-`Run` blocks; the caller puts it in a goroutine and waits on its own WaitGroup. There is no `Stop` — a
-cancelled context ends the loop, and that is safe with no second signal because **both queries are
-read-only**: nothing to commit, nothing to strand, so abandoning mid-flight is free. Cadence lives entirely
-in the pipeline, so the loop holds no timing policy of its own.
+`Run` spawns both and blocks until both return; the caller puts `Run` itself in a goroutine and waits on
+its own WaitGroup. There is no `Stop` — a cancelled context ends both loops, and that is safe with no
+second signal because **both queries are read-only**: nothing to commit, nothing to strand, so abandoning
+mid-flight is free. Cadence lives entirely in the pipeline, so neither loop holds timing policy of its own,
+and `SetIdle` parks both.
+
+**Why two.** The band scan costs O(due rows at the band) and grows with the backlog, so fused it set the
+whole cycle's period and therefore the rate candidates reached the workers — the refiller supplied least
+exactly when the backlog was deepest. The measurement, the ~10x it is worth, and what goes stale instead
+are all in `internal/pipeline/CLAUDE.md`. What belongs *here* are the three consequences for this package:
+
+- **Two concurrent connections per shard** while a scan and a fetch overlap. Structural and visible at this
+  level, where a goroutine hidden inside `ScanBand` would have concealed it.
+- **CADENCE IS PER LOOP, and nothing here may key off "the" period.** `SetInterval`/`SetMinGap` set both, as
+  a convenience for an owner deriving one number — that is not a claim the two agree, and the moment they
+  diverge a shared threshold is right for at most one loop. So `Liveness` compares each loop's `WorkingFor`
+  against **its own** `Period()`, and `stealGrace` takes the **longer** of the two (reaching one's own work
+  is a full round trip: a scan to tally it, then a supply cycle to fetch it — the slower loop is what bounds
+  how fast a healthy owner gets there, and keying off the faster one under-states the grace, which admits a
+  healthy peer's work). `Piston.Interval()`/`MinGap()` report the knob an owner last set, not a loop's
+  effective cadence. Pinned by `TestPiston_CadenceIsPerLoop`, which sets the two loops apart deliberately.
+- **`Liveness`'s turn count is the MINIMUM of the two loops'** — see below.
+- **The steal must not acquire a flag one loop writes and the other reads** — see below. Anything shared
+  between them is sampled at an arbitrary phase of the other's cadence, and the phases are not independent:
+  both loops start together and run at the same interval, so a "race" of that shape lands the same way every
+  time rather than half the time.
 
 ## `Liveness` — a counter, and why publishing is somebody else's job
 
@@ -41,11 +64,35 @@ a real bug when the two shared a goroutine. The band scan is O(due rows at the b
 ordinal — exactly the outcome that should mean "the process is stuck, nothing less." Reporting rather than
 publishing removes the coupling by construction: the reader samples on its own clock.
 
-Three things the shape has to get right:
+Four things the shape has to get right:
 
 - **A counter, never a flag the reader clears.** A consuming getter would create a contract — call it once
   per publication, from one caller — and any second caller (a metric, a test) would silently swallow the
   evidence. Holding "since I last looked" belongs to the reader.
+- **The count is the MINIMUM of each loop's own count, and EITHER loop alone reports a broken piston as
+  fully alive.** A turn has to mean this piston can both LOOK at its shard and SERVE it, and the two failures
+  are exactly symmetric:
+
+  | every… fails | what the piston still does | which counter keeps moving |
+  |---|---|---|
+  | SCAN | clears itself from planning, selects nothing | the SUPPLY loop's — it plans from an empty planner, pushes nothing, reports no error |
+  | FETCH | tallies honestly, claims its band, takes zero candidates | the TALLY loop's — the scan is perfectly healthy |
+
+  Either way the replica holds a residue class nobody else will select, which is the whole stranding this
+  evidence exists to prevent. The minimum stalls when either loop does. Each loop writes only its own
+  counter, so this adds no cross-loop state. Pinned from both sides by
+  `TestPiston_FailingCyclesReportNoLiveness` and `TestPiston_FailingFetchesReportNoLiveness`, each of which
+  fails against a build that takes the count from the other loop.
+
+  **The fetch side is the one with no other signal.** A failing scan at least logs and clears the shard; a
+  failing fetch leaves an honest tally, a claimed band, and a silent partition — no error counter names it,
+  and the metric signature is a normal `fetch_steps` duration with `selected` at zero on one shard. That is
+  also the shape a bind-count overflow produces, which is why `FaultFetchErr` exists at all.
+
+  **A residual blind spot: a HUNG loop reads busy forever.** `busy` covers a scan that is merely slow (it
+  reads either loop's work window), but one that never returns is indistinguishable from a legitimately long
+  one — the same false-alive trade the section below records. `dwarf_refill_tally_age_seconds` (the
+  planner's `TallyAge`) is the signal that distinguishes a rotting tally from a fresh one.
 - **A turn in flight counts, but only once it has outrun the cycle period.** Same O(backlog) argument — a
   piston in the middle of a long scan is plainly still serving — but "in flight" alone is the wrong
   predicate and shipped as a bug. A cycle whose scan fails *instantly* is also briefly in its queries
@@ -82,6 +129,21 @@ so the API permits the bad case. `SetIdle(true)` therefore does the same two thi
 dead hint costs a worker a claim round-trip. Pinned by `TestPiston_IdleWithdrawsTheShard`, which asserts the
 release from a *peer's* point of view rather than just the local state.
 
+**`SetIdle` ALONE IS NOT SUFFICIENT, and this is the whole of why each loop withdraws again.** The setter can
+only clear what is there when it runs. A loop already inside a cycle — past its own idle check — finishes
+*afterwards* and re-enters the shard it just withdrew, or re-pushes the partition it just emptied; both loops
+then park and the stale tally stands **forever**, which is precisely the wedge above. The window is not a
+sliver: the band scan runs for seconds on a deep backlog. So each loop repeats its own half on the way into
+idle — the Tallier `Clear`s, the Supplier empties the partition, the same seam the error policy splits on.
+
+**The flag that makes it once-per-transition starts TRUE.** It exists to undo what a COMPLETED cycle
+re-inserted, and a loop that has not run one has nothing to undo. Starting it false makes an
+already-idle piston wipe state on its first iteration, racing whatever its owner set up between `Startup`
+and then — caught by `TestFault_RefillScanErrPreservesCache`, which seeds an await-only engine's partition
+by hand. Pinned by `TestPiston_IdleWithdrawsAgainstARunningLoop`, which blocks both loops inside a cycle
+through the context func and only then goes idle; without the loop-side withdrawal the idle shard's band
+claim outranks a live peer's forever (measured: peer sees band 5, not the 9 it holds).
+
 The default is *not* idle, deliberately: a fresh piston dispatches, which is the common case, and a zero
 value that silently did nothing would be the worse default.
 
@@ -90,8 +152,8 @@ circumstance a dispatching piston meets constantly. Here it is a configured **mo
 
 ## The two queries
 
-They implement `pipeline.Source`, which is the whole reason the piston owns the pipeline — nothing else
-has the handle. Their per-query rationale lives in their doc comments; the cross-cutting rules are:
+They implement `pipeline.BandSource` and `pipeline.StepSource` — one per loop, so neither loop can reach
+the other's query — which is the whole reason the piston owns both. Nothing else has the handle. Their per-query rationale lives in their doc comments; the cross-cutting rules are:
 
 **The band scan costs O(due rows at the band), and `rn <= capacity` does not change that — do not
 re-derive it as a fix.** The cut filters *after* the window function has ranked every matching row, so it
@@ -122,11 +184,22 @@ contended resource.
 
 **The pair is VALIDATED, not trusted** (`replicas > 1 && 0 <= ordinal < replicas`, else select everything).
 Both bad shapes are strictly worse than not partitioning: `replicas == 0` emits `step_id % 0`, which errors
-every query — so the scan fails, the pipeline clears this shard, and it stays out of planning for as long as
+every query — so the scan fails, the Tallier clears this shard, and it stays out of planning for as long as
 the func keeps saying so. An ordinal at or past `replicas` is quieter and worse: the predicate matches
 nothing, so the piston reports `NoBand` while genuinely holding work, with no error anywhere. Today's
 intended caller guards all of this itself, but fail-open is *this package's* advertised posture, so it is
-enforced here rather than assumed of the caller. Pinned by `TestPiston_PartitionPairIsValidated`.
+enforced here rather than assumed of the caller.
+
+**Validated in exactly ONE place (`resolvePartition`), and read ONCE per query — a half-validated second
+read is worse than no validation at all.** The pair now feeds three things: the predicate that selects rows,
+the multiple that over-fetches, and the ranking that orders what comes back. A consumer that loads it again
+gets two hazards for the price of one. It can see a *different* pair, if the fleet changed between the two
+loads, and then filter by one and rank by the other. And if it validates more weakly — `ok && r > 1`, say,
+without the ordinal range — an out-of-range ordinal correctly disables the SQL predicate while the ranking
+built from that same bad pair puts **nothing** in tier 0 and counts **every kept step** as taken from a
+peer: `dwarf_steps_stolen` floods and `CheckpointStole` fires for steals that never happened, which is
+exactly the dishonesty counting-after-the-trim exists to prevent. Pinned for both queries by
+`TestPiston_PartitionPairIsValidated`.
 
 ## Stealing — the answer to a peer that is SLOW rather than dead
 
@@ -145,26 +218,139 @@ by an await-only replica so the residue class is genuinely in the path:
 | steal, single tier | 501–558 | 8–27% |
 | steal, two tiers | **458–501** | **0.4–5.4%** |
 
+⚠️ **These rows were measured under a coarser relaxation than the one below** — one that ran an entire scan
+relaxed once triggered, where the fill order takes foreign work only for the slots its own class could not
+fill. They therefore **bound** this mechanism rather than describing it, and the claim-lost column in
+particular should be re-measured before being quoted of it.
+
 Two facts to take from the first three rows. Keeping a slow replica cost **more than deleting it** — the
 fleet capped near `S·R` regardless of offered load, its class aging past 30s while healthy peers sat at a
 third of a core. And two unrelated cripplings produced the same cap, so this is a property of the
 PARTITION, not of how a replica goes slow.
 
-### The gate is a SHORTFALL, not emptiness — and fixtures cannot show that
+### The steal is a FILL ORDER, not a gate
 
-The gate arms when the last cycle's tally came in under `cache.Capacity()`: *can I fill the batch I am about
-to plan?* An earlier cut armed on `Band == NoBand` — nothing due in this replica's own class at all — and it
-**passed every fixture while doing nothing in production shape**. A burst workload drains a class to zero, so
-the fixtures armed; a workload with CONTINUOUS arrivals leaves a keeping-up replica a step or two due on
-almost every scan, so the gate never armed while its peer's class backed up unboundedly beside it. Measured
-against a 50 flows/s open-loop bench with one crippled peer: **zero steals, throughput unchanged at 177**.
-Do not weaken this back to emptiness; the fixtures will not catch it.
+The relaxed predicate runs on **every** query. Nothing arms it. What decides whether a foreign step is
+actually taken is where it lands in the ranking: `rankByResidue` sorts each key's admitted steps by residue
+distance — own class, then the designated neighbour's, then anyone's — and trims to the plan's per-key cap.
+**So a replica reaches outside its class only for the slots its own class could not fill.**
 
-**While stealing, the scan the gate reads is the RELAXED one**, so a replica filling its batch by stealing
-disarms, scans strictly next cycle, finds the shortfall again and re-arms. That alternation is deliberate:
-it steals on every other cycle while re-checking its own class in between, so recovery is noticed within one
-period and no separate re-probe is needed. Reading the strict tally instead would cost a second query per
-cycle to learn a fact that is free to rediscover.
+Two conditions, and each covers the other's blind spot:
+
+- **The GRACE** admits. A healthy owner dispatches its own class within a cycle or two, so its work is never
+  eligible; a stalled owner's ages without bound (measured: **23–41s** against a ~67ms cycle, while a
+  healthy fleet's oldest due step sits at **0–1s**). It is the only thing covering **moderate load**,
+  because a batch is sized to cache capacity rather than to what is due — so every replica in an
+  under-saturated fleet has spare slots the fill order alone would let it take from healthy peers. Measured:
+  a healthy fleet at ~30% of the database's capacity stole **0–23 steps across five arms**.
+- **The FILL ORDER** ranks. It is the only thing covering **saturation**, where normal queueing delay is
+  seconds so the grace admits everything — and there every class is deep, so tier 0 fills the batch and
+  nothing foreign survives the trim.
+
+**DO NOT gate the relaxation on a flag armed from the previous scan's tally** — arm when the last scan's
+own-class count came in under `cache.Capacity()`, run the next scan relaxed. It is the obvious alternative
+to the fill order, it answers the same question, and it fails three independent ways:
+
+- **The input is self-referential.** A tally counts whichever population the scan that produced it was
+  looking at — which the flag itself chose. `tally < capacity` then means "my own class is short" after a
+  strict scan and "my class *plus* my neighbours' long-due work is short" after a relaxed one: two different
+  questions read through one comparison.
+- **It alternates rather than settling.** A relaxed scan that fills the batch disarms the flag, so the steal
+  fires on every other cycle at best — and the cycles in between plan from a thin strict tally and supply a
+  correspondingly short batch.
+- **The two loops read it at different phases, and the phases are not independent.** Both start together and
+  run at the same interval, so the fetch reliably catches the *disarmed* half: it goes strict against a plan
+  built from the relaxed tally, asks for the foreign steps that tally promised, and selects none of them.
+  Measured: `TestPeerStalledDispatcherflow` fails most runs that way, at ~6.4s against ~0.9s, because the
+  work falls through to the 5s dispatch-window eviction instead of being taken. A latch (record the scan's
+  decision, have the fetch replay it) closes that third failure and neither of the first two.
+
+The fill order answers the same question **exactly, currently, and per slot**, with no flag to keep in step.
+
+**Do not weaken the grace to "any foreign step".** An earlier cut of the gate armed on `Band == NoBand` —
+nothing due in this replica's own class at all — and it **passed every fixture while doing nothing in
+production shape**: a burst workload drains a class to zero, so the fixtures armed, but a workload with
+continuous arrivals leaves a keeping-up replica a step or two due on almost every scan. Measured against a
+50 flows/s open-loop bench with one crippled peer: **zero steals, throughput unchanged at 177.** The general
+lesson holds for the fill order too — the fixtures cannot distinguish a mechanism that fires from one that
+does not, so a change here is measured on the bench or it is not measured.
+
+### The OVER-FETCH and its clamp — `max(1, min(R, 4))`
+
+The fetch asks for **`perKey × max(1, min(R, 4))`**, and **only while the grace can admit a foreign row at
+all** — with the class strict, every admitted row is already this replica's own, so a multiple would walk
+and ship four times the plan's demand purely to discard three quarters of it. In practice that guard costs
+nothing: the grace is zero only under `SetStealAfter(0)`, which nothing outside tests calls, so a
+partitioned production fleet always takes the multiple. It is there so the two cannot drift apart, not for a
+regime anyone is in. Over-fetching otherwise is not an optimisation, and
+removing it breaks the fill order outright: the query returns rows **oldest first**, and the oldest admitted
+rows are precisely the stalled peer's, so asking for exactly `perKey` comes back **entirely foreign** and
+leaves the ranking nothing of this replica's own to prefer — failing in exactly the case the mechanism
+exists for.
+
+Both bounds of the clamp are load-bearing, for unrelated reasons.
+
+**Floored at 1, because `replicas` reads ZERO when partitioning does not apply.** A multiple of zero binds
+`LIMIT 0` and the fetch returns **nothing** — silently starving every solo deployment while the query, the
+plan, the phase histogram and the `selected` counter all still look correct. Nothing names that failure, so
+the floor is the only thing between a solo replica and a refiller that supplies nothing at all.
+
+**Capped at R, because a fleet of R has only R residue classes to rank.** Fetching more than R times the cap
+can never surface an own-class row that R times would have missed, so anything above it is pure wire.
+
+**And capped at 4, because the multiple has to cover how many classes are simultaneously LONG-DUE, not how
+large the fleet is.** With k stalled peers this replica's share of the admitted rows is ~1/(1+k), so 4
+covers three stalled peers at once — well past the design point. Scaling with R instead is actively harmful
+on the healthy path, where the admitted fraction is 1/R and the index walk is `perKey × m × R`, i.e.
+**quadratic in R**.
+
+Measured, PostgreSQL 18.1, **1,392,636 pending rows**, one key, real lateral shape, `jit=off`
+(`walked` = rows returned + `Rows Removed by Filter`):
+
+| predicate | LIMIT 128 | 512 | 2048 |
+|---|---|---|---|
+| solo (no partition) | 128 | 512 | 2048 |
+| strict `% R = ordinal` | **505** | **2050** | **8191** |
+| 3 tiers, nothing aged | 505 | 2050 | 8191 |
+| 3 tiers, everything aged | **128** | **512** | **2048** |
+
+So at R=16 the 4× cap walks 8,191 entries (~1.7–3 ms) where an uncapped `m = R` walks ~32,700 (~12 ms),
+**every cycle**. Below R=4 the cap is inert and the multiple is simply R.
+
+Three facts from that table worth keeping:
+
+- **Every arm is `Index Only Scan using idx_dwarf_steps_selection` with `Heap Fetches: 0`, and the `LIMIT`
+  stops the scan.** The 3-term `OR` does **not** flip the plan — it lands in the `Filter` while
+  `(status, parked, priority, fairness_key)` stay equality-matched in the `Index Cond`, so the index still
+  supplies `(created_at, step_id)` order. That is what makes an always-relaxed predicate affordable.
+- **The relaxed predicate is never more expensive than the strict one at the same LIMIT**, and is *cheaper*
+  when it admits — the scan stops at n instead of skipping R−1 of every R rows.
+- **The walk is `LIMIT ÷ admitted fraction`**, not a constant.
+
+⚠️ **`EXPLAIN` this query with `jit = off`.** The first pass measured 100–280 ms and it was almost entirely
+JIT emission on a one-shot statement; the scan underneath was 0.3 ms. Nothing above is readable through it.
+
+**A two-phase fetch was designed and NOT built.** Fetch own+neighbour at `perKey × 2` first, then the
+remaining tiers only if short: it walks half as much on the healthy path (`perKey × 2 × R` against
+`perKey × 4 × R`) and wins whenever the multiple exceeds 2. It is not built because at R=4 the saving is
+~0.3 ms per key per cycle, against a band scan measured at **1.6–2.1 s in the same database** and an RTT of
+~0.6 ms that the extra round trip costs whenever it fires. Revisit it for a large-R deployment; the table
+above is the measurement, so that decision needs no re-run.
+
+**Known exposure: fairness-key CARDINALITY.** The tally is relaxed too (it must be — see below), so the R
+replicas no longer have disjoint plans by construction. This replica owns a row for a planned key with
+probability `1 − ((R−1)/R)^n`, where n is that key's due depth: at R=4 that is **94% at n=10** but only
+**25% at n=1**. So with many keys holding ~1 due step each, tier 0 is empty for most planned keys and every
+non-owner ranks the same single row first. **Unmeasured — the entire cloud archive ran at
+`fairness-keys=1`.** If it bites, the escalation is to keep the tally strict (plans disjoint at any
+cardinality) and top up *unfilled* capacity with a second key-unrestricted query, which trades away the
+fairness allocation for the top-up portion.
+
+**BOTH queries run the identical predicate, and this is an invariant rather than a tidiness.** The plan is
+built from the tally, so a fetch selecting from a different population than the scan counted asks for rows
+it cannot see. A fully-global tally against an age-gated fetch would allocate slots for fresh foreign rows
+the fetch must reject — and at moderate load most foreign work *is* fresh, so most of the batch would be
+unfillable. Nothing gates either query, so the two cannot drift apart.
 
 ### Two tiers, and why the second one is not optional
 
@@ -198,10 +384,11 @@ apple in a fleet with headroom — the common deployment — not a general conte
   interval and gap to zero (a bench sweep, a hand-driven cycle); deriving the floor from a configurable that
   can itself be zeroed yields a zero grace, which steals every foreign step the instant it comes due with no
   fuse at all.
-- **NOT an absolute age threshold.** That shape was rejected for the fuse it replaced: normal queueing delay
-  under load is *seconds*, so any constant either never fires or disables partitioning under exactly the load
-  it exists for. The gate is what makes an age term usable, by restricting it to replicas already short of
-  work.
+- **NOT an absolute age threshold — it is a multiple of the CYCLE PERIOD.** Normal queueing delay under load
+  is *seconds*, so any wall-clock constant either never fires or admits everything under exactly the load it
+  exists for. Deriving it from the period keeps it proportionate to how fast a healthy owner reaches its own
+  work, and the FILL ORDER is what covers the regime where it admits everything anyway: under saturation
+  every class is deep, so tier 0 fills the batch and nothing foreign survives the trim.
 
 `defaultStealAfter = 4` is not delicate: a healthy fleet's oldest due step sits at 0–1s while a stalled
 owner's class ages to 23–41s, against a ~67ms derived period. Anything from ~2 to ~10 periods separates
@@ -210,12 +397,14 @@ those cleanly.
 ### What a healthy fleet does: nothing
 
 At healthy RTT the bench fleet ran at ~30% of the database's capacity with spare everywhere and stole **0–23
-steps** across five arms. The gate arms — every replica is under capacity — but nothing ages past the grace,
-so nothing is taken. It is not that idle replicas steal harmlessly; they do not steal at all.
+steps** across five arms. Every replica had spare slots the fill order alone would have let it fill from its
+peers — nothing aged past the grace, so nothing was admitted. It is not that idle replicas steal harmlessly;
+they do not steal at all. **This arm is the direct evidence that the grace, not the fill order, is what
+covers moderate load**, and it is why the grace cannot be dropped alongside the gate.
 
-**A debounce on the gate was therefore considered and shelved.** The case for it was a uniformly slow fleet
+**A debounce was therefore considered and shelved.** The case for it was a uniformly slow fleet
 stealing pointlessly, and it does happen (a `-race` fixture run: 6 of 40 steps; a bench cell at rtt 2.4ms:
-79% of *claims*). But the second figure is a ratio over claims, and a failed claim is one round trip where a
+79% of *claims*, both measured under the gate build). But the second figure is a ratio over claims, and a failed claim is one round trip where a
 completed step is ~9.6 — in real terms 7.6% of round trips, on a run already at **78% of the ceiling its RTT
 allowed**. The missing throughput was the slow database, not the steal. Do not build the debounce without
 evidence that names a cost the grace does not already bound.
@@ -343,19 +532,30 @@ armed in one place, however many modules consult it — for the same reason `Set
 restores an inert one, which is the default, so an unwired piston consults nothing and a disabled Seamster
 makes every consult a bool read.
 
-Exactly one fault is consulted: **`FaultScanErr`**, in `ScanBand`. It earns its place because it perturbs
+Two faults are consulted, **`FaultScanErr`** in `ScanBand` and **`FaultFetchErr`** in `FetchSteps`. It earns its place because it perturbs
 the **database query**, which is the boundary a test cannot otherwise reach — the pipeline's scan-error
 policy (clear this shard from planning, leave its cache partition *alone*) is only reachable by making a
 real scan fail, and the two halves are asymmetric, so neither can be inferred from the other. The name is
 exported so the owner's catalogue aliases it rather than re-spelling the string. Pinned by
 `TestPiston_ScanErrSeamDrivesThePipelineErrorPolicy` and `TestPiston_SeamsDefaultInert`.
 
-Two checkpoints are fired. **`CheckpointStole`** reports a fetch that took steps from outside this
+`FaultFetchErr` earns its place on a sharper version of the same rule: a piston whose every fetch fails is
+**invisible from every angle a test can otherwise reach** — it scans honestly, publishes a real tally,
+claims its band, logs nothing, and simply supplies no candidates. Without the seam there is no way to drive
+`TestPiston_FailingFetchesReportNoLiveness`, and therefore no way to pin that the turn count demotes it.
+
+Three checkpoints are fired. **`CheckpointStole`** reports a fetch that took steps from outside this
 replica's residue class, and it earns its place on the same boundary rule: a test proving a slow peer's work
-is picked up cannot wait out a duration, because the steal fires on the first cycle after the gate arms and
-the grace elapses — a function of the cadence, the peer's degradation and the backlog, none of which a test
+is picked up cannot wait out a duration, because the steal fires on the first cycle where the grace has
+elapsed and this replica's own class has run short — a function of the cadence, the peer's degradation and the backlog, none of which a test
 controls. Without it the only available assertion is "the flows eventually finished", which passes equally
 against a build where stealing does nothing and the dispatch-window eviction did the work seconds later.
+
+**`CheckpointTallyDone`** is there because **a push does not imply a scan**. The supply loop plans from
+whatever tally the planner already holds and touches the database only to fetch, so any number of pushes can
+resolve a tally that predates the work under test. A caller needing "a scan has SEEN what I just committed"
+waits on this first and only then on `CheckpointCycleDone` — which is what `enginetest.AwaitShardCycles`
+does. Gated on the scan succeeding, since a failed one clears the shard rather than reporting it.
 
 The other is **`CheckpointCycleDone`**, in `Run`, once per cycle that PUSHED. It earns
 its place on the same boundary rule read from the other side — it publishes the one fact about a cycle that
@@ -364,9 +564,13 @@ cadence, so "every shard has reconciled its partition against the plan" is not a
 a shard whose goroutine is starved, or whose cycle is blocked on a slow round trip, can hold an unreconciled
 partition arbitrarily long while its peers turn normally. A caller that needs that state — a test asserting
 strict cross-shard priority must, because `Cache.Pop` ranks partitions by a FROZEN band and cannot tell a
-doorbell-set one from a plan-set one — has no other way to know. It is gated on `r.Err == nil` because that
-is exactly the push: both error paths return *before* pushing and deliberately leave the partition alone, so
-a visit on error would mean "looked and gave up", which is the opposite of what a waiter needs.
+doorbell-set one from a plan-set one — has no other way to know.
+
+**It is gated on `SupplyResult.Reconciled`, NOT on `Err == nil`, and the difference is not cosmetic.** Two
+paths hold everything and leave the partition exactly as they found it — a failed fetch, and an untallied
+shard — and **only one of them is an error**. Gating on the error would fire a visit on the untallied path,
+telling a waiter the partition reflects the plan at the one moment it demonstrably does not. `Reconciled` is
+set where the push happens, so a visit means the push happened.
 
 The gate is what keeps this from being the forbidden kind of seam. A counting checkpoint over pure logic
 would be a signal to inject a dependency instead; this one reports a **cycle's effect on shared state** the
@@ -374,8 +578,8 @@ package borrows (the cache partition), which no injection into `pipeline` would 
 the point rather than the call.
 
 **`pipeline` gets none, and that is not an oversight.** Every fault a test could want of a cycle is
-reachable through its `Source` — which is this type — or through `SetInterval`/`SetMinGap`, and
-`pipeline.Result` gives a caller everything a counting checkpoint would. The rule that separates the two
+reachable through its two source interfaces — which are this type — or through `SetInterval`/`SetMinGap`,
+and `TallyResult`/`SupplyResult` give a caller everything a counting checkpoint would. The rule that separates the two
 cases: a seam inside **pure logic** is a signal a dependency should have been injected instead; a seam at
 an **I/O boundary** is reaching the one thing that cannot be injected away. Do not add one to `planner`
 either, for the same reason.
