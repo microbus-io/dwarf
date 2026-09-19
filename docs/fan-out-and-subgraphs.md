@@ -52,9 +52,10 @@ which runs with the source task's own output and no branch contributions. So wri
 cohort of zero (a reducer-managed field just keeps its incoming value; any per-element output it expected is
 absent), and expect the branch task to sometimes never run at all.
 
-Every branch carrying the source array means an N-element fan-out over a chain of depth D stores N×D copies
-of it. For a large array, drop it once it has been fanned out: a branch calling `f.Set("<source>", nil)`
-removes it from the flow's state past the fan-in.
+A large carried field above a size threshold is stored once and referenced rather than copied into every
+branch's step row, so an N-element fan-out over a chain of depth D does not cost N×D copies of it. To drop
+a field entirely once it has been fanned out, a branch can still call `f.Set("<source>", nil)` to remove
+it from the flow's state past the fan-in.
 
 ## Fan-in
 

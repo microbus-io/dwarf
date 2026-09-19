@@ -49,11 +49,21 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 		return nil, errors.New("task '%s' requested goto to '%s' but no WithGoto transition exists from this task", stripProto(currentTask), stripProto(gotoTarget))
 	}
 
-	// boolexp.Eval takes the symbols as an `any` and marshals them itself, so the State goes in whole and
-	// a field still held as raw JSON passes straight through its MarshalJSON rather than being decoded here
-	// and re-encoded there. Note Eval is called once per conditional out-edge below, so it re-marshals the
-	// whole symbol set per edge - hoisting that is an available win, independent of anything here.
-	stateMap := flow.RawState()
+	// Switch/When transitions share one boolexp.Normalize of the flow state instead of one per edge,
+	// computed lazily so a graph with no conditional edges never pays for it.
+	var normalized map[string]any
+	haveNormalized := false
+	normalize := func() (map[string]any, error) {
+		if !haveNormalized {
+			var err error
+			normalized, err = boolexp.Normalize(flow.RawState())
+			haveNormalized = true
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+		}
+		return normalized, nil
+	}
 
 	for _, tr := range graph.Transitions() {
 		if tr.From != currentTask || !tr.Switch {
@@ -63,7 +73,11 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 			if sw.From != currentTask || !sw.Switch {
 				continue
 			}
-			match, err := boolexp.Eval(sw.When, stateMap)
+			symbols, err := normalize()
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			match, err := boolexp.Eval(sw.When, symbols)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -89,7 +103,11 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 		if tr.When == "" {
 			taken = true
 		} else {
-			match, err := boolexp.Eval(tr.When, stateMap)
+			symbols, err := normalize()
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			match, err := boolexp.Eval(tr.When, symbols)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}

@@ -76,6 +76,8 @@ Further guidance within each:
   `docs/benchmark-cloud.md`. "Measured at ~120 steps/s per connection" travels; "campaign 11 measured it"
   does not.
 - **Code comments do not refer to `CLAUDE.md`.** The agent reads `CLAUDE.md` implicitly.
+- **IMPORTANT: Do not add Claude as a co-author on git commits.** No `Co-Authored-By: Claude ...` trailer,
+  in this repo or any sibling repo (e.g. `boolexp`) touched from a dwarf task.
 
 ## Where the design docs live
 
@@ -157,9 +159,9 @@ matching one before working there:**
   byte-exact into the next step's `state`, `final_state`, a `Fork` and a `Continue`, and reading one does not
   memoize the rounded form. The exposure is **per-READER, not per-field**: a read into an `any`
   (`Get`/`Value`/`All`/`Map`/`Parse` into a map) rounds, while **`GetInt` does not** - it unmarshals straight
-  into an `int`, exact at any int64 magnitude. `boolexp` still rounds, because it re-marshals the symbols and
-  decodes them itself, so a `when` comparing a >2^53 id compares float64s regardless of storage. Carry a
-  large id as a string if it must be branched on. (2) A **NUL** (`U+0000`) in a string - Postgres `JSONB`
+  into an `int`, exact at any int64 magnitude - and neither does a `when` expression, which compares a
+  >2^53 id as an integer rather than through a float64. Carry a large id as a string only if it must
+  survive an untyped reader. (2) A **NUL** (`U+0000`) in a string - Postgres `JSONB`
   rejects it (`SQLSTATE 22P05`) while the other dialects accept it, so it passes SQLite tests and fails on the
   recommended production DB; base64-encode binary data. Do not add a guard (nor "fix" the integer with
   `UseNumber`) without revisiting the punt - a write-side guard must run on the **raw caller bytes** before

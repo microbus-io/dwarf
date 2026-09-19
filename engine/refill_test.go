@@ -214,7 +214,7 @@ func TestRefillInterval_DerivedFromStaticConfig(t *testing.T) {
 	// high-R configurations - and degenerate inputs fall back to it rather than to zero, which would
 	// restore the 100%-duty-cycle hot loop.
 	assert.Equal(refillIntervalCap, deriveRefillInterval(4096, 2, 2, 8, max(1, 4096/2)))
-	assert.Equal(refillIntervalCap, deriveRefillInterval(0, 8, 48, 1, max(1, 0/2)))
+	assert.Equal(refillIntervalCap, deriveRefillInterval(0, 8, 48, 1, max(1, 0)))
 	assert.Equal(refillIntervalCap, deriveRefillInterval(768, 0, 0, 1, max(1, 768/2)), "zero pool -> zero drain falls back to the cap, never a 0 divide")
 
 	// There is still deliberately NO floor in the formula - what keeps a degenerate configuration from

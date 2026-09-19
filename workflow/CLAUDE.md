@@ -151,10 +151,10 @@ it, not byte count. See `bench/CLAUDE.md`.
 **Invariant (still holds): every number the engine itself produces round-trips exactly through a `float64`.**
 State/baggage/payloads are carried as `map[string]any` across a JSON round trip through the database, and
 `encoding/json` decodes a JSON number into a **`float64`** whenever the target is an `any` - exact for integers
-only up to **2^53**. This is what lets every reader of a state map - including `boolexp`, which re-marshals its
-symbols through JSON and compares in `float64` - treat numbers as `float64` without qualification, and it holds
-by construction for every value dwarf derives (a `ReducerAdd`/`min`/`max` sum stores and round-trips fine even
-past 2^53). Do **not** "fix" the read side with `UseNumber`: it changes the Go type every state-map reader sees
+only up to **2^53**. This is what lets every untyped reader of a state map - `Get`/`Value`/`All`/`Map`/`Parse`
+into a map - treat numbers as `float64` without qualification, and it holds by construction for every value
+dwarf derives (a `ReducerAdd`/`min`/`max` sum stores and round-trips fine even past 2^53). Do **not** "fix"
+the read side with `UseNumber`: it changes the Go type every state-map reader sees
 (`outcome.State["x"].(float64)` stops matching for an integral value; JSON has one number type, so no scheme
 preserves the writer's Go type through the database), needs a reflect-walker for caller-supplied targets, and
 buys exactness for a value an author can carry losslessly as a string anyway.
@@ -180,9 +180,9 @@ exposure to revisit, not a non-issue:
 
   Two consequences worth holding. **The remaining rounding is per-READER, not per-field**: a plain `Get`
   into an `any` (and `Value`/`All`/`Map`/`Parse` into a map) rounds, while `GetInt` does not - it unmarshals
-  straight into an `int`, which is exact at any int64 magnitude. And `boolexp` still rounds, because it
-  re-marshals the symbols and decodes them into `map[string]any` itself, so a `when` expression comparing a
-  >2^53 id is comparing float64s regardless of how the field is stored.
+  straight into an `int`, which is exact at any int64 magnitude - and neither does a `when` expression: it
+  compares a >2^53 id as an integer rather than through a float64 (`boolexp` v1.2+ normalizes a JSON
+  integer literal to an exact `int64` instead of decoding it through `float64`).
 - **NUL (`U+0000`) in a string.** Valid UTF-8, legal JSON, but **PostgreSQL's `JSONB` rejects it**
   (`SQLSTATE 22P05`) while MySQL/SQLite/SQL Server accept it - so it passes the SQLite test suite and kills the
   flow on the recommended production database, in the worst way: the write that carries it is the step's own

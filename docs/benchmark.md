@@ -60,7 +60,7 @@ less useful here.
 | Graph | linear `T0 → T1 → T2 → END` | 3 trivial (no-op) tasks, so **3 steps/flow** and each step is essentially its own DB transaction |
 | Client concurrency | 32 goroutines | offered load; matched to the worker pool so the pool stays saturated |
 | Worker pool | 32 | fixed across dialects/shard counts |
-| Per-shard connection pool | 30, pinned via the `SetMaxOpenConns` override | the test default (8) starves 32 workers and would measure the pool, not the engine; 30 keeps 3 co-located shards under PostgreSQL's default `max_connections=100` (≈90) |
+| Per-shard connection pool | 30, pinned via the `SetMaxOpenConns` override | the test default (4) starves 32 workers and would measure the pool, not the engine; 30 keeps 3 co-located shards under PostgreSQL's default `max_connections=100` (≈90) |
 | Flows per pass | 1000 (`-benchtime=1000x`) | one measured pass per shard count; repeat the whole invocation ≥3× and take medians, since a single pass is not reproducible (see the results note) |
 
 Because the tasks are no-ops, essentially all of each step's time is its **durable DB transaction** (claim CAS

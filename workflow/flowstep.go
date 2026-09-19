@@ -46,8 +46,8 @@ type FlowStep struct {
 	Changes          State      `json:"changes,omitzero"`
 	InterruptPayload State      `json:"interruptPayload,omitzero"`
 	Status           string     `json:"status,omitzero"`
-	// Parked reports whether the step is currently held out of the selection band (a subgraph caller
-	// waiting on its child). A terminal step is never parked.
+	// Parked reports whether the step is currently held out of dispatch (a subgraph caller waiting on
+	// its child). A terminal step is never parked.
 	Parked    bool      `json:"parked,omitzero"`
 	Error     string    `json:"error,omitzero"`
 	CreatedAt time.Time `json:"createdAt,omitzero"`

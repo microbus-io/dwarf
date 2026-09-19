@@ -665,12 +665,11 @@ stack and its in-flight state map, so **memory is the reason to cap it**, via `S
 ## The sizing formula
 
 Inputs: `V` = the shard database's vCPU count, `L` = round-trip time to the shard, `exec` = mean task
-time, `Y` = the database's `max_connections` setting, `R` = the number of engine replicas. `headroom` is a
-small reserve of connections left for monitoring and other clients.
+time, `R` = the number of engine replicas.
 
 ```
-ratio = 6 if V < 32 else 12         # conservative below 32 vCPUs, at the knee above
-M     = min(Y − headroom, ratio·V) ÷ R    # connections per replica (R is read from the shared databases)
+ratio = ratio(V, L)                 # measured per-vCPU-tier, per-round-trip-time table (see Connections above)
+M     = ratio(V, L) × V ÷ R         # connections per replica (R is read from the shared databases)
 db    = k·L + s ≈ 11·L + 4.4ms      # per-step database time
 T     = db + exec                   # per-step worker time
 N     = M × T/db                    # workers actually doing database work

@@ -93,3 +93,68 @@ func TestConditionalflow(t *testing.T) {
 		assert.Equal("high", stateVal(outcome.State, "branch"))
 	})
 }
+
+// A when expression now compares integers exactly rather than through a float64, which held integers
+// only up to 2^53 and would have collapsed these two neighboring ids onto the same value.
+func TestConditionalflow_ExactIntegerComparison(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	proxy := engine.NewTestProxy()
+	eng := engine.NewEngineUnderTest(t.Name())
+	defer eng.Shutdown(ctx)
+	eng.SetHost(proxy)
+	assert.NoError(eng.Startup(t.Context()))
+
+	const id = 1234567890123456789
+	const neighbor = 1234567890123456788
+
+	graph := workflow.NewGraph("ConditionalExactID")
+	graph.SetEndpoint("TaskA", "conditionalflow.verify:428/exact-task-a")
+	graph.SetEndpoint("TaskMatch", "conditionalflow.verify:428/exact-task-match")
+	graph.SetEndpoint("TaskNoMatch", "conditionalflow.verify:428/exact-task-nomatch")
+	graph.SetEndpoint("TaskDone", "conditionalflow.verify:428/exact-task-done")
+	graph.SetFanIn("TaskDone")
+	graph.AddTransitionWhen("TaskA", "TaskMatch", "orderID == 1234567890123456789")
+	graph.AddTransitionWhen("TaskA", "TaskNoMatch", "orderID != 1234567890123456789")
+	graph.AddTransition("TaskMatch", "TaskDone")
+	graph.AddTransition("TaskNoMatch", "TaskDone")
+	graph.AddTransition("TaskDone", workflow.END)
+	proxy.HandleGraph("conditionalflow.verify:428/conditional-exact-id", graph)
+
+	proxy.HandleTask("conditionalflow.verify:428/exact-task-a", func(ctx context.Context, f *workflow.Flow) error {
+		return nil
+	})
+	proxy.HandleTask("conditionalflow.verify:428/exact-task-match", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetString("branch", "match")
+		return nil
+	})
+	proxy.HandleTask("conditionalflow.verify:428/exact-task-nomatch", func(ctx context.Context, f *workflow.Flow) error {
+		f.SetString("branch", "no-match")
+		return nil
+	})
+	proxy.HandleTask("conditionalflow.verify:428/exact-task-done", func(ctx context.Context, f *workflow.Flow) error {
+		return nil
+	})
+
+	t.Run("exact_id_matches", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		initialState := map[string]any{"orderID": int64(id)}
+		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional-exact-id", initialState, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("match", stateVal(outcome.State, "branch"))
+	})
+
+	t.Run("neighboring_id_does_not_match", func(t *testing.T) {
+		assert := testarossa.For(t)
+
+		initialState := map[string]any{"orderID": int64(neighbor)}
+		_, outcome, err := eng.Run(ctx, "conditionalflow.verify:428/conditional-exact-id", initialState, nil)
+		assert.NoError(err)
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal("no-match", stateVal(outcome.State, "branch"))
+	})
+}

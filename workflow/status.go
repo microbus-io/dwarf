@@ -17,7 +17,7 @@ limitations under the License.
 package workflow
 
 const (
-	StatusCreated     = "created"     // Flow/step exists but has not been started
+	StatusCreated     = "created"     // Step exists but has not been started; a flow's own status is never reported as created - Create returns it already running
 	StatusPending     = "pending"     // Step is awaiting execution
 	StatusRunning     = "running"     // Flow is actively executing a task
 	StatusInterrupted = "interrupted" // Flow is paused, waiting for external input

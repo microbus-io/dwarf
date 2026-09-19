@@ -353,13 +353,14 @@ type ShardSpec struct {
 	// with the shard index, which is what gives each shard its own isolated test database).
 	DSN string
 	// VirtualCPUs is the CPU count of the shard's database server - a fact off the instance's spec
-	// sheet. It drives the shard's connection budget (the pool is capped at the measured knee - 12x the
-	// CPU count on a server of 32 vCPUs or more, 6x below that, beyond which connections only queue - and
-	// on smaller servers actively destabilize or collapse throughput) and its placement weight (new flows are distributed across shards in proportion to
-	// measured capacity). Left at 0, the engine assumes 2 - the smallest machine any major cloud sells
-	// as a current-generation instance, so the assumed pool stays safe even if the real machine is
-	// smaller. Declare it: a large database sized as if it were a 2-CPU one runs at a fraction of its
-	// capacity.
+	// sheet. It drives the shard's connection budget (the pool is sized from a measured table of
+	// connections-per-vCPU, indexed by both this vCPU count and the round-trip time to the database -
+	// see the connection pool guidance in the deployment docs - beyond which connections only queue, and
+	// on smaller servers actively destabilize or collapse throughput) and its placement weight (new flows
+	// are distributed across shards in proportion to measured capacity). Left at 0, the engine assumes 2 -
+	// the smallest machine any major cloud sells as a current-generation instance, so the assumed pool
+	// stays safe even if the real machine is smaller. Declare it: a large database sized as if it were a
+	// 2-CPU one runs at a fraction of its capacity.
 	VirtualCPUs int
 	// Cordoned excludes the shard from new-flow placement. Everything already resident proceeds
 	// normally: existing flows keep executing, and subgraph children, thread continuations (Continue),
@@ -489,9 +490,9 @@ func (e *Engine) SetDefaultPriority(p int) error {
 
 // SetMaxOpenConns is an expert override that pins every shard's connection pool to exactly n open (and
 // idle) connections, replacing the per-shard budget the engine derives from ShardSpec.VirtualCPUs.
-// Operators normally never call this - provide VirtualCPUs instead and let the engine size the pool at
-// the measured knee (12x the database's CPU count at 32 vCPUs or more, 6x below). The override exists for
-// benchmarking (pool-size
+// Operators normally never call this - provide VirtualCPUs instead and let the engine size the pool from
+// a measured connections-per-vCPU table indexed by both vCPU count and round-trip time to the database
+// (see the connection pool guidance in the deployment docs). The override exists for benchmarking (pool-size
 // sweeps) and for deployments whose connection budget is constrained by something the engine cannot see
 // (e.g. a shared database or an external pooler). Live: pushes to every open shard immediately.
 func (e *Engine) SetMaxOpenConns(n int) error {
@@ -553,10 +554,9 @@ func (e *Engine) FlowsStarted() int64 { return e.flowsStartedCount.Load() }
 // FlowsTerminated returns the count of flows this engine has completed/failed/cancelled. See FlowsStarted.
 func (e *Engine) FlowsTerminated() int64 { return e.flowsTerminatedCount.Load() }
 
-// SetHost registers the host the engine reaches the outside world through: it loads graphs, executes
-// tasks, and (optionally) receives flow-stop notifications and carries cross-replica coordination signals.
-// A host must implement LoadGraph and ExecuteTask; the remaining Host methods may be no-ops.
-// Construction-time only.
+// SetHost registers the host the engine reaches the outside world through: it loads graphs and executes
+// tasks. Host has exactly two methods, LoadGraph and ExecuteTask, both required; the engine sends nothing
+// to its peers and has no other host callback. Construction-time only.
 func (e *Engine) SetHost(h Host) error {
 	if e.started.Load() {
 		return errSetAfterStartup("host")
@@ -1182,7 +1182,11 @@ func (e *Engine) List(ctx context.Context, query workflow.Query) ([]workflow.Flo
 	return e.list(ctx, query)
 }
 
-// Delete removes a flow and its steps.
+// Delete marks a flow (and its subgraph subtree) for deletion; a background reaper removes it shortly
+// after. The flow is excluded from List/History immediately, though Snapshot/Await/Run still report its
+// outcome during the grace window. Returns 404 for an unknown key, 400 for a subgraph-child key (address
+// the root instead), and 409 for a flow that is still running. Calling it again on an already-marked flow
+// is idempotent success.
 func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)

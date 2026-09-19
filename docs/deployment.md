@@ -159,9 +159,10 @@ Rules:
 - The shard set is fixed for the engine's life: shards are opened and migrated at `Startup`, and
   `SetShard` is rejected after. Each flow key encodes its shard, so changing the set requires a
   coordinated restart of every replica (a maintenance window), not a live/piecemeal change.
-- New top-level flows are placed across shards in proportion to their declared `VirtualCPUs`, so a bigger
-  database receives proportionally more work; cordoned shards are skipped. Subgraph flows, thread
-  continuations and forks all stay on their originating shard.
+- New top-level flows are placed across shards in proportion to their measured capacity (roughly flat for
+  shards declared at 2 vCPUs or fewer, then scaling with `VirtualCPUs` above that), so a bigger database
+  receives proportionally more work; cordoned shards are skipped. Subgraph flows, thread continuations and
+  forks all stay on their originating shard.
 
 ```go
 eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db-a.internal:5432/dwarf?sslmode=disable", VirtualCPUs: 8})

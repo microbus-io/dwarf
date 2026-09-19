@@ -63,9 +63,9 @@ and when to use each are covered in [Detecting flow completion](detecting-comple
 `Create` runs a flow immediately — there is no separate start step and no creation-time delay (no `StartAt`).
 Deferral is expressed in author space:
 
-- **Wait until a wall-clock time (durably):** make the entry task a **gate** that calls `flow.Sleep(until)`
-  and returns; the real work is the next step. The delay is persisted on the step's `not_before`, so it
-  survives restarts — and the flow's status honestly reflects that it ran its gate, not that it's idle.
+- **Wait a duration (durably):** make the entry task a **gate** that calls `flow.Sleep(duration)` and
+  returns; the real work is the next step. The delay survives restarts — and the flow's status honestly
+  reflects that it ran its gate, not that it's idle.
 - **Wait for an external signal:** make the entry task call `flow.Interrupt(...)`; the flow parks as
   `interrupted`, and the caller resumes it with `Resume(ctx, flowKey, data)` when ready. Such a flow rests
   as `interrupted` rather than idling unstarted, so its status honestly reports that it is waiting.

@@ -109,17 +109,17 @@ target all decode straight into that type. **Untyped reads round**, because JSON
 `float64` when there is nothing narrower to decode into: `Get` into an `any`, and the whole-state readers
 that produce maps.
 
-**One more place rounds, and it is easy to miss:** a `when` expression on a transition. Condition evaluation
-re-decodes state into untyped values, so a `when` comparing a >2^53 id compares floats no matter how the
-field was stored.
+**A `when` expression on a transition is exact too:** condition evaluation compares a >2^53 id as an
+integer, not through a float64.
 
 ```go
-g.AddTransition("A", "B").When("orderID == 1234567890123456789")  // unreliable at this magnitude
+g.AddTransitionWhen("A", "B", "orderID == 1234567890123456789")  // exact at any magnitude
 ```
 
-So: use typed accessors, and **carry the value as a string if you need to branch on it** — the same reason
-APIs that mint 64-bit ids publish an `id_str` alongside them. A `time.Duration` is nanoseconds, so a
-duration past ~104 days is in the same territory.
+So: use typed accessors, and **carry the value as a string** only if it must survive an untyped reader
+(`Get`/`Value`/`All`/`Map`/`Parse` into a map) — the same reason APIs that mint 64-bit ids publish an
+`id_str` alongside them. A `time.Duration` is nanoseconds, so a duration past ~104 days is in the same
+territory for those readers.
 
 ### Deltas, not totals, for reducer fields
 

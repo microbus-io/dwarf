@@ -145,22 +145,22 @@ const (
 	FaultContention         = "contention"         // a dispatch transaction returns a lock-contention error
 	FaultLeaseStaleWrite    = "leaseStaleWrite"    // the completion write carries a stale lease_seq (zombie)
 	FaultPersistErr         = "persistErr"         // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
-	FaultSubgraphSpawnErr   = "subgraphSpawnErr"   // createSubgraphFlow errors after the caller step parked
+	FaultSubgraphSpawnErr   = "subgraphSpawnErr"   // the subgraph child's creation errors after the caller step parked
 
 	// Scoped by workflow URL of the subgraph child:
-	FaultSubgraphReviveLost = "subgraphReviveLost" // completeSurgraphFlow skips reviving the parked caller
+	FaultSubgraphReviveLost = "subgraphReviveLost" // the subgraph-completion path skips reviving the parked caller
 
 	// Process-wide, consumed per attempt (InjectN sets how many attempts fail):
-	FaultCompleteSurgraphErr = "completeSurgraphErr" // completeSurgraphFlow returns a non-contention database error
+	FaultCompleteSurgraphErr = "completeSurgraphErr" // the subgraph-completion write returns a non-contention database error
 
 	// Scoped by signal op:
 
 	// Process-wide (no scope):
-	FaultInterruptStaleWrite = "interruptStaleWrite" // handleInterrupt's in-tx leaf lease_seq read is forced to mismatch (zombie)
-	FaultInterruptChainWrite = "interruptChainWrite" // handleInterrupt's combined chain UPDATE fails and applies nothing (deadlock victim)
-	FaultDropSignalStop      = "dropSignalStop"      // signalStop delivers nothing (lost terminal wake)
+	FaultInterruptStaleWrite = "interruptStaleWrite" // the interrupt path's in-transaction lease-generation read is forced to mismatch (zombie)
+	FaultInterruptChainWrite = "interruptChainWrite" // the interrupt path's combined chain update fails and applies nothing (deadlock victim)
+	FaultDropSignalStop      = "dropSignalStop"      // the flow-stop signal delivers nothing (lost terminal wake)
 	FaultDropDoorbell        = "dropDoorbell"        // the local work doorbell is dropped (the step waits for a refiller scan)
-	FaultRecoveryResetErr    = "recoveryResetErr"    // the processStep recovery defer's own reset UPDATE errors
+	FaultRecoveryResetErr    = "recoveryResetErr"    // the post-execution recovery reset write errors
 	FaultReapMidTree         = "reapMidTree"         // the reaper errors after deleting steps, before flows
 	FaultReapSelectErr       = "reapSelectErr"       // the reaper's due-root SELECT errors
 	FaultRefillScanErr       = piston.FaultScanErr   // the piston's priority-band scan errors (its name, so there is one catalogue)
@@ -175,18 +175,18 @@ const (
 
 // --- Execution checkpoints ---
 const (
-	CheckpointResumeBeforeFlowWrite   = "resumeBeforeFlowWrite"   // resume(), just before its transaction's flow-status gate write
-	CheckpointBeforeTransitionTx      = "beforeTransitionTx"      // processStep, after the step is marked completed, before the transition transaction
-	CheckpointAfterCallerPark         = "afterCallerPark"         // processStep, after the subgraph caller step is parked, before createSubgraphFlow
-	CheckpointBeforeRetryRewind       = "beforeRetryRewind"       // processStep, before the flow.Retry rewind transaction
-	CheckpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // completeFlow(), just before its transaction's status-gate write
-	CheckpointBeforeDeleteWrite       = "beforeDeleteWrite"       // deleteFlow(), just before its transaction's delete-stamp/interrupted-CAS write
-	CheckpointBeforeReviveWrite       = "beforeReviveWrite"       // completeSurgraphFlow(), just before its transaction's caller-revive write
-	CheckpointBeforeRecoveryReset     = "beforeRecoveryReset"     // processStep recovery defer, just before its fenced step-reset transaction
+	CheckpointResumeBeforeFlowWrite   = "resumeBeforeFlowWrite"   // Resume, just before its transaction's flow-status gate write
+	CheckpointBeforeTransitionTx      = "beforeTransitionTx"      // step execution, after the step is marked completed, before the transition transaction
+	CheckpointAfterCallerPark         = "afterCallerPark"         // step execution, after the subgraph caller step is parked, before the child is created
+	CheckpointBeforeRetryRewind       = "beforeRetryRewind"       // step execution, before the flow.Retry rewind transaction
+	CheckpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // flow completion, just before its transaction's status-gate write
+	CheckpointBeforeDeleteWrite       = "beforeDeleteWrite"       // Delete, just before its transaction's delete-stamp/interrupted-CAS write
+	CheckpointBeforeReviveWrite       = "beforeReviveWrite"       // the subgraph-completion path, just before its transaction's caller-revive write
+	CheckpointBeforeRecoveryReset     = "beforeRecoveryReset"     // the post-execution recovery path, just before its fenced step-reset transaction
 
 	// A COUNTING checkpoint (read with Visits, never a rendezvous), scoped by flow id so concurrent flows
 	// count independently. No test arms Wait/Break on it, so Checkpoint just increments and returns; both the
-	// count site (execution.go) and the read site (faninflowlock_test.go) consult e.seams directly.
+	// count site and the read site consult e.seams directly.
 	//
 	// It exists for a single pin, and that pin guards a performance property no correctness test can see: a
 	// NON-FINAL cohort arrival must issue ZERO flow-row statements. Grabbing the flow row for every arrival
@@ -259,9 +259,9 @@ const (
 
 // VariablePoolIdle is the idle-connection size the engine DERIVED for a shard, targeted by shard index
 // (seamsJoin(VariablePoolIdle, strconv.Itoa(idx))). It is recorded wherever a derived size is pushed, so a
-// test can read the half of shardPool's result that has no other witness: database/sql reports the configured
-// max OPEN size through DBStats.MaxOpenConnections, but nothing reports the configured max idle -
+// test can read the half of the derived pool size that has no other witness: database/sql reports the
+// configured max OPEN size through DBStats.MaxOpenConnections, but nothing reports the configured max idle -
 // DBStats.Idle is the number of connections currently idle, which is traffic, not configuration. The value
-// recorded is the engine's derivation, before the test-mode cap in internal/database clamps what the pool
-// actually takes.
+// recorded is the engine's derivation, before the test-mode connection cap clamps what the pool actually
+// takes.
 const VariablePoolIdle = "poolIdle"

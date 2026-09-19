@@ -543,7 +543,8 @@ func (f *Flow) RetryRequested() (initialDelay time.Duration, multiplier float64,
 
 // SleepRequested returns the duration set by Sleep, or zero if not set. The clamp is the trust boundary,
 // not a duplicate of Sleep's: this Flow may have been decoded off the wire from a remote task, so the field
-// is not necessarily a value Sleep ever vetted, and a negative here would land in the step's not_before.
+// is not necessarily a value Sleep ever vetted, and a negative duration would otherwise delay the next step
+// into the past.
 func (f *Flow) SleepRequested() time.Duration {
 	return max(f.sleepDuration, 0)
 }

@@ -53,8 +53,8 @@ type Query struct {
 	Shard int `json:"shard,omitzero"`
 	// Cursor is the opaque pagination cursor returned as NextCursor by the previous List call.
 	Cursor string `json:"cursor,omitzero"`
-	// Search is a case-insensitive substring matched against workflow_url, workflow_name, current
-	// task_name, error, cancel_reason, and the flow key. Any '%' or '_' in the value is matched
+	// Search is a case-insensitive substring matched against the flow's WorkflowURL, WorkflowName,
+	// current task name, Error, CancelReason, and the flow key. Any '%' or '_' in the value is matched
 	// literally, not as a wildcard, so "a_b" matches only "a_b" (not "axb") and "50%" matches only a
 	// literal "50%".
 	Search string `json:"search,omitzero"`

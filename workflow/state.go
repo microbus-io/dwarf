@@ -66,7 +66,9 @@ type State struct {
 // if read from a column. That canonicalization is deliberate: it is what lets reducers compare marshalled
 // bytes, so a caller passing a map with a nested struct sees the same spelling as its decoded twin. This is
 // the normalizer for a caller-supplied value at an API boundary: wrap it in NewState. It does NOT validate
-// value ranges (a >2^53 integer, a NUL) - see the storability note in the package docs.
+// value ranges: an integer beyond ±2^53 round-trips inexact once decoded into an untyped value (carry it as
+// a string instead), and a NUL byte in a string is rejected by some SQL dialects' JSON storage
+// (base64-encode binary data instead).
 //
 // Two or more arguments are variadic name/value pairs, e.g. NewState("count", 3, "name", "abc"); the value
 // is stored as passed. An odd count, or a non-string in a name position, is an error.
@@ -349,9 +351,11 @@ func (s State) Has(name string) bool {
 	return ok && !isCleared(v)
 }
 
-// IsDeleted reports whether the field is present as a DELETE - the marker Del writes, and the form a delete
-// takes while it is in transit in a changes delta. It is false both for a field holding a value and for one
-// that was never mentioned at all; Has answers the first, and neither being true means the second.
+// IsDeleted reports whether the field is present as a DELETE - a stored JSON null, such as Set(name, nil)
+// writes, and the form a delete takes while it is in transit in a changes delta. It is false both for a
+// field holding a value and for one that was never mentioned at all; Has answers the first, and neither
+// being true means the second. Del removes the field outright rather than writing this marker, so a field
+// removed with Del is indistinguishable from one never mentioned.
 //
 // A delta is the only place this is normally observable: materialized state has its deletes enacted, so
 // nothing there is deleted-and-present.

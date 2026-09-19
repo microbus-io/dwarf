@@ -197,10 +197,9 @@ fan-out's source array in an entry task, and bound your retention sweeps.
 Two values are known not to survive storage, and both fail silently rather than loudly:
 
 - **An integer beyond ±2^53, read untyped.** Storage itself is exact — the value round-trips byte-for-byte
-  through steps, `final_state`, `Fork` and `Continue` — and typed accessors like `GetInt` are exact too. But
-  a read into an untyped `any` (`Get`, `Value`, `All`, `Map`, `Parse`) comes back **rounded**, with no error
-  anywhere, and a `when` expression comparing such a value compares floats regardless of how it was stored.
-  Carry large ids as strings if either applies.
+  through steps, `final_state`, `Fork` and `Continue` — and typed accessors like `GetInt`, and a `when`
+  expression comparing it, are exact too. But a read into an untyped `any` (`Get`, `Value`, `All`, `Map`,
+  `Parse`) comes back **rounded**, with no error anywhere. Carry large ids as strings if that applies.
 - **A `NUL` byte (`U+0000`) in a string.** PostgreSQL rejects it; other dialects accept it. Base64-encode
   binary data. On PostgreSQL this surfaces as `dwarf_steps_write_failed_total` — see the
   [Runbook](runbook.md#dwarf_steps_write_failed-is-non-zero).

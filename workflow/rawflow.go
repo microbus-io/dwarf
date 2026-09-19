@@ -92,19 +92,18 @@ func (f *RawFlow) SetStepKey(stepKey string) {
 	f.stepKey = stepKey
 }
 
-// SetInterruptResolution records that an interrupt park has resolved, with the resume data
-// materialized from the step row's resume_data column, so flow.Interrupt returns it (with yield=false)
-// on re-entry instead of re-arming. The orchestrator calls this only when the step row's interrupt_done
-// is set; an un-resumed step leaves the flow's default (not resolved).
+// SetInterruptResolution records that an interrupt park has resolved, with the resume data the caller
+// supplied, so flow.Interrupt returns it (with yield=false) on re-entry instead of re-arming. The
+// orchestrator calls this only once the interrupt has actually been resumed; an un-resumed step leaves
+// the flow's default (not resolved).
 func (f *RawFlow) SetInterruptResolution(resumeData State) {
 	f.interruptDone = true
 	f.resumeData = resumeData
 }
 
-// SetSubgraphResolution records that a subgraph park has resolved, with the child's final_state
-// (result) and error materialized from the step row's subgraph_result / subgraph_error columns, so
-// flow.Subgraph returns them (with yield=false) on re-entry instead of re-arming. The orchestrator
-// calls this only when the step row's subgraph_done is set.
+// SetSubgraphResolution records that a subgraph park has resolved, with the child's final state (result)
+// and error, so flow.Subgraph returns them (with yield=false) on re-entry instead of re-arming. The
+// orchestrator calls this only once the child flow has actually completed.
 func (f *RawFlow) SetSubgraphResolution(result State, errStr string) {
 	f.subgraphDone = true
 	f.subgraphResult = result
