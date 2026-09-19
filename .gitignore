@@ -1,5 +1,6 @@
 .DS_Store
 /_*.md
+/_*.png
 bench/results/
 bench/bench
 /todo/

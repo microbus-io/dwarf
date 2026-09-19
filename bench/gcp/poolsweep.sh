@@ -33,7 +33,7 @@
 #   DSN=postgres://... KNOB=3.86 ./poolsweep.sh
 # Knobs (env): BENCH (./dwarf-bench), KNOB (netem one-way ms; "" = no injection), POOLS
 #   ("100 200 300 400 500 600"), REPS (1), RATE (1400 flows/s - ABOVE the top arm's ceiling so no arm
-#   is generator-capped), MAX_OUTSTANDING (2000), WINDOW (60s), WARMUP (20s), VCPUS (16), CONC (256),
+#   is generator-capped), MAX_OUTSTANDING (100000), WINDOW (60s), WARMUP (20s), VCPUS (16), CONC (256),
 #   COOLDOWN (20s), RESERVE (30), OUT, RUN_ID, EXTRA
 set -euo pipefail
 
@@ -52,7 +52,14 @@ KNOB="${KNOB-3.86}"
 POOLS="${POOLS:-100 200 300 400 500 600}"
 REPS="${REPS:-1}"
 RATE="${RATE:-1400}"
-MAX_OUTSTANDING="${MAX_OUTSTANDING:-2000}"
+# SIZE THIS FOR A SATURATED ARM, NOT AN UNDER-CEILING ONE. A sweep exists to find the pool where an arm
+# STOPS keeping up, so by construction some arms diverge - and the moment one does, the backlog grows
+# without bound and a small cap BINDS, throttling admission below the commanded rate. The artifact then
+# reports the ADMISSION rate as flowsPerSec, so a starved arm reads as a lower ceiling rather than as a
+# capped generator. Measured: a 20,000 cap turned a commanded 700 flows/s into 552-590 admitted, with a
+# wait profile that read exactly like the over-connection collapse. The bench marks such an arm invalid
+# rather than reporting it, but the arm is still lost; 100,000 does not bind at any rate this rig can drive.
+MAX_OUTSTANDING="${MAX_OUTSTANDING:-100000}"
 WINDOW="${WINDOW:-60s}"
 WARMUP="${WARMUP:-20s}"
 VCPUS="${VCPUS:-16}"

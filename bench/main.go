@@ -95,6 +95,7 @@ func run() error {
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus terminated) flows, the backpressure bound that keeps the backlog from OOMing the DB")
 		arrivalRate      = flag.Int("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec (0 = flat-out to saturation)")
+		arrivalStop      = flag.Duration("arrival-stop", 0, "open-loop only: stop admitting flows this far into the measurement window while the engine keeps running, so the remainder measures a DRAIN under abated load (0 = keep offering for the whole window). The window mean spans both phases, so read the shape from -stats-interval, not the mean")
 		concurrency      = flag.String("concurrency", "8,16,32,64,128", "comma-separated closed-loop submitter counts to sweep")
 		window           = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
 		warmup           = flag.Duration("warmup", 15*time.Second, "warmup before each measurement window (discarded)")
@@ -337,7 +338,7 @@ func run() error {
 		for _, k := range ks {
 			var res stepResult
 			if *openLoop {
-				res = runStepOpenLoop(ctx, engines, readers, pgss, waits, sharedBytes, pick, k, *fairnessKeys, *maxOutstanding, *arrivalRate, *warmup, *window)
+				res = runStepOpenLoop(ctx, engines, readers, pgss, waits, sharedBytes, pick, k, *fairnessKeys, *maxOutstanding, *arrivalRate, *warmup, *window, *arrivalStop)
 			} else {
 				res = runStep(ctx, engines, readers, pgss, waits, sharedBytes, pick, k, *fairnessKeys, *warmup, *window)
 			}

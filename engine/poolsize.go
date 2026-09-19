@@ -224,74 +224,76 @@ var poolRTTBuckets = [5]float64{0.25, 0.50, 1.00, 1.50, 2.00}
 // connsPerVCPUFor).
 const poolSafetyMargin = 1.2
 
+// tierRow is one measured shard-size tier: its vCPU count and its ratio at each poolRTTBuckets column.
+type tierRow struct {
+	vcpus  int
+	ratios [5]float64 // 0.25, 0.50, 1.00, 1.50, 2.00 ms
+}
+
 // poolRatio is the RAW MINIMUM connections per vCPU - the smallest pool that sustained the load, before
 // poolSafetyMargin - by shard size and distance, one column per poolRTTBuckets entry. connsPerVCPUFor
 // documents how the cells are derived and which of them rest on measurement.
-var poolRatio = []struct {
-	vcpus  int
-	ratios [5]float64 // 0.25, 0.50, 1.00, 1.50, 2.00 ms
-}{
+var poolRatio = []tierRow{
 	{1, [5]float64{3.00, 5.00, 7.00, 9.00, 11.00}},  // MEASURED
 	{2, [5]float64{3.00, 6.00, 7.00, 10.00, 11.00}}, // MEASURED
 	{4, [5]float64{3.00, 6.00, 6.00, 8.00, 10.00}},  // MEASURED
 	{8, [5]float64{5.00, 8.00, 8.00, 11.00, 11.00}}, // MEASURED
 	{16, [5]float64{5.00, 7.00, 7.00, 9.00, 9.00}},  // MEASURED
 	{32, [5]float64{3.75, 4.70, 5.60, 8.10, 8.75}},  // MEASURED
-	{64, [5]float64{4.42, 5.21, 6.55, 7.64, 8.54}},
-	{96, [5]float64{3.94, 4.65, 5.85, 6.83, 7.63}},
-	{128, [5]float64{3.63, 4.29, 5.40, 6.29, 7.03}},
+	{64, [5]float64{2.25, 3.50, 5.00, 6.00, 6.00}},  // MEASURED
 }
 
 // connsPerVCPUFor is the connection-per-vCPU ratio for a shard of a given size at a given distance. Both
 // axes are load-bearing: a connection held while a packet is in flight does the server no good, so what a
 // database sees is the duty cycle M*s/(k*RTT+s), not M.
 //
-// THE 1- THROUGH 32-vCPU ROWS ARE MEASURED; 64, 96 AND 128 REMAIN MODELLED, DELIBERATELY. The model derives each cell as
-// M* = B*(k*RTT+s*)/s* derated 10%, with k = 9.11 round trips per step and B* = 15*vCPU^0.72 backends at
-// the knee. Pool sweeps on Cloud SQL found it over-provisions worst at SHORT RTT - 8.63x and 7.34x where
-// 5.0x and 5.1x sufficed - which is where nearly every deployment sits (same-zone RTT is 0.05-0.96 ms).
-// The correction is NOT extrapolated to the untested rows: two tiers are not evidence about seven others,
-// and reasoning-by-inheritance is what put the wrong numbers here to begin with. Sweep a tier before
-// changing its row.
+// THE TABLE STOPS AT 64 vCPU, DELIBERATELY - every row in it is measured, and there is no modelled row
+// past it. A shard declared larger than 64 vCPU falls back to the 64-vCPU row (connsPerVCPUFor takes the
+// last row once vcpus exceeds every tabulated tier): the safe direction, since 64 vCPU is the LOWEST
+// ratio measured and under-connecting costs throughput rather than collapsing the database. The model
+// this table replaces derives each cell as M* = B*(k*RTT+s*)/s* derated 10%, with k = 9.11 round trips
+// per step and B* = 15*vCPU^0.72 backends at the knee. Pool sweeps on Cloud SQL found it over-provisions
+// worst at SHORT RTT - 8.63x and 7.34x where 5.0x and 5.1x sufficed - which is where nearly every
+// deployment sits (same-zone RTT is 0.05-0.96 ms). The correction is NOT extrapolated to an untested row:
+// reasoning-by-inheritance is what put the wrong numbers here to begin with. Sweep a tier before adding
+// its row.
 //
 // Every cell is the MINIMUM pool that sustained that distance's achievable throughput. poolSafetyMargin
 // is applied on top by this function, so the table stays a record of measurement and the slack stays one
 // number in one place.
 //
-//	      1 vCPU      2 vCPU        4 vCPU        8 vCPU        16 vCPU       32 vCPU
-//	RTT   rate min  x   rate min  x   rate  min  x  rate  min  x  rate  min  x  rate   min  x
-//	~0.1   390   3  3.0   770   6  3.0 1,750  12 3.0 3,500  40 5.0 7,000  82 5.1 14,000 120 3.75
-//	~0.5   390   5  5.0   770  12  6.0 1,750  24 6.0 3,500  64 8.0 7,000 120 7.5 14,000 150 4.70
-//	~1.0   390   7  7.0   660  14  7.0 1,500  24 6.0 3,000  64 8.0 6,000 115 7.2 12,000 180 5.60
-//	~1.5   390   9  9.0   660  20 10.0 1,500  32 8.0 3,000  88 11.0 6,000 145 9.1 12,000 260 8.10
-//	~2.0   390  11 11.0   660  22 11.0 1,500  40 10.0 3,000 88 11.0 5,000 145 9.1 10,000 280 8.75
+//	      1 vCPU      2 vCPU        4 vCPU        8 vCPU        16 vCPU       32 vCPU        64 vCPU
+//	RTT   rate min  x   rate min  x   rate  min  x  rate  min  x  rate  min  x  rate   min  x   rate   min  x
+//	~0.1   390   3  3.0   770   6  3.0 1,750  12 3.0 3,500  40 5.0 7,000  82 5.1 14,000 120 3.75 20,000 144 2.25
+//	~0.5   390   5  5.0   770  12  6.0 1,750  24 6.0 3,500  64 8.0 7,000 120 7.5 14,000 150 4.70 20,000 224 3.50
+//	~1.0   390   7  7.0   660  14  7.0 1,500  24 6.0 3,000  64 8.0 6,000 115 7.2 12,000 180 5.60 17,000 320 5.00
+//	~1.5   390   9  9.0   660  20 10.0 1,500  32 8.0 3,000  88 11.0 6,000 145 9.1 12,000 260 8.10 17,000 384 6.00
+//	~2.0   390  11 11.0   660  22 11.0 1,500  40 10.0 3,000 88 11.0 5,000 145 9.1 10,000 280 8.75 14,000 384 6.00
 //	(rate in steps/s - each tier's own achievable throughput at that distance, not one fixed rate)
 //
 // WHAT THE SWEEPS ESTABLISH IS THE LEVEL, NOT THE SHAPE ACROSS TIERS. Every measured minimum is far below
 // its modelled cell at short RTT (4 vCPU 3.0 vs 8.50, 8 vCPU 5.0 vs 7.19, 16 vCPU 5.1 vs 6.12, 32 vCPU
-// 3.75 vs 5.36), so the model over-provisions there on every tier tried, regardless of how each was
-// loaded.
+// 3.75 vs 5.36, 64 vCPU 2.25 vs 4.42), so the model over-provisions there on every tier tried, regardless
+// of how each was loaded.
 //
-// The ratio's trend ACROSS tiers is NOT established, and an earlier version of this comment claimed it
-// was. The measured base ratios run 3.0 / 5.0 / 5.1 / 3.75 at 4 / 8 / 16 / 32 vCPU, which is not
-// monotonic in either direction - and the arms were not held at a comparable fraction of each tier's own
-// ceiling (~70% / ~71% / ~93% / ~66%). The gap to the model also NARROWS with distance on every tier
-// (32 vCPU: 30% under at base, 13% under at 1.5 ms), so the error is concentrated at short RTT - which is
-// where same-zone deployments actually sit (0.05-0.96 ms). Since s inflates as a tier approaches its ceiling, part of that
-// spread measures how hard each was pushed rather than the tier itself. Comparing rows needs arms at
-// matched utilisation, which no campaign has run.
+// The ratio's trend ACROSS tiers is NOT established. The measured base ratios run 3.0 / 5.0 / 5.1 / 3.75 /
+// 2.25 at 4 / 8 / 16 / 32 / 64 vCPU, which is not monotonic in either direction - and the arms were not
+// held at a comparable fraction of each tier's own ceiling (~70% / ~71% / ~93% / ~66% / ~78%). Since s
+// inflates as a tier approaches its ceiling, part of that spread measures how hard each was pushed rather
+// than the tier itself. Comparing rows needs arms at matched utilisation, which no campaign has run.
+//
+// THE RTT SLOPE IS NOT UNIFORM ACROSS TIERS EITHER, and 64 vCPU is where that became visible. It rises
+// 2.7x from base to 2ms (2.25 -> 6.00) against 1.8x at 16 and 2.3x at 32, so the model is wrong in BOTH
+// directions on this tier at once: over-provisioning 2.0x at base (4.42 vs 2.25) while under-compensating
+// at distance. Reading only the far column hides the first error behind the second.
 //
 // THE CURVE IS A STEP, NOT A RAMP, and it plateaus because two terms cancel. Duty cycle pushes the
-// requirement UP with distance while the throughput the tier can deliver falls, so between 0.5 and 1 ms
-// the multiplier holds flat on both tiers. A table that only ever rises with distance models one term.
+// requirement UP with distance while the throughput the tier can deliver falls. Every measured tier
+// plateaus somewhere: 4 vCPU between 0.5 and 1 ms, 8 and 16 vCPU between 1.5 and 2 ms, 64 vCPU likewise
+// (6.00 at both). A table that only ever rises with distance models one term.
 //
-// WHY 64/96/128 WERE LEFT MODELLED RATHER THAN CORRECTED. The model's error is concentrated at SMALL
-// tiers and has already decayed by 32 vCPU - over-provisioning runs 4.1x / 3.4x / 2.8x / 1.4x / 1.2x /
-// 1.4x at 1/2/4/8/16/32. Its remaining cells are 4.42 / 3.94 / 3.63 at 64/96/128, already inside the
-// 3.0-5.1x band every measured tier occupies and inside the conventional Postgres 3-5x guidance; its RTT
-// slope there (1.94x base to 2ms) matches what 16 and 32 vCPU measured (1.8x, 2.3x). Extrapolating the
-// small-tier correction upward would push those cells BELOW 3x - outside anything measured, in the
-// STARVING direction. A future sweep should start at 64 and re-check 96/128 only if 64 disagrees.
+// ADDING A ROW PAST 64 vCPU IS GATED ON THE LOAD GENERATOR, NOT THE DATABASE - size it before booking a
+// rig, or the run reports the generator's ceiling as the tier's.
 //
 // COMPENSATION IS PARTIAL - NO POOL RECOVERS WHAT DISTANCE COSTS. The sustained column falls because
 // past ~1 ms there is a load no pool size can serve: 8 vCPU could not hold 3,500 st/s at 1 ms at ANY
@@ -309,46 +311,98 @@ var poolRatio = []struct {
 // sustainable rate dropped from 7,000 to 6,000. A table that only ever rises with distance is modelling
 // one term and ignoring the other.
 //
-// The 0.75 / 1.25 / 1.75 buckets are interpolated between measured neighbours, not measured.
-//
-// THE RTT AXIS INTERPOLATES, THE TIER AXIS ROUNDS UP. The requirement is smooth in RTT, so a bucket
-// boundary is an artifact of storing a curve as a table and a 0.75ms path lands halfway between the 0.50
-// and 1.00 columns. It is NOT smooth in vCPUs - B* is a power law and the rows are an octave apart - so a
-// 24-vCPU shard takes the 32-vCPU row, under-connecting rather than guessing between two curves.
+// BOTH AXES INTERPOLATE, BUT NOT THE SAME WAY. The RTT axis is smooth in RTT, so a bucket boundary is an
+// artifact of storing a curve as a table and a 0.75ms path lands halfway between the 0.50 and 1.00
+// columns - a plain linear blend. The tier axis is smooth in log(vCPUs), not vCPUs - B* is a power law
+// and the rows are roughly an octave apart, uniformly spaced in LOG space, not raw space - so a 24-vCPU
+// shard is blended between the 16- and 32-vCPU rows in LOG-LOG space (interpolating log(ratio) against
+// log(vCPUs), then exponentiating back): exact at every tabulated tier (f lands at exactly 0 or 1 there),
+// and it tracks the power-law shape between them instead of guessing with one curve's row for a shard
+// that sits between two. Below the first tier or at/beyond the last, there is no second point to
+// interpolate against, so the boundary row is taken flat - clamped, not extrapolated (see "THE TABLE
+// STOPS AT 64 vCPU" above for why the top clamp is the safe direction).
 // An unprobed shard (rttMs <= 0) lands in the first column: a failed probe must not inflate a pool.
 //
-// TWO CELLS SIT CLOSE TO A MEASURED FAILURE and are the ones a re-measurement should check first:
-// 8 vCPU at 0.25ms derives 69, and the one 8-vCPU arm that ever collapsed did so at M=70 (bracketed by
-// healthy arms at M=50 and M=90, n=1); 1 vCPU derives 14 against a peak at M=16 and a collapse from M=32.
+// A COLLAPSED ARM IS A TRANSIENT CAUGHT BY THE WINDOW, NOT AN UPPER BOUND ON THE POOL - so no cell here
+// is placed below one, and none should be. The stall lasts ~30s and recurs; below the ceiling it clears
+// itself with the offered rate unchanged, so whether a 120s window reports 46% or 98% of command is partly
+// a question of where the window landed. Measured on the 64-vCPU sweep, at one pool and one rate: 9,183
+// steps/s with a 75s p50 in one window, 19,685 (98.4%) in another. Three distance arms then showed a
+// collapsed pool bracketed by WORKING pools on both sides (256 between 224 and 320 at 0.5ms; 320 between
+// 256 and 384 at 1.5ms), which no threshold can produce.
+//
+// EVERY MINIMUM IN THIS TABLE WAS MEASURED ON A 120s WINDOW, so read each as the smallest pool that
+// sustained in every arm it ran, with a tail comparable to larger pools - not as an edge. The starvation
+// side is the trustworthy half: it is monotonic and reproducible (at 0.5ms on 64 vCPU, 40/70/85/97% of
+// command as the pool climbed 128/160/192/224), which is why the cells are placed from where starvation
+// ENDS rather than from where a collapse begins.
+//
+// The cells also sit well below every collapse observed for their tier, which is the direction to keep
+// them in: 8 vCPU at 0.25ms derives 48 against the one 8-vCPU arm that ever collapsed, at M=70; 1 vCPU
+// derives 3 against a peak at M=16. So what a re-measurement should look for is starvation at the top of
+// a tier's range, not collapse - and it should state its window length beside every throughput number.
 //
 // DO NOT READ A LARGE-RTT CELL AS AN OVER-CONNECTION WITHOUT APPLYING THE DUTY CYCLE. The 2.00ms cell for
-// 32 vCPU is 398 connections against a collapse observed at 430, but only ~41% are inside the database at
-// once - ~163 backends, fewer than the 183 the healthy knee carried. Any cap belongs on backends or on
+// 32 vCPU is 336 connections against a collapse observed at 430, but only ~41% are inside the database at
+// once - ~138 backends, fewer than the 183 the healthy knee carried. Any cap belongs on backends or on
 // the operator's configured max_connections, never on a connection count read without its RTT.
 //
 // This is a lookup on declared facts and one probe taken at Startup, not a controller: it reads nothing
 // that moves while the engine runs, converges on nothing, and cannot oscillate. Do not grow it into one.
 func connsPerVCPUFor(vcpus int, rttMs float64) float64 {
-	row := poolRatio[len(poolRatio)-1] // larger than every tabulated tier: take the smallest ratio
-	for _, r := range poolRatio {
-		if vcpus <= r.vcpus {
-			row = r
-			break
+	lo, hi, f := tierBracket(vcpus)
+	loRatio := ratioAtRTT(lo.ratios, rttMs)
+	if f <= 0 {
+		// Below the first tier or at/beyond the last: no second point to blend against, so the
+		// boundary row stands alone.
+		return loRatio * poolSafetyMargin
+	}
+	hiRatio := ratioAtRTT(hi.ratios, rttMs)
+	// Log-log: the ratio is a power law in vCPUs, so it is linear in log(ratio) against
+	// log(vCPUs), not in the raw values. f==1 lands exactly on hiRatio (every tabulated tier is
+	// therefore exact, never blended), and this is mathematically identical whether the blend is
+	// done on the ratio or on the raw connection count (ratio*vCPUs) - the vCPU term cancels.
+	logRatio := math.Log(loRatio) + f*(math.Log(hiRatio)-math.Log(loRatio))
+	return math.Exp(logRatio) * poolSafetyMargin
+}
+
+// tierBracket finds the two poolRatio rows bracketing vcpus and the log-log interpolation fraction
+// between them (0 at lo, 1 at hi). Below the first row or at/above the last, hi==lo and f==0: there is
+// no second point to interpolate against, so the caller takes the boundary row flat rather than
+// extrapolating past it.
+func tierBracket(vcpus int) (lo, hi tierRow, f float64) {
+	if vcpus <= poolRatio[0].vcpus {
+		return poolRatio[0], poolRatio[0], 0
+	}
+	last := poolRatio[len(poolRatio)-1]
+	if vcpus >= last.vcpus {
+		return last, last, 0
+	}
+	for i := 1; i < len(poolRatio); i++ {
+		if vcpus <= poolRatio[i].vcpus {
+			lo, hi = poolRatio[i-1], poolRatio[i]
+			f = (math.Log(float64(vcpus)) - math.Log(float64(lo.vcpus))) / (math.Log(float64(hi.vcpus)) - math.Log(float64(lo.vcpus)))
+			return lo, hi, f
 		}
 	}
-	// Linear interpolation between the two bracketing buckets, clamped at both ends. The buckets are
-	// unevenly spaced, so the position cannot be computed arithmetically the way an even grid allows.
-	// The margin rides on the result, so the table itself stays a record of what was measured.
+	return last, last, 0 // unreachable given the >= last.vcpus check above
+}
+
+// ratioAtRTT applies the RTT-bucket interpolation (poolRTTBuckets) to one tier row's ratios, clamped at
+// both ends - a plain linear blend, since the sweeps establish the requirement is smooth in RTT (see
+// "BOTH AXES INTERPOLATE" above for why the tier axis needs the log-log form instead). Shared by every
+// lookup, including the two rows a tier interpolation brackets.
+func ratioAtRTT(ratios [5]float64, rttMs float64) float64 {
 	if rttMs <= poolRTTBuckets[0] {
-		return row.ratios[0] * poolSafetyMargin
+		return ratios[0]
 	}
 	for i := 1; i < len(poolRTTBuckets); i++ {
 		if rttMs <= poolRTTBuckets[i] {
 			f := (rttMs - poolRTTBuckets[i-1]) / (poolRTTBuckets[i] - poolRTTBuckets[i-1])
-			return (row.ratios[i-1] + f*(row.ratios[i]-row.ratios[i-1])) * poolSafetyMargin
+			return ratios[i-1] + f*(ratios[i]-ratios[i-1])
 		}
 	}
-	return row.ratios[len(poolRTTBuckets)-1] * poolSafetyMargin
+	return ratios[len(poolRTTBuckets)-1]
 }
 
 // shardBudget is the whole-database connection budget for a shard of a given size at a given distance,

@@ -176,42 +176,60 @@ measures to that database at startup. The idle core is half the open ceiling.
 The second axis is the less obvious one. **A connection held while a packet is in flight does the database
 no good**, so a pool sized from CPU count alone leaves a distant server idle — a 16-vCPU database 4.8 ms
 away ran at **33% CPU** with a CPU-derived pool, two thirds of it unreachable. Sizing for distance as well
-held throughput at **93–100% of the same-zone peak out to 5 ms**. So connections per vCPU **fall as the
-database grows** (bigger servers need proportionally fewer, because what they can usefully run at once
-grows more slowly than their core count) and **rise with distance**:
+held throughput at **93–100% of the same-zone peak out to 5 ms**. So connections per vCPU **rise with
+distance**, roughly doubling from same-zone to 2 ms:
 
-| database | same zone (0.25 ms) | 1 ms | 2 ms and beyond |
-|---|---|---|---|
-| 1 vCPU | 14.6× | 18.0× | 22.5× |
-| 2 vCPU | 12.2× | 15.3× | 19.4× |
-| 4 vCPU | 10.2× | 13.2× | 17.1× |
-| 8 vCPU | 8.6× | 11.7× | 15.4× |
-| 16 vCPU | 7.3× | 10.4× | 13.7× |
-| 32 vCPU | 6.4× | 9.6× | 12.5× |
-| 64 vCPU | 5.3× | 7.9× | 10.3× |
-| 128 vCPU | 4.4× | 6.5× | 8.4× |
+| database | 0.25 ms | 0.5 ms | 1 ms | 1.5 ms | 2 ms and beyond |
+|---|---|---|---|---|---|
+| 1 vCPU | 3.6× | 6.0× | 8.4× | 10.8× | 13.2× |
+| 2 vCPU | 3.6× | 7.2× | 8.4× | 12.0× | 13.2× |
+| 4 vCPU | 3.6× | 7.2× | 7.2× | 9.6× | 12.0× |
+| 8 vCPU | 6.0× | 9.6× | 9.6× | 13.2× | 13.2× |
+| 16 vCPU | 6.0× | 8.4× | 8.4× | 10.8× | 10.8× |
+| 32 vCPU | 4.5× | 5.6× | 6.7× | 9.7× | 10.5× |
+| 64 vCPU and beyond | 2.7× | 4.2× | 6.0× | 7.2× | 7.2× |
 
-Round-trip times between two columns are interpolated, so a 0.9 ms path lands 60% of the way from the
-0.75 ms ratio to the 1 ms one. Sizes between two rows take the larger server's (smaller) ratio — a
-24-vCPU database is sized as a 32-vCPU one — because the curve is not linear in CPU count and rounding
-that way under-connects rather than over-connects. Every value also sits ~10% below the knee measured or
-projected for it. The bias is deliberate throughout: under-connecting costs throughput roughly in
-proportion, while over-connecting can collapse a database outright.
+Round-trip times between two columns are interpolated, so a 0.9 ms path lands 80% of the way from the
+0.5 ms ratio to the 1 ms one — a plain linear blend. **Sizes between two rows are blended too, but not the
+same way**: the ratio is smooth in the *logarithm* of the CPU count, not in the raw count, so a 24-vCPU
+database is blended between the 16- and 32-vCPU rows in log-log space (linear in log(ratio) against
+log(vCPUs), exact at every row in the table above) rather than simply taking the larger server's ratio —
+that blend lands at 24 vCPUs' own ~5.1× at 0.25 ms, between 16's 6.0× and 32's 4.5×, closer to 32's. Each
+tabulated value is the smallest pool measured to sustain that distance's achievable throughput, plus 20%:
+at the bare minimum the tail degrades sharply (a 16-vCPU database 1 ms away measured a p99 of 1,344 ms at
+its minimum against 203 ms at 26% above it), while much beyond that the extra connections buy nothing and
+start costing. **Past 64 vCPU there is no second row to blend against**, so a larger database is sized as
+if it were 64 vCPU (the lowest ratio measured, and therefore the safe direction — under-sizing costs
+throughput rather than risking collapse) until that tier is itself measured.
 
-**Confidence is not uniform across that table.** Only the 16-vCPU row is validated end to end. The 32-vCPU
-row reproduces the single knee measured for it; 64 and above are projected and take the conservative
-branch; and the rows under 8 vCPU are the least reliable — those databases run out of CPU before they run
-out of concurrency, and past their knee they collapse rather than plateau. If you run a small database
-near its limit, measure it.
+**Do not read the ratios as a trend across database sizes.** They do not fall monotonically — 8 and 16 vCPU
+need proportionally *more* than 4 vCPU, and 64 vCPU needs the least of any size measured — and the arms
+behind each row were not held at a matched fraction of their own tier's ceiling, so part of that spread
+measures how hard each was pushed rather than the tier itself. What the measurements establish is the
+level, not the shape. The rate of rise with distance is not uniform either: it roughly doubles across the
+range on most sizes but rises 2.7× on 64 vCPU.
+
+**Confidence is not uniform across that table.** Every row is measured (Cloud SQL for PostgreSQL, one arm
+per cell) — there is no projected or modelled row. A database larger than 64 vCPU has not been measured at
+all; the flat extrapolation above is a deliberate, safe placeholder until it is.
+
+**On how the numbers were obtained**, because it bounds how sharp they are. Each is the smallest pool that
+sustained the load across a 120-second window. This system exhibits a recurring stall of roughly 30
+seconds that clears itself while load continues, so a window of that length sometimes catches one and
+sometimes does not: the same pool at the same rate measured 46% and 98% of the offered rate in two
+windows. The values are therefore placed from where *starvation* ends — which is monotonic and
+reproducible — rather than from where a collapse begins. Treat them as well-sized, not as edges, and if
+you run a database near its limit, measure it over minutes rather than seconds.
 
 **Compensation stops at 2 ms**, and past roughly there the answer is more shards rather than a bigger one:
 reaching a 32-vCPU server's same-zone peak across a 4 ms path would take ~1,163 connections. For context,
 same-zone round trips run **0.05–0.96 ms** and cross-AZ same-region about **1.1 ms** — both inside the
 compensated range — while cross-region (10–40 ms) is far outside it.
 
-An undeclared count assumes 2 vCPUs (a pool of 24 same-zone). That is the floor of every
-current-generation RDS class, so the guess cannot undershoot there — but on a genuinely 1-vCPU machine it
-overshoots that tier's measured peak, and it cannot use a large database either way: **declare
+An undeclared count assumes 2 vCPUs (a pool of 7 same-zone). That is the floor of every
+current-generation RDS class, so the guess cannot undershoot there, and it stays safe even on a genuinely
+1-vCPU machine (that tier sustained its load on 3 connections and ran clean at 14). What it cannot do is
+use a large database: **declare
 `VirtualCPUs`.** It is a fact off the server's spec sheet, and it is the single most valuable thing you
 can tell the engine. `SetMaxOpenConns` is an expert override that pins every shard's pool exactly —
 for benchmarking sweeps, externally-constrained connection budgets, or a connection pooler in front of the

@@ -229,7 +229,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 // flat-out to saturation (find max throughput vs the scan interval).
 func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric.ManualReader, pgss *pgssSampler, wait *waitSampler,
 	bytesWritten *atomic.Int64, pick func() *workload, creators, fairnessKeys, maxOutstanding, arrivalPerSec int,
-	warmup, window time.Duration) stepResult {
+	warmup, window, arrivalStop time.Duration) stepResult {
 
 	flowOpts := func() *workflow.FlowOptions {
 		if fairnessKeys <= 1 {
@@ -247,8 +247,12 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	baseTerminated := terminated()
 
 	var (
-		measuring   atomic.Bool
-		stop        atomic.Bool
+		measuring atomic.Bool
+		stop      atomic.Bool
+		// halted is set partway through the window by -arrival-stop: creators stop admitting while the
+		// engine keeps running, so the rest of the window measures a drain under a load that has ABATED
+		// rather than one still being offered. Separate from `stop`, which tears the creators down.
+		halted      atomic.Bool
 		created     atomic.Int64 // flows successfully created this run
 		measCreated atomic.Int64 // ... within the measurement window (for arrival accounting)
 		errCount    atomic.Int64
@@ -284,7 +288,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		eng := engines[i%len(engines)]
 		creatorsWG.Go(func() {
 			var n int64
-			for !stop.Load() {
+			for !stop.Load() && !halted.Load() {
 				if outstanding() >= int64(maxOutstanding) {
 					time.Sleep(time.Millisecond) // backpressure: let completions drain the backlog
 					// Parking here SKIPS the arrival ticker, whose channel holds one slot - so every
@@ -354,6 +358,12 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	hostBefore := sampleHost()
 	windowStart := time.Now()
 	measuring.Store(true)
+	if arrivalStop > 0 && arrivalStop < window {
+		// Timed off the measurement window, not the warmup, so the offered-load phase is exactly
+		// arrivalStop long however long the warmup took to settle.
+		t := time.AfterFunc(arrivalStop, func() { halted.Store(true) })
+		defer t.Stop()
+	}
 	time.Sleep(window)
 	measuring.Store(false)
 	elapsed := time.Since(windowStart)

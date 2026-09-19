@@ -2157,44 +2157,131 @@ successor and advance no `step_id`. Constants, their portability, and the normal
   **A vCPU-only ratio is indexed to the wrong variable.** A connection held while a packet is in flight
   does the server no good, so the load a database sees is the duty cycle `M · s/(k·RTT+s)`, not `M`:
   a 16-vCPU shard at 4.8 ms ran **33% DB CPU with its pool pinned 96/96**, two thirds of the instance
-  unreachable. Compensating held throughput at **93-100% of base across 0.14 -> 5.07 ms**. Two
-  monotonicities fall out and are pinned by `TestPoolSizing_RatioFallsWithSizeAndRisesWithDistance`: the
-  ratio **falls with instance size** (`B*`, the backends inside Postgres at the knee, is sublinear in
-  cores - `15.0·vCPU^0.72`, predicting 67.3/110.9/182.7 against a measured 67.4/110.3/183.2) and **rises
-  with distance**.
+  unreachable. Compensating held throughput at **93-100% of base across 0.14 -> 5.07 ms**. The ratio
+  therefore **rises with distance** - roughly 2x from the 0.25 ms column to the 2.00 ms one on every tier
+  measured.
 
-  **The RTT axis interpolates; the tier axis rounds UP.** `M*` is smooth in RTT, so a bucket edge is an
-  artifact of storing a curve as a table and a 0.9 ms path takes 60% of the way from the 0.75 column to
-  the 1.00 one. It is *not* smooth in vCPUs - `B*` is a power law and the rows are an octave apart - so a
-  24-vCPU shard takes the 32-vCPU row, under-connecting ~5% rather than guessing between two curves.
-  Everything else also errs small, because under-connecting costs throughput roughly linearly while
-  over-connecting collapses: every cell is derated 10% off its knee, and a failed probe lands in the first
-  column rather than on an assumed distance - the same posture `defaultRTTMs` takes for `workerCeiling`.
+  ⚠️ **THE RATIO'S TREND ACROSS TIERS IS NOT ESTABLISHED, and a monotonic claim here was measured false.**
+  The measured base ratios run 3.0 / 3.0 / 3.0 / 5.0 / 5.0 / 3.75 / 2.25 at 1/2/4/8/16/32/64 vCPU - not
+  monotonic in either direction, with the LARGEST tier measured needing the least - and the arms were not
+  held at a matched fraction of each tier's own ceiling (~70% / ~71% / ~93% / ~66% / ~78% at 4/8/16/32/64).
+  Since `s` inflates as a tier approaches its ceiling, part of that spread measures how hard each was
+  pushed rather than the tier itself. Comparing rows needs arms at matched utilisation, which no campaign
+  has run.
 
-  ⚠️ **ONLY THE 16-vCPU ROW IS VALIDATED; EVERY OTHER ROW IS EXTRAPOLATION OF VARYING QUALITY.** Anchored
-  on that tier's 0.38 ms knee the model predicts its unseen 1.23 ms knee at **199 against a measured 200**;
-  32 vCPU reproduces its single knee (218 vs 220) with no second point; 64/96/128 have no knee measurement
-  at all. **Below 8 vCPU the model is not merely unmeasured but refuted** - those tiers saturate CPU first
-  (84/85/100% DB CPU at peak at 4/2/1 vCPU against 51.6% at 32), so a contention law over-predicts their
-  backends by 2.5-4x, and at 2 vCPU it puts the ceiling at 1,037 steps/s when **1,101 was measured at a
-  smaller pool**. The table derives them anyway, deliberately, so a rig can find where that breaks. **Two
-  cells sit closest to a measured failure and are what such a rig should watch**: 8 vCPU derives 69 while
-  the one 8-vCPU arm that ever collapsed did so at **M=70** (bracketed by healthy arms at M=50 and M=90,
-  n=1), and 1 vCPU derives 14 against a peak at **M=16** and a collapse from **M=32**.
+  ⚠️ **THE RTT SLOPE IS NOT UNIFORM ACROSS TIERS EITHER**, which the 64-vCPU sweep exposed: it rises 2.7x
+  from base to 2 ms (2.25 -> 6.00) against 1.8x at 16 and 2.3x at 32. So on that tier the model was wrong
+  in BOTH directions at once - over-provisioning 2.0x at base while under-compensating at distance - and
+  reading only the far column hides the first error behind the second. A row past 64 vCPU would need its
+  own sweep to know which direction it errs in; do not assume.
 
-  ⚠️ **`defaultVirtualCPUs` CARRIES THE NARROWEST MARGIN IN THE ENGINE** and is the one default whose cost
-  is not bounded by construction. An undeclared shard assumes 2 vCPUs and derives 24 at the reference
-  distance - above the 1-vCPU tier's measured peak of 16, below its collapse at 32, and widening with RTT
-  while the machine does not grow. The RDS floor argument still holds (every current-generation class
-  starts at 2, so the guess cannot undershoot there); it is Cloud SQL's 1-vCPU and shared-core tiers where
-  it can overshoot.
+  **BOTH AXES INTERPOLATE, BUT NOT THE SAME WAY.** `M*` is smooth in RTT, so a bucket edge is an artifact
+  of storing a curve as a table and a 0.9 ms path lands 80% of the way from the 0.50 column to the 1.00
+  one - a plain linear blend (`ratioAtRTT`). The tier axis is smooth in **log(vCPUs)**, not vCPUs - `B*` is
+  a power law and the rows are roughly an octave apart, uniformly spaced in log space - so a 24-vCPU shard
+  is blended between the 16- and 32-vCPU rows in **log-log** space (`tierBracket` + the `math.Log`/
+  `math.Exp` pair in `connsPerVCPUFor`): linear in log(ratio) against log(vCPUs), exact at every tabulated
+  tier (the interpolation fraction lands at exactly 0 or 1 there), and mathematically identical whether
+  the blend runs on the ratio or on the raw connection count (the vCPU term cancels - see the proof at the
+  function). A failed probe lands in the first RTT column rather than on an assumed distance - the same
+  posture `defaultRTTMs` takes for `workerCeiling`.
+
+  ⚠️ **THE TABLE STOPS AT 64 vCPU - EVERY ROW IN IT IS MEASURED, AND THERE IS NO MODELLED ROW PAST IT.**
+  Every cell is the smallest pool that sustained that distance's achievable throughput, with
+  `poolSafetyMargin` (1.2) applied on top by `connsPerVCPUFor` - so the table holds raw minima and the
+  slack stays one number in one place. A shard declared larger than 64 vCPU falls back to the 64-vCPU row
+  flat (no second point to interpolate against) - the safe direction, since 64 vCPU is the LOWEST ratio
+  measured and under-connecting costs throughput rather than collapsing the database. **The measured cells
+  sit well below every collapse observed**, which is the direction to keep them in: 8 vCPU derives 48 at
+  0.25 ms against the one 8-vCPU arm that ever collapsed, at **M=70** (bracketed by healthy arms at M=50
+  and M=90, n=1), and 1 vCPU derives 3 against a peak at **M=16** and a collapse from **M=32**. The
+  exposure a re-measurement should look for is therefore starvation at the top of a tier's range, not
+  collapse. Adding a row past 64 vCPU is gated on the load generator, not the database - size it before
+  booking a rig (`bench/CLAUDE.md`).
+
+  ⚠️ **A COLLAPSED ARM IS A TRANSIENT CAUGHT BY THE WINDOW, NOT A THRESHOLD - and every cell here was
+  measured on a 120s one.** The stall lasts ~30s and recurs; below the ceiling it clears itself with the
+  offered rate unchanged, so a 120s window aliases it and reports one of two answers depending where it
+  landed. Measured at one pool and one rate on the 64-vCPU sweep: **9,183 steps/s with a 75s p50 in one
+  window, 19,685 (98.4% of command) in another**. Three distance arms then showed a collapsed pool
+  bracketed by WORKING pools on both sides (256 between 224 and 320 at 0.5 ms; 320 between 256 and 384 at
+  1.5 ms), which no threshold can produce. Consequences: never place a stability boundary from a collapsed
+  arm, read every cell as "smallest pool that sustained in every arm it ran, with a tail comparable to
+  larger pools" rather than as an edge, and **state the window length beside any throughput number from
+  this system**. The cells are placed from where STARVATION ends, which is the reproducible half - at
+  0.5 ms on 64 vCPU the pool ladder 128/160/192/224 gave a clean monotonic 40/70/85/97% of command.
+
+  🔑 **SIZE A CELL BY COMMANDING ABOVE SATURATION AND READING THE 600s MEAN - do not go back to
+  "smallest pool that sustained rate R".** That older form has to CHOOSE R, and the choice decides the
+  answer (the existing arms landed anywhere from 66% to 93% of their own tier's ceiling, which is why the
+  rows are not comparable with each other); worse, "sustained it" is a BINARY that a short window decides
+  by where a stall happened to land. Commanding above saturation removes both: the machine's own maximum
+  needs no target, and the metric becomes a continuous mean that AVERAGES a transient instead of being
+  flipped by it. The answer is the pool at which the mean stops improving.
+  Measured this way on 8 vCPU at 0.15ms, 600s windows, 4,000 steps/s commanded against a ~3,100-3,260
+  sustained: **2,102 / 2,419 / 2,927 / 3,263 / 3,115 steps/s at M = 24 / 32 / 40 / 48 / 64** - a plateau
+  exactly at the shipped 6.0x, with 5.0x (the raw minimum) reaching only 89.7% of the machine. So
+  `poolSafetyMargin` is not only tail insurance on this tier; it is what closes the last 10% of
+  throughput.
+
+  **16 vCPU at 0.064ms agrees that 6.0x is the right operating point, by a different route:**
+  4,469 / 5,176 / 6,221 / 6,006 / 6,442 / 6,826 / 6,672 steps/s at M = 48 / 64 / 80 / 96 / 128 / 160 / 192
+  (3x to 12x per vCPU). The rise from 3x to ~5x is large and real (+39%); everything from 5x upward is
+  FLAT WITHIN NOISE. So 6.0x sits on the plateau rather than below it, and buying the last few percent
+  would cost roughly a doubling of connections - the same trade an earlier campaign measured from the
+  other direction ("6x captures 90-94% of peak at every tier; the last 6-10% costs roughly a doubling",
+  `bench/CLAUDE.md`). Tail moves the OTHER way past the plateau: p99 climbed 36.8s -> 90.5s -> 106.1s from
+  5x to 10x to 12x while p50 fell, which is the over-connection direction showing up as tail rather than
+  collapse.
+
+  🔑 **THE RUN-TO-RUN NOISE FLOOR IS TIER-DEPENDENT AND CAN BE ~10%, SO ESTABLISH IT BEFORE READING ANY
+  CURVE.** 8 vCPU measured ~5% on identical arms (3,105 vs 3,263). 16 vCPU measured **~10%**, caught only
+  because an arm with 0.1ms of ADDED netem delay beat its own base-distance twin by 10.1% (6,613 vs
+  6,006) - which no distance effect can produce, so it prices the noise directly. Reading the 16-vCPU
+  curve against the 8-vCPU floor produced two false findings before that arm ran: a "plateau at 10x" and
+  an 80-vs-96 inversion, both of which are scatter. **Budget a repeated arm per campaign to price the
+  floor**, and treat within-condition comparisons (same distance, same session, adjacent arms) as the only
+  ones resolving anything finer - at 0.169ms, 96 beat 80 by 11.3%, which is such a comparison and stands.
+  Two design rules for the next such sweep: pin the pool (an unpinned one moves with probe variance, see
+  below) and set `-max-outstanding` LOW so every arm is closed-loop at the SAME backlog depth - otherwise
+  the starved arms sit at a deeper backlog and pay an extra O(backlog) scan penalty the healthy ones do
+  not, biasing the comparison toward the larger pool.
+
+  ⚠️ **THE STARTUP RTT PROBE IS TAKEN IDLE AND IS ~HALF THE LOADED VALUE, AND ITS VARIANCE MOVES THE
+  POOL.** On one 8-vCPU rig: idle probe **0.157-0.182 ms**, RTT under load **p50 0.34-0.38 ms** across
+  every rate and pool tried (the median is remarkably invariant; only p95 moves, 0.56 -> 2.17 ms with
+  load). So the value indexing `poolRatio` is systematically about half what the engine then experiences.
+  It happens not to matter at 8 vCPU - both land in the first column - but a "fix" that probed under load
+  would interpolate to ~7.4x and inflate that pool ~25% for no measured gain. More immediately: **two runs
+  of the identical command line derived 48 and 64 connections** because one probe landed under 0.25 ms and
+  the other at ~0.39 ms, and the probe is taken ONCE and held for the process lifetime - so a replica that
+  starts during a latency blip is mis-sized for as long as it runs. Pin the pool in any sweep whose axis
+  is not RTT.
+
+  ⚠️ **THE TIER AXIS INTERPOLATES RATHER THAN ROUNDS UP, BECAUSE THE TABLE IS NOT MONOTONIC.** Rounding a
+  declared size up to the first tabulated row >= it would derive FEWER connections for everything from 33
+  to ~63 vCPUs than a 32-vCPU shard gets, because `shardBudget` would then multiply a SMALLER ratio (64's)
+  by a LARGER vCPU count only past the 64 boundary, not before it: on a non-monotonic table, rounding
+  under-connects a whole band, not just nicks a boundary. Those are real classes (AWS sells 40- and
+  48-vCPU database instances; Cloud SQL custom types take any even count), and the direction is starvation
+  - the failure mode every measured tier exhibits, and which the saturation sweep priced at -10%
+  throughput for a pool 17% short and -36% for one 50% short. `tierBracket`'s log-log blend (above) avoids
+  this: 24 -> 121, 32 -> 144, 40 -> 152, 48 -> 160, 56 -> 166, 64 -> 172 - monotonically rising the whole
+  way, exact at every tabulated tier, no change to the table's cells. Do NOT round up instead of
+  interpolating, and do NOT "fix" a future non-monotonic measurement by editing cells back toward
+  monotonicity; sweep the tier that disagrees.
+
+  **`defaultVirtualCPUs` sits well inside the measured 1-vCPU range.** An undeclared shard assumes 2 vCPUs
+  and derives **7** at the reference distance, against a 1-vCPU tier measured to sustain its load on 3 and
+  to run clean at 14. The RDS floor argument also holds (every current-generation class starts at 2, so
+  the guess cannot undershoot there). What it cannot do is use a large database.
 
   ⚠️ **COUNT BACKENDS, NOT CONNECTIONS, before calling a large-RTT cell an over-connection.** The 2.00 ms
-  cell for 32 vCPU is 398 connections against an observed collapse at 430 - but at that distance only
-  ~41% are inside the database at once, so it is **~163 backends, fewer than the 183 the healthy knee
+  cell for 32 vCPU is 336 connections against an observed collapse at 430 - but at that distance only
+  ~41% are inside the database at once, so it is **~138 backends, fewer than the 183 the healthy knee
   carried** and far from the collapsed arm's 414. Any cap belongs on backends or on the operator's
   configured `max_connections`, never on a connection count read without its RTT. **There is no such cap
-  today** - a 128-vCPU shard at 2 ms derives ~1,081, which exceeds some defaults; the engine trusts
+  today** - a 128-vCPU shard at 2 ms derives ~921, which exceeds some defaults; the engine trusts
   declared facts here exactly as it does for an over-declared `VirtualCPUs`.
 
   ⚠️ **COLLAPSE IS AN EVENT, NOT A THRESHOLD, so no cell here is a safety boundary.** A 32-vCPU shard
@@ -2225,8 +2312,8 @@ successor and advance no `step_id`. Constants, their portability, and the normal
   measured** (75.1/64.4/68.5% at 8/16/32) and WAL is one serialized writer per instance, so `s` cannot
   keep falling with cores; 64 vCPU and up hold the 32-vCPU curve rather than extrapolate it down.
   **Full compensation has a ceiling** regardless: 4 ms on 32 vCPU would need ~1,163 connections, so past
-  ~1.5-2 ms a large instance cannot be compensated at all (hence `poolRTTCapMs`) and the answer is more
-  shards, not a bigger one. Same-zone RTT spans **0.053-0.96 ms** and cross-AZ same-region is ~1.1 ms -
+  ~1.5-2 ms a large instance cannot be compensated at all (which is why `poolRTTBuckets` stops at 2 ms and
+  every longer path clamps to that column) and the answer is more shards, not a bigger one. Same-zone RTT spans **0.053-0.96 ms** and cross-AZ same-region is ~1.1 ms -
   both inside the compensated range; cross-region (10-40 ms) is far outside it.
 
   🔑 **NEVER FIT `k` FROM A LADDER THAT MOVES THE POOL WITH THE RTT.** `M` then becomes a linear function
@@ -2405,13 +2492,14 @@ engines to assert their solo pool sizes. The latter (`TestPoolSizing_DerivedWork
 each engine `t.Name()+"#"+key`, so each reads R=1. The
 sizing tests drive fleet size by writing fake peer rows (`addPeerRow`/`delPeerRow`, which wait for the Sonars to
 observe the change) rather than through signals.
-- **`VirtualCPUs = 0` (undeclared) assumes `defaultVirtualCPUs = 2`** (pool 12). The vCPU count is a fact
+- **`VirtualCPUs = 0` (undeclared) assumes `defaultVirtualCPUs = 2`** (pool 7 at the reference distance).
+  The vCPU count is a fact
   off the spec sheet - something an operator KNOWS - so this covers the zero-config case, not a guess
   anyone should rely on. It is bounded, not reckless: 2 is the FLOOR of every current-gen AWS RDS class,
-  and on the smaller machines that do exist (Cloud SQL's 1-vCPU `db-custom-1-*`) a pool of 12 still sits
-  under the measured knee - that tier peaked at M=16 and only collapsed from M=32 up. **Do NOT raise the
-  assumption to 4**: that yields a pool of 24, which lands in the unmeasured gap between the 1-vCPU
-  tier's peak (M=16) and its collapse (M=32). The asymmetry is the whole argument - under-connecting
+  and on the smaller machines that do exist (Cloud SQL's 1-vCPU `db-custom-1-*`) 7 sits under the measured
+  knee - that tier sustained its load on 3, peaked at M=16 and only collapsed from M=32 up. **Do NOT raise
+  the assumption to 4**: at 2 ms it would derive 48, past the 1-vCPU tier's collapse at M=32, and the guess
+  widens with distance while the machine does not grow. The asymmetry is the whole argument - under-connecting
   costs throughput but stays healthy (excess load queues client-side, measured benign), over-connecting
   collapses the database. Consequence to state plainly: an 8-vCPU database left undeclared runs at a
   fraction of its capacity, and **nothing detects an over-declared `VirtualCPUs`** - the declared facts
@@ -2897,6 +2985,32 @@ at the derived cadence. Pacing the supply loop against the measured drain (~190m
 17.8ms that fell below the 20ms floor) cut the fetches 4.4x and kept the throughput. So a high waste ratio
 now names a supply loop running ahead of the workers, which is a cadence-derivation question rather than a
 dead hypothesis - see `deriveRefillInterval`, which was calibrated when the scan capped it.
+
+**SUPPLY IS NOT WHAT BINDS AT SATURATION, AND THE TALLIER BEING SLOW DOES NOT MAKE IT SO.** The band scan
+is O(due rows) and inflates hard under a deep backlog - measured on 8 vCPU with a single fairness key,
+**8.6ms at a backlog of ~10 against 180-233ms at 80-91k**, a 21-27x inflation that takes the tally loop
+from a 12% to a ~90% duty cycle. It is tempting to read that as starving dispatch. It does not, and the
+counters say so directly:
+
+- the **supply loop keeps its cadence** - 13.5 cycles/s above the ceiling against 14.2 below, while the
+  tally loop collapsed 14.1 -> 5.0. This is exactly what splitting the two loops was for, working.
+- **supply runs 3.3x AHEAD of consumption** there (10,387 candidates/s against 3,105 steps/s executed,
+  55% discarded). The cache is full; workers are never waiting for a candidate.
+
+So the scan's cost is a **resource tax, not a supply chokepoint**: ~5 scans/s over ~85k rows is server CPU
+and I/O spent producing nothing, competing with real step work. Worth removing on those grounds, but
+removing it will NOT raise throughput, and any change justified by "the refiller is the constraint" is
+justified by a measurement nobody has made.
+
+**And the tax has now been PRICED, by varying backlog depth alone.** Same tier, pool, rate and distance,
+`-max-outstanding` 20,000 against 100,000: the backlog sat 5x deeper, the band scan went **107ms ->
+322ms** (3x), and throughput moved **-1.0%** - inside noise. So tripling the scan's cost bought nothing,
+which is as direct a statement as the instruments can make that this path is off the critical one. Do not
+spend effort narrowing the selection index predicate, or reviving distinct-key skip scans, **on
+throughput grounds**; they need a different justification (server CPU headroom, or a tier where the scan
+is a larger share). With one fairness key the whole backlog is a single partition,
+which is the worst case for the `rn <= capacity` cut (it skips per-partition OUTPUT past the cap, never
+the scan) - a many-key backlog is far less exposed, and no campaign has measured that difference.
 
 **17 counters** in total: the 8 event counters above, plus `dwarf_steps_offered` /
 `dwarf_steps_claim_preempted` / `dwarf_steps_claim_lost` / `dwarf_peer_changes`, plus the three the pistons

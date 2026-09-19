@@ -146,14 +146,65 @@ invisible in an average and because a connection ratio chosen for throughput mak
 | WAL share of backend waits | ~69% | **~14%** |
 | `CPU:running` share | ~6% | **~80%** |
 
-The backends stop committing and burn CPU instead. It appeared **only past saturation**, never on an
-instance with headroom, and a minute in it is an incident.
+The backends stop committing and burn CPU instead. A minute in it is an incident.
 
-**Do not count on it clearing while load continues.** The expectation is that it self-recovers once the
-workload abates enough for the database to catch up — but that has **not been tested**, and what has been
-observed points the other way: every degraded arm in the RTT campaigns ran its full 120-second
-measurement window without recovering under sustained load. Treat it as a state that persists until the
-offered rate drops, and leave headroom rather than relying on it to clear itself.
+**It recovers when the offered load stops.** On an 8-vCPU instance driven past saturation until the
+backlog reached 42,134 pending steps, cutting admission drained it to **zero in 76 seconds**, with the
+engine's internal queues and worker pool returning to their idle state. Nothing latches: the state is
+sustained by the load, not by damage. What it does *not* do is clear while the overload continues — a
+600-second arm at 8,000 steps/s commanded held ~99,500 pending for its last 300 seconds.
+
+### A shorter stall happens *below* saturation, and averages cannot see it
+
+The state above is what an overloaded instance settles into. Below saturation there is a second, more
+important behaviour: a **stall of roughly 30–60 seconds that clears itself and recurs**, while the
+offered rate is unchanged and the instance has headroom.
+
+Measured on an 8-vCPU instance, 600-second windows, one arm per rate, at 0.15 ms round-trip:
+
+| offered | % of sustained | delivered | **% of command** | stalls | peak backlog | p50 | p99 | **p99/p50** |
+|---|---|---|---|---|---|---|---|---|
+| 1,500 steps/s | 48% | 1,500 | **100.0%** | 0 | 28 | 88 ms | 110 ms | **1.2×** |
+| 2,100 | 68% | 2,100 | **100.0%** | 0 | 35 | 86 ms | 158 ms | **1.8×** |
+| 2,400 | 77% | 2,400 | **100.0%** | 0 | 45 | 93 ms | 601 ms | **6.5×** |
+| 2,700 | 87% | 2,700 | **100.0%** | 1 | 16,726 | 102 ms | **62,583 ms** | **614×** |
+| 3,000 | 97% | 2,998 | 99.9% | 4 | 3,150 | 125 ms | 1,377 ms | 11.1× |
+
+**Every arm delivered essentially 100% of what was asked of it — including the one whose p99 was 62
+seconds.** Throughput, error count and delivered rate are all blind to this; only the latency tail sees
+it. If you are watching a throughput dashboard, this failure mode is invisible.
+
+**Where the tail starts to go is ~77% of sustained capacity** (p99 first departs at 2,400 steps/s while
+backlog and throughput still look perfect), and below ~68% the instance is genuinely clean. Two arms
+showed multi-second to minute-scale stalls above that. So the operational rule is **size for the tail,
+not for the mean**: target roughly two thirds of sustained capacity if latency matters, and alert on the
+p99/p50 ratio rather than on throughput.
+
+Severity is not orderly at the top of the range — the 87% arm was far worse than the 97% one (a single
+16,726-step excursion against four moderate ones). One arm per rate cannot resolve that, so treat the
+ordering above ~77% as "bad, unpredictably" rather than as a curve.
+
+**What it is not: autovacuum.** All three stalls in one arm began while no vacuum was running, and one
+recovered completely *before* the next vacuum started. Vacuum ran on a regular ~60-second cadence
+throughout while the stalls were irregular and sparse. What does track them is B-tree health on the index
+the engine claims steps through: across one stall its leaf density fell **75.3 → 55.1** while
+fragmentation rose **3.3 → 21.2**, recovering afterwards. Independent runs on 8 and 16 vCPU reproduce
+that signature.
+
+### Sustained capacity is ~84% of the peak a short window reports
+
+The peaks in the vertical-scaling table are short-window figures, and this failure mode is why they
+overstate what an instance will hold. Two tiers, measured over 600-second windows:
+
+| database | short-window peak | 600 s sustained | ratio |
+|---|---|---|---|
+| 8 vCPU | 3,679 steps/s | **3,105–3,263** | 0.84 |
+| 16 vCPU | 7,491 steps/s | **6,066** | 0.81 |
+| 16 vCPU (separate run) | ~7,500 steps/s | ~6,300 | 0.82 |
+
+**Always state the window length beside a throughput number from this system.** The same 8-vCPU arm
+reported 99.9% of command over 600 seconds and something close to catastrophic over a 120-second window
+landing on one of its stalls — both true, same run.
 
 ### Connections: the throughput knee and the safe ratio are different numbers
 
@@ -573,18 +624,17 @@ The full offered rate, three times, with a 0.03% spread — while holding 24,000
 the `300 flows/s × 80 s` the workload implies. **Task duration has dropped out of the throughput
 equation entirely**; what remains is `min(offered load, database capacity)`.
 
-**Near the instance's ceiling the same workload used to be run-to-run bimodal. It no longer is.** At
+**Near the instance's ceiling, repeated runs stay tight rather than swinging between two outcomes.** At
 ~80% of what one 16-vCPU shard serves, three otherwise identical 8-second runs land within **1.09× of
 each other** (3,004–3,285 steps/s), and the zero-delay control repeats to the step (4,501 / 4,501 /
-4,501). An earlier engine measured a **5.0×** range on the equivalent arm.
+4,501).
 
-The mechanism the spread came from is still visible — it simply stopped collapsing. Across 0 / 1 / 8
-second tasks at a fixed offered rate, the candidate-selection pass slows **2.9 ms → 48 ms**, its rate
-roughly halves, and connection wait rises **2.2 ms → 30 ms**. What changed is that this now degrades
-smoothly instead of falling off a cliff.
+**The cost of longer tasks grows smoothly, not as a cliff.** Across 0 / 1 / 8 second tasks at a fixed
+offered rate, the candidate-selection pass slows **2.9 ms → 48 ms**, its rate roughly halves, and
+connection wait rises **2.2 ms → 30 ms** — a gradual cost, not a threshold effect.
 
-It is worth being precise about which half of that was ever the problem, because the obvious reading is
-wrong: **the supply of work to dispatch was never the loser.** In the same 8-second arms the engine
+Be precise about which half of that is the actual constraint, because the obvious reading is wrong:
+**the supply of work to dispatch is not the bottleneck.** In the same 8-second arms the engine
 *discards* 38–42% of the candidates it selects — it is oversupplying by 40% even with 48 ms selection
 passes — so a slower scan costs nothing while workers remain the scarce side. Blocked workers hold no
 connection, so a long task cannot crowd the database: **database CPU is flat at 43–49% across all three
@@ -627,9 +677,11 @@ N     = M × T/db                    # workers actually doing database work
 ceiling ≈ min(N/T, M/db, C_db)      # steps/s, where C_db is the instance's own ceiling
 ```
 
-Worked example — an 8-vCPU shard, same-zone (`L` = 0.5 ms), 50 ms tasks: `M` = 6×8 = 48 connections;
-`db` ≈ 11×0.5 + 4.4 ≈ 9.9 ms; `T` ≈ 60 ms; `N` = 48 × 6.1 ≈ 290 workers. Predicted ceiling ≈ 3,700
-steps/s, which is the 8-vCPU instance's own ceiling — the database binds, as designed.
+Worked example — an 8-vCPU shard, same-zone (`L` = 0.5 ms), 50 ms tasks: the engine derives `M` = 9.6×8 ≈ 76
+connections at that size and distance ([deployment](deployment.md#connection-pool));
+`db` ≈ 11×0.5 + 4.4 ≈ 9.9 ms; `T` ≈ 60 ms; `N` = 76 × 6.1 ≈ 464 workers. Predicted ceiling ≈ 7,700
+steps/s, so the binding term is `C_db` — the 8-vCPU instance's own ceiling of roughly 3,500 steps/s. The
+database binds, as designed.
 
 ### How many engine hosts, and how much database behind them
 

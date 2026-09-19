@@ -169,7 +169,7 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 		idle     int
 		open     int
 	}{
-		// The 16-vCPU row is MEASURED; every other row is modelled (see connsPerVCPUFor).
+		// Every row from 1 to 64 vCPU is MEASURED (see connsPerVCPUFor / poolRatio).
 		{0, 0, 1, 0.25, 3, 7},   // undeclared: assume 2 vCPUs -> the 2-vCPU pool
 		{1, 0, 1, 0.25, 2, 3},   // MEASURED row: 3 sustained 390 st/s on a 1-vCPU shard
 		{2, 0, 1, 0.25, 3, 7},   // MEASURED row: 6 sustained 770 st/s
@@ -180,12 +180,18 @@ func TestPoolSizing_ShardPool(t *testing.T) {
 		{16, 0, 1, 1.00, 67, 134},
 		{16, 0, 1, 2.00, 86, 172},
 		{32, 0, 1, 0.25, 72, 144}, // MEASURED row: 120 sustained 14,000 st/s
-		{128, 0, 1, 0.25, 278, 557},
-		// The tier band rounds UP (a 24-vCPU shard takes the 32-vCPU row, a 15-vCPU one the 16-vCPU row)
-		// and past the last tabulated tier it stays there, so both directions under-connect.
-		{24, 0, 1, 0.25, 54, 108},
+		// Past the last tabulated tier (64 vCPU) there is no second point to blend against, so it is
+		// taken flat - 128 and 256 land on the SAME ratio (2.25 * 1.2 margin = 2.7/vCPU) as 64 itself.
+		{128, 0, 1, 0.25, 172, 345},
+		{256, 0, 1, 0.25, 345, 691},
+		// Between two tabulated tiers the ratio is blended in LOG-LOG space (linear in log(ratio) vs
+		// log(vCPUs), since the underlying quantity is a power law) rather than rounding up to the
+		// larger row - 24 sits 58.5% of the way from 16 to 32 in log space, so its ratio (~4.23) lands
+		// between the two rows' 5.00 and 3.75, closer to 32's. 15 vCPU lands on 5.00 regardless of where
+		// it sits between 8 and 16, because those two rows share the SAME 0.25ms ratio - a coincidence of
+		// this RTT bucket, not a property of 15 vCPUs specifically.
+		{24, 0, 1, 0.25, 60, 121},
 		{15, 0, 1, 0.25, 45, 90},
-		{256, 0, 1, 0.25, 557, 1115},
 		// The RTT axis INTERPOLATES between buckets, and clamps at both ends.
 		{16, 0, 1, 0.50, 67, 134}, // on a bucket
 		{16, 0, 1, 0.90, 67, 134}, // between two buckets that are equal in the measured row

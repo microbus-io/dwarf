@@ -99,6 +99,38 @@ all tiers, and on 16 vCPU the 70-90% band straddles the collapse edge rather tha
 0.76ms to 2.26ms and R=1 throughput from 885 to 345 — a 2.5x drift that biases LATE phases against EARLY
 ones, silently, across a campaign. **Drop each database immediately after its arm**, not just before.
 Cross-phase comparisons of absolute throughput are unsafe without this; within-phase comparisons survive.
+It does not take 65 of them: **four** left on an 8-vCPU instance (3.9GB) roughly HALVED the next arm's
+throughput at identical settings. Autovacuum is the mechanism worth knowing — its workers are per
+INSTANCE (3 by default), so an abandoned database full of dead tuples spends workers that the live one
+needs, on top of the disk it holds.
+
+**A 10-minute arm is the shortest one worth trusting, because this system stalls for 30–60s at a time.**
+The same 8-vCPU configuration reports 99.9% of command over 600s and something close to catastrophic over
+a 120s window that happens to land on a stall — both true, same run. Two consequences for arm design:
+**state the window length beside every throughput number**, and never read a single short arm as a
+property of the configuration. The stalls are invisible in throughput anyway (every arm of a six-rate
+sweep delivered ~100% of command, including one whose p99 was 62 SECONDS) — **watch p99/p50**, which ran
+1.2x when clean and 6.5x at the onset.
+
+**To size a pool, command ABOVE saturation and read the 600s mean — do not sweep for the smallest pool
+that "sustains rate R".** The second form has to choose R, and the choice decides the answer; it also
+reduces to a binary that a short window decides by where a stall landed. Over-saturating removes both
+problems: the machine's maximum needs no target, and a mean absorbs transients rather than being flipped
+by them. Two rules for such a sweep, both learned by getting them wrong:
+
+- **Pin `-max-open-conns`.** The engine derives its pool from a Startup RTT probe, and two runs of an
+  identical command line derived 48 and 64 connections because the probe landed either side of a bucket
+  edge. An unpinned sweep confounds pool size with probe noise.
+- **Set `-max-outstanding` LOW, not high, so every arm is closed-loop at the SAME backlog depth.** With a
+  high cap the starved arms pin at the cap while the healthy ones sit lower, and since the band scan is
+  O(backlog) the starved arms pay a second penalty — biasing the result toward the larger pool. (`main.go`
+  will also mark those arms invalid, which is correct for a commanded-rate arm and a false alarm here.)
+
+**`-arrival-stop` measures recovery, which no other flag can.** It halts admission partway through the
+window while the engine keeps running, so the remainder is a drain under load that has ABATED rather than
+one still being offered — the difference between "the backlog is self-sustaining" and "it was being
+refilled faster than it emptied". Measured: a 42,134-step backlog drained to zero in 76s. The window mean
+spans both phases and is meaningless by construction, so read `-stats-interval`, not the artifact.
 
 **Stale `dwarf_peers` rows crater a run.** A killed engine leaves a row that inflates R, gutting every
 pool (measured ~180 vs ~7500 steps/s). `dwarf_peer_changes` reads zero in a settled fleet by construction,
@@ -157,6 +189,18 @@ work.
 **Doubling concurrency does not exonerate the load generator.** A saturated generator absorbs concurrency
 without producing throughput, exactly as a saturated database does. Measure host CPU (`host.cpuCores`)
 instead — there is precedent for a "shards add nothing" finding that was a 4-vCPU engine host all along.
+
+**SIZE THE GENERATOR BEFORE BOOKING THE RIG — the harness costs ~2,755–2,881 steps/s per host core.**
+Measured on `linear` across a 2× load range (11,953 → 23,178 steps/s), and flat over it, so it multiplies
+out honestly: a 16-vCPU host ceilings near **46,000 steps/s**, all in, since `cpuCores` covers the load
+generator *and* the engine in one process. That carried a 64-vCPU database (ceiling ~25,500 steps/s) at
+51–60% host CPU with room to spare, and it is why those arms measure the tier. Against the next tiers up
+it does not: ~35–40k steps/s would sit at 76–87%, and a 128-vCPU database's rate is simply out of reach.
+Two constraints make this awkward to solve by reflex. The generator must share the database's zone (a
+cross-zone hop adds ~1.1 ms and moves the very axis under test), and large instance types stock out
+per-zone — `c4a-standard-32` was unavailable in the zone this campaign needed. So check `steps/core`
+against the target tier's expected ceiling first, and if one VM cannot cover it, shard the generator
+rather than accepting the number.
 
 ## What the workload has to exercise
 

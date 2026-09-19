@@ -70,30 +70,58 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%d%H%M%S)}"
 OUT="${OUT:-./rttderived-results}"
 mkdir -p "$OUT"
 
-# A copy of engine/poolsize.go's poolRatio, for the EXPECTED column only. It predicts what the engine
-# should choose so a divergence is visible in the log; nothing here is passed to the binary.
+# A copy of engine/poolsize.go's poolRatio + poolSafetyMargin + the tierBracket/ratioAtRTT interpolation,
+# for the EXPECTED column only. It predicts what the engine should choose so a divergence is visible in
+# the log; nothing here is passed to the binary. The cells are RAW MINIMA and the margin rides on the
+# result, exactly as connsPerVCPUFor does - keep the two spellings identical or the EXPECTED column
+# silently stops being a check. The table stops at 64 vCPU (every row measured); past it there is no
+# second point to blend against, so the last row is taken flat, same as connsPerVCPUFor's clamp.
 expected_pool() { # $1 = measured rtt ms
 python3 - "$VCPUS" "$1" <<'PY'
-import sys
+import sys, math
 vcpus, rtt = int(sys.argv[1]), float(sys.argv[2])
-rows = [(1,[14.64,15.77,16.90,18.02,19.14,20.25,21.35,22.45]),
-        (2,[12.18,13.23,14.28,15.31,16.34,17.36,18.37,19.37]),
-        (4,[10.20,11.22,12.23,13.22,14.20,15.17,16.12,17.05]),
-        (8,[8.63,9.68,10.70,11.69,12.65,13.59,14.50,15.38]),
-        (16,[7.34,8.40,9.41,10.36,11.27,12.12,12.94,13.72]),
-        (32,[6.43,7.59,8.62,9.55,10.38,11.14,11.82,12.45]),
-        (64,[5.30,6.25,7.10,7.86,8.55,9.17,9.74,10.25]),
-        (96,[4.73,5.58,6.34,7.02,7.63,8.19,8.69,9.15]),
-        (128,[4.36,5.15,5.85,6.48,7.04,7.55,8.02,8.44])]
-row = rows[-1][1]
-for v, r in rows:
-    if vcpus <= v:
-        row = r
-        break
-pos = min(max(rtt, 0.25), 2.0)/0.25 - 1
-lo = int(pos)
-ratio = row[-1] if lo >= len(row)-1 else row[lo] + (pos-lo)*(row[lo+1]-row[lo])
-print(max(2, int(ratio*vcpus)))
+buckets = [0.25, 0.50, 1.00, 1.50, 2.00]
+margin = 1.2
+rows = [(1,[3.00,5.00,7.00,9.00,11.00]),
+        (2,[3.00,6.00,7.00,10.00,11.00]),
+        (4,[3.00,6.00,6.00,8.00,10.00]),
+        (8,[5.00,8.00,8.00,11.00,11.00]),
+        (16,[5.00,7.00,7.00,9.00,9.00]),
+        (32,[3.75,4.70,5.60,8.10,8.75]),
+        (64,[2.25,3.50,5.00,6.00,6.00])]
+
+def ratio_at_rtt(row_ratios):
+    if rtt <= buckets[0]:
+        return row_ratios[0]
+    if rtt >= buckets[-1]:
+        return row_ratios[-1]
+    i = next(i for i in range(1, len(buckets)) if rtt <= buckets[i])
+    f = (rtt - buckets[i-1]) / (buckets[i] - buckets[i-1])
+    return row_ratios[i-1] + f*(row_ratios[i] - row_ratios[i-1])
+
+# Tier axis: log-log blend between the two bracketing rows (linear in log(ratio) vs log(vCPUs)), clamped
+# flat below the first row or at/beyond the last - no second point to interpolate against there. A vcpus
+# that lands exactly on a tabulated tier skips the log/exp round-trip entirely (rather than relying on it
+# to land back on f==1.0 bit-exact), which a naive port does not: math.exp(math.log(x)) is NOT guaranteed
+# to reproduce x - measured one ULP low here (4.999999999999999 for a ratio of 5.00), enough for the
+# truncating int() below to under-report by a whole connection at every exact-tier RTT/vCPU pair.
+tiers = {v: r for v, r in rows}
+if vcpus in tiers:
+    ratio = ratio_at_rtt(tiers[vcpus])
+elif vcpus <= rows[0][0]:
+    ratio = ratio_at_rtt(rows[0][1])
+elif vcpus >= rows[-1][0]:
+    ratio = ratio_at_rtt(rows[-1][1])
+else:
+    lo = hi = rows[0]
+    for i in range(1, len(rows)):
+        if vcpus <= rows[i][0]:
+            lo, hi = rows[i-1], rows[i]
+            break
+    lo_ratio, hi_ratio = ratio_at_rtt(lo[1]), ratio_at_rtt(hi[1])
+    f = (math.log(vcpus) - math.log(lo[0])) / (math.log(hi[0]) - math.log(lo[0]))
+    ratio = math.exp(math.log(lo_ratio) + f*(math.log(hi_ratio) - math.log(lo_ratio)))
+print(max(2, int(ratio*margin*vcpus)))
 PY
 }
 
