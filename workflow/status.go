@@ -23,14 +23,27 @@ const (
 	StatusInterrupted = "interrupted" // Flow is paused, waiting for external input
 	StatusCompleted   = "completed"   // Flow has finished successfully
 	StatusFailed      = "failed"      // Flow has failed with an error
-	StatusCancelled   = "cancelled"   // Flow was cancelled by the user
+	StatusTerminated  = "terminated"  // Flow was forcefully, unconditionally stopped by Terminate; in-flight work was abandoned, not awaited
+	StatusCancelled   = "cancelled"   // Reserved for a future graceful-cancellation operation; not yet produced by any current operation
 )
 
 // IsValidStatus reports whether s is one of the defined flow/step statuses.
 func IsValidStatus(s string) bool {
 	switch s {
 	case StatusCreated, StatusPending, StatusRunning, StatusInterrupted,
-		StatusCompleted, StatusFailed, StatusCancelled:
+		StatusCompleted, StatusFailed, StatusTerminated, StatusCancelled:
+		return true
+	}
+	return false
+}
+
+// TerminalStatuses lists every flow/step status that is terminal (immutable, no further advancement).
+var TerminalStatuses = []string{StatusCompleted, StatusFailed, StatusTerminated, StatusCancelled}
+
+// IsTerminalStatus reports whether s is one of the terminal flow/step statuses.
+func IsTerminalStatus(s string) bool {
+	switch s {
+	case StatusCompleted, StatusFailed, StatusTerminated, StatusCancelled:
 		return true
 	}
 	return false

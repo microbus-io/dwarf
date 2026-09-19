@@ -18,7 +18,7 @@ external service. Two tables carry data you supply.
 | Baggage | `FlowOptions.Baggage` | Opaque to the engine and handed back to every task. **This is where hosts typically put caller identity or tenant claims** |
 | Final state | Computed at termination | The full merged state of the terminal step, unfiltered |
 | Error text | A failing task's error | Free-text, and **searchable** — see below |
-| Cancel reason | Your `Cancel` call | Free-text, and **searchable** |
+| Terminate reason | Your `Terminate` call | Free-text, and **searchable** |
 | Fairness key | `FlowOptions.FairnessKey` | Commonly a tenant id |
 | Trace context | The tracer, if configured | A W3C trace parent |
 
@@ -49,7 +49,7 @@ neither hides data from a query nor exposes any.
 - the workflow URL and display name
 - the task name
 - **the flow's error text**
-- **the cancel reason**
+- **the terminate reason**
 - the flow key
 
 **It does not reach state, changes, final state, baggage, interrupt payloads, or resume data.** Workflow
@@ -57,7 +57,7 @@ payloads are not searchable.
 
 The exposure to weigh is the error text, and it has two layers.
 
-**Errors are returned outright.** `List` returns each flow's error and cancel reason, and `History` returns
+**Errors are returned outright.** `List` returns each flow's error and terminate reason, and `History` returns
 each step's error — including in the payload-free readers. Task errors routinely quote the input that caused
 them (an address, an account number, a downstream API's rejection message quoting the record it rejected),
 so whatever your tasks interpolate into an error string is visible to anyone who can list flows, whether or
@@ -75,7 +75,7 @@ two obligations outside the engine:
 - **Task authors keep PII out of error text.** Name the failure, don't quote the payload — reference data by
   an internal identifier instead of by its value. See
   [Writing tasks → Keep payload data out of error text](tasks.md#keep-payload-data-out-of-error-text) for
-  the rule and examples. The same applies to whatever you pass as a cancel reason, which is stored verbatim.
+  the rule and examples. The same applies to whatever you pass as a terminate reason, which is stored verbatim.
 - **Your host restricts who may call what.** The engine has no notion of a caller, so gating `List` — and
   `Search` in particular — by credential is yours to do, in the layer that holds the principal.
 
@@ -98,7 +98,7 @@ structurally invisible to it. Every access decision belongs to the layer you bui
 a caller cannot enumerate flows by counting: without it, the numeric part of a flow key is a sequential
 integer. What the token buys is that an authorization bug alone is not enough to walk the table — you would
 also need each flow's token. What it is *not* is access control. **Anyone holding a flow key can resume,
-cancel, fork and read that flow.** Treat a leaked, logged, or forwarded key as a full write capability for
+terminate, fork and read that flow.** Treat a leaked, logged, or forwarded key as a full write capability for
 that one flow.
 
 **`List` is the amplifier.** It is the only operation that returns keys wholesale, so it converts "can call
@@ -110,7 +110,7 @@ fairness key to the tenant.
 
 | Operation | Returns state payloads? | Returns error text? |
 |---|---|---|
-| `List` | No — summaries only | **Yes** — the flow's `Error` and `CancelReason` |
+| `List` | No — summaries only | **Yes** — the flow's `Error` and `TerminateReason` |
 | `History` | No — `State` and `Changes` are left empty | **Yes** — each step's `Error` |
 | `Step` | **Yes** — that step's input state and changes | **Yes** |
 | `Snapshot` / `Await` / `Run` | **Yes** — final state, or the interrupt payload | **Yes** |
@@ -124,7 +124,7 @@ the data tier. That is why [what goes into an error string](#free-text-search-re
 question, not just a debugging one.
 
 **Subgraph child keys are read-only.** Lifecycle changes must be addressed to the root flow key, so holding a
-child's key does not confer the ability to cancel or resume its tree.
+child's key does not confer the ability to terminate or resume its tree.
 
 ## What telemetry carries
 

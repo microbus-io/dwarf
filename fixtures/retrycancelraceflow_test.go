@@ -28,11 +28,11 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestRetryCancelRaceflow pins the retry rewind's status guard. A Cancel landing mid-task terminalizes the
-// running step (cancelled); if the task then arms flow.Retry, an unguarded rewind would flip the immutable
-// cancelled step back to `pending` (with a backoff not_before minutes out) and reap the now-terminal tree's
+// TestRetryCancelRaceflow pins the retry rewind's status guard. A Terminate landing mid-task terminalizes the
+// running step (terminated); if the task then arms flow.Retry, an unguarded rewind would flip the immutable
+// terminated step back to `pending` (with a backoff not_before minutes out) and reap the now-terminal tree's
 // subgraph children - a transient zombie plus an immutability violation. With the guard, the rewind is a
-// no-op against the cancelled step: it stays cancelled and is never re-dispatched.
+// no-op against the terminated step: it stays terminated and is never re-dispatched.
 func TestRetryCancelRaceflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -59,8 +59,8 @@ func TestRetryCancelRaceflow(t *testing.T) {
 			return nil
 		}
 		started <- struct{}{}
-		<-release // hold the step in `running` until the test has cancelled the flow
-		// Arm a retry with a long backoff: without the guard the cancelled step would be flipped to
+		<-release // hold the step in `running` until the test has terminated the flow
+		// Arm a retry with a long backoff: without the guard the terminated step would be flipped to
 		// `pending` with a not_before ~10s out, which the assertion window below would observe.
 		f.Retry(10*time.Second, 2, 30*time.Second, time.Hour)
 		return nil
@@ -79,8 +79,8 @@ func TestRetryCancelRaceflow(t *testing.T) {
 		return
 	}
 
-	// Cancel mid-task: the running step and the flow go cancelled.
-	if !assert.NoError(eng.Cancel(ctx, flowKey, "abort mid-task")) {
+	// Terminate mid-task: the running step and the flow go terminated.
+	if !assert.NoError(eng.Terminate(ctx, flowKey, "abort mid-task")) {
 		return
 	}
 
@@ -91,9 +91,9 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	assert.Equal(workflow.StatusCancelled, outcome.Status)
+	assert.Equal(workflow.StatusTerminated, outcome.Status)
 
-	// Invariant: the cancelled step is never revived. With the guard it stays `cancelled` (attempt 0);
+	// Invariant: the terminated step is never revived. With the guard it stays `terminated` (attempt 0);
 	// without it the step flips to `pending` (attempt 1) and PERSISTS there for the ~10s retry backoff, so
 	// one reading taken after the window has closed is as strong as the two seconds of polling this
 	// replaces - and the window closes on the dispatcher's own terms rather than on a clock. Two pushing
@@ -101,7 +101,7 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	enginetest.AwaitShardCycles(t, eng, 1, 2)
 
 	final := stepRecordByTask(t, eng, flowKey, "Work")
-	assert.Equal(workflow.StatusCancelled, final.Status)
+	assert.Equal(workflow.StatusTerminated, final.Status)
 	assert.Equal(0, final.Attempt)
 	// The zombie re-dispatch never re-ran the task.
 	assert.Equal(int32(1), invocations.Load())

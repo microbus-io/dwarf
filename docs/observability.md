@@ -51,7 +51,7 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_*` instrument | Type | Labels | Measures | PromQL name |
 |---|---|---|---|---|
 | `dwarf_flows_started` | counter | `workflow`, `shard` | flows started. `shard` is where the flow was **placed**, so a skew across shards means work is not spread the way the capacity weights intended | `dwarf_flows_started_total` |
-| `dwarf_flows_terminated` | counter | `workflow`, `status`, `shard` | flows reaching a terminal status — **all three** of completed, failed and cancelled, which is what makes `started − terminated` a stable in-flight count rather than one that drifts up by every flow that did not finish cleanly | `dwarf_flows_terminated_total` |
+| `dwarf_flows_terminated` | counter | `workflow`, `status`, `shard` | flows reaching a terminal status — completed, failed, or terminated, which is what makes `started − terminated` a stable in-flight count rather than one that drifts up by every flow that did not finish cleanly | `dwarf_flows_terminated_total` |
 | `dwarf_steps_executed` | counter | `task_name`, `status`, `shard` | steps executed, by disposition. `shard` makes this per-shard dispatch throughput — selection, the connection pool and the work split are all per shard, so a fleet-wide total hides one shard falling behind | `dwarf_steps_executed_total` |
 | `dwarf_steps_recovered` | counter | — | steps recovered after a lease expiry | `dwarf_steps_recovered_total` |
 | `dwarf_steps_unwedged` | counter | `park_type` | wedged subgraph parks recovered by the sweep (nonzero = latent bug) | `dwarf_steps_unwedged_total` |

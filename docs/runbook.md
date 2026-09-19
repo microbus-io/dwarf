@@ -62,7 +62,7 @@ step anywhere, including inside subgraphs.
 
 ```go
 // 1. Terminalize the orphan. It stops being running and becomes a valid fork source.
-eng.Cancel(ctx, flowKey, "orphaned by replica termination")
+eng.Terminate(ctx, flowKey, "orphaned by replica termination")
 
 // 2. Re-run from the last step that completed successfully. Its key comes from History.
 newFlowKey, err := eng.Fork(ctx, lastGoodStepKey, nil)
@@ -86,8 +86,8 @@ and no manual recovery is needed. What the counter tells you is that a step reac
 have been able to reach.
 
 **Respond.** Nothing urgent. The `park_type` label distinguishes the two cases: `orphaned_child` is a live
-subgraph child whose parent already terminalized (usually the residue of a `Cancel` that raced a subgraph
-spawn — benign and expected at low rates under heavy cancellation); anything else is a caller whose child
+subgraph child whose parent already terminalized (usually the residue of a `Terminate` that raced a subgraph
+spawn — benign and expected at low rates under heavy termination); anything else is a caller whose child
 vanished, which is worth reporting.
 
 **Escalate** with the `park_type` label and the timing if the rate is sustained rather than occasional.
@@ -307,11 +307,11 @@ will wait indefinitely.
 **Confirm what it is waiting for** with `eng.Snapshot(ctx, flowKey)` — `InterruptPayload` carries whatever the
 task published when it parked.
 
-**Respond** by resuming it with the data it asked for, or by cancelling it:
+**Respond** by resuming it with the data it asked for, or by terminating it:
 
 ```go
 eng.Resume(ctx, flowKey, map[string]any{"approved": true})
-eng.Cancel(ctx, flowKey, "abandoned")
+eng.Terminate(ctx, flowKey, "abandoned")
 ```
 
 Both must be addressed by the **root** flow key. A subgraph child's key is read-only for lifecycle changes
@@ -319,7 +319,7 @@ and is rejected — address the root and the engine threads the resume down to t
 
 **If a flow has been interrupted longer than your business process allows**, that is a policy question rather
 than an engine fault: the engine imposes no flow lifetime. Find them with `List` filtered on
-`Status: interrupted` and `OlderThan`, and cancel or escalate per your own rules.
+`Status: interrupted` and `OlderThan`, and terminate or escalate per your own rules.
 
 ---
 

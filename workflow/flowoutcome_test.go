@@ -27,6 +27,7 @@ func TestFlowOutcome_Stopped(t *testing.T) {
 		StatusInterrupted: true,
 		StatusCompleted:   true,
 		StatusFailed:      true,
+		StatusTerminated:  true,
 		StatusCancelled:   true,
 	}
 	for status, want := range cases {

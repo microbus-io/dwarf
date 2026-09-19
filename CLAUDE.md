@@ -199,11 +199,11 @@ write output back to state fields. Tasks are reusable across workflows.
 
 **Flow** - A single execution of a workflow graph. Each flow has a unique ID, tracks its current position, and
 maintains a state map that evolves as tasks execute. Statuses: `created` -> `running` -> `completed`/`failed`/
-`cancelled`, with `interrupted` as a parked state for human-in-the-loop scenarios.
+`terminated`/`cancelled`, with `interrupted` as a parked state for human-in-the-loop scenarios.
 
 **Step** - A single task execution within a flow. Each step captures an immutable input snapshot (`state`), the output
 delta (`changes`), and metadata (status, error, timing). Steps are numbered by `step_depth`; parallel fan-out
-siblings share a `step_depth`. Once terminal (`completed`/`failed`/`cancelled`), a step is immutable.
+siblings share a `step_depth`. Once terminal (`completed`/`failed`/`terminated`/`cancelled`), a step is immutable.
 
 **Reducer** - A merge strategy for state fields during fan-in. When parallel branches converge, each branch's changes
 are merged using the reducer for that field. Ten are defined (`workflow/reducers.go`): `replace` (last write wins,
@@ -220,7 +220,7 @@ flowKey returned by the initial `Create` doubles as the threadKey.
 
 ### Terminal flows are immutable
 
-**A terminal flow (`completed`/`failed`/`cancelled`) is immutable.** Its outcome (`status`, `final_state`,
+**A terminal flow (`completed`/`failed`/`terminated`/`cancelled`) is immutable.** Its outcome (`status`, `final_state`,
 `error`/`cancel_reason`) is frozen; the only operations on it are **read** (Snapshot/History/Continue-source/
 Fork-source) and **removal** (Delete/Purge). There is **no in-place re-run of a terminal flow** - recovery and
 exploration happen only via **`Fork`**, which clones a terminal flow up to a chosen step into a *new*
@@ -245,7 +245,7 @@ Create --> running --> completed   (terminal, immutable)
             v
   failed   (terminal, immutable)
 
-  cancelled (terminal, immutable, via Cancel)
+  terminated (terminal, immutable, via Terminate)
 
 Recovery/exploration: Fork clones a terminal flow up to a chosen step into a NEW flow.
 ```
@@ -255,7 +255,7 @@ Recovery/exploration: Fork clones a terminal flow up to a chosen step into a NEW
    step and no externally-visible `created` resting state (`created` survives only as an internal/transient
    state inside Create's own transaction and Fork's leaf-gate).
 2. A worker picks up the step, executes the task, and evaluates transitions to create next steps.
-3. Repeats until no transitions match (flow completes), a task errors (flow fails), or the flow is cancelled.
+3. Repeats until no transitions match (flow completes), a task errors (flow fails), or the flow is terminated.
 4. Tasks can call `flow.Interrupt()` to pause for external input; `Resume` continues. A flow that should
    *wait* before doing work uses this as **staged start**: an entry task that interrupts, resumed when ready
    (such a flow rests as `interrupted`, not `created`).

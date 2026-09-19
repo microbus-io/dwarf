@@ -132,7 +132,7 @@ obvious escape hatches are not ones:
 - **`Continue` does the same.** A new turn in a thread runs the same graph the thread was created with.
 
 **Only `Create` loads a graph**, so the only way to get a flow onto a new definition is to start a new flow.
-If you cannot wait out the existing ones, that means cancelling them and creating replacements — carrying
+If you cannot wait out the existing ones, that means terminating them and creating replacements — carrying
 whatever state matters across yourself, by reading the old flow's outcome with `Snapshot` and passing it as
 the new flow's initial state. You lose the original's progress and history continuity; it is a migration,
 not a resume.

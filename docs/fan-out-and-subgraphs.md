@@ -105,8 +105,8 @@ A few rules worth knowing:
   from the flow's state once the cohort is behind it — at the fan-in, and in the final state of a flow whose
   fan-out failed. (Otherwise one arbitrary branch's element would ride forward as the flow's own, picked by
   whichever branch happened to finish last.) Forward an element value under a different key if you need it.
-- **A failed or cancelled sibling doesn't poison the fan-in.** It contributes nothing to the merge; the
-  flow is driven by the failure/error path instead.
+- **A failed, terminated, or cancelled sibling doesn't poison the fan-in.** It contributes nothing to the
+  merge; the flow is driven by the failure/error path instead.
 
 ## Subgraphs
 

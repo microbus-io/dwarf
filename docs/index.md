@@ -17,7 +17,7 @@ You build a `workflow.Graph` of tasks and transitions. You implement a `Host` wh
 returns a graph by name and whose **`ExecuteTask`** runs one task. The engine creates a **flow** (one
 execution of a graph), runs each task in turn, persists state to SQL between steps, follows transitions
 to decide what runs next, merges parallel branches, and recovers from crashes. You drive it with a handful
-of operations — `Create`, `Run`, `Await`, `Resume`, `Cancel`, `Continue`, `Fork` — and observe it through logs,
+of operations — `Create`, `Run`, `Await`, `Resume`, `Terminate`, `Continue`, `Fork` — and observe it through logs,
 metrics, and traces.
 
 ---
@@ -38,7 +38,7 @@ If you're new, read in this order:
 Then dip into the topic guides as you need them:
 
 - **[Driving flows](flows.md)** — every method on the engine: creating, running, inspecting,
-  pausing/resuming, cancelling, forking, continuing a thread, and retention.
+  pausing/resuming, terminating, forking, continuing a thread, and retention.
 - **[Detecting completion](detecting-completion.md)** — the ways to learn a flow's outcome (`Await` vs.
   orchestration) and how to make follow-up delivery reliable.
 - **[Fan-out & subgraphs](fan-out-and-subgraphs.md)** — running work in parallel and calling

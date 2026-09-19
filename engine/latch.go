@@ -145,7 +145,7 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, flowKeys []string) (ma
 		recent, err := db.QueryContext(ctx,
 			"SELECT flow_id, flow_token, status FROM dwarf_flows WHERE status IN ('"+
 				workflow.StatusCompleted+"','"+workflow.StatusFailed+"','"+
-				workflow.StatusCancelled+"','"+workflow.StatusInterrupted+
+				workflow.StatusTerminated+"','"+workflow.StatusCancelled+"','"+workflow.StatusInterrupted+
 				"') AND updated_at>=DATE_ADD_MILLIS(NOW_UTC(), ?)",
 			-2*e.latchSweepInterval.Milliseconds())
 		if err != nil {

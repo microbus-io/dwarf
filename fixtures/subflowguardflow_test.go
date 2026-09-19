@@ -29,7 +29,7 @@ import (
 )
 
 // TestSubflowGuardflow pins pure Option 1: a subgraph child flow's key is read-only. Lifecycle mutations
-// (Resume/Cancel/Delete/Continue) reject it with 400 - they act on the whole flow/tree and must be addressed
+// (Resume/Terminate/Delete/Continue) reject it with 400 - they act on the whole flow/tree and must be addressed
 // by the root key - while introspection (Snapshot/History) still works on the child key.
 func TestSubflowGuardflow(t *testing.T) {
 	t.Parallel()
@@ -101,7 +101,7 @@ func TestSubflowGuardflow(t *testing.T) {
 		assert.Error(err)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 
-		err = eng.Cancel(ctx, child, "nope")
+		err = eng.Terminate(ctx, child, "nope")
 		assert.Error(err)
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 
@@ -126,7 +126,7 @@ func TestSubflowGuardflow(t *testing.T) {
 
 	t.Run("child_survives_rejected_mutations", func(t *testing.T) {
 		assert := testarossa.For(t)
-		// The child was neither deleted nor cancelled by the rejected calls above.
+		// The child was neither deleted nor terminated by the rejected calls above.
 		snap, err := eng.Snapshot(ctx, child)
 		assert.NoError(err)
 		assert.Equal(workflow.StatusCompleted, snap.Status)

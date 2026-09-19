@@ -184,7 +184,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 		var url, status string
 		rows.Scan(&url, &status)
 		switch status {
-		case workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusCancelled:
+		case workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled:
 		default:
 			nonTerminal++
 			t.Logf("non-terminal flow left in tree: %s status=%s", url, status)

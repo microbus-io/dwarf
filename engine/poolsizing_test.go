@@ -690,7 +690,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	_, err = e2.Continue(ctx, flowKey, nil)
 	is503("Continue", err)
 	is503("Resume", e2.Resume(ctx, flowKey, nil))
-	is503("Cancel", e2.Cancel(ctx, flowKey, "x"))
+	is503("Terminate", e2.Terminate(ctx, flowKey, "x"))
 	is503("Delete", e2.Delete(ctx, flowKey))
 	_, err = e2.History(ctx, flowKey)
 	is503("History", err)

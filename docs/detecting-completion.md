@@ -24,7 +24,7 @@ call, a compensation.
 outcome, err := eng.Await(ctx, flowKey)
 ```
 
-`Await` blocks until the flow stops (`completed`/`failed`/`cancelled`/`interrupted`) and returns the outcome.
+`Await` blocks until the flow stops (`completed`/`failed`/`terminated`/`cancelled`/`interrupted`) and returns the outcome.
 It wakes promptly whichever replica ran the flow's last step, with no configuration or host support required.
 
 **Good for:** a request/response caller that holds the `flowKey` and can wait; tests; short flows.

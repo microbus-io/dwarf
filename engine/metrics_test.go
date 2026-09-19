@@ -505,11 +505,11 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 }
 
 // TestMetrics_TerminatedCountsEveryTerminalStatus pins that dwarf_flows_terminated counts FAILED and
-// CANCELLED flows, not only completed ones.
+// TERMINATED flows, not only completed ones.
 //
 // It regressed silently and cost nothing to miss: the instrument carried a `status` attribute and was
 // described as counting "flows that have reached a terminal status", while the only call site passed
-// StatusCompleted. Two things were wrong at once. `sum by (status)` invited a completed/failed/cancelled
+// StatusCompleted. Two things were wrong at once. `sum by (status)` invited a completed/failed/terminated
 // breakdown and answered with completions alone, and the in-flight panel the dwarf_flows_started
 // description recommends - started minus terminated - drifted upward permanently by every flow that did
 // not finish cleanly, never recovering.
@@ -535,7 +535,7 @@ func TestMetrics_TerminatedCountsEveryTerminalStatus(t *testing.T) {
 		return errors.New("intentional failure")
 	})
 
-	// A graph whose only task interrupts, parking the flow so Cancel has something live to cancel.
+	// A graph whose only task interrupts, parking the flow so Terminate has something live to terminate.
 	parking := workflow.NewGraph("Parking")
 	parking.SetEndpoint("wait", "termmetrics.verify:429/wait")
 	parking.AddTransition("wait", workflow.END)
@@ -557,18 +557,18 @@ func TestMetrics_TerminatedCountsEveryTerminalStatus(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusFailed, outcome.Status)
 
-	cancelKey, err := eng.Create(ctx, "termmetrics.verify:429/parking", nil, nil)
+	terminateKey, err := eng.Create(ctx, "termmetrics.verify:429/parking", nil, nil)
 	if !assert.NoError(err) {
 		return
 	}
 	// Await returns on any stop, and `interrupted` is one - so this parks until the entry task has actually
-	// interrupted, which is what gives Cancel a live flow to cancel rather than a racing one.
-	parked, err := eng.Await(ctx, cancelKey)
+	// interrupted, which is what gives Terminate a live flow to terminate rather than a racing one.
+	parked, err := eng.Await(ctx, terminateKey)
 	if !assert.NoError(err) {
 		return
 	}
 	assert.Equal(workflow.StatusInterrupted, parked.Status)
-	assert.NoError(eng.Cancel(ctx, cancelKey, "test"))
+	assert.NoError(eng.Terminate(ctx, terminateKey, "test"))
 
 	var rm metricdata.ResourceMetrics
 	if !assert.NoError(reader.Collect(ctx, &rm)) {
@@ -579,13 +579,13 @@ func TestMetrics_TerminatedCountsEveryTerminalStatus(t *testing.T) {
 	assert.True(ok, "dwarf_flows_terminated{status=failed} should be present")
 	assert.Equal(int64(1), failed, "a failed flow must be counted as terminated")
 
-	cancelled, ok := sumCounter(rm, "dwarf_flows_terminated", "status", workflow.StatusCancelled)
-	assert.True(ok, "dwarf_flows_terminated{status=cancelled} should be present")
-	assert.Equal(int64(1), cancelled, "a cancelled flow must be counted as terminated")
+	terminated, ok := sumCounter(rm, "dwarf_flows_terminated", "status", workflow.StatusTerminated)
+	assert.True(ok, "dwarf_flows_terminated{status=terminated} should be present")
+	assert.Equal(int64(1), terminated, "a terminated flow must be counted as terminated")
 
 	// The property the panel actually depends on: over a workload where nothing completed, starts and
 	// terminations still balance.
 	started, _ := sumCounter(rm, "dwarf_flows_started", "", "")
-	terminated, _ := sumCounter(rm, "dwarf_flows_terminated", "", "")
-	assert.Equal(started, terminated, "started minus terminated must not drift when flows fail or cancel")
+	allTerminated, _ := sumCounter(rm, "dwarf_flows_terminated", "", "")
+	assert.Equal(started, allTerminated, "started minus terminated must not drift when flows fail or terminate")
 }

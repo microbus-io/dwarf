@@ -28,12 +28,12 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestReviveVsCancel_Deterministic pins completeSurgraphFlow's revive guard: when a Cancel terminalizes the
-// parked caller step in the window between the child's completion and the parent's revive, the revive's
-// running+parkedSubgraph guard must match zero rows so it does NOT resurrect the just-cancelled caller to
+// TestReviveVsTerminate_Deterministic pins completeSurgraphFlow's revive guard: when a Terminate terminalizes
+// the parked caller step in the window between the child's completion and the parent's revive, the revive's
+// running+parkedSubgraph guard must match zero rows so it does NOT resurrect the just-terminated caller to
 // pending. The checkpoint freezes the worker at the revive (holding no lock - completeFlow's own transaction
-// already committed the child's completion), making the Cancel-wins ordering deterministic.
-func TestReviveVsCancel_Deterministic(t *testing.T) {
+// already committed the child's completion), making the Terminate-wins ordering deterministic.
+func TestReviveVsTerminate_Deterministic(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -71,13 +71,13 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	assert.NoError(err)
 	assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeReviveWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeReviveWrite")
 
-	// Cancel wins: the parked caller step is flipped cancelled under the cancel transaction.
-	assert.NoError(e.Cancel(ctx, fk, "test"))
+	// Terminate wins: the parked caller step is flipped terminated under the terminate transaction.
+	assert.NoError(e.Terminate(ctx, fk, "test"))
 
-	// Release the revive: its running+parkedSubgraph guard matches zero rows, so the cancelled caller is not
+	// Release the revive: its running+parkedSubgraph guard matches zero rows, so the terminated caller is not
 	// resurrected to pending and not re-dispatched.
 	e.Seams().Resume(engine.CheckpointBeforeReviveWrite)
-	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
@@ -85,7 +85,7 @@ func TestReviveVsCancel_Deterministic(t *testing.T) {
 	assert.NoError(err)
 	var callStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", flowID).Scan(&callStatus))
-	assert.Equal(workflow.StatusCancelled, callStatus) // not revived to pending
+	assert.Equal(workflow.StatusTerminated, callStatus) // not revived to pending
 
 	// callRuns == 1: the caller ran once (its park), the revive was fenced, so no re-dispatch.
 	//

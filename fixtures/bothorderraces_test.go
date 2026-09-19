@@ -38,11 +38,11 @@ import (
 // The checkpoint rendezvous is e.Seams().WaitTimeout; awaitFlowStatus (checkpointhelpers_test.go) is the
 // flow-status wait shared by every checkpoint-driven test.
 
-// TestCompleteFlowVsCancel_BothOrders pins the completeFlow-vs-Cancel race in both directions. The window:
+// TestCompleteFlowVsTerminate_BothOrders pins the completeFlow-vs-Terminate race in both directions. The window:
 // the terminal step is already marked completed, and completeFlow is about to flip the flow to completed when
-// a Cancel arrives. Released completion-first the flow completes and the later Cancel 409s (terminal);
-// released Cancel-first the flow cancels and completeFlow's status-gate (status NOT IN terminal) no-ops.
-func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
+// a Terminate arrives. Released completion-first the flow completes and the later Terminate 409s (terminal);
+// released Terminate-first the flow terminates and completeFlow's status-gate (status NOT IN terminal) no-ops.
+func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 	t.Parallel()
 	newEngine := func(t *testing.T, prefix string) (*engine.Engine, string) {
 		assert := testarossa.For(t)
@@ -59,7 +59,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		return e, prefix + "/g"
 	}
 
-	t.Run("cancel_first", func(t *testing.T) {
+	t.Run("terminate_first", func(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
 		e, url := newEngine(t, "cfvc1")
@@ -71,14 +71,14 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		assert.NoError(err)
 		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
 
-		// Cancel wins while completion is held: the flow goes cancelled under the flow-row lock.
-		assert.NoError(e.Cancel(ctx, fk, "test"))
+		// Terminate wins while completion is held: the flow goes terminated under the flow-row lock.
+		assert.NoError(e.Terminate(ctx, fk, "test"))
 
 		// Release completion: its status-gate write (status NOT IN terminal) matches zero rows - a clean no-op,
-		// the flow stays cancelled.
+		// the flow stays terminated.
 		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
-		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
-		assert.Equal(workflow.StatusCancelled, enginetest.FlowStatus(t, e, fk))
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
+		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk))
 		enginetest.AssertInvariants(t, e)
 	})
 
@@ -96,8 +96,8 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
-		// Cancel now arrives on a terminal flow: it 409s and the flow stays completed.
-		err = e.Cancel(ctx, fk, "test")
+		// Terminate now arrives on a terminal flow: it 409s and the flow stays completed.
+		err = e.Terminate(ctx, fk, "test")
 		assert.Error(err)
 		assert.Equal(409, errors.StatusCode(err))
 		assert.Equal(workflow.StatusCompleted, enginetest.FlowStatus(t, e, fk))
@@ -108,7 +108,7 @@ func TestCompleteFlowVsCancel_BothOrders(t *testing.T) {
 // TestDeleteVsResume_BothOrders pins the Delete-vs-Resume race in both directions with BOTH operations frozen
 // at their pre-transaction checkpoints, released in a chosen order. Both gate on the flow being `interrupted`,
 // so exactly one wins the CAS: released Resume-first the flow revives (running) and Delete 409s (running
-// flow); released Delete-first the flow cancels and Resume's gate write finds it no longer interrupted and
+// flow); released Delete-first the flow terminates and Resume's gate write finds it no longer interrupted and
 // rolls back with an honest 409. The Delete-wins direction mirrors the existing (single-freeze) TestDeleteResumeRace pin; the
 // Resume-wins direction is the untested mirror.
 func TestDeleteVsResume_BothOrders(t *testing.T) {
@@ -182,7 +182,7 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		delErr := <-deleteDone
 		assert.Error(delErr)
 		assert.Equal(409, errors.StatusCode(delErr))
-		assert.NotEqual(workflow.StatusCancelled, enginetest.FlowStatus(t, e, fk)) // Resume won; not cancelled
+		assert.NotEqual(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk)) // Resume won; not terminated
 		enginetest.AssertInvariants(t, e)
 	})
 
@@ -205,7 +205,7 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointResumeBeforeFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointResumeBeforeFlowWrite")
 		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeDeleteWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeDeleteWrite")
 
-		// Delete wins: released first, it flips interrupted->cancelled and stamps deletion, returning cleanly.
+		// Delete wins: released first, it flips interrupted->terminated and stamps deletion, returning cleanly.
 		e.Seams().Resume(engine.CheckpointBeforeDeleteWrite)
 		assert.NoError(<-deleteDone)
 
@@ -215,7 +215,7 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		resErr := <-resumeDone
 		assert.Error(resErr)
 		assert.Equal(409, errors.StatusCode(resErr))
-		assert.Equal(workflow.StatusCancelled, enginetest.FlowStatus(t, e, fk)) // Delete won
+		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk)) // Delete won
 		enginetest.AssertInvariants(t, e)
 	})
 }

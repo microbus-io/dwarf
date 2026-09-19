@@ -56,11 +56,11 @@ func TestCancelledfanoutflow(t *testing.T) {
 	var executed atomic.Int32
 
 	// A branch reports that it is in flight and then HOLDS the single worker until the test lets go. Both
-	// halves replace a duration: the report is what the cancel is sequenced against (a sleep long enough to
-	// cover dispatch on a loaded suite is a guess, and one that reads as "no branch ever ran" when it is
+	// halves replace a duration: the report is what the terminate is sequenced against (a sleep long enough
+	// to cover dispatch on a loaded suite is a guess, and one that reads as "no branch ever ran" when it is
 	// short), and the hold is what keeps a second branch from starting behind the first (a fixed branch
-	// duration has to outlast the Cancel round trip, which is equally unbounded). With the worker held and
-	// growth disabled by SetWorkers(1), exactly one branch can ever have run when the cancel lands.
+	// duration has to outlast the Terminate round trip, which is equally unbounded). With the worker held and
+	// growth disabled by SetWorkers(1), exactly one branch can ever have run when the terminate lands.
 	// The release is deferred at the engine below rather than here, so it unwinds BEFORE the Shutdown
 	// defer (LIFO); the drain would otherwise wait forever on the very worker this is holding.
 	var executedOnce sync.Once
@@ -98,7 +98,7 @@ func TestCancelledfanoutflow(t *testing.T) {
 	eng.SetWorkers(1)
 	assert.NoError(eng.Startup(t.Context()))
 
-	t.Run("cancel_mid_fan_out", func(t *testing.T) {
+	t.Run("terminate_mid_fan_out", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		flowKey, err := eng.Create(ctx, "cancelledfanoutflow.verify:428/cancelled-fan-out", nil, nil)
@@ -108,9 +108,9 @@ func TestCancelledfanoutflow(t *testing.T) {
 		select {
 		case <-inFlight:
 		case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
-			t.Fatal("no branch of the fan-out ever started, so there was nothing to cancel mid-flight")
+			t.Fatal("no branch of the fan-out ever started, so there was nothing to terminate mid-flight")
 		}
-		err = eng.Cancel(ctx, flowKey, "")
+		err = eng.Terminate(ctx, flowKey, "")
 		if !assert.NoError(err) {
 			return
 		}
@@ -118,7 +118,7 @@ func TestCancelledfanoutflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		assert.Equal(workflow.StatusCancelled, outcome.Status)
+		assert.Equal(workflow.StatusTerminated, outcome.Status)
 		assert.Equal(1, int(executed.Load()))
 	})
 }

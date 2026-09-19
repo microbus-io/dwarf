@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -271,7 +272,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	e.metricStateReadBytes(ctx, workflowURL, "resume_data", len(resumeDataJSON))
 	e.metricStateReadBytes(ctx, workflowURL, "subgraph_result", len(subgraphResultJSON))
 
-	if flowStatus == workflow.StatusCancelled || flowStatus == workflow.StatusFailed || flowStatus == workflow.StatusCompleted {
+	if slices.Contains(terminalStatuses, flowStatus) {
 		reapPass := turnstile.WaitTurn(ctx)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
@@ -601,7 +602,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// the wakeup and the caller is stranded permanently - its fan-in then never fires and the flow hangs.
 		// Observed deterministically when the caller is one of several fan-out siblings (the workers stay busy
 		// so the child wins the race), e.g. examples/creditflow's identity-verification branch. The
-		// status=running guard parks no row (n==0) if the step was concurrently cancelled; the error is
+		// status=running guard parks no row (n==0) if the step was concurrently terminated; the error is
 		// checked so a lost park fails the step rather than stranding it.
 		parkRes, err := db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
@@ -616,7 +617,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		}
 		e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
 		// Test checkpoint: a breakpoint here freezes the worker after the caller step is parked but before the
-		// child flow is inserted, so a test can Cancel the tree in exactly the window that produces an orphaned
+		// child flow is inserted, so a test can Terminate the tree in exactly the window that produces an orphaned
 		// subgraph child (the recoverOrphanedSubgraphChildren case).
 		e.seams.Checkpoint(ctx, CheckpointAfterCallerPark)
 		childInputState := subgraphInput
@@ -669,13 +670,13 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// single-path, and lets history attach the discarded child's subtree to this caller.
 		// The reap is step-scoped (only this caller's children), so a retrying fan-out sibling's
 		// cohort is untouched.
-		// The rewind is guarded to status='running': a Cancel landing mid-task flips this step terminal
-		// (cancelled), and an unguarded rewind would both revive an immutable terminal step and, via the reap,
+		// The rewind is guarded to status='running': a Terminate landing mid-task flips this step terminal
+		// (terminated), and an unguarded rewind would both revive an immutable terminal step and, via the reap,
 		// delete the now-terminal tree's subgraph children. So rewind first under the guard and reap (and
 		// re-dispatch) only when it actually rewound a still-running step; a lost guard (n==0) leaves the step
-		// terminal - the Cancel already cancelled its children - and returns without reaping or re-dispatching.
-		// Test checkpoint: a breakpoint here freezes the worker before the rewind, so a test can Cancel the flow
-		// (terminalizing this running step) in exactly the window the status='running' rewind guard protects.
+		// terminal - Terminate already terminated its children - and returns without reaping or re-dispatching.
+		// Test checkpoint: a breakpoint here freezes the worker before the rewind, so a test can Terminate the
+		// flow (terminalizing this running step) in exactly the window the status='running' rewind guard protects.
 		e.seams.Checkpoint(ctx, CheckpointBeforeRetryRewind)
 		var rewound bool
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
@@ -742,7 +743,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			return errors.New("injected fault: " + FaultPersistErr + " " + taskName)
 		}
 		res, werr := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status!='"+workflow.StatusCancelled+"' AND lease_seq=?",
+			"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status NOT IN ('"+workflow.StatusTerminated+"', '"+workflow.StatusCancelled+"') AND lease_seq=?",
 			workflow.StatusCompleted, changesJSON, stepID, writeSeq,
 		)
 		if werr != nil {
@@ -936,9 +937,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	flowFailedReDispatchParent := false
 
 	// Test checkpoint: a breakpoint here freezes the worker after the step is marked completed but before
-	// the transition transaction, so a test can Cancel the flow in exactly the window the transition's
+	// the transition transaction, so a test can Terminate the flow in exactly the window the transition's
 	// write-first terminal-status guard exists to survive (the transition must become a no-op, inserting no
-	// successors into the cancelled flow).
+	// successors into the terminated flow).
 	e.seams.Checkpoint(ctx, CheckpointBeforeTransitionTx)
 
 	// The transition (insert next steps, then advance or fail the flow) runs as one retryable
@@ -993,8 +994,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			}
 
 			// Write-first: take the flow row's lock before any step, guarded on non-terminal status. If a
-			// concurrent Cancel/failStep terminalized this flow after the step was marked completed but before
-			// this transition committed (the Cancel-vs-transition window, and the retry after a lock-contention
+			// concurrent Terminate/failStep terminalized this flow after the step was marked completed but before
+			// this transition committed (the Terminate-vs-transition window, and the retry after a lock-contention
 			// rollback), the guard yields zero rows and the transition becomes a clean no-op. Without it, the tx
 			// would insert pending successors into an already-terminal flow — orphan work only reaped later by the
 			// claim-time terminal-flow guard. The completed step is left as a harmless tail on the final flow.
@@ -1010,7 +1011,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					e.seams.Checkpoint(ctx, seamsJoin(CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
 				flowRes, flowErr := tx.ExecContext(ctx,
-					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 					flowID,
 				)
 				if flowErr != nil {
@@ -1166,7 +1167,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				// The cohort resolves here, so this arrival is about to extend (fan-in step) or terminalize
 				// (cohort failure) the flow - exactly the writes the terminal guard protects. A deferred grab is
 				// taken now, before either, so the guard sits in front of them just as it did when every arrival
-				// grabbed the row. A zero-row match means Cancel/failStep won the race: bail as a clean no-op.
+				// grabbed the row. A zero-row match means Terminate/failStep won the race: bail as a clean no-op.
 				if fullyResolved && !flowRowLocked {
 					ok, lerr := lockFlowRow()
 					if lerr != nil {
@@ -1209,7 +1210,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 							return errors.Trace(cfsErr)
 						}
 						tx.ExecContext(ctx,
-							"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+							"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 							finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
 						)
 						flowFailed = true
@@ -1317,7 +1318,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		fenced = false
 		payloadLen = 0
-		// Steps-first-then-flow lock ordering, matching resume and Cancel (which walk this same surgraph
+		// Steps-first-then-flow lock ordering, matching resume and Terminate (which walk this same surgraph
 		// chain). Interrupt is non-terminating, so it carries no write-first orphan obligation; the only
 		// requirement is that the first statement be a write (satisfied here, keeping SQLite's shared-lock
 		// upgrade deadlock closed). Ordering steps before flows removes the cycle with a concurrent
@@ -1444,12 +1445,12 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		fanInStepID = 0
 		txBytes = stateByteCount{}
 		// Write-first, guarded on non-terminal status - the same lock-grab the transition tx uses. If a
-		// concurrent Cancel/failStep terminalized this flow, the guard yields zero rows and this becomes a
+		// concurrent Terminate/failStep terminalized this flow, the guard yields zero rows and this becomes a
 		// clean no-op; without it we would insert a pending fan-in step and overwrite step_id on a terminal
 		// flow (orphan work reaped only later by the claim-time terminal-flow guard). `touch` always changes
 		// value, so RowsAffected reflects the WHERE match on every driver.
 		flowRes, flowErr := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 			flowID,
 		)
 		if flowErr != nil {
@@ -1510,8 +1511,8 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		return errors.Trace(err)
 	}
 	if fanInStepID == 0 {
-		// The terminal-status guard bailed - the flow was cancelled/failed concurrently, no fan-in step
-		// was inserted, nothing to dispatch.
+		// The terminal-status guard bailed - the flow was terminated/failed/cancelled concurrently, no fan-in
+		// step was inserted, nothing to dispatch.
 		return nil
 	}
 	e.metricStateWriteBytes(ctx, workflowURL, "state", txBytes.stateWritten)

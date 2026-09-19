@@ -192,7 +192,7 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 			if childStatus == workflow.StatusCompleted {
 				rerr = e.completeSurgraphFlow(ctx, shard, w.flowID, w.stepID, childFinalState)
 			} else {
-				// failed / cancelled: deliver the child's error (or a synthesized one) to the caller.
+				// failed / terminated / cancelled: deliver the child's error (or a synthesized one) to the caller.
 				msg := strings.TrimSpace(childError)
 				if msg == "" {
 					msg = "subgraph " + childStatus
@@ -212,17 +212,18 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 // terminal - the mirror image of recoverWedgedSubgraphParks (which handles a parked caller whose child is gone;
 // this handles a live child whose caller/parent is gone). Such a child is orphaned: its parent can never process
 // its completion or interrupt, and no lifecycle op reaches it - the root key 409s (the root is terminal), the
-// child's own key is read-only (Resume/Cancel 400), and recoverWedgedSubgraphParks is blind to it (the caller
-// step is terminal, not running+parked). It is the residue of a Cancel that terminalized the tree in the narrow
+// child's own key is read-only (Resume/Terminate 400), and recoverWedgedSubgraphParks is blind to it (the caller
+// step is terminal, not running+parked). It is the residue of a Terminate that terminalized the tree in the narrow
 // window after the caller step parked but before the child flow was inserted, so the teardown, working from a scan
 // taken before the child existed, missed it. (A fan-out sibling's failStep no longer produces this residue - a
 // subgraph child now fails via cohort accounting after every branch settles, never eagerly while a sibling is
-// live - so this is defense in depth for the Cancel race and any future orphan cause.) The sweep tears the orphan
-// down by cancelling its subtree, sharing the parent's terminal fate. In steady state a parent goes terminal only
-// after its live subgraphs resolve, so a non-terminal child under a terminal parent older than minAge is genuinely
-// orphaned; the age guard excludes the sub-second window in which a just-terminalized parent's sibling child is
-// still being cleaned up by the normal completion/error path. An interrupted parent is deliberately excluded (not
-// terminal): a Resume of the root revives the interrupted branch, and a sibling child running under it is healthy.
+// live - so this is defense in depth for the Terminate race and any future orphan cause.) The sweep tears the
+// orphan down by terminating its subtree, sharing the parent's terminal fate. In steady state a parent goes
+// terminal only after its live subgraphs resolve, so a non-terminal child under a terminal parent older than
+// minAge is genuinely orphaned; the age guard excludes the sub-second window in which a just-terminalized
+// parent's sibling child is still being cleaned up by the normal completion/error path. An interrupted parent is
+// deliberately excluded (not terminal): a Resume of the root revives the interrupted branch, and a sibling child
+// running under it is healthy.
 func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel.DB, shard int, minAge time.Duration) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT c.flow_id, c.flow_token FROM dwarf_flows c"+
@@ -231,7 +232,7 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 			// `<=`, so minAge=0 means "no age guard" - see recoverWedgedSubgraphParks for why a strict `<`
 			// silently skips a row stamped inside the sweep's own millisecond.
 			" AND c.updated_at <= DATE_ADD_MILLIS(NOW_UTC(), ?)"+
-			" AND p.status IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			" AND p.status IN ("+terminalStatusesSQL+")",
 		-minAge.Milliseconds(),
 	)
 	if err != nil {
@@ -259,24 +260,24 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 	}
 
 	for _, o := range hits {
-		e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child whose parent is terminal",
+		e.logger.ErrorContext(ctx, "Wedge sweep: terminating orphaned subgraph child whose parent is terminal",
 			"shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID))
-		if rerr := e.cancelOrphanedSubtree(ctx, shard, o.flowID, o.token); rerr != nil {
-			e.logger.ErrorContext(ctx, "Wedge sweep: cancelling orphaned subgraph child", "shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID), "error", rerr)
+		if rerr := e.terminateOrphanedSubtree(ctx, shard, o.flowID, o.token); rerr != nil {
+			e.logger.ErrorContext(ctx, "Wedge sweep: terminating orphaned subgraph child", "shard", shard, "childFlow", keys.CorrelationID(shard, o.flowID), "error", rerr)
 			continue
 		}
 		e.metricStepUnwedged(ctx, "orphaned_child")
 	}
 }
 
-// cancelOrphanedSubtree cancels an orphaned subgraph child and its own non-terminal descendants, sharing the
-// public Cancel's transaction (cancelSubtree). No surgraph up-walk is needed - and none exists: the ancestor
-// chain is already terminal, which is precisely why the child is orphaned. A zero-row flow update is a benign
-// no-op rather than a 409: the child may have terminalized concurrently between the sweep's SELECT and this
-// write, which is the outcome the sweep wanted anyway.
-func (e *Engine) cancelOrphanedSubtree(ctx context.Context, shard int, childFlowID int, childFlowToken string) error {
+// terminateOrphanedSubtree terminates an orphaned subgraph child and its own non-terminal descendants, sharing
+// the public Terminate's transaction (terminateSubtree). No surgraph up-walk is needed - and none exists: the
+// ancestor chain is already terminal, which is precisely why the child is orphaned. A zero-row flow update is a
+// benign no-op rather than a 409: the child may have terminalized concurrently between the sweep's SELECT and
+// this write, which is the outcome the sweep wanted anyway.
+func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childFlowID int, childFlowToken string) error {
 	const reason = "parent flow terminated (orphan recovery)"
-	return errors.Trace(e.cancelSubtree(ctx, shard, childFlowID, childFlowToken, reason, "", false))
+	return errors.Trace(e.terminateSubtree(ctx, shard, childFlowID, childFlowToken, reason, "", false))
 }
 
 // detectOrphanedFlows reports a `running` flow that is stranded: every step terminal AND no step touched for

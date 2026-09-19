@@ -1,7 +1,7 @@
 # Driving flows
 
 > **For developers** integrating dwarf into an application. This is the reference for the calls your code
-> makes against a running engine — starting flows, reading them back, resuming and cancelling them, and
+> makes against a running engine — starting flows, reading them back, resuming and terminating them, and
 > managing retention. It assumes you have an engine configured; standing one up in production is
 > [Operating dwarf](operations.md).
 
@@ -79,7 +79,7 @@ its schedule.
 outcome, err := eng.Await(ctx, flowKey)
 ```
 
-Blocks until the flow stops — `completed`, `failed`, `cancelled`, or `interrupted` — and returns the
+Blocks until the flow stops — `completed`, `failed`, `terminated`, `cancelled`, or `interrupted` — and returns the
 outcome, or returns without it when the caller's context ends first. The wait is bounded by a short internal
 cadence rather than by anything the caller or the host has to arrange: a flow that stops on another replica
 wakes its waiters just as one that stops locally does, and nothing has to be delivered between replicas for
@@ -116,9 +116,13 @@ type FlowOutcome struct {
     State            workflow.State  // final_state when terminal; the interrupted step's merged snapshot when interrupted; empty while running/created
     Error            string          // set when Status == "failed"
     InterruptPayload workflow.State  // set when Status == "interrupted"
-    CancelReason     string          // set when Status == "cancelled"
+    TerminateReason  string          // set when Status == "terminated"
+    CancelReason     string          // reserved for a future graceful-cancellation operation; not yet populated
 }
 ```
+
+`cancelled` is a reserved status that no current operation produces; every flow the engine terminates today
+reports `terminated`.
 
 The flow key is **not** on the outcome — it is delivered separately: you passed it to `Snapshot`/`Await`, or
 `Run` returns it alongside the outcome.
@@ -172,18 +176,19 @@ err := eng.Resume(ctx, flowKey, map[string]any{"approved": true})
 
 ## Terminating, and recovering with Fork
 
-A terminal flow (`completed`/`failed`/`cancelled`) is **immutable** — it is never re-run in place. To
-recover or explore, `Fork` clones a terminal flow up to a chosen step into a *new*, self-contained flow and
-re-runs from there, optionally with state overrides; the original is never touched.
+A terminal flow (`completed`/`failed`/`terminated`/`cancelled`) is **immutable** — it is never re-run in
+place. To recover or explore, `Fork` clones a terminal flow up to a chosen step into a *new*, self-contained
+flow and re-runs from there, optionally with state overrides; the original is never touched.
 
 ```go
-err := eng.Cancel(ctx, flowKey, "superseded by newer order") // abort; surfaced as CancelReason
+err := eng.Terminate(ctx, flowKey, "superseded by newer order") // abort; surfaced as TerminateReason
 
 // Re-run from a chosen step (its key comes from History) with an edit that lets it succeed.
 newFlowKey, err := eng.Fork(ctx, stepKey, map[string]any{"amount": 0})
 ```
 
-`Cancel` aborts a running or interrupted flow (and its subgraph hierarchy). `Fork`'s step may be
+`Terminate` forcefully, unconditionally aborts a running or interrupted flow (and its subgraph hierarchy) -
+in-flight work is abandoned immediately, not awaited. `Fork`'s step may be
 **any recorded step**, including one inside a subgraph; the clone re-runs from that step and bubbles back up
 to the root. The fork inherits the origin flow's scheduling and baggage, and does
 not auto-delete. Because the fork is an ordinary new flow, recover a partially-failed fan-out by forking one
@@ -229,7 +234,7 @@ eng.Purge(ctx, workflow.Query{
 ```
 
 A flow created with `FlowOptions.DeleteOnCompletion` schedules its own deletion when it completes successfully
-(failed/cancelled flows are kept). Its outcome stays observable via `Await`/`Snapshot` for a short grace window
+(failed/terminated/cancelled flows are kept). Its outcome stays observable via `Await`/`Snapshot` for a short grace window
 before the reaper removes it — so a fire-and-forget caller can still `Run` it and read the result.
 
 ## Operational

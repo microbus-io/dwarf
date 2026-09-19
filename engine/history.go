@@ -558,7 +558,10 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			lr.summary.ThreadKey = keys.New(shardIdx, threadID, threadToken)
 			lr.summary.TaskName = taskName.String
 			lr.summary.Error = strings.TrimSpace(flowError)
-			lr.summary.CancelReason = strings.TrimSpace(cancelReason)
+			// cancel_reason is the shared reason column both Terminate and (later) Cancel write into;
+			// splitTerminateCancelReason is the one place that maps it onto the two reason fields, shared
+			// with snapshot()'s FlowOutcome.
+			lr.summary.TerminateReason, lr.summary.CancelReason = splitTerminateCancelReason(lr.summary.Status, strings.TrimSpace(cancelReason))
 			shardRows = append(shardRows, lr)
 		}
 		perShard[pos[shardIdx]] = shardRows
@@ -795,7 +798,7 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 		// stamp delete_after_ms=1 (due immediately) so the reaper removes each tree on its next pass. Deleting
 		// nothing inline is what closes the old strand race - and the stamp UPDATE re-guards status<>running
 		// under the row lock, so a Resume racing in after this SELECT either wins (row is running, excluded) or
-		// loses (we stamp, and its interrupted CAS then finds cancelled). No lock-first re-selection needed.
+		// loses (we stamp, and its interrupted CAS then finds terminated). No lock-first re-selection needed.
 		selectIDs := "SELECT DISTINCT f.flow_id FROM dwarf_flows f" + joinSQL +
 			" WHERE " + where + " AND f.status<>'" + workflow.StatusRunning + "' AND f.delete_after_ms=0 ORDER BY f.flow_id LIMIT_OFFSET(?, 0)"
 		rows, err := db.QueryContext(ctx, selectIDs, args...)
@@ -821,13 +824,14 @@ func (e *Engine) purge(ctx context.Context, query workflow.Query) (int, error) {
 			return nil
 		}
 
-		// One set-based UPDATE per shard. The CASE terminalizes any interrupted root (interrupted -> cancelled)
-		// in the same write, preserving the Resume gate. ids are trusted integers embedded as literals to dodge
-		// the per-driver bind-param ceiling. The count returned is roots MARKED (reaped shortly after).
+		// One set-based UPDATE per shard. The CASE terminalizes any interrupted root (interrupted -> terminated,
+		// a forceful operator action, same as Terminate) in the same write, preserving the Resume gate. ids are
+		// trusted integers embedded as literals to dodge the per-driver bind-param ceiling. The count returned
+		// is roots MARKED (reaped shortly after).
 		ids := intCSV(flowIDs)
 		return db.Transact(ctx, func(tx *sequel.Tx) error {
 			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET delete_after_ms=1, status=CASE WHEN status='"+workflow.StatusInterrupted+"' THEN '"+workflow.StatusCancelled+"' ELSE status END"+
+				"UPDATE dwarf_flows SET delete_after_ms=1, status=CASE WHEN status='"+workflow.StatusInterrupted+"' THEN '"+workflow.StatusTerminated+"' ELSE status END"+
 					" WHERE flow_id IN ("+ids+") AND status<>'"+workflow.StatusRunning+"' AND delete_after_ms=0",
 			)
 			if err != nil {
@@ -923,7 +927,7 @@ func (e *Engine) continueFlow(ctx context.Context, threadKey string, additionalS
 	// rejected with 409 (a next turn is already in flight). This makes the outcome deterministic - exactly
 	// one Continue succeeds per race - rather than timing-dependent. touch is the non-indexed lock-grab
 	// column, so the anchor's updated_at stays frozen at its own last status transition; and because
-	// interrupt/cancel/resume never lock a thread SIBLING's rows, this anchor lock cannot cycle with them.
+	// interrupt/terminate/resume never lock a thread SIBLING's rows, this anchor lock cannot cycle with them.
 	newFlowToken := keys.RandomIdentifier(16)
 	newStepToken := keys.RandomIdentifier(16)
 	var newFlowID, newStepID int64

@@ -29,9 +29,10 @@ import (
 // TestRuntimeoutcancelflow pins that when Run's context ends before the flow stops, Run does NOT tear the
 // flow down. Run awaits on the caller's ctx; when that ctx ends, await returns a 408, and Run leaves the
 // durable flow running (it is not bound to this call) and returns its flowKey with the error - so the caller
-// keeps a handle. Cancelling a healthy durable flow just because the caller stopped waiting is an availability
-// footgun (and the earlier "cancel on the caller's behalf" both never ran - the await ctx was already expired -
-// and was the wrong intent). Teardown-on-timeout is the caller's explicit choice: it Cancels via the returned key.
+// keeps a handle. Terminating a healthy durable flow just because the caller stopped waiting is an availability
+// footgun (and the earlier "terminate on the caller's behalf" both never ran - the await ctx was already
+// expired - and was the wrong intent). Teardown-on-timeout is the caller's explicit choice: it Terminates via
+// the returned key.
 func TestRuntimeoutcancelflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -83,19 +84,19 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	}
 
 	// The returned key is a live handle: the caller tears the flow down explicitly (the supported
-	// teardown-on-timeout path). Cancel commits synchronously, so the flow is cancelled right after.
-	assert.NoError(eng.Cancel(ctx, flowKey, "caller gave up waiting"))
+	// teardown-on-timeout path). Terminate commits synchronously, so the flow is terminated right after.
+	assert.NoError(eng.Terminate(ctx, flowKey, "caller gave up waiting"))
 	var status string
 	for range 100 {
 		flows, _, listErr := eng.List(ctx, workflow.Query{WorkflowURL: "runtimeoutcancelflow.verify:428/run-timeout-cancel"})
 		assert.NoError(listErr)
 		if len(flows) == 1 {
 			status = flows[0].Status
-			if status == workflow.StatusCancelled {
+			if status == workflow.StatusTerminated {
 				break
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	assert.Equal(workflow.StatusCancelled, status)
+	assert.Equal(workflow.StatusTerminated, status)
 }

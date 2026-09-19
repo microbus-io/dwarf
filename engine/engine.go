@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -64,6 +65,17 @@ const (
 	parkedNone     = 0
 	parkedSubgraph = 1
 )
+
+// terminalStatuses lists every flow/step status that is terminal (immutable, no further advancement). Kept as
+// a slice - rather than only the pre-joined SQL form below - so it stays inspectable/iterable in Go, not just
+// consumable as SQL text. Backed by workflow.TerminalStatuses so this list and workflow's own terminal-status
+// predicate can never drift apart.
+var terminalStatuses = workflow.TerminalStatuses
+
+// terminalStatusesSQL is terminalStatuses pre-joined into a quoted literal ready to inline into a WHERE clause,
+// e.g. "status IN (" + terminalStatusesSQL + ")" or "status NOT IN (" + terminalStatusesSQL + ")". Computed once
+// at package init. Never bind this as a parameter - a bound status defeats the SQL Server / SQLite filtered index.
+var terminalStatusesSQL = "'" + strings.Join(terminalStatuses, "', '") + "'"
 
 // The recovery/await/reap timing knobs (leaseMargin, wedgeSweepInterval, parkWedgeThreshold,
 // orphanFlowThreshold, deletionGrace, reapInterval, awaitDefaultBudget) are per-engine fields on Engine
@@ -551,7 +563,7 @@ func (e *Engine) SetRefillInterval(d time.Duration) error {
 // started - terminated approximates in-flight work for backpressure.
 func (e *Engine) FlowsStarted() int64 { return e.flowsStartedCount.Load() }
 
-// FlowsTerminated returns the count of flows this engine has completed/failed/cancelled. See FlowsStarted.
+// FlowsTerminated returns the count of flows this engine has completed/failed/terminated/cancelled. See FlowsStarted.
 func (e *Engine) FlowsTerminated() int64 { return e.flowsTerminatedCount.Load() }
 
 // SetHost registers the host the engine reaches the outside world through: it loads graphs and executes
@@ -1126,12 +1138,13 @@ func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) err
 	return e.resume(ctx, flowKey, resumeData)
 }
 
-// Cancel aborts a flow.
-func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) error {
+// Terminate forcefully, unconditionally stops a flow. In-flight work is abandoned immediately - it is not
+// awaited, and no handler runs. The flow reads "terminated" as soon as this returns.
+func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
 	}
-	return e.cancel(ctx, flowKey, reason)
+	return e.terminate(ctx, flowKey, reason)
 }
 
 // Fork clones a terminal flow's prefix up to the given step into a new, self-contained running flow and
@@ -1215,7 +1228,7 @@ func (e *Engine) ShardInfo(ctx context.Context) ([]ShardSummary, error) {
 }
 
 // Await blocks until a flow stops, then returns its outcome. Running out of time is an error; the flow is
-// unaffected and keeps running, and the caller still holds the key to Await/Snapshot/Cancel it later.
+// unaffected and keeps running, and the caller still holds the key to Await/Snapshot/Terminate it later.
 //
 // Pass a ctx with a deadline. It is the only bound on the wait - a flow can run for as long as its work
 // takes, and there is no notification the engine could time out on instead. A ctx without one is honored
@@ -1262,8 +1275,8 @@ func (e *Engine) Poll(ctx context.Context, flowKey string) (*workflow.FlowOutcom
 // Error semantics differ by phase. A create failure returns flowKey "" and a nil outcome - no flow
 // exists. An await failure - most commonly the caller's ctx expiring before the flow stops - leaves the
 // flow running (it is durable and not bound to this call) and returns its flowKey with a nil outcome and
-// the error, so the caller keeps a handle to Await/Snapshot/Cancel it later. Run never cancels the flow
-// on the caller's behalf; a caller that wants the flow torn down on timeout calls Cancel explicitly.
+// the error, so the caller keeps a handle to Await/Snapshot/Terminate it later. Run never terminates the flow
+// on the caller's behalf; a caller that wants the flow torn down on timeout calls Terminate explicitly.
 func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", nil, errors.Trace(err)

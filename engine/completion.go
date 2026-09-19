@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -295,8 +296,8 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		if err := rows.Scan(&status, &changesJSON); err != nil {
 			return workflow.State{}, errors.Trace(err)
 		}
-		// Only completed members contribute, matching insertFanInStep: a failed or cancelled branch's partial
-		// output is not a fact the flow can build on (an error voids the task's changes).
+		// Only completed members contribute, matching insertFanInStep: a failed, terminated, or cancelled
+		// branch's partial output is not a fact the flow can build on (an error voids the task's changes).
 		if status != workflow.StatusCompleted {
 			continue
 		}
@@ -313,23 +314,23 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	return merged, nil
 }
 
-// cancelSubtree cancels a flow and every non-terminal flow beneath it, in one transaction: the steps first
-// (write-first, per the flow-terminating-transaction rule), then each flow's `final_state`, then one CASE-per-flow
-// terminalization guarded on non-terminal status. It signals every flow it stopped.
+// terminateSubtree forcefully stops a flow and every non-terminal flow beneath it, in one transaction: the steps
+// first (write-first, per the flow-terminating-transaction rule), then each flow's `final_state`, then one
+// CASE-per-flow terminalization guarded on non-terminal status. It signals every flow it stopped.
 //
-// It walks DOWN only. Cancellation is always initiated at a flow that has no live ancestor to reconcile with -
-// the public Cancel is root-only (a subgraph-child key is rejected, not silently widened), and the internal
+// It walks DOWN only. Termination is always initiated at a flow that has no live ancestor to reconcile with -
+// the public Terminate is root-only (a subgraph-child key is rejected, not silently widened), and the internal
 // orphan sweep starts at a child whose whole ancestor chain is already terminal. The `surgraphChain` up-walk the
 // public path used to run was therefore dead: on a root it returns no ancestor steps at all, so the block that
-// cancelled them could never execute, and the call itself was an expensive way (a full root_flow_id tree scan) to
+// terminated them could never execute, and the call itself was an expensive way (a full root_flow_id tree scan) to
 // learn the flow's own id and token, which the caller already holds.
 //
 // conflictIfSettled is the only behavioral difference between the two callers, and it is a real one: an operator
-// Cancel of an already-terminal flow is a 409 (the caller asked to stop something that had stopped), while the
+// Terminate of an already-terminal flow is a 409 (the caller asked to stop something that had stopped), while the
 // orphan sweep racing a concurrent terminalization is a benign no-op (it asked for an outcome that already
 // happened). commitFault is a test-only seam name, checked before any write so a fired fault proves the whole
 // transaction rolls back atomically; pass "" for none.
-func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowToken, reason, commitFault string, conflictIfSettled bool) error {
+func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flowToken, reason, commitFault string, conflictIfSettled bool) error {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
@@ -351,8 +352,8 @@ func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowTo
 			return errors.New("injected fault: " + commitFault)
 		}
 		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
-		// Write-first (the step-cancel UPDATE) per the flow-terminating-transaction rule.
-		stepArgs := append([]any{workflow.StatusCancelled, parkedNone}, allFlowIDs...)
+		// Write-first (the step-terminate UPDATE) per the flow-terminating-transaction rule.
+		stepArgs := append([]any{workflow.StatusTerminated, parkedNone}, allFlowIDs...)
 		tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
 			stepArgs...,
@@ -374,10 +375,13 @@ func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowTo
 			flowArgs = append(flowArgs, fid, finalStates[i])
 		}
 		caseClause.WriteString(" END")
-		flowArgs = append(flowArgs, workflow.StatusCancelled, reason)
+		// cancel_reason is deliberately the one reason column both Terminate and (later) Cancel write into -
+		// no migration to split it, since the two are told apart at the Go API level instead (FlowOutcome's
+		// TerminateReason vs CancelReason, gated by Status in snapshot()).
+		flowArgs = append(flowArgs, workflow.StatusTerminated, reason)
 		flowArgs = append(flowArgs, allFlowIDs...)
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
 			flowArgs...,
 		)
 		if err != nil {
@@ -394,16 +398,16 @@ func (e *Engine) cancelSubtree(ctx context.Context, shardNum, flowID int, flowTo
 
 	for i, cid := range allCompositeIDs {
 		fid := allFlowIDs[i].(int)
-		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fid), "to", workflow.StatusCancelled)
+		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fid), "to", workflow.StatusTerminated)
 		// Counted per flow, alongside the signal and on the same set, because every one of these was started
 		// (createWithGraph counts subgraph children too) and the in-flight panel is started minus terminated.
 		// The set is the flows that were non-terminal when the tree was scanned; one that terminalized in the
 		// window between that scan and this commit is excluded by the UPDATE's own status guard but still
-		// counted here, so a cancel racing a completion can over-count by one. That window is microseconds
-		// against a miscount that used to be EVERY failed and cancelled flow, so it is not worth a second
+		// counted here, so a terminate racing a completion can over-count by one. That window is microseconds
+		// against a miscount that used to be EVERY failed and terminated flow, so it is not worth a second
 		// round trip to close.
-		e.metricFlowTerminated(ctx, urlByFlowID[fid], workflow.StatusCancelled, shardNum)
-		e.signalStop(ctx, cid, workflow.StatusCancelled)
+		e.metricFlowTerminated(ctx, urlByFlowID[fid], workflow.StatusTerminated, shardNum)
+		e.signalStop(ctx, cid, workflow.StatusTerminated)
 	}
 	return nil
 }
@@ -472,8 +476,9 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	var deleteOnCompletion bool
 	completed := false
 	// Test checkpoint: a breakpoint here freezes completion just before its transaction (holding no lock, so a
-	// racing Cancel can commit), letting a test drive the completeFlow-vs-Cancel race in either order. Placed
-	// before the transaction, not inside, for the same SQLite-deadlock reason as CheckpointResumeBeforeFlowWrite.
+	// racing Terminate can commit), letting a test drive the completeFlow-vs-Terminate race in either order.
+	// Placed before the transaction, not inside, for the same SQLite-deadlock reason as
+	// CheckpointResumeBeforeFlowWrite.
 	e.seams.Checkpoint(ctx, CheckpointBeforeCompleteFlowWrite)
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
@@ -522,7 +527,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 			deleteAfterMs = int(e.deletionGrace.Milliseconds())
 		}
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET status=?, final_state=?, delete_after_ms=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+			"UPDATE dwarf_flows SET status=?, final_state=?, delete_after_ms=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 			workflow.StatusCompleted, finalStateJSON, deleteAfterMs, flowID,
 		)
 		if err != nil {
@@ -546,8 +551,8 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// parked-step wedge sweep (raising a false wedge alarm). completeSurgraphFlow is CAS-guarded on
 		// running+parkedSubgraph, so re-driving is idempotent (a peer that already revived, or that raced us to
 		// complete, makes this a harmless no-op). signalStop/metrics are deliberately NOT repeated - they fired
-		// on the attempt that transitioned the flow. A failed/cancelled flow (status != completed) gets no revive
-		// here; its parent is handled by failure delivery / the Cancel cascade.
+		// on the attempt that transitioned the flow. A failed/terminated/cancelled flow (status != completed)
+		// gets no revive here; its parent is handled by failure delivery / the Terminate cascade.
 		if currentStatus == workflow.StatusCompleted && surgraphFlowID != 0 {
 			if rerr := e.completeSurgraphFlow(ctx, shardNum, surgraphFlowID, surgraphStepID, finalStateJSON); rerr != nil {
 				return false, errors.Trace(rerr)
@@ -595,16 +600,16 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		resultJSON = []byte("{}")
 	}
 	// Test checkpoint: a breakpoint here freezes the worker after the child completed but before the caller
-	// revive, so a test can Cancel the caller in exactly the window the revive's running+parkedSubgraph guard
-	// exists to survive (the revive must not resurrect the just-cancelled caller).
+	// revive, so a test can Terminate the caller in exactly the window the revive's running+parkedSubgraph guard
+	// exists to survive (the revive must not resurrect the just-terminated caller).
 	e.seams.Checkpoint(ctx, CheckpointBeforeReviveWrite)
 	reDispatch := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatch = false
 		// Guard the revive on the exact park state (running + parkedSubgraph), mirroring
-		// deliverSubgraphError. Without it, a Cancel that cascaded to this caller step (between the child's
+		// deliverSubgraphError. Without it, a Terminate that cascaded to this caller step (between the child's
 		// completion and this revive) would be resurrected to pending: keying on step_id alone overwrites
-		// the just-cancelled row. The guard also subsumes the "step still live" check — a step that is no
+		// the just-terminated row. The guard also subsumes the "step still live" check — a step that is no
 		// longer running/parked matches no row — and the rows-affected gate keeps Enqueue off a no-op.
 		res, err := tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_result=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
@@ -664,7 +669,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// which for a child with a fan-out is after its cohort fully resolves (the same cohort accounting below
 	// that governs a top-level flow), never eagerly on the first branch error. Failing the child eagerly
 	// while a sibling branch is still live would strand that sibling and any subgraph descendants it parked
-	// on: the interrupt/resume/cancel tree walks all skip a terminal flow, so nothing could ever release
+	// on: the interrupt/resume/terminate tree walks all skip a terminal flow, so nothing could ever release
 	// them. parentStepID>0 iff this flow is a subgraph child.
 	parentStepID, isSubgraphChild, flowWorkflowURL, err := e.dynamicSubgraphParent(ctx, db, flowID)
 	if err != nil {
@@ -714,12 +719,13 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		// transition/eval failure that failOnPersistError fails the already-completed step for, to escape the
 		// re-execution loop). The lease fence alone guards the zombie "late error → healthy-flow kill" hazard;
 		// the status guard - which every sibling post-execution write carries and this one was missing - closes
-		// the rest. Without it a step a racing Cancel just cancelled (cancelSubtree does NOT bump lease_seq, so it
-		// still matches our generation) is rewritten cancelled→failed, violating step immutability and seeding a
-		// phantom branch failure a later Fork re-derives from step status; and a step recovery reset to `pending`
-		// (also lease_seq-preserving) would be terminalized out from under the peer re-claiming it. This is the
-		// first write in the transaction, so a zero-row match means nothing was written - commit the empty tx and
-		// report fenced so the caller abandons without failing a flow that is cancelled or that a peer is re-running.
+		// the rest. Without it a step a racing Terminate just terminated (terminateSubtree does NOT bump lease_seq,
+		// so it still matches our generation) is rewritten terminated→failed, violating step immutability and
+		// seeding a phantom branch failure a later Fork re-derives from step status; and a step recovery reset to
+		// `pending` (also lease_seq-preserving) would be terminalized out from under the peer re-claiming it. This
+		// is the first write in the transaction, so a zero-row match means nothing was written - commit the empty
+		// tx and report fenced so the caller abandons without failing a flow that is terminated or that a peer is
+		// re-running.
 		res, uerr := tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"') AND lease_seq=?",
 			workflow.StatusFailed, parkedNone, errMsg, stepID, leaseSeq,
@@ -755,7 +761,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 				finalStateJSON = []byte("{}")
 			}
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+				"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 				finalStateJSON, workflow.StatusFailed, errMsg, flowID,
 			)
 			if isSubgraphChild {
@@ -891,7 +897,7 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFl
 			// zero-row match is the ordinary case here - the wedge sweep calls this precisely to deliver an
 			// already-terminal child's error - and then there is nothing to terminalize.
 			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 				childFlowID,
 			)
 			if err != nil {
@@ -903,7 +909,7 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFl
 					return errors.Trace(err)
 				}
 				_, err = tx.ExecContext(ctx,
-					"UPDATE dwarf_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ('"+workflow.StatusCompleted+"', '"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"')",
+					"UPDATE dwarf_flows SET status=?, error=?, final_state=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
 					workflow.StatusFailed, errMsg, childFinalState, childFlowID,
 				)
 				if err != nil {
@@ -931,7 +937,7 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFl
 // Called inside the child flow's terminating transaction, after the child flow row has been marked failed.
 // Returns true when the caller step was still parked and got re-armed - the caller then enqueues it after
 // the transaction. Returns false for a top-level flow (parentStepID==0) or a caller step no longer parked
-// (already resolved, cancelled, or retried away), in which case there is nothing to re-dispatch.
+// (already resolved, terminated, or retried away), in which case there is nothing to re-dispatch.
 func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Executor, parentStepID int, errMsg string) (bool, error) {
 	if parentStepID == 0 {
 		return false, nil
@@ -1006,7 +1012,7 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 			rows.Close()
 			return nil, nil, nil, errors.Trace(err)
 		}
-		term := status == workflow.StatusCompleted || status == workflow.StatusFailed || status == workflow.StatusCancelled
+		term := slices.Contains(terminalStatuses, status)
 		byID[id] = node{token: token, terminal: term, workflowURL: workflowURL}
 		if parent != 0 {
 			childrenByParent[parent] = append(childrenByParent[parent], id)
@@ -1128,7 +1134,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 }
 
 // errResumeLost is an in-transaction sentinel: the root flow was terminalized by a concurrent
-// Delete/Cancel between resume's pre-tx status read and its own writes, so the transaction must roll
+// Delete/Terminate between resume's pre-tx status read and its own writes, so the transaction must roll
 // back (undoing the step re-park/leaf-reset) and the caller must 409 rather than falsely report success.
 var errResumeLost = errors.New("resume lost to a concurrent terminalization")
 
@@ -1207,10 +1213,10 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	}
 
 	// Test-only checkpoint: a breakpoint here lets a test freeze resume before its transaction so a racing
-	// Delete/Cancel can commit its interrupted->cancelled flip deterministically, then confirm the gate write
-	// below rolls this transaction back (409) instead of falsely succeeding. Placed *before* the transaction,
-	// not mid-tx: on SQLite the racing Delete would deadlock against this transaction's write lock if frozen
-	// inside it. No-op in production.
+	// Delete/Terminate can commit its interrupted->terminated flip deterministically, then confirm the gate
+	// write below rolls this transaction back (409) instead of falsely succeeding. Placed *before* the
+	// transaction, not mid-tx: on SQLite the racing Delete would deadlock against this transaction's write
+	// lock if frozen inside it. No-op in production.
 	e.seams.Checkpoint(ctx, CheckpointResumeBeforeFlowWrite)
 
 	lost := false
@@ -1235,17 +1241,17 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"'",
 			workflow.StatusPending, resumeDataJSON, leafStepID)
 
-		// Race gate against a concurrent Delete/Cancel. The step writes above are unconditional (their
-		// WHERE status='interrupted' still matches, because Delete/Cancel terminalize the flow row without
-		// touching steps), so without this gate a Delete that flipped the root interrupted→cancelled first
+		// Race gate against a concurrent Delete/Terminate. The step writes above are unconditional (their
+		// WHERE status='interrupted' still matches, because Delete terminalizes the flow row without
+		// touching steps), so without this gate a Delete that flipped the root interrupted→terminated first
 		// would let resume re-park ancestors and reset the leaf, then match 0 rows on the flow update below,
 		// and still return success - a resume that did not take effect reported as if it had, leaving a
-		// transient cancelled-flow-with-non-terminal-steps until the reaper mops it. The root flow row is the
+		// transient terminated-flow-with-non-terminal-steps until the reaper mops it. The root flow row is the
 		// serialization point: this guarded write takes its lock and confirms it is still interrupted (touch
 		// flips unconditionally, so RowsAffected reflects the status match on every driver, MySQL included).
-		// A zero-row match means Delete/Cancel won - roll the whole transaction back and 409, mutually
-		// exclusive with Delete/Cancel's own WHERE status='interrupted'. flowID is always the root here
-		// (subgraph-child keys were rejected above), which is exactly the row Delete/Cancel terminalize.
+		// A zero-row match means Delete/Terminate won - roll the whole transaction back and 409, mutually
+		// exclusive with Delete's own WHERE status='interrupted'. flowID is always the root here
+		// (subgraph-child keys were rejected above), which is exactly the row Delete/Terminate terminalize.
 		res, gerr := tx.ExecContext(ctx, "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID)
 		if gerr != nil {
 			return errors.Trace(gerr)

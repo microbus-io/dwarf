@@ -54,9 +54,9 @@ type Query struct {
 	// Cursor is the opaque pagination cursor returned as NextCursor by the previous List call.
 	Cursor string `json:"cursor,omitzero"`
 	// Search is a case-insensitive substring matched against the flow's WorkflowURL, WorkflowName,
-	// current task name, Error, CancelReason, and the flow key. Any '%' or '_' in the value is matched
-	// literally, not as a wildcard, so "a_b" matches only "a_b" (not "axb") and "50%" matches only a
-	// literal "50%".
+	// current task name, Error, TerminateReason/CancelReason (the shared underlying column), and the flow
+	// key. Any '%' or '_' in the value is matched literally, not as a wildcard, so "a_b" matches only
+	// "a_b" (not "axb") and "50%" matches only a literal "50%".
 	Search string `json:"search,omitzero"`
 	// Limit is a PER-SHARD cap divided across shards, NOT a hard ceiling on the total returned (default
 	// 100). On a multi-shard fleet each shard returns up to ceil(Limit/shards) of its own newest flows, so

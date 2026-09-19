@@ -26,13 +26,13 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestForkStraggler_NormalizedToCancelled pins that a kept non-terminal (running/pending) step
+// TestForkStraggler_NormalizedToTerminated pins that a kept non-terminal (running/pending) step
 // off the fork path - a straggler sibling that had not settled when the origin terminalized - is normalized
-// to cancelled in the fork, not copied verbatim. Copied verbatim it would (a) be re-dispatched by lease
+// to terminated in the fork, not copied verbatim. Copied verbatim it would (a) be re-dispatched by lease
 // recovery in the running fork and (b) as a cohort member wedge the fork's fan-in. The state is a race the
 // cohort accounting normally prevents (a flow does not terminalize with a live sibling), so it is injected
 // directly: run a single-node flow to completion, insert a running straggler off the fork path, then fork.
-func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
+func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -43,7 +43,7 @@ func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
 	g.AddTransition("A", workflow.END)
 	proxy.HandleGraph("sl/g", g)
 	proxy.HandleTask("sl/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
-	// B is only ever the injected straggler; it must never be dispatched (the fix cancels its clone). Register
+	// B is only ever the injected straggler; it must never be dispatched (the fix terminates its clone). Register
 	// a no-op so an accidental dispatch would not fail the fork step instead of surfacing the real defect.
 	proxy.HandleTask("sl/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
@@ -91,12 +91,12 @@ func TestForkStraggler_NormalizedToCancelled(t *testing.T) {
 		assert.Equal(workflow.StatusCompleted, out.Status)
 	}
 
-	// The cloned straggler is cancelled, not copied verbatim as running.
+	// The cloned straggler is terminated, not copied verbatim as running.
 	_, forkFlowID, _, err := keys.ParseFlowKey(forkKey)
 	assert.NoError(err)
 	var bStatus string
 	err = db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='B'", forkFlowID).Scan(&bStatus)
 	if assert.NoError(err) {
-		assert.Equal(workflow.StatusCancelled, bStatus)
+		assert.Equal(workflow.StatusTerminated, bStatus)
 	}
 }

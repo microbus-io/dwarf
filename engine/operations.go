@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -153,7 +154,7 @@ func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum,
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
 	}
-	// A subgraph child key is read-only, like everywhere else (Resume/Cancel/Delete/Continue all 400 it).
+	// A subgraph child key is read-only, like everywhere else (Resume/Terminate/Delete/Continue all 400 it).
 	// A child runs on its own private thread precisely so it cannot contaminate the parent's continuation
 	// chain, so joining that thread is never what a caller means: the new flow would be a top-level root
 	// grouped under a subgraph's thread, and a later Continue of it would build on the subgraph's turns.
@@ -348,6 +349,19 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	return flowKey, nil
 }
 
+// splitTerminateCancelReason maps the shared cancel_reason column onto whichever reason field the given
+// terminal status has declared it feeds - Terminate's if "terminated", Cancel's if "cancelled" - so
+// snapshot's FlowOutcome and list's FlowSummary, which both split this one column, agree on the mapping.
+func splitTerminateCancelReason(status, reason string) (terminateReason, cancelReason string) {
+	switch status {
+	case workflow.StatusTerminated:
+		return reason, ""
+	case workflow.StatusCancelled:
+		return "", reason
+	}
+	return "", ""
+}
+
 // snapshot returns the current outcome of a flow.
 func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
@@ -368,6 +382,9 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	var flowStatus string
 	var finalStateJSON []byte
 	var flowErrorMsg string
+	// cancel_reason is the one column both Terminate and (later) Cancel write their reason into, to avoid a
+	// migration for what the two operations agree is the same kind of fact. Which FlowOutcome field it
+	// surfaces as is decided below, by status.
 	var flowCancelReason string
 	err = db.QueryRowContext(ctx,
 		"SELECT status, final_state, error, cancel_reason FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
@@ -392,9 +409,9 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	case workflow.StatusFailed:
 		out.State, _ = workflow.NewState(finalStateJSON)
 		out.Error = flowErrorMsg
-	case workflow.StatusCancelled:
+	case workflow.StatusTerminated, workflow.StatusCancelled:
 		out.State, _ = workflow.NewState(finalStateJSON)
-		out.CancelReason = flowCancelReason
+		out.TerminateReason, out.CancelReason = splitTerminateCancelReason(flowStatus, flowCancelReason)
 	case workflow.StatusInterrupted:
 		// For interrupted, query the leaf step's state and interrupt payload
 		var stepStateJSON, stepChangesJSON, stepRefsJSON, interruptPayloadJSON []byte
@@ -499,7 +516,7 @@ func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 }
 
 // signalStop wakes local Await callers waiting on the given flow. Use it at every flow-stop site
-// (completed, failed, cancelled, interrupted) and NOWHERE ELSE: a woken caller reads the flow once and
+// (completed, failed, terminated, cancelled, interrupted) and NOWHERE ELSE: a woken caller reads the flow once and
 // returns what it finds, so waking it for a status the flow is merely passing through would hand a running
 // flow back as an outcome. A non-terminal transition needs no wake at all - nobody is parked on it.
 //
@@ -613,10 +630,10 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 	e.logger.DebugContext(ctx, "Doorbell (due)", "stepID", stepID, "priority", priority, "admitted", admitted)
 }
 
-// cancel aborts a flow and its whole subgraph subtree. Root-only: a subgraph child is not an independently
-// cancellable unit (its parent is parked on it, and the unit of any lifecycle change is the tree), so a child key
-// is rejected rather than silently widened into a tree-wide cancel.
-func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
+// terminate forcefully stops a flow and its whole subgraph subtree, unconditionally. Root-only: a subgraph
+// child is not an independently terminable unit (its parent is parked on it, and the unit of any lifecycle
+// change is the tree), so a child key is rejected rather than silently widened into a tree-wide terminate.
+func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
 		return errors.Trace(err)
@@ -645,23 +662,24 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		return errors.Trace(err)
 	}
 	if surgraphFlowID != 0 {
-		return errors.New("cannot cancel a subgraph child; use the root flow key", http.StatusBadRequest)
+		return errors.New("cannot terminate a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	if flowStatus == workflow.StatusCompleted || flowStatus == workflow.StatusFailed || flowStatus == workflow.StatusCancelled {
+	if slices.Contains(terminalStatuses, flowStatus) {
 		return errors.New("flow is already in terminal status", http.StatusConflict)
 	}
 
-	// The root has no ancestors by construction, so this walks DOWN only - see cancelSubtree, which the orphan
+	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
 	// sweep shares. A racing terminalization that empties the flow UPDATE is a 409 here: the caller asked to stop
 	// something that had already stopped.
-	return errors.Trace(e.cancelSubtree(ctx, shardNum, flowID, flowToken, reason, FaultCancelCommit, true))
+	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowToken, reason, FaultTerminateCommit, true))
 }
 
 // deleteFlow schedules a flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete rows
 // inline. It stamps delete_after_ms=1 (due immediately) on the root; the reaper removes the whole tree on its
-// next pass. An interrupted flow is terminalized (interrupted -> cancelled) in the same UPDATE, which is
-// mutually exclusive with a racing Resume (WHERE status<>'running', re-checked under the row lock), so the
-// old strand race (delete steps while Resume revives) is gone by construction - no lock-first selection needed.
+// next pass. An interrupted flow is terminalized (interrupted -> terminated, a forceful operator action, same
+// as Terminate) in the same UPDATE, which is mutually exclusive with a racing Resume (WHERE status<>'running',
+// re-checked under the row lock), so the old strand race (delete steps while Resume revives) is gone by
+// construction - no lock-first selection needed.
 func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -702,11 +720,11 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		}
 		// The 409 guards only the ROOT's status; a running subgraph descendant does not block the delete. The
 		// reaper later removes the whole root_flow_id tree regardless of descendant status - safe because the
-		// only running descendant a terminal-rooted tree can hold is a live orphan (Cancel-vs-spawn residue) the
-		// wedge sweep would cancel anyway, and a worker mid-dispatch on it no-ops via the lease fence. This is a
+		// only running descendant a terminal-rooted tree can hold is a live orphan (Terminate-vs-spawn residue) the
+		// wedge sweep would terminate anyway, and a worker mid-dispatch on it no-ops via the lease fence. This is a
 		// deliberate change from the old inline delete, which 409'd on any running descendant (see reapDueFlows).
 		if flowStatus == workflow.StatusRunning {
-			return errors.New("cannot delete a running flow; cancel it first", http.StatusConflict)
+			return errors.New("cannot delete a running flow; terminate it first", http.StatusConflict)
 		}
 		if deleteAfterMs > 0 {
 			return nil // already scheduled - idempotent
@@ -714,9 +732,9 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 
 		// Stamp due-now; terminalize an interrupted flow in the same write (the Resume gate). status<>'running'
 		// re-guards a Resume that raced in after the SELECT: it either wins (row is running -> 0 rows here, a
-		// benign lost delete, flow stays alive) or loses (we stamp; its interrupted CAS then finds cancelled).
+		// benign lost delete, flow stays alive) or loses (we stamp; its interrupted CAS then finds terminated).
 		tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET delete_after_ms=1, status=CASE WHEN status='"+workflow.StatusInterrupted+"' THEN '"+workflow.StatusCancelled+"' ELSE status END WHERE flow_id=? AND flow_token=? AND status<>'"+workflow.StatusRunning+"' AND delete_after_ms=0",
+			"UPDATE dwarf_flows SET delete_after_ms=1, status=CASE WHEN status='"+workflow.StatusInterrupted+"' THEN '"+workflow.StatusTerminated+"' ELSE status END WHERE flow_id=? AND flow_token=? AND status<>'"+workflow.StatusRunning+"' AND delete_after_ms=0",
 			flowID, flowToken,
 		)
 		return nil
@@ -735,10 +753,10 @@ func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, 
 	}
 	if !outcome.Stopped() {
 		// The caller's ctx expired before the flow stopped. The flow is durable and already running on the
-		// engine's own worker lifetime, independent of this call - so do NOT tear it down. Cancelling here
+		// engine's own worker lifetime, independent of this call - so do NOT tear it down. Terminating here
 		// would destroy healthy, in-progress work (a durable retry-until-success job especially) just because
 		// the caller stopped waiting - an availability footgun. Return the flowKey with a timeout error
-		// instead, so the caller keeps a handle to re-Await/Snapshot/Cancel on its own terms.
+		// instead, so the caller keeps a handle to re-Await/Snapshot/Terminate on its own terms.
 		return flowKey, nil, errors.Trace(ctx.Err(), http.StatusRequestTimeout)
 	}
 	return flowKey, outcome, nil

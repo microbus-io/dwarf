@@ -162,7 +162,7 @@ func TestSoakflow(t *testing.T) {
 				var remaining []started
 				for _, s := range active {
 					outcome, _ := eng.Snapshot(ctx, s.key)
-					if outcome != nil && (outcome.Status == workflow.StatusCompleted || outcome.Status == workflow.StatusFailed || outcome.Status == workflow.StatusCancelled) {
+					if outcome != nil && (outcome.Status == workflow.StatusCompleted || outcome.Status == workflow.StatusFailed || outcome.Status == workflow.StatusTerminated || outcome.Status == workflow.StatusCancelled) {
 						continue
 					}
 					remaining = append(remaining, s)
@@ -180,7 +180,7 @@ func TestSoakflow(t *testing.T) {
 			var remaining []started
 			for _, s := range active {
 				outcome, _ := eng.Snapshot(ctx, s.key)
-				if outcome != nil && (outcome.Status == workflow.StatusCompleted || outcome.Status == workflow.StatusFailed || outcome.Status == workflow.StatusCancelled) {
+				if outcome != nil && (outcome.Status == workflow.StatusCompleted || outcome.Status == workflow.StatusFailed || outcome.Status == workflow.StatusTerminated || outcome.Status == workflow.StatusCancelled) {
 					continue
 				}
 				remaining = append(remaining, s)

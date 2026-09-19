@@ -82,8 +82,8 @@
   at-least-once and two attempts can overlap. → [Writing tasks](tasks.md#idempotency)
 - [ ] **Tasks respect their context deadline.** A task that overruns its `TimeBudget` loses its lease to a
   peer and runs twice concurrently.
-- [ ] **No PII in error text or cancel reasons.** Error text is returned by both `List` and `History` — the
-  readers that otherwise expose no state payloads — and the cancel reason by `List`. Both are
+- [ ] **No PII in error text or terminate reasons.** Error text is returned by both `List` and `History` — the
+  readers that otherwise expose no state payloads — and the terminate reason by `List`. Both are
   substring-searchable. → [Writing tasks](tasks.md#keep-payload-data-out-of-error-text)
 - [ ] **Large integers read with typed accessors, or carried as strings.** Beyond ±2^53 storage is exact and
   `GetInt` is exact, but an untyped read or a `when` expression rounds. And **binary data base64-encoded** —

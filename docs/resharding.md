@@ -81,7 +81,7 @@ count, _ := eng.Purge(ctx, workflow.Query{Shard: 3, OlderThan: 30 * 24 * time.Ho
 ```
 
 `Query.Shard` scopes both to one shard. Watch `interrupted` flows especially — they wait indefinitely and are
-the ones that will still be there when you assumed the shard was empty. Either resume them, cancel them, or
+the ones that will still be there when you assumed the shard was empty. Either resume them, terminate them, or
 wait.
 
 `Purge` marks at most 4,096 roots per call, so draining a large shard is a loop, and a background reaper does

@@ -205,7 +205,8 @@ start) - and recurring schedules are an external concern (a host/cron service th
 schedule), never the engine's.
 
 **Snapshot** - Returns a `*workflow.FlowOutcome` for a flow at the current moment. For terminal statuses
-(`completed`/`failed`/`cancelled`) it returns the flow's `final_state` (plus `Error`/`CancelReason`); for
+(`completed`/`failed`/`terminated`/`cancelled`) it returns the flow's `final_state` (plus
+`Error`/`TerminateReason`/`CancelReason`); for
 `interrupted` it returns the interrupted step's merged `state+changes` and its `interrupt_payload`. When the
 flow has several interrupted steps, Snapshot picks the **same one the next `Resume` will resolve** - the
 earliest-`updated_at` (`step_id` tiebreak), *not* by `step_depth` - so a Snapshot reports exactly the
@@ -223,25 +224,26 @@ by the **root** flow key (a subgraph-child key is rejected with 400 - see "Subgr
 multiple fan-out siblings interrupt, each `Resume` handles one; the flow returns to `running` only when no
 interrupted steps remain.
 
-**Cancel** - Aborts a created, running, or interrupted flow. Walks **down** (`allSubgraphFlows`) the hierarchy,
-atomically cancels all steps across all flows, computes `final_state` per flow, and cancels all flows with per-flow
-`final_state` via CASE - all in one transaction (`cancelSubtree`). Must be addressed by the **root** flow key (a
-subgraph-child key is rejected with 400 - see "Subgraph keys are read-only"). Takes a reason string surfaced as
-`FlowOutcome.CancelReason`.
+**Terminate** - Aborts a created, running, or interrupted flow, forcefully and unconditionally: in-flight work is
+abandoned immediately, with no chance for any task to react. Walks **down** (`allSubgraphFlows`) the hierarchy,
+atomically terminates all steps across all flows, computes `final_state` per flow, and sets every flow to
+`terminated` via CASE - all in one transaction (`terminateSubtree`). Must be addressed by the **root** flow key
+(a subgraph-child key is rejected with 400 - see "Subgraph keys are read-only"). Takes a reason string surfaced
+as `FlowOutcome.TerminateReason`.
 
-*Down only - there is no up-walk, and there was never a live one.* Cancel used to call `surgraphChain` too, but
-being root-only it can have no ancestors: the chain returns no ancestor steps, so the block that cancelled them was
-unreachable, and the call itself was a full `root_flow_id` tree scan run to learn the flow's own id and token - both
-of which the caller already holds. Every cancellation the engine performs, present or planned, is down-only or
-one-level: a root-addressed Cancel has no ancestors; the orphan sweep starts at a child whose ancestor chain is
-already terminal; and a child terminalizing settles its *one* caller step by `surgraph_step_id` (a PK), not by
-walking to the root. The up-walk would only come alive if Cancel accepted a mid-tree key - which it deliberately
-does not. (`surgraphChain` itself stays: `Resume`, `handleInterrupt`, and `Fork` are its real users.)
+*Down only - Terminate never walks up.* It is addressed only by the **root** flow key (a mid-tree key is
+rejected - see "Subgraph keys are read-only"), so it has no ancestors to walk: `surgraphChain`, the up-walk
+helper, has no role here and would find nothing above a root. Every termination the engine performs is
+down-only or one-level: a root-addressed Terminate has no ancestors; the orphan sweep starts at a child whose
+ancestor chain is already terminal; and a child terminalizing settles its *one* caller step by
+`surgraph_step_id` (a PK), not by walking to the root. (`surgraphChain` itself stays: `Resume`,
+`handleInterrupt`, and `Fork` are its real users.)
 
-**`cancelSubtree` is shared with the orphan sweep** (`cancelOrphanedSubtree`), which had been a near-duplicate of
-this transaction. The two differ in exactly one behavior, and it is a real one: a zero-row flow UPDATE (a racing
-terminalization) is a **409** for an operator Cancel - the caller asked to stop something that had already stopped -
-and a **benign no-op** for the sweep, which asked for an outcome that already happened.
+**`terminateSubtree` is shared with the orphan sweep** (`terminateOrphanedSubtree`), which had been a
+near-duplicate of this transaction. The two differ in exactly one behavior, and it is a real one: a zero-row
+flow UPDATE (a racing terminalization) is a **409** for an operator Terminate - the caller asked to stop
+something that had already stopped - and a **benign no-op** for the sweep, which asked for an outcome that
+already happened.
 
 **Fork** - The sole recovery/exploration operation, given terminal-flow immutability. `Fork(stepKey,
 stateOverrides)` clones a terminal flow's execution tree up to a chosen step into a brand-new,
@@ -379,7 +381,7 @@ ambiguous for the *next* Continue). The anchor lock closes it deterministically:
 `running` turn; every other concurrent Continue then reads **that** running turn as the latest, fails the
 completed-check, and returns **409**. So the outcome is "exactly one succeeds per race," not timing-dependent.
 `touch` is the non-indexed lock-grab column, so the anchor's `updated_at` stays frozen (it is a terminal flow),
-and because interrupt/cancel/resume never lock a thread *sibling*'s rows, this anchor lock cannot cycle with
+and because interrupt/terminate/resume never lock a thread *sibling*'s rows, this anchor lock cannot cycle with
 them. Determinism caveat: it also requires the winner's turn to still be `running` when the losers re-check - it
 is, because the new turn is inserted `running` and only completes after its entry task runs; a test proving the
 "exactly one" contract must keep that entry task from completing during the race (see
@@ -395,11 +397,11 @@ the new flow's key alongside its outcome (the key is the flow's identity, not pa
 need it for later `History`/`Resume`/`Fork`). Error semantics are phase-split: a **create** failure
 returns `flowKey == ""` with a nil outcome (no flow exists); an **await** failure (usually the caller's
 ctx expiring first) **leaves the flow running** and returns its **`flowKey`** with a nil outcome and the
-error, so the caller retains a handle. `Run` never cancels the flow on the caller's behalf - tearing down
+error, so the caller retains a handle. `Run` never terminates the flow on the caller's behalf - tearing down
 a healthy durable flow just because the caller stopped waiting is an availability footgun; a caller that
-wants teardown-on-timeout calls `Cancel` itself. (This is the corrected behavior of the former bug where
-`Run` cancelled the just-started flow with the already-expired await ctx - so the cancel silently never
-ran *and* the intent to cancel a healthy durable flow was itself wrong.)
+wants teardown-on-timeout calls `Terminate` itself. (This is the corrected behavior of the former bug where
+`Run` terminated the just-started flow with the already-expired await ctx - so the termination silently never
+ran *and* the intent to tear down a healthy durable flow was itself wrong.)
 
 **Await** - Blocks until the flow stops (see "Await" below).
 
@@ -418,11 +420,11 @@ third.
 A subgraph child flow has a real flowKey (a task inside it reads its own via `flow.FlowKey()`, and `List` with
 `IncludeSubgraphs` surfaces it), but that key is a **read** handle, not a write unit: a child cannot be mutated
 independently because its parent is parked waiting on it, and the unit for any lifecycle change is the whole tree.
-So the **lifecycle mutations reject a subgraph-child key with 400** (`surgraph_flow_id != 0`): `Resume`, `Cancel`,
+So the **lifecycle mutations reject a subgraph-child key with 400** (`surgraph_flow_id != 0`): `Resume`, `Terminate`,
 `Delete`, `Continue`, and `Create` with `FlowOptions.ThreadKey` (in `resolveThread`). The rejection is folded into each operation's existing flow-row SELECT (no extra round-trip;
 the 404-not-found check still takes precedence). The caller addresses the tree by the **root** key instead - which
 it always holds (it came from `Create`/`Run`/`Continue`, or from `List` of roots). The rationale per op: `Resume`/
-`Cancel` are inherently tree-wide (they walk up to the root and down), so a child key is just a confusing alias for
+`Terminate` are inherently tree-wide (they walk up to the root and down), so a child key is just a confusing alias for
 the root; `Delete` cascades *down* only, so deleting a child directly would strand the parent's surgraph step; and
 `Continue` on a child's own (private) thread would spin up a detached top-level flow from the subgraph's final state,
 not a thread turn. **`Create(ThreadKey: childKey)` is the subtlest of the five** - it does not mutate the child at
@@ -447,6 +449,7 @@ type FlowOutcome struct {
     State            map[string]any
     Error            string         // populated when Status == "failed"
     InterruptPayload map[string]any // populated when Status == "interrupted"
+    TerminateReason  string         // populated when Status == "terminated"
     CancelReason     string         // populated when Status == "cancelled"
 }
 ```
@@ -485,7 +488,7 @@ refiller wholesale-replaces its own partition; workers pop from the lowest-floor
 
 1. Reserve the step (atomic CAS `UPDATE ... WHERE step_id=? AND status='pending' AND parked=parkedNone AND
    not_before<=NOW AND lease_expires<=NOW`).
-2. Check for terminal flow status (abort if cancelled/failed/completed).
+2. Check for terminal flow status (abort if terminated/cancelled/failed/completed).
 3. Load the flow's graph, config, and baggage.
 4. Execute the task via the host's `ExecuteTask` with a time budget on the call context.
 5. Persist changes, evaluate transitions, create next steps (in a transaction), ring the doorbell.
@@ -992,7 +995,7 @@ Fan-in accounting no longer issues sibling/subgraph COUNT queries at all - it re
 **Transaction constraint (do not reintroduce parallelism here):** a function receiving a `sequel.Executor` - which may
 be a `*sequel.Tx` - must not run concurrent statements on it, because a SQL transaction is not safe for concurrent
 use. This is exactly what forbids wrapping an errgroup around, say, the flow read and `resolveStateRefs` (which takes
-a `sequel.Executor`). It applies to `computeFinalState` and code inside `failStep`/`Cancel` transactions.
+a `sequel.Executor`). It applies to `computeFinalState` and code inside `failStep`/`Terminate` transactions.
 
 ### Fan-Out and Fan-In
 
@@ -1092,9 +1095,10 @@ and the failed-fan-out case the strip exists for), each verified to fail against
 reducers and creates the next step(s) in a transaction that prevents duplicate next steps when multiple workers
 finish siblings simultaneously.
 
-**Fan-in does not escalate on cancelled or failed siblings.** If a sibling is `failed` or `cancelled` when fan-in
-evaluates, the flow is already being driven by another path - a sibling's `failStep` cascaded the flow to failed, or an
-external `Cancel` cancelled it. The fan-in worker returns `nil` instead of calling `failStep` on its own step: doing
+**Fan-in does not escalate on terminated, cancelled, or failed siblings.** If a sibling is `failed`, `terminated`,
+or `cancelled` when fan-in evaluates, the flow is already being driven by another path - a sibling's `failStep`
+cascaded the flow to failed, or an external `Terminate` terminated it. The fan-in worker returns `nil` instead of
+calling `failStep` on its own step: doing
 so would race an in-flight `OnError` handler (an errored branch routes to its handler, whose next step runs at depth
 N+1 while the fan-in worker is still finishing depth N) and could incorrectly fail an otherwise-recoverable flow.
 
@@ -1103,8 +1107,8 @@ N+1 while the fan-in worker is still finishing depth N) and could incorrectly fa
 branch's position in the spawn loop (the `forEach` array index or static declaration order), so `list`/`append`/
 `sum`/`set` reducers fold in input-array order rather than completion order; `step_id` breaks ties. The firing gate is
 `cohort_arrivals >= cohort_size`, a counter on the spawn step independent of the merge query, so the merge's status
-filter cannot deadlock fan-in. Only `completed` members contribute `changes`; `failed`/`cancelled`/`pending`/
-`running` contribute nothing.
+filter cannot deadlock fan-in. Only `completed` members contribute `changes`; `failed`/`terminated`/`cancelled`/
+`pending`/`running` contribute nothing.
 
 **Escalation is counter-based (`cohort_failures`), not status-based, and happens *before* `insertFanInStep`.**
 `insertFanInStep` itself never marks the flow terminal - but it is only reached when the cohort resolves with
@@ -1116,9 +1120,9 @@ The signal is a *counter* incremented only by a genuine `failStep`, so it is dis
 "poison" (which scanned member *statuses* in the merge and failed on any `failed`/`cancelled` member - that raced
 with OnError recovery and made the fanouterrorflow fixture flaky). A branch that errored but has an `onError` handler
 does **not** bump `cohort_failures` - its step is marked `completed` and routed to the handler, so the cohort still
-converges and the flow recovers via the handler -> fan-in path; likewise a `cancelled` member (from an external
-`Cancel`) does not escalate. So the invariant is precise: escalate only on a genuinely-unhandled branch failure
-(`failStep` with no `onError`), never on an onError-handled error or an externally-cancelled sibling.
+converges and the flow recovers via the handler -> fan-in path; likewise a `terminated`/`cancelled` member (from an
+external `Terminate`) does not escalate. So the invariant is precise: escalate only on a genuinely-unhandled branch
+failure (`failStep` with no `onError`), never on an onError-handled error or an externally-terminated sibling.
 
 **Retry rejoins its cohort naturally.** `flow.Retry` rewinds the failed step in place - same `step_id`, `lineage_id`,
 `fan_out_ordinal`, just `status='pending'` and the prior error/park slot cleared. The merge query sees one row per
@@ -1507,7 +1511,7 @@ any graph where an intra-thread `flow.Goto` self-loop sits inside a fan-out: eac
 the dangling loop step (empty state). The tail-step merge is depth-agnostic: loop iterations carry
 `successor_id = <fan-in step>` (set by the cohort-exit UPDATE), so only the real terminal step qualifies. Two-tier
 and depth-free: the completed tail (`successor_id = 0 AND status = completed`) for a normal finish; if none, the
-non-completed tail (`successor_id = 0`, any status) for a flow force-terminated by `Cancel`/`failStep` before any
+non-completed tail (`successor_id = 0`, any status) for a flow force-terminated by `Terminate`/`failStep` before any
 step completed. An empty map is returned for a flow with no steps.
 
 ### Time Budgets
@@ -1648,7 +1652,7 @@ re-claimed and is running concurrently — is exactly the one the bumped generat
 has exactly one fenced write to the dispatched step, and everything after it is safe:
 
 - **complete / goto / fan-out / fan-in-direct / flow-complete** — gated by the completion UPDATE
-  (`WHERE step_id=? AND status!='cancelled' AND lease_seq=?`). Past it the step is `completed`, so no peer can
+  (`WHERE step_id=? AND status NOT IN ('terminated', 'cancelled') AND lease_seq=?`). Past it the step is `completed`, so no peer can
   re-claim (claim needs `pending`); the entire transition transaction — successor inserts, `cohort_arrivals`
   bumps, `successor_id` writes, `fireFanInDirect`, `completeFlowSequential`, `insertFanInStep` — needs no fence.
   `completeFlowSequential` in particular makes **no step write at all**: the gate already completed the step, so the
@@ -1684,7 +1688,7 @@ The engine imposes no flow-level deadline. Picking a max-lifetime that fits both
 workflow is impossible, and a knob defaulting to "no deadline" is surface area without a customer. Workflows needing a
 bound implement it in author space: a guard task reading `flow.CreatedAt()` that returns a 408 when too much time has
 elapsed; a `flow.Retry` loop that exhausts after a chosen bound; an `OnError`/timeout transition; or an external
-caller scheduling a `Cancel`. `Flow.CreatedAt()` and `Flow.UpdatedAt()` are populated on every dispatch, so the
+caller scheduling a `Terminate`. `Flow.CreatedAt()` and `Flow.UpdatedAt()` are populated on every dispatch, so the
 elapsed-time guard is one call away inside any task.
 
 ### Transition Evaluation
@@ -1796,14 +1800,14 @@ completing last-arriver; both call `deliverFlowFailureToParent` when `failFlow` 
 eager terminalization on the first branch error. Failing the child eagerly (an earlier `failStep` short-circuit
 straight into `deliverSubgraphError`, bypassing cohort accounting) stranded the child's *other* live branches and
 any subgraph descendants they had parked on: every tree walk skips a terminal flow (`Resume`'s down-walk descends
-only `interrupted` children; `Cancel`/`allSubgraphFlows` stop at terminal nodes; the parked-caller wedge sweep
+only `interrupted` children; `Terminate`/`allSubgraphFlows` stop at terminal nodes; the parked-caller wedge sweep
 sees a *terminal* caller step, not `running`+`parkedSubgraph`), so the stranded sub-tree had no path out but
 `Delete`. Deferring the child's failure to cohort resolution means every branch has settled (completed or failed)
 before the child terminalizes, so there is no live sibling to strand - and a sibling parked on a grandchild that
 *interrupts* propagates up normally, so the whole tree parks `interrupted` and a root `Resume` still threads down
 to it (rather than the grandchild's approval being silently cancelled). `deliverSubgraphError` remains, now used
 **only** by the wedge sweep (a wedged caller whose child already went terminal); the live failStep path no longer
-calls it. Defense in depth for any residual orphan (e.g. the Cancel-vs-spawn race) is
+calls it. Defense in depth for any residual orphan (e.g. the Terminate-vs-spawn race) is
 `recoverOrphanedSubgraphChildren` (see "Background Recovery"). `fixtures`/`engine`
 `TestSubgraphCohortFail_NoStrandOnBranchFailure` pins the child staying `running` after one branch failed while a
 sibling is parked on a live grandchild, then converging to a clean terminal tree with the branch error surfaced
@@ -1855,10 +1859,10 @@ tree first, so each walk works whether its starting flow is the root or a mid-tr
 
 - `allDescendantSubgraphFlows` (Delete cascade, `Fingerprint`) - BFS *down* from the given flow over the loaded
   rows (any status).
-- `allSubgraphFlows` (Cancel's descendant set) - BFS *down* through **non-terminal** nodes only, matching the old
-  walk, which also stopped descending at a terminal node. Mid-tree Cancel/Delete therefore keep their exact prior
+- `allSubgraphFlows` (Terminate's descendant set) - BFS *down* through **non-terminal** nodes only, matching the old
+  walk, which also stopped descending at a terminal node. Mid-tree Terminate/Delete therefore keep their exact prior
   "descendants of *this* node" semantics, not "the whole tree."
-- `surgraphChain` (the ordered *up*-walk: Cancel, Resume, Fork, interrupt propagation) - follows
+- `surgraphChain` (the ordered *up*-walk: Terminate, Resume, Fork, interrupt propagation) - follows
   `surgraph_flow_id`/`surgraph_step_id` pointers from the flow up to the root, collecting each ancestor's caller
   step + token. One scan vs the former *two* queries per level.
 - `interruptedSubgraphChain` (Resume's *down*-walk) - one tree scan plus **one** batched query for every flow's
@@ -1881,11 +1885,11 @@ elsewhere - the retry-reap, the wedge sweep, and `Step`-navigation.)
 
 **Consistency.** Denormalized + write-once-at-create is low-risk, but a creation path that forgot to set it (or set
 it wrong on a fork descendant) would silently drop rows from tree scans - and, now that the structural walks ride
-the same scan, mis-route a Cancel/Resume/Fork. `TestRootFlowID_*` (engine package, white-box) pins the three
+the same scan, mis-route a Terminate/Resume/Fork. `TestRootFlowID_*` (engine package, white-box) pins the three
 population paths: top-level self-root, subgraph inheritance, and Fork self-root + non-inheritance; `Continue`
 starting a fresh root. `fixtures/deepsubgraphflow_test.go` pins the walks themselves at depth 5: a leaf interrupt
 propagating up to the root, Resume descending back to the leaf with state threaded through every level, and a
-root Cancel tearing down the whole interrupted tree.
+root Terminate tearing down the whole interrupted tree.
 
 ### Interrupt/Resume Propagation Across Subgraphs
 
@@ -1963,7 +1967,7 @@ correlation-id→key lookup (see "Tracing"); subgraph-child keys are read-only f
 ### Await
 
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
-`cancelled`/`interrupted`. Its shape is **read, park, read - at most twice, and never in a loop**: snapshot and
+`terminated`/`cancelled`/`interrupted`. Its shape is **read, park, read - at most twice, and never in a loop**: snapshot and
 return if the flow has already stopped; otherwise park on the **latch board** (`internal/latch`, held as
 `e.latches`) until it settles, then snapshot once more to build the outcome.
 
@@ -2099,7 +2103,7 @@ is already local and free, at the price of a write per await.
   `running` with every step terminal (a permanent orphan). `failStep`, the fan-in transaction, and `completeFlow` all
   write first. A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go` reproduce
   the wedge without the fix. This write-first rule governs the flow-*advancing*/*terminating* transactions only; the
-  lifecycle mutations (`Resume`/`Cancel`/`failStep`/`Delete`) run the **opposite** (steps-first) order on purpose, so
+  lifecycle mutations (`Resume`/`Terminate`/`failStep`/`Delete`) run the **opposite** (steps-first) order on purpose, so
   the two disciplines cross on row-locking engines - see "Transactions" for why that crossing is tolerated (retry-
   recovered) rather than reconciled, and do not "fix" one side into matching the other.
 - **Busy timeout** - `sequel` applies `_pragma=busy_timeout(1000)` to SQLite DSNs without one, so concurrent workers
@@ -2834,10 +2838,10 @@ the refiller's per-key oldest-first ordering; see `internal/migrations/CLAUDE.md
   (the lease lapsed, the parent recovered, the task re-ran, launching a duplicate child).
 
 **Terminal status implies `parked=parkedNone`.** The park value is meaningful only while a step is actively waiting.
-Once terminal (`completed`/`failed`/`cancelled`), the park slot is gone, and the column must read `parkedNone`. Every
-terminal-transition code path resets `parked` in the same UPDATE (the `failStep` write, the `Cancel` cascade, the
+Once terminal (`completed`/`failed`/`terminated`/`cancelled`), the park slot is gone, and the column must read `parkedNone`. Every
+terminal-transition code path resets `parked` in the same UPDATE (the `failStep` write, the `Terminate` cascade, the
 `processStep` terminal-flow guard). Without this, a step that was parked
-when its flow was cancelled would sit terminal with non-zero `parked` - invisible to the selection index but never
+when its flow was terminated would sit terminal with non-zero `parked` - invisible to the selection index but never
 re-leased. A `Fork` clone writes each step's `parked` explicitly (the re-parked ancestor callers to `parkedSubgraph`,
 all other cloned steps to `parkedNone`), so cloned rows never inherit a stale non-zero `parked`.
 
@@ -3101,17 +3105,20 @@ nothing about now, while `max_over_time` on the plain gauge gives a WINDOWED pea
 free. It also carried a footgun the gauge does not: the two roles peak at different moments, so summing
 them reported a mark that never occurred.
 
-**Fidelity choices:** `flows_terminated` counts ALL THREE terminal statuses - completed (`completeFlow`),
-failed (`failStep`, and the cohort-resolution path in `processStep` that fails a flow without going through
-it), and cancelled (`cancelSubtree`, per flow of the tree it terminalized). It once fired only on
-`completed`, which broke it in two ways at once: the `status` attribute had a single value, so
-`sum by (status)` silently answered a completed/failed/cancelled question with completions alone, and the
-in-flight panel this metric exists for - `flows_started` minus this - drifted upward permanently by every
-flow that did not finish cleanly. Both halves are pinned by
+**Fidelity choices:** `flows_terminated` counts every terminal status it is called with - completed
+(`completeFlow`), failed (`failStep`, and the cohort-resolution path in `processStep` that fails a flow
+without going through it), and terminated (`terminateSubtree`, per flow of the tree it terminalized). It
+once fired only on `completed`, which broke it in two ways at once: the `status` attribute had a single
+value, so `sum by (status)` silently answered a completed/failed/terminated question with completions
+alone, and the in-flight panel this metric exists for - `flows_started` minus this - drifted upward
+permanently by every flow that did not finish cleanly. Both halves are pinned by
 `TestMetrics_TerminatedCountsEveryTerminalStatus`, which fails on all three of its assertions against the
-old behaviour. The cancel path counts the flows that were non-terminal when it scanned the tree, so a cancel
-racing a concurrent completion can over-count by one; that window is microseconds against a miscount that
-used to be every failed and cancelled flow, so it is not worth a round trip to close. **Every path that starts a flow must call
+old behaviour (the test predates the `terminated`/`cancelled` status split and still exercises the same
+completed/failed/terminated shape). The terminate path counts the flows that were non-terminal when it
+scanned the tree, so a terminate racing a concurrent completion can over-count by one; that window is
+microseconds and the miscount is bounded to at most one flow, so it is not worth a round trip to close.
+`cancelled` is a reserved fourth terminal status nothing currently produces - the
+counter would tally it identically the moment something does. **Every path that starts a flow must call
 `metricFlowStarted`** - `Create`, `Continue`, AND `Fork` (which builds its new root through its own
 `INSERT...SELECT` clone and so was silently missed): a fork's completion runs through the same `completeFlow`
 that increments `flows_terminated`, so a missing start makes the standard in-flight panel
@@ -3148,7 +3155,7 @@ metrics: spans need cross-replica continuity, metrics don't).
 
 **Telemetry carries the token-free correlation id, never the flowKey.** `workflow.id` is
 `keys.CorrelationID(shard, flowID)` = `"{shard}-{flowID}"`, **not** the flowKey. The flowKey's third
-segment is a random token that is a *bearer write-capability* (`Resume`/`Cancel`/`Fork`/… gate only on
+segment is a random token that is a *bearer write-capability* (`Resume`/`Terminate`/`Fork`/… gate only on
 `flow_id`+`flow_token`), and a trace backend is typically readable far more broadly than the workflow
 data - so stamping the key onto every span would hand a write capability for every traced flow to every
 trace reader. The correlation id uniquely identifies the flow ({shard} disambiguates the per-shard
@@ -3218,7 +3225,7 @@ makes a disposable flow's **outcome observable** during its grace window.
 - **`FlowOptions.DeleteOnCompletion`** - the author declares a flow fire-and-forget (durable-execution jobs whose
   output and history are not needed). On success `completeFlow` stamps `delete_after_ms = deletionGrace` (hardcoded
   **1 min**; a per-flow duration would be retention policy, out of scope) **in the same transaction** that marks the
-  flow `completed`. An *event* trigger on success, not a clock: `failed`/`cancelled`/`interrupted` flows are **never**
+  flow `completed`. An *event* trigger on success, not a clock: `failed`/`terminated`/`cancelled`/`interrupted` flows are **never**
   scheduled (a failed disposable job is exactly the one to keep as a `Fork` source). Root-only (`surgraph_flow_id=0`),
   not inherited by children (the reaper sweeps descendants via `root_flow_id`). During the grace window the flow stays
   `completed` and its **outcome is observable**: `Snapshot`/`Await`/`Run` return the completed `FlowOutcome` - this is
@@ -3231,12 +3238,13 @@ For operator-driven retention (both mark, do not delete inline):
 
 - **`Delete(flowKey)`** stamps `delete_after_ms = 1` (due immediately) on the root after the read-guards (404 on
   unknown key, 400 on a subgraph-child key, 409 on a `running` flow). An `interrupted` flow is terminalized in the
-  same UPDATE (`status = CASE WHEN 'interrupted' THEN 'cancelled' ELSE status END`) - deleting a pending approval
-  *is* cancelling it. Already-scheduled (`delete_after_ms > 0`) is idempotent-success. The reaper sweeps the subtree.
+  same UPDATE (`status = CASE WHEN 'interrupted' THEN 'terminated' ELSE status END`) - a forceful operator action,
+  the same status `Terminate` itself produces - deleting a pending approval *is* terminating it. Already-scheduled
+  (`delete_after_ms > 0`) is idempotent-success. The reaper sweeps the subtree.
 - **`Purge(Query)`** marks all matching roots with one set-based UPDATE per shard: it `SELECT DISTINCT`s candidate
   roots (`f.surgraph_flow_id=0 AND f.status<>'running' AND f.delete_after_ms=0`, capped at `purgeCap` **4096**, ids
   embedded as integer literals to dodge the per-driver bind-param ceiling), then
-  `UPDATE ... SET delete_after_ms=1, status=CASE WHEN 'interrupted' THEN 'cancelled' ELSE status END WHERE flow_id
+  `UPDATE ... SET delete_after_ms=1, status=CASE WHEN 'interrupted' THEN 'terminated' ELSE status END WHERE flow_id
   IN (ids) AND status<>'running' AND delete_after_ms=0`. Returns the count **marked** (reaped shortly after). Same
   `Query` shape as `List`; **rejects** `IncludeSubgraphs` with 400.
 
@@ -3253,8 +3261,8 @@ that came due while a replica was down is removed on the next tick (single-repli
 The former `deleteFlow` returned 409 if *any* subgraph descendant was `running`; the deferred path stamps only the
 root (whose own status is 409-guarded, so a non-terminal root is never stamped) and the reaper deletes the whole
 `root_flow_id` tree regardless of descendant status. The only running descendant a terminal-rooted tree can hold is
-the **orphaned-child residue** (the Cancel-vs-spawn race: a live child whose parent already terminalized - see
-`recoverOrphanedSubgraphChildren`), a bug-state row the wedge sweep would cancel anyway. Deleting it is safe: a
+the **orphaned-child residue** (the Terminate-vs-spawn race: a live child whose parent already terminalized - see
+`recoverOrphanedSubgraphChildren`), a bug-state row the wedge sweep would terminate anyway. Deleting it is safe: a
 worker mid-dispatch on the orphan no-ops via the lease fence (claim/write matches zero rows once the tree is gone),
 so no strand and no corruption. Whichever of the reaper and the wedge sweep reaches the orphan first wins. The
 reaper therefore does **not** reguard on descendant status. Backed by a
@@ -3267,28 +3275,28 @@ engine-package tests force a reap via `reapDueFlows`; fixtures verify the observ
 alone does not serialize against `Resume`. The invariant that keeps the old strand bug closed is
 **`delete_after_ms > 0 ⟹ terminal status`**, and the reaper reaps only terminal-rooted trees: DeleteOnCompletion
 stamps a `completed` root (immutable); `Delete`/`Purge` of a terminal flow stamp an immutable row; `Delete`/`Purge`
-of an `interrupted` flow flip it to `cancelled` in the same UPDATE, mutually exclusive with `Resume`'s
+of an `interrupted` flow flip it to `terminated` in the same UPDATE, mutually exclusive with `Resume`'s
 **root-flow gate** (row lock; exactly one wins, loser 409s). So a live `delete_after_ms` never coexists
 with a resumable flow, and no steps are ever deleted where a `Resume` could interleave.
 
 The mutual exclusion is not automatic - `resume`'s step writes (leaf `→pending`, ancestor re-park) are
-*unconditional* on `WHERE status='interrupted'` at the **step** level, and `Delete`/`Cancel` terminalize the
+*unconditional* on `WHERE status='interrupted'` at the **step** level, and `Delete`/`Terminate` terminalize the
 **flow** row without touching steps, so those step writes still match after a `Delete` won. Left ungated,
 `resume` would re-park + reset the leaf, match 0 rows on its `→running` flow update (the flow is now
-`cancelled`), and still return success - a resume that did not take effect reported as if it had, leaving a
-transient cancelled-flow-with-non-terminal-steps until the reaper mops it. So `resume`'s transaction carries a
+`terminated`), and still return success - a resume that did not take effect reported as if it had, leaving a
+transient terminated-flow-with-non-terminal-steps until the reaper mops it. So `resume`'s transaction carries a
 dedicated **gate write** on the root flow (`UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=<root> AND
-status='interrupted'`) after its step writes: a zero-row match means `Delete`/`Cancel` terminalized the root
+status='interrupted'`) after its step writes: a zero-row match means `Delete`/`Terminate` terminalized the root
 first, so the whole transaction rolls back (undoing the step writes) and `resume` returns 409. `touch` flips
 unconditionally, so `RowsAffected` reflects the status match on every driver (MySQL included), and the write is
-placed *after* the step writes to preserve `resume`'s steps-first lock order (shared with `Cancel`). This gate is
+placed *after* the step writes to preserve `resume`'s steps-first lock order (shared with `Terminate`). This gate is
 distinct from the `→running` chain-flow update, which legitimately matches 0 rows when a *sibling* interrupt
 still holds the flow (fan-out resume-one-at-a-time), so it cannot serve as the race gate.
 
 **Reads/derivations of a `delete_after_ms > 0` flow.** `Snapshot`/`Await` serve the outcome (the observability win);
 `List` and `History` exclude it; `Continue` **skips** deleting turns (its latest-turn query adds `delete_after_ms=0`,
 so it builds on the latest *undeleted* turn - the copy is safe even if the source is later reaped); `Fork` **409s**
-(it names a specific doomed flow, unlike `Continue`'s search); `Cancel`/`Resume` 409 (terminal); `Delete` is
+(it names a specific doomed flow, unlike `Continue`'s search); `Terminate`/`Resume` 409 (terminal); `Delete` is
 idempotent-success.
 
 Both share filter clauses with `List`. The `Query.TaskName` filter joins `dwarf_steps` and matches the current
@@ -3386,7 +3394,7 @@ The trap for anyone re-deriving this: raw `database/sql` behaves differently, an
 broken. On MySQL and SQLite a failed statement does *not* poison a plain `sql.Tx` - the commit succeeds with that write
 silently missing (measured). It is `sequel.Tx`, not the driver, that closes the hole. Any analysis that reasons about
 driver semantics without accounting for the `autoErr` latch will "discover" a partial-commit bug that does not exist -
-in `Delete`/`Cancel`, in the `cohort_arrivals` bump, in the resume leaf reset, in the reaper's deletes.
+in `Delete`/`Terminate`, in the `cohort_arrivals` bump, in the resume leaf reset, in the reaper's deletes.
 
 What is **not** delegated to the latch, and is still checked explicitly at each site: **`RowsAffected()==0`** - a
 zero-row match is a *semantic* outcome (a lost CAS, a terminal-status guard, the resume race gate), not an error, and
@@ -3405,11 +3413,11 @@ ordering was wrong:
   SQLite SHARED-upgrade deadlock and the `completed`-step-strands-`running` orphan failure mode it prevents (the
   terminating step is marked `completed` in a standalone UPDATE *before* the disposition tx, so the flow row must
   be locked first for the disposition to be recoverable). Do not reorder these to read-first.
-- **Steps-first.** The lifecycle mutations update `dwarf_steps` before `dwarf_flows`: `Resume`, `Cancel`,
+- **Steps-first.** The lifecycle mutations update `dwarf_steps` before `dwarf_flows`: `Resume`, `Terminate`,
   `failStep`, `handleInterrupt`, and `Delete`/`Purge` (the deletes run steps-before-flows, ascending id). `handleInterrupt` belongs here despite advancing the flow (running→interrupted): interrupt is
   **non-terminating** and marks no step `completed` in a prior standalone UPDATE, so it carries **no** orphan-strand
   obligation - its only write-first requirement is that the *first* statement be a write (the `UPDATE dwarf_steps`
-  satisfies it, keeping the SQLite deadlock closed). It is deliberately steps-first to match `Resume`/`Cancel`,
+  satisfies it, keeping the SQLite deadlock closed). It is deliberately steps-first to match `Resume`/`Terminate`,
   which walk the *same* surgraph chain, so the two never lock that chain's flow+step rows in opposite order (the
   former deadlock cycle, now eliminated).
 
@@ -3421,29 +3429,29 @@ transaction (so a crash mid-clone rolls back), and the leaf fork step is held `c
 **The two disciplines still cross in one place on row-locking engines, and that is tolerated, not eliminated.**
 On MySQL `REPEATABLE READ` and SQL Server without RCSI, a flow-row-first transaction and a steps-first one can
 acquire the same flow and step rows in opposite orders and form a genuine lock cycle - the surviving case is
-`Cancel` (steps + gap locks, then the flow row) vs the transition tx (flow row, then step insert/`successor_id`)
+`Terminate` (steps + gap locks, then the flow row) vs the transition tx (flow row, then step insert/`successor_id`)
 on one flow. It is **recoverable**: both paths run under `db.Transact`, whose lock-contention retry rolls the
 loser back and re-runs the closure, so the cycle degrades to a transient rollback visible only on retry
 exhaustion - and the transition side is further backstopped by the `processStep` lock-contention defer (rewinds
 the leased step and re-polls) and, last-resort, lease recovery. The recommended `READ COMMITTED` (MySQL) / `RCSI`
 (SQL Server) settings drop the gap locks and remove it outright. This last cross is *not* cheaply reconcilable:
 forcing the flow-terminating transactions steps-first would reintroduce the SQLite deadlock and the orphan-strand,
-and forcing `Cancel` flow-first buys nothing on SQLite (it serializes writes, so its only exposed deadlock is the
-read-first-upgrade one the write-first rule already closes) while giving `Cancel` a wider flow-row lock hold.
+and forcing `Terminate` flow-first buys nothing on SQLite (it serializes writes, so its only exposed deadlock is the
+read-first-upgrade one the write-first rule already closes) while giving `Terminate` a wider flow-row lock hold.
 
 The former `handleInterrupt` (flow-first) vs `Resume` (steps-first) cross on a shared interrupt chain - the more
 dangerous of the two, because it locked *two* overlapping resources (chain flow rows **and** chain step rows) in
 opposite order - was **eliminated** by making `handleInterrupt` steps-first (above): with `handleInterrupt`,
-`Resume`, and `Cancel` all acquiring that chain's steps before its flows, none can cycle against another. The
+`Resume`, and `Terminate` all acquiring that chain's steps before its flows, none can cycle against another. The
 move is safe precisely because interrupt is non-terminating (no orphan-strand obligation), and `handleInterrupt`
 still shares only the *single* flow row with the flow-first cluster (`advanceFlow`/`completeFlow` never lock a
 sibling's step row), which cannot form a cycle - the same reason steps-first `Resume` already coexisted with them.
 
 Orthogonal to that tolerated cross (the deadlock stays retry-recovered; the lock order is **unchanged** - the
-transition tx still takes the flow row write-first), the transition must not *extend* a flow `Cancel` already
-terminalized. Whenever the race resolves in `Cancel`'s favor - or the transition simply re-runs after a
-contention rollback against a since-cancelled flow - its opening write-first `UPDATE dwarf_flows` is **guarded on
-non-terminal status** (`AND status NOT IN (completed, failed, cancelled)`) and bails on zero rows. Without the
+transition tx still takes the flow row write-first), the transition must not *extend* a flow `Terminate` already
+terminalized. Whenever the race resolves in `Terminate`'s favor - or the transition simply re-runs after a
+contention rollback against a since-terminated flow - its opening write-first `UPDATE dwarf_flows` is **guarded on
+non-terminal status** (`AND status NOT IN (completed, failed, terminated, cancelled)`) and bails on zero rows. Without the
 guard it would insert `pending` successors (and bump `cohort_arrivals` / write a fan-in step) into the terminal
 flow - orphan work reaped only later by the claim-time terminal-flow guard. The already-`completed` step is left
 as a harmless tail on the final flow. The guard passes `interrupted` (a sibling interrupt must not stop a
@@ -3462,7 +3470,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
 1. **`recoverExpiredLeases`** (`wedge.go`) - resets `running` steps whose lease expired to `pending`, one UPDATE
    per shard. It rings no doorbell: a reset step is due and `pending`, so its shard's next piston cycle selects it
    like any other. Runs on `recoveryLoop` with everything else here - there is no timer goroutine.
-2. **Terminal flow check** in `processStep` - after loading flow data, if the flow is `cancelled`/`failed`/
+2. **Terminal flow check** in `processStep` - after loading flow data, if the flow is `terminated`/`cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
 3. **Orphan flow detection** (`detectOrphanedFlows`, `wedge.go`) - logs an error for a `running` flow that is
@@ -3497,7 +3505,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    park can re-offer a step. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a
    false positive (the guard sits comfortably beyond normal subgraph-completion latency). Unlike orphan-flow detection
    this **does** auto-recover, because each recovery re-invokes a *normal, status-guarded* mechanism (the
-   `parkedSubgraph` revive CAS, or a subtree `Cancel` guarded by `status NOT IN (terminal)`) rather than duplicating
+   `parkedSubgraph` revive CAS, or a subtree `Terminate` guarded by `status NOT IN (terminal)`) rather than duplicating
    transition logic, so it is idempotent and harmless under a concurrent resolution, a false positive, or a peer
    replica sweeping the same shard. It runs **two mirror-image detectors** - a wedged caller (child gone) and an
    orphaned child (caller/parent gone):
@@ -3505,7 +3513,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      non-terminal child** (`surgraph_step_id = step_id`, status created/running/interrupted) is wedged - the child
      reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
      latest child (`flow_id DESC`): `completeSurgraphFlow` for a completed child, `deliverSubgraphError` for a
-     failed/cancelled/absent one. **The absent-child case (`childFlowID == 0`) is the one the whole sweep exists
+     failed/terminated/cancelled/absent one. **The absent-child case (`childFlowID == 0`) is the one the whole sweep exists
      for** - a worker that committed the park and died before inserting the child leaves a step no lease can
      recover (`parkedSubgraph` carries no lease) - and it must skip every child-directed write: aiming them at
      id `0` made `computeFinalState` SELECT `WHERE flow_id=0`, hit `sql.ErrNoRows`, and roll the recovery back on
@@ -3519,17 +3527,17 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      the `NOT EXISTS` + latest-child logic.)
    - **orphaned subgraph child** (`recoverOrphanedSubgraphChildren`) - the **mirror image** of the above: a
      non-terminal child flow (`created`/`running`/`interrupted`) whose *parent flow* is already terminal
-     (`completed`/`failed`/`cancelled`). Where the `parkedSubgraph` case is a live caller whose child vanished,
-     this is a live child whose caller/parent vanished. It is the residue of a `Cancel` that terminalized the
+     (`completed`/`failed`/`terminated`/`cancelled`). Where the `parkedSubgraph` case is a live caller whose child vanished,
+     this is a live child whose caller/parent vanished. It is the residue of a `Terminate` that terminalized the
      tree in the narrow window **after the caller step parked but before the child flow was inserted**
      (`execution.go`: the park UPDATE commits, then `createSubgraphFlow` runs), so the teardown - working from a
      scan taken before the child existed - missed it. (A fan-out sibling's `failStep` no longer produces this
      residue: a subgraph child now fails via cohort accounting after every branch settles, never eagerly while a
      sibling is live - see "Failure back to the parent".) The orphan has no path out on its
-     own: the terminal root 409s `Resume`/`Cancel`, the child's own key is read-only (400), and
+     own: the terminal root 409s `Resume`/`Terminate`, the child's own key is read-only (400), and
      `recoverWedgedSubgraphParks` is blind because the caller step is *terminal*, not `running`+`parkedSubgraph`.
-     The sweep cancels the orphan's whole subtree (`cancelOrphanedSubtree`, which now *shares* `Cancel`'s
-     transaction via `cancelSubtree` rather than cloning it - no surgraph up-walk is wanted or exists, since the
+     The sweep terminates the orphan's whole subtree (`terminateOrphanedSubtree`, which now *shares* `Terminate`'s
+     transaction via `terminateSubtree` rather than cloning it - no surgraph up-walk is wanted or exists, since the
      ancestor chain is already terminal; it differs only in taking a zero-row flow UPDATE as a benign no-op rather
      than a 409), sharing the parent's terminal fate. An **`interrupted`** parent is deliberately *excluded* (not terminal - a `Resume` of the root
      revives that branch and a sibling child under it is healthy); the `parkWedgeThreshold` age guard excludes the
@@ -3551,7 +3559,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
   the leaf fork step held `created` until the mapping completes, then enqueue. A pre-commit crash rolls back entirely
   (no partial clone); a post-commit crash before the doorbell is recovered by `recoverExpiredLeases`. The original flow is
   read-only throughout, so it is never at risk. Self-healing.
-- **Cancel / failStep** - one transaction over the whole surgraph chain. A pre-commit crash rolls back; a post-commit
+- **Terminate / failStep** - one transaction over the whole surgraph chain. A pre-commit crash rolls back; a post-commit
   crash leaves correct terminal state, `Await` callers discover it on the next poll. Self-healing.
 - **processStep - Interrupt** - one transaction. A pre-commit crash rolls back and re-execution produces the interrupt
   again (interrupt-producing tasks should be idempotent). Self-healing.
@@ -3706,7 +3714,7 @@ The join is package-local and unexported everywhere it appears (`engine`, `fixtu
 surface. The copies must agree on the separator; a drift makes a wait target a name nothing fires, so it times
 out and fails loudly rather than going quietly wrong.
 
-Two limits: only stops routed through `signalStop` have a rendezvous (completed/failed/cancelled/interrupted),
+Two limits: only stops routed through `signalStop` have a rendezvous (completed/failed/terminated/cancelled/interrupted),
 and because `Visits` is monotonic a **repeated** status (interrupt → resume → interrupt) is satisfied by the
 earlier occurrence, so wait on those with a `Waiter` armed around the specific trigger.
 

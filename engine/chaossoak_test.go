@@ -36,7 +36,7 @@ import (
 
 // TestChaosSoak mechanizes hunting for the lease-fence and Delete/Purge-vs-Resume bug class: it
 // runs a mixed workload of three graph shapes while a chaos goroutine fires random lifecycle operations
-// (Cancel/Resume/Snapshot/History/Fork/Delete/duplicate work doorbell) at random flows, then drives every
+// (Terminate/Resume/Snapshot/History/Fork/Delete/duplicate work doorbell) at random flows, then drives every
 // flow to terminal and asserts (a) nothing wedged - every Await returns - (b) the structural invariants
 // are clean, and (c) the dwarf_steps_unwedged "latent bug" alarm never fired. The RNG seed is logged so a
 // failure reproduces (DWARF_SOAK_SEED overrides it).
@@ -138,7 +138,7 @@ func TestChaosSoak(t *testing.T) {
 				if k != "" {
 					switch roll(8) {
 					case 0:
-						_ = eng.Cancel(ctx, k, "chaos")
+						_ = eng.Terminate(ctx, k, "chaos")
 					case 1:
 						_ = eng.Resume(ctx, k, map[string]any{"chaos": true})
 					case 2:
@@ -168,22 +168,22 @@ func TestChaosSoak(t *testing.T) {
 	close(stop)
 	chaosWG.Wait()
 
-	// Drive every known flow to terminal: Cancel terminalizes anything still running/interrupted (a Delete of
-	// an interrupted flow already flipped it to cancelled), then Await must return for each - a timeout is a
+	// Drive every known flow to terminal: Terminate terminalizes anything still running/interrupted (a Delete of
+	// an interrupted flow already flipped it to terminated), then Await must return for each - a timeout is a
 	// wedge and fails the test. Errors (404 on a genuinely-gone flow, 400 on a fork's subgraph step key that
 	// never became a root) are legitimate.
 	mu.Lock()
 	all := append([]string(nil), live...)
 	mu.Unlock()
 	for _, k := range all {
-		_ = eng.Cancel(ctx, k, "drain")
+		_ = eng.Terminate(ctx, k, "drain")
 	}
 	// A final List sweep catches any non-terminal root not in `live` (e.g. a subgraph child promoted nowhere).
 	for _, st := range []string{workflow.StatusRunning, workflow.StatusInterrupted} {
 		summaries, _, err := eng.List(ctx, workflow.Query{Status: st, Limit: 200})
 		if err == nil {
 			for _, s := range summaries {
-				_ = eng.Cancel(ctx, s.FlowKey, "drain")
+				_ = eng.Terminate(ctx, s.FlowKey, "drain")
 			}
 		}
 	}
@@ -316,7 +316,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 }
 
 // TestChaosSoak_Faults layers random test-only fault injection over the chaos soak: alongside the
-// random lifecycle operations (Cancel/Resume/Fork/Delete/doorbell) a fault goroutine continuously arms
+// random lifecycle operations (Terminate/Resume/Fork/Delete/doorbell) a fault goroutine continuously arms
 // random recovery faults - transition/completion-commit failures, lock contention, stale-lease zombie writes,
 // dropped wakes, a lost subgraph revive, a refiller scan error (and, under longsoak, a mid-tree reaper abort)
 // - scoped to random live task names. This exercises *recovery interacting with chaos*, the surface where the
@@ -326,7 +326,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 // terminal, the same asserts as the fault-free soak must hold - every Await returns (no permanent wedge), the
 // structural invariants are clean, and the always-on dwarf_steps_unwedged alarm reads zero. The alarm stays a
 // meaningful zero because the wedge sweep keeps its default 5m cadence/age-guard, so a fault that wedges a step
-// (e.g. subgraphReviveLost, leaseStaleWrite) is terminalized by the drain Cancel, never papered over by the
+// (e.g. subgraphReviveLost, leaseStaleWrite) is terminalized by the drain Terminate, never papered over by the
 // sweep within the window. Seed is logged (DWARF_SOAK_SEED overrides); DWARF_LONGSOAK=1 lengthens the window
 // and raises fault density.
 func TestChaosSoak_Faults(t *testing.T) {
@@ -477,7 +477,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 					opCtx, opCancel := context.WithTimeout(ctx, 15*time.Second)
 					switch rng.intn(8) {
 					case 0:
-						_ = eng.Cancel(opCtx, k, "chaos")
+						_ = eng.Terminate(opCtx, k, "chaos")
 					case 1:
 						_ = eng.Resume(opCtx, k, map[string]any{"chaos": true})
 					case 2:
@@ -537,14 +537,14 @@ func TestChaosSoak_Faults(t *testing.T) {
 	all := append([]string(nil), live...)
 	mu.Unlock()
 	for _, k := range all {
-		_ = eng.Cancel(ctx, k, "drain")
+		_ = eng.Terminate(ctx, k, "drain")
 	}
 	// A List sweep catches any non-terminal root not in `live`.
 	for _, st := range []string{workflow.StatusRunning, workflow.StatusInterrupted} {
 		summaries, _, err := eng.List(ctx, workflow.Query{Status: st, Limit: 200})
 		if err == nil {
 			for _, s := range summaries {
-				_ = eng.Cancel(ctx, s.FlowKey, "drain")
+				_ = eng.Terminate(ctx, s.FlowKey, "drain")
 			}
 		}
 	}
@@ -558,7 +558,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 	}
 
 	// The workload has quiesced: structural invariants clean and the wedge alarm silent (armed wedges were
-	// terminalized by the drain Cancel, not papered over by the still-5m-cadence sweep).
+	// terminalized by the drain Terminate, not papered over by the still-5m-cadence sweep).
 	enginetest.AssertInvariants(t, eng)
 	var rm metricdata.ResourceMetrics
 	if assert.NoError(reader.Collect(ctx, &rm)) {

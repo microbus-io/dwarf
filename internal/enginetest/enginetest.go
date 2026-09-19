@@ -74,7 +74,7 @@ func AssertInvariants(t *testing.T, e Engine) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	terminal := "('" + workflow.StatusCompleted + "', '" + workflow.StatusFailed + "', '" + workflow.StatusCancelled + "')"
+	terminal := "('" + workflow.StatusCompleted + "', '" + workflow.StatusFailed + "', '" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "')"
 	nonTerminal := "('" + workflow.StatusCreated + "', '" + workflow.StatusPending + "', '" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "')"
 
 	for shard := 1; shard <= e.DB().NumShards(); shard++ {

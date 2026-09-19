@@ -33,14 +33,14 @@ Create ──► running ──► completed
              │  ▲              \
     Interrupt│  │Resume         ► failed   (an unhandled task error)
              ▼  │
-        interrupted              ► cancelled (via Cancel)
+        interrupted              ► terminated (via Terminate)
 ```
 
 - **running** — `Create` makes a flow and immediately runs it; a task is being dispatched/executed.
 - **interrupted** — parked for external input (a task called `Interrupt`).
 - **completed** — finished; no transition matched.
 - **failed** — a task returned an error with no matching error handler.
-- **cancelled** — terminated by `Cancel`.
+- **terminated** — forcefully stopped by `Terminate`.
 
 A flow's key is a composite string of the form `{shard}-{flowID}-{token}`. You pass it to every operation.
 

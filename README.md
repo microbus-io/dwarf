@@ -155,7 +155,7 @@ Full guides live in [`docs/`](docs/), split by who they are written for — star
 - [Concepts](docs/concepts.md) — graph, task, flow, step, thread, reducer, lifecycle
 - [Building graphs](docs/graphs.md) — transitions, conditions, fan-out, error handling, reducers
 - [Writing tasks](docs/tasks.md) — the Flow carrier, state, control signals, baggage, error handling
-- [Driving flows](docs/flows.md) — create, run, inspect, resume, cancel, fork, continue, retain
+- [Driving flows](docs/flows.md) — create, run, inspect, resume, terminate, fork, continue, retain
 - [Detecting completion](docs/detecting-completion.md) — `Await` vs. orchestration, and how to deliver reliably
 - [Fan-out & subgraphs](docs/fan-out-and-subgraphs.md) — parallelism, dynamic `forEach`, calling sub-workflows
 - [Scheduling & reliability](docs/scheduling-and-reliability.md) — priority, fairness, retries, recovery

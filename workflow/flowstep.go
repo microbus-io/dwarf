@@ -61,7 +61,7 @@ type FlowStep struct {
 // default. True for running and any terminal status; false for created/pending.
 func (s FlowStep) HasStarted() bool {
 	switch s.Status {
-	case StatusRunning, StatusCompleted, StatusFailed, StatusCancelled, StatusInterrupted:
+	case StatusRunning, StatusCompleted, StatusFailed, StatusTerminated, StatusCancelled, StatusInterrupted:
 		return true
 	}
 	return false

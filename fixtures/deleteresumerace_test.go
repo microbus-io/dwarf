@@ -32,7 +32,7 @@ import (
 // TestDeleteResumeRace pins that the orphan state "a `running` flow with zero step rows" is
 // unreachable however a Delete or Purge races a Resume on an interrupted flow. Deferred deletion closes the
 // window by construction - Delete/Purge no longer delete steps inline (they mark `delete_after_ms` and flip
-// `interrupted -> cancelled` under the flow-row lock, mutually exclusive with Resume's `WHERE
+// `interrupted -> terminated` under the flow-row lock, mutually exclusive with Resume's `WHERE
 // status='interrupted'`), and the reaper only removes provably-terminal trees. So the invariant holds: every
 // `running`/`interrupted` flow has >= 1 step, and no `running` flow ever has zero steps.
 //
@@ -99,11 +99,11 @@ func TestDeleteResumeRace(t *testing.T) {
 	}
 
 	// assertResumeHonest pins the Resume-vs-Delete race: Resume must not falsely report success for a resume the racing
-	// Delete/Cancel preempted. The two operations serialize on the root-flow row (Resume's gate write and
-	// Delete's interrupted->cancelled flip both key on `WHERE status='interrupted'`), so exactly one wins. If
+	// Delete preempted. The two operations serialize on the root-flow row (Resume's gate write and
+	// Delete's interrupted->terminated flip both key on `WHERE status='interrupted'`), so exactly one wins. If
 	// Resume returned nil it genuinely took effect - the flow moved to `running` (and on from there), so a
-	// Delete that flipped it to `cancelled` must have 409'd, and the flow is never `cancelled` here. A false
-	// success (the pre-fix bug) would show up as a `cancelled` flow after a nil Resume.
+	// Delete that flipped it to `terminated` must have 409'd, and the flow is never `terminated` here. A false
+	// success (the pre-fix bug) would show up as a `terminated` flow after a nil Resume.
 	assertResumeHonest := func(t *testing.T, flowKey string, resumeErr error) {
 		if resumeErr != nil {
 			return // Resume reported a conflict/not-found - honest, nothing to prove
@@ -125,7 +125,7 @@ func TestDeleteResumeRace(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		assert.NotEqual(workflow.StatusCancelled, status)
+		assert.NotEqual(workflow.StatusTerminated, status)
 	}
 
 	// createInterrupted creates a flow and blocks until it rests `interrupted`.

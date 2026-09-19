@@ -21,7 +21,7 @@ schedule is what tells you whether to intervene or wait — and the answer is us
 | A replica joins or leaves | Every peer re-reads the shared registry and re-divides each database's connection budget | Registry read every 250ms; a dead replica stops counting after 40s |
 | A doorbell is missed between replicas | The owning replica's next selection cycle finds the work by scanning | Under a second at the derived cycle rate |
 | A flow marked for deletion | A background reaper removes the flow and its whole subgraph tree | Within ~1 minute |
-| A subgraph park that never released | A sweep re-drives the release, or cancels an orphaned child | Detected after 5 minutes, swept every 5 minutes |
+| A subgraph park that never released | A sweep re-drives the release, or terminates an orphaned child | Detected after 5 minutes, swept every 5 minutes |
 
 Two consequences worth internalising:
 

@@ -168,7 +168,7 @@ const (
 	FaultPeerBeatErr         = peers.FaultBeatErr    // a shard's peer-registry beat writes nothing: this replica stops proving its liveness THERE, while running on
 	FaultSlowPoolPush        = "slowPoolPush"        // recomputePools stalls between reading R and pushing the derived sizes
 	FaultDeliverFailureErr   = "deliverFailureErr"   // deliverFlowFailureToParent drops the parked-caller re-dispatch (lost delivery); unscoped, or scoped by the parked caller's task name for per-level control
-	FaultCancelCommit        = "cancelCommit"        // the Cancel transaction errors
+	FaultTerminateCommit     = "terminateCommit"     // the Terminate transaction errors
 	FaultResumeCommit        = "resumeCommit"        // the Resume transaction errors
 	FaultForkCommit          = "forkCommit"          // the Fork clone transaction errors
 )
@@ -210,7 +210,7 @@ const (
 	//
 	// The scoped form is meaningful only because signalStop runs POST-COMMIT: when it fires, the status is
 	// durable, so a test reading the row immediately after sees it - the exact guarantee a status poll spun for.
-	CheckpointFlowStopped = "flowStopped" // signalStop(), a flow just reached a stop (completed/failed/cancelled/interrupted)
+	CheckpointFlowStopped = "flowStopped" // signalStop(), a flow just reached a stop (completed/failed/terminated/cancelled/interrupted)
 
 	// Lifecycle rendezvous, fired BOTH unscoped and scoped by flow key when an Await has registered on the
 	// latch board and is about to block. It is the mirror of CheckpointFlowStopped: that one says a flow

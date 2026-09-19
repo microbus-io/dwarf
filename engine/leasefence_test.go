@@ -638,8 +638,8 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 
 // TestFailStep_TerminalStatusGuard pins that failStep's fenced write now carries a status guard
 // (status IN ('running','completed')), so it fails only a step a worker legitimately holds, never a terminal
-// one. cancelSubtree terminalizes a step to `cancelled` WITHOUT bumping lease_seq, so the dispatching worker's
-// generation still matches; without the status guard, failStep rewrote that cancelled step to `failed` -
+// one. terminateSubtree terminalizes a step to `terminated` WITHOUT bumping lease_seq, so the dispatching
+// worker's generation still matches; without the status guard, failStep rewrote that terminated step to `failed` -
 // violating step immutability, miscounting dwarf_steps_executed, and (the one that bites) seeding a phantom
 // branch failure that a later Fork re-derives from step status. The guard still admits the `completed` case
 // failOnPersistError relies on (fail an already-completed step whose transition tx could not be persisted).
@@ -675,20 +675,20 @@ func TestFailStep_TerminalStatusGuard(t *testing.T) {
 		return flowStatus, stepStatus
 	}
 
-	// A step a racing Cancel already terminalized (cancelled, same generation) must NOT be re-failed: the write
-	// matches zero rows, failStep reports fenced, and both the step and its flow stay cancelled.
-	t.Run("cancelled_step_is_not_refailed", func(t *testing.T) {
+	// A step a racing Terminate already terminalized (terminated, same generation) must NOT be re-failed: the
+	// write matches zero rows, failStep reports fenced, and both the step and its flow stay terminated.
+	t.Run("terminated_step_is_not_refailed", func(t *testing.T) {
 		assert := testarossa.For(t)
-		e, db := setup(t, workflow.StatusCancelled, workflow.StatusCancelled)
+		e, db := setup(t, workflow.StatusTerminated, workflow.StatusTerminated)
 		defer e.Shutdown(ctx)
 
 		fenced, err := e.failStep(ctx, 1, 1, 5, 1, "ftok", errors.New("boom"), "T")
 		assert.NoError(err)
-		assert.True(fenced, "a cancelled step under our generation must fence, not be rewritten to failed")
+		assert.True(fenced, "a terminated step under our generation must fence, not be rewritten to failed")
 
 		flowStatus, stepStatus := statuses(t, db)
-		assert.Equal(workflow.StatusCancelled, stepStatus, "the cancelled step must stay cancelled (immutable)")
-		assert.Equal(workflow.StatusCancelled, flowStatus, "the cancelled flow must stay cancelled")
+		assert.Equal(workflow.StatusTerminated, stepStatus, "the terminated step must stay terminated (immutable)")
+		assert.Equal(workflow.StatusTerminated, flowStatus, "the terminated flow must stay terminated")
 	})
 
 	// Control: failOnPersistError's escape hatch - a `completed` step whose transition could not be persisted is

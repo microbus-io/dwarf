@@ -88,7 +88,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 	assert.True(e.seams.WaitTimeout(ctx, CheckpointResumeBeforeFlowWrite, 10*time.Second), "Resume never reached the checkpoint")
 
 	// Resume is frozen before its flow-status gate write. Drive a Delete to completion: it flips the flow
-	// interrupted->cancelled and stamps delete_after_ms under the flow-row lock.
+	// interrupted->terminated and stamps delete_after_ms under the flow-row lock.
 	assert.NoError(e.Delete(ctx, fk))
 
 	// Release Resume: its transaction now runs, the gate write finds the flow no longer interrupted, and the
@@ -103,15 +103,15 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 		return
 	}
 
-	// The flow is cancelled (Delete won) with a live deletion stamp.
+	// The flow is terminated (Delete won) with a live deletion stamp.
 	var status string
 	var deleteAfterMs int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, delete_after_ms FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status, &deleteAfterMs))
-	assert.Equal(workflow.StatusCancelled, status)
+	assert.Equal(workflow.StatusTerminated, status)
 	assert.True(deleteAfterMs > 0)
 
 	// Resume's step writes rolled back: no step was flipped to `pending`, and the leaf is still `interrupted`
-	// (the transient cancelled-flow-with-non-terminal-steps state the reaper mops up - Resume added nothing to
+	// (the transient terminated-flow-with-non-terminal-steps state the reaper mops up - Resume added nothing to
 	// it). A pre-fix Resume would have left the leaf `pending` and returned nil.
 	var pending, interrupted int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusPending+"'", flowID).Scan(&pending))
@@ -131,7 +131,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 
 // TestReaperDeletesRunningDescendant pins the reaper's tree-delete: it removes the whole root_flow_id tree regardless of
 // descendant status. deleteFlow 409s only on a running *root*; a running subgraph *descendant* (the
-// Cancel-vs-spawn orphan residue) is deleted anyway. Here the descendant is forged into `running` under a
+// Terminate-vs-spawn orphan residue) is deleted anyway. Here the descendant is forged into `running` under a
 // terminal root, then the reaper removes it along with the root.
 func TestReaperDeletesRunningDescendant(t *testing.T) {
 	t.Parallel()
@@ -174,7 +174,7 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 	assert.Equal(2, shardFlowCount(t, e, shardNum)) // root + child
 
 	// Forge the orphan residue: flip the completed child to `running` (a live descendant under a terminal
-	// root, as the Cancel-vs-spawn race leaves it - here it inherits root_flow_id = rootID).
+	// root, as the Terminate-vs-spawn race leaves it - here it inherits root_flow_id = rootID).
 	res, err := db.ExecContext(ctx, "UPDATE dwarf_flows SET status='"+workflow.StatusRunning+"' WHERE root_flow_id=? AND surgraph_flow_id<>0", rootID)
 	assert.NoError(err)
 	if n, _ := res.RowsAffected(); assert.Equal(int64(1), n) {
@@ -197,11 +197,11 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 	assert.Equal(0, steps)
 }
 
-// TestCancelVsTransition_Deterministic pins the transition tx's write-first terminal-status guard: a Cancel
-// that terminalizes a flow after its step was marked completed but before the transition transaction runs
-// must make the transition a clean no-op - no successor step is inserted into the cancelled flow, and no
-// orphan results. The checkpoint makes the Cancel-wins ordering deterministic.
-func TestCancelVsTransition_Deterministic(t *testing.T) {
+// TestTerminateVsTransition_Deterministic pins the transition tx's write-first terminal-status guard: a
+// Terminate that terminalizes a flow after its step was marked completed but before the transition
+// transaction runs must make the transition a clean no-op - no successor step is inserted into the
+// terminated flow, and no orphan results. The checkpoint makes the Terminate-wins ordering deterministic.
+func TestTerminateVsTransition_Deterministic(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -229,12 +229,12 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 	assert.NoError(err)
 	assert.True(e.seams.WaitTimeout(ctx, CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint CheckpointBeforeTransitionTx")
 
-	// Cancel wins while A's transition is held: the flow goes cancelled under the flow-row lock.
-	assert.NoError(e.Cancel(ctx, fk, "test"))
+	// Terminate wins while A's transition is held: the flow goes terminated under the flow-row lock.
+	assert.NoError(e.Terminate(ctx, fk, "test"))
 
 	// Release A: its transition tx's guard (status NOT IN terminal) matches zero rows and inserts nothing.
 	e.seams.Resume(CheckpointBeforeTransitionTx)
-	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
@@ -242,16 +242,17 @@ func TestCancelVsTransition_Deterministic(t *testing.T) {
 	assert.NoError(err)
 	var bSteps int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='B'", flowID).Scan(&bSteps))
-	assert.Equal(0, bSteps)           // no successor inserted into the cancelled flow
+	assert.Equal(0, bSteps)           // no successor inserted into the terminated flow
 	assert.Equal(0, bRan)             // B never dispatched
 	enginetest.AssertInvariants(t, e) // no orphan
 }
 
-// TestCancelVsSubgraphSpawn_Deterministic pins the orphaned-child recovery: a Cancel that terminalizes the
-// tree in the window after the caller step parked but before the child flow was inserted leaves a live child
-// under a terminal parent - an orphan no lifecycle op reaches. The wedge sweep's recoverOrphanedSubgraphChildren
-// must cancel it. The checkpoint manufactures this residue deterministically (vs. the Cancel-vs-spawn timing race).
-func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
+// TestTerminateVsSubgraphSpawn_Deterministic pins the orphaned-child recovery: a Terminate that terminalizes
+// the tree in the window after the caller step parked but before the child flow was inserted leaves a live
+// child under a terminal parent - an orphan no lifecycle op reaches. The wedge sweep's
+// recoverOrphanedSubgraphChildren must terminate it. The checkpoint manufactures this residue
+// deterministically (vs. the Terminate-vs-spawn timing race).
+func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -295,10 +296,10 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 	assert.NoError(err)
 	assert.True(e.seams.WaitTimeout(ctx, CheckpointAfterCallerPark, 10*time.Second), "engine never reached checkpoint CheckpointAfterCallerPark")
 
-	// Cancel the tree while the child does not yet exist: teardown works from a scan taken before the child.
-	assert.NoError(e.Cancel(ctx, fk, "test"))
+	// Terminate the tree while the child does not yet exist: teardown works from a scan taken before the child.
+	assert.NoError(e.Terminate(ctx, fk, "test"))
 
-	// Release the caller: createSubgraphFlow now inserts the child under the already-cancelled parent - orphan.
+	// Release the caller: createSubgraphFlow now inserts the child under the already-terminated parent - orphan.
 	e.seams.Resume(CheckpointAfterCallerPark)
 
 	shardNum, parentFlowID, _, err := keys.ParseFlowKey(fk)
@@ -306,7 +307,7 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 	db, err := e.db.Shard(shardNum)
 	assert.NoError(err)
 
-	// Wait for the orphaned child flow to be inserted (surgraph_flow_id -> the cancelled parent).
+	// Wait for the orphaned child flow to be inserted (surgraph_flow_id -> the terminated parent).
 	var childFlowID int
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -320,27 +321,27 @@ func TestCancelVsSubgraphSpawn_Deterministic(t *testing.T) {
 		return
 	}
 
-	// The sweep (minAge 0, bypassing the steady-state age guard) must cancel the orphaned child's subtree.
+	// The sweep (minAge 0, bypassing the steady-state age guard) must terminate the orphaned child's subtree.
 	e.recoverOrphanedSubgraphChildren(ctx, db, shardNum, 0)
 
 	var childStatus string
 	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", childFlowID).Scan(&childStatus)
-		if childStatus == workflow.StatusCancelled {
+		if childStatus == workflow.StatusTerminated {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	assert.Equal(workflow.StatusCancelled, childStatus) // orphan shares the parent's terminal fate
+	assert.Equal(workflow.StatusTerminated, childStatus) // orphan shares the parent's terminal fate
 	enginetest.AssertInvariants(t, e)
 }
 
-// TestRetryRewindVsCancel_Deterministic pins the flow.Retry rewind's status='running' guard: a Cancel that
-// terminalizes the running step before the rewind must stop the rewind from reviving the cancelled (immutable)
-// step to pending and from reaping the cancelled tree's children. The checkpoint makes the Cancel-wins ordering
-// deterministic.
-func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
+// TestRetryRewindVsTerminate_Deterministic pins the flow.Retry rewind's status='running' guard: a Terminate
+// that terminalizes the running step before the rewind must stop the rewind from reviving the terminated
+// (immutable) step to pending and from reaping the terminated tree's children. The checkpoint makes the
+// Terminate-wins ordering deterministic.
+func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -369,12 +370,12 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 	assert.NoError(err)
 	assert.True(e.seams.WaitTimeout(ctx, CheckpointBeforeRetryRewind, 10*time.Second), "engine never reached checkpoint CheckpointBeforeRetryRewind")
 
-	// Cancel wins: A's running step is flipped cancelled under the cancel transaction.
-	assert.NoError(e.Cancel(ctx, fk, "test"))
+	// Terminate wins: A's running step is flipped terminated under the terminate transaction.
+	assert.NoError(e.Terminate(ctx, fk, "test"))
 
-	// Release A: the rewind's status='running' guard matches zero rows, so the cancelled step is not revived.
+	// Release A: the rewind's status='running' guard matches zero rows, so the terminated step is not revived.
 	e.seams.Resume(CheckpointBeforeRetryRewind)
-	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
@@ -383,8 +384,8 @@ func TestRetryRewindVsCancel_Deterministic(t *testing.T) {
 	var stepStatus string
 	var attempt int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, attempt FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&stepStatus, &attempt))
-	assert.Equal(workflow.StatusCancelled, stepStatus) // not revived to pending
-	assert.Equal(0, attempt)                           // rewind did not bump the attempt
-	assert.Equal(1, aRuns)                             // no re-dispatch
+	assert.Equal(workflow.StatusTerminated, stepStatus) // not revived to pending
+	assert.Equal(0, attempt)                            // rewind did not bump the attempt
+	assert.Equal(1, aRuns)                              // no re-dispatch
 	enginetest.AssertInvariants(t, e)
 }

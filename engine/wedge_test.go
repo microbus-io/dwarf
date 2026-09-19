@@ -253,13 +253,13 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 		"the failure names the missing subgraph (got %q)", out.Error)
 }
 
-// TestWedgeSweep_OrphanedSubgraphChildCancelled forges the zombie a Cancel racing a subgraph spawn leaves - a
-// non-terminal subgraph child whose parent tree was cancelled in the window after the caller step parked but
+// TestWedgeSweep_OrphanedSubgraphChildTerminated forges the zombie a Terminate racing a subgraph spawn leaves -
+// a non-terminal subgraph child whose parent tree was terminated in the window after the caller step parked but
 // before the child was inserted, so the teardown missed it. The child rests interrupted with no path out
 // (root-key ops 409 on the terminal root, the child's own key is read-only, and recoverWedgedSubgraphParks is
-// blind because the caller step is cancelled, not running+parked). recoverOrphanedSubgraphChildren must cancel
-// it, while leaving a healthy subgraph child (running under a still-running parent) untouched.
-func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
+// blind because the caller step is terminated, not running+parked). recoverOrphanedSubgraphChildren must
+// terminate it, while leaving a healthy subgraph child (running under a still-running parent) untouched.
+func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	assert := testarossa.For(t)
@@ -314,8 +314,8 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 	defer close(release)
 
-	// Orphan: create, await the interrupt, then forge a Cancel that raced the spawn - the parent tree is
-	// cancelled but the child (which the racing scan missed) is left interrupted.
+	// Orphan: create, await the interrupt, then forge a Terminate that raced the spawn - the parent tree is
+	// terminated but the child (which the racing scan missed) is left interrupted.
 	parentKey, err := e.Create(ctx, "orphanchild.verify:0/parent", nil, nil)
 	if !assert.NoError(err) {
 		return
@@ -340,11 +340,11 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 		return
 	}
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET status=?, cancel_reason=? WHERE flow_id=?",
-		workflow.StatusCancelled, "forged", parentFlowID)
+		workflow.StatusTerminated, "forged", parentFlowID)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status=?, parked=? WHERE flow_id=? AND status IN (?, ?)",
-		workflow.StatusCancelled, parkedNone, parentFlowID, workflow.StatusInterrupted, workflow.StatusRunning)
+		workflow.StatusTerminated, parkedNone, parentFlowID, workflow.StatusInterrupted, workflow.StatusRunning)
 	assert.NoError(err)
 
 	// Healthy control: a subgraph child running under a still-running parent.
@@ -374,18 +374,18 @@ func TestWedgeSweep_OrphanedSubgraphChildCancelled(t *testing.T) {
 	// Recover (minAge=0 bypasses the age gate).
 	e.recoverOrphanedSubgraphChildren(ctx, db, shard, 0)
 
-	// The orphaned child is cancelled with the recovery reason, and its interrupted step is cancelled too.
+	// The orphaned child is terminated with the recovery reason, and its interrupted step is terminated too.
 	var childStatus, childReason string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, cancel_reason FROM dwarf_flows WHERE flow_id=?", childFlowID).
 		Scan(&childStatus, &childReason))
-	assert.Equal(workflow.StatusCancelled, childStatus)
+	assert.Equal(workflow.StatusTerminated, childStatus)
 	assert.Equal("parent flow terminated (orphan recovery)", strings.TrimSpace(childReason))
 	var liveChildSteps int
 	assert.NoError(db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status IN (?, ?, ?, ?)",
 		childFlowID, workflow.StatusCreated, workflow.StatusPending, workflow.StatusInterrupted, workflow.StatusRunning,
 	).Scan(&liveChildSteps))
-	assert.Equal(0, liveChildSteps, "orphaned child's steps should all be cancelled")
+	assert.Equal(0, liveChildSteps, "orphaned child's steps should all be terminated")
 
 	// The healthy child (parent still running) is untouched.
 	var healthyChildStatus string

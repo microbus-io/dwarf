@@ -65,14 +65,14 @@ limitations under the License.
 // # Operations
 //
 // Create makes a flow and runs it; Await blocks until it stops; Run is Create+Await in one
-// call. Snapshot/History/Step/List inspect; Resume continues a paused flow; Cancel/Continue
+// call. Snapshot/History/Step/List inspect; Resume continues a paused flow; Terminate/Continue
 // manage lifecycle; Fork clones a terminal flow from a chosen step into a new flow for
 // non-destructive recovery; Delete/Purge retain. See the repository's docs/ directory for guides.
 //
 // # Security model
 //
 // Flow and step keys ("{shard}-{id}-{token}") are unguessable bearer capabilities, not authorization.
-// Holding a flow key is by itself sufficient to act on that one flow — Resume, Cancel, Fork, Continue,
+// Holding a flow key is by itself sufficient to act on that one flow — Resume, Terminate, Fork, Continue,
 // Delete, and every introspection call — with no further check: the sole gate is the key (the numeric id
 // plus its random flow_token). The engine performs no authentication, authorization, or rate limiting and
 // has no notion of caller identity; its only vantage is the flow reference and the task URL, so ownership

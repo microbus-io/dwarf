@@ -20,7 +20,7 @@ root_flow_id-backed tree walks end to end. An interrupt raised in the deepest le
 propagates up the whole chain (surgraphChain) so the caller awaiting the root sees
 interrupted; Resume on the root descends back down (interruptedSubgraphChain +
 surgraphChain) to the leaf and the chain runs to completion, with state threaded
-correctly through every level. A second case cancels a deeply-interrupted tree from
+correctly through every level. A second case terminates a deeply-interrupted tree from
 the root (surgraphChain + the membership down-walk allSubgraphFlows). These are the
 operations whose per-level recursion was collapsed to single tree scans; the test
 pins that the collapse is behavior-preserving at depth.
@@ -119,7 +119,7 @@ func TestDeepsubgraphflow(t *testing.T) {
 		assert.Equal("leaf(ok)<3><2><1><0>", stateVal(outcome.State, "v"))
 	})
 
-	t.Run("cancel_deeply_interrupted_tree_from_root", func(t *testing.T) {
+	t.Run("terminate_deeply_interrupted_tree_from_root", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		flowKey, err := eng.Create(ctx, "deepnest.verify:0/g0", nil, nil)
@@ -132,15 +132,15 @@ func TestDeepsubgraphflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
 
-		// Cancel from the root tears down the whole interrupted tree (surgraphChain + allSubgraphFlows).
-		if !assert.NoError(eng.Cancel(ctx, flowKey, "stop")) {
+		// Terminate from the root tears down the whole interrupted tree (surgraphChain + allSubgraphFlows).
+		if !assert.NoError(eng.Terminate(ctx, flowKey, "stop")) {
 			return
 		}
 		outcome, err = eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
-		assert.Equal(workflow.StatusCancelled, outcome.Status)
-		assert.Equal("stop", outcome.CancelReason)
+		assert.Equal(workflow.StatusTerminated, outcome.Status)
+		assert.Equal("stop", outcome.TerminateReason)
 	})
 }

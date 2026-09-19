@@ -15,9 +15,9 @@ limitations under the License.
 */
 
 /*
-Cancel works on a created, running, OR interrupted flow. Existing fixtures cancel
-running/created flows; this covers cancelling a flow parked at an interrupt, and
-asserts the cancel reason surfaces on the outcome and a subsequent Resume is
+Terminate works on a created, running, OR interrupted flow. Existing fixtures terminate
+running/created flows; this covers terminating a flow parked at an interrupt, and
+asserts the terminate reason surfaces on the outcome and a subsequent Resume is
 rejected (the flow is terminal).
 */
 package fixtures
@@ -64,7 +64,7 @@ func TestCancelinterruptedflow(t *testing.T) {
 		return nil
 	})
 
-	t.Run("cancel_an_interrupted_flow", func(t *testing.T) {
+	t.Run("terminate_an_interrupted_flow", func(t *testing.T) {
 		assert := testarossa.For(t)
 
 		flowKey, err := eng.Create(ctx, "cancelinterruptedflow.verify:428/flow", nil, nil)
@@ -78,21 +78,21 @@ func TestCancelinterruptedflow(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusInterrupted, outcome.Status)
 
-		// Cancel the parked flow with a reason.
-		if !assert.NoError(eng.Cancel(ctx, flowKey, "no longer needed")) {
+		// Terminate the parked flow with a reason.
+		if !assert.NoError(eng.Terminate(ctx, flowKey, "no longer needed")) {
 			return
 		}
 		outcome, err = eng.Await(ctx, flowKey)
 		if !assert.NoError(err) {
 			return
 		}
-		assert.Equal(workflow.StatusCancelled, outcome.Status)
-		assert.Equal("no longer needed", outcome.CancelReason)
+		assert.Equal(workflow.StatusTerminated, outcome.Status)
+		assert.Equal("no longer needed", outcome.TerminateReason)
 		// The downstream task never ran.
 		_, reachedB := stateVal(outcome.State, "result"), outcome.State.Has("result")
 		assert.False(reachedB)
 
-		// Resuming a cancelled flow is rejected — it is terminal.
+		// Resuming a terminated flow is rejected — it is terminal.
 		err = eng.Resume(ctx, flowKey, map[string]any{"answer": "x"})
 		assert.Error(err)
 	})

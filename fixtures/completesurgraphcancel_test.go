@@ -28,26 +28,26 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestCompleteSurgraph_vs_CancelRoot_BothOrders is the subgraph-child variant of
-// TestCompleteFlowVsCancel_BothOrders (which raced a top-level completeFlow against Cancel). Here the flow
+// TestCompleteSurgraph_vs_TerminateRoot_BothOrders is the subgraph-child variant of
+// TestCompleteFlowVsTerminate_BothOrders (which raced a top-level completeFlow against Terminate). Here the flow
 // completing at engine.CheckpointBeforeCompleteFlowWrite is a subgraph CHILD, so its completion additionally drives
-// completeSurgraphFlow's revive of the parked caller - and the racing Cancel is a whole-tree teardown from the
+// completeSurgraphFlow's revive of the parked caller - and the racing Terminate is a whole-tree teardown from the
 // root. The window: the child's terminal step is already marked completed and completeFlow is about to flip the
-// child flow to completed (which would then revive the caller) when a Cancel(root) arrives.
+// child flow to completed (which would then revive the caller) when a Terminate(root) arrives.
 //
 //   - completion_first: the child completes, completeSurgraphFlow revives the (running+parkedSubgraph) caller to
-//     pending and it re-dispatches; the later Cancel then tears the now-running caller down cleanly.
-//   - cancel_first: Cancel terminalizes the whole tree (caller + still-running child) first; on release the
-//     child's completeFlow status-gate matches zero rows (child already cancelled), so it no-ops - it does NOT
-//     complete the child and never reaches completeSurgraphFlow, so the cancelled caller is not resurrected.
+//     pending and it re-dispatches; the later Terminate then tears the now-running caller down cleanly.
+//   - terminate_first: Terminate terminalizes the whole tree (caller + still-running child) first; on release the
+//     child's completeFlow status-gate matches zero rows (child already terminated), so it no-ops - it does NOT
+//     complete the child and never reaches completeSurgraphFlow, so the terminated caller is not resurrected.
 //
-// This composes the checkpoint seam with the revive guard TestReviveVsCancel_Deterministic pins, but across the
+// This composes the checkpoint seam with the revive guard TestReviveVsTerminate_Deterministic pins, but across the
 // child's completion boundary and in both orders.
-func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
+func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 	t.Parallel()
 	// newEngine builds Parent(Call -> subgraph Child(X)). On the caller's post-subgraph re-dispatch the Call task
 	// signals callResumed then blocks on callBlock, so a revived caller rests `running` (not racing to completion)
-	// while the test drives the Cancel. callBlock is closed at cleanup to release the parked worker goroutine.
+	// while the test drives the Terminate. callBlock is closed at cleanup to release the parked worker goroutine.
 	newEngine := func(t *testing.T, prefix string) (e *engine.Engine, url string, callResumed chan struct{}, callBlock chan struct{}) {
 		assert := testarossa.For(t)
 		callResumed = make(chan struct{}, 1)
@@ -71,7 +71,7 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 			if yield || err != nil {
 				return err
 			}
-			// Resumed after the child completed: signal, then hold the flow running so Cancel deterministically
+			// Resumed after the child completed: signal, then hold the flow running so Terminate deterministically
 			// sees a running caller.
 			select {
 			case callResumed <- struct{}{}:
@@ -128,15 +128,15 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		}
 		assert.Equal(workflow.StatusRunning, callStatus(t, e, fk)) // caller revived and running
 
-		// Cancel now tears the running caller (and its root flow) down cleanly.
-		assert.NoError(e.Cancel(ctx, fk, "test"))
-		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCancelled, 10*time.Second)
-		assert.Equal(workflow.StatusCancelled, enginetest.FlowStatus(t, e, fk))
-		assert.Equal(workflow.StatusCancelled, callStatus(t, e, fk))
+		// Terminate now tears the running caller (and its root flow) down cleanly.
+		assert.NoError(e.Terminate(ctx, fk, "test"))
+		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
+		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk))
+		assert.Equal(workflow.StatusTerminated, callStatus(t, e, fk))
 		enginetest.AssertInvariants(t, e)
 	})
 
-	t.Run("cancel_first", func(t *testing.T) {
+	t.Run("terminate_first", func(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
 		e, url, _, callBlock := newEngine(t, "csvc2")
@@ -151,23 +151,23 @@ func TestCompleteSurgraph_vs_CancelRoot_BothOrders(t *testing.T) {
 		assert.NoError(err)
 		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
 
-		// Cancel wins while the child's completion is held: the whole tree (root, its parked Call caller, and the
-		// still-running child) is terminalized under the cancel transaction.
-		assert.NoError(e.Cancel(ctx, fk, "test"))
-		assert.Equal(workflow.StatusCancelled, callStatus(t, e, fk)) // caller cancelled, not parked/revived
+		// Terminate wins while the child's completion is held: the whole tree (root, its parked Call caller, and the
+		// still-running child) is terminalized under the terminate transaction.
+		assert.NoError(e.Terminate(ctx, fk, "test"))
+		assert.Equal(workflow.StatusTerminated, callStatus(t, e, fk)) // caller terminated, not parked/revived
 
 		// Release completion: the child's status-gate (status NOT IN terminal) matches zero rows - a clean no-op.
-		// completeFlow returns completed=false, so completeSurgraphFlow never runs and the cancelled caller is not
+		// completeFlow returns completed=false, so completeSurgraphFlow never runs and the terminated caller is not
 		// resurrected to pending.
 		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
 
-		// Confirm nothing revived the caller: the flow stays cancelled, the caller stays cancelled, and no
+		// Confirm nothing revived the caller: the flow stays terminated, the caller stays terminated, and no
 		// orphan/wedge shape was created. Two pushing cycles close the window rather than a duration - a
 		// wrongly revived caller is a PENDING step, and a cycle is the dispatcher looking for exactly those,
 		// so a slow piston makes this wait longer rather than weaker.
 		enginetest.AwaitShardCycles(t, e, 1, 2)
-		assert.Equal(workflow.StatusCancelled, enginetest.FlowStatus(t, e, fk))
-		assert.Equal(workflow.StatusCancelled, callStatus(t, e, fk))
+		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk))
+		assert.Equal(workflow.StatusTerminated, callStatus(t, e, fk))
 		enginetest.AssertInvariants(t, e)
 	})
 }

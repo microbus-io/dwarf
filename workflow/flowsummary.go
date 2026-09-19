@@ -20,13 +20,15 @@ import "time"
 
 // FlowSummary is a summary of a flow for listing purposes.
 type FlowSummary struct {
-	FlowKey      string    `json:"flowKey,omitzero"`
-	ThreadKey    string    `json:"threadKey,omitzero"`
-	WorkflowURL  string    `json:"workflowURL,omitzero"`
-	WorkflowName string    `json:"workflowName,omitzero"`
-	Status       string    `json:"status,omitzero"`
-	TaskName     string    `json:"taskName,omitzero"`
-	Error        string    `json:"error,omitzero"`
+	FlowKey         string `json:"flowKey,omitzero"`
+	ThreadKey       string `json:"threadKey,omitzero"`
+	WorkflowURL     string `json:"workflowURL,omitzero"`
+	WorkflowName    string `json:"workflowName,omitzero"`
+	Status          string `json:"status,omitzero"`
+	TaskName        string `json:"taskName,omitzero"`
+	Error           string `json:"error,omitzero"`
+	TerminateReason string `json:"terminateReason,omitzero"`
+	// CancelReason is reserved for a future graceful-cancellation operation; not yet populated by any current operation.
 	CancelReason string    `json:"cancelReason,omitzero"`
 	CreatedAt    time.Time `json:"createdAt,omitzero"`
 	// Use StartedAt for duration metrics; CreatedAt for when the flow first appeared. StartedAt is

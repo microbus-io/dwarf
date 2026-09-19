@@ -97,7 +97,7 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	// would simply sit `pending` and invisible until its future lease lapsed on its own.
 	//
 	// A zero-row match (the query SUCCEEDED but matched nothing) therefore means we no longer own the step - a peer
-	// re-claimed it (lease_seq bumped), recovery reset it to `pending`, or a racing Cancel terminalized it. Abandon
+	// re-claimed it (lease_seq bumped), recovery reset it to `pending`, or a racing Terminate terminalized it. Abandon
 	// silently: retrying would be a zombie's write, and the fence would reject it anyway. An ERROR here means the
 	// database is unreachable, which is exactly the case the retry loop is for - so fall through and try, with
 	// whatever lease we still hold (the margin is 30s and the window is ~7s, so there is room unless the task
@@ -155,8 +155,8 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 
 // releaseLease hands a step back for immediate re-dispatch, fenced on our lease generation. It resets from
 // `running` (the task ran but its outcome never landed) or `completed` (the outcome landed but the transition
-// did not) - the two states a worker can be holding a step in. A terminal step (cancelled by a racing Cancel) is
-// deliberately not matched: it is immutable.
+// did not) - the two states a worker can be holding a step in. A terminal step (terminated by a racing
+// Terminate) is deliberately not matched: it is immutable.
 func (e *Engine) releaseLease(ctx context.Context, db *sequel.DB, stepID, leaseSeq int) {
 	_, err := db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC()"+

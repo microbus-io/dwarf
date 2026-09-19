@@ -159,9 +159,9 @@ func registerGate(proxy *TestProxy, prefix string) {
 	})
 }
 
-// TestFaultSite_CancelCommit pins that a Cancel whose transaction fails once rolls back atomically (the tree
-// is untouched, flow still interrupted) and a retry then cancels cleanly.
-func TestFaultSite_CancelCommit(t *testing.T) {
+// TestFaultSite_TerminateCommit pins that a Terminate whose transaction fails once rolls back atomically (the
+// tree is untouched, flow still interrupted) and a retry then terminates cleanly.
+func TestFaultSite_TerminateCommit(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -178,15 +178,15 @@ func TestFaultSite_CancelCommit(t *testing.T) {
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
-	// The Cancel transaction fails once: Cancel errors and nothing changed (still interrupted).
-	e.seams.Inject(FaultCancelCommit)
-	err = e.Cancel(ctx, fk, "boom")
+	// The Terminate transaction fails once: Terminate errors and nothing changed (still interrupted).
+	e.seams.Inject(FaultTerminateCommit)
+	err = e.Terminate(ctx, fk, "boom")
 	assert.Error(err)
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
 
-	// Retry (fault consumed): Cancel succeeds.
-	assert.NoError(e.Cancel(ctx, fk, "boom"))
-	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusCancelled+"'", flowID))
+	// Retry (fault consumed): Terminate succeeds.
+	assert.NoError(e.Terminate(ctx, fk, "boom"))
+	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusTerminated+"'", flowID))
 	assertFaultRecoveryClean(t, e, reader)
 }
 

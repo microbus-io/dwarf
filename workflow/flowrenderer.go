@@ -101,7 +101,7 @@ func (r *FlowRenderer) WithSecondaryColors(fill, text string) *FlowRenderer {
 	return r
 }
 
-// WithErrorColors overrides the pair used for failed and cancelled steps.
+// WithErrorColors overrides the pair used for failed, terminated, and cancelled steps.
 func (r *FlowRenderer) WithErrorColors(fill, text string) *FlowRenderer {
 	r.errorFill = fill
 	r.errorText = text
@@ -155,6 +155,7 @@ func (r *FlowRenderer) Render() string {
 	flowClassDefLine(&b, StatusRunning, r.primaryFill, r.primaryText, r.primaryFill, "stroke-dasharray:4 2")
 	flowClassDefLine(&b, StatusPending, r.secondaryFill, r.secondaryText, chromeStroke, "")
 	flowClassDefLine(&b, StatusFailed, r.errorFill, r.errorText, r.errorFill, "")
+	flowClassDefLine(&b, StatusTerminated, r.errorFill, r.errorText, r.errorFill, "")
 	flowClassDefLine(&b, StatusCancelled, r.errorFill, r.errorText, r.errorFill, "")
 	flowClassDefLine(&b, StatusInterrupted, r.attentionFill, r.attentionText, r.attentionFill, "")
 	flowClassDefLine(&b, "term", r.secondaryFill, r.secondaryText, chromeStroke, "")
@@ -436,11 +437,7 @@ func escapeMermaid(s string) string {
 }
 
 func isTerminalStepStatus(status string) bool {
-	switch status {
-	case StatusCompleted, StatusFailed, StatusCancelled:
-		return true
-	}
-	return false
+	return IsTerminalStatus(status)
 }
 
 func subgraphWallTime(history []FlowStep) (time.Duration, bool) {

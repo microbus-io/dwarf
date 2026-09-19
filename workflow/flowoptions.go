@@ -42,10 +42,11 @@ type FlowOptions struct {
 	// deadline that has already passed.
 	TimeBudget time.Duration `json:"timeBudget,omitzero"`
 	// DeleteOnCompletion marks the flow (and its subgraph subtree) for deletion once it completes
-	// successfully - for fire-and-forget jobs whose output is not retained. Failed and cancelled flows are
-	// kept. Deletion is deferred: the flow lingers for a short grace window during which its outcome stays
-	// observable (Await/Snapshot return the completed FlowOutcome), then a background reaper removes it and
-	// reads return "flow not found". During the window the flow is excluded from List and History 404s.
+	// successfully - for fire-and-forget jobs whose output is not retained. Failed, terminated, and
+	// cancelled flows are kept. Deletion is deferred: the flow lingers for a short grace window during
+	// which its outcome stays observable (Await/Snapshot return the completed FlowOutcome), then a
+	// background reaper removes it and reads return "flow not found". During the window the flow is
+	// excluded from List and History 404s.
 	DeleteOnCompletion bool `json:"deleteOnCompletion,omitzero"`
 	// Baggage is opaque, host-defined context (identity/claims, tenant, locale, ...) carried with the
 	// flow. The engine never interprets it: it is set once here, stored on the flow, inherited by
