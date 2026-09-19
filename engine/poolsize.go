@@ -527,10 +527,12 @@ func (e *Engine) recomputePools() {
 	dispatch := max(64, workersPerConnBudget*postSplitConns)
 	e.cache.Resize(min(dispatch, int(e.workers.Load())))
 	// The refill scan floor is measured against the cache's capacity, so it follows the same split -
-	// the same rule the dispatch count and worker ceiling obey just above.
-	e.recomputeRefillIntervals()
+	// the same rule the dispatch count and worker ceiling obey just above. Reuses the specs/rtts already
+	// locked-and-cloned above rather than paying for a second (and, below, a third) lock/clone pass over
+	// the same shardSpecs/shardRTTMs maps.
+	e.recomputeRefillIntervalsWith(specs, rtts)
 	e.logger.Info("Derived pools recomputed", "replicas", observed, "dispatch", dispatch)
-	e.recomputeWorkerCeiling(e.lifetimeCtx)
+	e.recomputeWorkerCeilingWith(e.lifetimeCtx, specs, rtts)
 }
 
 // recomputeWorkerCeiling re-derives the worker maximum from each shard's CURRENT pool and its probed
@@ -543,13 +545,22 @@ func (e *Engine) recomputePools() {
 // Shrinking only bounds FUTURE growth: workers already spawned keep running (they are cheap, and killing
 // a worker mid-step is not a thing the pool does). The ceiling is a bound on how far the pool may grow,
 // not a live target.
+//
+// Locks shardsLock and clones the shard facts itself; recomputePools has already done both by the time it
+// gets here, so it calls recomputeWorkerCeilingWith directly with its own clones rather than paying for a
+// second lock/clone pass over the same maps.
 func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
-	override := int(e.maxOpenConns.Load())
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)
 	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
+	e.recomputeWorkerCeilingWith(ctx, specs, rtts)
+}
 
+// recomputeWorkerCeilingWith is recomputeWorkerCeiling's core, taking the shard specs and RTTs as
+// already-read snapshots rather than re-acquiring shardsLock to fetch them.
+func (e *Engine) recomputeWorkerCeilingWith(ctx context.Context, specs map[int]ShardSpec, rtts map[int]float64) {
+	override := int(e.maxOpenConns.Load())
 	ceiling := math.MaxInt
 	for idx, rttMs := range rtts {
 		// Each shard's own count, since each shard's pool is divided by its own fleet - and the worst shard's

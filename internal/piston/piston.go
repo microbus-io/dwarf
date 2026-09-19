@@ -52,7 +52,6 @@ import (
 	"github.com/microbus-io/dwarf/internal/pipeline"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/internal/turnstile"
-	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
@@ -488,10 +487,7 @@ func (p *Piston) runTallier(ctx context.Context) {
 		}
 		if r.Err == nil {
 			// A scan completed and its tally is in the planner - see CheckpointTallyDone.
-			if seams := p.seams.Load(); seams.Enabled() { // Enabled gates the assembled name in production
-				seams.Checkpoint(ctx, CheckpointTallyDone)
-				seams.Checkpoint(ctx, seamsJoin(CheckpointTallyDone, strconv.Itoa(p.shard)))
-			}
+			p.fireCheckpoint(ctx, CheckpointTallyDone)
 		}
 	}
 }
@@ -528,11 +524,18 @@ func (p *Piston) runSupplier(ctx context.Context) {
 			// This shard's partition now reflects the plan - see CheckpointCycleDone. Gated on the push
 			// rather than on the error, so a visit cannot mean "looked and gave up": both hold-everything
 			// paths leave the partition alone and only one of them is an error.
-			if seams := p.seams.Load(); seams.Enabled() { // Enabled gates the assembled name in production
-				seams.Checkpoint(ctx, CheckpointCycleDone)
-				seams.Checkpoint(ctx, seamsJoin(CheckpointCycleDone, strconv.Itoa(p.shard)))
-			}
+			p.fireCheckpoint(ctx, CheckpointCycleDone)
 		}
+	}
+}
+
+// fireCheckpoint fires name both unscoped (fleet-wide) and shard-scoped, the shape every checkpoint this
+// package fires uses, so a caller can wait on either "any shard" or this shard specifically. A no-op when
+// seams are disabled, which the caller need not check itself.
+func (p *Piston) fireCheckpoint(ctx context.Context, name string) {
+	if seams := p.seams.Load(); seams.Enabled() { // Enabled gates the assembled name in production
+		seams.Checkpoint(ctx, name)
+		seams.Checkpoint(ctx, seamsJoin(name, strconv.Itoa(p.shard)))
 	}
 }
 
@@ -765,6 +768,20 @@ func residueTier(stepID, replicas, ordinal int) int {
 	return 2
 }
 
+// residueSort sorts list by its parallel, precomputed tiers - the decorate half of rankByResidue's
+// decorate-sort-undecorate, so a step's tier is computed once rather than twice per comparison.
+type residueSort struct {
+	list  []int
+	tiers []int
+}
+
+func (s *residueSort) Len() int { return len(s.list) }
+func (s *residueSort) Swap(i, j int) {
+	s.list[i], s.list[j] = s.list[j], s.list[i]
+	s.tiers[i], s.tiers[j] = s.tiers[j], s.tiers[i]
+}
+func (s *residueSort) Less(i, j int) bool { return s.tiers[i] < s.tiers[j] }
+
 // ScanBand implements pipeline.BandSource. It returns this shard's minimum due priority band and one
 // aggregate row per fairness key at that band.
 //
@@ -815,10 +832,10 @@ func (p *Piston) ScanBand(ctx context.Context, shard int) (band int, tallies []p
 			" fairness_weight AS weight,"+
 			" ROW_NUMBER() OVER (PARTITION BY fairness_key ORDER BY created_at, step_id) AS rn"+
 			" FROM dwarf_steps"+
-			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
+			" WHERE "+dueSteps+
 			part+
 			" AND priority=(SELECT MIN(priority) FROM dwarf_steps"+
-			" WHERE status='"+workflow.StatusPending+"' AND parked=0 AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC())"+
+			" WHERE "+dueSteps+")"+
 			") t WHERE rn<=? GROUP BY fairness_key",
 		args...,
 	)
@@ -911,10 +928,7 @@ func (p *Piston) FetchSteps(ctx context.Context, shard, band int, keys []string,
 	stolen := p.rankByResidue(out, perKey, replicas, ordinal)
 	if stolen > 0 {
 		p.inst.Load().stolen.Add(ctx, int64(stolen), metric.WithAttributes(p.shardAttr))
-		if seams := p.seams.Load(); seams.Enabled() {
-			seams.Checkpoint(ctx, CheckpointStole)
-			seams.Checkpoint(ctx, seamsJoin(CheckpointStole, strconv.Itoa(p.shard)))
-		}
+		p.fireCheckpoint(ctx, CheckpointStole)
 	}
 	return out, nil
 }
@@ -935,9 +949,14 @@ func (p *Piston) rankByResidue(out map[string][]int, perKey, replicas, ordinal i
 	stolen := 0
 	for key, list := range out {
 		if replicas > 1 {
-			sort.SliceStable(list, func(i, j int) bool {
-				return residueTier(list[i], replicas, ordinal) < residueTier(list[j], replicas, ordinal)
-			})
+			// Tier is computed once per element (decorate-sort-undecorate) rather than twice per
+			// comparison: sort.SliceStable's comparator would otherwise recompute residueTier on both
+			// operands every comparison, O(n log n) redundant evaluations instead of O(n).
+			tiers := make([]int, len(list))
+			for i, stepID := range list {
+				tiers[i] = residueTier(stepID, replicas, ordinal)
+			}
+			sort.Stable(&residueSort{list: list, tiers: tiers})
 		}
 		if len(list) > perKey {
 			list = list[:perKey]

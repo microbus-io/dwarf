@@ -983,9 +983,9 @@ func TestPiston_StealPredicateIsAlwaysRelaxed(t *testing.T) {
 	assert.Equal("", sql, "stealing must not resurrect a partition the pair disabled")
 }
 
-// TestPiston_FetchPrefersItsOwnClass pins the fill order, which is what replaced the gate: among steps the
-// grace ADMITTED, this replica's own class is ranked first, its designated neighbour's second, everyone
-// else's last - and the fetch keeps only the per-key cap off the top.
+// TestPiston_FetchPrefersItsOwnClass pins the fill order: among steps the grace ADMITTED, this replica's
+// own class is ranked first, its designated neighbour's second, everyone else's last - and the fetch keeps
+// only the per-key cap off the top.
 //
 // The over-fetch is what makes this possible and is not an optimisation. The query returns rows oldest
 // first, and the oldest admitted rows are precisely the stalled peer's, so fetching only perKey would come

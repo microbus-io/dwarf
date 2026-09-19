@@ -116,7 +116,24 @@ func deriveRefillInterval(bufferShare, virtualCPUs, poolConns, replicas, dispatc
 // from recomputePools - the same "every path that changes a pool must re-derive what depends on it" rule
 // the worker ceiling and the candidate cache already obey, since the period is measured against the
 // cache's capacity. Pushing is live: a piston reads its interval once per cycle rather than capturing it.
+//
+// Locks shardsLock and clones the shard facts itself; recomputePools has already done both by the time it
+// gets here, so it calls recomputeRefillIntervalsWith directly with its own clones rather than paying for a
+// second lock/clone pass over the same maps.
 func (e *Engine) recomputeRefillIntervals() {
+	e.shardsLock.Lock()
+	specs := make(map[int]ShardSpec, len(e.shardSpecs))
+	for idx, spec := range e.shardSpecs {
+		specs[idx] = spec
+	}
+	rtts := maps.Clone(e.shardRTTMs)
+	e.shardsLock.Unlock()
+	e.recomputeRefillIntervalsWith(specs, rtts)
+}
+
+// recomputeRefillIntervalsWith is recomputeRefillIntervals' core, taking the shard specs and RTTs as
+// already-read snapshots rather than re-acquiring shardsLock to fetch them.
+func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[int]float64) {
 	n := max(1, e.db.NumShards())
 	// max(1, ...) because a cache smaller than the shard count divides to zero, which reaches the degenerate
 	// guard and answers with the 1s cap - backwards for a tiny cache, which drains instantly and wants
@@ -132,13 +149,6 @@ func (e *Engine) recomputeRefillIntervals() {
 	dispatchers := max(1, share/2)
 	override := time.Duration(e.refillIntervalOverride.Load())
 	pinned := int(e.maxOpenConns.Load()) // >0 when SetMaxOpenConns pins every shard's pool
-	e.shardsLock.Lock()
-	specs := make(map[int]ShardSpec, len(e.shardSpecs))
-	for idx, spec := range e.shardSpecs {
-		specs[idx] = spec
-	}
-	rtts := maps.Clone(e.shardRTTMs)
-	e.shardsLock.Unlock()
 	for idx, p := range e.pistons {
 		if override > 0 {
 			// The gap is the fuse against a 100%-duty-cycle loop, and a bench sweep measuring below it is the
