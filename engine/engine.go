@@ -1147,6 +1147,22 @@ func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) e
 	return e.terminate(ctx, flowKey, reason)
 }
 
+// Cancel requests graceful cancellation of a flow, addressed by its root flow key. Every step in progress
+// when it is called - pending, running, parked on a subgraph, or interrupted - is covered: a step not yet
+// started is skipped, and a step already running finishes before the cancellation takes effect. A covered
+// step receives the cancellation as an error on its node's onError transition, where workflow.IsCancelled
+// reports true and the task's own changes are preserved; a step with no onError transition ends the flow as
+// failed. A subgraph caller runs once more when its child returns, so it sees the child's result before its
+// own cancellation is delivered. An interrupted step is cancelled when it is next resumed, and its resume
+// data is not acted on. Cancel returns once the marking is recorded, not when the flow stops; use Await for
+// that. Terminate is the unconditional, immediate alternative.
+func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) error {
+	if err := e.ensureStarted(); err != nil {
+		return errors.Trace(err)
+	}
+	return e.cancel(ctx, flowKey, reason)
+}
+
 // Fork clones a terminal flow's prefix up to the given step into a new, self-contained running flow and
 // re-executes from that step with optional stateOverrides applied to it. The original flow is never
 // modified. The fork inherits the original's scheduling and baggage (it does not take FlowOptions).

@@ -674,6 +674,76 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowToken, reason, FaultTerminateCommit, true))
 }
 
+// cancel marks every pending, running or interrupted step in the tree with cancelling=1. Each marked step
+// consumes its own mark at its next checkpoint - the claim (preempted without running) or the completion
+// write after a dispatch that was already under way - so Cancel itself touches nothing but these two writes.
+//
+// Parked subgraph callers are marked like any other running step. A caller's cancellation is its own, not
+// its child's to decide: when the child returns, the caller runs once more to see the child's result, and is
+// then redirected by the mark. Excluding parked callers would lose the cancellation outright whenever it lands
+// between the park and the child's insert, or between the child's completion and the caller's revive - the
+// caller is skipped and the child is either not yet there or already terminal, so nothing is marked at all.
+//
+// The reason is written BEFORE the mark: a step claimed between the two statements reads the reason off its
+// flow row, and the opposite order hands it an empty one. Idempotent rather than a 409 on a terminal flow - a
+// repeat call marks whatever is still in progress, and the reason write is guarded to non-terminal flows so
+// it can never rewrite a recorded outcome.
+func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
+	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	db, err := e.db.Shard(shardNum)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	ctx, doneTurn := e.dbTurn(ctx, shardNum)
+	defer doneTurn()
+
+	var surgraphFlowID int
+	err = db.QueryRowContext(ctx,
+		"SELECT surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+		flowID, flowToken,
+	).Scan(&surgraphFlowID)
+	if err == sql.ErrNoRows {
+		return errors.New("flow not found", http.StatusNotFound)
+	}
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if surgraphFlowID != 0 {
+		return errors.New("cannot cancel a subgraph child; use the root flow key", http.StatusBadRequest)
+	}
+
+	// Same tree-membership shape Terminate's descendant walk uses (root_flow_id scan, non-terminal nodes
+	// only) - a terminal descendant's steps are already all-terminal (step immutability), so it would
+	// contribute nothing to the mark below even if included; excluding it here is just one fewer flow_id
+	// in the IN-list.
+	descendantFlowIDs, _, _, err := e.allSubgraphFlows(ctx, shardNum, flowID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
+	flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
+
+	reason = strings.TrimSpace(reason)
+	reasonArgs := append([]any{reason}, allFlowIDs...)
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_flows SET cancel_reason=?, touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
+		reasonArgs...,
+	)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	_, err = db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET cancelling=1 WHERE flow_id IN ("+flowPlaceholders+")"+
+			" AND status IN ('"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
+		allFlowIDs...,
+	)
+	return errors.Trace(err)
+}
+
 // deleteFlow schedules a flow (and its subgraph subtree) for deletion by the reaper - it does NOT delete rows
 // inline. It stamps delete_after_ms=1 (due immediately) on the root; the reaper removes the whole tree on its
 // next pass. An interrupted flow is terminalized (interrupted -> terminated, a forceful operator action, same

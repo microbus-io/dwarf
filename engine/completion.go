@@ -689,6 +689,13 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// NUL, which Postgres rejects in `text` exactly as it does in `jsonb`) would kill the very write that is
 	// supposed to be the clean one, and failOnPersistError would misread that as an unreachable database.
 	errMsg := sanitizeErrorMessage(taskErr.Error())
+	// A cancellation settles the STEP as cancelled; the flow still resolves failed until the flow-level
+	// cancelled-vs-failed decision exists. Either value differs from the running/completed row it replaces,
+	// which is what keeps the RowsAffected fence below honest on MySQL.
+	stepStatus := workflow.StatusFailed
+	if workflow.IsCancelled(taskErr) {
+		stepStatus = workflow.StatusCancelled
+	}
 	failFlow := false
 	reDispatchParent := false
 	var finalStateJSON []byte
@@ -728,7 +735,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		// re-running.
 		res, uerr := tx.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, error=?, updated_at=NOW_UTC() WHERE step_id=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"') AND lease_seq=?",
-			workflow.StatusFailed, parkedNone, errMsg, stepID, leaseSeq,
+			stepStatus, parkedNone, errMsg, stepID, leaseSeq,
 		)
 		if uerr != nil {
 			return errors.Trace(uerr)
@@ -781,8 +788,8 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		// Lease re-granted to a peer; we wrote nothing. The peer owns this step and settles it.
 		return true, nil
 	}
-	// The step is now failed regardless of whether the whole flow fails - count it.
-	e.metricStepExecuted(ctx, taskName, workflow.StatusFailed, shardNum)
+	// The step is now failed (or cancelled) regardless of whether the whole flow fails - count it.
+	e.metricStepExecuted(ctx, taskName, stepStatus, shardNum)
 
 	if !failFlow {
 		return false, nil

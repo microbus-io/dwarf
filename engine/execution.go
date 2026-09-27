@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/cancelmarker"
 	"github.com/microbus-io/dwarf/internal/faninmap"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -163,6 +164,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var subgraphErrorStr string
 	var stepCreatedAt time.Time
 	var stateRefsJSON []byte
+	// stepCancelling is this step's own Cancel mark as of the claim.
+	var stepCancelling bool
 
 	switch db.DriverName() {
 	case "pgx", "sqlite":
@@ -170,9 +173,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()"+
-				" RETURNING step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq, fan_out_ordinal",
+				" RETURNING step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq, fan_out_ordinal, cancelling",
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -182,10 +185,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		err = db.QueryRowContext(ctx,
 			"UPDATE dwarf_steps SET status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), time_budget_ms + ?), lease_seq=lease_seq+1, engine_id=?, updated_at=NOW_UTC(),"+
 				" started_at=CASE WHEN attempt>0 OR subgraph_done=1 OR interrupt_done=1 THEN started_at ELSE NOW_UTC() END"+
-				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.state_refs, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq, INSERTED.fan_out_ordinal"+
+				" OUTPUT INSERTED.step_depth, INSERTED.task_name, INSERTED.step_token, INSERTED.state, INSERTED.changes, INSERTED.state_refs, INSERTED.attempt, INSERTED.lineage_id, INSERTED.flow_id, INSERTED.time_budget_ms, INSERTED.interrupt_done, INSERTED.resume_data, INSERTED.subgraph_done, INSERTED.subgraph_result, INSERTED.subgraph_error, INSERTED.created_at, INSERTED.lease_seq, INSERTED.fan_out_ordinal, INSERTED.cancelling"+
 				" WHERE step_id=? AND status='"+workflow.StatusPending+"' AND parked=? AND not_before<=NOW_UTC() AND lease_expires<=NOW_UTC()",
 			workflow.StatusRunning, leaseMarginMs, e.engineID, stepID, parkedNone,
-		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal)
+		).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling)
 		if err == sql.ErrNoRows {
 			n, err = 0, nil
 		} else if err == nil {
@@ -213,9 +216,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		n, _ = res.RowsAffected()
 		if n == 1 {
 			readErr := db.QueryRowContext(ctx,
-				"SELECT step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq, fan_out_ordinal FROM dwarf_steps WHERE step_id=?",
+				"SELECT step_depth, task_name, step_token, state, changes, state_refs, attempt, lineage_id, flow_id, time_budget_ms, interrupt_done, resume_data, subgraph_done, subgraph_result, subgraph_error, created_at, lease_seq, fan_out_ordinal, cancelling FROM dwarf_steps WHERE step_id=?",
 				stepID,
-			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal)
+			).Scan(&stepDepth, &taskName, &stepToken, &stateJSON, &priorChangesJSON, &stateRefsJSON, &attempt, &lineageID, &flowID, &timeBudgetMs, &interruptDone, &resumeDataJSON, &subgraphDone, &subgraphResultJSON, &subgraphErrorStr, &stepCreatedAt, &leaseSeq, &fanOutOrdinal, &stepCancelling)
 			if readErr != nil && readErr != sql.ErrNoRows {
 				err = readErr
 			}
@@ -253,11 +256,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var flowFairnessKey string
 	var flowFairnessWeight float64
 	var flowTimeBudgetMs int
+	var flowCancelReason string
 	flowPass := turnstile.WaitTurn(ctx)
 	err = db.QueryRowContext(ctx,
-		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms FROM dwarf_flows WHERE flow_id=?",
+		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms, cancel_reason FROM dwarf_flows WHERE flow_id=?",
 		flowID,
-	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs)
+	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs, &flowCancelReason)
 	flowPass.Return()
 	if err != nil {
 		return errors.Trace(err)
@@ -411,16 +415,26 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	heldBytes := int64(len(stateJSON) + len(priorChangesJSON) + refBytes)
 	e.inFlightStateBytes.Add(heldBytes)
 	e.inFlightStateSteps.Add(1)
-	// A panic in the in-process host is caught here so it flows through the normal error disposition
-	// rather than wedging this leased step until lease expiry.
-	execErr := errors.CatchPanic(func() error {
-		// FaultPanicExecuteTask panics inside the wrapper so it exercises the host-call panic isolation
-		// (caught here, routed as a normal task error), scoped to this task name.
-		if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultPanicExecuteTask, taskName)) {
-			panic("injected fault: " + FaultPanicExecuteTask + " " + taskName)
-		}
-		return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
-	})
+	// A step marked by Cancel before it started is preempted: the task is not run, and the cancellation
+	// takes the path a task error would. The one exemption is a subgraph caller resuming after its child
+	// returned - it runs once more so the child's result reaches its code, and its own mark is then applied
+	// at the completion write below. An interrupted step resumed after Cancel is NOT exempt: its resume
+	// data is new input arriving after the cancellation, and acting on it would keep a cancelled flow alive.
+	var execErr error
+	if stepCancelling && !subgraphDone {
+		execErr = cancelmarker.New(flowCancelReason)
+	} else {
+		// A panic in the in-process host is caught here so it flows through the normal error disposition
+		// rather than wedging this leased step until lease expiry.
+		execErr = errors.CatchPanic(func() error {
+			// FaultPanicExecuteTask panics inside the wrapper so it exercises the host-call panic isolation
+			// (caught here, routed as a normal task error), scoped to this task name.
+			if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultPanicExecuteTask, taskName)) {
+				panic("injected fault: " + FaultPanicExecuteTask + " " + taskName)
+			}
+			return e.host.ExecuteTask(taskCtx, dispatchURL, &flow.Flow)
+		})
+	}
 	e.inFlightStateBytes.Add(-heldBytes)
 	e.inFlightStateSteps.Add(-1)
 	// The task has now RUN. Everything below records that fact, and it holds a connection to do so, so it
@@ -714,14 +728,8 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		return nil
 	}
 
-	// Complete the step
-	if errorRouted {
-		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", workflowURL)
-		e.metricStepExecuted(ctx, taskName, "error_routed", shardNum)
-	} else {
-		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "workflow", workflowURL)
-		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted, shardNum)
-	}
+	// Complete the step.
+	//
 	// FaultLeaseStaleWrite makes this completion write carry a stale lease generation, exactly as a zombie
 	// worker (whose lease was re-granted to a peer) would. The fence must reject it (zero rows -> benign
 	// no-op below), so the step stays claimable and lease recovery re-runs it cleanly - the test proves a
@@ -734,22 +742,65 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// A database error here must therefore retry the WRITE, never the task (see persist): an ephemeral blip is
 	// absorbed with zero re-execution, and a write that will never land is classified and terminalized rather
 	// than left to lease recovery, which would re-execute the task every `budget + leaseMargin`, forever.
+	//
+	// The write also reads back the step's Cancel mark - the one post-dispatch cancellation check. It rides a
+	// write every completion makes anyway, so an uncancelled flow pays nothing for it. The status always moves
+	// running -> completed, which keeps RowsAffected an honest fence on MySQL (it counts CHANGED rows): a
+	// covered step is settled by a write of its own below, never by a variant of this one that could leave
+	// the row unchanged. On MySQL the mark is read by a follow-up SELECT, and that is race-free only because
+	// the row is already terminal when it runs - Cancel never marks a terminal row, so the value it reads is
+	// the one this UPDATE saw.
 	var stepRowsAffected int64
+	var completedCancelling bool
 	err = e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
+		stepRowsAffected, completedCancelling = 0, false
 		// FaultPersistErr makes this write fail with a synthetic NON-contention error, consumed per attempt -
 		// so InjectN(1) is a transient blip the retry must absorb with NO re-execution, and InjectN(large) is a
 		// permanent failure the classifier must terminalize rather than loop on.
 		if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultPersistErr, taskName)) {
 			return errors.New("injected fault: " + FaultPersistErr + " " + taskName)
 		}
-		res, werr := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC() WHERE step_id=? AND status NOT IN ('"+workflow.StatusTerminated+"', '"+workflow.StatusCancelled+"') AND lease_seq=?",
-			workflow.StatusCompleted, changesJSON, stepID, writeSeq,
-		)
-		if werr != nil {
-			return errors.Trace(werr)
+		const where = " WHERE step_id=? AND status NOT IN ('" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "') AND lease_seq=?"
+		switch db.DriverName() {
+		case "pgx", "sqlite":
+			werr := db.QueryRowContext(ctx,
+				"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC()"+where+" RETURNING cancelling",
+				workflow.StatusCompleted, changesJSON, stepID, writeSeq,
+			).Scan(&completedCancelling)
+			if werr == sql.ErrNoRows {
+				return nil
+			}
+			if werr != nil {
+				return errors.Trace(werr)
+			}
+			stepRowsAffected = 1
+		case "mssql":
+			werr := db.QueryRowContext(ctx,
+				"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC() OUTPUT INSERTED.cancelling"+where,
+				workflow.StatusCompleted, changesJSON, stepID, writeSeq,
+			).Scan(&completedCancelling)
+			if werr == sql.ErrNoRows {
+				return nil
+			}
+			if werr != nil {
+				return errors.Trace(werr)
+			}
+			stepRowsAffected = 1
+		default:
+			res, werr := db.ExecContext(ctx,
+				"UPDATE dwarf_steps SET status=?, changes=?, updated_at=NOW_UTC()"+where,
+				workflow.StatusCompleted, changesJSON, stepID, writeSeq,
+			)
+			if werr != nil {
+				return errors.Trace(werr)
+			}
+			stepRowsAffected, _ = res.RowsAffected()
+			if stepRowsAffected > 0 {
+				if rerr := db.QueryRowContext(ctx, "SELECT cancelling FROM dwarf_steps WHERE step_id=?", stepID).Scan(&completedCancelling); rerr != nil {
+					return errors.Trace(rerr)
+				}
+			}
 		}
-		stepRowsAffected, _ = res.RowsAffected()
 		return nil
 	})
 	switch {
@@ -768,6 +819,53 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	}
 	stepMarkedComplete = true
 	e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
+
+	// A step Cancel marked while its task was running: the task genuinely ran, so its changes stand (the write
+	// above persisted them), but what it asked for next is not honored. An errorRouted step is already on its
+	// way to its handler and needs nothing more.
+	if completedCancelling && !errorRouted {
+		// The flow row was read at claim time, which for a step already running when Cancel landed predates
+		// the reason. Cancel writes the reason before the mark, so a step that sees the mark finds the reason
+		// on a fresh read; this path is rare, so the extra round trip is too.
+		if rerr := db.QueryRowContext(ctx, "SELECT cancel_reason FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&flowCancelReason); rerr != nil {
+			return errors.Trace(rerr)
+		}
+		tr, ok := graph.ErrorTransition(taskName)
+		if !ok {
+			// No handler: fail the step as cancelled. failStep flips it completed -> cancelled, the same
+			// completed-to-terminal escape failOnPersistError uses, so the recovery defer - which rewinds only
+			// a `completed` row - has nothing to rewind once it lands, and rewinds it for a re-dispatch (where
+			// the claim preempts it) if it does not.
+			return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, cancelmarker.New(flowCancelReason), taskName))
+		}
+		// Route to the handler exactly as a task error would, except that the task's own changes are kept -
+		// it ran to completion, so they are a fact, not a half-written attempt - and onErr is added to them.
+		// The extra write puts onErr into the step's persisted changes, so the step reads afterwards the way an
+		// error-routed step does; it runs only on this rare path, so the completion write above never carries
+		// a second copy of the changes.
+		tracedErr := errors.Convert(cancelmarker.New(flowCancelReason))
+		redactedErr := *tracedErr
+		redactedErr.Stack = nil
+		accumulatedChanges = accumulatedChanges.Clone()
+		_ = accumulatedChanges.Set("onErr", &redactedErr)
+		changesJSON, _ = json.Marshal(accumulatedChanges)
+		if _, uerr := db.ExecContext(ctx,
+			"UPDATE dwarf_steps SET changes=? WHERE step_id=? AND lease_seq=?",
+			changesJSON, stepID, leaseSeq,
+		); uerr != nil {
+			return errors.Trace(uerr)
+		}
+		errorRouted = true
+		errorTarget = tr.To
+		sleepDur = 0
+	}
+	if errorRouted {
+		e.logger.DebugContext(ctx, "Task error routed", "task", taskName, "workflow", workflowURL)
+		e.metricStepExecuted(ctx, taskName, "error_routed", shardNum)
+	} else {
+		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "workflow", workflowURL)
+		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted, shardNum)
+	}
 
 	// Evaluate transitions
 	var nextTasks []nextStep
@@ -1198,7 +1296,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					if failFlow {
 						var sampleErr string
 						tx.QueryRowContext(ctx,
-							"SELECT error FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusFailed+"' AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
+							"SELECT error FROM dwarf_steps WHERE flow_id=? AND status IN ('"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"') AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
 							flowID,
 						).Scan(&sampleErr)
 						sampleErr = strings.TrimSpace(sampleErr)

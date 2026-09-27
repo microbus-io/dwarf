@@ -245,6 +245,62 @@ flow UPDATE (a racing terminalization) is a **409** for an operator Terminate - 
 something that had already stopped - and a **benign no-op** for the sweep, which asked for an outcome that
 already happened.
 
+**Cancel** - The graceful counterpart of Terminate: a cancellation is delivered as an error on each covered
+step's ordinary `onError` transition (detectable with `workflow.IsCancelled`), so an author can catch it and
+recover. Root-only (400 on a subgraph-child key), 404 on an unknown key, a no-op on a terminal flow.
+
+*The mechanism is a per-step mark, consumed lazily.* `cancel()` writes the tree's `cancel_reason`, then sets
+`dwarf_steps.cancelling=1` on every `pending`/`running`/`interrupted` step of the tree, and does nothing else.
+Each marked step consumes its own mark at one of exactly two checkpoints, both reading the column off a write
+they make anyway, so an uncancelled flow pays nothing:
+
+- **The claim.** The claim CAS returns `cancelling`; a marked step is preempted - `ExecuteTask` is skipped and
+  `cancelmarker.New(reason)` takes the path a task error would (`onError`, else `failStep`). Retry-rewound,
+  sleeping and resumed-interrupt steps all arrive here, which is why none of them needs a check of its own.
+- **The completion write**, for a step that was already running when the mark landed. It reads `cancelling`
+  back (`RETURNING`/`OUTPUT`, or a follow-up `SELECT` on MySQL - race-free because the row is already terminal
+  and Cancel never marks a terminal row). A covered step's changes stand - it genuinely ran - but its next
+  transition is not honored: with `onError` it routes to the handler with `onErr` added to its changes; without,
+  `failStep` flips it `completed -> cancelled` and escalates exactly as a failure does.
+
+*A subgraph, retry or interrupt request made by a covered step is honored, not intercepted.* The mark stays on
+the row, so the next claim catches it: a rewound retry is preempted a backoff later, an interrupted step is
+preempted when resumed. Intercepting each request kind at its own write (a CASE on the park, on the rewind, a
+rollback on the interrupt chain) was built and discarded: it multiplied dialect branches at four sites, and its
+conditional writes are the class that breaks the MySQL fence (see "Lease fencing"). The cost of honoring is
+latency - a rare `Cancel` landing mid-task on a step that then arms a subgraph lets that child run to completion
+before its caller is redirected - and a second `Cancel` or a `Terminate` covers the rare long child.
+
+*Two rules at the claim are load-bearing:*
+
+- **A subgraph caller resuming after its child (`subgraph_done=1`) is NOT preempted.** It runs once more so the
+  child's result reaches its code, and its own mark is applied at its completion write. Preempting it would
+  deliver the cancellation without the caller ever seeing what its child did.
+- **An interrupted step resumed after Cancel IS preempted.** Its resume data is new input arriving after the
+  cancellation; running on it would keep a cancelled flow acting on a human response.
+
+*Parked callers are marked like any other running step - a caller's cancellation is its own, not its child's to
+decide.* Excluding them loses the cancellation outright in two windows: after the park commits but before the
+child flow is inserted, and after the child completes but before the caller is revived (`completeFlow` and
+`completeSurgraphFlow` are separate transactions). In both the caller is skipped and the child is either absent
+or terminal, so nothing is marked and the flow runs on as if never cancelled.
+
+*The reason is written before the mark*, so a step that sees the mark finds the reason. A step already running
+when Cancel landed read its flow row at claim time, before the reason existed, so the completion-write path
+re-reads `cancel_reason` - one extra round trip, on that rare path only.
+
+*The FLOW still resolves `failed`.* A covered step settles `cancelled`, but there is no flow-level
+cancelled-vs-failed decision yet: that needs a cohort counter parallel to `cohort_failures`, so a cohort whose
+every loss was a cancellation resolves `cancelled` while one with a real error mixed in stays `failed`. Until then,
+**a `cancelled` step counts as a loss everywhere a `failed` one does** - `failStep` bumps `cohort_failures` for
+it, Fork's branch recompute scores it as a failed branch, and the cohort-fail path samples its error text.
+Relatedly, a subgraph child's error still reaches its caller's `flow.Subgraph` as plain text, so
+`workflow.IsCancelled` is false on a cancelled child's error; carrying the marker across that boundary depends
+on the same cohort decision (a fan-out child's loss is only known to be a cancellation once it exists).
+
+Pinned by `fixtures/gracefulcancelflow_test.go`, which the SQLite suite alone cannot vouch for - run it against
+a MySQL-family server as well.
+
 **Fork** - The sole recovery/exploration operation, given terminal-flow immutability. `Fork(stepKey,
 stateOverrides)` clones a terminal flow's execution tree up to a chosen step into a brand-new,
 self-contained **root** flow, then re-runs from that step (optionally with `stateOverrides` merged onto it). The
@@ -1637,8 +1693,15 @@ holds a stale generation (the current owner's claim bumped it), so its write mat
 **bails with `nil`** — the same benign lost-race as losing the claim CAS itself (which also returns `nil`).
 Returning an *error* instead would be actively wrong: it would spin `processStep`'s recovery defer (whose own
 reset must also be fenced) and log an ERROR for a normal, expected lease-protocol outcome. The predicate is a
-genuine `WHERE` filter (not a value-changing `SET`), so `RowsAffected` reflects the real match on **every**
-driver, MySQL included — no `touch`-column trick needed on steps.
+genuine `WHERE` filter (not a value-changing `SET`), so no `touch`-column trick is needed on steps - **but only
+because every fenced step write changes at least one column on every row it matches.** MySQL's `RowsAffected`
+counts CHANGED rows, not matched ones, so a fenced write that can leave its row unchanged - a `SET col=CASE WHEN
+... THEN col ELSE ? END` whose fallback is the current value, or a flat bind of the status the row already has -
+reports zero on MySQL and is read as a lost lease. The failure it produces: an escalation writing
+`status=CASE WHEN status='running' THEN ? ELSE status END` onto an already-`completed` step matches the row,
+changes nothing, reads "fenced", and returns without failing the flow - a permanent `running` orphan on MySQL
+alone, invisible to the SQLite suite. Keep every fenced step write moving a value (in practice: the status), and
+run anything touching these writes against a MySQL-family server (`fixtures/CLAUDE.md`).
 
 **`lease_seq` is bumped only where a lease is *granted* — the claim CAS.** `recoverExpiredLeases`' expired-lease
 reset (`running`→`pending`) leaves it untouched: the reset does not grant a lease, it only makes the step

@@ -262,13 +262,14 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   (the park resolves only on a terminal child), so this is a delete of inert rows, not a cascade-cancel of live work.
   Leaving it would make the execution DAG claim two paths (`X -> iter1 -> iter2 -> Y`) when the model is single-path,
   and let History assembly attach the discarded child's subtree to the caller. The reap is **step-scoped** (only this
-  caller's children). **The rewind is guarded on `status='running'`, and the reap runs only if it fires:** a `Cancel`
-  landing mid-task terminalizes this running step (cancelled) before the task returns and arms the retry, so an
-  unguarded rewind would revive the immutable cancelled step to `pending` (with a far backoff `not_before` - a transient
+  caller's children). **The rewind is guarded on `status='running'`, and the reap runs only if it fires:** a `Terminate`
+  landing mid-task terminalizes this running step (`terminated`) before the task returns and arms the retry, so an
+  unguarded rewind would revive the immutable terminated step to `pending` (with a far backoff `not_before` - a transient
   zombie the terminal-flow check only clears minutes later) *and* reap the now-terminal tree's children (inert, but
   belonging to a terminal flow - an immutability violation). `processStep` therefore rewinds first under the guard and
-  reaps/re-dispatches only when it actually rewound a still-running step; a lost guard leaves the step cancelled (its
-  children already cancelled by the `Cancel` cascade) and returns. This is the enforcement behind "`flow.Retry` rewinds
+  reaps/re-dispatches only when it actually rewound a still-running step; a lost guard leaves the step terminated (its
+  children already terminated by the `Terminate` cascade) and returns. (A graceful `Cancel` does not interfere: it only
+  marks the step, and the rewound step is preempted at its next claim.) This is the enforcement behind "`flow.Retry` rewinds
   a step in place but only while the flow is `running`" (see root "Terminal flows are immutable"). Defense in depth:
   History's `loadSubgraphChildren` keeps only the latest child per caller step (`ORDER BY flow_id`, last row wins =
   highest `flow_id`), matching `completeSurgraphFlow`/wedge/`Continue`, so even a stray dangling child never renders. `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`

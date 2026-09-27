@@ -515,7 +515,10 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 				if n.oldID == rewind {
 					branchRewound = true
 				}
-				if n.status == workflow.StatusFailed {
+				// A cancelled step is an unrecovered loss exactly like a failed one - failStep bumped
+				// cohort_failures for it - so a clone must count it the same or re-derive a fan-in that
+				// converges where the original failed.
+				if n.status == workflow.StatusFailed || n.status == workflow.StatusCancelled {
 					branchFailed = true
 				}
 				for _, c := range childrenByPred[n.oldID] {
