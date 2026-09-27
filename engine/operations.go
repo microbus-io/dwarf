@@ -683,13 +683,14 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 // between the park and the child's insert, or between the child's completion and the caller's revive - the
 // caller is skipped and the child is either not yet there or already terminal, so nothing is marked at all.
 //
-// The first statement writes the flow rows - the reason, and cancelled_at - and must come BEFORE the mark.
+// The first write is to the flow rows - the reason, and cancel_watermark - and must come BEFORE the mark.
 // A step claimed between the two reads the reason off its flow row, and the opposite order hands it an empty
-// one. cancelled_at closes the one gap the mark cannot reach: a step whose completion write has landed but
-// whose successors are not yet inserted is terminal and so unmarked, and its successors do not exist yet. The
-// transition that inserts them holds the flow row's lock, so this write either lands before it - and the
-// successors inherit a mark from cancelled_at - or waits for it to commit, after which the mark below finds
-// them pending. Idempotent rather than a 409 on a terminal flow - a repeat call marks whatever is still in
+// one. cancel_watermark (the flow's highest step_id at the Cancel) closes the one gap the mark cannot reach: a
+// step whose completion write has landed but whose successors are not yet inserted is terminal and so unmarked,
+// and its successors do not exist yet. The transition that inserts them holds the flow row's lock, so this write
+// either lands before it - and the successors inherit a mark, their source being at or below the watermark - or
+// waits for it to commit, after which the mark below finds them pending. Every step inserted after the Cancel
+// sits above the watermark, which is what keeps a handler that caught the cancellation from passing it on. Idempotent rather than a 409 on a terminal flow - a repeat call marks whatever is still in
 // progress, and the flow write is guarded to non-terminal flows so it can never rewrite a recorded outcome.
 func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
@@ -732,10 +733,23 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 
 	reason = strings.TrimSpace(reason)
 	reasonArgs := append([]any{reason}, allFlowIDs...)
-	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_flows SET cancel_reason=?, cancelled_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
-		reasonArgs...,
-	)
+	// The watermark is read by a statement AFTER the one that takes the flow rows' locks. On Postgres an UPDATE's
+	// subquery reads the snapshot taken before the statement waited for its row lock, so a single statement would
+	// miss a successor that a transition committed while holding that lock - and that successor could then run to
+	// completion before the mark below, unmarked, and pass nothing on.
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		tx.ExecContext(ctx,
+			"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
+			allFlowIDs...,
+		)
+		tx.ExecContext(ctx,
+			"UPDATE dwarf_flows SET cancel_reason=?,"+
+				" cancel_watermark=(SELECT COALESCE(MAX(s.step_id), 0) FROM dwarf_steps s WHERE s.flow_id=dwarf_flows.flow_id),"+
+				" touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
+			reasonArgs...,
+		)
+		return nil
+	})
 	if err != nil {
 		return errors.Trace(err)
 	}

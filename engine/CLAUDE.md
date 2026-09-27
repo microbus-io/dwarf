@@ -250,7 +250,7 @@ step's ordinary `onError` transition (detectable with `workflow.IsCancelled`), s
 recover. Root-only (400 on a subgraph-child key), 404 on an unknown key, a no-op on a terminal flow.
 
 *The mechanism is a per-step mark, consumed lazily.* `cancel()` writes the tree's `cancel_reason` and
-`cancelled_at`, then sets `dwarf_steps.cancelling=1` on every `pending`/`running`/`interrupted` step of the tree,
+`cancel_watermark`, then sets `dwarf_steps.cancelling=1` on every `pending`/`running`/`interrupted` step of the tree,
 and does nothing else. Each marked step consumes its own mark at one of exactly two checkpoints, both reading the
 column off a write they make anyway, so an uncancelled flow pays no extra round trip - **except the completion
 write on MySQL**, which lacks `RETURNING`/`OUTPUT` and reads the mark with a follow-up `SELECT`: +1 round trip per
@@ -271,17 +271,29 @@ insert; neither cost has been measured on the cloud rig yet.
 *The one step the mark cannot reach is a step between its completion write and its transition* - terminal, so
 never marked, with its successors not inserted yet. Left alone, a `Cancel` landing there is lost outright: the
 successors are inserted unmarked and a linear flow runs to `completed` although `Cancel` returned nil. So every
-successor is inserted by one `INSERT...SELECT` (`successorInsertSQL`) that marks it when the flow's
-`cancelled_at` is later than its source step's `started_at` and the source was not itself covered. Both halves of
-that condition are load-bearing. The time comparison is what exempts a handler that caught the cancellation and
-everything after it - they started after the `Cancel` - so a flow can still recover; the "not covered" exemption
-covers the handler's own insert, whose source started before. It is race-free and free of round trips because
-the inserting transaction already holds the flow row's lock and `cancel()`'s first statement writes that row:
-either the insert sees the new `cancelled_at`, or `cancel()` waits and its mark then finds the successors
-pending. `cancelled_at` defaults to `2000-01-01` (never cancelled, the same non-null shape as
-`dwarf_peers.dispatched_at`), and **Fork deliberately does not copy it**: a fork is not under cancellation, and a
-copied timestamp would re-cancel it through its re-parked callers, which keep their original `started_at`.
-Pinned by `engine/cancelgap_test.go` and by `ran_covered_with_onerror`'s handler successor.
+successor is inserted by one `INSERT...SELECT` (`successorInsertSQL`) that marks it when its source step's
+`step_id` is at or below the flow's `cancel_watermark` - the flow's highest `step_id` when `Cancel` ran - and the
+source was not itself covered. Both halves of that condition are load-bearing. The watermark is what exempts a
+handler that caught the cancellation and everything after it - they were inserted after the `Cancel`, so their
+ids sit above it - and so a flow can still recover; the "not covered" exemption covers the handler's own insert,
+whose source existed before. Among steps that existed at the `Cancel`, "at or below the watermark and not
+covered" is exactly "terminal when the mark ran", which is the gap. It is race-free and free of round trips
+because every insert of a flow's steps holds that flow row's lock and `cancel()` writes the watermark under it:
+either the insert sees the new watermark, or `cancel()` waits and its mark then finds the successors pending.
+`cancel_watermark` defaults to 0 (never cancelled), and **Fork deliberately does not copy it**: a fork is not
+under cancellation. Pinned by `engine/cancelgap_test.go` and by `ran_covered_with_onerror`'s handler successor.
+
+**Do not compare timestamps for this.** A flow-level cancel time tested against the source's `started_at` fails
+because three dialects store milliseconds: a fast source step and the `Cancel` share a millisecond, the strict comparison reads
+false and the `Cancel` is lost - measured at ~1 in 4 runs of `TestCancelInTransitionGap` on SQLite. An inclusive
+comparison only moves the tie onto the handler, cancelling a flow that recovered. The ordering needed is
+"inserted before the `Cancel`", which a per-shard auto-increment id gives exactly and a clock does not.
+
+**The watermark is read by a SECOND statement, after a lock-grab on the flow rows.** On Postgres an `UPDATE`'s
+subquery reads the snapshot taken before the statement waited for its row lock, so folding the lock and the
+`MAX(step_id)` into one statement misses a successor that a transition committed while holding the lock; that
+successor can then complete before the mark runs, unmarked and below no watermark, and its own successor
+escapes. The two-statement transaction costs Cancel two extra round trips, on an operation that is rare.
 
 *An error the task itself returns wins over the cancellation.* A covered step that returns a real error takes
 the ordinary error path; with `onError` its handler receives that error, is inserted unmarked (its source was
@@ -425,7 +437,7 @@ cohort accounting (no limbo) until every failed branch is fixed. **A branch lost
 exactly like a failed one** - Fork has one rewind point, so it re-runs the chosen step and inherits every sibling's
 recorded loss - and a fork whose only remaining losses are cancelled branches resolves `cancelled`. Each cloned
 flow therefore copies its origin's `cancel_reason`, so such a fork reports the reason for the cancellation it
-inherited rather than a reasonless one - but NOT its `cancelled_at` (see **Cancel**). Re-running every lost branch in one fork would need multiple rewind points
+inherited rather than a reasonless one - but NOT its `cancel_watermark` (see **Cancel**). Re-running every lost branch in one fork would need multiple rewind points
 in the cohort recount above; it is deliberately not offered.
 
 *Caveat:* the cloned-prefix steps keep the **origin's** timestamps (the `INSERT…SELECT` copies `created_at`/

@@ -61,17 +61,22 @@ func cohortLockStripe(shard, spawnStepID int) int {
 }
 
 // successorInsertSQL inserts a pending step created by a transition out of a source step. It is an INSERT...SELECT
-// so the successor's Cancel mark is decided by the same statement: the successor is marked when the flow was
-// cancelled after the source step started and the source was not itself covered (the inherit argument, 1 or 0).
-// That reaches the one step Cancel's own mark cannot - a source whose completion write landed before Cancel, with
-// its successors still to be inserted - while the successor of a step that started after the Cancel, such as a
-// handler that caught the cancellation and everything it leads to, stays unmarked, which is what lets a flow
-// recover. The inserting transaction already holds the flow row's lock and Cancel writes cancelled_at to that
-// row, so the read cannot race it, and it costs no extra round trip. Arguments: the eighteen step columns in
-// order, then the inherit flag, the flow id and the source step id.
+// so the successor's Cancel mark is decided by the same statement: the successor is marked when the source step
+// already existed when the flow was cancelled (its id is at or below the flow's cancel_watermark) and the source
+// was not itself covered (the inherit argument, 1 or 0). That reaches the one step Cancel's own mark cannot - a
+// source whose completion write landed before Cancel, with its successors still to be inserted - while the
+// successor of a step inserted after the Cancel, such as a handler that caught the cancellation and everything it
+// leads to, stays unmarked, which is what lets a flow recover. The inserting transaction already holds the flow
+// row's lock and Cancel writes the watermark to that row, so the read cannot race it, and it costs no extra round
+// trip. Arguments: the eighteen step columns in order, then the inherit flag, the flow id and the source step id.
+//
+// Do not compare timestamps here (the flow's cancel time against the source's started_at). Three dialects store
+// milliseconds, and a source that starts in the same millisecond as the Cancel reads as not-before it, losing the
+// Cancel - measured at ~1 in 4 runs of TestCancelInTransitionGap on SQLite. Making it inclusive only moves the tie
+// to the handler, whose successors would then be cancelled too.
 const successorInsertSQL = "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling)" +
 	" SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
-	" CASE WHEN ?=1 AND f.cancelled_at > s.started_at THEN 1 ELSE 0 END" +
+	" CASE WHEN ?=1 AND s.step_id <= f.cancel_watermark THEN 1 ELSE 0 END" +
 	" FROM dwarf_flows f, dwarf_steps s WHERE f.flow_id=? AND s.step_id=?"
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.

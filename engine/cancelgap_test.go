@@ -28,8 +28,9 @@ import (
 
 // TestCancelInTransitionGap pins the one window Cancel's per-step mark cannot reach: a step whose completion
 // write has landed (so it is terminal, never marked) but whose successor is not inserted yet (so there is
-// nothing to mark). Without the flow-level cancelled_at the successor is inserted unmarked and the flow runs
-// to completed although Cancel returned nil; with it, the successor inherits the mark and is preempted.
+// nothing to mark). Without the flow-level cancel_watermark the successor is inserted unmarked and the flow
+// runs to completed although Cancel returned nil; with it, the successor inherits the mark and is preempted.
+// A and the Cancel routinely land in the same millisecond here, which is what a timestamp comparison lost.
 func TestCancelInTransitionGap(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
