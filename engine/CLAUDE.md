@@ -2646,6 +2646,10 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   announce-then-wait ordering already covers that handoff, since the joiner grows only after peers have read
   its row. A promotion after the rank-improving reading that ended a blind spell is withheld by the Sonar -
   the correlated stall that would otherwise make every replica rank itself first and grow at once.
+- **The role flags are PUBLISHED, not assigned** (`dispatching` is an `atomic.Pointer` to a per-run map): a
+  host still serving through a Shutdown/Startup restart reads them from `Create` while `Startup` builds the
+  next run's set, and a map assigned in place under that read is a fatal throw. Pinned under `-race` by
+  `TestDispatchers_RoleFlagsSurviveARestartUnderLoad`.
 - **The role changes in a fixed order** (`applyRole` under `poolsLock`): a replica leaving a shard idles its
   piston and closes its doorbell *before* its pool shrinks; one joining grows its pool *before* it
   dispatches. Idling the piston is `piston.SetIdle`, which withdraws the shard from the planner and empties
@@ -2672,13 +2676,17 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
 - **`SetMaxOpenConns` turns the ranking off**: every replica dispatches every shard (`slotsOn` returns the
   candidate count) and the pinned pools are never divided - an operator pinning pools, typically behind an external
   pooler, has taken the budget out of the engine's hands. `recomputePools` still applies roles under the
-  override, so a reader when the override lands starts dispatching; it leaves the pools to `SetMaxOpenConns`.
+  override, so a reader when the override lands starts dispatching, and it re-derives the cache, the refill
+  periods and the worker ceiling from the pinned pool - a replica sized at Startup as a reader would
+  otherwise keep a reader's cache on shards it now dispatches. It leaves the pools themselves to
+  `SetMaxOpenConns`. The derivations all take the one role reading `recomputePools` made rather than re-read
+  the roles, so a reading landing mid-pass cannot give them different answers.
 - **An await-only replica (`SetWorkers(0)`) registers flagged `zero_workers`**, so it is counted in the fleet
   (its reader pools are real connections, and the fleet check prices them) but takes no rank. Unflagged, it
   could win a slot it will never serve - leaving a shard with fewer working dispatchers than `X`, or none.
-  **This is not the dropped `dispatches` flag returning.** That flag claimed *serving* and fed the work
-  partition, so a wedged replica kept its residue class forever; `zero_workers` states a configured *mode*,
-  feeds only the ranking, and the partition still divides on `dispatched_at` evidence alone. A dispatcher
+  **It is not a claim to be serving**, which the registry must never carry (a replica claiming to serve and
+  then wedging would keep its residue class forever): `zero_workers` states a configured *mode*, feeds only
+  the ranking, and the partition divides on `dispatched_at` evidence alone. A dispatcher
   that wedges still holds its slot until its row goes stale - the residual below - but it strands no class.
 - **Background sweeps run only on dispatched shards.** The reaper and every recovery repair (expired leases,
   wedged parks, orphaned children, orphan detection) skip a shard this replica only reads. Each is
@@ -2693,13 +2701,20 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   joining moves no pool and so would never reach the deduped push). It warns when `budget + 2(R-X)` passes 80%
   (`R` every registered replica, await-only included)
   of `max_connections`, read once per shard at Startup (`pg_settings`, `@@max_connections`,
-  `@@MAX_CONNECTIONS`; SQLite and a failed read give 0 and skip). It never resizes anything: shrinking
+  `@@MAX_CONNECTIONS`; SQLite and a failed read give 0 and skip). SQL Server reports 32767 unless "user
+  connections" is configured - always, on Azure SQL - so there the check effectively never fires. It never resizes anything: shrinking
   dispatchers to make room for idle readers is the wrong trade, and a fleet that size wants a pooler.
+- **A draining replica withdraws before it waits** (`withdrawFromFleet`, first in `drainRuntime` after the
+  reconcile loop stops): `Sonar.Withdraw` flags its rows `zero_workers`, so its peers re-rank without it on
+  their next reading while it finishes its in-flight tasks. Without it the row stays fresh - and keeps its
+  rank - for the whole drain, which can be minutes, and a small shard whose dispatchers all drained at once
+  (a scale-in, a rollout with `maxUnavailable >= 2`) would run nothing until the slowest task finished. The
+  cost is that the drainer still holds its pool while a successor grows, one share over for the drain.
+  Pinned by `TestDispatchers_DrainGivesUpTheSlotBeforeWaiting`.
 - **Known residual: a crashed dispatcher holds its slot for the fresh window (40s).** The rank is drawn from
-  rows still counted by `Replicas`, so a dispatcher that dies without `Leave` keeps its rank until its row ages
-  out, and the shard runs on `X-1` meanwhile. With `X >= 2` that is slower, not stopped; **all `X` crashing
-  together stops the shard for up to the window**. A clean shutdown deletes the row and promotes the next rank
-  on the next reading. Ranking only rows with fresh dispatch evidence would shorten it, but a reader never
+  rows still counted by `Replicas`, so a dispatcher that dies without shutting down keeps its rank until its
+  row ages out, and the shard runs on `X-1` meanwhile. With `X >= 2` that is slower, not stopped; **all `X`
+  crashing together stops the shard for up to the window**. Ranking only rows with fresh dispatch evidence would shorten it, but a reader never
   stamps that evidence, so it could never be promoted - the fix is not free.
 `engine_id` (random per process, fresh on restart) is the id a replica writes into `dwarf_peers`; it is
 also **stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - forensic

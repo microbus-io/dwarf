@@ -23,6 +23,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/microbus-io/errors"
@@ -271,6 +272,16 @@ func (e *Engine) slotsOn(shard int, spec ShardSpec) int {
 	return slots
 }
 
+// slotsByShard is every open shard's current role (slotsOn), read once so that everything derived from
+// the roles in one pass is derived from the same reading.
+func (e *Engine) slotsByShard(specs map[int]ShardSpec) map[int]int {
+	slots := make(map[int]int, len(specs))
+	for _, idx := range e.db.Indices() {
+		slots[idx] = e.slotsOn(idx, specs[idx])
+	}
+	return slots
+}
+
 // zeroWorkers reports a replica configured with SetWorkers(0): it creates, awaits and reads, and dispatches
 // no shard.
 func (e *Engine) zeroWorkers() bool {
@@ -280,12 +291,24 @@ func (e *Engine) zeroWorkers() bool {
 // dispatchesOn reports whether this replica dispatches one shard - whether a step on it may be offered to
 // this replica's own cache. True for a shard with no recorded role, which is the solo default.
 func (e *Engine) dispatchesOn(shard int) bool {
-	b := e.dispatching[shard]
+	b := e.dispatchFlag(shard)
 	return b == nil || b.Load()
 }
 
+// dispatchFlag is one shard's role flag in the current run's map, or nil before the first Startup and
+// for a shard that run did not open.
+func (e *Engine) dispatchFlag(shard int) *atomic.Bool {
+	flags := e.dispatching.Load()
+	if flags == nil {
+		return nil
+	}
+	return (*flags)[shard]
+}
+
 // readMaxConnections returns the server's connection limit for one shard, or 0 when it cannot say - SQLite
-// has none, and a failed read is treated the same, since the check it feeds is advisory. Read once at
+// has none, and a failed read is treated the same, since the check it feeds is advisory. SQL Server reports
+// 32767 unless "user connections" is configured, and Azure SQL always does, so there the check effectively
+// never fires. Read once at
 // Startup and held: Postgres and SQL Server change the limit only on a server restart, and a managed
 // service's resize restarts or fails the server over.
 func readMaxConnections(ctx context.Context, db *sequel.DB) int {
@@ -642,7 +665,11 @@ func (e *Engine) recomputePools() {
 		if slots == 0 {
 			e.applyRole(idx, false)
 		}
-		if override == 0 {
+		if override != 0 {
+			if slots > 0 {
+				postSplitConns += override
+			}
+		} else {
 			// Zero-value spec = the default shard's sizing; a missing RTT (an unprobed shard) falls to the
 			// uncompensated bucket, which is the under-connecting direction.
 			idle, open := shardPool(specs[idx], 0, slots, rtts[idx])
@@ -666,10 +693,10 @@ func (e *Engine) recomputePools() {
 			e.applyRole(idx, true)
 		}
 	}
-	if override != 0 {
-		e.logger.Info("Dispatch roles recomputed", "slots", observed)
-		return
-	}
+	// Under an override the pools were pushed by SetMaxOpenConns, but what follows from WHICH shards this
+	// replica dispatches still moves with the roles: a replica promoted by the override landing was sized at
+	// Startup as a reader, with the minimum cache and no refill period on shards it now dispatches.
+	//
 	// The candidate cache follows the pool split, for the same reason the worker ceiling does: it is sized from
 	// what this replica can actually CLAIM, and only a dispatched shard's pool claims anything.
 	//
@@ -692,15 +719,15 @@ func (e *Engine) recomputePools() {
 	// the same rule the dispatch count and worker ceiling obey just above. Reuses the specs/rtts already
 	// locked-and-cloned above rather than paying for a second (and, below, a third) lock/clone pass over
 	// the same shardSpecs/shardRTTMs maps.
-	e.recomputeRefillIntervalsWith(specs, rtts)
+	e.recomputeRefillIntervalsWith(specs, rtts, observed)
 	e.logger.Info("Derived pools recomputed", "slots", observed, "dispatch", dispatch)
-	e.recomputeWorkerCeilingWith(e.lifetimeCtx, specs, rtts)
+	e.recomputeWorkerCeilingWith(e.lifetimeCtx, specs, rtts, observed)
 }
 
 // applyRole starts or stops this replica dispatching one shard: the doorbell's gate and the piston's idle
 // mode move together. Called under poolsLock, in the order recomputePools gives it.
 func (e *Engine) applyRole(shard int, dispatches bool) {
-	if b := e.dispatching[shard]; b != nil && b.Swap(dispatches) != dispatches {
+	if b := e.dispatchFlag(shard); b != nil && b.Swap(dispatches) != dispatches {
 		e.logger.Info("Shard dispatch role changed", "shard", shard, "dispatching", dispatches)
 	}
 	if p := e.pistons[shard]; p != nil {
@@ -727,19 +754,19 @@ func (e *Engine) recomputeWorkerCeiling(ctx context.Context) {
 	specs := maps.Clone(e.shardSpecs)
 	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
-	e.recomputeWorkerCeilingWith(ctx, specs, rtts)
+	e.recomputeWorkerCeilingWith(ctx, specs, rtts, e.slotsByShard(specs))
 }
 
-// recomputeWorkerCeilingWith is recomputeWorkerCeiling's core, taking the shard specs and RTTs as
-// already-read snapshots rather than re-acquiring shardsLock to fetch them.
-func (e *Engine) recomputeWorkerCeilingWith(ctx context.Context, specs map[int]ShardSpec, rtts map[int]float64) {
+// recomputeWorkerCeilingWith is recomputeWorkerCeiling's core, taking the shard specs, RTTs and roles as
+// already-read snapshots rather than re-acquiring shardsLock or re-reading the roles to fetch them.
+func (e *Engine) recomputeWorkerCeilingWith(ctx context.Context, specs map[int]ShardSpec, rtts map[int]float64, slotsBy map[int]int) {
 	override := int(e.maxOpenConns.Load())
 	ceiling := math.MaxInt
 	for idx, rttMs := range rtts {
 		// Each dispatched shard's own pool, since each is divided by its own dispatchers - and the worst
 		// shard's number wins, because a storm drains through whichever pool is tightest. A shard this replica
 		// only reads runs no step, so its small pool drains no storm and must not bound the workers.
-		slots := e.slotsOn(idx, specs[idx])
+		slots := slotsBy[idx]
 		if slots == 0 {
 			continue
 		}

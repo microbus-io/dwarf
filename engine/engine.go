@@ -172,9 +172,11 @@ type Engine struct {
 	// shard's unchanged sizes, and an unchanged one must not mask a change elsewhere.
 	lastAppliedSlots map[int]int
 	// dispatching is whether this replica dispatches each shard - the doorbell's gate and pickShard's
-	// preference. Built in Startup before anything reads it, one entry per open shard, so the map itself is
-	// read-only thereafter and each flag is flipped by applyRole under poolsLock.
-	dispatching map[int]*atomic.Bool
+	// preference. Startup builds a fresh map per run and PUBLISHES it through the pointer: a host still
+	// serving through a Shutdown/Startup restart reads it from Create, and a map assigned in place under
+	// that read is a fatal throw. Each published map is read-only; its flags are flipped by applyRole under
+	// poolsLock. Read through dispatchFlag.
+	dispatching atomic.Pointer[map[int]*atomic.Bool]
 	// shardMaxConns is each shard's server connection limit, read once at Startup (0 = unknown), and
 	// fleetOverLimit is whether checkFleetFits last found the fleet over it. The first is written in
 	// Startup before the reconcile loop starts; the second is owned by poolsLock.
@@ -536,8 +538,8 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	// through M connections - so a live pool change must re-derive it. Skipping this leaves the ceiling
 	// at the size computed for the OLD pool: an override that shrinks the pool (the external-pooler case)
 	// would keep a bound many times too permissive on exactly the storm the ceiling exists to contain.
-	// Note this is also the only path that re-derives it once an override is set, because recomputePools
-	// (the fleet-change path) early-returns while the override pins the pools.
+	// recomputePools also re-derives it under an override, but only when a role moves, so a new pin with an
+	// unchanged fleet reaches the ceiling only through here.
 	if e.started.Load() {
 		e.recomputeWorkerCeiling(e.lifetimeCtx)
 		// The turnstiles are a function of the pool too, and for the same reason this path re-derives the
@@ -729,10 +731,11 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.shardMaxConns = maxConns
 	// One flag per open shard, rebuilt per run and filled in by the sizing loop below, before anything that
 	// could ring a doorbell is running.
-	e.dispatching = make(map[int]*atomic.Bool, len(shards))
+	flags := make(map[int]*atomic.Bool, len(shards))
 	for idx := range shards {
-		e.dispatching[idx] = &atomic.Bool{}
+		flags[idx] = &atomic.Bool{}
 	}
+	e.dispatching.Store(&flags)
 
 	// Announce this replica on every shard, wait for peers to notice, and read each shard's fleet back -
 	// then size every pool from the derived budget split by THAT shard's count. Those are the real sizes,
@@ -760,7 +763,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 		// This replica's role on the shard, from the ranking Join just read. A shard it does not dispatch
 		// gets the reader pool and a piston that initRuntime starts idle.
 		slots := e.slotsOn(idx, specs[idx])
-		e.dispatching[idx].Store(slots > 0)
+		e.dispatchFlag(idx).Store(slots > 0)
 		idle, open := shardPool(specs[idx], override, slots, rtts[idx]) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
@@ -915,8 +918,8 @@ func (e *Engine) initRuntime() error {
 		e.pistons[idx] = p
 	}
 
-	// Derive each piston's cycle period now that the cache is sized and R is known. recomputePools
-	// re-derives it on every later fleet change.
+	// Derive each piston's cycle period now that the cache is sized and the roles are known. recomputePools
+	// re-derives it on every later role change.
 	e.recomputeRefillIntervals()
 
 	// The worker pool. Its callback is the claim skip plus processStep - NOT the host's ExecuteTask, which
@@ -1018,6 +1021,12 @@ func (e *Engine) drainRuntime() {
 		close(e.reconcileStop)
 	}
 	e.reconcileWorker.Wait()
+	// Give up every dispatcher slot BEFORE waiting on the workers. A draining replica takes on no new work,
+	// but its row stays fresh until it leaves the fleet at the very end, and a fresh row keeps its rank - so
+	// without this each shard it dispatched would run on one dispatcher fewer for the whole drain, and a
+	// small shard whose dispatchers all drain at once would run nothing until the slowest task finished.
+	// Withdrawn, it stays counted for the connections it still holds while its peers re-rank without it.
+	e.withdrawFromFleet(e.lifetimeCtx)
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()

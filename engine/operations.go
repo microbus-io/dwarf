@@ -580,9 +580,6 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	if e.seams.IsFault(FaultDropDoorbell) {
 		return
 	}
-	if !e.dispatchesOn(shard) {
-		return // see enqueueStepDue
-	}
 	// Every caller of this cold path is RE-offering a step this replica already dispatched once - a revived
 	// surgraph caller, a resumed interrupt leaf, an unwedged park - so the step still carries the claim
 	// reservation its earlier dispatch took, and those dispatches finish far inside the ~1-2s window. Left
@@ -592,6 +589,9 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	// company this site belongs in. A no-op for the callers that offer a genuinely new step id (Fork's leaf,
 	// Continue), which have no reservation to drop.
 	e.claims.RelinquishClaim(shard, stepID)
+	if !e.dispatchesOn(shard) {
+		return // see enqueueStepDue; after the relinquish, which is this replica's own bookkeeping either way
+	}
 	priority := math.MaxInt
 	var notBeforeDelayMs sql.NullFloat64
 	db, err := e.db.Shard(shard)

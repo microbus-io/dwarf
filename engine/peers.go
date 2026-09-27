@@ -114,9 +114,10 @@ func (e *Engine) partitionOn(shard int) (replicas, ordinal int, ok bool) {
 }
 
 // buildSonars creates one Sonar per open shard, before anything is sized from a Sonar. Errors are logged
-// rather than returned: a shard without one falls back to dispatching solo there (pools sized for one
-// replica) with unpartitioned selection - over-connecting by at most one share, and never leaving the
-// shard without a dispatcher.
+// rather than returned: a shard without one falls back to dispatching solo there with the WHOLE budget and
+// unpartitioned selection, since its peers never see its row and go on splitting the budget among
+// themselves - so that shard holds up to about twice its budget, in exchange for never being left without a
+// dispatcher. New fails only on arguments this caller cannot get wrong, so the case is near-impossible.
 //
 // Each Sonar states this replica's probed RTT and whether it is await-only (SetWorkers(0)) in its row. The
 // RTT is there for operators to query. The await-only flag keeps the replica out of every shard's ranking,
@@ -211,6 +212,17 @@ func (e *Engine) sleepPeerGrace(ctx context.Context, d time.Duration) {
 	}
 }
 
+// withdrawFromFleet flags this replica's row on every shard as running no steps, so its peers take over
+// its dispatcher slots at their next reading. Called at the start of a drain; best effort - a shard whose
+// write fails keeps this replica ranked until the row ages out or leaveFleet deletes it.
+func (e *Engine) withdrawFromFleet(ctx context.Context) {
+	for idx, s := range e.sonars {
+		if err := s.Withdraw(ctx); err != nil {
+			e.logger.ErrorContext(ctx, "Withdrawing from the fleet", "shard", idx, "error", err)
+		}
+	}
+}
+
 // leaveFleet deletes this replica's row from every shard's registry, so peers recount without waiting out
 // the freshness window.
 //
@@ -255,11 +267,10 @@ func (e *Engine) leaveFleet(ctx context.Context) {
 func (e *Engine) runReconcileLoop() {
 	ticker := time.NewTicker(max(time.Millisecond, e.peerCadence()/reconcileTicksPerCadence))
 	defer ticker.Stop()
-	// The fleet size this loop last SAW, per shard. Deliberately not recomputePools' lastAppliedR: that one
-	// records what the pools were last DERIVED with and is never updated under a SetMaxOpenConns override
-	// (pinned pools derive nothing), so churn counted from it would report a settled fleet whenever an
-	// operator pinned the pools - which is exactly what a benchmark does. Owned by this goroutine alone, so
-	// it needs no lock.
+	// The fleet size this loop last SAW, per shard. Deliberately not recomputePools' lastAppliedSlots: that
+	// one records the ROLE the pools were last derived for, which stays put while readers join and leave, so
+	// churn counted from it would report a settled fleet through exactly the membership changes this counts.
+	// Owned by this goroutine alone, so it needs no lock.
 	seen := map[int]int{}
 	for _, idx := range e.db.Indices() {
 		seen[idx] = e.replicasOn(idx)

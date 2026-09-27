@@ -128,16 +128,16 @@ func (e *Engine) recomputeRefillIntervals() {
 	}
 	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
-	e.recomputeRefillIntervalsWith(specs, rtts)
+	e.recomputeRefillIntervalsWith(specs, rtts, e.slotsByShard(specs))
 }
 
-// recomputeRefillIntervalsWith is recomputeRefillIntervals' core, taking the shard specs and RTTs as
-// already-read snapshots rather than re-acquiring shardsLock to fetch them.
-func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[int]float64) {
+// recomputeRefillIntervalsWith is recomputeRefillIntervals' core, taking the shard specs, RTTs and roles
+// as already-read snapshots rather than re-acquiring shardsLock or re-reading the roles to fetch them.
+func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[int]float64, slotsBy map[int]int) {
 	// The shards this replica dispatches, which are the only ones whose partitions the cache holds.
 	n := 0
-	for _, idx := range e.db.Indices() {
-		if e.dispatchesOn(idx) {
+	for _, slots := range slotsBy {
+		if slots > 0 {
 			n++
 		}
 	}
@@ -175,7 +175,7 @@ func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[
 		// the replicas sharing the shard's CPU, so deriving the period from anything else would measure the
 		// buffer against the wrong drain rate. A shard this replica only reads has an idle piston, which
 		// reads no period, and recomputePools re-derives this on the promotion that wakes it.
-		slots := e.slotsOn(idx, spec)
+		slots := slotsBy[idx]
 		if slots == 0 {
 			continue
 		}

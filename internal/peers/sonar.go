@@ -234,6 +234,10 @@ type Sonar struct {
 	// the prune's patience.
 	healthySince time.Time
 	blindLogged  bool
+	// lastRaw is the standing the previous successful reading computed, before any withholding. A gapped
+	// reading is held against THIS, not against what was published, so a promotion waits one reading rather
+	// than for the gaps to stop - see observe.
+	lastRaw standing
 	// lastPass is when the last pass STARTED, which is what the next one is paced from - see untilNextPass.
 	lastPass time.Time
 	// lastErr is the most recent read's error, kept so Join can report synchronously what the loop only logs.
@@ -268,6 +272,7 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 	s.lastGood.Store(s.now().UnixNano())
 	s.replicas.Store(1)
 	s.standing.Store(&standing{rank: 0, candidates: 1})
+	s.lastRaw = standing{rank: 0, candidates: 1}
 	s.profile.Store(&Profile{})
 	s.part.Store(&partition{ordinal: -1})
 	return s, nil
@@ -518,6 +523,19 @@ func (s *Sonar) untilNextPass() time.Duration {
 	return max(s.scan-s.now().Sub(s.lastPass), s.scan/4)
 }
 
+// Withdraw marks this replica's row as running no steps, so every peer re-ranks without it on its next
+// reading while still counting it. The owner calls it when it stops taking on work but is not yet gone -
+// a shutdown draining tasks already in flight - so that another replica takes over its dispatcher slots
+// for the length of the drain rather than after it. It also sticks: a later registration repair writes
+// the same flag.
+func (s *Sonar) Withdraw(ctx context.Context) error {
+	p := *s.profile.Load()
+	p.ZeroWorkers = true
+	s.profile.Store(&p)
+	_, err := s.db.ExecContext(ctx, "UPDATE dwarf_peers SET zero_workers=1 WHERE engine_id=?", s.engineID)
+	return errors.Trace(err)
+}
+
 // Leave deletes this replica's row, so peers recount without waiting out the freshness window.
 //
 // Call it with a LIVE context after Run has returned. Run cannot do it on the way out - its context is
@@ -740,12 +758,20 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	// stale at once, so every replica would rank itself first, claim a dispatcher slot, and grow its pool to a
 	// dispatcher's share - a fleet of dispatchers against a database that is already sick. A demotion (a
 	// higher rank) shrinks the pool and is always believed; a promotion waits for the next reading.
-	next := &standing{rank: v.rank, candidates: v.candidates}
+	//
+	// HELD AGAINST THE PREVIOUS RAW READING, NOT THE PUBLISHED VALUE. Holding against what was published
+	// ratchets: every gapped reading re-publishes the larger of two values, the older of which was itself
+	// held, so the rank can only rise for as long as the readings stay gapped - and a slow enough pass makes
+	// every reading gapped. A reader on a sick database would then never be promoted, and a shard whose
+	// dispatchers left would run nothing. Against the raw reading, two consecutive readings that agree are
+	// believed whether or not either was gapped. Pinned by TestPeers_RankPromotesThroughSustainedGaps.
+	raw := standing{rank: v.rank, candidates: v.candidates}
+	next := raw
 	if gapped {
-		prev := s.standing.Load()
-		next = &standing{rank: max(prev.rank, v.rank), candidates: max(prev.candidates, v.candidates)}
+		next = standing{rank: max(s.lastRaw.rank, raw.rank), candidates: max(s.lastRaw.candidates, raw.candidates)}
 	}
-	s.standing.Store(next)
+	s.lastRaw = raw
+	s.standing.Store(&next)
 
 	if !v.selfSeen {
 		// Nothing else can fix this: the beat only UPDATEs, so a row that has gone missing is refreshed by

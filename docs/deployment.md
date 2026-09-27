@@ -274,7 +274,8 @@ constants are in the [cloud benchmarks](benchmark-cloud.md).
 > random by default. A replica that *crashes* (rather than shutting down cleanly) leaves its last entry
 > behind until it ages out, about 40 seconds. If it was one of a shard's dispatchers, the shard runs on the
 > remaining dispatchers until then — slower, not stopped, unless every dispatcher of that shard crashed at
-> once. A clean shutdown removes the entry and hands its place on at once. If a replica restarts under a
+> once. A replica shutting down cleanly hands its place on as soon as its drain starts, not when it ends, so a
+> long in-flight task does not hold a shard short of dispatchers. If a replica restarts under a
 > *fresh* random id each time (a crashloop), those entries can pile up faster than they age out. To avoid this, call `SetEngineID(id)` before `Startup` with a value
 > that is **stable across that replica's restarts** and **unique across your live replicas** — for example
 > one derived from the deployment's own per-instance identity (a StatefulSet pod name/ordinal, or the

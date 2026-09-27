@@ -38,8 +38,9 @@ registration repair exists (below) and why it cannot be left to the beat.
 way out — its context is cancelled by then, so the DELETE would fail — and `Run` having returned is itself
 the guarantee that no beat follows.
 
-**The API is fourteen calls, and keeping it that small is a standing constraint.** Six inputs (`New`,
-`SetProfile`, `SetEvidence`, `SetTurnFunc`, `SetLogger`, `SetSeams`), three lifecycle calls (`Join`, `Run`, `Leave`), four
+**The API is fifteen calls, and keeping it that small is a standing constraint.** Six inputs (`New`,
+`SetProfile`, `SetEvidence`, `SetTurnFunc`, `SetLogger`, `SetSeams`), four lifecycle calls (`Join`, `Run`,
+`Withdraw`, `Leave`), four
 published facts (`Replicas`, `Rank`, `Partition`, `BlindFor`), and one knob (`SetCadence`).
 
 The windows and the beat are **constants with plain fields behind them**, not setters, because they are
@@ -128,6 +129,17 @@ deliberately:
   dispatch" would then grow every replica's pool to a dispatcher's share simultaneously. A demotion (a higher
   rank) shrinks a pool and is believed at once; a promotion waits one reading. Pinned by
   `TestPeers_RankPromotionIsWithheldAcrossAGap`.
+
+  **HOLD A GAPPED RANK AGAINST THE PREVIOUS RAW READING, NEVER AGAINST THE PUBLISHED VALUE.** The published
+  value is itself held, so holding against it ratchets: across consecutive gapped readings the rank can only
+  rise - and a slow enough pass makes every reading gapped (below). Unlike a frozen `Replicas`, which only
+  under-sizes pools, a frozen rank is not fail-safe: a reader whose dispatchers left is never promoted, and
+  the shard runs nothing. Against the raw reading, two consecutive readings that agree are believed whether
+  or not either was gapped. Pinned by `TestPeers_RankPromotesThroughSustainedGaps`.
+- **`Withdraw` takes a replica out of the ranking without taking it out of the fleet**: it flags the row
+  `zero_workers` and makes a later repair write the same flag. An owner calls it when it stops taking on work
+  but still holds connections - a drain - so another replica takes over its dispatcher slots for the length
+  of the drain rather than after it. Pinned by `TestPeers_WithdrawDropsTheReplicaFromEveryRanking`.
 
 **A failed read publishes nothing at all.** A read that did not happen is not an observation that anybody
 left. Pinned by `TestPeers_FailedReadHoldsTheLastGoodFleet` and
@@ -276,7 +288,8 @@ thresholds. A **lone** slow pass among fast ones trips at `pass > scan`: the pre
 interval old when this one starts, so its age at publication is `scan + pass`. A **sustained** slow pass
 settles at `pass > 1.75 × scan`, because the floor takes over the pacing and the period becomes
 `pass + scan/4`. Both are a genuinely sick database at a 250ms interval, and all three consequences remain
-fail-safe.
+fail-safe. `Rank` stays live through it only because a gapped rank is held against the previous raw reading
+(see above); held against the published value it would freeze, and a frozen rank strands work.
 
 The beat rides the *read's* cadence when the evidence bit **flips**. A starting replica's first turn lands
 milliseconds after it starts, long before its next beat is due, and until it is published the replica is

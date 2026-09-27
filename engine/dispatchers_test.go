@@ -18,6 +18,8 @@ package engine
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,8 +99,6 @@ func TestDispatchers_Slots(t *testing.T) {
 	for _, c := range cases {
 		assert.Equal(c.want, dispatcherSlots(ShardSpec{VirtualCPUs: c.vcpus}, c.replicas), "%+v", c)
 	}
-	// Agreement: the answer is independent of the RTT this replica happened to probe.
-	assert.Equal(shardBudget(8, defaultRTTMs), shardBudget(8, defaultRTTMs))
 }
 
 // TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing pins the whole role on a replica ranked
@@ -272,11 +272,11 @@ func TestDispatchers_DoorbellRingsOnlyForDispatchedShards(t *testing.T) {
 	assert.NoError(e.SetWorkers(0)) // no crew draining the cache while the test looks at it
 	assert.NoError(e.Startup(t.Context()))
 
-	e.dispatching[1].Store(false)
+	e.dispatchFlag(1).Store(false)
 	e.enqueueStepDue(t.Context(), 1, 999, 100)
 	assert.Equal(0, e.cache.Len(), "a shard this replica only reads is never offered")
 
-	e.dispatching[1].Store(true)
+	e.dispatchFlag(1).Store(true)
 	e.enqueueStepDue(t.Context(), 1, 999, 100)
 	assert.Equal(1, e.cache.Len(), "a dispatched shard is")
 }
@@ -294,14 +294,14 @@ func TestDispatchers_PlacementPrefersDispatchedShards(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 2, VirtualCPUs: 2}))
 	assert.NoError(e.Startup(t.Context()))
 
-	e.dispatching[2].Store(false)
+	e.dispatchFlag(2).Store(false)
 	for range 50 {
 		shard, err := e.pickShard()
 		assert.NoError(err)
 		assert.Equal(1, shard, "only the dispatched shard takes new flows")
 	}
 
-	e.dispatching[1].Store(false)
+	e.dispatchFlag(1).Store(false)
 	seen := map[int]bool{}
 	for range 200 {
 		shard, err := e.pickShard()
@@ -362,11 +362,115 @@ func TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads(t *testing.T) {
 	assert.NoError(err)
 	time.Sleep(5 * time.Millisecond) // inherent wall-clock: let the 1ms deletion window elapse
 
-	e.dispatching[shard].Store(false)
+	e.dispatchFlag(shard).Store(false)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard), "a reader leaves the shard to its dispatchers")
 
-	e.dispatching[shard].Store(true)
+	e.dispatchFlag(shard).Store(true)
 	e.reapDueFlows(ctx)
 	assert.Equal(0, shardFlowCount(t, e, shard), "a dispatcher reaps it")
+}
+
+// TestDispatchers_DrainGivesUpTheSlotBeforeWaiting pins that a shutting-down replica hands its dispatcher
+// slots on at the START of its drain. It takes on no new work from that moment, but its row stays fresh
+// until it leaves at the end, and a fresh row keeps its rank - so a shard whose dispatchers all drained at
+// once would otherwise run nothing until the slowest in-flight task finished.
+func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Drain")
+	g.SetEndpoint("A", "drain/a")
+	g.AddTransition("A", workflow.END)
+	proxy.HandleGraph("drain/g", g)
+	proxy.HandleTask("drain/a", func(ctx context.Context, f *workflow.Flow) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	e.SetHost(proxy)
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	_, err = e.Create(ctx, "drain/g", nil, nil)
+	assert.NoError(err)
+	<-started
+
+	var wg sync.WaitGroup
+	wg.Go(func() { e.Shutdown(ctx) })
+	defer func() {
+		close(release)
+		wg.Wait()
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var zeroWorkers int
+		err := db.QueryRowContext(ctx, "SELECT zero_workers FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&zeroWorkers)
+		if err == nil && zeroWorkers == 1 {
+			return // withdrawn while the task is still holding the drain open
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the draining replica never withdrew from the ranking while its task was in flight")
+}
+
+// TestDispatchers_RoleFlagsSurviveARestartUnderLoad pins that the role flags are published, not assigned in
+// place: a host still serving through a Shutdown/Startup restart reads them from Create while Startup
+// builds the next run's set, and an in-place map assignment under that read is a fatal throw. Meaningful
+// under -race.
+func TestDispatchers_RoleFlagsSurviveARestartUnderLoad(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
+	assert.NoError(e.Startup(t.Context()))
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for !stop.Load() {
+			e.dispatchesOn(1)
+			e.pickShard()
+		}
+	})
+	for range 3 {
+		assert.NoError(e.Shutdown(t.Context()))
+		assert.NoError(e.Startup(t.Context()))
+	}
+	stop.Store(true)
+	wg.Wait()
+	assert.True(e.dispatchesOn(1))
+}
+
+// TestDispatchers_OverridePromotionResizesTheCache pins that a replica promoted by SetMaxOpenConns re-derives
+// what follows from dispatching, not only its role. Sized at Startup as a reader on its only shard, it holds
+// the minimum cache; once it dispatches, the cache follows the pinned pool it now claims through.
+func TestDispatchers_OverridePromotionResizesTheCache(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetEngineID(readerID))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
+	assert.NoError(e.Startup(t.Context()))
+	joinFakeFleet(t, e)
+	assert.False(e.dispatchesOn(1))
+	before := e.cache.Capacity()
+
+	assert.NoError(e.SetMaxOpenConns(40))
+	e.recomputePools()
+	assert.True(e.dispatchesOn(1))
+	// The cache holds twice the workers it is sized for.
+	want := 2 * min(max(64, workersPerConnBudget*40), int(e.workers.Load()))
+	assert.True(want > before, "fixture: the pinned pool must size a larger cache than a reader's (%d vs %d)", want, before)
+	assert.Equal(want, e.cache.Capacity(), "the cache follows the pinned pool of the promoted shard")
 }

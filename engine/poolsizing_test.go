@@ -551,7 +551,7 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 }
 
 // TestPoolSizing_ConcurrentRecomputeAppliesLatestR pins the ORDERING of pool application, which the
-// lastAppliedR dedupe does not give. Two peers saying hello microseconds apart during a rolling deploy each
+// lastAppliedSlots dedupe does not give. Two peers saying hello microseconds apart during a rolling deploy each
 // run a recompute: one reads R=2, the other R=3. Nothing ordered their pushes, so the R=2 sizes could land
 // AFTER the R=3 sizes and leave the replica holding a half-of-the-budget pool against a fleet of three -
 // over-connecting the shard's server, and sticky until the next fleet change (the dedupe sees R unchanged

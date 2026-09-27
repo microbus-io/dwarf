@@ -372,6 +372,55 @@ func TestPeers_RegisterWritesTheProfile(t *testing.T) {
 	assert.True(r.row(t, selfID).zeroWorkers, "and the read returns it")
 }
 
+// TestPeers_RankPromotesThroughSustainedGaps pins that the withholding delays a promotion by one reading
+// and no more, even when every reading is gapped - the regime a pass slower than 1.75x the scan interval
+// settles into. Held against the published value instead, the rank ratcheted: each gapped reading kept the
+// larger of the new rank and an already-held one, so a reader whose dispatchers left was never promoted.
+func TestPeers_RankPromotesThroughSustainedGaps(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	var fleet []peer
+	for id := int64(1); id <= 16; id++ {
+		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge})
+	}
+	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge})
+	alone := fleet[len(fleet)-1:]
+
+	r.s.observe(ctx, fleet, nil)
+	ranked, _ := r.s.Rank()
+	assert.True(ranked > 0)
+
+	// Every reading from here on ends a gap.
+	r.clk.advance(3 * r.s.scan)
+	r.s.observe(ctx, alone, nil)
+	rank, _ := r.s.Rank()
+	assert.Equal(ranked, rank, "the first reading after the fleet left is withheld")
+	r.clk.advance(3 * r.s.scan)
+	r.s.observe(ctx, alone, nil)
+	rank, cands := r.s.Rank()
+	assert.Equal(0, rank, "the second agrees with it, so it is believed though it too is gapped")
+	assert.Equal(1, cands)
+}
+
+// TestPeers_WithdrawDropsTheReplicaFromEveryRanking pins what a draining replica publishes: its row stays -
+// it still holds connections - but it no longer ranks, and a repair cannot put it back in the running.
+func TestPeers_WithdrawDropsTheReplicaFromEveryRanking(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	assert.NoError(r.s.register(ctx))
+	assert.False(r.row(t, selfID).zeroWorkers)
+	assert.NoError(r.s.Withdraw(ctx))
+	assert.True(r.row(t, selfID).zeroWorkers, "withdrawn in place")
+	_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", selfID)
+	assert.NoError(err)
+	assert.NoError(r.s.register(ctx))
+	assert.True(r.row(t, selfID).zeroWorkers, "and a repair writes the same flag")
+}
+
 // TestPeers_RankPromotionIsWithheldAcrossAGap pins the rank's version of the correlated-stall guard. After a
 // stall every peer's row reads stale at once, so every replica would rank itself first and claim a dispatcher
 // slot - and with it a dispatcher's pool - simultaneously. A demotion shrinks the pool and is believed at
