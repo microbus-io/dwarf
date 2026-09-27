@@ -382,9 +382,8 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 	var flowStatus string
 	var finalStateJSON []byte
 	var flowErrorMsg string
-	// cancel_reason is the one column both Terminate and (later) Cancel write their reason into, to avoid a
-	// migration for what the two operations agree is the same kind of fact. Which FlowOutcome field it
-	// surfaces as is decided below, by status.
+	// cancel_reason is the one column both Terminate and Cancel write their reason into. Which FlowOutcome
+	// field it surfaces as is decided below, by status.
 	var flowCancelReason string
 	err = db.QueryRowContext(ctx,
 		"SELECT status, final_state, error, cancel_reason FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
@@ -684,10 +683,14 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 // between the park and the child's insert, or between the child's completion and the caller's revive - the
 // caller is skipped and the child is either not yet there or already terminal, so nothing is marked at all.
 //
-// The reason is written BEFORE the mark: a step claimed between the two statements reads the reason off its
-// flow row, and the opposite order hands it an empty one. Idempotent rather than a 409 on a terminal flow - a
-// repeat call marks whatever is still in progress, and the reason write is guarded to non-terminal flows so
-// it can never rewrite a recorded outcome.
+// The first statement writes the flow rows - the reason, and cancelled_at - and must come BEFORE the mark.
+// A step claimed between the two reads the reason off its flow row, and the opposite order hands it an empty
+// one. cancelled_at closes the one gap the mark cannot reach: a step whose completion write has landed but
+// whose successors are not yet inserted is terminal and so unmarked, and its successors do not exist yet. The
+// transition that inserts them holds the flow row's lock, so this write either lands before it - and the
+// successors inherit a mark from cancelled_at - or waits for it to commit, after which the mark below finds
+// them pending. Idempotent rather than a 409 on a terminal flow - a repeat call marks whatever is still in
+// progress, and the flow write is guarded to non-terminal flows so it can never rewrite a recorded outcome.
 func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -730,7 +733,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	reason = strings.TrimSpace(reason)
 	reasonArgs := append([]any{reason}, allFlowIDs...)
 	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_flows SET cancel_reason=?, touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
+		"UPDATE dwarf_flows SET cancel_reason=?, cancelled_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
 		reasonArgs...,
 	)
 	if err != nil {

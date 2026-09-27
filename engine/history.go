@@ -558,7 +558,7 @@ func (e *Engine) list(ctx context.Context, query workflow.Query) ([]workflow.Flo
 			lr.summary.ThreadKey = keys.New(shardIdx, threadID, threadToken)
 			lr.summary.TaskName = taskName.String
 			lr.summary.Error = strings.TrimSpace(flowError)
-			// cancel_reason is the shared reason column both Terminate and (later) Cancel write into;
+			// cancel_reason is the shared reason column both Terminate and Cancel write into;
 			// splitTerminateCancelReason is the one place that maps it onto the two reason fields, shared
 			// with snapshot()'s FlowOutcome.
 			lr.summary.TerminateReason, lr.summary.CancelReason = splitTerminateCancelReason(lr.summary.Status, strings.TrimSpace(cancelReason))

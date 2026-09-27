@@ -253,9 +253,10 @@ func TestGracefulCancelFlow(t *testing.T) {
 		graph.SetEndpoint("C", "gracefulcancelflow.verify:428/rcw-c")
 		graph.SetEndpoint("D", "gracefulcancelflow.verify:428/rcw-d")
 		graph.SetEndpoint("Handler", "gracefulcancelflow.verify:428/rcw-handler")
+		graph.SetEndpoint("Tail", "gracefulcancelflow.verify:428/rcw-tail")
 		graph.AddTransitionChain("C", "D", workflow.END)
 		graph.AddTransitionOnError("C", "Handler")
-		graph.AddTransition("Handler", workflow.END)
+		graph.AddTransitionChain("Handler", "Tail", workflow.END)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/ran-covered-with-onerror", graph)
 		running := make(chan struct{})
 		release := make(chan struct{})
@@ -272,6 +273,13 @@ func TestGracefulCancelFlow(t *testing.T) {
 			return nil
 		})
 		proxy.HandleTask("gracefulcancelflow.verify:428/rcw-handler", recordCancellation)
+		// The handler's successor started after the Cancel, so it must not inherit the cancellation: a flow
+		// that caught it carries on.
+		var tailRan atomic.Bool
+		proxy.HandleTask("gracefulcancelflow.verify:428/rcw-tail", func(ctx context.Context, f *workflow.Flow) error {
+			tailRan.Store(true)
+			return nil
+		})
 
 		eng := engine.NewEngineUnderTest(t.Name())
 		defer eng.Shutdown(ctx)
@@ -295,6 +303,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		assert.False(dRan.Load(), "C's transition must be redirected to its handler")
 		assert.True(outcome.State.GetBool("recovered"))
 		assert.True(outcome.State.GetBool("cWorked"), "the handler's input must carry C's changes")
+		assert.True(tailRan.Load(), "a flow that caught the cancellation carries on past its handler")
 		if step, err := stepByName(ctx, eng, flowKey, "C"); assert.NoError(err) {
 			assert.Equal(workflow.StatusCompleted, step.Status)
 			assert.True(step.Changes.GetBool("cWorked"))
@@ -633,8 +642,12 @@ func TestGracefulCancelFlow(t *testing.T) {
 		release := make(chan struct{})
 		var releaseOnce sync.Once
 		hold := holdBranches(running, release)
+		var aFixedRuns atomic.Int32
 		url := fanOut("FanOutMixed", func(ctx context.Context, f *workflow.Flow) error {
 			hold(f)
+			if f.GetString("item") == "a" && f.GetBool("fixed") {
+				aFixedRuns.Add(1)
+			}
 			if f.GetString("item") == "a" && !f.GetBool("fixed") {
 				return errors.New("a boom")
 			}
@@ -685,6 +698,9 @@ func TestGracefulCancelFlow(t *testing.T) {
 		forked, err := eng.Await(ctx, forkKey)
 		if assert.NoError(err) {
 			assert.Equal(workflow.StatusCancelled, forked.Status, "the kept cancelled branch is now the cohort's only loss")
+			// Not preempted by a mark carried over from the origin, where a was running when Cancel landed: the
+			// fork re-runs it, so the kept cancelled branch is the only loss by the recount, not by accident.
+			assert.Equal(int32(1), aFixedRuns.Load(), "the fork re-runs branch a rather than preempting it")
 			assert.Equal("test reason", forked.CancelReason, "the fork reports the reason for the cancellation it inherited")
 		}
 	})

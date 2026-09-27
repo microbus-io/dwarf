@@ -376,9 +376,8 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			flowArgs = append(flowArgs, fid, finalStates[i])
 		}
 		caseClause.WriteString(" END")
-		// cancel_reason is deliberately the one reason column both Terminate and (later) Cancel write into -
-		// no migration to split it, since the two are told apart at the Go API level instead (FlowOutcome's
-		// TerminateReason vs CancelReason, gated by Status in snapshot()).
+		// cancel_reason is the one reason column both Terminate and Cancel write into; the two are told apart
+		// by status at the Go API level (FlowOutcome's TerminateReason vs CancelReason, in snapshot()).
 		flowArgs = append(flowArgs, workflow.StatusTerminated, reason)
 		flowArgs = append(flowArgs, allFlowIDs...)
 		res, err := tx.ExecContext(ctx,
@@ -777,7 +776,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 			}
 			tx.ExecContext(ctx,
 				"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-				finalStateJSON, flowStatus, sanitizeErrorMessage(lossErr.Error()), flowID,
+				finalStateJSON, flowStatus, flowErrorText(flowCancelled, lossErr), flowID,
 			)
 			if isSubgraphChild {
 				var derr error
@@ -863,6 +862,16 @@ func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor,
 		}
 		current = lineageID
 	}
+}
+
+// flowErrorText is the error column's text for a flow resolving as a loss: the error for a failed flow, and
+// nothing for a cancelled one, whose explanation is its cancel reason - as a terminated flow's is. Every reader
+// then agrees that a cancelled flow carries no error.
+func flowErrorText(cancelled bool, lossErr error) string {
+	if cancelled {
+		return ""
+	}
+	return sanitizeErrorMessage(lossErr.Error())
 }
 
 // flowLossError picks the error a flow resolving as a loss records, and delivers to its surgraph caller. A

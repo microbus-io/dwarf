@@ -274,7 +274,9 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	newFlowToken := keys.RandomIdentifier(16)
 	// The origin's cancel reason comes along: a kept fan-out branch lost to the origin's cancellation is a loss
 	// the clone inherits, and a fork whose only losses are such branches resolves cancelled - so it reports the
-	// reason that explains it, rather than a cancellation nobody gave a reason for.
+	// reason that explains it, rather than a cancellation nobody gave a reason for. cancelled_at is deliberately
+	// NOT copied: the fork is not under cancellation, and its re-parked callers keep their original started_at,
+	// so a copied timestamp would have their successors inherit a cancellation nobody asked of the fork.
 	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id",
 		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason)"+
 			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

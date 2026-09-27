@@ -249,10 +249,10 @@ already happened.
 step's ordinary `onError` transition (detectable with `workflow.IsCancelled`), so an author can catch it and
 recover. Root-only (400 on a subgraph-child key), 404 on an unknown key, a no-op on a terminal flow.
 
-*The mechanism is a per-step mark, consumed lazily.* `cancel()` writes the tree's `cancel_reason`, then sets
-`dwarf_steps.cancelling=1` on every `pending`/`running`/`interrupted` step of the tree, and does nothing else.
-Each marked step consumes its own mark at one of exactly two checkpoints, both reading the column off a write
-they make anyway, so an uncancelled flow pays nothing:
+*The mechanism is a per-step mark, consumed lazily.* `cancel()` writes the tree's `cancel_reason` and
+`cancelled_at`, then sets `dwarf_steps.cancelling=1` on every `pending`/`running`/`interrupted` step of the tree,
+and does nothing else. Each marked step consumes its own mark at one of exactly two checkpoints, both reading the
+column off a write they make anyway, so an uncancelled flow pays nothing:
 
 - **The claim.** The claim CAS returns `cancelling`; a marked step is preempted - `ExecuteTask` is skipped and
   `cancelmarker.New(reason)` takes the path a task error would (`onError`, else `failStep`). Retry-rewound,
@@ -262,6 +262,26 @@ they make anyway, so an uncancelled flow pays nothing:
   and Cancel never marks a terminal row). A covered step's changes stand - it genuinely ran - but its next
   transition is not honored: with `onError` it routes to the handler with `onErr` added to its changes; without,
   `failStep` flips it `completed -> cancelled` and escalates exactly as a failure does.
+
+*The one step the mark cannot reach is a step between its completion write and its transition* - terminal, so
+never marked, with its successors not inserted yet. Left alone, a `Cancel` landing there is lost outright: the
+successors are inserted unmarked and a linear flow runs to `completed` although `Cancel` returned nil. So every
+successor is inserted by one `INSERT...SELECT` (`successorInsertSQL`) that marks it when the flow's
+`cancelled_at` is later than its source step's `started_at` and the source was not itself covered. Both halves of
+that condition are load-bearing. The time comparison is what exempts a handler that caught the cancellation and
+everything after it - they started after the `Cancel` - so a flow can still recover; the "not covered" exemption
+covers the handler's own insert, whose source started before. It is race-free and free of round trips because
+the inserting transaction already holds the flow row's lock and `cancel()`'s first statement writes that row:
+either the insert sees the new `cancelled_at`, or `cancel()` waits and its mark then finds the successors
+pending. `cancelled_at` defaults to `2000-01-01` (never cancelled, the same non-null shape as
+`dwarf_peers.dispatched_at`), and **Fork deliberately does not copy it**: a fork is not under cancellation, and a
+copied timestamp would re-cancel it through its re-parked callers, which keep their original `started_at`.
+Pinned by `engine/cancelgap_test.go` and by `ran_covered_with_onerror`'s handler successor.
+
+*An error the task itself returns wins over the cancellation.* A covered step that returns a real error takes
+the ordinary error path; with `onError` its handler receives that error, is inserted unmarked (its source was
+covered) and the flow carries on under the author's control. Preempting the handler instead would hide the real
+error.
 
 *A subgraph, retry or interrupt request made by a covered step is honored, not intercepted.* The mark stays on
 the row, so the next claim catches it: a rewound retry is preempted a backoff later, an interrupted step is
@@ -300,10 +320,13 @@ loss everywhere a `failed` one does** (`cohort_failures`, Fork's branch recomput
 `cohort_cancellations` by the same rule the counters apply: a branch is a cancellation if it holds cancelled
 steps and no failed one. Get that wrong and a fork resolves `cancelled`, or converges, where the original failed.
 
-*`flowLossError` picks the error a resolving flow records and delivers*, and it is shared by `failStep` and the
-cohort-fail branch in `processStep` so they cannot disagree. A cancelled flow reports the cancellation; a failed
-flow reports a REAL failure even when the loss that resolved it was a cancellation (it samples a `failed` step's
-error) - a cancellation marker on a failed flow would have `IsCancelled` report true for it.
+*`flowLossError` picks the error a resolving flow delivers to its surgraph caller*, and it is shared by
+`failStep` and the cohort-fail branch in `processStep` so they cannot disagree. A cancelled flow delivers the
+cancellation; a failed flow delivers a REAL failure even when the loss that resolved it was a cancellation (it
+samples a `failed` step's error) - a cancellation marker on a failed flow would have `IsCancelled` report true
+for it. The flow's own `error` column gets that failure's text for a failed flow and nothing for a cancelled
+one (`flowErrorText`), whose explanation is its `cancel_reason` - as a terminated flow's is - so `List` and
+`Snapshot` agree that a cancelled flow carries no error.
 
 *`subgraph_error` holds the delivered error's `TracedError` JSON, stack stripped, not its message*, and
 `flow.Subgraph` decodes it. That is what carries the cancellation marker across the boundary - a cancelled child
@@ -397,7 +420,7 @@ cohort accounting (no limbo) until every failed branch is fixed. **A branch lost
 exactly like a failed one** - Fork has one rewind point, so it re-runs the chosen step and inherits every sibling's
 recorded loss - and a fork whose only remaining losses are cancelled branches resolves `cancelled`. Each cloned
 flow therefore copies its origin's `cancel_reason`, so such a fork reports the reason for the cancellation it
-inherited rather than a reasonless one. Re-running every lost branch in one fork would need multiple rewind points
+inherited rather than a reasonless one - but NOT its `cancelled_at` (see **Cancel**). Re-running every lost branch in one fork would need multiple rewind points
 in the cohort recount above; it is deliberately not offered.
 
 *Caveat:* the cloned-prefix steps keep the **origin's** timestamps (the `INSERT…SELECT` copies `created_at`/

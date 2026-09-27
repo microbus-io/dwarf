@@ -187,6 +187,8 @@ err := eng.Cancel(ctx, flowKey, "customer withdrew the order") // surfaced as Ca
 - **A covered step receives the cancellation as an error on its node's `onError` transition**, like any task
   error, except that the task's own changes are kept, because it ran. `workflow.IsCancelled(onErr)` tells a
   cancellation apart from a real failure, so the handler can compensate and let the flow carry on, or stop.
+- **An error the task itself returns wins over the cancellation.** It takes the ordinary error path - its
+  `onError` transition, or failing the flow - and the handler receives that error, not the cancellation.
 - **With no `onError` transition, the flow stops.** It ends `cancelled` if every unrecovered loss in it was a
   cancellation, and `failed` if a real error is mixed in - a real error is never reported as a cancellation.
 - **A task that arms something as it finishes:** a retry does not run the task again; an interrupt still parks the

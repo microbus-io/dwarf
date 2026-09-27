@@ -14,8 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package cancelmarker builds the error the engine delivers when its Cancel operation covers a step. It is
-// internal so that only the engine can construct one; workflow.IsCancelled detects it.
+// Package cancelmarker builds the error the engine delivers when its Cancel operation covers a step;
+// workflow.IsCancelled detects it. It is internal so the constructor is not part of the public API - detection
+// is by a plain error property, so it does not stop a task from building one by hand.
 package cancelmarker
 
 import "github.com/microbus-io/errors"

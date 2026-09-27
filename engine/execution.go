@@ -60,6 +60,20 @@ func cohortLockStripe(shard, spawnStepID int) int {
 	return int(h >> (64 - cohortLockStripesLog2))
 }
 
+// successorInsertSQL inserts a pending step created by a transition out of a source step. It is an INSERT...SELECT
+// so the successor's Cancel mark is decided by the same statement: the successor is marked when the flow was
+// cancelled after the source step started and the source was not itself covered (the inherit argument, 1 or 0).
+// That reaches the one step Cancel's own mark cannot - a source whose completion write landed before Cancel, with
+// its successors still to be inserted - while the successor of a step that started after the Cancel, such as a
+// handler that caught the cancellation and everything it leads to, stays unmarked, which is what lets a flow
+// recover. The inserting transaction already holds the flow row's lock and Cancel writes cancelled_at to that
+// row, so the read cannot race it, and it costs no extra round trip. Arguments: the eighteen step columns in
+// order, then the inherit flag, the flow id and the source step id.
+const successorInsertSQL = "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling)" +
+	" SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
+	" CASE WHEN ?=1 AND f.cancelled_at > s.started_at THEN 1 ELSE 0 END" +
+	" FROM dwarf_flows f, dwarf_steps s WHERE f.flow_id=? AND s.step_id=?"
+
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
 //
 // THE CTX CARRIES THIS JOB'S PLACE IN LINE, stamped by the crew's gate at the moment the candidate was
@@ -866,6 +880,13 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		e.logger.DebugContext(ctx, "Task completed", "task", taskName, "workflow", workflowURL)
 		e.metricStepExecuted(ctx, taskName, workflow.StatusCompleted, shardNum)
 	}
+	// A successor inherits a Cancel mark only from a source that was not itself covered: a covered source has
+	// already had its cancellation delivered (or overridden by its own error), and what it routes to next is
+	// the author's recovery. See successorInsertSQL.
+	inheritCancel := 1
+	if stepCancelling || completedCancelling {
+		inheritCancel = 0
+	}
 
 	// Evaluate transitions
 	var nextTasks []nextStep
@@ -921,7 +942,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if isFanOutSource && fanInOfSource != "" &&
 		((cohortSize == 0 && !routedToEnd) || (cohortSize == 1 && realTasks[0].taskName == fanInOfSource)) {
 		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
-			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+			return e.fireFanInDirect(ctx, shardNum, db, flowID, stepID, stepDepth, lineageID, fanOutOrdinal, fanInOfSource, dispatchURLOf(graph, fanInOfSource), workflowURL, graph, sleepDur, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel)
 		})
 	}
 	if isFanOutSource && cohortSize == 0 {
@@ -1195,10 +1216,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					}
 				}
 				nextURL := dispatchURLOf(graph, next.taskName)
-				newStepID, err := tx.InsertReturnID(ctx, "step_id",
-					"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
-						" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+				newStepID, err := tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
 					flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, stepStateJSON, stepRefsJSON, workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, successorOrdinal, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID,
+					inheritCancel, flowID, stepID,
 				)
 				if err != nil {
 					return errors.Trace(err)
@@ -1277,7 +1297,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					}
 				}
 				if fullyResolved && failures == 0 {
-					fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs)
+					fanInStepID, fanInBytes, err := e.insertFanInStep(ctx, tx, shardNum, flowID, nextStepDepth, cohortSpawnID, stepID, fanInTaskName, graph, workflowURL, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, flowTimeBudgetMs, inheritCancel)
 					if err != nil {
 						return errors.Trace(err)
 					}
@@ -1308,7 +1328,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						}
 						tx.ExecContext(ctx,
 							"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-							finalStateJSON, flowFailedStatus, sanitizeErrorMessage(lossErr.Error()), flowID,
+							finalStateJSON, flowFailedStatus, flowErrorText(flowCancelled, lossErr), flowID,
 						)
 						flowFailed = true
 						// The cohort fully resolved here (this branch completed last), so every sibling has
@@ -1535,7 +1555,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, shardNum int, db *sequel.D
 }
 
 // fireFanInDirect creates the fan-in step immediately for an empty-cohort case.
-func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanOutOrdinal int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) error {
+func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.DB, flowID int, stepID int, stepDepth int, lineageID int, fanOutOrdinal int, fanInTarget, fanInURL string, workflowURL string, graph *workflow.Graph, sleepDur time.Duration, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, inheritCancel int) error {
 	var fanInStepID int64
 	var txBytes stateByteCount
 	err := db.Transact(ctx, func(tx *sequel.Tx) error {
@@ -1592,10 +1612,9 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		nextStepDepth := stepDepth + 1
 		sleepMs := sleepDur.Milliseconds()
 		var err error
-		fanInStepID, err = tx.InsertReturnID(ctx, "step_id",
-			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
-				" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+		fanInStepID, err = tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
 			flowID, nextStepDepth, keys.RandomIdentifier(16), fanInTarget, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, lineageID, fanOutOrdinal, stepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
+			inheritCancel, flowID, stepID,
 		)
 		if err != nil {
 			return errors.Trace(err)
@@ -1636,7 +1655,7 @@ type stateByteCount struct {
 // insertFanInStep creates the fan-in step after the cohort completes. It also returns the state bytes it
 // moved (read: spawn snapshot + every cohort member's changes; written: the merged fan-in snapshot), which
 // the caller emits after its transaction commits.
-func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardNum, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, workflowURL string, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int) (int, stateByteCount, error) {
+func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardNum, flowID, nextStepDepth, cohortSpawnID, predecessorStepID int, fanInTaskName string, graph *workflow.Graph, workflowURL string, sleepMs int64, priority int, fairnessKey string, fairnessWeight float64, timeBudgetMs int, inheritCancel int) (int, stateByteCount, error) {
 	var spawnTaskName string
 	var spawnStateJSON, spawnChangesJSON, spawnRefsJSON []byte
 	var spawnLineageID, spawnFanOutOrdinal int
@@ -1766,10 +1785,9 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	}
 	bytes.stateWritten = len(mergedJSON)
 	fanInURL := dispatchURLOf(graph, fanInTaskName)
-	fanInStepID, err := tx.InsertReturnID(ctx, "step_id",
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?)",
+	fanInStepID, err := tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
 		flowID, fanInDepth, keys.RandomIdentifier(16), fanInTaskName, fanInURL, mergedJSON, refsJSON, workflow.StatusPending, parkedNone, timeBudgetMs, spawnLineageID, spawnFanOutOrdinal, predecessorStepID, sleepMs, priority, fairnessKey, fairnessWeight, e.engineID,
+		inheritCancel, flowID, predecessorStepID,
 	)
 	if err != nil {
 		return 0, stateByteCount{}, errors.Trace(err)
