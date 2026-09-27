@@ -7,8 +7,8 @@
 > for).
 
 One Sonar works one shard. It owns this replica's row in that shard's registry — creates it, refreshes it,
-deletes it — reads the whole registry on its own cadence, and publishes what the reading implies: the pool
-divisor, the work partition, and how stale the answer is.
+deletes it — reads the whole registry on its own cadence, and publishes what the reading implies: how many
+replicas are there, this replica's rank among them, the work partition, and how stale the answer is.
 
 **Nothing here spans shards, and it must not start to.** Every timestamp in the registry is stamped by the
 shard that holds it (`NOW_UTC()`), so ages are comparable *within* a shard and timestamps are comparable
@@ -38,9 +38,9 @@ registration repair exists (below) and why it cannot be left to the beat.
 way out — its context is cancelled by then, so the DELETE would fail — and `Run` having returned is itself
 the guarantee that no beat follows.
 
-**The API is eleven calls, and keeping it that small is a standing constraint.** Four inputs (`New`,
-`SetEvidence`, `SetLogger`, `SetSeams`), three lifecycle calls (`Join`, `Run`, `Leave`), three published
-facts (`Replicas`, `Partition`, `BlindFor`), and one knob (`SetCadence`).
+**The API is fourteen calls, and keeping it that small is a standing constraint.** Six inputs (`New`,
+`SetProfile`, `SetEvidence`, `SetTurnFunc`, `SetLogger`, `SetSeams`), three lifecycle calls (`Join`, `Run`, `Leave`), four
+published facts (`Replicas`, `Rank`, `Partition`, `BlindFor`), and one knob (`SetCadence`).
 
 The windows and the beat are **constants with plain fields behind them**, not setters, because they are
 this package's policy — derived from which errors are safe in which direction rather than from anything an
@@ -100,7 +100,7 @@ deliberately:
 
 | | direction of error that hurts | posture |
 |---|---|---|
-| `Replicas` (pool divisor) | under-count → over-size pools → collapse a database | **hold, and withhold a fall across a gap** |
+| `Replicas` + `Rank` (who dispatches) | under-count / over-promote → over-size pools → collapse a database | **hold, and withhold a fall or a promotion across a gap** |
 | `Partition` (work divisor) | over-count → a residue class nobody selects → stranded work | **fail open** |
 | prune (hygiene) | a wrong delete is the only irreversible act here | **wait 5 minutes** |
 
@@ -122,6 +122,12 @@ deliberately:
   costs work that nobody runs. Blindness is evaluated **at the getter**, not published by the loop, so a
   shard that stops answering stops being partitioned within a round trip rather than within a cadence.
 - **The prune waits** (below).
+
+- **`Rank` obeys the same asymmetry as `Replicas`, for the same storm.** After a correlated stall every
+  row reads stale at once, so every replica would rank itself first; an owner that turns rank into "I
+  dispatch" would then grow every replica's pool to a dispatcher's share simultaneously. A demotion (a higher
+  rank) shrinks a pool and is believed at once; a promotion waits one reading. Pinned by
+  `TestPeers_RankPromotionIsWithheldAcrossAGap`.
 
 **A failed read publishes nothing at all.** A read that did not happen is not an observation that anybody
 left. Pinned by `TestPeers_FailedReadHoldsTheLastGoodFleet` and
@@ -189,6 +195,12 @@ verified sensitive: removing the gap's reset of the healthy run makes it delete 
 
 Both pinned by `TestPeers_ClassifySelfAbsenceCutsBothWays`.
 
+- **`Rank` follows `Replicas`, not the partition: self is ranked even when its row is missing.** The owner
+  turns a rank into a dispatcher role, and there the dangerous error is the opposite of the partition's:
+  over-claiming a slot over-connects by one share until the row is repaired, while a replica that ranked
+  nowhere would leave a lone replica dispatching nothing at all. Pinned by
+  `TestPeers_ClassifyRanksAnAbsentSelf`.
+
 **The registration repair fires promptly, not on a hygiene cadence**, because being missing makes *peers*
 under-count and over-size — the dangerous direction. It triggers on any successful read that does not
 contain self, **including an empty one**: an empty registry is always wrong, since this process is in it by
@@ -199,6 +211,26 @@ restart. Pinned by `TestPeers_EmptyRegistryStillRepairsItself`.
 neither caller can hit the one tripping case — an existing row whose `seen_at` already holds this
 millisecond. At startup nothing has beaten yet; the repair path has just *observed* the row absent, and this
 replica is the only writer of its own row, so that observation cannot be raced.
+
+## `Rank` — a rendezvous score, fixed forever
+
+The rank is highest-random-weight hashing: each fresh row scores `rendezvousScore(engineID, shard)`, ties
+break on the lower id, and a replica's rank is how many counted rows outrank it. Rows flagged `zero_workers`
+(the owner's `Profile.ZeroWorkers`) are counted in `Replicas` but neither rank nor count as candidates, and
+`Rank` returns the rank together with that candidate count as one published pair - an owner derives how many
+slots to fill from the candidates, and a rank only means anything against the count it came from. Pinned by
+`TestPeers_ClassifyNeverRanksAZeroWorkersPeer`.
+
+The `Profile` is written at registration and at a repair, **never by the beat**: it is a fact about the
+process, not a liveness signal, and the beat stays one fixed statement shape. Every replica reading the
+same rows derives a distinct rank with no coordination, and the score is per shard, so the top ranks land on
+different replicas on different shards. Pinned by `TestPeers_ClassifyRanksAgreeAcrossReplicas`.
+
+**Do not change `rendezvousScore`, and do not seed it.** Its value must agree across every process in a
+fleet, and a fleet is upgraded one replica at a time: during a rolling upgrade that changed the function,
+old and new replicas would rank the same rows differently, so a shard could be claimed by more dispatchers
+than its budget feeds, or by none. A seeded or per-process hash has the same failure permanently. The
+function is a splitmix64 finalizer over `engineID ^ shard*φ`, and that spelling is part of the wire.
 
 ## Two cadences, because only one of them is detection
 
@@ -275,7 +307,7 @@ is about the decision, not the socket count.
 
 ## What is deliberately absent
 
-- **No metrics.** The owner builds its own async gauges by pulling `Replicas`, `Partition` and `BlindFor` at
+- **No metrics.** The owner builds its own async gauges by pulling `Replicas`, `Rank`, `Partition` and `BlindFor` at
   collection time, which is one fewer scope to keep in step and needs no meter here.
 - **Exactly two fault seams, both at an I/O boundary, and that is the whole rule for adding a third.**
   Everything reachable from *inside* the package needs none: `observe` takes an error directly, and every

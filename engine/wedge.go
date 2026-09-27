@@ -42,6 +42,10 @@ import (
 // It sweeps on entry rather than after the first tick, because a replica restarting after a crash inherits
 // its own expired leases and reclaiming those is exactly this loop's job. The wedge detectors are no-ops
 // that early: their age guards exclude everything younger than parkWedgeThreshold.
+//
+// Every repair runs only on the shards this replica DISPATCHES. Each repair is idempotent, so one sweeper
+// per shard is enough, and every shard always has a dispatcher; a replica that only reads a shard would
+// otherwise run these heavy scans through its two-connection reader pool, once per replica in the fleet.
 func (e *Engine) recoveryLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.wedgeSweepInterval)
 	defer ticker.Stop()
@@ -68,6 +72,9 @@ func (e *Engine) recoveryLoop(ctx context.Context) {
 func (e *Engine) runRecoverySweep(ctx context.Context) {
 	e.recoverExpiredLeases(ctx)
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		if !e.dispatchesOn(shard) {
+			return nil // see recoveryLoop
+		}
 		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
 		// connections like any other caller instead of taking them from work already under way.
 		ctx, doneTurn := e.dbTurn(ctx, shard)
@@ -102,6 +109,9 @@ func (e *Engine) runRecoverySweep(ctx context.Context) {
 // transient DB error costs one deferred pass and needs no retry or backoff of its own.
 func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		if !e.dispatchesOn(shard) {
+			return nil // see recoveryLoop
+		}
 		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
 		// connections like any other caller instead of taking them from work already under way.
 		ctx, doneTurn := e.dbTurn(ctx, shard)

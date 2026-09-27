@@ -27,8 +27,11 @@ import (
 // reaperLoop deletes flows whose delete_after_ms window has elapsed, on its own plain ticker. A single
 // goroutine is inherently non-overlapping - a slow pass just delays the next tick. Deletion is
 // latency-tolerant, so there is no wake/startup/shutdown special pass: a flow that came due while a replica
-// was down is removed on the next tick here, or by a peer replica's reaper. Drained via reaperStop in
-// drainRuntime; a pass in progress finishes its current tree-delete (checked between batches) and exits.
+// was down is removed on the next tick here, or by a peer replica's reaper. Only the shards this replica
+// dispatches are reaped: every shard always has a dispatcher, so each is still covered, and a replica that
+// only reads a shard would otherwise run the sweep through its two-connection reader pool once per replica.
+// Drained via reaperStop in drainRuntime; a pass in progress finishes its current tree-delete (checked
+// between batches) and exits.
 func (e *Engine) reaperLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.reapInterval)
 	defer ticker.Stop()
@@ -63,6 +66,9 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 func (e *Engine) reapDueFlows(ctx context.Context) {
 	const reapBatch = 4096
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+		if !e.dispatchesOn(shard) {
+			return nil // see reaperLoop
+		}
 		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
 		// connections like any other caller instead of taking them from work already under way.
 		ctx, doneTurn := e.dbTurn(ctx, shard)

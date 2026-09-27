@@ -580,6 +580,9 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	if e.seams.IsFault(FaultDropDoorbell) {
 		return
 	}
+	if !e.dispatchesOn(shard) {
+		return // see enqueueStepDue
+	}
 	// Every caller of this cold path is RE-offering a step this replica already dispatched once - a revived
 	// surgraph caller, a resumed interrupt leaf, an unwedged park - so the step still carries the claim
 	// reservation its earlier dispatch took, and those dispatches finish far inside the ~1-2s window. Left
@@ -620,6 +623,13 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int) {
 	// FaultDropDoorbell: see enqueueStep.
 	if e.seams.IsFault(FaultDropDoorbell) {
+		return
+	}
+	// ONLY A DISPATCHER MAY RING ITS OWN BELL. The cache admits a step for any shard, and whoever pops it
+	// executes it and offers every successor back to the same cache - so a replica that rang the bell for a
+	// shard it does not dispatch would run the whole flow through its reader pool. The step is already
+	// committed and due, so a dispatcher's next scan takes it; the chain then stays on that dispatcher.
+	if !e.dispatchesOn(shard) {
 		return
 	}
 	admitted := e.cache.Offer(candidates.Job{StepID: stepID, Shard: shard}, priority)

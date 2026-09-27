@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"testing"
 	"time"
@@ -32,12 +33,15 @@ import (
 // in that shard's registry and publishes what reading it implies. The rationale for the mechanism lives in
 // internal/peers; what matters here is the shape of what it publishes and what the engine does with it.
 //
-// Two numbers, from one reading, with opposite risk profiles:
+// Three numbers, from one reading:
 //
-//   - Replicas divides that shard's connection POOL, because the budget belongs to the shard's database and
-//     N replicas each holding the whole budget would overshoot it N times over.
+//   - Replicas and Rank choose that shard's DISPATCHERS: the replicas ranked below dispatcherSlots(Replicas)
+//     split the shard's connection budget, because it belongs to the shard's database and N replicas each
+//     holding the whole budget would overshoot it N times over. Everyone else holds a small reader pool
+//     there, so the budget no longer divides by a count that grows with the fleet.
 //   - Partition divides that shard's WORK - the residue class of step_id each replica selects - across the
-//     replicas that demonstrably serve it.
+//     replicas that demonstrably serve it. A replica that does not dispatch a shard idles its piston there,
+//     stops stamping its dispatch evidence, and drops out of the partition with no rule of its own.
 //
 // PER SHARD is the whole point, and it is what a fleet-global count cannot express: a peer whose piston
 // wedges on shard 3 drops out of shard 3's work divisor and stays in every other shard's, and a peer whose
@@ -83,8 +87,9 @@ func (e *Engine) sonarFor(shard int) *peers.Sonar {
 	return e.sonars[shard]
 }
 
-// replicasOn is how many replicas hold connections to one shard - the divisor for that shard's pool. One
-// before the Sonars exist, which is the solo sizing every derivation falls back to.
+// replicasOn is how many replicas are registered on one shard - the count dispatcherSlots divides into
+// dispatchers and readers, and what the fleet-limit check prices. One before the Sonars exist, which is
+// the solo sizing every derivation falls back to.
 func (e *Engine) replicasOn(shard int) int {
 	s := e.sonarFor(shard)
 	if s == nil {
@@ -109,10 +114,19 @@ func (e *Engine) partitionOn(shard int) (replicas, ordinal int, ok bool) {
 }
 
 // buildSonars creates one Sonar per open shard, before anything is sized from a Sonar. Errors are logged
-// rather than returned: a shard without one falls back to solo sizing on that shard (pools sized for one
-// replica) and to unpartitioned selection, which is the safe direction on both axes.
+// rather than returned: a shard without one falls back to dispatching solo there (pools sized for one
+// replica) with unpartitioned selection - over-connecting by at most one share, and never leaving the
+// shard without a dispatcher.
+//
+// Each Sonar states this replica's probed RTT and whether it is await-only (SetWorkers(0)) in its row. The
+// RTT is there for operators to query. The await-only flag keeps the replica out of every shard's ranking,
+// where it could otherwise win a dispatcher slot it will never serve, while leaving it counted in the fleet
+// its reader pools are part of.
 func (e *Engine) buildSonars() {
 	e.sonars = make(map[int]*peers.Sonar, e.db.NumShards())
+	e.shardsLock.Lock()
+	rtts := maps.Clone(e.shardRTTMs)
+	e.shardsLock.Unlock()
 	for _, idx := range e.db.Indices() {
 		db, err := e.db.Shard(idx)
 		if err != nil {
@@ -124,6 +138,10 @@ func (e *Engine) buildSonars() {
 			e.logger.Error("Building peer sonar", "shard", idx, "error", err)
 			continue
 		}
+		s.SetProfile(peers.Profile{
+			RTT:         time.Duration(rtts[idx] * float64(time.Millisecond)),
+			ZeroWorkers: e.zeroWorkers(),
+		})
 		s.SetLogger(e.logger)
 		s.SetSeams(e.seams)
 		if testing.Testing() {

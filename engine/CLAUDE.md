@@ -127,9 +127,9 @@ engine:
 - **Live** (take effect immediately, callable any time): `SetMaxOpenConns` (an **expert override** that pins
   every shard's pool exactly - the benchmarking / external-pooler path; normal deployments never call it),
   `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
-  existing flow keeps the budget/priority frozen at its own `Create`). The replica count that divides the derived
-  pools is NOT a setter - it is **read** live from the shared `dwarf_peers` registry (see "Peer discovery" below), and
-  `recomputePools` pushes each shard's recomputed size through the per-shard `sequel.DB` pool setters (hot/atomic);
+  existing flow keeps the budget/priority frozen at its own `Create`). Which replicas dispatch a shard, and so how its
+  derived budget divides, is NOT a setter - it is **read** live from the shared `dwarf_peers` registry (see "Peer
+  discovery" and "Dispatchers" below), and `recomputePools` pushes each shard's recomputed size through the per-shard `sequel.DB` pool setters (hot/atomic);
   the uniform override rides `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. **The derived *worker* ceiling follows the
   pools, and EVERY path that changes a pool must re-derive it** (`recomputeWorkerCeiling`): the ceiling encodes how
   fast a completion storm drains through `M` connections, so a shrunken pool must never leave a stale, too-high bound
@@ -1434,10 +1434,10 @@ reports a piston that serves nothing as fully alive: one whose every SCAN fails 
 happily against an empty planner, and one whose every FETCH fails tallies honestly and claims its band while
 taking zero candidates. Both hold a residue class nobody else selects. See `internal/piston/CLAUDE.md`. Registration does NOT stamp it - intent is not evidence - so a
 replica earns it on its first cycle, and the beat rides the read cadence when that evidence flips so the
-window is a read interval rather than a beat interval. An await-only replica (`SetWorkers(0)`) holds
-connections, so it counts toward the pool divisor, but it claims nothing: giving it a residue class means
-*nothing ever selects those steps*. This shipped broken in the first cut and hung
-`fixtures/crossreplicaawait_test.go`, which uses exactly that configuration.
+window is a read interval rather than a beat interval. A registered replica that claims nothing on a shard -
+one ranked out of its dispatchers there - still counts in the fleet, but giving it a residue class means
+*nothing ever selects those steps*. This shipped broken in the first cut (for an await-only replica, which
+then registered) and hung `fixtures/crossreplicaawait_test.go`, which uses exactly that configuration.
 
 **Everything fails open.** Solo dispatcher, unknown ordinal (self absent from the roster), an ordinal out of
 range for the divisor, a Sonar gone blind, or no Sonar at all - every one disables partitioning on that
@@ -1448,7 +1448,8 @@ catch half a fleet change: an ordinal only means anything against the count it w
 *The count and the ordinal come from ONE shard's rows*, which is what per-shard accounting makes automatic -
 there is no cross-shard roster to assemble, and no timestamps from different clocks to rank.
 
-**The doorbell is deliberately NOT partitioned, and the case for that got simpler twice.** `Offer` now
+**The doorbell is deliberately NOT partitioned** - it is gated only by role, ringing solely for a shard this
+replica dispatches (see "Dispatchers") - **and the case for not partitioning it got simpler twice.** `Offer` now
 admits only into an EMPTY partition, so a busy replica never offers at all, and a uniform-priority workload
 offers only at the head of a drained chain. Partitioning that check would delay exactly the sequential-hop
 case it exists for, and the claim CAS still arbitrates, so the worst case is one lost claim. Note this
@@ -1478,8 +1479,8 @@ class ahead of them - and the measurements behind each are in `internal/piston/C
 Three things stay the engine's:
 
 - **The pair the piston partitions on is still `partitionOn(shard)`** - the steal relaxes that pair's
-  predicate, it does not change how the pair is derived. An await-only replica is still excluded from the
-  divisor, and every fail-open case still disables partitioning outright, which leaves nothing to relax.
+  predicate, it does not change how the pair is derived. A replica that does not dispatch the shard is still
+  excluded from the divisor, and every fail-open case still disables partitioning outright, which leaves nothing to relax.
 - **`dwarf_steps_stolen{shard}` is the operator's signal that a peer is alive but not serving its share.**
   Zero in a healthy fleet by construction (measured 0-23 steps across five arms, because the grace blocks a
   fleet that is keeping up). A sustained nonzero rate names the condition nothing else reports - and it is
@@ -1487,8 +1488,8 @@ Three things stay the engine's:
 - **The doorbell bypasses all of it, so a fixture must create from an await-only replica to test any of
   this.** `Offer` admits a step into the local cache regardless of residue class, so a chain created on a
   dispatcher walks hop by hop on that dispatcher and never consults a class. That is why the steal fixtures
-  create through a `SetWorkers(0)` replica: its offers land in a cache with no workers to pop them, so its
-  work is reachable only by a peer scanning. The bench disables the doorbell outright to isolate the path;
+  create through a `SetWorkers(0)` replica: it dispatches no shard, so its doorbell never rings, and its work
+  is reachable only by a peer scanning. The bench disables the doorbell outright to isolate the path;
   **the fixtures do not** - they run at the production default and still exercise the steal, which is the
   stronger statement of the two.
 
@@ -2465,20 +2466,19 @@ successor and advance no `step_id`. Constants, their portability, and the normal
   replicas starting together stay far under any server's `max_connections`. It is not an over-connect guard - that
   is "the fleet is known before dispatch" - just enough to bootstrap the read.
 
-  **`lastAppliedR` starts EMPTY (`"nothing derived yet"` per shard), and Startup records each shard's count**
+  **`lastAppliedSlots` starts EMPTY (`"nothing derived yet"` per shard), and Startup records each shard's role**
   after sizing its pool directly, so the first reconcile `recomputePools` dedupes against the values the pools
-  actually hold. `shardPool` clamps `replicas = max(1, replicas)`, so an absent count never reaches the
-  arithmetic.
+  actually hold.
 
   None of this depends on any transport: the registry is the only thing anyone reads (see "Peer discovery"
   below).
 
-- **The derived budget is per DATABASE, so the observed replica count R splits it**: each replica
-  takes `max(2, open/R)`. The knee belongs to the shard's server, not to one replica - R replicas
-  each holding the full budget overshoot it R times over. R is never declared: the engine reads it
-  from the shared `dwarf_peers` registry (see "Peer discovery"), and every fleet change pushes
-  recomputed pools to the open shards immediately. The `SetMaxOpenConns` override is a per-replica
-  exact number and is never divided.
+- **The derived budget is per DATABASE, so the shard's DISPATCHERS split it**: each of the `X` replicas
+  that dispatch a shard takes `max(2, round(budget/X))`, and every other replica holds the reader pool
+  (1 idle, 2 open). The knee belongs to the shard's server, not to one replica. Which replicas dispatch is
+  never declared: the engine reads it from the shared `dwarf_peers` registry (see "Dispatchers"), and every
+  role change pushes recomputed pools to the open shards immediately. The `SetMaxOpenConns` override is a
+  per-replica exact number and is never divided.
 
 **Peer discovery (`peers.go` + `internal/peers`).** Everything the engine knows about its fleet comes from
 the shared **`dwarf_peers`** registry, NOT from the host transport, and it comes **per shard**: one
@@ -2487,14 +2487,15 @@ its own cadence, and publishes what the reading implies. The mechanism - the two
 and their opposite postures, the blindness rules, the id-list prune - lives in `internal/peers/CLAUDE.md`.
 What belongs here is the engine's side of it.
 
-**Two numbers, from one reading, with opposite risk profiles.** `replicasOn(shard)` divides that shard's
-connection **pool**, because the budget belongs to the shard's database and N replicas each holding the whole
-budget would overshoot it N times over. `partitionOn(shard)` divides that shard's **work** - the residue
-class of `step_id` each replica selects - across the replicas that demonstrably serve it (see §"Candidate
-de-duplication"). Over-counting the first over-sizes pools and can collapse a database; over-counting the
-second hands a residue class to a replica that never selects it and strands the work in it. They are
-therefore never the same number, and the second excludes an await-only replica (`SetWorkers(0)`) that the
-first counts.
+**Two decisions, from one reading, with opposite risk profiles.** `replicasOn(shard)` and the Sonar's rank
+choose which replicas **dispatch** the shard and so how its connection budget divides (see "Dispatchers"
+below). `partitionOn(shard)` divides that shard's **work** - the residue class of `step_id` each replica
+selects - across the replicas that demonstrably serve it (see §"Candidate de-duplication"). Getting the first
+wrong toward too many dispatchers over-connects the database by a share each; toward too few, it leaves a
+shard short of dispatchers. Over-counting the second hands a residue class to a replica that never selects it
+and strands the work in it. They are therefore never the same number: a registered replica that does not
+dispatch a shard idles its piston there, stops stamping its dispatch evidence, and drops out of the partition
+with no rule of its own.
 
 **PER SHARD is the point, and a fleet-global count cannot express it.** A peer whose piston wedges on shard 3
 drops out of shard 3's work divisor and stays in every other shard's; a peer whose beats to shard 3 fail
@@ -2503,7 +2504,7 @@ registry is stamped by the shard holding it, so ages are comparable within a sha
 comparable nowhere. Consequently **every derivation that consumes a replica count does so per shard**:
 `recomputePools`, `recomputeWorkerCeiling` (worst shard wins, since a storm drains through the tightest
 pool) and `recomputeRefillIntervals` (the period is measured against the pool that shard drains through).
-`lastAppliedR` is a per-shard map under `poolsLock` for the same reason: one shard's change must not re-push
+`lastAppliedSlots` is a per-shard map under `poolsLock` for the same reason: one shard's change must not re-push
 another's unchanged sizes, and one shard's stillness must not mask a change elsewhere.
 
 **The two halves are wired to each other through the engine**, so neither package imports the other:
@@ -2595,21 +2596,111 @@ mis-sizes pools, corrupts nothing).
 
 **Every APPLICATION of a pool size is serialized under `poolsLock`** - both writers: the derived
 recompute (`recomputePools`, driven by the reconcile loop) and the live
-override (`SetMaxOpenConns`). The `lastAppliedR` dedupe skips a no-op recompute but does **not order two live ones**:
-two recounts microseconds apart during a rolling deploy each read a different R, and with nothing serializing
-read-of-R through push, the **R=2 sizes can land AFTER the R=3 sizes** - every replica then holds a half-budget
-pool against a fleet of three, over-connecting the shard's server, and it is *sticky* (the next
-recompute sees R unchanged and skips). The override races the same way and worse: `recomputePools`
-reads `maxOpenConns` and only *then* pushes, so a `SetMaxOpenConns` landing in that window has its
-**pinned pools silently overwritten by derived ones** - the operator's explicit pin evaporates. With
-the lock spanning read through push, whichever writer goes second sees a settled world (the override
-applies last, or the recompute early-returns because the override is now set). Lock order:
+override (`SetMaxOpenConns`). The `lastAppliedSlots` dedupe skips a no-op recompute but does **not order two live
+ones**: two readings microseconds apart during a rolling deploy each derive a different split, and with nothing
+serializing read through push, the **half-budget sizes can land AFTER the third-budget sizes** - every replica
+then holds a pool sized for a fleet smaller than the one it is in, over-connecting the shard's server, and it is
+*sticky* (the next recompute sees the role unchanged and skips). The override races the same way and worse:
+`recomputePools` reads `maxOpenConns` and only *then* pushes, so a `SetMaxOpenConns` landing in that window has
+its **pinned pools silently overwritten by derived ones** - the operator's explicit pin evaporates. With the
+lock spanning read through push, whichever writer goes second sees a settled world (the override applies last,
+or the recompute sees the override and leaves the pools alone). Lock order:
 `poolsLock` -> `shardsLock` (the counts are lock-free reads of the Sonars' published state, so they drop out of the order). Pinned by
 `TestPoolSizing_ConcurrentRecomputeAppliesLatestR` and
 `TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride` (both drive the interleaving with the
 `slowPoolPush` seam rather than racing for it - staging the two counts through the registry itself and waiting for
 each to be OBSERVED before the recompute that must read it; without the lock they measure 24 instead of 16, and a
 pinned 7 turning into 24).
+
+**Dispatchers: a shard's budget divides by a bounded count, not by the fleet (`poolsize.go`).** Dividing the
+budget across every registered replica has a floor, and the floor is what breaks: once `budget/R` drops below
+two, each further replica adds its minimum pool to a budget that does not grow - an 8-vCPU shard's 48 at
+`R=100` becomes 200, **4.2x over**, and over-connection is the collapse direction (the 1-vCPU tier lost 55%
+past its knee). The realistic fleet that reaches it is not a large dwarf deployment but a host scaled wide
+for its own traffic, every instance paying for connections to shards it barely uses. So each shard has
+`X = dispatcherSlots(spec, R)` **dispatchers** that split the budget, and every other replica holds a
+**reader pool** (1 idle, 2 open) and runs no step there. Connections per shard become `budget + ~R` held,
+most of the `R` idle, instead of `max(budget, 2R)` active.
+
+- **Two budgets, and they must not be conflated.** The **knee** (`shardBudget`) bounds *active* connections
+  and is what dispatchers divide. **`max_connections`** bounds *held* connections, idle included, and is what
+  readers count against. Subtracting the readers from the knee (`(knee - 2(R-X))/X`) goes negative at 2 vCPU
+  and `R=10`, and shrinks the active pool to make room for connections that are not active.
+- **`X` MUST AGREE ACROSS THE FLEET, so it is derived at `defaultRTTMs`, never at the probed RTT.** Each
+  replica probes its own RTT, so replicas in different zones derive different knees. That is right for the
+  *pool* (a farther replica needs more connections to keep the same backends busy - Little's law - and the
+  server sees roughly the mean) but wrong for `X`, which is the rank cut: two replicas disagreeing on it both
+  claim, or both leave, one slot. `VirtualCPUs` is therefore a fleet-wide fact - a replica declaring a
+  different value for a shard derives a different `X` there.
+- **`X = clamp(round(budgetRef/minDispatcherPool), min(2,C), C)`, where `C` is the CANDIDATES** - the fresh
+  replicas not flagged `zero_workers`, from `Sonar.Rank`, not `Replicas`. Dividing by every registered replica
+  would split the budget among dispatchers that do not exist: one worker beside await-only frontends would
+  run on a fraction of its shard (pinned by `TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget`). The floor
+  of two is availability, not throughput: one replica dying leaves the other dispatching while the slot
+  passes. `minDispatcherPool` (12) is the smallest slice of a budget worth dispatching from - a piston's
+  queries plus workers to use them - and is an estimate, not a measurement; it yields 2 dispatchers at 1-4
+  vCPU, 4 at 8, 9 at 16, 16 at 64. Lowering it spreads a shard over more replicas with smaller pools.
+- **Which replicas: the Sonar's rendezvous rank** (`internal/peers/CLAUDE.md`), ranks `0..X-1` dispatch.
+  Per-shard scores spread the slots across the fleet; "oldest X" would hand every shard to the same few.
+  A joining replica can displace a sitting dispatcher on a shard with probability ~`X/(R+1)`; `Join`'s
+  announce-then-wait ordering already covers that handoff, since the joiner grows only after peers have read
+  its row. A promotion after the rank-improving reading that ended a blind spell is withheld by the Sonar -
+  the correlated stall that would otherwise make every replica rank itself first and grow at once.
+- **The role changes in a fixed order** (`applyRole` under `poolsLock`): a replica leaving a shard idles its
+  piston and closes its doorbell *before* its pool shrinks; one joining grows its pool *before* it
+  dispatches. Idling the piston is `piston.SetIdle`, which withdraws the shard from the planner and empties
+  its cache partition; its evidence then goes idle and it leaves the work partition on its own.
+- **THE DOORBELL IS GATED BY ROLE, and without that the design is wrong.** `cache.Offer` admits a step for
+  any shard, and the worker that pops it offers every successor back into the same cache - so a replica that
+  rang its own bell for a shard it does not dispatch would run the entire chain through its two-connection
+  reader pool. `enqueueStep`/`enqueueStepDue` return early unless `dispatchesOn(shard)`; the step is committed
+  and due, so a dispatcher's scan takes it and the chain then stays on that dispatcher. The cost is one scan
+  cycle once per `Create`/`Resume`/`Fork`/`Continue` issued on a replica that does not dispatch the shard, not
+  once per hop. Pinned by `TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing`.
+- **`pickShard` places among dispatched shards when there are any**, capacity-weighted, so a new flow's first
+  step rings a bell that is answered. A replica dispatching nothing places across every non-cordoned shard.
+- **Only dispatched shards feed the workers.** `workersDispatch`, the cache resize, the worker ceiling (worst
+  *dispatched* shard) and the refill share all skip reader shards: a reader pool runs no step, and a 2-connection
+  pool entering the ceiling's `min` would cap the whole crew.
+- **Readers hold ONE, not zero.** A reader beats the registry every second per shard and polls it every 50 ms
+  for a parked `Await`, so `MaxIdleConns=0` would reconnect for each - a new server process per beat on
+  Postgres, twenty a second per parked caller. Going to zero needs, as a package, a solution for the beat, an
+  enforced zero-hold invariant, a promotion out of ephemeral mode for a reader holding parked keys, and a host
+  routing API that makes both rare. None of it is built; the one held connection is what makes all of it
+  unnecessary. The burst to two keeps a `Create` transaction from queueing behind an `Await` poll, and is
+  safe because no code path holds one pooled connection while acquiring a second from the same pool.
+- **`SetMaxOpenConns` turns the ranking off**: every replica dispatches every shard (`slotsOn` returns the
+  candidate count) and the pinned pools are never divided - an operator pinning pools, typically behind an external
+  pooler, has taken the budget out of the engine's hands. `recomputePools` still applies roles under the
+  override, so a reader when the override lands starts dispatching; it leaves the pools to `SetMaxOpenConns`.
+- **An await-only replica (`SetWorkers(0)`) registers flagged `zero_workers`**, so it is counted in the fleet
+  (its reader pools are real connections, and the fleet check prices them) but takes no rank. Unflagged, it
+  could win a slot it will never serve - leaving a shard with fewer working dispatchers than `X`, or none.
+  **This is not the dropped `dispatches` flag returning.** That flag claimed *serving* and fed the work
+  partition, so a wedged replica kept its residue class forever; `zero_workers` states a configured *mode*,
+  feeds only the ranking, and the partition still divides on `dispatched_at` evidence alone. A dispatcher
+  that wedges still holds its slot until its row goes stale - the residual below - but it strands no class.
+- **Background sweeps run only on dispatched shards.** The reaper and every recovery repair (expired leases,
+  wedged parks, orphaned children, orphan detection) skip a shard this replica only reads. Each is
+  idempotent, so one sweeper per shard suffices, and every shard always has a dispatcher; a reader running
+  them would put heavy scans through its two-connection pool once per replica in the fleet. Pinned by
+  `TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads`.
+- **`dwarf_shard_dispatching{shard}`** reports the role (1/0) per replica; summed across the fleet it is the
+  shard's dispatcher count, and zero means the shard runs nothing. Replica identity is the host's OTel
+  resource (`service.instance.id`), never an engine attribute - engine ids are random per restart, so an
+  attribute would open a new series on every deploy.
+- **The fleet check is advisory and edge-triggered** (`checkFleetFits`, every reconcile tick, since a reader
+  joining moves no pool and so would never reach the deduped push). It warns when `budget + 2(R-X)` passes 80%
+  (`R` every registered replica, await-only included)
+  of `max_connections`, read once per shard at Startup (`pg_settings`, `@@max_connections`,
+  `@@MAX_CONNECTIONS`; SQLite and a failed read give 0 and skip). It never resizes anything: shrinking
+  dispatchers to make room for idle readers is the wrong trade, and a fleet that size wants a pooler.
+- **Known residual: a crashed dispatcher holds its slot for the fresh window (40s).** The rank is drawn from
+  rows still counted by `Replicas`, so a dispatcher that dies without `Leave` keeps its rank until its row ages
+  out, and the shard runs on `X-1` meanwhile. With `X >= 2` that is slower, not stopped; **all `X` crashing
+  together stops the shard for up to the window**. A clean shutdown deletes the row and promotes the next rank
+  on the next reading. Ranking only rows with fresh dispatch evidence would shorten it, but a reader never
+  stamps that evidence, so it could never be promoted - the fix is not free.
 `engine_id` (random per process, fresh on restart) is the id a replica writes into `dwarf_peers`; it is
 also **stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - forensic
 provenance there ("which replica created/ran this row"), deliberately unindexed.

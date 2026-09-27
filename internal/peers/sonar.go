@@ -27,6 +27,7 @@ limitations under the License.
 // # Driving one
 //
 //	s, err := peers.New(engineID, shard, db)
+//	s.SetProfile(peers.Profile{RTT: rtt}) // optional; what this replica states in its row
 //	s.SetEvidence(dispatcher.Liveness) // optional; without it this replica never claims to dispatch
 //	s.Join(ctx)                        // announce, wait for peers to notice, then read
 //	go s.Run(ctx)                      // ... and keep reading until ctx ends
@@ -46,8 +47,9 @@ limitations under the License.
 //
 // # What it publishes
 //
-// Replicas is how many replicas hold connections to this shard - the divisor for the shard's connection
-// pool. Partition is the (replicas, ordinal) pair that splits candidate selection across the replicas that
+// Replicas is how many replicas are registered on this shard, and Rank is this replica's place among those
+// that may dispatch, on a per-shard score every replica computes the same way - so "the replicas ranked
+// below k" is a set the whole fleet agrees on with no coordination. Partition is the (replicas, ordinal) pair that splits candidate selection across the replicas that
 // actually serve this shard, in the shape a dispatcher consumes: ok=false means "select everything".
 // BlindFor is how long it has been since the registry was last read successfully, which an owner should
 // surface: a Sonar that cannot read holds every one of its published values frozen.
@@ -156,6 +158,24 @@ type partition struct {
 	ordinal int
 }
 
+// standing is the pair Rank reports. Immutable once published.
+type standing struct {
+	rank       int
+	candidates int
+}
+
+// Profile is what a replica states about itself in its registry row, written when the row is created or
+// repaired and never by the beat: facts that hold for the life of the process.
+type Profile struct {
+	// RTT is the round-trip time this replica measured to the shard, recorded in whole microseconds for
+	// operators to query; nothing here reads it.
+	RTT time.Duration
+	// ZeroWorkers says this replica is configured to run no steps. It stays in Replicas, since it still holds
+	// connections, but takes no rank: a rank is a claim on a dispatcher slot, and a replica that will never
+	// dispatch would hold that slot empty.
+	ZeroWorkers bool
+}
+
 // Sonar owns this replica's row in one shard's peer registry and everything derived from reading it.
 //
 // Join and Run must be driven by a single goroutine. Every getter is safe to call from another one, at any
@@ -184,6 +204,11 @@ type Sonar struct {
 
 	// Published state: written only by the driving goroutine, read by the owner from anywhere.
 	replicas atomic.Int32
+	// standing is this replica's rank and the count it ranks among, published as ONE value for the same
+	// reason part is: a rank only means anything against the count it was derived from - see Rank.
+	standing atomic.Pointer[standing]
+	// profile is what this replica states about itself in its row - see SetProfile.
+	profile atomic.Pointer[Profile]
 	// part is the dispatcher count and this replica's ordinal in it, published as ONE value. They are two
 	// halves of a single decision - an ordinal only means anything against the count it was derived from -
 	// so a reader that caught one half of a fleet change would partition on a pair that never existed. As
@@ -242,6 +267,8 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 	s.SetSeams(nil)
 	s.lastGood.Store(s.now().UnixNano())
 	s.replicas.Store(1)
+	s.standing.Store(&standing{rank: 0, candidates: 1})
+	s.profile.Store(&Profile{})
 	s.part.Store(&partition{ordinal: -1})
 	return s, nil
 }
@@ -369,10 +396,30 @@ func (s *Sonar) SetLogger(l *slog.Logger) {
 	s.logger.Store(l)
 }
 
-// Replicas is how many replicas hold connections to this shard, self included, never below one. It is the
-// divisor for the shard's connection pool: the budget belongs to the shard's DATABASE, so N replicas each
-// holding the whole budget would overshoot it N times over.
+// Replicas is how many replicas hold connections to this shard, self included, never below one. It
+// withholds a fall on the reading that ended a blind spell, and believes a rise at once, so an owner that
+// sizes anything per replica from it errs toward smaller shares.
 func (s *Sonar) Replicas() int { return max(1, int(s.replicas.Load())) }
+
+// Rank is this replica's 0-based rendezvous rank on this shard, and the number of candidates it ranks among:
+// the replicas counted by Replicas that are not await-only. Every replica computes both from the same rows
+// with no coordination, so the replicas holding ranks 0..k-1 are a set they all agree on - the owner's way
+// of choosing which k of them serve the shard.
+//
+// Like Replicas, it counts this replica even when its own row is missing (unless its Profile says it is
+// await-only), and on the reading that ended a blind spell it holds each of the two at the larger of its
+// old and new value: no promotion, and no fewer candidates to divide by.
+func (s *Sonar) Rank() (rank, candidates int) {
+	st := s.standing.Load()
+	return st.rank, max(1, st.candidates)
+}
+
+// SetProfile states the facts this replica writes into its registry row. Call it before Join: the row is
+// written at registration and at a repair, never by the beat, so a later change reaches the registry only
+// if the row is ever re-created.
+func (s *Sonar) SetProfile(p Profile) {
+	s.profile.Store(&p)
+}
 
 // Partition is the (replicas, ordinal) pair that splits candidate selection across the replicas serving
 // this shard, or ok=false when selection must not be partitioned at all.
@@ -500,8 +547,14 @@ func (s *Sonar) register(ctx context.Context) error {
 	if s.faulted(FaultBeatErr) {
 		return nil
 	}
+	prof := s.profile.Load()
+	zeroWorkers := 0
+	if prof.ZeroWorkers {
+		zeroWorkers = 1
+	}
 	res, err := s.db.ExecContext(ctx,
-		"UPDATE dwarf_peers SET seen_at=NOW_UTC() WHERE engine_id=?", s.engineID)
+		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), zero_workers=?, rtt_us=? WHERE engine_id=?",
+		zeroWorkers, prof.RTT.Microseconds(), s.engineID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -513,7 +566,8 @@ func (s *Sonar) register(ctx context.Context) error {
 		return nil
 	}
 	_, err = s.db.ExecContext(ctx,
-		"INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (?, NOW_UTC())", s.engineID)
+		"INSERT INTO dwarf_peers (engine_id, seen_at, zero_workers, rtt_us) VALUES (?, NOW_UTC(), ?, ?)",
+		s.engineID, zeroWorkers, prof.RTT.Microseconds())
 	return errors.Trace(err)
 }
 
@@ -615,7 +669,7 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	}
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS seen_age_ms,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms"+
+			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms, zero_workers"+
 			" FROM dwarf_peers ORDER BY engine_id")
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -624,9 +678,11 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	var out []peer
 	for rows.Next() {
 		var p peer
-		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs); err != nil {
+		var zeroWorkers int
+		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs, &zeroWorkers); err != nil {
 			return nil, errors.Trace(err)
 		}
+		p.zeroWorkers = zeroWorkers != 0
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -663,7 +719,7 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 		s.healthySince = now
 	}
 
-	v := classify(rows, s.engineID, s.windows())
+	v := classify(rows, s.engineID, s.profile.Load().ZeroWorkers, s.shard, s.windows())
 	// The dispatch pair is published as observed, with no hysteresis: under-counting only makes replicas
 	// select overlapping candidates, so there is nothing here worth debouncing, and delaying a REMOVAL would
 	// keep a residue class assigned to a replica that has stopped serving it.
@@ -680,6 +736,16 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	if !gapped || v.replicas >= s.Replicas() {
 		s.replicas.Store(int32(max(1, v.replicas)))
 	}
+	// The rank obeys the same asymmetry, for the same storm. After a correlated stall every peer's row reads
+	// stale at once, so every replica would rank itself first, claim a dispatcher slot, and grow its pool to a
+	// dispatcher's share - a fleet of dispatchers against a database that is already sick. A demotion (a
+	// higher rank) shrinks the pool and is always believed; a promotion waits for the next reading.
+	next := &standing{rank: v.rank, candidates: v.candidates}
+	if gapped {
+		prev := s.standing.Load()
+		next = &standing{rank: max(prev.rank, v.rank), candidates: max(prev.candidates, v.candidates)}
+	}
+	s.standing.Store(next)
 
 	if !v.selfSeen {
 		// Nothing else can fix this: the beat only UPDATEs, so a row that has gone missing is refreshed by

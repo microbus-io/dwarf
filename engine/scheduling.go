@@ -134,7 +134,14 @@ func (e *Engine) recomputeRefillIntervals() {
 // recomputeRefillIntervalsWith is recomputeRefillIntervals' core, taking the shard specs and RTTs as
 // already-read snapshots rather than re-acquiring shardsLock to fetch them.
 func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[int]float64) {
-	n := max(1, e.db.NumShards())
+	// The shards this replica dispatches, which are the only ones whose partitions the cache holds.
+	n := 0
+	for _, idx := range e.db.Indices() {
+		if e.dispatchesOn(idx) {
+			n++
+		}
+	}
+	n = max(1, n)
 	// max(1, ...) because a cache smaller than the shard count divides to zero, which reaches the degenerate
 	// guard and answers with the 1s cap - backwards for a tiny cache, which drains instantly and wants
 	// frequent scans. The case is a small cache, not an unknown one.
@@ -164,11 +171,16 @@ func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[
 		// vCPUs (0 = undeclared), so the drain is bounded by whichever channel is real - the pinned pool,
 		// not a defaulted vCPU count. An unconfigured shard's zero-value spec falls to the conn channel.
 		spec := specs[idx]
-		// This shard's own replica count: the pool it drains through was divided by that one, so deriving the
-		// period from any other shard's fleet would measure the buffer against the wrong drain rate.
-		replicas := e.replicasOn(idx)
-		_, pool := shardPool(spec, pinned, replicas, rtts[idx])
-		derived := deriveRefillInterval(share, spec.VirtualCPUs, pool, replicas, dispatchers)
+		// This shard's own dispatcher count: the pool it drains through was divided by that one, and they are
+		// the replicas sharing the shard's CPU, so deriving the period from anything else would measure the
+		// buffer against the wrong drain rate. A shard this replica only reads has an idle piston, which
+		// reads no period, and recomputePools re-derives this on the promotion that wakes it.
+		slots := e.slotsOn(idx, spec)
+		if slots == 0 {
+			continue
+		}
+		_, pool := shardPool(spec, pinned, slots, rtts[idx])
+		derived := deriveRefillInterval(share, spec.VirtualCPUs, pool, slots, dispatchers)
 		p.SetTallyCadence(derived, pipeline.DefaultMinGap)
 		p.SetSupplyCadence(derived, min(pipeline.DefaultMinGap, derived/supplyGapDivisor))
 	}

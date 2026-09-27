@@ -166,13 +166,22 @@ type Engine struct {
 	// reconcileStop ends the loop that keeps the derived pool sizes in step with what the Sonars observe.
 	reconcileStop   chan struct{}
 	reconcileWorker sync.WaitGroup
-	// lastAppliedR is the per-shard replica count the pools were last derived with, to skip no-op
+	// lastAppliedSlots is the per-shard role (slotsOn) the pools were last derived with, to skip no-op
 	// recomputes. Written and read only under poolsLock, so a plain map needs no synchronization of its
-	// own. Per shard because the counts are: a fleet change on one shard must not re-push every other
+	// own. Per shard because the roles are: a fleet change on one shard must not re-push every other
 	// shard's unchanged sizes, and an unchanged one must not mask a change elsewhere.
-	lastAppliedR map[int]int
+	lastAppliedSlots map[int]int
+	// dispatching is whether this replica dispatches each shard - the doorbell's gate and pickShard's
+	// preference. Built in Startup before anything reads it, one entry per open shard, so the map itself is
+	// read-only thereafter and each flag is flipped by applyRole under poolsLock.
+	dispatching map[int]*atomic.Bool
+	// shardMaxConns is each shard's server connection limit, read once at Startup (0 = unknown), and
+	// fleetOverLimit is whether checkFleetFits last found the fleet over it. The first is written in
+	// Startup before the reconcile loop starts; the second is owned by poolsLock.
+	shardMaxConns  map[int]int
+	fleetOverLimit map[int]bool
 	// poolsLock serializes every APPLICATION of a pool size - the derived recompute (recomputePools) and
-	// the live override (SetMaxOpenConns). Deduping the recompute on lastAppliedR is not enough: two peer
+	// the live override (SetMaxOpenConns). Deduping the recompute on lastAppliedSlots is not enough: two peer
 	// signals microseconds apart during a rolling deploy each read a different R, and nothing orders their
 	// pushes, so the R=2 sizes can land AFTER the R=3 sizes and leave every replica over-connecting a fleet
 	// of 3 - sticky until the next fleet change. The override races the same way, and worse: recomputePools
@@ -320,7 +329,8 @@ func NewEngine() *Engine {
 	e.SetEngineID(int64(rand.Uint64() >> 1)) // positive, 63 bits of entropy
 	// Empty, not seeded: "nothing derived yet" per shard. Startup reads each shard's count, sizes its pool
 	// directly, and records it here; the reconcile loop then dedupes against that.
-	e.lastAppliedR = map[int]int{}
+	e.lastAppliedSlots = map[int]int{}
+	e.fleetOverLimit = map[int]bool{}
 	e.leaseMargin = 30 * time.Second
 	// The detector's cost scales with concurrent AWAITERS, not with step throughput - one small indexed
 	// IN-lookup per shard holding one, and nothing at all when nobody is waiting - so the cadence is picked
@@ -373,6 +383,9 @@ type ShardSpec struct {
 	// the smallest machine any major cloud sells as a current-generation instance, so the assumed pool
 	// stays safe even if the real machine is smaller. Declare it: a large database sized as if it were a
 	// 2-CPU one runs at a fraction of its capacity.
+	//
+	// It also decides how many replicas dispatch the shard, so declare the SAME value for a shard on every
+	// replica: replicas that disagree on it disagree on which of them dispatch.
 	VirtualCPUs int
 	// Cordoned excludes the shard from new-flow placement. Everything already resident proceeds
 	// normally: existing flows keep executing, and subgraph children, thread continuations (Continue),
@@ -424,7 +437,7 @@ func (e *Engine) SetShard(spec ShardSpec) error {
 // and benchmark sweeps. Setting it ABOVE the ceiling is allowed - an operator may consciously trade the
 // risk of duplicate task execution in a storm for long-task throughput - and is logged as a warning at
 // Startup. SetWorkers(0) is a valid shape: a replica that creates, awaits, and serves reads but never
-// executes tasks. Construction-time only: the pool bound is fixed at Startup, so a call on a running
+// executes tasks. It holds two connections to each shard and is never chosen as any shard's dispatcher. Construction-time only: the pool bound is fixed at Startup, so a call on a running
 // engine is rejected.
 func (e *Engine) SetWorkers(n int) error {
 	if e.started.Load() {
@@ -439,11 +452,11 @@ func (e *Engine) SetWorkers(n int) error {
 }
 
 // SetEngineID pins this replica's identity, overriding the random identifier minted per instance. The
-// identity is what a replica registers in the shared peer registry to be counted for the connection-pool
-// split across replicas. The default is random and fresh on every restart, which is correct for the common
-// case (including several engines in one process, which must count as distinct replicas) but leaves a stale
-// registry entry behind when a replica crashes: the entry lingers until it ages out, transiently over-counting
-// replicas and shrinking every live replica's pool share in the meantime. Pinning a value that is STABLE
+// identity is what a replica registers in the shared peer registry, from which the replicas agree on which
+// of them dispatch each shard. The default is random and fresh on every restart, which is correct for the
+// common case (including several engines in one process, which must count as distinct replicas) but leaves a
+// stale registry entry behind when a replica crashes: the entry lingers until it ages out, transiently
+// over-counting replicas and, if the crashed replica dispatched a shard, holding its place there. Pinning a value that is STABLE
 // across a replica's restarts (for example, derived from the deployment's own per-instance identity) lets a
 // restarted replica reuse its entry instead, so a crash-restart never inflates the count.
 //
@@ -507,6 +520,9 @@ func (e *Engine) SetDefaultPriority(p int) error {
 // (see the connection pool guidance in the deployment docs). The override exists for benchmarking (pool-size
 // sweeps) and for deployments whose connection budget is constrained by something the engine cannot see
 // (e.g. a shared database or an external pooler). Live: pushes to every open shard immediately.
+//
+// With the override set, every replica dispatches every shard: the derived pools are what bound each
+// shard's connections to a few dispatching replicas, and a pinned pool replaces them.
 func (e *Engine) SetMaxOpenConns(n int) error {
 	if n < 1 {
 		return errors.New("max open connections must be >= 1", http.StatusBadRequest)
@@ -646,10 +662,11 @@ func (e *Engine) Startup(ctx context.Context) error {
 	}
 	// Per-shard pool sizes: the SetMaxOpenConns override pins every pool; otherwise each shard's budget
 	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools), split across the
-	// observed replicas R. R comes from the shared dwarf_peers registry, which needs open connections to
-	// read - so the shards first open at a small BOOTSTRAP pool (enough to register + probe + read R,
-	// which is all any pre-dispatch work needs), then, once R is known, every pool is resized to its
-	// derived R-divided share BEFORE a single worker dispatches. There is no async grace window: R is
+	// replicas that DISPATCH that shard, while every other replica holds a small reader pool there. Which
+	// replicas dispatch comes from the shared dwarf_peers registry, which needs open connections to read -
+	// so the shards first open at a small BOOTSTRAP pool (enough to register + probe + read the fleet,
+	// which is all any pre-dispatch work needs), then, once the roles are known, every pool is resized to
+	// its derived share BEFORE a single worker dispatches. There is no async grace window: R is
 	// known before the replica takes on work, so a cold-starting fleet's rows settle in the registry and
 	// one read yields the converged count - no partial-count over-connect. Lazy fill means the bootstrap
 	// ceiling barely materializes (a handful of connections), so the whole fleet's startup stays well
@@ -692,6 +709,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// SetMaxOpenConns, and a Shutdown/Startup restart reassigns it - an unsynchronized map read/write is a
 	// fatal throw, not a recoverable panic.
 	rtts := make(map[int]float64, len(shards))
+	maxConns := make(map[int]int, len(shards))
 	for idx := range shards {
 		db, dbErr := e.db.Shard(idx)
 		if dbErr != nil {
@@ -702,11 +720,19 @@ func (e *Engine) Startup(ctx context.Context) error {
 			rttMs = defaultRTTMs // probe failed: fall back to the measured same-zone constant
 		}
 		rtts[idx] = rttMs
-		e.logger.DebugContext(ctx, "Shard RTT probed", "shard", idx, "rttMs", rttMs)
+		maxConns[idx] = readMaxConnections(ctx, db)
+		e.logger.DebugContext(ctx, "Shard RTT probed", "shard", idx, "rttMs", rttMs, "maxConnections", maxConns[idx])
 	}
 	e.shardsLock.Lock()
 	e.shardRTTMs = rtts
 	e.shardsLock.Unlock()
+	e.shardMaxConns = maxConns
+	// One flag per open shard, rebuilt per run and filled in by the sizing loop below, before anything that
+	// could ring a doorbell is running.
+	e.dispatching = make(map[int]*atomic.Bool, len(shards))
+	for idx := range shards {
+		e.dispatching[idx] = &atomic.Bool{}
+	}
 
 	// Announce this replica on every shard, wait for peers to notice, and read each shard's fleet back -
 	// then size every pool from the derived budget split by THAT shard's count. Those are the real sizes,
@@ -731,8 +757,11 @@ func (e *Engine) Startup(ctx context.Context) error {
 		if dbErr != nil {
 			continue
 		}
-		replicas := e.replicasOn(idx)
-		idle, open := shardPool(specs[idx], override, replicas, rtts[idx]) // zero-value spec = the default shard's sizing
+		// This replica's role on the shard, from the ranking Join just read. A shard it does not dispatch
+		// gets the reader pool and a piston that initRuntime starts idle.
+		slots := e.slotsOn(idx, specs[idx])
+		e.dispatching[idx].Store(slots > 0)
+		idle, open := shardPool(specs[idx], override, slots, rtts[idx]) // zero-value spec = the default shard's sizing
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
 		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
@@ -742,8 +771,11 @@ func (e *Engine) Startup(ctx context.Context) error {
 		// and the workers initRuntime starts must never see an unsized shard - which, this failing open,
 		// would dispatch entirely unordered rather than stalling.
 		e.turnstiles.Resize(idx, turnstilePassesPerConn*open)
-		e.lastAppliedR[idx] = replicas
-		totalConns += open
+		e.lastAppliedSlots[idx] = slots
+		if slots > 0 {
+			// Only a dispatched shard's pool feeds the workers; a reader pool runs no step.
+			totalConns += open
+		}
 	}
 	// The RESIDENT worker set (and, with it, the candidate cache and every refill scan) is sized from
 	// the aggregate connection budget: dispatch is database-bound, so 8 x conns keeps the pool saturated
@@ -826,9 +858,9 @@ func (e *Engine) initRuntime() error {
 	e.initTracer()
 
 	// Build the pistons now that the cache is sized: each takes its own shard's handle, the shared planner
-	// and the shared cache. An await-only replica (SetWorkers(0)) idles them - the replica goes on holding
-	// connections and dividing the pools, since its Sonars keep beating either way, but it claims no work
-	// and its idling pistons report as much, which is what excludes it from the candidate partition.
+	// and the shared cache. A piston starts idle on a shard this replica does not dispatch, and on every
+	// shard of an await-only replica (SetWorkers(0)): it claims no work, and its idling reports as much,
+	// which is what keeps the replica out of that shard's candidate partition.
 	idle := int(e.workers.Load()) == 0
 	for _, idx := range e.db.Indices() {
 		// A shard without a piston has no supply cycle, so nothing on it is ever dispatched while the replica
@@ -879,7 +911,7 @@ func (e *Engine) initRuntime() error {
 		if merr := p.SetMeter(e.meter); merr != nil {
 			e.logger.ErrorContext(e.lifetimeCtx, "Building piston instruments", "shard", idx, "error", merr)
 		}
-		p.SetIdle(idle)
+		p.SetIdle(idle || !e.dispatchesOn(idx))
 		e.pistons[idx] = p
 	}
 

@@ -107,11 +107,11 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 	t.Fatal("returning to solo must disable partitioning")
 }
 
-// TestPartition_AwaitOnlyPeerOwnsNoSlice is the regression test for the flaw that shipped in the first
-// cut of this feature: an await-only replica (SetWorkers(0)) registers in dwarf_peers - it holds
-// connections, so it must count toward R - but claims nothing. Partitioning on R therefore handed it a
-// residue class of step_id that NO replica would ever select, stranding those steps until an operator
-// noticed. Caught by fixtures/crossreplicaawait_test.go hanging; pinned here at the unit level.
+// TestPartition_AwaitOnlyPeerOwnsNoSlice pins that a peer which is registered but claims nothing - a
+// replica that only reads this shard, alive in seen_at and never advancing dispatched_at - owns no residue
+// class. Partitioning on the registered count instead once handed such a peer a class of step_id that NO
+// replica would ever select, stranding those steps until an operator noticed. Caught by
+// fixtures/crossreplicaawait_test.go hanging; pinned here at the unit level.
 func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -123,14 +123,14 @@ func TestPartition_AwaitOnlyPeerOwnsNoSlice(t *testing.T) {
 
 	// A peer that holds connections but dispatches nothing.
 	addPeerRowWithDispatch(t, e, 4242, false)
-	assert.Equal(2, e.replicasOn(1), "an await-only peer still divides the connection pools")
+	assert.Equal(2, e.replicasOn(1), "a non-dispatching peer is still counted in the fleet")
 	_, _, ok := e.partitionOn(1)
 	assert.False(ok, "one dispatcher means nothing to partition, whatever the pool divisor says")
 
 	// A second DISPATCHING peer does open partitioning - proving the exclusion is about dispatch, not
 	// about peer count.
 	addPeerRowWithDispatch(t, e, 4243, true)
-	assert.Equal(3, e.replicasOn(1), "the pool divisor counts all three")
+	assert.Equal(3, e.replicasOn(1), "the fleet counts all three")
 	awaitPartition(t, e, 1, 2, -1) // only the two dispatchers divide the candidates
 }
 

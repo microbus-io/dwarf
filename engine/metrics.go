@@ -182,7 +182,8 @@ func (e *Engine) initMetrics() error {
 	// The two peer gauges are PER-REPLICA readings of a per-shard fact, and both are pulled from the Sonars
 	// rather than emitted by them - internal/peers deliberately owns no meter, so this is the one scope that
 	// has to stay in step. Neither queries anything: both are atomic reads of what the last reading published.
-	peerReplicas := gauge("dwarf_peer_replicas", "Per-replica, per-shard: how many replicas this one currently sees holding connections to that shard - the divisor its pool is sized by. Replicas should AGREE on it, so a spread across the fleet is itself the signal: one replica reading 3 while its peers read 4 is sizing its pool for a fleet that does not exist. It is deliberately slow to fall (a reading that did not happen is not evidence anybody left), so a drop lags a real departure by a reading or two.", "")
+	peerReplicas := gauge("dwarf_peer_replicas", "Per-replica, per-shard: how many replicas this one currently sees holding connections to that shard - the fleet that shard's dispatchers are picked from. Replicas should AGREE on it, so a spread across the fleet is itself the signal: one replica reading 3 while its peers read 4 is sizing its pool for a fleet that does not exist. It is deliberately slow to fall (a reading that did not happen is not evidence anybody left), so a drop lags a real departure by a reading or two.", "")
+	shardDispatching := gauge("dwarf_shard_dispatching", "Per-replica, per-shard: 1 when this replica is one of that shard's dispatchers - holding a share of its connection budget and running its steps - and 0 when it only holds a two-connection reader pool there. Summed across the fleet it is how many replicas dispatch each shard; a shard summing to zero is running nothing.", "")
 	tallyAge := gaugeF("dwarf_refill_tally_age_seconds", "Per-replica: how long ago the STALEST shard still in this replica's planner reported. Every shard plans from a merged view of every shard's LAST report, so a piston cycling slowly holds its peers' plans on a picture that old - the global priority band and the per-key slice rule are both computed from those mixed-freshness tallies. Expect roughly one cycle interval in a healthy fleet; sustained multiples name a shard whose piston has fallen behind its peers, which no throughput number can distinguish from a slow database. Single-shard deployments always read ~one interval and can ignore it.", "s")
 	// Per ROLE: entering and exiting work draw on separate reservations, and an operator reading one without
 	// the other cannot tell "dispatch is gated" from "completions are". Instantaneous, so a reservation that
@@ -210,6 +211,7 @@ func (e *Engine) initMetrics() error {
 				stepsPending:     stepsPending,
 				oldestAge:        oldestAge,
 				peerReplicas:     peerReplicas,
+				shardDispatching: shardDispatching,
 				peerBlind:        peerBlind,
 				tallyAge:         tallyAge,
 				turnstileAvail:   turnstileAvail,
@@ -220,7 +222,7 @@ func (e *Engine) initMetrics() error {
 				inFlightSteps:    inFlightSteps,
 			})
 		},
-		queueDepth, stepsPending, oldestAge, peerReplicas, peerBlind, tallyAge,
+		queueDepth, stepsPending, oldestAge, peerReplicas, shardDispatching, peerBlind, tallyAge,
 		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps,
 		dbPhaseWorkers,
 	)
@@ -247,6 +249,7 @@ type observableGauges struct {
 	stepsPending     metric.Int64ObservableGauge
 	oldestAge        metric.Int64ObservableGauge
 	peerReplicas     metric.Int64ObservableGauge
+	shardDispatching metric.Int64ObservableGauge
 	peerBlind        metric.Int64ObservableGauge
 	tallyAge         metric.Float64ObservableGauge
 	turnstileAvail   metric.Int64ObservableGauge
@@ -293,6 +296,11 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	for _, idx := range e.db.Indices() {
 		shard := metric.WithAttributes(attribute.String("shard", strconv.Itoa(idx)))
 		o.ObserveInt64(g.peerReplicas, int64(e.replicasOn(idx)), shard)
+		dispatching := int64(0)
+		if e.dispatchesOn(idx) {
+			dispatching = 1
+		}
+		o.ObserveInt64(g.shardDispatching, dispatching, shard)
 		if s := e.sonarFor(idx); s != nil {
 			o.ObserveInt64(g.peerBlind, int64(s.BlindFor().Seconds()), shard)
 		}

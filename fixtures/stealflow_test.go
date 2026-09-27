@@ -92,8 +92,8 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 	crippled = engine.NewEngineUnderTest(t.Name())
 	crippled.SetHost(build("crippled"))
 	assert.NoError(crippled.SetWorkers(crippledWorkers))
-	// Await-only: it holds connections and divides the pools, but claims no work and so earns no residue
-	// class. Its creations are the fleet's only scan-discovered work.
+	// Await-only: it holds a reader pool, is never ranked as a dispatcher and claims no work, so it earns no
+	// residue class. Its creations are the fleet's only scan-discovered work.
 	creator = engine.NewEngineUnderTest(t.Name())
 	creator.SetHost(build("creator"))
 	assert.NoError(creator.SetWorkers(0))
@@ -268,6 +268,10 @@ func TestStealTwoBadApplesflow(t *testing.T) {
 
 	// Four replicas: an await-only creator plus three dispatchers, two of them crippled. The creator's work
 	// is reachable only by scanning, which is what puts the residue class in the path.
+	//
+	// The shard is declared at 8 vCPUs so its budget feeds three dispatchers. The default 2-vCPU shard takes
+	// two, which would leave one of the three a reader - and when that one is the healthy replica, the two
+	// crippled ones carry the whole load and there is nothing for it to steal.
 	ran := map[string]*atomic.Int64{"creator": {}, "healthy": {}, "bad1": {}, "bad2": {}}
 	build := func(replica string, delay time.Duration) *engine.TestProxy {
 		p := engine.NewTestProxy()
@@ -297,6 +301,7 @@ func TestStealTwoBadApplesflow(t *testing.T) {
 		defer e.Shutdown(ctx)
 		e.SetHost(build(replica, delay))
 		assert.NoError(e.SetWorkers(workers))
+		assert.NoError(e.SetShard(engine.ShardSpec{Index: 1, VirtualCPUs: 8}))
 		return e
 	}
 	healthy := mk("healthy", 4, 0)

@@ -93,8 +93,11 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, vcpus in
 	t.Helper()
 	assert := testarossa.For(t)
 	// The engine probes once at Startup and holds it, so this is stable for the life of the replica.
+	// Every replica of these fleets ranks inside the dispatcher cut - an 8-vCPU shard takes four, and no
+	// fleet here is larger - so each divides the budget by the slot count.
+	spec := ShardSpec{Index: shard, VirtualCPUs: vcpus}
 	wantFor := func(e *Engine) int {
-		_, open := shardPool(ShardSpec{Index: shard, VirtualCPUs: vcpus}, int(e.maxOpenConns.Load()), wantR, probedRTT(e, shard))
+		_, open := shardPool(spec, int(e.maxOpenConns.Load()), dispatcherSlots(spec, wantR), probedRTT(e, shard))
 		return open
 	}
 	deadline := time.Now().Add(30 * time.Second)

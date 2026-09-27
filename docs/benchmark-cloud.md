@@ -665,11 +665,12 @@ stack and its in-flight state map, so **memory is the reason to cap it**, via `S
 ## The sizing formula
 
 Inputs: `V` = the shard database's vCPU count, `L` = round-trip time to the shard, `exec` = mean task
-time, `R` = the number of engine replicas.
+time, `X` = the number of engine replicas dispatching the shard (at most the replica count; see
+[deployment](deployment.md#connection-pool)).
 
 ```
 ratio = ratio(V, L)                 # measured per-vCPU-tier, per-round-trip-time table (see Connections above)
-M     = ratio(V, L) × V ÷ R         # connections per replica (R is read from the shared databases)
+M     = ratio(V, L) × V ÷ X         # connections per dispatching replica (X is agreed through the shared databases)
 db    = k·L + s ≈ 11·L + 4.4ms      # per-step database time
 T     = db + exec                   # per-step worker time
 N     = M × T/db                    # workers actually doing database work
@@ -707,8 +708,8 @@ to drive the database to saturation the same measurement reads as ~1:4. Prefer 1
 engine merely queues, while an over-driven database degrades non-linearly.
 
 **The engine applies most of this automatically**: provide `ShardSpec.VirtualCPUs` and it derives each
-shard's connection pool (divided by the replica count it reads live from the shared databases — nothing
-to declare), its capacity-proportional share of new-flow placement, and the worker set it grows on
+shard's connection pool (divided among the replicas that dispatch it, which the fleet agrees on through
+the shared databases — nothing to declare), its capacity-proportional share of new-flow placement, and the worker set it grows on
 demand. `SetWorkers` and `SetMaxOpenConns` survive as expert overrides for tests, benchmark sweeps,
 memory-bounded hosts, and externally-constrained connection budgets.
 

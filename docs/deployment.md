@@ -21,7 +21,7 @@ after `Startup`. `SetMaxOpenConns`, `SetTimeBudget`, and `SetDefaultPriority` ar
 | `SetWorkers(n)` | derived | Expert override: pins the worker *maximum* (deterministic tests, benchmarks, memory-bounded hosts). Normally unset — derived from the crash-recovery lease margin and the round-trip time measured at startup, so it holds for any task duration; the pool grows into it only on demand |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
-| `SetMaxOpenConns(n)` | derived | Expert override: pins every shard's pool exactly (benchmarks, external poolers). Normally unset - each shard's pool derives from its `VirtualCPUs` |
+| `SetMaxOpenConns(n)` | derived | Expert override: pins every shard's pool exactly and has every replica dispatch every shard (benchmarks, external poolers). Normally unset - each shard's pool derives from its `VirtualCPUs` |
 
 Provide `ShardSpec.VirtualCPUs` (the database server's CPU count - a fact off its spec sheet) and the
 engine derives the shard's connection budget (the measured knee, beyond which connections only queue, and
@@ -47,8 +47,9 @@ auto-detected from the DSN. They behave very differently under concurrent INSERT
 
 MVCC means concurrent INSERTs don't lock each other on secondary indexes, and there are no gap locks at the
 default `READ COMMITTED` isolation, so the fan-out/fan-in pattern runs deadlock-free at any worker
-concurrency. Use Postgres 13+ for `JSONB` and partial indexes. For throughput, raise `max_connections` to
-at least `NumShards × MaxOpenConns × replicas` and `shared_buffers` to ~25% of host RAM.
+concurrency. Use Postgres 13+ for `JSONB` and partial indexes. Set `max_connections` above each shard's
+derived pool budget plus two connections for every replica beyond the few that dispatch it (see
+[Running more than one replica](#connection-pool)), and `shared_buffers` to ~25% of host RAM.
 
 ### SQL Server
 
@@ -246,22 +247,35 @@ constants are in the [cloud benchmarks](benchmark-cloud.md).
 > **Running more than one replica?** The derived budget is a property of the shard's *database*, not
 > of one replica: R replicas each holding the full derived pool would overshoot the knee R
 > times over, into the over-connection zone the cap exists to prevent. The engine handles this
-> automatically: each replica records a periodic heartbeat in the shard databases it already shares
-> with the others, reads the live replica count back from them **per shard**, and takes its 1/R share of
-> that shard's derived pool — resizing live as the fleet scales in or out, with nothing to declare. Per
-> shard because the budget is: a replica that loses touch with one shard mis-sizes only that shard's pool.
-> The count lives in the shared databases, so nothing has to be delivered between replicas for it to
-> converge. A joining replica also waits to be seen by the others before it opens its own connections, so
-> the fleet shrinks to make room for it rather than briefly overshooting the budget together. (Lowering a
-> pool's limit closes nothing, so a peer's surplus connections drain as they are returned rather than
-> instantly.) (`SetMaxOpenConns`, when used, is an exact per-replica number and is never divided.)
+> automatically. Each replica records a periodic heartbeat in the shard databases it already shares with
+> the others, and from those rows the fleet agrees **per shard** on a small number of **dispatchers** that
+> split that shard's derived pool and run its steps. The count grows with the shard's size, not the fleet's:
+> two for a shard of up to 4 vCPUs, four at 8 vCPUs, sixteen at 64 — never more than there are replicas,
+> and at least two once there are two, so one replica failing does not stop a shard. Every other replica
+> holds just **two connections** to that shard, enough to create flows, answer reads and wait on outcomes,
+> and runs none of its steps. So a shard's connections stay near its budget plus about one per extra
+> replica, rather than growing with the fleet — a host running many replicas for its own traffic does not
+> over-connect its workflow databases. Different shards pick different dispatchers, so the work spreads
+> across the fleet. It all resizes live as the fleet scales in or out, with nothing to declare, and a
+> joining replica waits to be seen by the others before it opens its own connections, so the fleet makes
+> room for it rather than briefly overshooting together. (Lowering a pool's limit closes nothing, so a
+> peer's surplus connections drain as they are returned rather than instantly.)
+>
+> Declare **the same `VirtualCPUs` for a shard on every replica**: it decides how many dispatchers that shard
+> has, and replicas that disagree on it disagree on which of them dispatch. A new flow is created on a shard
+> its replica dispatches when it has one, so its first step runs at once; a flow created, resumed, forked or
+> continued on a replica that does not dispatch its shard waits for the next scan (well under a second)
+> before its first step runs, and then runs normally. The engine warns in the log when a fleet's
+> connections to a shard approach the server's `max_connections`; past that, put a connection pooler in
+> front of the database. `SetMaxOpenConns`, when used, is an exact per-replica number, is never divided,
+> and makes every replica a dispatcher of every shard.
 
 > **Crashing replicas and `SetEngineID`.** A replica identifies itself in the registry by an id that is
 > random by default. A replica that *crashes* (rather than shutting down cleanly) leaves its last entry
-> behind until it ages out, so for a short window the fleet counts one replica too many and every live
-> replica takes a slightly smaller pool share — a self-correcting, safe-direction dip. If a replica
-> restarts under a *fresh* random id each time (a crashloop), those entries can pile up faster than they
-> age out and shrink the shares more. To avoid this, call `SetEngineID(id)` before `Startup` with a value
+> behind until it ages out, about 40 seconds. If it was one of a shard's dispatchers, the shard runs on the
+> remaining dispatchers until then — slower, not stopped, unless every dispatcher of that shard crashed at
+> once. A clean shutdown removes the entry and hands its place on at once. If a replica restarts under a
+> *fresh* random id each time (a crashloop), those entries can pile up faster than they age out. To avoid this, call `SetEngineID(id)` before `Startup` with a value
 > that is **stable across that replica's restarts** and **unique across your live replicas** — for example
 > one derived from the deployment's own per-instance identity (a StatefulSet pod name/ordinal, or the
 > hostname). A restarting replica then reuses its one entry instead of leaving a ghost. Leave it unset
@@ -320,9 +334,13 @@ That has three consequences worth knowing:
 - **A cross-replica `Await` needs no delivery.** A flow created on replica A and completed on replica B is
   found by A reading the shared database, so `Await` returns promptly with nothing sent.
 - **Fleet size is observed, not declared.** Each replica registers itself in a small `dwarf_peers` table
-  per shard and reads the others back, which is what splits each shard's connection budget (above). A
-  joining replica waits to be seen before it opens its own connections, so the fleet makes room for it
-  rather than briefly overshooting together.
+  per shard and reads the others back, which is how the fleet agrees on each shard's dispatchers and splits
+  its connection budget (above). A joining replica waits to be seen before it opens its own connections, so
+  the fleet makes room for it rather than briefly overshooting together. A replica configured with
+  `SetWorkers(0)` runs no steps anywhere; it registers, holds two connections to each shard, and is never
+  chosen to dispatch one. Each replica also records the round-trip time it measured to each shard, so
+  `SELECT engine_id, rtt_us, zero_workers FROM dwarf_peers` on a shard shows the fleet as that shard sees it
+  (`rtt_us` in microseconds).
 - **A replica that dies needs no goodbye.** Its rows stop being refreshed and it drops out of both counts
   on its own; a clean shutdown deletes them outright and the fleet regrows immediately.
 

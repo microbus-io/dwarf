@@ -40,9 +40,10 @@ limitations under the License.
 // construction-time-only ones (SetShard, SetWorkers, SetHost, SetLogger, SetMeterProvider,
 // SetTracerProvider) return an error if called after Startup. Tuning derives from the facts the host
 // declares plus what the engine observes: ShardSpec.VirtualCPUs drives each shard's connection budget
-// and its placement weight; the budget is automatically split across the engine replicas sharing each
-// database, counted from a shared peer registry the replicas heartbeat into (no replica count is ever
-// declared, and nothing is sent between replicas to establish it); and the
+// and its placement weight; the budget is automatically split across the few engine replicas that
+// dispatch each database, which the replicas agree on through a shared peer registry they heartbeat into,
+// while every other replica holds two connections there (no replica count is ever declared, and nothing
+// is sent between replicas to establish it); and the
 // worker maximum is derived from the crash-recovery lease margin and the
 // round-trip time measured at Startup, so it holds for any task duration (the pool grows into it only
 // on demand, so short-task deployments never pay for the headroom). The SetWorkers/SetMaxOpenConns

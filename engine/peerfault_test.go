@@ -71,7 +71,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	addPeerRow(t, e, 5001)
 	addPeerRow(t, e, 5002)
 	assert.Equal(3, e.replicasOn(1))
-	assert.Equal(budget8(e, 1)/3, awaitPoolSize(t, db, budget8(e, 1)/3), "1/3 share at three replicas")
+	assert.Equal(open8(e, 1, 3), awaitPoolSize(t, db, open8(e, 1, 3)), "1/3 share at three replicas")
 	awaitPartition(t, e, 1, 3, -1)
 
 	// The registry stops answering on this shard.
@@ -85,7 +85,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	}))
 	time.Sleep(10 * testPeerCadence)
 	assert.Equal(3, e.replicasOn(1), "a failed reading publishes nothing")
-	assert.Equal(budget8(e, 1)/3, db.DB.Stats().MaxOpenConnections, "so the pools stay where the last good reading put them")
+	assert.Equal(open8(e, 1, 3), db.DB.Stats().MaxOpenConnections, "so the pools stay where the last good reading put them")
 
 	// The partition, by contrast, is off: the pair is stale and nothing justifies excluding rows on it.
 	_, _, ok := e.partitionOn(1)
@@ -123,8 +123,8 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 		return
 	}
 	addPeerRow(t, e, 6001) // lands on every shard
-	assert.Equal(budget8(e, 1)/2, awaitPoolSize(t, db1, budget8(e, 1)/2))
-	assert.Equal(budget8(e, 2)/2, awaitPoolSize(t, db2, budget8(e, 2)/2))
+	assert.Equal(open8(e, 1, 2), awaitPoolSize(t, db1, open8(e, 1, 2)))
+	assert.Equal(open8(e, 2, 2), awaitPoolSize(t, db2, open8(e, 2, 2)))
 
 	// Blind shard 1 only, then take the peer away everywhere.
 	e.seams.InjectN(seamsJoin(FaultPeerReadErr, "1"), 1<<20)
@@ -136,7 +136,7 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 	// Shard 2 sees it and regrows; shard 1 cannot, and holds. The two shards' pools are now legitimately
 	// different, derived from different readings of different tables.
 	assert.Equal(budget8(e, 2), awaitPoolSize(t, db2, budget8(e, 2)), "the shard that can read follows the fleet")
-	assert.Equal(budget8(e, 1)/2, db1.DB.Stats().MaxOpenConnections, "the blind shard holds its last good reading")
+	assert.Equal(open8(e, 1, 2), db1.DB.Stats().MaxOpenConnections, "the blind shard holds its last good reading")
 	assert.Equal(2, e.replicasOn(1))
 	assert.Equal(1, e.replicasOn(2))
 }

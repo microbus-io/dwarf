@@ -71,7 +71,8 @@ PromQL **with** `_total` (e.g. the `dwarf_flows_started` instrument is queried a
 | `dwarf_steps_queue_depth` | gauge | — | steps in the local worker cache | `dwarf_steps_queue_depth` |
 | `dwarf_steps_pending` | gauge | `priority` | due pending steps per priority band | `dwarf_steps_pending` |
 | `dwarf_steps_oldest_pending_age_seconds` | gauge | `priority` | age of the oldest due pending step | `dwarf_steps_oldest_pending_age_seconds` |
-| `dwarf_peer_replicas` | gauge | `shard` | replicas this one currently sees holding connections to that shard — the divisor its pool is sized by | `dwarf_peer_replicas` |
+| `dwarf_peer_replicas` | gauge | `shard` | replicas this one currently sees holding connections to that shard, from which the fleet picks that shard's dispatchers | `dwarf_peer_replicas` |
+| `dwarf_shard_dispatching` | gauge | `shard` | 1 when this replica dispatches that shard (holds a share of its connection budget and runs its steps), 0 when it only holds a two-connection reader pool there. Sum across the fleet for how many replicas dispatch each shard; a shard summing to zero runs nothing | `dwarf_shard_dispatching` |
 | `dwarf_peer_blind_seconds` | gauge | `shard` | time since that shard's peer registry was last read successfully; zero when healthy | `dwarf_peer_blind_seconds` |
 | `dwarf_refill_tally_age_seconds` | gauge | — | how long ago the stalest shard still counted in this replica's selection last reported | `dwarf_refill_tally_age_seconds` |
 | `dwarf_turnstile_gate_wait_seconds` | histogram | `shard` | time a worker waited for its FIRST turn, taken before it picks a step up. It is the queue in front of dispatch, and the only wait a worker holds no work through | `dwarf_turnstile_gate_wait_seconds` |

@@ -120,6 +120,22 @@ const (
 	// louder problem than a mis-sized pool.
 	defaultRTTMs = 0.3
 
+	// minDispatcherPool is the smallest pool worth dispatching a shard from - a piston's two queries plus
+	// workers enough to use them - and so what sets how many replicas share a shard's budget
+	// (dispatcherSlots). An estimate, not a measurement: it makes a 2-vCPU shard's two dispatchers and an
+	// 8-vCPU shard's four. Lowering it spreads a shard across more replicas with smaller pools each.
+	minDispatcherPool = 12.0
+
+	// readerIdleConns / readerOpenConns size a replica's pool to a shard it does not dispatch. It still beats
+	// that shard's registry every second and polls it for parked Awaits, so one connection stays warm; the
+	// second lets a Create's transaction proceed alongside a poll.
+	readerIdleConns = 1
+	readerOpenConns = 2
+
+	// fleetLimitPercent is how much of a server's connection limit the fleet may hold before checkFleetFits
+	// warns. The limit is shared with every other client of that database.
+	fleetLimitPercent = 80
+
 	// workerSafetyFactor discounts the theoretical worker ceiling. The clean model assumes the whole
 	// connection pool drains completions; in a real storm, claims compete with the drain (~2x), tx time
 	// varies under contention, a mature database is ~20% slower, and in-flight steps are not evenly
@@ -181,9 +197,14 @@ func probeRTT(ctx context.Context, db *sequel.DB) float64 {
 }
 
 // shardPool returns the idle/open pool sizes for one shard, with a warm idle core of half the open
-// ceiling. VirtualCPUs (defaulted, see effectiveVirtualCPUs) and the shard's probed RTT pick the ratio,
-// and the resulting per-DATABASE budget is split across the OBSERVED engine replicas holding connections
-// to that database (the peer-discovery count; see peers.go).
+// ceiling. VirtualCPUs (defaulted, see effectiveVirtualCPUs) and the shard's probed RTT pick the ratio, and
+// the resulting per-DATABASE budget is split across the shard's DISPATCHERS - slots of them, this replica
+// among them. slots == 0 means this replica does not dispatch the shard and holds the small fixed pool its
+// reads and heartbeat need.
+//
+// The split rounds to the nearest connection rather than flooring: each dispatcher gains under half a
+// connection, so the shard exceeds its budget by at most slots/2, inside the margin poolSafetyMargin
+// already builds into every budget.
 //
 // The explicit SetMaxOpenConns override wins and pins the pool to exactly that size (the
 // benchmarking/external-pooler path): it is the operator's exact per-replica number, is never divided,
@@ -191,14 +212,130 @@ func probeRTT(ctx context.Context, db *sequel.DB) float64 {
 //
 // rttMs is the value probed at Startup and held, never a live reading - a latency change re-derives on
 // restart, the same posture as the shard set itself.
-func shardPool(spec ShardSpec, override int, replicas int, rttMs float64) (idle, open int) {
+func shardPool(spec ShardSpec, override int, slots int, rttMs float64) (idle, open int) {
 	if override > 0 {
 		return override, override
 	}
-	replicas = max(1, replicas)
+	if slots <= 0 {
+		return readerIdleConns, readerOpenConns
+	}
 	vcpus := effectiveVirtualCPUs(spec.VirtualCPUs)
-	open = max(2, shardBudget(vcpus, rttMs)/replicas)
+	open = max(2, int(math.Round(float64(shardBudget(vcpus, rttMs))/float64(slots))))
 	return max(2, open/2), open
+}
+
+// dispatcherSlots is how many replicas dispatch one shard: enough that each holds a pool worth running a
+// piston and workers on, never more than the replicas there are, and never fewer than two once there are
+// two, so one replica dying does not stop the shard while its slot passes to the next rank.
+//
+// IT MUST AGREE ACROSS THE FLEET, which is why the budget is taken at defaultRTTMs rather than at the RTT
+// this replica probed: the replicas ranked below this number are the shard's dispatchers, and two replicas
+// that disagreed on it would both claim, or both leave, the same slot. VirtualCPUs is declared fleet-wide,
+// and replicas is read from one registry, so every replica derives the same answer.
+func dispatcherSlots(spec ShardSpec, replicas int) int {
+	replicas = max(1, replicas)
+	ref := shardBudget(effectiveVirtualCPUs(spec.VirtualCPUs), defaultRTTMs)
+	want := int(math.Round(float64(ref) / minDispatcherPool))
+	return min(replicas, max(want, min(2, replicas)))
+}
+
+// slotsOn is this replica's role on one shard: how many replicas dispatch it when this one is among them,
+// or 0 when it is not. It is the pool divisor, the piston's on/off switch and the doorbell's gate in one
+// number.
+//
+// The slots are derived from the replicas that MAY dispatch, not from every registered one: an await-only
+// replica holds connections but takes no rank, and counting it would divide the budget among more
+// dispatchers than exist - one worker beside an await-only frontend would run on half its shard's budget.
+//
+// Every doubt resolves toward dispatching, because the two errors are not symmetric: a replica wrongly
+// dispatching over-connects the shard by one share, while a shard nobody dispatches runs nothing at all.
+// A shard with no Sonar dispatches solo. Under a SetMaxOpenConns override every replica dispatches - the
+// pools are pinned and never divided, so there is no budget for the ranking to protect - and the count is
+// every candidate, which is who drains the shard.
+func (e *Engine) slotsOn(shard int, spec ShardSpec) int {
+	if e.zeroWorkers() {
+		return 0
+	}
+	s := e.sonarFor(shard)
+	if s == nil {
+		return 1
+	}
+	rank, candidates := s.Rank()
+	if e.maxOpenConns.Load() != 0 {
+		return candidates
+	}
+	slots := dispatcherSlots(spec, candidates)
+	if rank >= slots {
+		return 0
+	}
+	return slots
+}
+
+// zeroWorkers reports a replica configured with SetWorkers(0): it creates, awaits and reads, and dispatches
+// no shard.
+func (e *Engine) zeroWorkers() bool {
+	return e.workers.Load() == 0
+}
+
+// dispatchesOn reports whether this replica dispatches one shard - whether a step on it may be offered to
+// this replica's own cache. True for a shard with no recorded role, which is the solo default.
+func (e *Engine) dispatchesOn(shard int) bool {
+	b := e.dispatching[shard]
+	return b == nil || b.Load()
+}
+
+// readMaxConnections returns the server's connection limit for one shard, or 0 when it cannot say - SQLite
+// has none, and a failed read is treated the same, since the check it feeds is advisory. Read once at
+// Startup and held: Postgres and SQL Server change the limit only on a server restart, and a managed
+// service's resize restarts or fails the server over.
+func readMaxConnections(ctx context.Context, db *sequel.DB) int {
+	var q string
+	switch db.DriverName() {
+	case "pgx":
+		q = "SELECT CAST(setting AS INTEGER) FROM pg_settings WHERE name='max_connections'"
+	case "mysql":
+		q = "SELECT @@max_connections"
+	case "mssql":
+		q = "SELECT @@MAX_CONNECTIONS"
+	default:
+		return 0
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
+		return 0
+	}
+	return max(0, n)
+}
+
+// checkFleetFits warns when the connections the fleet can hold on one shard approach the server's limit:
+// the dispatchers' budget plus up to readerOpenConns for every replica that does not dispatch there.
+// Advisory and edge-triggered - it never resizes anything, since shrinking dispatchers to make room for
+// idle readers is the wrong trade, and a fleet that size wants an external pooler. It is evaluated on
+// every reconcile tick, because it is the replica count that moves it and a non-dispatcher joining
+// changes no pool. Called under poolsLock, which owns fleetOverLimit.
+func (e *Engine) checkFleetFits(shard int, spec ShardSpec, rttMs float64, maxConns int) {
+	if maxConns <= 0 {
+		return
+	}
+	replicas := e.replicasOn(shard)
+	candidates := 1
+	if s := e.sonarFor(shard); s != nil {
+		_, candidates = s.Rank()
+	}
+	budget := shardBudget(effectiveVirtualCPUs(spec.VirtualCPUs), rttMs)
+	held := budget + readerOpenConns*max(0, replicas-dispatcherSlots(spec, candidates))
+	over := held > maxConns*fleetLimitPercent/100
+	if over == e.fleetOverLimit[shard] {
+		return
+	}
+	e.fleetOverLimit[shard] = over
+	if over {
+		e.logger.Warn("Fleet may exceed the database's connection limit; consider an external pooler",
+			"shard", shard, "replicas", replicas, "connections", held, "maxConnections", maxConns)
+		return
+	}
+	e.logger.Info("Fleet back within the database's connection limit",
+		"shard", shard, "replicas", replicas, "connections", held, "maxConnections", maxConns)
 }
 
 // poolRTTBuckets are the distances poolRatio is indexed by, in ms. UNEVENLY SPACED ON PURPOSE: they are
@@ -439,84 +576,109 @@ const startupBootstrapConns = 4
 // the derived sizes. Test-only (the fault is inert in production); a var so it stays adjustable.
 var slowPoolPushDelay = 200 * time.Millisecond
 
-// recomputePools re-derives every shard's connection pool from that shard's OWN replica count and pushes
-// the sizes to the open shards (sequel's pool setters are hot/atomic), then re-derives the worker
+// recomputePools re-derives every shard's role and connection pool from that shard's OWN registry reading
+// and pushes the sizes to the open shards (sequel's pool setters are hot/atomic), then re-derives the worker
 // ceiling, which is a function of those pools. Called by the reconcile loop on the Sonars' cadence.
-// No-ops when the engine is not running, when the SetMaxOpenConns override pins the pools (an exact
-// per-replica number, never divided), and when no shard's count has moved since the last application.
-// (Startup itself sizes the pools directly from what it read, not through here, and records the counts.)
+// No-ops when the engine is not running and when no shard's role has moved since the last application.
+// (Startup itself sizes the pools directly from what it read, not through here, and records the roles.)
+//
+// Under a SetMaxOpenConns override the roles are still applied - every replica dispatches then, and one
+// that was a reader when the override landed must start - but the pinned pools are left alone:
+// SetMaxOpenConns pushed them, and it owns everything that follows from them.
 //
 // The divisor is PER SHARD because the budget is: it belongs to the shard's database, so the replicas that
-// matter are the ones holding connections to THAT database. One shard's fleet changing must not re-push
-// another's unchanged sizes, and one shard's count staying put must not mask a change elsewhere.
+// matter are the ones dispatching from THAT database. One shard's fleet changing must not re-push another's
+// unchanged sizes, and one shard's role staying put must not mask a change elsewhere.
 func (e *Engine) recomputePools() {
-	// poolsLock is held across the whole read-then-push, not just the dedupe: lastAppliedR keeps a no-op
-	// recompute from touching the pools, but it does not ORDER two live ones, so without this an R=2 push
-	// could land after an R=3 push (over-connecting a fleet of 3), and a concurrent SetMaxOpenConns could
-	// have its pinned pools overwritten by derived ones. The poolsLock -> shardsLock order below cannot
-	// cycle (the counts are lock-free reads of the Sonars' published state).
+	// poolsLock is held across the whole read-then-push, not just the dedupe: lastAppliedSlots keeps a no-op
+	// recompute from touching the pools, but it does not ORDER two live ones, so without this a push derived
+	// from an older reading could land after a newer one (over-connecting the fleet), and a concurrent
+	// SetMaxOpenConns could have its pinned pools overwritten by derived ones. The poolsLock -> shardsLock
+	// order below cannot cycle (the roles are lock-free reads of the Sonars' published state).
 	e.poolsLock.Lock()
 	defer e.poolsLock.Unlock()
-	if !e.started.Load() || e.maxOpenConns.Load() != 0 {
+	if !e.started.Load() {
 		return
-	}
-	// Read every shard's count first and compare as a whole: a push is all-or-nothing, so a single shard
-	// moving is enough to re-derive, and nothing moving is the cheap common case.
-	observed := make(map[int]int, len(e.lastAppliedR))
-	changed := false
-	for _, idx := range e.db.Indices() {
-		r := e.replicasOn(idx)
-		observed[idx] = r
-		if prev, ok := e.lastAppliedR[idx]; !ok || prev != r {
-			changed = true
-		}
-	}
-	if !changed && len(observed) == len(e.lastAppliedR) {
-		return
-	}
-	e.lastAppliedR = observed
-	// The window poolsLock closes: R has been read, the sizes are not yet pushed. A test stalls one recompute
-	// here to hold a stale R while a peer's fresher one races past (see TestPoolSizing_ConcurrentRecompute-
-	// AppliesLatestR). Deliberately a FAULT, not a checkpoint: a breakpoint would freeze the racing recompute
-	// at this same site too, and the test needs it to run through.
-	if e.seams.IsFault(FaultSlowPoolPush) {
-		time.Sleep(slowPoolPushDelay)
 	}
 	e.shardsLock.Lock()
 	specs := maps.Clone(e.shardSpecs)
 	rtts := maps.Clone(e.shardRTTMs)
 	e.shardsLock.Unlock()
+	override := int(e.maxOpenConns.Load())
+	// Read every shard's role first and compare as a whole: a push is all-or-nothing, so a single shard
+	// moving is enough to re-derive, and nothing moving is the cheap common case.
+	observed := make(map[int]int, len(e.lastAppliedSlots))
+	changed := false
+	for _, idx := range e.db.Indices() {
+		if override == 0 {
+			e.checkFleetFits(idx, specs[idx], rtts[idx], e.shardMaxConns[idx])
+		}
+		slots := e.slotsOn(idx, specs[idx])
+		observed[idx] = slots
+		if prev, ok := e.lastAppliedSlots[idx]; !ok || prev != slots {
+			changed = true
+		}
+	}
+	if !changed && len(observed) == len(e.lastAppliedSlots) {
+		return
+	}
+	e.lastAppliedSlots = observed
+	// The window poolsLock closes: the roles have been read, the sizes are not yet pushed. A test stalls one
+	// recompute here to hold a stale reading while a peer's fresher one races past (see TestPoolSizing_-
+	// ConcurrentRecomputeAppliesLatestR). Deliberately a FAULT, not a checkpoint: a breakpoint would freeze
+	// the racing recompute at this same site too, and the test needs it to run through.
+	if e.seams.IsFault(FaultSlowPoolPush) {
+		time.Sleep(slowPoolPushDelay)
+	}
 	postSplitConns := 0
 	for _, idx := range e.db.Indices() {
 		db, err := e.db.Shard(idx)
 		if err != nil {
 			continue
 		}
-		// Zero-value spec = the default shard's sizing; a missing RTT (an unprobed shard) falls to the
-		// uncompensated bucket, which is the under-connecting direction.
-		idle, open := shardPool(specs[idx], 0, observed[idx], rtts[idx])
-		db.SetMaxOpenConns(open)
-		db.SetMaxIdleConns(idle)
-		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
-			e.seams.Variable(seamsJoin(VariablePoolIdle, strconv.Itoa(idx)), idle)
+		slots := observed[idx]
+		// A replica leaving a shard stops dispatching BEFORE its pool shrinks, and one joining grows its pool
+		// BEFORE it dispatches, so no worker is ever handed a shard through a pool sized for reading.
+		if slots == 0 {
+			e.applyRole(idx, false)
 		}
-		// The turnstile follows the pool for the same reason the cache and the worker ceiling do: it orders
-		// access to the connections this replica actually holds, and the pool just changed. Resize moves the
-		// available count by the DELTA, so a turn held by an in-flight worker is never handed out twice.
-		if e.turnstiles != nil {
-			e.turnstiles.Resize(idx, turnstilePassesPerConn*open)
+		if override == 0 {
+			// Zero-value spec = the default shard's sizing; a missing RTT (an unprobed shard) falls to the
+			// uncompensated bucket, which is the under-connecting direction.
+			idle, open := shardPool(specs[idx], 0, slots, rtts[idx])
+			db.SetMaxOpenConns(open)
+			db.SetMaxIdleConns(idle)
+			if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
+				e.seams.Variable(seamsJoin(VariablePoolIdle, strconv.Itoa(idx)), idle)
+			}
+			// The turnstile follows the pool for the same reason the cache and the worker ceiling do: it
+			// orders access to the connections this replica actually holds, and the pool just changed. Resize
+			// moves the available count by the DELTA, so a turn held by an in-flight worker is never handed
+			// out twice.
+			if e.turnstiles != nil {
+				e.turnstiles.Resize(idx, turnstilePassesPerConn*open)
+			}
+			if slots > 0 {
+				postSplitConns += open
+			}
 		}
-		postSplitConns += open
+		if slots > 0 {
+			e.applyRole(idx, true)
+		}
+	}
+	if override != 0 {
+		e.logger.Info("Dispatch roles recomputed", "slots", observed)
+		return
 	}
 	// The candidate cache follows the pool split, for the same reason the worker ceiling does: it is sized from
-	// what this replica can actually CLAIM, and the pool it claims through just shrank by R.
+	// what this replica can actually CLAIM, and only a dispatched shard's pool claims anything.
 	//
-	// Startup derives the dispatch count with R=1 (peer discovery has not run yet), so it is the FULL per-database
-	// budget. Left alone, a replica in a fleet of 8 keeps a cache sized for 8x the connections it now holds - and
-	// the refiller scans up to the cache's capacity per fairness key and wholesale-replaces it, so it is handed far
-	// more candidates than it can ever claim. Stale hints whose claim CAS loses to a peer, and wasted round-trips,
-	// exactly when the fleet is busiest. This is the same "never size the cache from more than the replica can
-	// claim" rule the worker ceiling is kept away from, arrived at through a different door.
+	// Startup derives the dispatch count from the roles it read at Join, and a fleet change moves them. Left
+	// alone, a replica whose pools shrank keeps a cache sized for connections it no longer holds - and the
+	// refiller scans up to the cache's capacity per fairness key and wholesale-replaces it, so it is handed far
+	// more candidates than it can ever claim. Stale hints whose claim CAS loses to a peer, and wasted
+	// round-trips, exactly when the fleet is busiest. This is the same "never size the cache from more than
+	// the replica can claim" rule the worker ceiling is kept away from, arrived at through a different door.
 	//
 	// The RESIDENT worker count is deliberately NOT resized, because the crew shrinks ITSELF: a worker that
 	// spent too little of its own recent wall clock holding a candidate retires on a coin flip, so the surplus
@@ -531,8 +693,19 @@ func (e *Engine) recomputePools() {
 	// locked-and-cloned above rather than paying for a second (and, below, a third) lock/clone pass over
 	// the same shardSpecs/shardRTTMs maps.
 	e.recomputeRefillIntervalsWith(specs, rtts)
-	e.logger.Info("Derived pools recomputed", "replicas", observed, "dispatch", dispatch)
+	e.logger.Info("Derived pools recomputed", "slots", observed, "dispatch", dispatch)
 	e.recomputeWorkerCeilingWith(e.lifetimeCtx, specs, rtts)
+}
+
+// applyRole starts or stops this replica dispatching one shard: the doorbell's gate and the piston's idle
+// mode move together. Called under poolsLock, in the order recomputePools gives it.
+func (e *Engine) applyRole(shard int, dispatches bool) {
+	if b := e.dispatching[shard]; b != nil && b.Swap(dispatches) != dispatches {
+		e.logger.Info("Shard dispatch role changed", "shard", shard, "dispatching", dispatches)
+	}
+	if p := e.pistons[shard]; p != nil {
+		p.SetIdle(!dispatches || e.zeroWorkers())
+	}
 }
 
 // recomputeWorkerCeiling re-derives the worker maximum from each shard's CURRENT pool and its probed
@@ -563,13 +736,18 @@ func (e *Engine) recomputeWorkerCeilingWith(ctx context.Context, specs map[int]S
 	override := int(e.maxOpenConns.Load())
 	ceiling := math.MaxInt
 	for idx, rttMs := range rtts {
-		// Each shard's own count, since each shard's pool is divided by its own fleet - and the worst shard's
-		// number wins, because a storm drains through whichever pool is tightest.
-		_, open := shardPool(specs[idx], override, e.replicasOn(idx), rttMs)
+		// Each dispatched shard's own pool, since each is divided by its own dispatchers - and the worst
+		// shard's number wins, because a storm drains through whichever pool is tightest. A shard this replica
+		// only reads runs no step, so its small pool drains no storm and must not bound the workers.
+		slots := e.slotsOn(idx, specs[idx])
+		if slots == 0 {
+			continue
+		}
+		_, open := shardPool(specs[idx], override, slots, rttMs)
 		ceiling = min(ceiling, workerCeiling(open, rttMs))
 	}
 	if ceiling == math.MaxInt {
-		ceiling = 64 // no shard was probed (an unopened or test-mode engine)
+		ceiling = 64 // no shard was probed or dispatched (an unopened, test-mode or reader-only engine)
 	}
 	if !e.workersSet.Load() {
 		// Derived default: the ceiling. It is independent of the task duration T (which the engine
@@ -605,6 +783,11 @@ func capacityWeight(virtualCPUs int) int {
 // shards, in proportion to capacityWeight. Placement is the engine's only load-balancing moment (flows
 // are shard-pinned for life), so heterogeneous fleets must be loaded in capacity proportion - uniform
 // placement saturates the smallest shard first while larger ones idle.
+//
+// The pick is among the shards this replica DISPATCHES when there are any, because the doorbell rings only
+// for those: a flow placed elsewhere waits for a dispatcher's scan before its first step runs. The ranking
+// spreads dispatch slots across the fleet, so placement stays roughly capacity-proportional fleet-wide. A
+// replica that dispatches nothing picks among every non-cordoned shard.
 func (e *Engine) pickShard() (int, error) {
 	e.shardsLock.Lock()
 	specs := make([]ShardSpec, 0, len(e.shardSpecs))
@@ -626,14 +809,20 @@ func (e *Engine) pickShard() (int, error) {
 		}
 		return indices[rand.IntN(len(indices))], nil
 	}
-	total := 0
 	weights := make([]int, len(specs))
-	for i, spec := range specs {
-		if spec.Cordoned {
-			continue
+	total := 0
+	for _, dispatchedOnly := range []bool{true, false} {
+		for i, spec := range specs {
+			weights[i] = 0
+			if spec.Cordoned || (dispatchedOnly && !e.dispatchesOn(spec.Index)) {
+				continue
+			}
+			weights[i] = capacityWeight(spec.VirtualCPUs)
+			total += weights[i]
 		}
-		weights[i] = capacityWeight(spec.VirtualCPUs)
-		total += weights[i]
+		if total > 0 {
+			break
+		}
 	}
 	if total == 0 {
 		return 0, errors.New("all shards are cordoned", http.StatusServiceUnavailable)

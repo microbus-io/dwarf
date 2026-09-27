@@ -173,7 +173,7 @@ func TestPeers_ClassifyCountsAndOrdinal(t *testing.T) {
 		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 30000},  // fresh, NOT dispatching (await-only/wedged)
 		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 200}, // us, dispatching
 		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: 100},  // stale: counts for nothing
-	}, selfID, testWindows)
+	}, selfID, false, 1, testWindows)
 
 	assert.Equal(3, v.replicas, "three fresh rows hold connections")
 	assert.Equal(2, v.dispatchers, "only two of them proved they serve the shard")
@@ -185,7 +185,7 @@ func TestPeers_ClassifyCountsAndOrdinal(t *testing.T) {
 	v = classify([]peer{
 		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 50},
 		{engineID: 90, seenAgeMs: 90000, dispatchAgeMs: 90000},
-	}, selfID, testWindows)
+	}, selfID, false, 1, testWindows)
 	assert.Equal([]int64{90}, v.dead)
 }
 
@@ -200,7 +200,7 @@ func TestPeers_ClassifySelfAbsenceCutsBothWays(t *testing.T) {
 	v := classify([]peer{
 		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100},
 		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100},
-	}, selfID, testWindows)
+	}, selfID, false, 1, testWindows)
 
 	assert.False(v.selfSeen)
 	assert.Equal(3, v.replicas, "two peers plus this process, which exists whether or not its row does")
@@ -213,7 +213,7 @@ func TestPeers_ClassifySelfAbsenceCutsBothWays(t *testing.T) {
 	v = classify([]peer{
 		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100},
 		{engineID: selfID, seenAgeMs: 60000, dispatchAgeMs: 60000},
-	}, selfID, testWindows)
+	}, selfID, false, 1, testWindows)
 	assert.True(v.selfSeen, "the row is there, so nothing needs re-registering")
 	assert.Equal(2, v.replicas, "but it is not fresh, so we still count ourselves")
 	assert.Equal(-1, v.ordinal)
@@ -229,7 +229,7 @@ func TestPeers_ClassifyNeverCondemnsSelf(t *testing.T) {
 	v := classify([]peer{
 		{engineID: selfID, seenAgeMs: 999999, dispatchAgeMs: 999999},
 		{engineID: 90, seenAgeMs: 999999, dispatchAgeMs: 999999},
-	}, selfID, testWindows)
+	}, selfID, false, 1, testWindows)
 
 	assert.Equal([]int64{90}, v.dead, "every row is a corpse except ours")
 	assert.Equal(1, v.replicas, "we still count ourselves")
@@ -273,6 +273,143 @@ func TestPeers_ReplicaFallIsWithheldAcrossAGap(t *testing.T) {
 	r.clk.advance(3 * r.s.scan)
 	r.s.observe(ctx, fleet, nil)
 	assert.Equal(3, r.s.Replicas(), "growth in the fleet is always safe to believe")
+}
+
+// TestPeers_ClassifyRanksAgreeAcrossReplicas pins what makes the rank usable for choosing a shard's
+// dispatchers with no coordination: every replica reading the same rows derives a DISTINCT rank, the ranks
+// cover 0..n-1 exactly, and a stale row takes no rank at all.
+func TestPeers_ClassifyRanksAgreeAcrossReplicas(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	fleet := []peer{
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: staleAge},
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge},
+		{engineID: 30, seenAgeMs: 100, dispatchAgeMs: staleAge},
+		{engineID: 40, seenAgeMs: 100, dispatchAgeMs: staleAge},
+		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: staleAge}, // stale: ranks nobody
+	}
+	for _, shard := range []int{1, 2, 7} {
+		seen := map[int]bool{}
+		for _, p := range fleet[:4] {
+			v := classify(fleet, p.engineID, false, shard, testWindows)
+			assert.Equal(4, v.replicas)
+			assert.True(v.rank >= 0 && v.rank < v.replicas, "shard %d: rank %d out of range", shard, v.rank)
+			assert.False(seen[v.rank], "shard %d: two replicas share rank %d", shard, v.rank)
+			seen[v.rank] = true
+		}
+	}
+
+	// The top of the ranking moves between shards, which is the whole point of a per-shard score: "the
+	// oldest k replicas" would hand every shard to the same few.
+	firsts := map[int64]bool{}
+	for shard := 1; shard <= 32; shard++ {
+		for _, p := range fleet[:4] {
+			if classify(fleet, p.engineID, false, shard, testWindows).rank == 0 {
+				firsts[p.engineID] = true
+			}
+		}
+	}
+	assert.True(len(firsts) > 1, "one replica ranked first on every one of 32 shards")
+}
+
+// TestPeers_ClassifyRanksAnAbsentSelf pins the rank's self-absence posture, which follows the pool divisor's
+// rather than the partition's: a replica whose row is missing still ranks itself among the peers it can see.
+// The failure it prevents is a lone replica that cannot see its own row ranking nowhere and dispatching
+// nothing.
+func TestPeers_ClassifyRanksAnAbsentSelf(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	v := classify(nil, selfID, false, 1, testWindows)
+	assert.Equal(1, v.replicas)
+	assert.Equal(0, v.rank, "alone and unseen, a replica still ranks first")
+
+	fleet := []peer{
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: staleAge},
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge},
+	}
+	withSelf := append([]peer{{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge}}, fleet...)
+	assert.Equal(classify(withSelf, selfID, false, 1, testWindows).rank, classify(fleet, selfID, false, 1, testWindows).rank,
+		"a missing own row ranks exactly as a present one does")
+}
+
+// TestPeers_ClassifyNeverRanksAZeroWorkersPeer pins what zero_workers is for. Such a peer is counted - it holds
+// connections - but takes no rank, because a rank is a claim on a dispatcher slot and a replica that will
+// never dispatch would hold that slot empty. The count it is excluded from is what an owner divides a
+// shard's budget by, so one worker beside an await-only peer must see itself as the only candidate.
+func TestPeers_ClassifyNeverRanksAZeroWorkersPeer(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	var fleet []peer
+	for id := int64(1); id <= 16; id++ {
+		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge, zeroWorkers: true})
+	}
+	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge})
+	v := classify(fleet, selfID, false, 1, testWindows)
+	assert.Equal(17, v.replicas, "await-only peers still hold connections")
+	assert.Equal(1, v.candidates, "but only this replica may dispatch")
+	assert.Equal(0, v.rank, "so it ranks first however the scores fall")
+
+	v = classify(fleet[:16], selfID, true, 1, testWindows)
+	assert.Equal(0, v.candidates, "an await-only replica with a missing row does not count itself in either")
+}
+
+// TestPeers_RegisterWritesTheProfile pins that the row carries what the replica states about itself, and
+// that the beat leaves it alone.
+func TestPeers_RegisterWritesTheProfile(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	r.s.SetProfile(Profile{RTT: 1250 * time.Microsecond, ZeroWorkers: true})
+	assert.NoError(r.s.register(ctx))
+	r.s.publishBeat(ctx, false)
+	var zeroWorkers int
+	var rttUs int64
+	assert.NoError(r.db.QueryRowContext(ctx,
+		"SELECT zero_workers, rtt_us FROM dwarf_peers WHERE engine_id=?", selfID).Scan(&zeroWorkers, &rttUs))
+	assert.Equal(1, zeroWorkers)
+	assert.Equal(int64(1250), rttUs)
+	assert.True(r.row(t, selfID).zeroWorkers, "and the read returns it")
+}
+
+// TestPeers_RankPromotionIsWithheldAcrossAGap pins the rank's version of the correlated-stall guard. After a
+// stall every peer's row reads stale at once, so every replica would rank itself first and claim a dispatcher
+// slot - and with it a dispatcher's pool - simultaneously. A demotion shrinks the pool and is believed at
+// once; a promotion waits one reading.
+func TestPeers_RankPromotionIsWithheldAcrossAGap(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	// Enough peers that self is certain to be outranked by at least one of them.
+	var fleet []peer
+	for id := int64(1); id <= 16; id++ {
+		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge})
+	}
+	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge})
+	alone := fleet[len(fleet)-1:]
+
+	r.s.observe(ctx, fleet, nil)
+	ranked, candidates := r.s.Rank()
+	assert.True(ranked > 0, "self should be outranked by one of 16 peers")
+	assert.Equal(17, candidates)
+
+	r.clk.advance(3 * r.s.scan)
+	r.s.observe(ctx, alone, nil)
+	rank, cands := r.s.Rank()
+	assert.Equal(ranked, rank, "the reading that ends a blind spell cannot promote")
+	assert.Equal(17, cands, "nor shrink the count the slots are derived from")
+
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, alone, nil)
+	rank, cands = r.s.Rank()
+	assert.Equal(0, rank, "confirmed on the next reading")
+	assert.Equal(1, cands)
+
+	r.clk.advance(3 * r.s.scan)
+	r.s.observe(ctx, fleet, nil)
+	rank, _ = r.s.Rank()
+	assert.Equal(ranked, rank, "a demotion is always safe to believe")
 }
 
 // TestPeers_FailedReadHoldsTheLastGoodFleet pins the rule the rest of the design rests on: a read that did

@@ -158,10 +158,11 @@ replica that has stopped serving its share.
 
 ## Throughput collapsed after a restart or crash
 
-**Suspect phantom replicas first.** Each replica registers a row per shard and heartbeats it. The count of
-live rows divides each database's connection budget — so rows belonging to replicas that no longer exist
-shrink every surviving replica's pool. A replica that crash-loops is the worst case: unless its identity is
-pinned, every restart mints a fresh one and leaves another corpse.
+**Suspect phantom replicas first.** Each replica registers a row per shard and heartbeats it, and the live
+rows decide which replicas dispatch each shard and how its connection budget divides — so rows belonging to
+replicas that no longer exist can hold a dispatcher's place, leaving that shard with fewer replicas running
+its steps, and can shrink the surviving dispatchers' pools. A replica that crash-loops is the worst case:
+unless its identity is pinned, every restart mints a fresh one and leaves another corpse.
 
 **Confirm.** Compare `dwarf_peer_replicas` against your actual replica count. If the gauge is higher, that is
 the fault. Directly:
@@ -170,7 +171,7 @@ the fault. Directly:
 SELECT engine_id, seen_at FROM dwarf_peers ORDER BY seen_at;
 ```
 
-**Respond.** A stale row stops counting toward the replica count after **40 seconds** — so the pool damage
+**Respond.** A stale row stops counting toward the replica count after **40 seconds** — so the damage
 resolves itself that fast. Deletion of the row is slower and needs two conditions: the row must be older
 than **80 seconds**, *and* the registry must have been continuously readable for **5 minutes**. **Wait
 first** — the cleanup is deliberately patient because deleting a row is the only irreversible act in the
