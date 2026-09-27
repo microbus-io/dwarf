@@ -73,8 +73,8 @@ func recordCancellation(ctx context.Context, f *workflow.Flow) error {
 // Either way the cancellation arrives on the node's onError transition, or, with none, fails the flow. A
 // subgraph caller runs once more when its child returns, so it sees the child's result before its own
 // cancellation is applied; an interrupted step resumed after Cancel is preempted, so its resume data is not
-// acted on. Until the flow-level cancelled-vs-failed decision exists, an uncaught cancellation terminalizes
-// the flow `failed` (its covered step is `cancelled`).
+// acted on. A flow whose every unrecovered loss was a cancellation resolves `cancelled`; one real error mixed
+// in resolves it `failed`. A child's cancellation reaches its caller as an error IsCancelled recognizes.
 func TestGracefulCancelFlow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -145,9 +145,8 @@ func TestGracefulCancelFlow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		assert.Equal(workflow.StatusFailed, outcome.Status)
-		assert.Contains(outcome.Error, "flow cancelled")
-		assert.Contains(outcome.Error, "test reason")
+		assert.Equal(workflow.StatusCancelled, outcome.Status)
+		assert.Equal("test reason", outcome.CancelReason)
 		assert.False(bRan.Load(), "a preempted task must never run")
 		if step, err := stepByName(ctx, eng, flowKey, "B"); assert.NoError(err) {
 			assert.Equal(workflow.StatusCancelled, step.Status)
@@ -237,8 +236,8 @@ func TestGracefulCancelFlow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		assert.Equal(workflow.StatusFailed, outcome.Status)
-		assert.Contains(outcome.Error, "test reason")
+		assert.Equal(workflow.StatusCancelled, outcome.Status)
+		assert.Equal("test reason", outcome.CancelReason)
 		assert.False(dRan.Load(), "C's transition must not be honored")
 		if step, err := stepByName(ctx, eng, flowKey, "C"); assert.NoError(err) {
 			assert.Equal(workflow.StatusCancelled, step.Status)
@@ -456,6 +455,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 			}
 			if err != nil {
 				f.SetString("childErr", err.Error())
+				f.SetBool("childCancelled", workflow.IsCancelled(err))
 			}
 			return nil
 		})
@@ -493,6 +493,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		assert.False(fRan.Load(), "E's transition must be redirected to its handler")
 		assert.True(outcome.State.GetBool("recovered"), "the caller itself is covered, not only its child")
 		assert.Contains(outcome.State.GetString("childErr"), "flow cancelled", "the caller saw its child's cancellation")
+		assert.True(outcome.State.GetBool("childCancelled"), "the child's cancellation crosses the subgraph boundary with its marker")
 	})
 
 	// interrupt: I is interrupted when Cancel lands. A later Resume does not run the task with the resume
@@ -544,6 +545,241 @@ func TestGracefulCancelFlow(t *testing.T) {
 		assert.Equal(int32(1), iRuns.Load(), "the resumed step must be preempted, not re-run")
 		assert.False(sawResume.Load(), "resume data arriving after Cancel must not be acted on")
 		assert.True(outcome.State.GetBool("recovered"))
+	})
+
+	// fanOut builds Src -forEach(items as item)-> W -> Join(fan-in) -> END, with W's behaviour supplied.
+	fanOut := func(name string, w engine.TaskHandler) string {
+		url := "gracefulcancelflow.verify:428/" + name
+		g := workflow.NewGraph(name)
+		g.SetEndpoint("Src", url+"-src")
+		g.SetEndpoint("W", url+"-w")
+		g.SetEndpoint("Join", url+"-join")
+		g.AddTransitionForEach("Src", "W", "items", "item")
+		g.AddTransition("W", "Join")
+		g.SetFanIn("Join")
+		g.AddTransition("Join", workflow.END)
+		proxy.HandleGraph(url, g)
+		proxy.HandleTask(url+"-src", func(ctx context.Context, f *workflow.Flow) error {
+			f.Set("items", []string{"a", "b"})
+			return nil
+		})
+		proxy.HandleTask(url+"-w", w)
+		proxy.HandleTask(url+"-join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		return url
+	}
+	// holdBranches makes W report which branch it is on its FIRST run, then hold until released; a later run
+	// (a Fork's re-run) neither reports nor holds.
+	holdBranches := func(running chan<- string, release <-chan struct{}) func(f *workflow.Flow) {
+		return func(f *workflow.Flow) {
+			select {
+			case running <- f.GetString("item"):
+				<-release
+			default:
+			}
+		}
+	}
+	awaitBranches := func(t *testing.T, running <-chan string, n int) {
+		for range n {
+			select {
+			case <-running:
+			case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
+				t.Fatal("fan-out branches never started")
+			}
+		}
+	}
+
+	// fan-out, every loss a cancellation: both branches are running when Cancel lands, and both finish
+	// covered with no handler. The cohort resolves with only cancellations, so the flow is cancelled.
+	t.Run("fanout_all_cancelled", func(t *testing.T) {
+		assert := testarossa.For(t)
+		running := make(chan string, 2)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		hold := holdBranches(running, release)
+		url := fanOut("FanOutAllCancelled", func(ctx context.Context, f *workflow.Flow) error {
+			hold(f)
+			return nil
+		})
+
+		eng := engine.NewEngineUnderTest(t.Name())
+		defer eng.Shutdown(ctx)
+		defer releaseOnce.Do(func() { close(release) })
+		eng.SetHost(proxy)
+		assert.NoError(eng.Startup(t.Context()))
+
+		flowKey, err := eng.Create(ctx, url, nil, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		awaitBranches(t, running, 2)
+		assert.NoError(eng.Cancel(ctx, flowKey, "test reason"))
+		releaseOnce.Do(func() { close(release) })
+
+		outcome, err := eng.Await(ctx, flowKey)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(workflow.StatusCancelled, outcome.Status)
+		assert.Equal("test reason", outcome.CancelReason)
+	})
+
+	// fan-out, a real error mixed in: branch a fails for real while branch b is cancelled. A real error wins,
+	// so the flow is failed and reports a's error. Forking at a with the fault fixed re-runs a alone; the
+	// clone keeps b's cancellation, so the cohort now resolves with only cancellations - the fork is
+	// cancelled, which it can be only if the clone re-derived the cancellation count along with the failures.
+	t.Run("fanout_mixed_fails_then_fork_resolves_cancelled", func(t *testing.T) {
+		assert := testarossa.For(t)
+		running := make(chan string, 2)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		hold := holdBranches(running, release)
+		url := fanOut("FanOutMixed", func(ctx context.Context, f *workflow.Flow) error {
+			hold(f)
+			if f.GetString("item") == "a" && !f.GetBool("fixed") {
+				return errors.New("a boom")
+			}
+			return nil
+		})
+
+		eng := engine.NewEngineUnderTest(t.Name())
+		defer eng.Shutdown(ctx)
+		defer releaseOnce.Do(func() { close(release) })
+		eng.SetHost(proxy)
+		assert.NoError(eng.Startup(t.Context()))
+
+		flowKey, err := eng.Create(ctx, url, nil, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		awaitBranches(t, running, 2)
+		assert.NoError(eng.Cancel(ctx, flowKey, "test reason"))
+		releaseOnce.Do(func() { close(release) })
+
+		outcome, err := eng.Await(ctx, flowKey)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(workflow.StatusFailed, outcome.Status, "a real error mixed into the cohort wins")
+		assert.Contains(outcome.Error, "a boom")
+
+		steps, err := eng.History(ctx, flowKey)
+		if !assert.NoError(err) {
+			return
+		}
+		var aKey string
+		for _, s := range steps {
+			if s.TaskName != "W" {
+				continue
+			}
+			if step, err := eng.Step(ctx, s.StepKey); err == nil && step.State.GetString("item") == "a" {
+				aKey = s.StepKey
+			}
+		}
+		if !assert.NotEqual("", aKey) {
+			return
+		}
+		forkKey, err := eng.Fork(ctx, aKey, map[string]any{"fixed": true})
+		if !assert.NoError(err) {
+			return
+		}
+		forked, err := eng.Await(ctx, forkKey)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusCancelled, forked.Status, "the kept cancelled branch is now the cohort's only loss")
+			assert.Equal("test reason", forked.CancelReason, "the fork reports the reason for the cancellation it inherited")
+		}
+	})
+
+	// subgraph, the child's cancellation propagates: E has no handler and simply returns the error its
+	// child's cancellation delivered. The error still carries the marker after crossing the boundary, so E's
+	// own loss is a cancellation and the flow resolves cancelled rather than failed.
+	t.Run("subgraph_child_cancellation_propagates", func(t *testing.T) {
+		assert := testarossa.For(t)
+		graph := workflow.NewGraph("SubgraphChildCancellationPropagates")
+		graph.SetEndpoint("E", "gracefulcancelflow.verify:428/sccp-e")
+		graph.AddTransition("E", workflow.END)
+		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-child-cancellation-propagates", graph)
+		child := workflow.NewGraph("SubgraphChildCancellationPropagatesChild")
+		child.SetEndpoint("K", "gracefulcancelflow.verify:428/sccp-k")
+		child.AddTransition("K", workflow.END)
+		proxy.HandleGraph("gracefulcancelflow.verify:428/sccp-child", child)
+
+		running := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		proxy.HandleTask("gracefulcancelflow.verify:428/sccp-e", func(ctx context.Context, f *workflow.Flow) error {
+			yield, err := f.Subgraph("gracefulcancelflow.verify:428/sccp-child", nil, nil)
+			if yield {
+				return nil
+			}
+			return err
+		})
+		proxy.HandleTask("gracefulcancelflow.verify:428/sccp-k", func(ctx context.Context, f *workflow.Flow) error {
+			close(running)
+			<-release
+			return nil
+		})
+
+		eng := engine.NewEngineUnderTest(t.Name())
+		defer eng.Shutdown(ctx)
+		defer releaseOnce.Do(func() { close(release) })
+		eng.SetHost(proxy)
+		assert.NoError(eng.Startup(t.Context()))
+
+		flowKey, err := eng.Create(ctx, "gracefulcancelflow.verify:428/subgraph-child-cancellation-propagates", nil, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		awaitSignal(t, running, "the child's step starting")
+		assert.NoError(eng.Cancel(ctx, flowKey, "test reason"))
+		releaseOnce.Do(func() { close(release) })
+
+		outcome, err := eng.Await(ctx, flowKey)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(workflow.StatusCancelled, outcome.Status)
+		assert.Equal("test reason", outcome.CancelReason)
+	})
+
+	// subgraph error fidelity: a child's real failure reaches its caller with its status code intact, not
+	// flattened to a bare message.
+	t.Run("subgraph_error_keeps_status_code", func(t *testing.T) {
+		assert := testarossa.For(t)
+		graph := workflow.NewGraph("SubgraphErrorKeepsStatusCode")
+		graph.SetEndpoint("E", "gracefulcancelflow.verify:428/sesc-e")
+		graph.AddTransition("E", workflow.END)
+		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-error-keeps-status-code", graph)
+		child := workflow.NewGraph("SubgraphErrorKeepsStatusCodeChild")
+		child.SetEndpoint("K", "gracefulcancelflow.verify:428/sesc-k")
+		child.AddTransition("K", workflow.END)
+		proxy.HandleGraph("gracefulcancelflow.verify:428/sesc-child", child)
+		proxy.HandleTask("gracefulcancelflow.verify:428/sesc-e", func(ctx context.Context, f *workflow.Flow) error {
+			yield, err := f.Subgraph("gracefulcancelflow.verify:428/sesc-child", nil, nil)
+			if yield {
+				return nil
+			}
+			f.SetInt("code", errors.StatusCode(err))
+			f.SetString("msg", err.Error())
+			f.SetBool("cancelled", workflow.IsCancelled(err))
+			return nil
+		})
+		proxy.HandleTask("gracefulcancelflow.verify:428/sesc-k", func(ctx context.Context, f *workflow.Flow) error {
+			return errors.New("nope: %s", "50% off", http.StatusNotFound)
+		})
+
+		eng := engine.NewEngineUnderTest(t.Name())
+		defer eng.Shutdown(ctx)
+		eng.SetHost(proxy)
+		assert.NoError(eng.Startup(t.Context()))
+
+		_, outcome, err := eng.Run(ctx, "gracefulcancelflow.verify:428/subgraph-error-keeps-status-code", nil, nil)
+		if !assert.NoError(err) {
+			return
+		}
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal(http.StatusNotFound, outcome.State.GetInt("code"))
+		assert.Equal("nope: 50% off", outcome.State.GetString("msg"), "a %% in the child's message survives the hop")
+		assert.False(outcome.State.GetBool("cancelled"))
 	})
 
 	// guards: an unknown key is a 404, a subgraph child's key a 400 (the tree is addressed by its root), and

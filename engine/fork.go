@@ -242,13 +242,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		}
 	}
 
-	var status, workflowURL, workflowName, traceParent string
+	var status, workflowURL, workflowName, traceParent, cancelReason string
 	var graphJSON, baggageJSON []byte
 	var deleteOnCompletion, originStepID int
 	err := tx.QueryRowContext(ctx,
-		"SELECT status, workflow_url, workflow_name, graph, baggage, trace_parent, delete_on_completion, step_id FROM dwarf_flows WHERE flow_id=?",
+		"SELECT status, workflow_url, workflow_name, graph, baggage, trace_parent, delete_on_completion, step_id, cancel_reason FROM dwarf_flows WHERE flow_id=?",
 		originFlowID,
-	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &baggageJSON, &traceParent, &deleteOnCompletion, &originStepID)
+	).Scan(&status, &workflowURL, &workflowName, &graphJSON, &baggageJSON, &traceParent, &deleteOnCompletion, &originStepID, &cancelReason)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
 	}
@@ -272,10 +272,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	// flow keeps it AND must echo it into thread_token (it is its own thread), or List builds a malformed
 	// ThreadKey ("{shard}-{id}-") that the API's thread resolution then 404s on.
 	newFlowToken := keys.RandomIdentifier(16)
+	// The origin's cancel reason comes along: a kept fan-out branch lost to the origin's cancellation is a loss
+	// the clone inherits, and a fork whose only losses are such branches resolves cancelled - so it reports the
+	// reason that explains it, rather than a cancellation nobody gave a reason for.
 	newFlowID64, err := tx.InsertReturnID(ctx, "flow_id",
-		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id)"+
-			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		newFlowToken, workflowURL, workflowName, graphJSON, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID,
+		"INSERT INTO dwarf_flows (flow_token, workflow_url, workflow_name, graph, baggage, status, surgraph_flow_id, surgraph_step_id, forked_from_step, trace_parent, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, cancel_reason)"+
+			" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		newFlowToken, workflowURL, workflowName, graphJSON, baggageJSON, newStatus, newSurgFlowID, newSurgStepID, forkedFromStep, newTrace, deleteOnCompletion, flowPriority, flowFairnessKey, flowFairnessWeight, flowBudget, e.engineID, cancelReason,
 	)
 	if err != nil {
 		return 0, nil, errors.Trace(err)
@@ -501,13 +504,13 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 			memo[lineageID] = v
 			return v
 		}
-		arrivals, failures := 0, 0
+		arrivals, failures, cancellations := 0, 0, 0
 		for _, head := range childrenByPred[s.oldID] {
 			if head.lineageID != s.oldID {
 				continue // not a member of this spawn's cohort (e.g. a nested cohort's own frame)
 			}
 			// Walk this branch's sub-DAG, descending THROUGH any nested cohort and stopping at the fan-in.
-			branchFailed, branchRewound := false, false
+			branchFailed, branchCancelled, branchRewound := false, false, false
 			stack := []stepMeta{head}
 			for len(stack) > 0 {
 				n := stack[len(stack)-1]
@@ -515,11 +518,15 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 				if n.oldID == rewind {
 					branchRewound = true
 				}
-				// A cancelled step is an unrecovered loss exactly like a failed one - failStep bumped
-				// cohort_failures for it - so a clone must count it the same or re-derive a fan-in that
-				// converges where the original failed.
-				if n.status == workflow.StatusFailed || n.status == workflow.StatusCancelled {
+				// A cancelled step is an unrecovered loss like a failed one - failStep counted it in
+				// cohort_failures - and the branch's loss is a cancellation only if nothing in it failed, the
+				// same rule the live counters apply when a nested cohort resolves. Counted any other way, the
+				// clone re-derives a fan-in that converges, or resolves cancelled, where the original failed.
+				switch n.status {
+				case workflow.StatusFailed:
 					branchFailed = true
+				case workflow.StatusCancelled:
+					branchCancelled = true
 				}
 				for _, c := range childrenByPred[n.oldID] {
 					if inCohort(c.lineageID) {
@@ -531,11 +538,14 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 				continue // this branch re-runs in the fork; it has not arrived
 			}
 			arrivals++
-			if branchFailed {
+			if branchFailed || branchCancelled {
 				failures++
 			}
+			if branchCancelled && !branchFailed {
+				cancellations++
+			}
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals=?, cohort_failures=? WHERE step_id=?", arrivals, failures, idMap[s.oldID])
+		_, err = tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals=?, cohort_failures=?, cohort_cancellations=? WHERE step_id=?", arrivals, failures, cancellations, idMap[s.oldID])
 		if err != nil {
 			return 0, nil, errors.Trace(err)
 		}
@@ -558,7 +568,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 		if isLeafFlow && rewind == cc.leafStepID {
 			// Leaf fork step: merged input, cleared output/park/cohort, gated `created`.
 			_, err = tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
+				"UPDATE dwarf_steps SET status=?, parked=?, state=?, state_refs=?, changes=?, error='', attempt=0, interrupt_done=0, resume_data=?, subgraph_done=0, subgraph_result=?, subgraph_error='', successor_id=0, cohort_size=0, cohort_arrivals=0, cohort_failures=0, cohort_cancellations=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), created_at=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",
 				workflow.StatusCreated, parkedNone, cc.mergedLeafState, emptyJSON, emptyJSON, emptyJSON, emptyJSON, newRewindID,
 			)
 			cc.newLeafStepID = newRewindID

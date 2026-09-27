@@ -27,7 +27,8 @@ const (
 )
 
 // IsCancelled reports whether err is a cancellation delivered by the engine's Cancel operation: the error an
-// onError handler reads as onErr when its step was cancelled.
+// onError handler reads as onErr when its step was cancelled, or the error flow.Subgraph returns when the
+// child flow was cancelled. Returning that error from a task keeps it a cancellation.
 func IsCancelled(err error) bool {
 	var te *errors.TracedError
 	// A nil *TracedError passed as an error is a non-nil interface that As matches, so te can still be nil.

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/cancelmarker"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -689,14 +690,15 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// NUL, which Postgres rejects in `text` exactly as it does in `jsonb`) would kill the very write that is
 	// supposed to be the clean one, and failOnPersistError would misread that as an unreachable database.
 	errMsg := sanitizeErrorMessage(taskErr.Error())
-	// A cancellation settles the STEP as cancelled; the flow still resolves failed until the flow-level
-	// cancelled-vs-failed decision exists. Either value differs from the running/completed row it replaces,
-	// which is what keeps the RowsAffected fence below honest on MySQL.
+	// A cancellation settles the step as cancelled. Either value differs from the running/completed row it
+	// replaces, which is what keeps the RowsAffected fence below honest on MySQL.
+	stepCancelled := workflow.IsCancelled(taskErr)
 	stepStatus := workflow.StatusFailed
-	if workflow.IsCancelled(taskErr) {
+	if stepCancelled {
 		stepStatus = workflow.StatusCancelled
 	}
 	failFlow := false
+	flowStatus := workflow.StatusFailed
 	reDispatchParent := false
 	var finalStateJSON []byte
 	// Serialize a failing BRANCH's arrival through the same per-peer stripe the success path uses (keyed on
@@ -719,6 +721,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		// A fan-out branch (lineage_id!=0) instead defers to cohort accounting below: siblings run to
 		// completion and the flow fails only once the whole cohort arrives with cohort_failures>0.
 		failFlow = stepLineageID == 0
+		flowCancelled := stepCancelled
 		finalStateJSON = nil
 		reDispatchParent = false
 		// Fence the fail on BOTH our lease generation AND the two states a worker legitimately fails a step
@@ -746,12 +749,17 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 		}
 		if !failFlow {
 			var err error
-			failFlow, err = e.propagateCohortFailure(ctx, tx, stepLineageID)
+			failFlow, flowCancelled, err = e.propagateCohortFailure(ctx, tx, stepLineageID, stepCancelled)
 			if err != nil {
 				return errors.Trace(err)
 			}
 		}
 		if failFlow {
+			flowStatus = workflow.StatusFailed
+			if flowCancelled {
+				flowStatus = workflow.StatusCancelled
+			}
+			lossErr := e.flowLossError(ctx, tx, flowID, flowCancelled, taskErr)
 			var err error
 			finalStateJSON, _, err = e.computeFinalState(ctx, tx, shardNum, flowID)
 			if err != nil {
@@ -769,11 +777,11 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 			}
 			tx.ExecContext(ctx,
 				"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-				finalStateJSON, workflow.StatusFailed, errMsg, flowID,
+				finalStateJSON, flowStatus, sanitizeErrorMessage(lossErr.Error()), flowID,
 			)
 			if isSubgraphChild {
 				var derr error
-				reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, errMsg)
+				reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, lossErr)
 				if derr != nil {
 					return errors.Trace(derr)
 				}
@@ -803,49 +811,87 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// counted as started - a subgraph child included, since createWithGraph is the shared insert path. The
 	// child's failure additionally travels to its parent's flow.Subgraph call, but that is delivery, not a
 	// second termination.
-	e.metricFlowTerminated(ctx, flowWorkflowURL, workflow.StatusFailed, shardNum)
+	e.metricFlowTerminated(ctx, flowWorkflowURL, flowStatus, shardNum)
 
 	if isSubgraphChild {
-		e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), workflow.StatusFailed)
+		e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), flowStatus)
 		if reDispatchParent {
 			e.enqueueStep(ctx, shardNum, parentStepID)
 		}
 		return false, nil
 	}
 
-	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusFailed)
+	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", flowStatus)
 	compositeID := keys.New(shardNum, flowID, flowToken)
-	e.signalStop(ctx, compositeID, workflow.StatusFailed)
+	e.signalStop(ctx, compositeID, flowStatus)
 	return false, nil
 }
 
 // propagateCohortFailure bumps a spawn step's cohort_arrivals and cohort_failures.
-func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor, spawnStepID int) (bool, error) {
+// cancelled says whether the loss arriving is a cancellation, and is counted in cohort_cancellations. When a
+// cohort resolves, its own loss - carried to the enclosing cohort, or to the flow - is a cancellation only if
+// every failure in it was one, so a single real error anywhere below makes the whole resolution a failure.
+// Returns whether the flow fails, and if so whether it resolves cancelled.
+func (e *Engine) propagateCohortFailure(ctx context.Context, tx sequel.Executor, spawnStepID int, cancelled bool) (failFlow bool, flowCancelled bool, err error) {
 	current := spawnStepID
 	for {
+		cancelledInc := 0
+		if cancelled {
+			cancelledInc = 1
+		}
 		_, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + 1, cohort_failures = cohort_failures + 1 WHERE step_id=?",
-			current,
+			"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + 1, cohort_failures = cohort_failures + 1, cohort_cancellations = cohort_cancellations + ? WHERE step_id=?",
+			cancelledInc, current,
 		)
 		if err != nil {
-			return false, errors.Trace(err)
+			return false, false, errors.Trace(err)
 		}
-		var arrivals, size, lineageID int
+		var arrivals, size, failures, cancellations, lineageID int
 		err = tx.QueryRowContext(ctx,
-			"SELECT cohort_arrivals, cohort_size, lineage_id FROM dwarf_steps WHERE step_id=?",
+			"SELECT cohort_arrivals, cohort_size, cohort_failures, cohort_cancellations, lineage_id FROM dwarf_steps WHERE step_id=?",
 			current,
-		).Scan(&arrivals, &size, &lineageID)
+		).Scan(&arrivals, &size, &failures, &cancellations, &lineageID)
 		if err != nil {
-			return false, errors.Trace(err)
+			return false, false, errors.Trace(err)
 		}
 		if arrivals < size {
-			return false, nil
+			return false, false, nil
 		}
+		cancelled = cancellations == failures
 		if lineageID == 0 {
-			return true, nil
+			return true, cancelled, nil
 		}
 		current = lineageID
 	}
+}
+
+// flowLossError picks the error a flow resolving as a loss records, and delivers to its surgraph caller. A
+// cancelled flow reports the cancellation. A failed flow reports a real failure even when the loss that
+// resolved it was a cancellation - a real error was mixed into its cohort, and a cancellation on a failed flow
+// would have IsCancelled report true for it. lastLoss is the resolving step's own error, or nil when the
+// resolver is a completing arrival that has none.
+func (e *Engine) flowLossError(ctx context.Context, tx sequel.Executor, flowID int, cancelled bool, lastLoss error) error {
+	if cancelled {
+		if workflow.IsCancelled(lastLoss) {
+			return lastLoss
+		}
+		var reason string
+		tx.QueryRowContext(ctx, "SELECT cancel_reason FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&reason)
+		return cancelmarker.New(strings.TrimSpace(reason))
+	}
+	if lastLoss != nil && !workflow.IsCancelled(lastLoss) {
+		return lastLoss
+	}
+	var sample string
+	tx.QueryRowContext(ctx,
+		"SELECT error FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusFailed+"' AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
+		flowID,
+	).Scan(&sample)
+	sample = strings.TrimSpace(sample)
+	if sample == "" {
+		sample = "cohort failed"
+	}
+	return errors.New("%s", sample)
 }
 
 // dynamicSubgraphParent reports whether the given flow is a subgraph child, and if so which step called
@@ -885,7 +931,7 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFl
 	if err != nil {
 		return errors.Trace(err)
 	}
-	errMsg := taskErr.Error()
+	errMsg := sanitizeErrorMessage(taskErr.Error())
 	reDispatchParent := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatchParent = false
@@ -927,7 +973,7 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFl
 		// The parent re-arm. With no child flow this is the transaction's first statement and is itself a
 		// write (the parked caller step), so write-first holds on that path too.
 		var derr error
-		reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, errMsg)
+		reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, taskErr)
 		return errors.Trace(derr)
 	})
 	if err != nil {
@@ -939,13 +985,18 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFl
 	return nil
 }
 
-// deliverFlowFailureToParent re-arms a parked parent caller step with a failed child flow's error, so the
-// parent's flow.Subgraph call re-dispatches and observes it (yield=false, err set from subgraph_error).
-// Called inside the child flow's terminating transaction, after the child flow row has been marked failed.
-// Returns true when the caller step was still parked and got re-armed - the caller then enqueues it after
-// the transaction. Returns false for a top-level flow (parentStepID==0) or a caller step no longer parked
-// (already resolved, terminated, or retried away), in which case there is nothing to re-dispatch.
-func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Executor, parentStepID int, errMsg string) (bool, error) {
+// deliverFlowFailureToParent re-arms a parked parent caller step with a failed or cancelled child flow's
+// error, so the parent's flow.Subgraph call re-dispatches and observes it (yield=false, err set from
+// subgraph_error). Called inside the child flow's terminating transaction, after the child flow row has been
+// terminalized. Returns true when the caller step was still parked and got re-armed - the caller then
+// enqueues it after the transaction. Returns false for a top-level flow (parentStepID==0) or a caller step no
+// longer parked (already resolved, terminated, or retried away), in which case there is nothing to re-dispatch.
+//
+// The error is stored as its TracedError JSON, stack stripped, not as its message: flow.Subgraph decodes it,
+// so its status code and properties reach the caller - the cancellation marker among them, which is what
+// lets workflow.IsCancelled recognize a cancelled child. A bare message would arrive as a new error without
+// any of them.
+func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Executor, parentStepID int, childErr error) (bool, error) {
 	if parentStepID == 0 {
 		return false, nil
 	}
@@ -973,9 +1024,15 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 			return false, nil
 		}
 	}
+	delivered := *errors.Convert(childErr)
+	delivered.Stack = nil
+	encoded, err := json.Marshal(&delivered)
+	if err != nil {
+		return false, errors.Trace(err)
+	}
 	res, err := tx.ExecContext(ctx,
 		"UPDATE dwarf_steps SET status=?, parked=?, subgraph_done=1, subgraph_error=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?",
-		workflow.StatusPending, parkedNone, errMsg, parentStepID, parkedSubgraph,
+		workflow.StatusPending, parkedNone, string(encoded), parentStepID, parkedSubgraph,
 	)
 	if err != nil {
 		return false, errors.Trace(err)

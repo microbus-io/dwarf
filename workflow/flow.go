@@ -436,7 +436,7 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 			}
 		}
 		if f.subgraphError != "" {
-			return false, errors.New(f.subgraphError)
+			return false, decodeSubgraphError(f.subgraphError)
 		}
 		return false, nil
 	}
@@ -458,6 +458,18 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 	f.subgraphURL = workflowURL
 	f.subgraphInput = inputState
 	return true, nil
+}
+
+// decodeSubgraphError rebuilds the error a child flow delivered. The engine stores it as the error's
+// TracedError JSON, so its status code and properties - a cancellation marker among them - survive the hop.
+// A value that is not such JSON is taken as a bare message, and passed as an argument rather than as the
+// pattern, which would read any % in it as a format verb.
+func decodeSubgraphError(s string) error {
+	var te errors.TracedError
+	if json.Unmarshal([]byte(s), &te) == nil && te.Err != nil && te.Error() != "" {
+		return &te
+	}
+	return errors.New("%s", s)
 }
 
 /*

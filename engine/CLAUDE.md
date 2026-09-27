@@ -289,14 +289,32 @@ or terminal, so nothing is marked and the flow runs on as if never cancelled.
 when Cancel landed read its flow row at claim time, before the reason existed, so the completion-write path
 re-reads `cancel_reason` - one extra round trip, on that rare path only.
 
-*The FLOW still resolves `failed`.* A covered step settles `cancelled`, but there is no flow-level
-cancelled-vs-failed decision yet: that needs a cohort counter parallel to `cohort_failures`, so a cohort whose
-every loss was a cancellation resolves `cancelled` while one with a real error mixed in stays `failed`. Until then,
-**a `cancelled` step counts as a loss everywhere a `failed` one does** - `failStep` bumps `cohort_failures` for
-it, Fork's branch recompute scores it as a failed branch, and the cohort-fail path samples its error text.
-Relatedly, a subgraph child's error still reaches its caller's `flow.Subgraph` as plain text, so
-`workflow.IsCancelled` is false on a cancelled child's error; carrying the marker across that boundary depends
-on the same cohort decision (a fan-out child's loss is only known to be a cancellation once it exists).
+*The flow resolves `cancelled` only if EVERY unrecovered loss was a cancellation; one real error makes it
+`failed`.* A real error must always win visibility over an incidental cancellation, and the terminal status is
+immutable, so the decision is made per loss, never from "was Cancel called on this flow". `cohort_cancellations`
+counts, beside `cohort_failures`, the losses that were cancellations; `propagateCohortFailure` carries a
+`cancelled` flag up through nested cohorts, and a cohort that resolves passes on a cancellation only if
+`cohort_cancellations == cohort_failures` - so a real failure anywhere below makes every enclosing resolution a
+failure. A trunk step decides from its own error (`workflow.IsCancelled`). **A `cancelled` step counts as a
+loss everywhere a `failed` one does** (`cohort_failures`, Fork's branch recompute), and Fork rebuilds
+`cohort_cancellations` by the same rule the counters apply: a branch is a cancellation if it holds cancelled
+steps and no failed one. Get that wrong and a fork resolves `cancelled`, or converges, where the original failed.
+
+*`flowLossError` picks the error a resolving flow records and delivers*, and it is shared by `failStep` and the
+cohort-fail branch in `processStep` so they cannot disagree. A cancelled flow reports the cancellation; a failed
+flow reports a REAL failure even when the loss that resolved it was a cancellation (it samples a `failed` step's
+error) - a cancellation marker on a failed flow would have `IsCancelled` report true for it.
+
+*`subgraph_error` holds the delivered error's `TracedError` JSON, stack stripped, not its message*, and
+`flow.Subgraph` decodes it. That is what carries the cancellation marker across the boundary - a cancelled child
+reaches its caller as an error `IsCancelled` recognizes, so a caller that returns it resolves `cancelled` - and
+it keeps a real child error's status code and properties, which a bare message lost. A value that is not such
+JSON decodes as a bare message.
+
+**Never pass a stored or operator-supplied string as `errors.New`'s pattern.** It counts every `%` as a format
+verb consuming a trailing argument, so `errors.New(msg, errors.StatusCode)`-style calls silently lose the status
+code or a property when `msg` contains `%`: `cancelmarker.New("50% off")` yielded `flow cancelled: 50%!o(...)` and
+lost its marker. Pass the text as an argument, `errors.New("%s", msg, ...)`.
 
 Pinned by `fixtures/gracefulcancelflow_test.go`, which the SQLite suite alone cannot vouch for - run it against
 a MySQL-family server as well.
@@ -375,7 +393,12 @@ lives in a descendant, so it must carry the same values. The new root mints a fr
 `Continue`), sets `forked_from_step` to the *original* fork step's id (provenance + Continue exclusion), copies
 the origin's `thread_id` (so it groups in `List`) but does **not** notify or auto-delete. A failed-fan-out
 fork-of-fork is the partial-recovery path: fork one failed branch at a time; the first fork re-fails cleanly via
-cohort accounting (no limbo) until every failed branch is fixed.
+cohort accounting (no limbo) until every failed branch is fixed. **A branch lost to a graceful `Cancel` is kept
+exactly like a failed one** - Fork has one rewind point, so it re-runs the chosen step and inherits every sibling's
+recorded loss - and a fork whose only remaining losses are cancelled branches resolves `cancelled`. Each cloned
+flow therefore copies its origin's `cancel_reason`, so such a fork reports the reason for the cancellation it
+inherited rather than a reasonless one. Re-running every lost branch in one fork would need multiple rewind points
+in the cohort recount above; it is deliberately not offered.
 
 *Caveat:* the cloned-prefix steps keep the **origin's** timestamps (the `INSERT…SELECT` copies `created_at`/
 `started_at`/`updated_at` verbatim); only the **rewound** rows (the leaf fork step and re-parked ancestor
@@ -3180,8 +3203,8 @@ old behaviour (the test predates the `terminated`/`cancelled` status split and s
 completed/failed/terminated shape). The terminate path counts the flows that were non-terminal when it
 scanned the tree, so a terminate racing a concurrent completion can over-count by one; that window is
 microseconds and the miscount is bounded to at most one flow, so it is not worth a round trip to close.
-`cancelled` is a reserved fourth terminal status nothing currently produces - the
-counter would tally it identically the moment something does. **Every path that starts a flow must call
+`cancelled` (a graceful `Cancel` whose every loss was a cancellation) is tallied the same way, from both
+`failStep` and the cohort-fail path. **Every path that starts a flow must call
 `metricFlowStarted`** - `Create`, `Continue`, AND `Fork` (which builds its new root through its own
 `INSERT...SELECT` clone and so was silently missed): a fork's completion runs through the same `completeFlow`
 that increments `flows_terminated`, so a missing start makes the standard in-flight panel

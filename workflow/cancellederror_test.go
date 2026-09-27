@@ -29,6 +29,9 @@ import (
 func TestIsCancelled(t *testing.T) {
 	assert := testarossa.For(t)
 	assert.True(IsCancelled(cancelmarker.New("reason")))
+	pct := cancelmarker.New("50% off")
+	assert.True(IsCancelled(pct), "a %% in the operator's reason must not consume the marker")
+	assert.Equal("flow cancelled: 50% off", pct.Error())
 	assert.False(IsCancelled(errors.New("flow cancelled: reason")), "detection is by marker, never by message")
 	assert.False(IsCancelled(nil))
 	var onErr *errors.TracedError

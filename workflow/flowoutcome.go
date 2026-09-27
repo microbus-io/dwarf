@@ -34,7 +34,7 @@ type FlowOutcome struct {
 	// TerminateReason is the reason string passed to Terminate(flowKey, reason). Populated when Status is
 	// "terminated".
 	TerminateReason string `json:"terminateReason,omitzero"`
-	// CancelReason is reserved for a future graceful-cancellation operation; not yet populated by any current operation.
+	// CancelReason is the reason string passed to Cancel(flowKey, reason). Populated when Status is "cancelled".
 	CancelReason string `json:"cancelReason,omitzero"`
 }
 

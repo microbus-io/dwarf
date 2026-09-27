@@ -24,7 +24,7 @@ const (
 	StatusCompleted   = "completed"   // Flow has finished successfully
 	StatusFailed      = "failed"      // Flow has failed with an error
 	StatusTerminated  = "terminated"  // Flow was forcefully, unconditionally stopped by Terminate; in-flight work was abandoned, not awaited
-	StatusCancelled   = "cancelled"   // Reserved for a future graceful-cancellation operation; not yet produced by any current operation
+	StatusCancelled   = "cancelled"   // Flow was gracefully stopped by Cancel: every unrecovered loss in it was a cancellation
 )
 
 // IsValidStatus reports whether s is one of the defined flow/step statuses.

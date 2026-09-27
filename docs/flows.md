@@ -117,12 +117,12 @@ type FlowOutcome struct {
     Error            string          // set when Status == "failed"
     InterruptPayload workflow.State  // set when Status == "interrupted"
     TerminateReason  string          // set when Status == "terminated"
-    CancelReason     string          // reserved for a future graceful-cancellation operation; not yet populated
+    CancelReason     string          // set when Status == "cancelled"
 }
 ```
 
-`cancelled` is a reserved status that no current operation produces; every flow the engine terminates today
-reports `terminated`.
+`terminated` means `Terminate` stopped the flow outright; `cancelled` means a graceful `Cancel` stopped it (see
+[Cancelling gracefully](#cancelling-gracefully)).
 
 The flow key is **not** on the outcome — it is delivered separately: you passed it to `Snapshot`/`Await`, or
 `Run` returns it alongside the outcome.
@@ -174,6 +174,31 @@ return value of its `Interrupt` call (it is **not** merged into state):
 err := eng.Resume(ctx, flowKey, map[string]any{"approved": true})
 ```
 
+## Cancelling gracefully
+
+`Cancel` asks a flow to stop and lets it react, where `Terminate` (below) stops it outright:
+
+```go
+err := eng.Cancel(ctx, flowKey, "customer withdrew the order") // surfaced as CancelReason
+```
+
+- **Every step in progress when you call it is covered.** A step that has not started yet does not run. A step
+  that is already running finishes, and then its next transition is not taken.
+- **A covered step receives the cancellation as an error on its node's `onError` transition**, like any task
+  error, except that the task's own changes are kept, because it ran. `workflow.IsCancelled(onErr)` tells a
+  cancellation apart from a real failure, so the handler can compensate and let the flow carry on, or stop.
+- **With no `onError` transition, the flow stops.** It ends `cancelled` if every unrecovered loss in it was a
+  cancellation, and `failed` if a real error is mixed in - a real error is never reported as a cancellation.
+- **A task that arms something as it finishes:** a retry does not run the task again; an interrupt still parks the
+  flow, and the step is cancelled when it is resumed, without acting on the resume data; a subgraph still runs.
+  A task waiting on a subgraph runs once more when its child returns, so it sees what the child did. If the child
+  was itself cancelled, the error `flow.Subgraph` returns satisfies `workflow.IsCancelled`, and returning that
+  error from the task keeps its loss a cancellation.
+- **There is no deadline.** `Cancel` returns once the request is recorded - `Await` the flow to see it stop. A
+  sleeping or backed-off step is reached when it next wakes, and an interrupted flow stays `interrupted` until
+  someone calls `Resume` or `Terminate`.
+- Address the flow by its root key; calling `Cancel` on a flow that has already stopped does nothing.
+
 ## Terminating, and recovering with Fork
 
 A terminal flow (`completed`/`failed`/`terminated`/`cancelled`) is **immutable** — it is never re-run in
@@ -192,7 +217,9 @@ in-flight work is abandoned immediately, not awaited. `Fork`'s step may be
 **any recorded step**, including one inside a subgraph; the clone re-runs from that step and bubbles back up
 to the root. The fork inherits the origin flow's scheduling and baggage, and does
 not auto-delete. Because the fork is an ordinary new flow, recover a partially-failed fan-out by forking one
-failed branch at a time.
+failed branch at a time. A branch lost to a `Cancel` is recovered the same way: the fork re-runs only the step you
+chose and keeps every other branch as it was, so while a cancelled branch remains, the fork ends `cancelled`,
+with the original `CancelReason`.
 
 ## Continue a thread
 

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/cancelmarker"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -167,12 +168,12 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 		// The latest child for this caller step decides the disposition; older children are completed
 		// retry attempts. flow_id DESC mirrors how the live completion path keys the surgraph.
 		var childFlowID int
-		var childStatus, childError string
+		var childStatus, childError, childCancelReason string
 		var childFinalState []byte
 		err := db.QueryRowContext(ctx,
-			"SELECT flow_id, status, final_state, error FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
+			"SELECT flow_id, status, final_state, error, cancel_reason FROM dwarf_flows WHERE surgraph_step_id=? ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)",
 			w.stepID,
-		).Scan(&childFlowID, &childStatus, &childFinalState, &childError)
+		).Scan(&childFlowID, &childStatus, &childFinalState, &childError, &childCancelReason)
 		switch {
 		case err == sql.ErrNoRows:
 			// The child flow is gone (e.g. deleted/purged): fail the caller so the flow can terminate.
@@ -189,15 +190,20 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 			e.logger.ErrorContext(ctx, "Wedge sweep: reviving wedged subgraph caller",
 				"shard", shard, "step", w.stepID, "childFlow", keys.CorrelationID(shard, childFlowID), "childStatus", childStatus)
 			var rerr error
-			if childStatus == workflow.StatusCompleted {
+			switch childStatus {
+			case workflow.StatusCompleted:
 				rerr = e.completeSurgraphFlow(ctx, shard, w.flowID, w.stepID, childFinalState)
-			} else {
-				// failed / terminated / cancelled: deliver the child's error (or a synthesized one) to the caller.
+			case workflow.StatusCancelled:
+				// Delivered as the cancellation itself, as the live path does, so the caller can recognize it.
+				rerr = e.deliverSubgraphError(ctx, shard, childFlowID, w.stepID, cancelmarker.New(strings.TrimSpace(childCancelReason)))
+			default:
+				// failed / terminated: deliver the child's error (or a synthesized one) to the caller. The stored
+				// message is passed as an argument, never as the pattern, which would read any % in it as a verb.
 				msg := strings.TrimSpace(childError)
 				if msg == "" {
 					msg = "subgraph " + childStatus
 				}
-				rerr = e.deliverSubgraphError(ctx, shard, childFlowID, w.stepID, errors.New(msg))
+				rerr = e.deliverSubgraphError(ctx, shard, childFlowID, w.stepID, errors.New("%s", msg))
 			}
 			if rerr != nil {
 				e.logger.ErrorContext(ctx, "Wedge sweep: reviving subgraph caller", "shard", shard, "step", w.stepID, "error", rerr)

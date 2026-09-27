@@ -28,7 +28,7 @@ type FlowSummary struct {
 	TaskName        string `json:"taskName,omitzero"`
 	Error           string `json:"error,omitzero"`
 	TerminateReason string `json:"terminateReason,omitzero"`
-	// CancelReason is reserved for a future graceful-cancellation operation; not yet populated by any current operation.
+	// CancelReason is the reason string passed to Cancel(flowKey, reason). Populated when Status is "cancelled".
 	CancelReason string    `json:"cancelReason,omitzero"`
 	CreatedAt    time.Time `json:"createdAt,omitzero"`
 	// Use StartedAt for duration metrics; CreatedAt for when the flow first appeared. StartedAt is

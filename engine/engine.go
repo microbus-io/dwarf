@@ -1151,9 +1151,10 @@ func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) e
 // when it is called - pending, running, parked on a subgraph, or interrupted - is covered: a step not yet
 // started is skipped, and a step already running finishes before the cancellation takes effect. A covered
 // step receives the cancellation as an error on its node's onError transition, where workflow.IsCancelled
-// reports true and the task's own changes are preserved; a step with no onError transition ends the flow as
-// failed. A subgraph caller runs once more when its child returns, so it sees the child's result before its
-// own cancellation is delivered. An interrupted step is cancelled when it is next resumed, and its resume
+// reports true and the task's own changes are preserved. If a covered step has no onError transition, the flow
+// ends cancelled when every unrecovered loss in it was a cancellation, and failed if a real error is mixed in.
+// A subgraph caller runs once more when its child returns, so it sees the child's result - a cancelled child's
+// error is one workflow.IsCancelled recognizes - before its own cancellation is delivered. An interrupted step is cancelled when it is next resumed, and its resume
 // data is not acted on. Cancel returns once the marking is recorded, not when the flow stops; use Await for
 // that. Terminate is the unconditional, immediate alternative.
 func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) error {

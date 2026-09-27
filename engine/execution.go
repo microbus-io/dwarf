@@ -1026,6 +1026,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 
 	var newStepIDs []int
 	flowFailed := false
+	flowFailedStatus := workflow.StatusFailed
 	// State bytes moved by this transition (successor snapshots, fan-in merge), accumulated in the
 	// closure and emitted only after commit (see stateByteCount).
 	var txBytes stateByteCount
@@ -1075,7 +1076,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	err = e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
 		return db.Transact(ctx, func(tx *sequel.Tx) error {
 			newStepIDs = newStepIDs[:0]
-			flowFailed = false
+			flowFailed, flowFailedStatus = false, workflow.StatusFailed
 			txBytes = stateByteCount{}
 			flowFailedParentStepID, flowFailedReDispatchParent = 0, false
 
@@ -1232,31 +1233,31 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				// lineage_id are untouched by this statement, and cohort_arrivals is read post-increment either
 				// way. A zero-row match yields sql.ErrNoRows from both forms, preserving the existing error path
 				// (the trunk-step-into-a-fan-in case, guarded above).
-				var arrivals, size, failures, spawnLineageID int
+				var arrivals, size, failures, cancellations, spawnLineageID int
 				var err error
 				switch db.DriverName() {
 				case "pgx", "sqlite":
 					err = tx.QueryRowContext(ctx,
 						"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?"+
-							" RETURNING cohort_arrivals, cohort_size, cohort_failures, lineage_id",
+							" RETURNING cohort_arrivals, cohort_size, cohort_failures, cohort_cancellations, lineage_id",
 						fanInArrivals, cohortSpawnID,
-					).Scan(&arrivals, &size, &failures, &spawnLineageID)
+					).Scan(&arrivals, &size, &failures, &cancellations, &spawnLineageID)
 				case "mssql":
 					err = tx.QueryRowContext(ctx,
 						"UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ?"+
-							" OUTPUT INSERTED.cohort_arrivals, INSERTED.cohort_size, INSERTED.cohort_failures, INSERTED.lineage_id"+
+							" OUTPUT INSERTED.cohort_arrivals, INSERTED.cohort_size, INSERTED.cohort_failures, INSERTED.cohort_cancellations, INSERTED.lineage_id"+
 							" WHERE step_id=?",
 						fanInArrivals, cohortSpawnID,
-					).Scan(&arrivals, &size, &failures, &spawnLineageID)
+					).Scan(&arrivals, &size, &failures, &cancellations, &spawnLineageID)
 				default:
 					// MySQL lacks RETURNING, so the bump and the read stay two statements. They run in one
 					// transaction on one connection, so they are already serial and the read still sees the
 					// post-bump value; only the shorter lock hold is unavailable there.
 					tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_arrivals = cohort_arrivals + ? WHERE step_id=?", fanInArrivals, cohortSpawnID)
 					err = tx.QueryRowContext(ctx,
-						"SELECT cohort_arrivals, cohort_size, cohort_failures, lineage_id FROM dwarf_steps WHERE step_id=?",
+						"SELECT cohort_arrivals, cohort_size, cohort_failures, cohort_cancellations, lineage_id FROM dwarf_steps WHERE step_id=?",
 						cohortSpawnID,
-					).Scan(&arrivals, &size, &failures, &spawnLineageID)
+					).Scan(&arrivals, &size, &failures, &cancellations, &spawnLineageID)
 				}
 				if err != nil {
 					return errors.Trace(err)
@@ -1285,31 +1286,29 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 					txBytes.changesRead += fanInBytes.changesRead
 					newStepIDs = append(newStepIDs, fanInStepID)
 				} else if fullyResolved && failures > 0 {
+					// The cohort resolves as a loss, and is a cancellation only if every failure in it was one.
 					failFlow := spawnLineageID == 0
+					flowCancelled := cancellations == failures
 					if !failFlow {
 						var pcfErr error
-						failFlow, pcfErr = e.propagateCohortFailure(ctx, tx, spawnLineageID)
+						failFlow, flowCancelled, pcfErr = e.propagateCohortFailure(ctx, tx, spawnLineageID, flowCancelled)
 						if pcfErr != nil {
 							return errors.Trace(pcfErr)
 						}
 					}
 					if failFlow {
-						var sampleErr string
-						tx.QueryRowContext(ctx,
-							"SELECT error FROM dwarf_steps WHERE flow_id=? AND status IN ('"+workflow.StatusFailed+"', '"+workflow.StatusCancelled+"') AND error!='' ORDER BY step_id LIMIT_OFFSET(1, 0)",
-							flowID,
-						).Scan(&sampleErr)
-						sampleErr = strings.TrimSpace(sampleErr)
-						if sampleErr == "" {
-							sampleErr = "cohort failed"
+						flowFailedStatus = workflow.StatusFailed
+						if flowCancelled {
+							flowFailedStatus = workflow.StatusCancelled
 						}
+						lossErr := e.flowLossError(ctx, tx, flowID, flowCancelled, nil)
 						finalStateJSON, _, cfsErr := e.computeFinalState(ctx, tx, shardNum, flowID)
 						if cfsErr != nil {
 							return errors.Trace(cfsErr)
 						}
 						tx.ExecContext(ctx,
 							"UPDATE dwarf_flows SET final_state=?, status=?, error=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-							finalStateJSON, workflow.StatusFailed, sampleErr, flowID,
+							finalStateJSON, flowFailedStatus, sanitizeErrorMessage(lossErr.Error()), flowID,
 						)
 						flowFailed = true
 						// The cohort fully resolved here (this branch completed last), so every sibling has
@@ -1318,7 +1317,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						var parentStepID int
 						tx.QueryRowContext(ctx, "SELECT surgraph_step_id FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&parentStepID)
 						if parentStepID != 0 {
-							rd, derr := e.deliverFlowFailureToParent(ctx, tx, parentStepID, sampleErr)
+							rd, derr := e.deliverFlowFailureToParent(ctx, tx, parentStepID, lossErr)
 							if derr != nil {
 								return errors.Trace(derr)
 							}
@@ -1373,20 +1372,20 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// that carries failures - so it must count the termination itself, on both branches, exactly as
 		// failStep does. Missing it here would leave the in-flight panel drifting for precisely the fan-out
 		// failures the cohort accounting exists to get right.
-		e.metricFlowTerminated(ctx, workflowURL, workflow.StatusFailed, shardNum)
+		e.metricFlowTerminated(ctx, workflowURL, flowFailedStatus, shardNum)
 		if flowFailedParentStepID != 0 {
 			// Subgraph child: the failure is delivered to the parent's flow.Subgraph call - but the child has
 			// still stopped, so wake any Await on the child key (legal read-only introspection), mirroring
 			// failStep's subgraph-child branch. Without this, an Await(childKey) on a child failed by its
 			// completing last arriver (this path) would wait on the latch detector to read the stop instead.
-			e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), workflow.StatusFailed)
+			e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), flowFailedStatus)
 			if flowFailedReDispatchParent {
 				e.enqueueStep(ctx, shardNum, flowFailedParentStepID)
 			}
 			return nil
 		}
 		compositeID := keys.New(shardNum, flowID, flowToken)
-		e.signalStop(ctx, compositeID, workflow.StatusFailed)
+		e.signalStop(ctx, compositeID, flowFailedStatus)
 		return nil
 	}
 

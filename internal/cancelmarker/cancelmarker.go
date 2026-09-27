@@ -33,5 +33,7 @@ func New(reason string) error {
 	if reason != "" {
 		msg += ": " + reason
 	}
-	return errors.New(msg, Property, Value)
+	// Never pass the message as the pattern: errors.New treats every % in it as a format verb consuming a
+	// trailing argument, so an operator's "50% off" would swallow the marker property.
+	return errors.New("%s", msg, Property, Value)
 }

@@ -18,7 +18,7 @@ external service. Two tables carry data you supply.
 | Baggage | `FlowOptions.Baggage` | Opaque to the engine and handed back to every task. **This is where hosts typically put caller identity or tenant claims** |
 | Final state | Computed at termination | The full merged state of the terminal step, unfiltered |
 | Error text | A failing task's error | Free-text, and **searchable** — see below |
-| Terminate reason | Your `Terminate` call | Free-text, and **searchable** |
+| Terminate / cancel reason | Your `Terminate` or `Cancel` call | Free-text, and **searchable** |
 | Fairness key | `FlowOptions.FairnessKey` | Commonly a tenant id |
 | Trace context | The tracer, if configured | A W3C trace parent |
 
@@ -110,7 +110,7 @@ fairness key to the tenant.
 
 | Operation | Returns state payloads? | Returns error text? |
 |---|---|---|
-| `List` | No — summaries only | **Yes** — the flow's `Error` and `TerminateReason` |
+| `List` | No — summaries only | **Yes** — the flow's `Error`, `TerminateReason` and `CancelReason` |
 | `History` | No — `State` and `Changes` are left empty | **Yes** — each step's `Error` |
 | `Step` | **Yes** — that step's input state and changes | **Yes** |
 | `Snapshot` / `Await` / `Run` | **Yes** — final state, or the interrupt payload | **Yes** |
