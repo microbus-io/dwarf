@@ -45,8 +45,8 @@ github.com/jackc/puddle/v2 v2.2.2 h1:PR8nw+E/1w0GLuRFSmiioY6UooMp6KJv0/61nB7icHo
 github.com/jackc/puddle/v2 v2.2.2/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
 github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI=
 github.com/mattn/go-isatty v0.0.24/go.mod h1:nMCL3Zebbrt45jsMDgnfIwz6ydEQApk5oEI3HqDio6A=
-github.com/microbus-io/boolexp v1.2.2 h1:epfXxnUu5M+9s/JYaf8cDkYzIBZbDrWNu61cIs6zGoY=
-github.com/microbus-io/boolexp v1.2.2/go.mod h1:3hNRg2w67v0axnTy+BpgRufa7/vXucsblBMncq64lv4=
+github.com/microbus-io/boolexp v1.3.0 h1:eJjj4uN+lVH3BLWXLJbaFPvYFE4SI5Y/YJRv9UYi3E8=
+github.com/microbus-io/boolexp v1.3.0/go.mod h1:3hNRg2w67v0axnTy+BpgRufa7/vXucsblBMncq64lv4=
 github.com/microbus-io/copyrighter v1.4.0 h1:EucSuHMyUO1fb+0eVOAz9ORpygTfaQxz/LK4jumciJ4=
 github.com/microbus-io/copyrighter v1.4.0/go.mod h1:zk1Tt0nD2cI3NA1i6SHOCRgj7n02TZLyq6uHAMqLmXs=
 github.com/microbus-io/errors v1.0.1 h1:pujosfRSEqSJi0gcx6d+A7Mf2RZr2vQVMSQz0pG+wkM=

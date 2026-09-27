@@ -447,6 +447,51 @@ func TestGraph_ValidateWhenExpression(t *testing.T) {
 	assert.Contains(err.Error(), "invalid 'when' expression")
 }
 
+func TestGraph_IsFieldName(t *testing.T) {
+	assert := testarossa.For(t)
+
+	for _, name := range []string{"x", "_", "_x", "item", "orderID", "order_id", "x1", "X_9_y"} {
+		assert.True(isFieldName(name), "%s", name)
+	}
+	for _, name := range []string{"", "1x", "9", "order-id", "order id", "order.items", "é", "x$", " x", "x\n"} {
+		assert.False(isFieldName(name), "%q", name)
+	}
+}
+
+func TestGraph_ValidateFieldNames(t *testing.T) {
+	assert := testarossa.For(t)
+
+	forEach := func(field, as string) *Graph {
+		g := NewGraph("Test")
+		g.AddTransitionForEach("svc/a", "svc/b", field, as)
+		g.AddTransition("svc/b", "svc/join")
+		g.AddTransition("svc/join", END)
+		g.SetFanIn("svc/join")
+		return g
+	}
+
+	assert.NoError(forEach("orders", "order").Validate())
+	assert.NoError(forEach("orders", "").Validate()) // 'as' defaults to "item"
+
+	err := forEach("order.items", "item").Validate()
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "invalid 'forEach' field name 'order.items'")
+	}
+	err = forEach("orders", "line-item").Validate()
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "invalid 'as' field name 'line-item'")
+	}
+
+	g := forEach("orders", "order")
+	g.SetReducer("totalCount", ReducerAdd)
+	assert.NoError(g.Validate())
+	g.SetReducer("total count", ReducerAdd)
+	err = g.Validate()
+	if assert.Error(err) {
+		assert.Contains(err.Error(), "invalid field name 'total count'")
+	}
+}
+
 func TestGraph_AddTransitionOnError(t *testing.T) {
 	assert := testarossa.For(t)
 

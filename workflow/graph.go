@@ -19,6 +19,7 @@ package workflow
 import (
 	"encoding/json"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/microbus-io/boolexp"
@@ -240,6 +241,9 @@ func (g *Graph) AddTransitionGoto(from, to string) {
 // task must tolerate a cohort of zero (a reducer-managed field simply keeps its incoming value, and any
 // per-element output it expected is absent), and the branch task must tolerate never running at all.
 //
+// Both 'forEach' and 'as' must be plain identifiers - an ASCII letter or underscore, then ASCII letters,
+// digits, or underscores - or Validate rejects the graph.
+//
 // Every branch carries the source array (it is ordinary flow state), so an N-element fan-out over a chain
 // of depth D stores N*D copies of it. For a large array, a branch can drop it with f.Set(<forEach>, nil),
 // which removes it from the flow's state past the fan-in.
@@ -352,7 +356,8 @@ func (g *Graph) IsFanOutSource(name string) bool {
 	return false
 }
 
-// SetReducer sets the merge strategy for a state field during fan-in.
+// SetReducer sets the merge strategy for a state field during fan-in. The field must be a plain identifier -
+// an ASCII letter or underscore, then ASCII letters, digits, or underscores - or Validate rejects the graph.
 func (g *Graph) SetReducer(field string, reducer Reducer) {
 	if g.reducers == nil {
 		g.reducers = make(map[string]Reducer)
@@ -365,6 +370,27 @@ func (g *Graph) SetReducer(field string, reducer Reducer) {
 // result would silently re-wire the fan-in merge of a graph already frozen onto running flows.
 func (g *Graph) Reducers() map[string]Reducer {
 	return maps.Clone(g.reducers)
+}
+
+const fieldNameRule = "a state field name must start with an ASCII letter or underscore, followed by ASCII letters, digits, or underscores"
+
+// isFieldName reports whether name is a state field name a graph may declare. The rule is the intersection
+// of a Go identifier and a boolexp identifier segment: a name outside it cannot be referenced from a 'when'
+// expression, and a dot would read as a nested path in 'when' but as a flat key everywhere else.
+func isFieldName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c == '_', 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z':
+		case '0' <= c && c <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Validate checks the graph for structural errors.
@@ -440,6 +466,17 @@ func (g *Graph) Validate() error {
 			if err != nil {
 				return errors.New("transition from '%s' to '%s' in graph '%s' has invalid 'when' expression: %v", stripProto(tr.From), stripProto(tr.To), g.name, err)
 			}
+		}
+		if tr.ForEach != "" && !isFieldName(tr.ForEach) {
+			return errors.New("transition from '%s' to '%s' in graph '%s' has invalid 'forEach' field name '%s'; %s", stripProto(tr.From), stripProto(tr.To), g.name, tr.ForEach, fieldNameRule)
+		}
+		if tr.As != "" && !isFieldName(tr.As) {
+			return errors.New("transition from '%s' to '%s' in graph '%s' has invalid 'as' field name '%s'; %s", stripProto(tr.From), stripProto(tr.To), g.name, tr.As, fieldNameRule)
+		}
+	}
+	for _, field := range slices.Sorted(maps.Keys(g.reducers)) {
+		if !isFieldName(field) {
+			return errors.New("reducer in graph '%s' is set on invalid field name '%s'; %s", g.name, field, fieldNameRule)
 		}
 	}
 
