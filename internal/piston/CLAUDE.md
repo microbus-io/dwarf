@@ -172,6 +172,14 @@ the query does. A single fairness key is the degenerate case — the `PARTITION 
 partition over the whole due backlog — and it puts a fan-out workload into a **bistable** regime: healthy
 ~2,400 steps/s or collapsed ~550, never between.
 
+**Do not bound the scan by fetching the oldest N due rows instead of tallying the band.** It is the
+obvious way to cap the O(backlog) term, and it breaks fairness in the one regime fairness exists for. A
+tenant holding 1M old due steps against one holding 10 newer ones at equal weight fills the whole window,
+so the second tenant wins zero slots every cycle until the first drains, and never if the first keeps
+producing. The planner's guarantee is that queue depth does not buy share (`internal/planner/CLAUDE.md`).
+The tally can only honour that if every key with due work appears in it. "It only starves under a burst" is
+no defence: fairness does nothing except under backlog, so "only at peak" means "only when it matters".
+
 **The partition filters the ROWS this replica tallies but deliberately NOT the `MIN(priority)` subquery.**
 The band is a cluster-wide fact, so mining it from one replica's slice would let replicas disagree about
 which band is open. A replica holding nothing at the global band therefore tallies zero rows — correct,

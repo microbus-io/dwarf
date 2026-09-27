@@ -161,6 +161,54 @@ without fragmentation or excessive write amplification.
 | `idx_dwarf_steps_due` | `(status, parked, priority, not_before)` + covering `fairness_key, created_at, step_id, lease_expires, fairness_weight` (an `INCLUDE` on pgx/mssql; trailing key columns on mysql/sqlite) - partial `WHERE status = 'pending'` on pgx/mssql/sqlite, full on mysql | **The sleeper index.** A step that is `pending` but not yet DUE - `flow.Sleep`, a retry backoff, a long-poll that retries for days - sits at the min band in `idx_dwarf_steps_selection` and is walked by every refill cycle, on every shard, on every replica, forever, because `not_before` is only *carried* there (appended after the ordering prefix) and can therefore be filtered but never seeked. This index makes due-ness seekable, and a workload with a large sleeping population is a supported one, not a corner: whether pending work is mostly due or mostly asleep is a property of what the host's workflows do, so no single index shape can be right for everyone and both must be available for the planner to choose between. **Column order is the whole design and neither half is optional.** `priority` sits *before* `not_before` so the band scan gets `priority = <band>` as an **equality seek** followed by a `not_before` range on the very next column - it reads exactly the due rows at that band and nothing else. The same order serves the `MIN(priority)` band probe, because within a priority `not_before` ascending sorts every due row *ahead* of every sleeping one, so the probe's top-1 walk terminates on the first entry whatever the insertion order. **Measured (PG 18.1, 400k pending at one band, 32 keys), phase 1 end to end including the band probe: dense 47.4 -> 45.1ms (no regression), 396k old sleepers + 4k fresh due steps 16.7 -> 3.7ms, whole keys asleep 49.7 -> 6.8ms.** Three shapes that were tried and lost, each for a reason that recurs: (1) folding `not_before` into `idx_dwarf_steps_selection`'s key **costs 9x on the dense band scan and 98x on the fetch** - a range predicate terminates a B-tree's usable ordering, so the trailing `(created_at, step_id)` stops being an ordering and `EXPLAIN` grows a `Sort`, killing both the window's no-sort property and the per-key `LIMIT`'s early stop; (2) leading with `not_before` before `priority` can only target "due rows at *any* band" and then filters, measuring 40.7ms against this index's 6.8 when whole keys sleep; (3) `(…, priority, step_id)` for the probe alone cures clustered sleepers (29.9 -> 0.008ms) but **walks all 396k of them (22ms) when the sleepers are simply older than the due work**, which is the ordinary shape of a long-lived polling population - `step_id` is insertion order and carries no information about due-ness. Adding a second `not_before`-leading index *on top* of this one buys nothing (identical within noise on all three shapes), so this is one index, not two. Cost is write amplification on `not_before`, which - unlike the write-once `created_at`/`step_id` that made the selection index cheap to widen - is rewritten by every sleep and every retry backoff, i.e. by exactly the workload it helps. That trade is accepted deliberately. The partial predicate is `status = 'pending'` alone, **narrower than the selection index's `IN ('pending','running')`**: the refiller never wants a due `running` row, and the narrower filter makes a claim a pure delete from this index rather than a delete-plus-reinsert. Do **not** narrow the selection index to match - `wedge.go`'s expired-lease sweep (`status='running' AND parked=0 AND lease_expires<=NOW`) reads it as an index-only scan, and dropping `running` would push that hot recovery path onto `idx_dwarf_steps_status`, which carries neither `parked` nor `lease_expires`. It does **not** help `FetchSteps` (0.077 -> 0.084ms dense, ~3.4ms under sleepers, i.e. unchanged): sleepers interleaved inside one key's run are still walked by the per-key `LIMIT`, and no index fixes that without losing the dense case |
 | `idx_dwarf_steps_saturation` | `(status, parked, task_url)` - partial as above | **No current reader.** It backed a per-task in-flight gauge (`dwarf_task_concurrency_running`) that was removed: it cost a second collection query per shard on every replica to produce R copies of one cluster-wide number, and per-downstream concurrency belongs to the host, which owns the account identity the engine cannot see. Nothing now filters or groups `dwarf_steps` by `task_url`, so this index is maintained on every insert and every status transition of the highest-churn table for nobody. It is left in place rather than dropped because that is a schema migration and a judgement about whether a per-task view returns; **if it is not coming back, drop it** - the write amplification is the whole cost and there is no read to weigh against it. Parked rows were excluded so a surgraph parent could not inflate the executing-slot count |
 
+### A claim RELOCATES its entry in `idx_dwarf_steps_selection` - that is where a load stall lives
+
+Four `dwarf_steps` indexes are partial on `status` (`selection`, `due`, `status`, `saturation`), so every
+status change touches all four. Only the one whose predicate **spans** the transition pays a structural cost.
+`idx_dwarf_steps_selection` is partial on `IN ('pending','running')` and leads with `status`, so a
+`pending -> running` claim keeps the row in the index and moves it: a delete from the `pending` region and an
+INSERT into the packed `running` region, which splits leaves. `idx_dwarf_steps_due` is partial on
+`status = 'pending'`, so the same claim is a pure delete, and deletes never split. This qualifies design
+principle 2 above: the transient sections are small, but under a building backlog their leaves are packed
+and splitting them is not free.
+
+**Measured** (PostgreSQL 16, 16-vCPU managed instance, one shard, 96 connections, linear workload, open loop,
+`pgstatindex` sampled every 10s through a stall):
+
+| pending | claim CAS mean | `selection` density / frag | `due` density / frag |
+|---|---|---|---|
+| 4 | 0.45ms | 64.4 / 0.8 | 89.7 / 0.1 |
+| 8,545 | 12.45ms | 49.5 / 19.2 | 86.1 / 0.6 |
+| 15,112 | 31.51ms | 52.1 / 17.9 | 84.9 / 0.5 |
+| 25,497 | 0.25ms | 57.1 / 9.0 | 88.6 / 0.2 |
+
+The claim CAS is a primary-key update, yet it inflates ~70x while `selection` loses leaf density and `due`
+barely moves. It tracks neither backlog depth (0.24ms at 21k pending, 27.6ms at 12k) nor the table-wide dead
+tuple count (0.42ms at 730k dead, 206ms at 177k).
+
+**The fragmented state is the CHEAP state.** Once the stall passes, fragmentation stays at ~17 for the rest of
+the run while the CAS sits at 0.24ms: leaves with free space take inserts cheaply. The expense is the one-off
+reorganisation of packed leaves, which is why the stall is transient (~30s) and clears under the same
+sustained offered rate. Do not read a fragmented `selection` index as a problem to fix. **Not separated:** the
+split window overlapped an autovacuum completion by ~20s, and both relieve the index. The evidence for splits
+over dead tuples is that fragmentation persists while latency recovers.
+
+**Levers that were tried and do not work. Do not re-raise them without new evidence:**
+
+- **Autovacuum off** (`autovacuum_enabled=false` on `dwarf_steps`): 1,708 against 6,837 steps/s. The claim CAS
+  climbed steadily to 395ms and never recovered. Vacuum is the cure, not the contention.
+- **Aggressive autovacuum** (`scale_factor=0.02`, `cost_delay=0`): 5,702 steps/s with a 115-second p99. Neither
+  direction away from the defaults helps.
+- **`fillfactor` 70 or 90, to get HOT updates:** made no difference to throughput. The HOT ratio moved only
+  25.7% -> 29.8%. It cannot work by construction: HOT requires that no indexed column changes, and about 70% of
+  the engine's roughly 5.6 updates per step write `status`, which leads four indexes.
+- **It is not client-side.** Active backends held at 72-99 before, during and after the stall (the pool caps
+  them), and row-lock waits (`Lock:transactionid`, `Lock:tuple`) read zero in every sample.
+
+Narrowing `selection`'s predicate to `status = 'pending'` would attack the mechanism directly, because it
+makes a claim a pure delete. It is rejected for the reason given in the `idx_dwarf_steps_due` row above: the
+expired-lease sweep reads `running` rows from this index as an index-only scan.
+
 ### `List` gets no indexes of its own, and its `ORDER BY` is not a bug
 
 **Indexes here are earned by load-bearing hot-path queries** - candidate selection, the claim CAS, fan-in, the

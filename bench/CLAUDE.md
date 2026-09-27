@@ -112,6 +112,15 @@ property of the configuration. The stalls are invisible in throughput anyway (ev
 sweep delivered ~100% of command, including one whose p99 was 62 SECONDS) — **watch p99/p50**, which ran
 1.2x when clean and 6.5x at the onset.
 
+**To reproduce a stall, command BELOW what the database can sustain, not above it.** Pushing harder looks
+in the wrong place. In a 3x3 Latin square (PostgreSQL 16, 16 vCPU, one shard, linear, open loop, 120s
+windows, each rate run once in each sequence position), the spread across repeats was **1.83x at 700
+flows/s**, 1.26x at 800, and **1.04x at 900**. 900 was the only rate above the sustainable rate. A
+saturated arm keeps a standing backlog, so it has no healthy state to fall out of. That is the same property
+that makes over-saturating the right way to size a pool (below), and the reason it can never show you a
+stall. Rotate sequence position when chasing one: position means were 6,536 / 6,498 / 5,910, so order was
+not the signal here, but that has to be measured each time, not assumed.
+
 **To size a pool, command ABOVE saturation and read the 600s mean — do not sweep for the smallest pool
 that "sustains rate R".** The second form has to choose R, and the choice decides the answer; it also
 reduces to a binary that a short window decides by where a stall landed. Over-saturating removes both
