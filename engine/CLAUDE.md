@@ -252,7 +252,12 @@ recover. Root-only (400 on a subgraph-child key), 404 on an unknown key, a no-op
 *The mechanism is a per-step mark, consumed lazily.* `cancel()` writes the tree's `cancel_reason` and
 `cancelled_at`, then sets `dwarf_steps.cancelling=1` on every `pending`/`running`/`interrupted` step of the tree,
 and does nothing else. Each marked step consumes its own mark at one of exactly two checkpoints, both reading the
-column off a write they make anyway, so an uncancelled flow pays nothing:
+column off a write they make anyway, so an uncancelled flow pays no extra round trip - **except the completion
+write on MySQL**, which lacks `RETURNING`/`OUTPUT` and reads the mark with a follow-up `SELECT`: +1 round trip per
+completed step (+1 to `k` in the ceiling equation), accepted like the claim's own follow-up read. Returning it
+through `LAST_INSERT_ID(expr)` in the UPDATE would avoid that; it was declined as a one-off idiom for a dialect
+that is not the recommended one. The successor INSERT...SELECT adds no round trip but two indexed lookups per
+insert; neither cost has been measured on the cloud rig yet.
 
 - **The claim.** The claim CAS returns `cancelling`; a marked step is preempted - `ExecuteTask` is skipped and
   `cancelmarker.New(reason)` takes the path a task error would (`onError`, else `failStep`). Retry-rewound,

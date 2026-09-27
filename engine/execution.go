@@ -758,12 +758,13 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// than left to lease recovery, which would re-execute the task every `budget + leaseMargin`, forever.
 	//
 	// The write also reads back the step's Cancel mark - the one post-dispatch cancellation check. It rides a
-	// write every completion makes anyway, so an uncancelled flow pays nothing for it. The status always moves
-	// running -> completed, which keeps RowsAffected an honest fence on MySQL (it counts CHANGED rows): a
-	// covered step is settled by a write of its own below, never by a variant of this one that could leave
-	// the row unchanged. On MySQL the mark is read by a follow-up SELECT, and that is race-free only because
-	// the row is already terminal when it runs - Cancel never marks a terminal row, so the value it reads is
-	// the one this UPDATE saw.
+	// write every completion makes anyway, via RETURNING/OUTPUT, so on those dialects an uncancelled flow pays
+	// nothing for it. MySQL lacks both and reads the mark with a follow-up SELECT: one extra round trip per
+	// completed step, accepted as it is at the claim, rather than returning it through LAST_INSERT_ID(expr).
+	// That SELECT is race-free only because the row is already terminal when it runs - Cancel never marks a
+	// terminal row, so the value it reads is the one this UPDATE saw. The status always moves running ->
+	// completed, which keeps RowsAffected an honest fence on MySQL (it counts CHANGED rows): a covered step is
+	// settled by a write of its own below, never by a variant of this one that could leave the row unchanged.
 	var stepRowsAffected int64
 	var completedCancelling bool
 	err = e.persistYielding(ctx, db, shardNum, stepID, leaseSeq, &persistPass, func() error {
