@@ -18,6 +18,7 @@ package peers
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -169,23 +170,23 @@ func TestPeers_ClassifyCountsAndOrdinal(t *testing.T) {
 	assert := testarossa.For(t)
 
 	v := classify([]peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100},    // fresh, dispatching
-		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 30000},  // fresh, NOT dispatching (await-only/wedged)
-		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 200}, // us, dispatching
-		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: 100},  // stale: counts for nothing
-	}, selfID, false, 1, testWindows)
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},    // fresh, dispatching
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 30000, working: true},  // fresh, NOT dispatching (await-only/wedged)
+		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 200, working: true}, // us, dispatching
+		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: 100, working: true},  // stale: counts for nothing
+	}, selfID, true, 1, testWindows)
 
 	assert.Equal(3, v.replicas, "three fresh rows hold connections")
 	assert.Equal(2, v.dispatchers, "only two of them proved they serve the shard")
 	assert.Equal(1, v.ordinal, "we are second among the dispatchers, by engine id")
 	assert.True(v.selfSeen)
-	assert.Len(v.dead, 0, "60s is stale but not yet a corpse")
+	assert.Len(v.dead, 0, "60s is stale but not yet abandoned")
 
 	// A row past the straggler age becomes a delete candidate, and only then.
 	v = classify([]peer{
-		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 50},
-		{engineID: 90, seenAgeMs: 90000, dispatchAgeMs: 90000},
-	}, selfID, false, 1, testWindows)
+		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 50, working: true},
+		{engineID: 90, seenAgeMs: 90000, dispatchAgeMs: 90000, working: true},
+	}, selfID, true, 1, testWindows)
 	assert.Equal([]int64{90}, v.dead)
 }
 
@@ -198,9 +199,9 @@ func TestPeers_ClassifySelfAbsenceCutsBothWays(t *testing.T) {
 	assert := testarossa.For(t)
 
 	v := classify([]peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100},
-		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100},
-	}, selfID, false, 1, testWindows)
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+	}, selfID, true, 1, testWindows)
 
 	assert.False(v.selfSeen)
 	assert.Equal(3, v.replicas, "two peers plus this process, which exists whether or not its row does")
@@ -211,9 +212,9 @@ func TestPeers_ClassifySelfAbsenceCutsBothWays(t *testing.T) {
 	// own row is exactly what a heartbeat starved of a connection produces, which is when over-sizing pools
 	// would be most harmful.
 	v = classify([]peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100},
-		{engineID: selfID, seenAgeMs: 60000, dispatchAgeMs: 60000},
-	}, selfID, false, 1, testWindows)
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: selfID, seenAgeMs: 60000, dispatchAgeMs: 60000, working: true},
+	}, selfID, true, 1, testWindows)
 	assert.True(v.selfSeen, "the row is there, so nothing needs re-registering")
 	assert.Equal(2, v.replicas, "but it is not fresh, so we still count ourselves")
 	assert.Equal(-1, v.ordinal)
@@ -227,11 +228,11 @@ func TestPeers_ClassifyNeverCondemnsSelf(t *testing.T) {
 	assert := testarossa.For(t)
 
 	v := classify([]peer{
-		{engineID: selfID, seenAgeMs: 999999, dispatchAgeMs: 999999},
-		{engineID: 90, seenAgeMs: 999999, dispatchAgeMs: 999999},
-	}, selfID, false, 1, testWindows)
+		{engineID: selfID, seenAgeMs: 999999, dispatchAgeMs: 999999, working: true},
+		{engineID: 90, seenAgeMs: 999999, dispatchAgeMs: 999999, working: true},
+	}, selfID, true, 1, testWindows)
 
-	assert.Equal([]int64{90}, v.dead, "every row is a corpse except ours")
+	assert.Equal([]int64{90}, v.dead, "every row is abandoned except ours")
 	assert.Equal(1, v.replicas, "we still count ourselves")
 }
 
@@ -249,9 +250,9 @@ func TestPeers_ReplicaFallIsWithheldAcrossAGap(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
 	fleet := []peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100},
-		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100},
-		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100},
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
 	}
 	alone := fleet[2:]
 
@@ -282,16 +283,16 @@ func TestPeers_ClassifyRanksAgreeAcrossReplicas(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	fleet := []peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: staleAge},
-		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge},
-		{engineID: 30, seenAgeMs: 100, dispatchAgeMs: staleAge},
-		{engineID: 40, seenAgeMs: 100, dispatchAgeMs: staleAge},
-		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: staleAge}, // stale: ranks nobody
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true},
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true},
+		{engineID: 30, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true},
+		{engineID: 40, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true},
+		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: staleAge, working: true}, // stale: ranks nobody
 	}
 	for _, shard := range []int{1, 2, 7} {
 		seen := map[int]bool{}
 		for _, p := range fleet[:4] {
-			v := classify(fleet, p.engineID, false, shard, testWindows)
+			v := classify(fleet, p.engineID, true, shard, testWindows)
 			assert.Equal(4, v.replicas)
 			assert.True(v.rank >= 0 && v.rank < v.replicas, "shard %d: rank %d out of range", shard, v.rank)
 			assert.False(seen[v.rank], "shard %d: two replicas share rank %d", shard, v.rank)
@@ -304,7 +305,7 @@ func TestPeers_ClassifyRanksAgreeAcrossReplicas(t *testing.T) {
 	firsts := map[int64]bool{}
 	for shard := 1; shard <= 32; shard++ {
 		for _, p := range fleet[:4] {
-			if classify(fleet, p.engineID, false, shard, testWindows).rank == 0 {
+			if classify(fleet, p.engineID, true, shard, testWindows).rank == 0 {
 				firsts[p.engineID] = true
 			}
 		}
@@ -319,38 +320,38 @@ func TestPeers_ClassifyRanksAgreeAcrossReplicas(t *testing.T) {
 func TestPeers_ClassifyRanksAnAbsentSelf(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	v := classify(nil, selfID, false, 1, testWindows)
+	v := classify(nil, selfID, true, 1, testWindows)
 	assert.Equal(1, v.replicas)
 	assert.Equal(0, v.rank, "alone and unseen, a replica still ranks first")
 
 	fleet := []peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: staleAge},
-		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge},
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true},
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true},
 	}
-	withSelf := append([]peer{{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge}}, fleet...)
-	assert.Equal(classify(withSelf, selfID, false, 1, testWindows).rank, classify(fleet, selfID, false, 1, testWindows).rank,
+	withSelf := append([]peer{{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true}}, fleet...)
+	assert.Equal(classify(withSelf, selfID, true, 1, testWindows).rank, classify(fleet, selfID, true, 1, testWindows).rank,
 		"a missing own row ranks exactly as a present one does")
 }
 
-// TestPeers_ClassifyNeverRanksAZeroWorkersPeer pins what zero_workers is for. Such a peer is counted - it holds
+// TestPeers_ClassifyNeverRanksAnIdlePeer pins what working=0 is for. Such a peer is counted - it holds
 // connections - but takes no rank, because a rank is a claim on a dispatcher slot and a replica that will
 // never dispatch would hold that slot empty. The count it is excluded from is what an owner divides a
 // shard's budget by, so one worker beside an await-only peer must see itself as the only candidate.
-func TestPeers_ClassifyNeverRanksAZeroWorkersPeer(t *testing.T) {
+func TestPeers_ClassifyNeverRanksAnIdlePeer(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	var fleet []peer
 	for id := int64(1); id <= 16; id++ {
-		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge, zeroWorkers: true})
+		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge})
 	}
-	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge})
-	v := classify(fleet, selfID, false, 1, testWindows)
+	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
+	v := classify(fleet, selfID, true, 1, testWindows)
 	assert.Equal(17, v.replicas, "await-only peers still hold connections")
 	assert.Equal(1, v.candidates, "but only this replica may dispatch")
 	assert.Equal(0, v.rank, "so it ranks first however the scores fall")
 
-	v = classify(fleet[:16], selfID, true, 1, testWindows)
-	assert.Equal(0, v.candidates, "an await-only replica with a missing row does not count itself in either")
+	v = classify(fleet[:16], selfID, false, 1, testWindows)
+	assert.Equal(0, v.candidates, "a replica that is not working, with a missing row, does not count itself in either")
 }
 
 // TestPeers_RegisterWritesTheProfile pins that the row carries what the replica states about itself, and
@@ -360,16 +361,16 @@ func TestPeers_RegisterWritesTheProfile(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	r := newRig(t)
-	r.s.SetProfile(Profile{RTT: 1250 * time.Microsecond, ZeroWorkers: true})
+	r.s.SetProfile(Profile{RTT: 1250 * time.Microsecond, Working: false})
 	assert.NoError(r.s.register(ctx))
 	r.s.publishBeat(ctx, false)
-	var zeroWorkers int
+	var working int
 	var rttUs int64
 	assert.NoError(r.db.QueryRowContext(ctx,
-		"SELECT zero_workers, rtt_us FROM dwarf_peers WHERE engine_id=?", selfID).Scan(&zeroWorkers, &rttUs))
-	assert.Equal(1, zeroWorkers)
+		"SELECT working, rtt_us FROM dwarf_peers WHERE engine_id=?", selfID).Scan(&working, &rttUs))
+	assert.Equal(0, working)
 	assert.Equal(int64(1250), rttUs)
-	assert.True(r.row(t, selfID).zeroWorkers, "and the read returns it")
+	assert.False(r.row(t, selfID).working, "and the read returns it")
 }
 
 // TestPeers_RankPromotesThroughSustainedGaps pins that the withholding delays a promotion by one reading
@@ -383,9 +384,9 @@ func TestPeers_RankPromotesThroughSustainedGaps(t *testing.T) {
 	r := newRig(t)
 	var fleet []peer
 	for id := int64(1); id <= 16; id++ {
-		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge})
+		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
 	}
-	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge})
+	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
 	alone := fleet[len(fleet)-1:]
 
 	r.s.observe(ctx, fleet, nil)
@@ -412,13 +413,37 @@ func TestPeers_WithdrawDropsTheReplicaFromEveryRanking(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
 	assert.NoError(r.s.register(ctx))
-	assert.False(r.row(t, selfID).zeroWorkers)
+	assert.True(r.row(t, selfID).working, "a Sonar given no profile registers as working")
 	assert.NoError(r.s.Withdraw(ctx))
-	assert.True(r.row(t, selfID).zeroWorkers, "withdrawn in place")
+	assert.False(r.row(t, selfID).working, "withdrawn in place")
 	_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", selfID)
 	assert.NoError(err)
 	assert.NoError(r.s.register(ctx))
-	assert.True(r.row(t, selfID).zeroWorkers, "and a repair writes the same flag")
+	assert.False(r.row(t, selfID).working, "and a repair writes the same flag")
+}
+
+// TestPeers_WithdrawSurvivesARacingRepair pins that a withdrawal cannot be undone by a registration repair
+// running at the same moment. Unserialized, a repair that loaded the profile before Withdraw flipped it
+// INSERTed the row after Withdraw's UPDATE had matched nothing, writing the replica back into the ranking.
+func TestPeers_WithdrawSurvivesARacingRepair(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	// ONE rig, reset between rounds: every rig reserves connections from a per-driver test budget until the
+	// test ends, so a rig per round exhausts it on a real database and the test waits on itself forever.
+	r := newRig(t)
+	for i := range 400 {
+		_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", selfID)
+		assert.NoError(err)
+		r.s.SetProfile(Profile{Working: true})
+		var wg sync.WaitGroup
+		wg.Go(func() { assert.NoError(r.s.register(ctx)) })
+		wg.Go(func() { assert.NoError(r.s.Withdraw(ctx)) })
+		wg.Wait()
+		if !assert.False(r.row(t, selfID).working, "round %d: a racing repair re-ranked the withdrawn replica", i) {
+			return
+		}
+	}
 }
 
 // TestPeers_RankPromotionIsWithheldAcrossAGap pins the rank's version of the correlated-stall guard. After a
@@ -433,9 +458,9 @@ func TestPeers_RankPromotionIsWithheldAcrossAGap(t *testing.T) {
 	// Enough peers that self is certain to be outranked by at least one of them.
 	var fleet []peer
 	for id := int64(1); id <= 16; id++ {
-		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge})
+		fleet = append(fleet, peer{engineID: id, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
 	}
-	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge})
+	fleet = append(fleet, peer{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true})
 	alone := fleet[len(fleet)-1:]
 
 	r.s.observe(ctx, fleet, nil)
@@ -470,9 +495,9 @@ func TestPeers_FailedReadHoldsTheLastGoodFleet(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
 	r.s.observe(ctx, []peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100},
-		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100},
-		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100},
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
 	}, nil)
 	assert.Equal(3, r.s.Replicas())
 
@@ -494,8 +519,8 @@ func TestPeers_PartitionFailsOpenWhenBlind(t *testing.T) {
 	r := newRig(t)
 
 	r.s.observe(ctx, []peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100},
-		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100},
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
 	}, nil)
 	replicas, ordinal, ok := r.s.Partition()
 	assert.True(ok, "two dispatchers and a known ordinal")
@@ -514,13 +539,13 @@ func TestPeers_PartitionFailsOpenWhenBlind(t *testing.T) {
 	// A solo dispatcher has nothing to divide, and a replica absent from the roster must not claim a class its
 	// peers have handed to someone else.
 	r.clk.advance(-3 * r.s.scan)
-	r.s.observe(ctx, []peer{{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100}}, nil)
+	r.s.observe(ctx, []peer{{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true}}, nil)
 	_, _, ok = r.s.Partition()
 	assert.False(ok, "a solo dispatcher partitions nothing")
 
 	r.s.observe(ctx, []peer{
-		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100},
-		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100},
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
 	}, nil)
 	_, _, ok = r.s.Partition()
 	assert.False(ok, "absent from the roster: decline rather than guess")
@@ -648,7 +673,7 @@ func TestPeers_BeatRidesTheReadCadenceWhenEvidenceFlips(t *testing.T) {
 	assert.True(r.row(t, selfID).dispatchAgeMs < staleAge)
 }
 
-// TestPeers_ReadIsUnfiltered pins that the read returns the whole table, corpses included. The freshness
+// TestPeers_ReadIsUnfiltered pins that the read returns the whole table, stale rows included. The freshness
 // decisions are this package's, not SQL's: that is what lets every window change without touching a
 // statement, gives the hygiene delete its candidates from the same reading everything else is derived from,
 // and keeps a row that is ABSENT distinguishable from one that is merely stale.
@@ -767,7 +792,7 @@ func TestPeers_PruneWaitsForAHealthyRun(t *testing.T) {
 	r.s.straggler = time.Second
 	r.s.pruneAfter = 400 * time.Millisecond
 	assert.NoError(r.s.register(ctx))
-	r.addPeer(t, 90, time.Minute, time.Minute) // a corpse by any measure
+	r.addPeer(t, 90, time.Minute, time.Minute) // abandoned by any measure
 
 	r.s.pass(ctx)
 	assert.Equal([]int64{90, selfID}, r.ids(t), "the first reading has no healthy run behind it")
@@ -778,7 +803,7 @@ func TestPeers_PruneWaitsForAHealthyRun(t *testing.T) {
 
 	r.clk.advance(200 * time.Millisecond)
 	r.s.pass(ctx)
-	assert.Equal([]int64{selfID}, r.ids(t), "readable long enough: the corpse goes")
+	assert.Equal([]int64{selfID}, r.ids(t), "readable long enough: the abandoned row goes")
 }
 
 // TestPeers_PruneStandsDownAfterAGap pins the anchor that makes a recovery storm unreachable. The case is a

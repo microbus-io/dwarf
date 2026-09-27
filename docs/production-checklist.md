@@ -30,7 +30,8 @@
   encodes its shard, so a flow created on a shard a peer does not know about is unroutable there.
   → [Resharding](resharding.md)
 - [ ] **`SetEngineID` pinned** if your platform restarts replicas in place. Otherwise a crash-looping replica
-  leaves a registry corpse per restart, shrinking every survivor's connection pool. Must be unique among
+  leaves a stale registry row per restart, and one that ranked as a shard's dispatcher holds that slot until it
+  ages out, leaving the shard fewer replicas running it. Must be unique among
   concurrently-live replicas. → [Upgrading](upgrading.md#deploying-your-own-application)
 - [ ] **Logger, meter provider and tracer provider injected.** All three default to no-ops, so an engine with
   nothing injected is silent — including its error logs. → [Observability](observability.md)

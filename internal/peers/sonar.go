@@ -63,6 +63,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -141,7 +142,7 @@ const (
 	// irreversible thing here.
 	pruneHealthyFor = 5 * time.Minute
 	// maxPruneBatch bounds one hygiene delete. A crash-looping replica that mints a fresh identity per
-	// restart leaves one corpse per restart, so the list is bounded by the crash rate rather than by anything
+	// restart leaves one stale row per restart, so the list is bounded by the crash rate rather than by anything
 	// here; deleting a bounded slice per pass keeps the statement one shape and its parameter count trivially
 	// inside every driver's ceiling.
 	maxPruneBatch = 64
@@ -170,10 +171,10 @@ type Profile struct {
 	// RTT is the round-trip time this replica measured to the shard, recorded in whole microseconds for
 	// operators to query; nothing here reads it.
 	RTT time.Duration
-	// ZeroWorkers says this replica is configured to run no steps. It stays in Replicas, since it still holds
-	// connections, but takes no rank: a rank is a claim on a dispatcher slot, and a replica that will never
-	// dispatch would hold that slot empty.
-	ZeroWorkers bool
+	// Working says this replica has workers and is taking on work. One that is not stays in Replicas, since
+	// it still holds connections, but takes no rank: a rank is a claim on a dispatcher slot, and a replica
+	// that will not dispatch would hold that slot empty.
+	Working bool
 }
 
 // Sonar owns this replica's row in one shard's peer registry and everything derived from reading it.
@@ -209,6 +210,11 @@ type Sonar struct {
 	standing atomic.Pointer[standing]
 	// profile is what this replica states about itself in its row - see SetProfile.
 	profile atomic.Pointer[Profile]
+	// rowMu serializes the two writes that decide what the row states: register (run by Join and by the
+	// repair on the driving goroutine) and Withdraw (run by the owner, from any goroutine). Interleaved, a
+	// repair that loaded the profile just before Withdraw flipped it would INSERT the row after Withdraw's
+	// UPDATE had matched nothing, and the replica would stay ranked for the drain it withdrew from.
+	rowMu sync.Mutex
 	// part is the dispatcher count and this replica's ordinal in it, published as ONE value. They are two
 	// halves of a single decision - an ordinal only means anything against the count it was derived from -
 	// so a reader that caught one half of a fleet change would partition on a pair that never existed. As
@@ -273,7 +279,7 @@ func New(engineID int64, shard int, db *sequel.DB) (*Sonar, error) {
 	s.replicas.Store(1)
 	s.standing.Store(&standing{rank: 0, candidates: 1})
 	s.lastRaw = standing{rank: 0, candidates: 1}
-	s.profile.Store(&Profile{})
+	s.profile.Store(&Profile{Working: true})
 	s.part.Store(&partition{ordinal: -1})
 	return s, nil
 }
@@ -422,6 +428,10 @@ func (s *Sonar) Rank() (rank, candidates int) {
 // SetProfile states the facts this replica writes into its registry row. Call it before Join: the row is
 // written at registration and at a repair, never by the beat, so a later change reaches the registry only
 // if the row is ever re-created.
+//
+// It replaces the whole profile, and a zero Profile states a replica that is NOT working. A Sonar that is
+// never given one registers as working - the default New seeds - so set Working explicitly whenever this is
+// called.
 func (s *Sonar) SetProfile(p Profile) {
 	s.profile.Store(&p)
 }
@@ -529,10 +539,12 @@ func (s *Sonar) untilNextPass() time.Duration {
 // for the length of the drain rather than after it. It also sticks: a later registration repair writes
 // the same flag.
 func (s *Sonar) Withdraw(ctx context.Context) error {
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
 	p := *s.profile.Load()
-	p.ZeroWorkers = true
+	p.Working = false
 	s.profile.Store(&p)
-	_, err := s.db.ExecContext(ctx, "UPDATE dwarf_peers SET zero_workers=1 WHERE engine_id=?", s.engineID)
+	_, err := s.db.ExecContext(ctx, "UPDATE dwarf_peers SET working=0 WHERE engine_id=?", s.engineID)
 	return errors.Trace(err)
 }
 
@@ -556,7 +568,8 @@ func (s *Sonar) Leave(ctx context.Context) error {
 // The RowsAffected test is safe on MySQL, which counts CHANGED rather than matched rows, because both
 // callers are clear of the one case that would trip it - an existing row whose seen_at already holds this
 // millisecond. Join runs before anything has beaten, and the repair path has just OBSERVED the row absent.
-// This replica is the only writer of its own row, so that observation cannot be raced.
+// This replica is the only writer of its own row, and rowMu orders this against the one other write it
+// makes (Withdraw), so that observation cannot be raced.
 func (s *Sonar) register(ctx context.Context) error {
 	// FaultBeatErr covers this as well as the beat, and the reason is the repair below: a Sonar that observes
 	// itself absent re-registers, so gating only the beat would let a replica which cannot prove its liveness
@@ -565,14 +578,16 @@ func (s *Sonar) register(ctx context.Context) error {
 	if s.faulted(FaultBeatErr) {
 		return nil
 	}
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
 	prof := s.profile.Load()
-	zeroWorkers := 0
-	if prof.ZeroWorkers {
-		zeroWorkers = 1
+	working := 0
+	if prof.Working {
+		working = 1
 	}
 	res, err := s.db.ExecContext(ctx,
-		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), zero_workers=?, rtt_us=? WHERE engine_id=?",
-		zeroWorkers, prof.RTT.Microseconds(), s.engineID)
+		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), working=?, rtt_us=? WHERE engine_id=?",
+		working, prof.RTT.Microseconds(), s.engineID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -584,8 +599,8 @@ func (s *Sonar) register(ctx context.Context) error {
 		return nil
 	}
 	_, err = s.db.ExecContext(ctx,
-		"INSERT INTO dwarf_peers (engine_id, seen_at, zero_workers, rtt_us) VALUES (?, NOW_UTC(), ?, ?)",
-		s.engineID, zeroWorkers, prof.RTT.Microseconds())
+		"INSERT INTO dwarf_peers (engine_id, seen_at, working, rtt_us) VALUES (?, NOW_UTC(), ?, ?)",
+		s.engineID, working, prof.RTT.Microseconds())
 	return errors.Trace(err)
 }
 
@@ -666,7 +681,7 @@ func (s *Sonar) publishBeat(ctx context.Context, dispatched bool) {
 // database.
 //
 // It is deliberately UNFILTERED. A freshness predicate in SQL would save nothing - the table holds one row
-// per live replica plus a few corpses, has no secondary index by design, and is scanned whole either way -
+// per live replica plus a few stale ones, has no secondary index by design, and is scanned whole either way -
 // while costing three things worth having: every window becomes a value this package can change without
 // touching SQL, the hygiene delete gets its candidate list from the same reading everything else is derived
 // from instead of a second query, and a row that is ABSENT becomes distinguishable from one that is merely
@@ -687,7 +702,7 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	}
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS seen_age_ms,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms, zero_workers"+
+			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms, working"+
 			" FROM dwarf_peers ORDER BY engine_id")
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -696,11 +711,11 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	var out []peer
 	for rows.Next() {
 		var p peer
-		var zeroWorkers int
-		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs, &zeroWorkers); err != nil {
+		var working int
+		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs, &working); err != nil {
 			return nil, errors.Trace(err)
 		}
-		p.zeroWorkers = zeroWorkers != 0
+		p.working = working != 0
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -737,7 +752,7 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 		s.healthySince = now
 	}
 
-	v := classify(rows, s.engineID, s.profile.Load().ZeroWorkers, s.shard, s.windows())
+	v := classify(rows, s.engineID, s.profile.Load().Working, s.shard, s.windows())
 	// The dispatch pair is published as observed, with no hysteresis: under-counting only makes replicas
 	// select overlapping candidates, so there is nothing here worth debouncing, and delaying a REMOVAL would
 	// keep a residue class assigned to a replica that has stopped serving it.
@@ -789,7 +804,7 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	s.prune(ctx, v.dead)
 }
 
-// prune deletes rows that have been stale long enough to be corpses, by PRIMARY KEY, from the list the same
+// prune deletes rows that have been stale long enough to be abandoned, by PRIMARY KEY, from the list the same
 // reading produced.
 //
 // It waits for the registry to have been continuously readable for pruneHealthyFor, and that patience is the

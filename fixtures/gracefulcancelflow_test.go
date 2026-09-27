@@ -70,7 +70,7 @@ func recordCancellation(ctx context.Context, f *workflow.Flow) error {
 
 // TestGracefulCancelFlow pins graceful cancellation end to end. A step Cancel reaches before it starts is
 // preempted without running; a step already running finishes, and what it asked for next is not honored.
-// Either way the cancellation arrives on the node's onError transition, or, with none, fails the flow. A
+// Either way the cancellation arrives on the node's onError transition, or, with none, stops the flow. A
 // subgraph caller runs once more when its child returns, so it sees the child's result before its own
 // cancellation is applied; an interrupted step resumed after Cancel is preempted, so its resume data is not
 // acted on. A flow whose every unrecovered loss was a cancellation resolves `cancelled`; one real error mixed
@@ -113,7 +113,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 	}
 
 	// preempted: B is pending when Cancel lands, so it never runs. With no onError the step settles
-	// cancelled and the flow fails, carrying the reason.
+	// cancelled and the flow ends cancelled, carrying the reason.
 	t.Run("preempted_no_onerror", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("PreemptNoOnError")
@@ -195,7 +195,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 	})
 
 	// ran, covered: C is running when Cancel lands and returns nil. Its changes stand (it ran), its transition
-	// to D is not honored, and with no onError it settles cancelled and fails the flow.
+	// to D is not honored, and with no onError it settles cancelled and the flow ends cancelled.
 	t.Run("ran_covered_no_onerror", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("RanCoveredNoOnError")

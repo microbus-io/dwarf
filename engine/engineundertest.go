@@ -177,6 +177,7 @@ const (
 const (
 	CheckpointResumeBeforeFlowWrite   = "resumeBeforeFlowWrite"   // Resume, just before its transaction's flow-status gate write
 	CheckpointBeforeTransitionTx      = "beforeTransitionTx"      // step execution, after the step is marked completed, before the transition transaction
+	CheckpointCancelBeforeMark        = "cancelBeforeMark"        // Cancel, after its watermark transaction commits, before it marks the steps
 	CheckpointAfterCallerPark         = "afterCallerPark"         // step execution, after the subgraph caller step is parked, before the child is created
 	CheckpointBeforeRetryRewind       = "beforeRetryRewind"       // step execution, before the flow.Retry rewind transaction
 	CheckpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // flow completion, just before its transaction's status-gate write

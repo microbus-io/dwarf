@@ -274,8 +274,8 @@ constants are in the [cloud benchmarks](benchmark-cloud.md).
 > random by default. A replica that *crashes* (rather than shutting down cleanly) leaves its last entry
 > behind until it ages out, about 40 seconds. If it was one of a shard's dispatchers, the shard runs on the
 > remaining dispatchers until then — slower, not stopped, unless every dispatcher of that shard crashed at
-> once. A replica shutting down cleanly hands its place on as soon as its drain starts, not when it ends, so a
-> long in-flight task does not hold a shard short of dispatchers. If a replica restarts under a
+> once. A replica shutting down cleanly whose drain is still waiting on tasks a quarter-second in hands its
+> place on then, not when the drain ends, so a long in-flight task does not hold a shard short of dispatchers. If a replica restarts under a
 > *fresh* random id each time (a crashloop), those entries can pile up faster than they age out. To avoid this, call `SetEngineID(id)` before `Startup` with a value
 > that is **stable across that replica's restarts** and **unique across your live replicas** — for example
 > one derived from the deployment's own per-instance identity (a StatefulSet pod name/ordinal, or the
@@ -338,9 +338,9 @@ That has three consequences worth knowing:
   per shard and reads the others back, which is how the fleet agrees on each shard's dispatchers and splits
   its connection budget (above). A joining replica waits to be seen before it opens its own connections, so
   the fleet makes room for it rather than briefly overshooting together. A replica configured with
-  `SetWorkers(0)` runs no steps anywhere; it registers, holds two connections to each shard, and is never
-  chosen to dispatch one. Each replica also records the round-trip time it measured to each shard, so
-  `SELECT engine_id, rtt_us, zero_workers FROM dwarf_peers` on a shard shows the fleet as that shard sees it
+  `SetWorkers(0)` runs no steps anywhere; it registers as not working, holds two connections to each shard,
+  and is never chosen to dispatch one. Each replica also records the round-trip time it measured to each shard, so
+  `SELECT engine_id, rtt_us, working FROM dwarf_peers` on a shard shows the fleet as that shard sees it
   (`rtt_us` in microseconds).
 - **A replica that dies needs no goodbye.** Its rows stop being refreshed and it drops out of both counts
   on its own; a clean shutdown deletes them outright and the fleet regrows immediately.

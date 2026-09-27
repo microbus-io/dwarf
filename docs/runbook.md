@@ -162,7 +162,7 @@ replica that has stopped serving its share.
 rows decide which replicas dispatch each shard and how its connection budget divides — so rows belonging to
 replicas that no longer exist can hold a dispatcher's place, leaving that shard with fewer replicas running
 its steps, and can shrink the surviving dispatchers' pools. A replica that crash-loops is the worst case:
-unless its identity is pinned, every restart mints a fresh one and leaves another corpse.
+unless its identity is pinned, every restart mints a fresh one and leaves another stale row.
 
 **Confirm.** Compare `dwarf_peer_replicas` against your actual replica count. If the gauge is higher, that is
 the fault. Directly:

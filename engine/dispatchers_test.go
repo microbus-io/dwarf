@@ -221,11 +221,11 @@ func TestDispatchers_ZeroWorkersReplicaRegistersButNeverRanks(t *testing.T) {
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
-	var zeroWorkers int
+	var working int
 	var rttUs int64
 	assert.NoError(db.QueryRowContext(t.Context(),
-		"SELECT zero_workers, rtt_us FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&zeroWorkers, &rttUs))
-	assert.Equal(1, zeroWorkers, "registered, and flagged")
+		"SELECT working, rtt_us FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&working, &rttUs))
+	assert.Equal(0, working, "registered, as not working")
 	assert.Equal(time.Duration(probedRTT(e, 1)*float64(time.Millisecond)).Microseconds(), rttUs,
 		"with the RTT it probed, in microseconds")
 	assert.False(e.dispatchesOn(1))
@@ -249,7 +249,7 @@ func TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget(t *testing.T) {
 
 	for _, id := range []int64{3001, 3002, 3003} {
 		_, err := db.ExecContext(t.Context(),
-			"INSERT INTO dwarf_peers (engine_id, seen_at, zero_workers) VALUES (?, NOW_UTC(), 1)", id)
+			"INSERT INTO dwarf_peers (engine_id, seen_at, working) VALUES (?, NOW_UTC(), 0)", id)
 		assert.NoError(err)
 	}
 	awaitPeerCount(t, e, 1, 4)
@@ -410,9 +410,9 @@ func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var zeroWorkers int
-		err := db.QueryRowContext(ctx, "SELECT zero_workers FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&zeroWorkers)
-		if err == nil && zeroWorkers == 1 {
+		var working int
+		err := db.QueryRowContext(ctx, "SELECT working FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&working)
+		if err == nil && working == 0 {
 			return // withdrawn while the task is still holding the drain open
 		}
 		time.Sleep(time.Millisecond)
@@ -473,4 +473,173 @@ func TestDispatchers_OverridePromotionResizesTheCache(t *testing.T) {
 	want := 2 * min(max(64, workersPerConnBudget*40), int(e.workers.Load()))
 	assert.True(want > before, "fixture: the pinned pool must size a larger cache than a reader's (%d vs %d)", want, before)
 	assert.Equal(want, e.cache.Capacity(), "the cache follows the pinned pool of the promoted shard")
+}
+
+// twoReplicaFleet stands up a dispatcher (dispatcherID) and a reader (readerID) on one 2-vCPU shard, beside
+// one fake working peer (1001) that dispatches nothing. Among the three candidates 1001 ranks first,
+// dispatcherID second and readerID third, so with two slots the dispatcher dispatches and the reader reads -
+// and once the dispatcher stops working, the reader moves inside the cut. Each engine runs on its own host,
+// so a test can tell which replica ran a task.
+func twoReplicaFleet(t *testing.T, dispHost, readHost Host) (disp, reader *Engine) {
+	t.Helper()
+	assert := testarossa.For(t)
+	mk := func(id int64, h Host) *Engine {
+		e := NewEngineUnderTest(t.Name())
+		e.testConnCap = 0
+		assert.NoError(e.SetHost(h))
+		assert.NoError(e.SetEngineID(id))
+		assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 2}))
+		return e
+	}
+	disp = mk(dispatcherID, dispHost)
+	assert.NoError(disp.Startup(t.Context()))
+	db, err := disp.db.Shard(1)
+	assert.NoError(err)
+	_, err = db.ExecContext(t.Context(), "INSERT INTO dwarf_peers (engine_id, seen_at) VALUES (1001, NOW_UTC())")
+	assert.NoError(err)
+	reader = mk(readerID, readHost)
+	assert.NoError(reader.Startup(t.Context()))
+	for _, e := range []*Engine{disp, reader} {
+		awaitPeerCount(t, e, 1, 3)
+		e.recomputePools()
+	}
+	if !assert.True(disp.dispatchesOn(1), "fixture: the dispatcher must rank inside the cut") ||
+		!assert.False(reader.dispatchesOn(1), "fixture: the reader must rank outside it") {
+		t.FailNow()
+	}
+	return disp, reader
+}
+
+// TestDispatchers_ResumeOnAReaderRunsOnADispatcher pins the cross-replica path the doorbell gate creates. A
+// Resume issued on a replica that does not dispatch the flow's shard rings no bell, so the step is left to a
+// dispatcher's scan - and it must run there, not through the reader's two-connection pool.
+func TestDispatchers_ResumeOnAReaderRunsOnADispatcher(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	var dispRan, readRan atomic.Int32
+	build := func(ran *atomic.Int32) *TestProxy {
+		p := NewTestProxy()
+		g := workflow.NewGraph("ResumeOnReader")
+		g.SetEndpoint("Gate", "ronr/gate")
+		g.SetEndpoint("B", "ronr/b")
+		g.AddTransition("Gate", "B")
+		g.AddTransition("B", workflow.END)
+		p.HandleGraph("ronr/g", g)
+		p.HandleTask("ronr/gate", func(ctx context.Context, f *workflow.Flow) error {
+			_, err := f.Interrupt(nil, nil)
+			return err
+		})
+		p.HandleTask("ronr/b", func(ctx context.Context, f *workflow.Flow) error { ran.Add(1); return nil })
+		return p
+	}
+	disp, reader := twoReplicaFleet(t, build(&dispRan), build(&readRan))
+	defer disp.Shutdown(ctx)
+	defer reader.Shutdown(ctx)
+
+	fk, err := disp.Create(ctx, "ronr/g", nil, nil)
+	assert.NoError(err)
+	outcome, err := disp.Await(ctx, fk)
+	if !assert.NoError(err) || !assert.Equal(workflow.StatusInterrupted, outcome.Status) {
+		return
+	}
+
+	assert.NoError(reader.Resume(ctx, fk, nil))
+	assert.Equal(0, reader.cache.Len(), "the reader rang no bell")
+	outcome, err = reader.Await(ctx, fk)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, outcome.Status, "a dispatcher's scan picked the resumed step up")
+	}
+	assert.Equal(int32(1), dispRan.Load(), "and ran the rest of the flow")
+	assert.Equal(int32(0), readRan.Load(), "the reader ran nothing")
+}
+
+// TestDispatchers_DrainingDispatcherHandsItsSlotToAPeer pins what Withdraw is for, end to end: while a
+// dispatcher drains a long in-flight task at shutdown, a peer takes over its slot - not after the drain.
+func TestDispatchers_DrainingDispatcherHandsItsSlotToAPeer(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	started, release := make(chan struct{}), make(chan struct{})
+	build := func() *TestProxy {
+		p := NewTestProxy()
+		g := workflow.NewGraph("Drain")
+		g.SetEndpoint("A", "dslot/a")
+		g.AddTransition("A", workflow.END)
+		p.HandleGraph("dslot/g", g)
+		p.HandleTask("dslot/a", func(ctx context.Context, f *workflow.Flow) error {
+			close(started)
+			<-release
+			return nil
+		})
+		return p
+	}
+	disp, reader := twoReplicaFleet(t, build(), build())
+	defer reader.Shutdown(ctx)
+
+	_, err := disp.Create(ctx, "dslot/g", nil, nil)
+	assert.NoError(err)
+	<-started
+
+	var wg sync.WaitGroup
+	wg.Go(func() { disp.Shutdown(ctx) })
+	defer func() {
+		close(release)
+		wg.Wait()
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if reader.dispatchesOn(1) {
+			return // promoted while the dispatcher's task is still holding its drain open
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the peer was never promoted while the dispatcher drained")
+}
+
+// TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads pins the recovery half of the sweep rule,
+// through the lease reset: an expired lease on a shard this replica only reads is left to the shard's
+// dispatchers, and reset once this replica dispatches it.
+func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	started, release := make(chan struct{}), make(chan struct{})
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Lease")
+	g.SetEndpoint("A", "rsweep/a")
+	g.AddTransition("A", workflow.END)
+	proxy.HandleGraph("rsweep/g", g)
+	proxy.HandleTask("rsweep/a", func(ctx context.Context, f *workflow.Flow) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	defer close(release) // below the Shutdown defer, so it unwinds first and frees the drain
+	e.SetHost(proxy)
+	assert.NoError(e.Startup(t.Context()))
+	_, err := e.Create(ctx, "rsweep/g", nil, nil)
+	assert.NoError(err)
+	<-started
+
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE status='"+workflow.StatusRunning+"'")
+	assert.NoError(err)
+	expired := func() int {
+		var n int
+		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE status='"+workflow.StatusRunning+"' AND lease_expires<=NOW_UTC()").Scan(&n))
+		return n
+	}
+
+	e.dispatchFlag(1).Store(false)
+	e.recoverExpiredLeases(ctx)
+	assert.Equal(1, expired(), "a reader leaves the expired lease to the shard's dispatchers")
+
+	e.dispatchFlag(1).Store(true)
+	e.recoverExpiredLeases(ctx)
+	assert.Equal(0, expired(), "a dispatcher resets it")
 }

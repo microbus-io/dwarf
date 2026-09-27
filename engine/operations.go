@@ -700,8 +700,15 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 // and its successors do not exist yet. The transition that inserts them holds the flow row's lock, so this write
 // either lands before it - and the successors inherit a mark, their source being at or below the watermark - or
 // waits for it to commit, after which the mark below finds them pending. Every step inserted after the Cancel
-// sits above the watermark, which is what keeps a handler that caught the cancellation from passing it on. Idempotent rather than a 409 on a terminal flow - a repeat call marks whatever is still in
-// progress, and the flow write is guarded to non-terminal flows so it can never rewrite a recorded outcome.
+// sits above the watermark, which is what keeps a handler that caught the cancellation from passing it on.
+//
+// ONE CANCEL PER FLOW: a nonzero cancel_watermark means the flow was already cancelled, and a repeat call is
+// a no-op. Not cancel_reason, which may be empty and is shared with Terminate. A repeat that re-marked would
+// preempt the onError handler that caught the first cancellation - a host retrying a Cancel whose response
+// was lost would cancel a flow that had recovered - so a flow that recovers and must still stop is
+// Terminated. The watermark write is itself guarded on cancel_watermark=0, so two concurrent calls that both
+// read zero raise it once. A no-op on a terminal flow too, rather than a 409: the flow write is guarded to
+// non-terminal flows, so it can never rewrite a recorded outcome.
 func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) error {
 	shardNum, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -715,11 +722,11 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	ctx, doneTurn := e.dbTurn(ctx, shardNum)
 	defer doneTurn()
 
-	var surgraphFlowID int
+	var surgraphFlowID, watermark int
 	err = db.QueryRowContext(ctx,
-		"SELECT surgraph_flow_id FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
+		"SELECT surgraph_flow_id, cancel_watermark FROM dwarf_flows WHERE flow_id=? AND flow_token=?",
 		flowID, flowToken,
-	).Scan(&surgraphFlowID)
+	).Scan(&surgraphFlowID, &watermark)
 	if err == sql.ErrNoRows {
 		return errors.New("flow not found", http.StatusNotFound)
 	}
@@ -728,6 +735,9 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	}
 	if surgraphFlowID != 0 {
 		return errors.New("cannot cancel a subgraph child; use the root flow key", http.StatusBadRequest)
+	}
+	if watermark != 0 {
+		return nil // already cancelled - see above
 	}
 
 	// Same tree-membership shape Terminate's descendant walk uses (root_flow_id scan, non-terminal nodes
@@ -755,7 +765,8 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		tx.ExecContext(ctx,
 			"UPDATE dwarf_flows SET cancel_reason=?,"+
 				" cancel_watermark=(SELECT COALESCE(MAX(s.step_id), 0) FROM dwarf_steps s WHERE s.flow_id=dwarf_flows.flow_id),"+
-				" touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
+				" touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")"+
+				" AND cancel_watermark=0",
 			reasonArgs...,
 		)
 		return nil
@@ -763,9 +774,16 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if err != nil {
 		return errors.Trace(err)
 	}
+	e.seams.Checkpoint(ctx, CheckpointCancelBeforeMark)
+	// The mark reaches only steps at or below their flow's watermark. A step above it was inserted after the
+	// watermark committed, and its insert already decided its mark - inherited if its source was reached by
+	// this Cancel, not if its source was covered. Unbounded, the mark would catch the onError handler of a
+	// step preempted in the window between that commit and this statement, and deliver the cancellation a
+	// second time to the handler written to catch it.
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_steps SET cancelling=1 WHERE flow_id IN ("+flowPlaceholders+")"+
-			" AND status IN ('"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
+			" AND status IN ('"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
+			" AND step_id <= (SELECT f.cancel_watermark FROM dwarf_flows f WHERE f.flow_id=dwarf_steps.flow_id)",
 		allFlowIDs...,
 	)
 	return errors.Trace(err)

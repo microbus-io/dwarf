@@ -729,6 +729,11 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.shardRTTMs = rtts
 	e.shardsLock.Unlock()
 	e.shardMaxConns = maxConns
+	// Forget the last run's verdicts, so a fleet still over the limit after a restart is warned about again
+	// rather than taken as already reported.
+	e.poolsLock.Lock()
+	e.fleetOverLimit = map[int]bool{}
+	e.poolsLock.Unlock()
 	// One flag per open shard, rebuilt per run and filled in by the sizing loop below, before anything that
 	// could ring a doorbell is running.
 	flags := make(map[int]*atomic.Bool, len(shards))
@@ -1021,12 +1026,31 @@ func (e *Engine) drainRuntime() {
 		close(e.reconcileStop)
 	}
 	e.reconcileWorker.Wait()
-	// Give up every dispatcher slot BEFORE waiting on the workers. A draining replica takes on no new work,
-	// but its row stays fresh until it leaves the fleet at the very end, and a fresh row keeps its rank - so
-	// without this each shard it dispatched would run on one dispatcher fewer for the whole drain, and a
-	// small shard whose dispatchers all drain at once would run nothing until the slowest task finished.
-	// Withdrawn, it stays counted for the connections it still holds while its peers re-rank without it.
-	e.withdrawFromFleet(e.lifetimeCtx)
+	// Give up every dispatcher slot if the drain turns out to be LONG. A draining replica takes on no new
+	// work, but its row stays fresh until it leaves the fleet at the very end, and a fresh row keeps its rank
+	// - so a drain waiting on a long task would leave each shard it dispatched one dispatcher short for the
+	// whole wait, and a small shard whose dispatchers all drain at once would run nothing until the slowest
+	// task finished. Withdrawn, it stays counted for the connections it still holds while its peers re-rank
+	// without it.
+	//
+	// NOT UNCONDITIONALLY, and not on a count of tasks in flight. Withdrawing costs an overlap: the peers grow
+	// into the freed share while this replica still holds it, until the drain ends and its pool closes. A
+	// drain that ends at once pays that for nothing - leaveFleet hands the slot on just as fast - and in a
+	// rolling restart the overlap stacks with the replacement's bootstrap pool (measured 71 against a 67
+	// bound, TestPeerRollingRestart_FleetNeverExceedsTheShardBudget, on Postgres). A count read at this
+	// instant misses a worker that has claimed a step and not yet entered the task. So the withdrawal waits
+	// one registry read cadence, and fires only if the drain is still going by then.
+	drained := make(chan struct{})
+	var withdrawal sync.WaitGroup
+	withdrawal.Go(func() {
+		t := time.NewTimer(e.peerCadence())
+		defer t.Stop()
+		select {
+		case <-drained:
+		case <-t.C:
+			e.withdrawFromFleet(e.lifetimeCtx)
+		}
+	})
 	// Unregister the observable-gauge callback first so the OTEL reader cannot invoke it (and query the
 	// shards) while/after the databases are being closed.
 	e.closeMetrics()
@@ -1039,6 +1063,8 @@ func (e *Engine) drainRuntime() {
 		e.turnstiles.Close()
 	}
 	e.crew.Drain()
+	close(drained)
+	withdrawal.Wait() // before anything below can close what a late withdrawal writes through
 	if e.recoveryStop != nil {
 		close(e.recoveryStop)
 	}
@@ -1200,6 +1226,10 @@ func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) e
 // workflow.IsCancelled recognizes - before its own cancellation is delivered. An interrupted step is cancelled
 // when it is next resumed, and its resume data is not acted on. Cancel returns once the request is recorded,
 // not when the flow stops; use Await for that. Terminate is the unconditional, immediate alternative.
+//
+// A flow is cancelled once. Calling Cancel again on a flow already cancelled does nothing, so a call whose
+// response was lost is safe to retry - even after a handler has caught the first cancellation and the flow
+// has carried on. To stop a flow that recovered from its cancellation, Terminate it.
 func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)

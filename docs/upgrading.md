@@ -87,7 +87,8 @@ over-connects the databases.
 identity, so a restart leaves the old registry row behind until it ages out (it stops counting toward the replica
 count after 40 seconds; the row itself is deleted once it is over 80 seconds old and the registry has been
 continuously readable for 5 minutes). That is fine for a deploy. It is not fine for a
-crash-looping replica, which accumulates a corpse per restart and shrinks every survivor's connection pool.
+crash-looping replica, which leaves a stale row per restart: each is counted as a live replica until it ages
+out, and one that ranked as a shard's dispatcher holds that slot, leaving the shard fewer replicas running it.
 Pass a value stable across that replica's restarts — a pod ordinal or hostname — to `SetEngineID` before
 startup. It must be unique among concurrently-live replicas: two live replicas sharing an id count as one,
 which over-sizes pools, so a wrong stable id is worse than the random default.

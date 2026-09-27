@@ -306,7 +306,8 @@ preempted when resumed. Intercepting each request kind at its own write (a CASE 
 rollback on the interrupt chain) was built and discarded: it multiplied dialect branches at four sites, and its
 conditional writes are the class that breaks the MySQL fence (see "Lease fencing"). The cost of honoring is
 latency - a rare `Cancel` landing mid-task on a step that then arms a subgraph lets that child run to completion
-before its caller is redirected - and a second `Cancel` or a `Terminate` covers the rare long child.
+before its caller is redirected - and a `Terminate` covers the rare long child. (Not a second `Cancel`: a
+flow is cancelled once, and a repeat call is a no-op - see "one cancel per flow" on `cancel`.)
 
 *Two rules at the claim are load-bearing:*
 
@@ -1449,13 +1450,12 @@ catch half a fleet change: an ordinal only means anything against the count it w
 there is no cross-shard roster to assemble, and no timestamps from different clocks to rank.
 
 **The doorbell is deliberately NOT partitioned** - it is gated only by role, ringing solely for a shard this
-replica dispatches (see "Dispatchers") - **and the case for not partitioning it got simpler twice.** `Offer` now
-admits only into an EMPTY partition, so a busy replica never offers at all, and a uniform-priority workload
-offers only at the head of a drained chain. Partitioning that check would delay exactly the sequential-hop
-case it exists for, and the claim CAS still arbitrates, so the worst case is one lost claim. Note this
-concerns **only this replica's own** origination sites: with the peer `enqueue` broadcast removed, no
-unpartitioned offer can arrive from a peer at all, which closed the one case where it genuinely raced the
-residue class's owner.
+replica dispatches (see "Dispatchers"). `Offer` admits only into an EMPTY partition, so a busy replica never
+offers at all, and a uniform-priority workload offers only at the head of a drained chain. Partitioning that
+check would delay exactly the sequential-hop case it exists for, and the claim CAS still arbitrates, so the
+worst case is one lost claim. It concerns **only this replica's own** origination sites: there is no
+cross-replica `enqueue`, so no unpartitioned offer arrives from a peer - **do not add one**, since a peer's
+offer is the one case that genuinely races the residue class's owner.
 
 **Known residual: replica death strands a slice for up to the dispatch window (5s) plus a read cadence.** A
 dead replica's residue class is owned by nobody until its row ages out of the dispatcher count and ordinals
@@ -2633,7 +2633,7 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   claim, or both leave, one slot. `VirtualCPUs` is therefore a fleet-wide fact - a replica declaring a
   different value for a shard derives a different `X` there.
 - **`X = clamp(round(budgetRef/minDispatcherPool), min(2,C), C)`, where `C` is the CANDIDATES** - the fresh
-  replicas not flagged `zero_workers`, from `Sonar.Rank`, not `Replicas`. Dividing by every registered replica
+  replicas registered `working`, from `Sonar.Rank`, not `Replicas`. Dividing by every registered replica
   would split the budget among dispatchers that do not exist: one worker beside await-only frontends would
   run on a fraction of its shard (pinned by `TestDispatchers_ZeroWorkersPeersDoNotDivideTheBudget`). The floor
   of two is availability, not throughput: one replica dying leaves the other dispatching while the slot
@@ -2681,12 +2681,12 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   otherwise keep a reader's cache on shards it now dispatches. It leaves the pools themselves to
   `SetMaxOpenConns`. The derivations all take the one role reading `recomputePools` made rather than re-read
   the roles, so a reading landing mid-pass cannot give them different answers.
-- **An await-only replica (`SetWorkers(0)`) registers flagged `zero_workers`**, so it is counted in the fleet
-  (its reader pools are real connections, and the fleet check prices them) but takes no rank. Unflagged, it
+- **An await-only replica (`SetWorkers(0)`) registers `working=0`**, so it is counted in the fleet (its reader
+  pools are real connections, and the fleet check prices them) but takes no rank. Registered as working, it
   could win a slot it will never serve - leaving a shard with fewer working dispatchers than `X`, or none.
-  **It is not a claim to be serving**, which the registry must never carry (a replica claiming to serve and
-  then wedging would keep its residue class forever): `zero_workers` states a configured *mode*, feeds only
-  the ranking, and the partition divides on `dispatched_at` evidence alone. A dispatcher
+  **`working` is intent, not evidence of serving**, and the registry must never carry a claim to be serving (a
+  replica claiming it and then wedging would keep its residue class forever): it feeds only the ranking, and
+  the partition divides on `dispatched_at` evidence alone. A dispatcher
   that wedges still holds its slot until its row goes stale - the residual below - but it strands no class.
 - **Background sweeps run only on dispatched shards.** The reaper and every recovery repair (expired leases,
   wedged parks, orphaned children, orphan detection) skip a shard this replica only reads. Each is
@@ -2704,13 +2704,19 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   `@@MAX_CONNECTIONS`; SQLite and a failed read give 0 and skip). SQL Server reports 32767 unless "user
   connections" is configured - always, on Azure SQL - so there the check effectively never fires. It never resizes anything: shrinking
   dispatchers to make room for idle readers is the wrong trade, and a fleet that size wants a pooler.
-- **A draining replica withdraws before it waits** (`withdrawFromFleet`, first in `drainRuntime` after the
-  reconcile loop stops): `Sonar.Withdraw` flags its rows `zero_workers`, so its peers re-rank without it on
-  their next reading while it finishes its in-flight tasks. Without it the row stays fresh - and keeps its
-  rank - for the whole drain, which can be minutes, and a small shard whose dispatchers all drained at once
-  (a scale-in, a rollout with `maxUnavailable >= 2`) would run nothing until the slowest task finished. The
-  cost is that the drainer still holds its pool while a successor grows, one share over for the drain.
-  Pinned by `TestDispatchers_DrainGivesUpTheSlotBeforeWaiting`.
+- **A draining replica withdraws if its drain outlasts one registry read cadence** (`drainRuntime`, a timer
+  armed before `crew.Drain` and joined after it): `Sonar.Withdraw` sets its rows' `working=0`, so its peers
+  re-rank without it on their next reading while it finishes its in-flight tasks. Without it the row stays
+  fresh - and keeps its rank - for the whole drain, which can be minutes, and a small shard whose dispatchers
+  all drained at once (a scale-in, a rollout with `maxUnavailable >= 2`) would run nothing until the slowest
+  task finished. **The withdrawal has a cost, which is why it waits:** the peers grow into the freed share
+  while the drainer still holds it, so for a drain the shard is one share over. A drain that ends at once
+  pays that for nothing (`leaveFleet` hands the slot on as fast), and in a rolling restart the overlap stacks
+  with the replacement's bootstrap pool - withdrawing unconditionally measured 71 connections against the 67
+  bound of `TestPeerRollingRestart_FleetNeverExceedsTheShardBudget` on Postgres. **Do not gate it on a count of
+  tasks in flight instead:** read at the instant the drain starts, it misses a worker that has claimed a step
+  and not yet entered the task. Pinned by `TestDispatchers_DrainGivesUpTheSlotBeforeWaiting` and
+  `TestDispatchers_DrainingDispatcherHandsItsSlotToAPeer`.
 - **Known residual: a crashed dispatcher holds its slot for the fresh window (40s).** The rank is drawn from
   rows still counted by `Replicas`, so a dispatcher that dies without shutting down keeps its rank until its
   row ages out, and the shard runs on `X-1` meanwhile. With `X >= 2` that is slower, not stopped; **all `X`

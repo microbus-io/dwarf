@@ -200,6 +200,9 @@ err := eng.Cancel(ctx, flowKey, "customer withdrew the order") // surfaced as Ca
   sleeping or backed-off step is reached when it next wakes, and an interrupted flow stays `interrupted` until
   someone calls `Resume` or `Terminate`.
 - Address the flow by its root key; calling `Cancel` on a flow that has already stopped does nothing.
+- **A flow is cancelled once.** A second `Cancel` on a flow already cancelled does nothing, so a call whose
+  response was lost is safe to retry - even after an `onError` handler caught the first cancellation and the
+  flow carried on. To stop a flow that recovered, `Terminate` it.
 
 ## Terminating, and recovering with Fork
 
@@ -222,6 +225,18 @@ not auto-delete. Because the fork is an ordinary new flow, recover a partially-f
 failed branch at a time. A branch lost to a `Cancel` is recovered the same way: the fork re-runs only the step you
 chose and keeps every other branch as it was, so while a cancelled branch remains, the fork ends `cancelled`,
 with the original `CancelReason`.
+
+To re-run a terminal flow from the beginning, fork it at its first step. `History` lists steps in execution
+order, so the first entry is the flow's entry step, and the fork starts from the original's initial state with
+your overrides applied:
+
+```go
+hist, err := eng.History(ctx, flowKey)
+newFlowKey, err := eng.Fork(ctx, hist[0].StepKey, map[string]any{"amount": 0})
+```
+
+This is still a fork: it reuses the original's graph, scheduling and baggage. To start over with the graph
+loaded fresh, or with different options, call `Create` instead.
 
 ## Continue a thread
 

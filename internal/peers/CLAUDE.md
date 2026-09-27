@@ -24,7 +24,7 @@ divisor derived from one shard's rows can express neither.
 
 ## The row's whole lifecycle lives here, and that is what makes deletion final
 
-Registration creates, the beat refreshes, `Leave` deletes, the prune deletes other replicas' corpses. All
+Registration creates, the beat refreshes, `Leave` deletes, the prune deletes other replicas' stale rows. All
 four in one owner, because splitting create/delete from refresh reintroduces a hazard that has no local fix:
 **the beat must never create a row.** If it did, a straggler beat could resurrect a replica that had
 just deleted itself on the way down, and the shutdown delete would then be correct only under an ordering
@@ -136,10 +136,10 @@ deliberately:
   under-sizes pools, a frozen rank is not fail-safe: a reader whose dispatchers left is never promoted, and
   the shard runs nothing. Against the raw reading, two consecutive readings that agree are believed whether
   or not either was gapped. Pinned by `TestPeers_RankPromotesThroughSustainedGaps`.
-- **`Withdraw` takes a replica out of the ranking without taking it out of the fleet**: it flags the row
-  `zero_workers` and makes a later repair write the same flag. An owner calls it when it stops taking on work
-  but still holds connections - a drain - so another replica takes over its dispatcher slots for the length
-  of the drain rather than after it. Pinned by `TestPeers_WithdrawDropsTheReplicaFromEveryRanking`.
+- **`Withdraw` takes a replica out of the ranking without taking it out of the fleet**: it sets the row's
+  `working=0` and makes a later repair write the same value. An owner calls it when it stops taking on work
+  but still holds connections - a drain long enough to be worth it - so another replica takes over its
+  dispatcher slots for the length of the drain rather than after it. Pinned by `TestPeers_WithdrawDropsTheReplicaFromEveryRanking`.
 
 **A failed read publishes nothing at all.** A read that did not happen is not an observation that anybody
 left. Pinned by `TestPeers_FailedReadHoldsTheLastGoodFleet` and
@@ -147,7 +147,7 @@ left. Pinned by `TestPeers_FailedReadHoldsTheLastGoodFleet` and
 
 ## The read is unfiltered, and that buys three things
 
-No `WHERE` clause. The table holds one row per live replica plus a few corpses, has no secondary index by
+No `WHERE` clause. The table holds one row per live replica plus a few stale ones, has no secondary index by
 design, and is scanned whole either way — so a freshness predicate saves nothing and costs:
 
 1. every window becomes a value this package can change without touching SQL;
@@ -193,7 +193,7 @@ Two structural guards on top of the patience, so a wipe is not merely unlikely:
 - **Never self** (`classify` excludes it). A replica that deleted its own row is refreshed by nobody.
 
 Pinned by `TestPeers_PruneWaitsForAHealthyRun` and `TestPeers_PruneStandsDownAfterAGap` — the second
-verified sensitive: removing the gap's reset of the healthy run makes it delete the corpse immediately.
+verified sensitive: removing the gap's reset of the healthy run makes it delete the stale row immediately.
 
 ## Self-absence: counted in one divisor, never in the other
 
@@ -227,11 +227,15 @@ replica is the only writer of its own row, so that observation cannot be raced.
 ## `Rank` — a rendezvous score, fixed forever
 
 The rank is highest-random-weight hashing: each fresh row scores `rendezvousScore(engineID, shard)`, ties
-break on the lower id, and a replica's rank is how many counted rows outrank it. Rows flagged `zero_workers`
-(the owner's `Profile.ZeroWorkers`) are counted in `Replicas` but neither rank nor count as candidates, and
+break on the lower id, and a replica's rank is how many counted rows outrank it. Rows with `working=0` (the
+owner's `Profile.Working` false) are counted in `Replicas` but neither rank nor count as candidates, and
 `Rank` returns the rank together with that candidate count as one published pair - an owner derives how many
 slots to fill from the candidates, and a rank only means anything against the count it came from. Pinned by
-`TestPeers_ClassifyNeverRanksAZeroWorkersPeer`.
+`TestPeers_ClassifyNeverRanksAnIdlePeer`.
+
+**A zero `Profile` states a replica that is NOT working.** `New` seeds `Working: true`, so a Sonar never given
+a profile ranks normally, but `SetProfile` replaces the whole value: an owner that sets only the RTT would
+take itself out of every ranking. Always set `Working` alongside it.
 
 The `Profile` is written at registration and at a repair, **never by the beat**: it is a fact about the
 process, not a liveness signal, and the beat stays one fixed statement shape. Every replica reading the

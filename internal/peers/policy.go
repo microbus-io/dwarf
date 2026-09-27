@@ -28,9 +28,10 @@ type peer struct {
 	// dispatchAgeMs is how long ago the peer last proved it is actually serving this shard. A replica that
 	// has never dispatched carries the column's decades-stale default, so this reads as enormous.
 	dispatchAgeMs float64
-	// zeroWorkers is the peer's own statement that it is configured to run no steps. It keeps the peer out of
-	// the ranking and nothing else - it still counts in replicas, and the partition never reads it.
-	zeroWorkers bool
+	// working is the peer's own statement that it has workers and is taking on work. A peer that is not -
+	// configured to run no steps, or draining at shutdown - is kept out of the ranking and nothing else: it
+	// still counts in replicas, and the partition never reads it.
+	working bool
 }
 
 // windows are the three thresholds one classification applies, in milliseconds to match the ages the
@@ -85,10 +86,10 @@ type view struct {
 //     work in it.
 //
 // The candidates and the rank follow replicas, self absence included: a replica that cannot see its own row
-// still counts and ranks itself among the peers it can see, unless selfZeroWorkers says it may not dispatch.
+// still counts and ranks itself among the peers it can see, unless selfWorking says it is not working.
 // Over-claiming a dispatcher slot over-connects by one share until the row is repaired; under-claiming one
 // leaves the shard short of a dispatcher, and at one replica leaves it with none.
-func classify(rows []peer, self int64, selfZeroWorkers bool, shard int, w windows) view {
+func classify(rows []peer, self int64, selfWorking bool, shard int, w windows) view {
 	v := view{ordinal: -1}
 	selfFresh := false
 	selfScore := rendezvousScore(self, shard)
@@ -107,7 +108,7 @@ func classify(rows []peer, self int64, selfZeroWorkers bool, shard int, w window
 			continue
 		}
 		v.replicas++
-		if !p.zeroWorkers {
+		if p.working {
 			v.candidates++
 			if p.engineID != self && outranks(rendezvousScore(p.engineID, shard), p.engineID, selfScore, self) {
 				v.rank++
@@ -123,7 +124,7 @@ func classify(rows []peer, self int64, selfZeroWorkers bool, shard int, w window
 	}
 	if !selfFresh {
 		v.replicas++
-		if !selfZeroWorkers {
+		if selfWorking {
 			v.candidates++
 		}
 	}

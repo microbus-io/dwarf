@@ -38,7 +38,7 @@ import (
 //   - Replicas and Rank choose that shard's DISPATCHERS: the replicas ranked below dispatcherSlots(Replicas)
 //     split the shard's connection budget, because it belongs to the shard's database and N replicas each
 //     holding the whole budget would overshoot it N times over. Everyone else holds a small reader pool
-//     there, so the budget no longer divides by a count that grows with the fleet.
+//     there, so the budget divides by a count bounded by the shard's size rather than the fleet's.
 //   - Partition divides that shard's WORK - the residue class of step_id each replica selects - across the
 //     replicas that demonstrably serve it. A replica that does not dispatch a shard idles its piston there,
 //     stops stamping its dispatch evidence, and drops out of the partition with no rule of its own.
@@ -140,8 +140,8 @@ func (e *Engine) buildSonars() {
 			continue
 		}
 		s.SetProfile(peers.Profile{
-			RTT:         time.Duration(rtts[idx] * float64(time.Millisecond)),
-			ZeroWorkers: e.zeroWorkers(),
+			RTT:     time.Duration(rtts[idx] * float64(time.Millisecond)),
+			Working: !e.zeroWorkers(),
 		})
 		s.SetLogger(e.logger)
 		s.SetSeams(e.seams)

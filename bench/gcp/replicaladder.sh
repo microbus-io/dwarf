@@ -22,7 +22,7 @@
 #   2. FRESH DATABASE PER RUN - and here that is about dwarf_peers, not table bloat. A hard-killed
 #      engine leaves its registry row behind; because R is counted over a fresh window of 4x
 #      pingInterval and the engine id is random per restart, a replica starting within that window on
-#      the same database counts the corpse, halves its derived pool, and craters throughput (~180 vs
+#      the same database counts the leftover row, halves its derived pool, and craters throughput (~180 vs
 #      ~7,500 steps/s, measured in results/10-fanout-fix-degradation-20260722). A fresh database means
 #      an empty registry, which is the only way an arm's R is the R the script asked for.
 #   3. REP-MAJOR INTERLEAVE (1,2,4,8 / 1,2,4,8 / ...), so session drift hits every arm equally.
