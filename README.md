@@ -19,10 +19,15 @@ RPC, a message bus) or where your graphs live. You wire it to your world through
 interfaces, and it handles scheduling, state, durability, and recovery.
 
 ```go
+// Define the workflow:
+// a one-node graph whose "Hello" node runs the task at an endpoint URL, then ends.
 g := workflow.NewGraph("Greet")
 g.SetEndpoint("Hello", "http://example/hello") // node "Hello" dispatches to this endpoint URL
 g.AddTransition("Hello", workflow.END)
 
+// Wire URLs to what serves them. The engine knows graphs and tasks only by URL: the graph's URL
+// resolves to the graph, and each task's URL to the handler that runs it. TestProxy is an in-process
+// router; a production host maps the same URLs onto its own registry or transport.
 proxy := engine.NewTestProxy()
 proxy.HandleGraph("http://example/greet", g)
 proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
@@ -30,11 +35,13 @@ proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.F
     return nil
 })
 
+// Start an engine that reaches graphs and tasks through the proxy.
 eng := dwarf.NewEngineUnderTest(t.Name()) // SQLite in-memory, auto-dropped
 defer eng.Shutdown(ctx)
 eng.SetHost(proxy) // TestProxy implements the Host interface
 eng.Startup(ctx)
 
+// Run a flow of the graph by its URL, with initial state, and wait for its outcome.
 _, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil) // Run returns (flowKey, outcome, err)
 fmt.Println(out.State.GetString("greeting")) // hello ada
 ```
