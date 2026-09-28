@@ -13,13 +13,13 @@ providers below are injected separately. It has exactly two methods, both requir
 **THE ENGINE SENDS NOTHING TO ITS PEERS, and nothing may be added that does.** Replicas coordinate purely
 by reading the database they share - work discovery, `Await` wakes and fleet membership are all polled, on
 cadences the engine derives - so there is no inter-replica transport in the contract and no host obligation
-to provide one. Three signal kinds have existed here and all three were deleted after measurement, in this
-order: a per-step work doorbell (volume O(steps), and it bought no latency because every piston was already
-scanning at its cycle interval), a per-flow stop broadcast (the await latch's detector reads the shared
-rows on a tighter cadence than a broadcast could beat), and a fleet-membership nudge (peers re-read the
-registry every 250ms, which is faster than a broadcast converges). The rule that killed each: a signal may
-only ACCELERATE a convergence the database already guarantees, and once the poll is faster than the
-message, it accelerates nothing. Do not reintroduce one without showing it beats the poll it would replace.
+to provide one. Three signal kinds are ruled out by measurement: a per-step work doorbell (volume O(steps),
+and it buys no latency because every piston is already scanning at its cycle interval), a per-flow stop
+broadcast (the await latch's detector reads the shared rows on a tighter cadence than a broadcast could
+beat), and a fleet-membership nudge (peers re-read the registry every 250ms, which is faster than a
+broadcast converges). The rule behind each: a signal may only ACCELERATE a convergence the database already
+guarantees, and once the poll is faster than the message, it accelerates nothing. Do not add one without
+showing it beats the poll it would replace.
 
 The interface methods:
 
@@ -60,7 +60,7 @@ at `Create`, not per-request mutable.) See "Identity / baggage propagation".
 ### Backpressure is the task's or host's job, never the engine's
 
 The engine deliberately holds **no** backpressure machinery - no rate valve, no circuit breaker, no failure
-dispositions. An earlier design had all three; they were removed and must not return. The reason is structural:
+dispositions - and none of the three may be added. The reason is structural:
 the engine's only vantage is the **task URL**, and that is the wrong axis for every scarcity that actually causes
 backpressure.
 
@@ -85,13 +85,14 @@ one probe succeeds) for zero engine-side policy and no shared-state machinery to
 
 State is float64-domain, so an integer-shaped number beyond ±2^53 does not survive the JSON round trip and comes
 back silently rounded; and a NUL (`U+0000`) in a string is rejected by Postgres `JSONB`. Neither is guarded at
-ingress anymore - the former write-side storability guard (and its whole `internal/jsonx` package) was removed by
-deliberate decision (the two edge cases are rare, and the full rationale + workarounds are in `workflow/CLAUDE.md`).
-There is **no** 400 for either at any ingress point (`Create`/`Run`, `resume`, `Fork`'s overrides, `Continue`'s
-`additionalState`); a host handing an oversized integer or a NUL now gets a rounded value / a Postgres write
-failure rather than a clean 400. The host inputs are still normalized to a `workflow.State` at each door (via
+ingress, by deliberate decision (the two edge cases are rare, and the full rationale + workarounds are in
+`workflow/CLAUDE.md`). There is **no** 400 for either at any ingress point (`Create`/`Run`, `resume`, `Fork`'s
+overrides, `Continue`'s `additionalState`); a host handing an oversized integer or a NUL gets a rounded value / a
+Postgres write failure rather than a clean 400. The host inputs are still normalized to a `workflow.State` at each
+door (via
 `workflow.NewState`, which JSON-round-trips a map/struct - so `Continue`'s `additionalState` is canonicalized for
-reducer comparison, see "Continue" below), but that normalization only decodes; it does not range-check. If a guard is reintroduced, it must run on the **raw**
+reducer comparison, see "Continue" below), but that normalization only decodes; it does not range-check. A guard,
+if one is ever added, must run on the **raw**
 caller bytes *before* the decode (the decode rounds >2^53 to `float64`) and must **not** re-check the engine's own
 derived merges - a legitimate `ReducerAdd` sum past 2^53 stores and round-trips fine but marshals integer-shaped,
 so a naive re-check would falsely reject it.
@@ -110,13 +111,13 @@ an author-space entry task, bound retention (recall `Purge` deletes ≤4096 root
 loops). For a **pass-through host** that adds no policy of its own, the obligation flows through to the
 application using that host - it is not silently absorbed anywhere.
 
-Subgraph nesting depth is the one axis that was *also* a latent crash vector, now closed: `Fork` clones the
+Subgraph nesting depth is the one axis that is *also* a crash vector if handled carelessly: `Fork` clones the
 tree with an **explicit LIFO worklist** (`cloneTree` drives `cloneOneFlow` per flow), not recursion, so
-arbitrarily deep nesting costs O(1) goroutine stack and only one flow's clone state is live at a time. The
-former recursive `cloneSubtree` held every ancestor's clone state (including each flow's `graph`/`baggage`
-JSON) on the stack at once and, at pathological depth, could overflow the goroutine stack - fatal, since a Go
-stack overflow is *not* recoverable by `errors.CatchPanic`, unlike a host-call panic. Deep nesting now costs
-only bounded storage (one flow row + step rows per level), which falls back under the host-quota rule above.
+arbitrarily deep nesting costs O(1) goroutine stack and only one flow's clone state is live at a time. **Do not
+make the clone recursive:** a recursive walk holds every ancestor's clone state (including each flow's
+`graph`/`baggage` JSON) on the stack at once and, at pathological depth, overflows the goroutine stack - fatal,
+since a Go stack overflow is *not* recoverable by `errors.CatchPanic`, unlike a host-call panic. Deep nesting
+costs only bounded storage (one flow row + step rows per level), which falls back under the host-quota rule above.
 
 ### Configuration (`Set*` methods)
 
@@ -129,7 +130,8 @@ engine:
   `SetTimeBudget`, `SetDefaultPriority`. `SetTimeBudget`/`SetDefaultPriority` are read fresh at each `Create` (an
   existing flow keeps the budget/priority frozen at its own `Create`). Which replicas dispatch a shard, and so how its
   derived budget divides, is NOT a setter - it is **read** live from the shared `dwarf_peers` registry (see "Peer
-  discovery" and "Dispatchers" below), and `recomputePools` pushes each shard's recomputed size through the per-shard `sequel.DB` pool setters (hot/atomic);
+  discovery" and "Dispatchers" below), and `recomputePools` pushes each shard's recomputed size through the per-shard
+  `sequel.DB` pool setters (hot/atomic);
   the uniform override rides `ShardSet.SetMaxIdleConns`/`SetMaxOpenConns`. **The derived *worker* ceiling follows the
   pools, and EVERY path that changes a pool must re-derive it** (`recomputeWorkerCeiling`): the ceiling encodes how
   fast a completion storm drains through `M` connections, so a shrunken pool must never leave a stale, too-high bound
@@ -150,7 +152,8 @@ engine:
 For the observability providers specifically (`SetLogger`/`SetMeterProvider`/`SetTracerProvider`): the engine
 resolves the logger/tracer/meter once at startup (the logger feeds the worker hot path and is read lock-free; the
 meter registers an async gauge callback) and passes all three into `ShardSet.Open` (via `database.Config`), which
-wires them into every shard's sequel DB. Hot-swapping a provider on a live engine is deliberately unsupported: a half-hot version
+wires them into every shard's sequel DB. Hot-swapping a provider on a live engine is deliberately unsupported: a
+half-hot version
 that only re-pointed the DBs (sequel's setters are atomic/hot) but left the engine's own logger/tracer/metrics
 frozen would be inconsistent, and a full-hot version (atomic logger + tracer re-resolve + meter rebuild/Unregister)
 is real complexity for a need that does not arise in practice.
@@ -204,7 +207,8 @@ itself is an engine-side optimization derived per flow at dispatch from the froz
 `O(V+E)` function of the structure, computed once per flow rather than per step. The **subgraph-spawn** path
 validates identically (a nil/invalid child graph fails the caller step like any `LoadGraph` error). One
 consequence for graph authors: a graph with no explicit transition to `END` (relying on "no matching
-transition completes the flow") is rejected at `Create` - `Validate` requires an explicit `END` edge. `FlowOptions.ThreadKey` (optional) joins the new flow into an existing thread
+transition completes the flow") is rejected at `Create` - `Validate` requires an explicit `END` edge.
+`FlowOptions.ThreadKey` (optional) joins the new flow into an existing thread
 (any **root** flowKey in that thread; a bad/stale key 404s, and a **subgraph-child key 400s** - see "Subgraph
 keys are read-only"). The engine has **no creation-time delay** (no `StartAt`):
 every flow runs as soon as it is created. A flow that should wait runs author-side - an entry **gate** task that
@@ -292,7 +296,8 @@ either the insert sees the new watermark, or `cancel()` waits and its mark then 
 under cancellation. Pinned by `engine/cancelgap_test.go` and by `ran_covered_with_onerror`'s handler successor.
 
 **Do not compare timestamps for this.** A flow-level cancel time tested against the source's `started_at` fails
-because three dialects store milliseconds: a fast source step and the `Cancel` share a millisecond, the strict comparison reads
+because three dialects store milliseconds: a fast source step and the `Cancel` share a millisecond, the strict
+comparison reads
 false and the `Cancel` is lost - measured at ~1 in 4 runs of `TestCancelInTransitionGap` on SQLite. An inclusive
 comparison only moves the tie onto the handler, cancelling a flow that recovered. The ordering needed is
 "inserted before the `Cancel`", which a per-shard auto-increment id gives exactly and a clock does not.
@@ -310,9 +315,9 @@ error.
 
 *A subgraph, retry or interrupt request made by a covered step is honored, not intercepted.* The mark stays on
 the row, so the next claim catches it: a rewound retry is preempted a backoff later, an interrupted step is
-preempted when resumed. Intercepting each request kind at its own write (a CASE on the park, on the rewind, a
-rollback on the interrupt chain) was built and discarded: it multiplied dialect branches at four sites, and its
-conditional writes are the class that breaks the MySQL fence (see "Lease fencing"). The cost of honoring is
+preempted when resumed. Do not intercept each request kind at its own write (a CASE on the park, on the rewind,
+a rollback on the interrupt chain): built, it multiplied dialect branches at four sites, and its conditional
+writes are the class that breaks the MySQL fence (see "Lease fencing"). The cost of honoring is
 latency - a rare `Cancel` landing mid-task on a step that then arms a subgraph lets that child run to completion
 before its caller is redirected - and a `Terminate` covers the rare long child. (Not a second `Cancel`: a
 flow is cancelled once, and a repeat call is a no-op - see "one cancel per flow" on `cancel`.)
@@ -446,7 +451,8 @@ cohort accounting (no limbo) until every failed branch is fixed. **A branch lost
 exactly like a failed one** - Fork has one rewind point, so it re-runs the chosen step and inherits every sibling's
 recorded loss - and a fork whose only remaining losses are cancelled branches resolves `cancelled`. Each cloned
 flow therefore copies its origin's `cancel_reason`, so such a fork reports the reason for the cancellation it
-inherited rather than a reasonless one - but NOT its `cancel_watermark` (see **Cancel**). Re-running every lost branch in one fork would need multiple rewind points
+inherited rather than a reasonless one - but NOT its `cancel_watermark` (see **Cancel**). Re-running every lost
+branch in one fork would need multiple rewind points
 in the cohort recount above; it is deliberately not offered.
 
 *Caveat:* the cloned-prefix steps keep the **origin's** timestamps (the `INSERT…SELECT` copies `created_at`/
@@ -482,21 +488,20 @@ state; a workflow author wanting narrower carryover scrubs with an entry adapter
 thread's policy** (priority/fairness/budget/baggage) from the latest turn; a caller wanting different policy
 uses `Create` with `FlowOptions.ThreadKey` (explicit policy, same thread).
 
-*`additionalState` is canonicalized at the door, because reducers compare MARSHALLED bytes.* A reducer
-dedupes (`union`) and overwrites (`merge`) on the marshalled form of its operands, and those bytes are
-canonical only for a **decoded** value: Go sorts a map's keys but marshals a **struct's** fields in
-*declaration* order, so a struct a caller re-contributes compares byte-unequal to its own decoded twin (the
-sorted-key map a prior turn stored). Every other reducer input arrives decoded from the
-database (the fan-in merge, `computeFinalState`) - which is what makes their byte comparison sound - but
-`Continue`'s `additionalState` is the caller's **raw Go value** and skips the database entirely. Unfixed, a
-caller re-contributing an element already in the thread's state *as a struct* produced a second, byte-different
-spelling of it and `union` kept **both** (pinned by `fixtures/continuecanonicalflow_test.go`). So
-`continueFlow` passes it through `workflow.NewState`, which JSON-round-trips a map or struct (it has **no**
-short-circuit for a raw `map[string]any` - that fast path was removed precisely so this canonicalizes), decoding
-it exactly like a value read from a column. Done outside the transaction so a lock-contention retry re-runs the
-closure and this stays invariant - keeping *reducers only ever see decoded values* an invariant rather than a
-coincidence. This is why the fix belongs here and not in `reduceUnion`: it covers **every** reducer, not just the
-one whose symptom was noticed.
+*`additionalState` is canonicalized at the door, because reducers compare DECODED values.* `union` dedupes
+with `reflect.DeepEqual` (`doUnion` in `workflow/reducers.go`), and `DeepEqual` between a Go **struct** and its
+own decoded twin (the `map[string]any` a prior turn stored) is **false** - the Go TYPE differs, whatever the
+bytes. Key order plays no part. Every other reducer input arrives decoded from the database (the fan-in merge,
+`computeFinalState`) - which is what makes the comparison sound - but `Continue`'s `additionalState` is the
+caller's **raw Go value** and skips the database entirely. Passed through raw, a caller re-contributing an
+element already in the thread's state *as a struct* produces a second copy of it and `union` keeps **both**
+(pinned by `fixtures/continuecanonicalflow_test.go`). So
+`continueFlow` passes it through `workflow.NewState`, which JSON-round-trips a map or struct, decoding it exactly
+like a value read from a column. **Do not give `NewState` a short-circuit for a raw `map[string]any`** - that fast
+path skips the round trip, and this canonicalization depends on it. Done outside the transaction so a
+lock-contention retry re-runs the closure and this stays invariant - keeping *reducers only ever see decoded
+values* an invariant rather than a coincidence. This is why it belongs here and not in `doUnion`: it covers
+**every** reducer, not just `union`.
 
 *Concurrent Continue is serialized by a thread-anchor lock, so exactly one wins.* The latest-turn read
 (`find latest non-fork flow`), the completed-check, and the new-turn insert run in **one transaction**
@@ -516,9 +521,9 @@ is, because the new turn is inserted `running` and only completes after its entr
 `fixtures/concurrentcontinueflow_test.go`). The insert half is shared with `Create`/subgraph spawn via
 `insertFlowTx` (one copy of the flow+entry-step INSERTs); `Continue` differs only by wrapping it in the
 lock-and-recheck transaction. Edge case: if the thread anchor row (`flow_id == thread_id`) was `Delete`d while
-later turns remain, the write-first UPDATE matches no row and the serialization degrades to the old racy
-behavior for that thread - still safe, just non-deterministic; continuing via a deleted anchor *key* already
-404s, so this only affects continuing via a surviving later-turn key on a thread whose original root was removed.
+later turns remain, the write-first UPDATE matches no row and the serialization degrades to the unlocked race
+above for that thread - still safe, just non-deterministic; continuing via a deleted anchor *key* already
+404s, so this only affects continuing via a surviving later-turn key on a thread whose original root was deleted.
 
 **Run** - Create + Await in one call, returning `(flowKey string, *workflow.FlowOutcome, error)` -
 the new flow's key alongside its outcome (the key is the flow's identity, not part of the outcome; callers
@@ -527,9 +532,8 @@ returns `flowKey == ""` with a nil outcome (no flow exists); an **await** failur
 ctx expiring first) **leaves the flow running** and returns its **`flowKey`** with a nil outcome and the
 error, so the caller retains a handle. `Run` never terminates the flow on the caller's behalf - tearing down
 a healthy durable flow just because the caller stopped waiting is an availability footgun; a caller that
-wants teardown-on-timeout calls `Terminate` itself. (This is the corrected behavior of the former bug where
-`Run` terminated the just-started flow with the already-expired await ctx - so the termination silently never
-ran *and* the intent to tear down a healthy durable flow was itself wrong.)
+wants teardown-on-timeout calls `Terminate` itself. (Terminating from inside `Run` would also be issued on the
+already-expired await ctx, so the termination would silently never run.)
 
 **Await** - Blocks until the flow stops (see "Await" below).
 
@@ -549,7 +553,8 @@ A subgraph child flow has a real flowKey (a task inside it reads its own via `fl
 `IncludeSubgraphs` surfaces it), but that key is a **read** handle, not a write unit: a child cannot be mutated
 independently because its parent is parked waiting on it, and the unit for any lifecycle change is the whole tree.
 So the **lifecycle mutations reject a subgraph-child key with 400** (`surgraph_flow_id != 0`): `Resume`, `Terminate`,
-`Delete`, `Continue`, and `Create` with `FlowOptions.ThreadKey` (in `resolveThread`). The rejection is folded into each operation's existing flow-row SELECT (no extra round-trip;
+`Delete`, `Continue`, and `Create` with `FlowOptions.ThreadKey` (in `resolveThread`). The rejection is folded into
+each operation's existing flow-row SELECT (no extra round-trip;
 the 404-not-found check still takes precedence). The caller addresses the tree by the **root** key instead - which
 it always holds (it came from `Create`/`Run`/`Continue`, or from `List` of roots). The rationale per op: `Resume`/
 `Terminate` are inherently tree-wide (they walk up to the root and down), so a child key is just a confusing alias for
@@ -558,7 +563,8 @@ the root; `Delete` cascades *down* only, so deleting a child directly would stra
 not a thread turn. **`Create(ThreadKey: childKey)` is the subtlest of the five** - it does not mutate the child at
 all, it *joins its thread*, and a child gets its own thread precisely so it cannot contaminate the parent's
 continuation chain: the new flow would be a top-level root grouped under a subgraph's thread (polluting `List` by
-thread), and a later `Continue` of it would build on the subgraph's turns. **Reject, not silently widen** - widening `Delete(childKey)` into a whole-tree delete is a
+thread), and a later `Continue` of it would build on the subgraph's turns. **Reject, not silently widen** - widening
+`Delete(childKey)` into a whole-tree delete is a
 surprising blast radius, so the engine makes the caller name the root.
 
 What a subgraph-child key *is* good for: **introspection** - `Snapshot`, `Fingerprint`, `History`, `HistoryMermaid`,
@@ -607,9 +613,9 @@ the host/author, matching the engine's "carry facts, not policy" posture (baggag
 ### Execution Model
 
 The engine uses a **queue-as-cache execution model** with a configurable worker pool (`SetWorkers`) and **one
-refiller goroutine per shard** (decoupled 2026-07-19; the former single merged refiller fanned out through
-`OnEach`, a barrier whose max-over-shards wait was measured at 2.02x by 6 shards on the path that is the
-engine's throughput ceiling). The in-memory `candidates.Cache` is bounded, **partitioned by shard** (each
+refiller goroutine per shard** (never one merged refiller fanning out through `OnEach`: that is a barrier
+whose max-over-shards wait measured 2.02x by 6 shards, on the path that is the engine's throughput ceiling).
+The in-memory `candidates.Cache` is bounded, **partitioned by shard** (each
 refiller wholesale-replaces its own partition; workers pop from the lowest-floor partition - see
 `internal/candidates/CLAUDE.md`), and holds *hints*, not ownership. Each worker pops a candidate and calls
 `processStep`:
@@ -628,13 +634,13 @@ claim time rather than dispatched, so a parked step in a stale cache entry never
 
 **Selection (two-level priority + fairness), in three phases, one PISTON per shard.** The pistons, not
 the workers, decide *what* runs. Each shard's piston cycles against its own database on its own clock,
-with **no barrier anywhere** between shards (a merged pass returned when the slowest shard did - an
+with **no barrier anywhere** between shards (a merged pass returns when the slowest shard does - an
 order-statistics tax measured at 2.02x by 6 shards, on the path that is the engine's throughput ceiling).
 Each piston runs **two independently paced loops** (`internal/pipeline`), meeting only at the planner: a
 **Tallier** (`sleep -> tallying`) and a **Supplier** (`sleep -> planning -> fetching -> pushing`). They are
 separate because the band scan costs O(due rows at the band) and therefore grows with the backlog, so
-fusing them let the scan set the rate at which candidates reached the workers - supplying least exactly
-when the backlog was deepest (measured: the scan was ~90% of a 634ms cycle at ~500k pending, capping supply
+fusing them lets the scan set the rate at which candidates reach the workers - supplying least exactly
+when the backlog is deepest (measured fused: the scan was ~90% of a 634ms cycle at ~500k pending, capping supply
 at 353 steps/s against ~3,340 for a Supplier alone at 67ms). What goes stale instead is the fairness tally,
 which is the cheap thing to be stale about; strict *priority* is the real concession, since a peer-created
 better band is seen up to one Tallier iteration late. The full accounting, and the two traps the split
@@ -647,7 +653,7 @@ band - the key's due **count CAPPED at cache capacity** (`MAX(rn)` under a `rn <
 `fairness_weight` of its *oldest* due step (`ROW_NUMBER()=1`). The band is a
 `priority=(SELECT MIN(priority) ... due)` subquery, so band and aggregates are self-consistent within the
 statement. (2) **Global merge + weighted pick** (`internal/planner`): the shard's tally is recorded in the
-planner - a shared map holding each shard's LAST report, which is what replaced the barrier - and the plan
+planner - a shared map holding each shard's LAST report, which is what makes a barrier unnecessary - and the plan
 is computed over all of them: global minimum band (strict priority is cluster-wide; worse-band shards
 contribute nothing), counts summed per key, the globally-oldest step's weight winning, then repeatedly
 weighted-random pick a key (Efraimidis-Spirakis over the *keys*, not the rows) until the plan reaches
@@ -665,21 +671,19 @@ per-shard counts, largest-remainder rounding, deterministic - and the piston fet
 (at most its slice's max per-key demand, oldest first per key), replaying the plan's interleave for its
 occurrences. Intra-key ordering across shards is approximate below the head.
 
-**A cycle is UNCONDITIONAL, and that is what removed an entire class of liveness machinery.** There is no
-trigger, no nudge, and no wake channel: a piston scans on its period whether or not anything happened.
-Four mechanisms existed only to decide *when* to scan, and all four are gone with the trigger - the
-per-shard single-slot `refillTriggers`, the `refillAboveBand` census watch (`awaitBandRelease`), the
-`refillStarved` self-re-arm, and the `refillIdleInterval` cap on parking. Each existed because a parked
-refiller could only be woken by shard-LOCAL activity, so a shard holding work nothing local had announced
-would sleep; a cycle that always runs cannot be in that state. **Do not reintroduce a trigger to shave
-latency** - what it would shave is bounded by one interval, and the doorbell already covers the case that
-matters (see below).
+**A cycle is UNCONDITIONAL, and that is what makes an entire class of liveness machinery unnecessary.** There
+is no trigger, no nudge, and no wake channel: a piston scans on its period whether or not anything happened.
+A triggered refiller needs machinery just to decide *when* to scan - single-slot triggers, a census watch on
+a better band, a starvation self-re-arm, a cap on parking - because a parked refiller can only be woken by
+shard-LOCAL activity, so a shard holding work nothing local announced would sleep; a cycle that always runs
+cannot be in that state. **Do not add a trigger to shave latency** - what it would shave is bounded by one
+interval, and the doorbell already covers the case that matters (see below).
 
 **Strict priority across shards: no spill, no back-off needed.** A shard whose own minimum band sits above
 the global minimum plans an **empty slice** and fetches nothing; its partition is cleared, because hints at
-a band it no longer holds due work at are dead. Under the old trigger design this needed its own outcome
-and a census watch to avoid spinning; now it is simply a cycle that fetched nothing, and the next one
-re-evaluates on its own. The same is true of a shard AT the global band that wins zero slots because a
+a band it no longer holds due work at are dead. It is simply a cycle that fetched nothing, and the next one
+re-evaluates on its own - no outcome of its own, no watch to avoid spinning. The same is true of a shard AT the
+global band that wins zero slots because a
 capacity-bound plan gave them all to shards holding more (or older) of the planned keys. `planner.Plan`
 deliberately does not say WHICH of those happened - every case takes the same action, hold no candidates.
 
@@ -689,9 +693,9 @@ peer then computes the same global minimum, finds none of its own keys there, an
 forever, waiting on a shard that will never report again. So the pipeline calls `planner.Clear` on a scan
 error. Participation is **declared, never inferred**: there is no TTL and no timeout, because the reports
 come from this replica's own per-shard workers over a fixed shard set - the caller *knows* its scan
-failed, and a clock cannot tell a dead shard from a slow one anyway. (The old census carried a
-`censusTTL()` scaled to the slowest observed pass precisely to guess at that; declaring it retires the
-guess.) A merely SLOW shard says nothing, keeps its tally, and stays counted - correct, since it is alive
+failed, and a clock cannot tell a dead shard from a slow one anyway. **Do not add a TTL scaled to the
+slowest observed pass** to guess at liveness; declaring it makes the guess unnecessary. A merely SLOW shard says
+nothing, keeps its tally, and stays counted - correct, since it is alive
 and its last report is still the best information anyone has.
 
 `created_at` (read as an age, comparable across shards) does two things per
@@ -710,104 +714,89 @@ is proportional to weight and independent of backlog depth or shard layout. Stri
 higher-priority band starves lower bands by design.
 
 **The wire/heap cost scales with fairness-key CARDINALITY, not with the backlog, and this is load-bearing.** The
-three-phase split exists to keep that promise. Its history is three stages:
+three-phase split exists to keep that promise, and the two simpler shapes it rules out are both traps:
 
-- **Unbounded scan** (the original): the band query returned every due row of every key, each allocated as a
-  a Go struct, only to be discarded down to `capacity` by the pick. Cost grew with the **backlog**, so under a
-  deep one - the case the refiller exists for - it re-read hundreds of thousands of rows on every pass.
-- **Per-key cut** (the intermediate fix): a `ROW_NUMBER() OVER (PARTITION BY fairness_key ...)` cut at `capacity`
-  bounded it to `capacity` rows *per key*. That killed the backlog-depth dependence but not the **cardinality** one:
-  with thousands of tenants at the band it still returned up to `capacity * keys` rows (e.g. 768 x thousands) to pick
-  only `capacity`. A plain global `LIMIT n` was never an option - it would let one tenant's old backlog fill the
-  window and starve every other key (a fairness bug traded for the waste).
-- **Three-phase** (current): phase 1 collapses each key to *one* aggregate row (count + oldest age/weight) server-
-  side, so the scan returns O(distinct keys) rows; phase 2 picks the per-key demand from those aggregates; phase 3
-  fetches only the selected steps. Total rows crossing the wire are bounded by `capacity^2` (at most `capacity`
-  distinct keys chosen, each fetched at the uniform per-key cap `<= capacity`) - **independent of key cardinality**.
-  At high cardinality the per-key cap is ~1, so the fetch is ~`capacity`.
+- **Do not return every due row and pick in Go.** Each row is allocated as a Go struct only to be discarded down to
+  `capacity` by the pick, so cost grows with the **backlog** - under a deep one, the case the refiller exists for,
+  it re-reads hundreds of thousands of rows on every pass.
+- **Do not stop at a per-key `ROW_NUMBER() ... rn <= capacity` cut returning rows.** It bounds rows *per key* but
+  not the **cardinality** term: with thousands of tenants at the band it returns up to `capacity * keys` rows (e.g.
+  768 x thousands) to pick only `capacity`. And a plain global `LIMIT n` is not an option at all - it lets one
+  tenant's old backlog fill the window and starve every other key (a fairness bug traded for the waste).
 
-The uniform per-key fetch cap (phase 3's `maxNeeded`, not each key's exact demand) is a deliberate simplicity choice:
-an exact per-key cap would need a per-key `VALUES`/`LATERAL` join, non-trivial across the four SQL dialects, to shave
-an over-fetch that only appears under extreme weight skew among many keys - the low-cardinality regime that never had
-a scaling problem. The uniform cap stays complete for every key (a key's globally-oldest N steps sit at most N on any
-one shard, so the per-shard `rn<=maxNeeded` cut captures them all; the cross-shard merge then sorts by age). The
-resulting batch is *identical* to what the earlier fully-materialized pick produced. Pinned by
+So phase 1 collapses each key to *one* aggregate row (count + oldest age/weight) server-side, so the scan returns
+O(distinct keys) rows; phase 2 picks the per-key demand from those aggregates; phase 3 fetches only the selected
+steps. Total rows crossing the wire are bounded by `capacity^2` (at most `capacity` distinct keys chosen, each
+fetched at the uniform per-key cap `<= capacity`) - **independent of key cardinality**. At high cardinality the
+per-key cap is ~1, so the fetch is ~`capacity`.
+
+The uniform per-key fetch cap (phase 3's `perKey`, not each key's exact demand) is a deliberate simplicity choice:
+an exact per-key cap would need a per-key limit carried into the join for each key, to shave an over-fetch that only
+appears under extreme weight skew among many keys - the low-cardinality regime that never had a scaling problem. The
+uniform cap stays complete for every key (a key's globally-oldest N steps sit at most N on any one shard, so a
+per-shard cap of N captures them all), and the plan's slice rule then assigns each shard its share. Pinned by
 `TestRefillScan_BoundedPerFairnessKey` (one aggregate row per key, the per-key fetch cut, oldest-first).
 
-**The phase-1 scan count is CAPPED, not exact - the three-phase split fixed WIRE cost, this fixes SERVER
-SCAN cost.** The three-phase split bounds the *rows crossing the wire* to `capacity^2`, but phase 1's
-server-side scan was still **O(backlog)**: `COUNT(*) OVER (PARTITION BY fairness_key)` must read every due
-row of a key to count it. That is invisible on a fragmented backlog (many tiny keys) but catastrophic on a
-**single-key flood** - a `forEach` fan-out's N branches all inherit the flow's `fairness_key`, so a 3M-way
-fan-out is *one* key with 3M due steps, counted in full **every refiller pass**. Measured (`engine/refillfetchscaling_test.go`):
-~15-23s per pass at 3M on Postgres (→ the ~99s seen on a loaded rig), which stalls dispatch fleet-wide.
+**The phase-1 scan count is CAPPED, not exact.** The three-phase split bounds the *rows crossing the wire* to
+`capacity^2`; the count bounds what phase 1 reports. **Do not count with `COUNT(*) OVER (PARTITION BY
+fairness_key)`:** it adds a second full window-aggregation pass over every due row of a key, and a single-key flood
+- a `forEach` fan-out's N branches all inherit the flow's `fairness_key`, so a 3M-way fan-out is *one* key with 3M
+due steps - pays it on **every refiller pass**. Measured on Postgres at 3M: ~15-23s per pass (~99s on a loaded
+rig), which stalls dispatch fleet-wide.
 
-The fix: the tally `Count` is now `min(count, capacity)` - computed as `MAX(rn)` under a `rn <= capacity`
-cut (`piston.ScanBand`), never `COUNT(*) OVER`. **The cap is LOSSLESS, and this is the whole point:**
-the planner builds a plan of at most `capacity` slots, so a single key can be picked at most `capacity`
-times, and the per-key fetch cap is `<= capacity`
-too. So a count above `capacity` is indistinguishable from `capacity` for every downstream consumer. **This is
-NOT the forbidden "approximate count"** (below): an approximation is wrong in *either* direction and distorts
-fairness; a cap is *exact* where it matters (`count < capacity`) and *saturated-correct* above it. The oldest
-step's age/weight still come from the `rn=1` row (`MAX(CASE WHEN rn=1 ...)`); `MAX(priority)` returns the band
-(all inner rows are at the min band).
+The tally `Count` is `min(count, capacity)` - computed as `MAX(rn)` under a `rn <= capacity` cut
+(`piston.ScanBand`). **The cap is LOSSLESS, and this is the whole point:** the planner builds a plan of at most
+`capacity` slots, so a single key can be picked at most `capacity` times, and the per-key fetch cap is
+`<= capacity` too. So a count above `capacity` is indistinguishable from `capacity` for every downstream consumer.
+**This is NOT the forbidden "approximate count"** (below): an approximation is wrong in *either* direction and
+distorts fairness; a cap is *exact* where it matters (`count < capacity`) and *saturated-correct* above it. The
+oldest step's age/weight still come from the `rn=1` row (`MAX(CASE WHEN rn=1 ...)`); `MAX(priority)` returns the
+band (all inner rows are at the min band). Pinned by `TestPiston_ScanBandCapsCountAtCapacity`.
 
-**The cross-dialect behavior is load-bearing - `rn <= cap` early-stops ONLY on Postgres 15+.** The `rn <= N`
-cut becomes a `WindowAgg` **run condition** (an executor early-stop) *only* on PostgreSQL 15+ (measured:
-`Run Condition: (row_number() OVER w1 <= '4608')`). MySQL 8, SQL Server, and SQLite have **no** equivalent -
-they compute the window over all rows and filter after. So off-Postgres the scan is still O(backlog); the win
-there is *only* from dropping the second window-aggregation pass (`COUNT(*) OVER`). It is still a win
-everywhere (measured: PG flood 15.3s→2.2s @3M; PG fragmented 1.47s→0.76s; SQLite flood 4.6s→3.2s), just for
-different reasons. **Even on Postgres it is not sub-linear:** `PARTITION BY` resets `row_number`, so PG cannot
-terminate the scan of a *single* flooded partition (it must keep scanning in case another partition begins) -
-the run condition skips per-partition *output* past cap, not the scan. Truly sub-linear phase 1 needs distinct-
-key enumeration (skip-scan: PG18+, or a portable recursive-CTE loose index scan) - deliberately **deferred**
-(not portable, and O(backlog)-with-a-small-constant is acceptable). The **correctness** of the cap depends on
-none of this; only the flood's *speed* does.
+**The cap bounds the reported COUNT, not the SCAN, on every dialect - Postgres included.** Dropping the second
+window pass is a real win everywhere (measured: PG flood 15.3s→2.2s at 3M; PG fragmented 1.47s→0.76s; SQLite flood
+4.6s→3.2s), but the scan stays O(due rows at the band). PostgreSQL 15+ turns the `rn <= N` cut into a `WindowAgg`
+**run condition** (`EXPLAIN` prints `Run Condition: (row_number() OVER w1 <= ...)`), but with `PARTITION BY`
+present the node stops *evaluating* past the cut and still pulls every tuple to find the partition boundary; MySQL
+8, SQL Server and SQLite have no equivalent at all. The measurement and the rest of the argument are in
+`internal/piston/CLAUDE.md`. Truly sub-linear phase 1 needs distinct-key enumeration (skip-scan: PG18+, or a
+portable recursive-CTE loose index scan) - deliberately **deferred** (not portable, and O(backlog)-with-a-small-
+constant is acceptable). The **correctness** of the cap depends on none of this; only the flood's *speed* does.
 
-*Aurora / managed variants:* Aurora PostgreSQL runs the **stock PG planner/executor** (Aurora replaces only
-the storage layer), so the run condition is present **iff the Aurora PG major version is >= 15** - verify with
-`EXPLAIN` (look for `Run Condition`). Aurora **Limitless** (distributed) is unverified and a *poor fit* anyway
-- dwarf already shards at the application layer (`ShardSet`), so a dwarf shard on Limitless is double-sharded,
-and whether the run condition survives its distributed planner is unknown. **Do not assume; `EXPLAIN` on the
-actual target.** Where the run condition is absent, a single-key flood is O(backlog) per pass (the constant is
-one scan, not the old two), which is why the cap is still the right change even there.
+*Aurora / managed variants:* Aurora PostgreSQL runs the **stock PG planner/executor** (Aurora replaces only the
+storage layer), so it behaves as the matching PG major version - verify with `EXPLAIN`. Aurora **Limitless**
+(distributed) is unverified and a *poor fit* anyway - dwarf already shards at the application layer (`ShardSet`),
+so a dwarf shard on Limitless is double-sharded, and its distributed planner is unknown territory. **Do not
+assume; `EXPLAIN` on the actual target.**
 
-**Why the sibling phase-3 window (`piston.FetchSteps`) was deliberately LEFT ALONE.** Phase 3's
-`ROW_NUMBER() OVER (PARTITION BY key) WHERE rn<=perKey` has the *same* run-condition dependency. On Postgres 15+
-it already early-stops (measured 2ms on a 3M flood), so a per-key `ORDER BY ... LIMIT` rewrite is **no faster**
-- and it would replace one query with a **UNION-ALL branch per chosen key**, which hits SQLite's
-`SQLITE_MAX_COMPOUND_SELECT` (500-term) wall and was measured at **121s** on a 500k-key fragmented backlog
-(vs the window's 276ms). On MySQL/SQL Server the phase-3 window *is* O(backlog) for a flood and a per-key
-`LIMIT`/`TOP` (which the executor honors as a hard early-stop on every engine, unlike `rn<=N`) **would** help -
-a gated (few chosen keys) + chunked (`<=500` UNION branches / `<=900` IN-keys) hybrid was designed for that,
-then **deferred** as unneeded for the recommended Postgres deployment. **Do not revive the phase-3 rewrite
-without a MySQL/SQL Server flood workload showing it binds** (and if you do, it must be gated + chunked - an
-unconditional UNION is a 121s footgun on the fragmented regime and on SQLite tests).
+**Phase 3 (`piston.FetchSteps`) is dialect-split, and the split is not optional.** On pgx and mssql each chosen key
+is fetched by a `LIMIT`/`TOP` inside a `CROSS JOIN LATERAL`/`CROSS APPLY` over the keys passed as ONE json bind, so
+the index walk stops after `perKey` rows per key - measured 400,000 rows read (64.4ms) with the window shape against
+32 (0.25ms) with the lateral. mysql (which must also run on MariaDB, which has no lateral join) and sqlite keep the
+window shape and its O(due rows at the band) cost. **Do not fetch with a UNION-ALL branch per chosen key**: it hits
+SQLite's `SQLITE_MAX_COMPOUND_SELECT` (500-term) wall and measured **121s** on a 500k-key fragmented backlog against
+the window's 276ms. The dialect table, the MySQL collation trap and the bind-count bound are in
+`internal/piston/CLAUDE.md`.
 
-Reproduce/measure any of the above with `engine/refillfetchscaling_test.go` (opt-in: `DWARF_BENCH_ROWS`;
-targets a real DB via `SEQUEL_TESTING_DSN`; `DWARF_BENCH_EXPLAIN=1` prints the plans).
+**The work doorbell is PURELY LOCAL - it reaches this replica's candidate cache and nothing else. Do not
+broadcast it to peers** (one message per step per peer), and the reasoning is worth keeping because the idea
+re-suggests itself - a broadcast was measured and:
 
-**The work doorbell is PURELY LOCAL - it reaches this replica's candidate cache and nothing else.** It used to
-also broadcast to peers (op `enqueue`, one message per step per peer, plus a `{0,0}`-sentinel one on every
-flow completion). That broadcast was **removed**, and the reasoning is worth keeping because the idea
-re-suggests itself:
-
-- **It bought no latency where it cost the most.** Under load every peer's refiller is already scanning at
-  its derived cycle interval (~67ms), so the doorbell only ever beat a scan that was about to happen anyway.
-- **It cost a round-trip on every receiver.** The inbound path had to resolve the announced step's `priority`
+- **It buys no latency where it costs the most.** Under load every peer's refiller is already scanning at
+  its derived cycle interval (~67ms), so the doorbell only ever beats a scan that was about to happen anyway.
+- **It costs a round-trip on every receiver.** The inbound path must resolve the announced step's `priority`
   and `not_before` with a PK lookup - the exact round-trip `enqueueStepDue` exists to avoid locally - R-1
   times per step.
-- **It head-inserted UNPARTITIONED**, so a peer could offer a step outside its residue class and race the
-  owner to the claim CAS (measurable as `dwarf_steps_claim_lost` scaling with R).
+- **It head-inserts UNPARTITIONED**, so a peer can offer a step outside its residue class and race the
+  owner to the claim CAS (measured as `dwarf_steps_claim_lost` scaling with R).
 
-What replaced it is that every piston cycles **unconditionally** on its own period: a peer discovers work
+Instead every piston cycles **unconditionally** on its own period: a peer discovers work
 by scanning, bounded, with no message at all. The consequence to hold in mind when
 reading the origination sites: a step created here is offered to **this replica's cache only**, so if this
 replica cannot serve it (its partition is non-empty, and the step falls in a peer's residue class) the step
-waits for that peer's next scan. If a per-step peer signal is ever revived it must be coalesced and
-payload-free ("shard S has work", rate-limited), never per-step - and it would first have to beat the
-cycle interval it is trying to shorten, which is the bar every removed signal failed.
+waits for that peer's next scan. Any peer work signal must be coalesced and payload-free ("shard S has
+work", rate-limited), never per-step - and it would first have to beat the cycle interval it is trying to
+shorten, which is the bar every signal measured so far has failed.
 
 Pinned by `TestSignals_VolumeDoesNotScaleWithSteps`, which asserts on the emitted **op names** rather than a
 count: a per-step broadcast reintroduced under any new op name fails it.
@@ -832,13 +821,12 @@ admission bar oscillates as a better-banded arrival passes through.
 Admissions are counted as `dwarf_steps_offered` and subtracted from the refiller's discard signal, so waste
 stays attributed to whoever caused it.
 
-**An EMPTY partition ADMITS the arrival, and reversing that is what makes a fixed-cadence refiller viable.**
-It used to decline (request a scan, cache nothing), reasoning that an arbitrary-priority step must not jump
-an idle replica's queue - an inversion that was genuinely observed. That held only while the single-slot
-trigger let the refiller answer the decline within a fraction of a cycle. It does not survive the trigger's
-removal: a sequential chain holds exactly one pending step at a time, so its partition is empty at *every*
-hop, and declining costs each hop a uniformly-random fraction of the cycle interval - half on average, all
-of it at worst (~330ms over a 10-step flow at the derived ~67ms).
+**An EMPTY partition ADMITS the arrival, and that is what makes a fixed-cadence refiller viable.** Do not
+make it decline (request a scan, cache nothing) on the reasoning that an arbitrary-priority step must not jump
+an idle replica's queue. Declining is only affordable when something answers the decline within a fraction of
+a cycle, and nothing does: a sequential chain holds exactly one pending step at a time, so its partition is
+empty at *every* hop, and declining costs each hop a uniformly-random fraction of the cycle interval - half on
+average, all of it at worst (~330ms over a 10-step flow at the derived ~67ms).
 
 *This is not a fairness exception, and the framing matters:* the plan grants a fairness key a share of the
 batch **for the cycle**, not a single dispatch, so a successor taking the slot its predecessor just vacated
@@ -852,22 +840,22 @@ loaded fixtures gain most from it (`completionraceflow` 2.05x, `soakflow` 1.84x,
 because a cycle supplies only 1.04-1.47x ahead of consumption, so under load the cache is shallow and
 partitions drain to empty constantly. See `internal/candidates/CLAUDE.md` for the table.
 
-**The priority-preempting head-insert that used to sit beside it is GONE.** It let a strictly-better band
-jump the queue so the first urgent step did not wait a cycle, at the price of a bounded fairness bypass. It
-was removed after measuring `fixtures/crossshardpriorityflow_test.go` - the fixture built for exactly this -
-with and without: burst latency 134-146ms vs 134-152ms, identical ordering. It only ever reordered one
-replica's cache anyway, since the planner learns of the new band from that shard's next tally either way,
-so the fleet-level change costs a cycle regardless. See `internal/candidates/CLAUDE.md` for the full
-accounting, and `docs/scheduling-and-reliability.md`, which has always promised the weaker (and now
-accurate) contract: priority is never preemptive, and a new band is served within a snapshot cycle or two.
+**Do not add a priority-preempting head-insert beside it.** Letting a strictly-better band jump the queue, so
+the first urgent step does not wait a cycle, costs a bounded fairness bypass and buys nothing measurable:
+`fixtures/crossshardpriorityflow_test.go` - the fixture built for exactly this - measured burst latency
+134-146ms with it against 134-152ms without, identical ordering. It can only reorder one replica's cache,
+since the planner learns of the new band from that shard's next tally either way, so the fleet-level change
+costs a cycle regardless. See `internal/candidates/CLAUDE.md` for the full accounting, and
+`docs/scheduling-and-reliability.md`, which promises the matching contract: priority is never preemptive, and
+a new band is served within a snapshot cycle or two.
 
 **The cycle period is the supply control, DERIVED per shard (`deriveRefillInterval` /
 `recomputeRefillIntervals`, ~67ms at the reference config) - NOT a fixed constant.** The pipeline paces each
 cycle from the *start* of the previous scan, so a slow cycle pays for itself rather than stacking. It exists
 because an unpaced piston runs at a **100% duty cycle** -
-measured, in *both* the merged and decoupled builds: every refiller scanning back to back for a whole 60s
-window. The merged pass was accidentally self-limiting (its straggler wait made it slow); deleting the
-barrier made each pass fast and the loop hot, raising phase-1 scan load **3.4x**. **Phase 1 costs per DUE
+measured: every refiller scanning back to back for a whole 60s window. A cross-shard barrier would hide
+this by accident (its straggler wait makes each pass slow); without one each pass is fast and the loop hot,
+measured at **3.4x** the phase-1 scan load of the barriered build. **Phase 1 costs per DUE
 ROW regardless of how many rows the pass then fetches**, which is why sizing the batch can never substitute
 for scanning less often.
 
@@ -921,14 +909,13 @@ Confirmed after the IOPS diagnostic (below) made throughput resolvable.
 
 **THE FLOOR DEPENDS ON `workersPerConnBudget` (8) THROUGH THE CACHE - which is why it is derived rather
 than hardcoded.** `capacity = 2 x workersDispatch = 2 x 8 x conns`, so anything changing the 8 rescales the
-buffer this floor is measured against, proportionally. That nearly happened: the 8 assumes `T/db≈8` while
-5ms tasks measure ~1.5-2, so the resident worker count overshoots ~4x. The overshoot was
-deliberately KEPT (it is throughput-neutral - surplus workers queue for a connection and connections are
-never idle), but had it been "corrected" with a hardcoded floor, capacity would have fallen ~4x, the
-per-partition share 768 -> 192 and the supply ceiling proportionally, leaving the floor **longer than the
-buffer can cover** - the measured starvation mode (-10% throughput). Deriving it closes that by
-construction. **A change to worker or cache sizing now rescales the floor automatically; do not reintroduce
-a constant here.**
+buffer this floor is measured against, proportionally. The 8 assumes `T/db≈8` while 5ms tasks measure
+~1.5-2, so the resident worker count overshoots ~4x, and the overshoot is deliberately KEPT (it is
+throughput-neutral - surplus workers queue for a connection and connections are never idle). "Correcting" it
+under a hardcoded floor would cut capacity ~4x, the per-partition share 768 -> 192 and the supply ceiling
+proportionally, leaving the floor **longer than the buffer can cover** - the measured starvation mode (-10%
+throughput). Deriving it closes that by construction: **a change to worker or cache sizing rescales the floor
+automatically; do not put a constant here.**
 
 **Why scanning less often helps more than the scan count alone suggests:** the band scan's apparent "fixed
 ~46ms" is largely **connection-pool wait**, so refiller scans queue against worker traffic on
@@ -942,56 +929,54 @@ p99** while buying no throughput; a fixed 150ms gave **+19% throughput and a tai
 barriered baseline**. But throughput there was **bimodal** (40-86% run-to-run spread) - the disk, not the
 engine (see the IOPS finding below), so the exact optimum was unresolvable. On a **1TB / 16-vCPU single
 shard** (IOPS non-binding, spread collapsed to ~4%): throughput peaked at **110-150ms** and fell off ~15% by
-~260ms. A later M-sweep measured the drain per CONNECTION directly - sustained ~120 steps/s/conn, roughly
-flat across connection counts, instance sizes, and backlog volumes - and recalibrated `sustainedDrainPerVCPU`
-340→720, moving the reference floor 141ms→**67ms**, inside a flat-good 10-80ms band at high connection
-counts. (The two peaks were taken on different rigs/loads; the connection-rate measurement is what the
-constant now encodes, since it held across the widest range - and a validation sweep at 67ms beat the old
-141ms by ~50% at M=8 and M=64.) headroom stays **2.0**: the decline past the peak is drain-rate jitter
-stalling workers at a tight buffer, which a ~2x buffer absorbs.
+~260ms. The constant encodes the drain per CONNECTION, measured directly by an M-sweep - sustained ~120
+steps/s/conn, roughly flat across connection counts, instance sizes, and backlog volumes - which gives
+`sustainedDrainPerVCPU` 720 and the reference floor **67ms**, inside a flat-good 10-80ms band at high
+connection counts. (The peaks above were taken on different rigs/loads; the connection rate held across the
+widest range, and a validation sweep measured 67ms beating 141ms - what a 340 steps/s/vCPU constant derives -
+by ~50% at M=8 and M=64.) headroom is **2.0**: the decline past the peak is drain-rate jitter stalling workers
+at a tight buffer, which a ~2x buffer absorbs.
 
-**Three adaptive alternatives were built and all lost.** This is the only record of them - `scheduling.go`
-carries the formula and its local traps, not the campaign. Do not re-propose any without new evidence: an
-adaptive fetch DEPTH was *inert* (batch
+**Do not replace the static formula with an adaptive one - three were built, measured, and lost.**
+`scheduling.go` carries the formula and its local traps; this is the record of the alternatives. Do not
+re-propose any without new evidence: an adaptive fetch DEPTH was *inert* (batch
 moved 179→173→190 across a 60% margin change, because the batch is set by the backlog and the plan slice,
 never by a target); a DERIVED interval (set from observed consumption) was *actively harmful* (~1,000x
 the discard, 2.4x the p99) because consumption is `min(demand, supply)`, so the actuation contaminates its
 own measurement; and an AIMD loop that crawled each shard's floor toward its own optimum won at low
 connection counts but was *unprovable* - its over-supply signal (`discarded`) measures only worker
 starvation, blind to refiller scan cost, so it could not find the high-connection optimum and over-crawled
-to the clamp. It was rig-validated, then SHELVED for the recalibrated static floor it could not be proven to
-beat (only bounded) - the same `control-loops-must-be-simple` bar the removed rate valve failed. The
-FIXED-headroom static formula beats all three.
+to the clamp; on the rig it could be bounded against the static floor but never shown to beat it - the same
+simplicity bar that rules out a rate valve (a control loop must be a fuse, not a feedback loop on its own
+actuation). The FIXED-headroom static formula beats all
+three.
 
-**The throughput bimodality was IOPS contention, not engine noise.** Cloud SQL provisions IOPS by disk size
-(~30 IOPS/GB); the 500GB/8-vCPU shards throttled under the write-heavy load, producing the 40-86% run-to-run
-swing that made every 500GB throughput number suspect (this is why the campaign leaned on *waste*, a
-DB-independent phase metric, over throughput). A 16-vCPU/1TB shard (30k IOPS) collapsed the spread to ~4%,
-confirming it. Operator guidance (size disk throughput to the workload's `dwarf_state_write_bytes` rate) is
+**A throughput bimodality on an undersized disk is IOPS contention, not engine noise.** Cloud SQL provisions
+IOPS by disk size (~30 IOPS/GB); 500GB/8-vCPU shards throttled under the write-heavy load, producing a 40-86%
+run-to-run swing that makes any throughput number from them suspect (read a DB-independent phase metric such as
+*waste* there instead). A 16-vCPU/1TB shard (30k IOPS) collapsed the spread to ~4%. Operator guidance (size disk
+throughput to the workload's `dwarf_state_write_bytes` rate) is
 in `docs/deployment.md`.
 
 **CROSS-SHARD PRIORITY IS STRICT ONLY WITHIN ONE OR TWO CYCLE INTERVALS**, and this must be stated rather
-than assumed. There used to be a floor-cutting nudge channel (`requestRefillDemand` / `routeRefill`, fed by
-an `urgent` flag out of `Offer`) whose whole job was to close the publish gap below; it is gone, and so is
-the ordinary trigger that replaced it.
+than assumed. Nothing closes the publish gap below: there is no nudge channel carrying an urgent band to the
+refiller and no trigger, by the unconditional-cycle rule above.
 
 The gap: a shard learns of an arriving better band from its doorbell, but peers learn of it only from that
 shard's next **tally**, which it publishes by *scanning*. So the band becomes globally visible one interval
 later (this shard cycles and tallies) plus up to one more (a peer plans on its own next cycle). Inside that
 window a peer computes a stale global minimum, finds itself holding it, and legitimately dispatches
 worse-band work. That is an inversion of the observable dispatch ORDER, not merely of latency - do not
-repeat the old claim that "the rate limit can only delay dispatch, never invert order." It was true of a
-cycle planning from a *current* picture and false across the publish gap, which is exactly the case that
-matters.
+claim that "the rate limit can only delay dispatch, never invert order." That is true of a cycle planning
+from a *current* picture and false across the publish gap, which is exactly the case that matters.
 
 Pinned by `fixtures/shardedflow_test.go` and, on the latency axis,
 `fixtures/crossshardpriorityflow_test.go`. **Both are interval-relative, so both are sensitive to the period
-being derived sanely** - which is how the `bufferShare` zero-division bug was found. A cache smaller than
-the shard count integer-divided to zero and took the derivation's degenerate branch, answering with the 1s
-CAP: the slowest period there is, for the case that wants the fastest. Every `SetWorkers(1)` multi-shard
-fixture silently ran at second-long scan intervals, which is why the fix took ~13s off the whole fixtures
-suite. `recomputeRefillIntervals` clamps `share` at 1. If either fixture starts failing on timing again,
-suspect the derived period before suspecting the test.
+being derived sanely.** `recomputeRefillIntervals` clamps `share` at 1, and the clamp is load-bearing: a cache
+smaller than the shard count otherwise integer-divides to zero and takes the derivation's degenerate branch,
+answering with the 1s CAP - the slowest period there is, for the case that wants the fastest. Unclamped, every
+`SetWorkers(1)` multi-shard fixture runs at second-long scan intervals (measured: ~13s of the fixtures suite).
+If either fixture starts failing on timing, suspect the derived period before suspecting the test.
 
 **THE PUBLISH GAP IS NOT THE ONLY WAY ORDER INVERTS. The second way needs no arriving band at all, and it
 is the local cache: `Pop` ranks partitions by a FROZEN band that the DOORBELL can set.** `Offer` admits into
@@ -1022,10 +1007,10 @@ that priority governs *admission* across shards within a cycle or two, not the e
 already sitting in one replica's cache.
 
 What is NOT weakened: ordering among work already tallied **and reconciled** is strict, and nothing is
-preemptive - which is now true of the local cache too, since `Offer` no longer head-inserts a better band. The
+preemptive - including in the local cache, since `Offer` never head-inserts a better band. The
 public statement of all this is in `docs/scheduling-and-reliability.md` - keep the two in step.
 
-`fixtures/crossshardpriorityflow_test.go` still asserts urgent-burst LATENCY as its sensitive axis (an
+`fixtures/crossshardpriorityflow_test.go` asserts urgent-burst LATENCY as its sensitive axis (an
 ordering-only test passes a starved build silently - verified: a 5s period produced correct ordering and
 took 22x as long).
 
@@ -1036,10 +1021,10 @@ cache over many shards produces a sub-millisecond period - `SetWorkers(1)` gives
 loop, whose cost is measured and severe: at high backlog ~half of all pops and their claim round-trips were
 stale, with the entire due backlog streamed every few ms.
 
-The fuse used to be `refillScanFloorMin`, a 20ms clamp inside the derivation. It moved to `MinGap`, which
-bounds the quiet time between the END of one cycle and the START of the next, and that is the STRONGER
-form: a start-to-start minimum cannot bound a cycle that outruns it, which is exactly the deep-backlog case
-the fuse exists for. Inert in the derived path (~67ms), so a healthy configuration pays nothing, and
+**Do not move the fuse back into the derivation as a clamp on the period.** `MinGap` bounds the quiet time
+between the END of one cycle and the START of the next, and that is the STRONGER form: a start-to-start
+minimum cannot bound a cycle that outruns it, which is exactly the deep-backlog case the fuse exists for. Inert in
+the derived path (~67ms), so a healthy configuration pays nothing, and
 `SetRefillInterval` lowers the gap to match a pinned interval when that is tighter, so a bench sweep can
 still measure the unlimited arm; it never raises it, so a 500ms pin keeps the ordinary 20ms gap.
 
@@ -1047,11 +1032,12 @@ Liveness is unaffected: a cycle always runs, so a drained-early partition waits 
 period. Pinned by `TestRefillInterval_DeepBacklogLiveness` (a deep backlog still drains under a period
 pinned into the over-limiting regime, with a single worker).
 
-**Liveness guarantee.** It is now structural rather than protocol: every piston cycles unconditionally, so
-the scan after a completion always sees the freed slot without anything having to ask for it. This retires a
-rule that was genuinely subtle - a worker had to request its refill *after* `processStep` returned, never at
-pop time, because requesting before the CAS let the refiller re-select the in-flight step and, under
-single-slot coalescing, never scan post-completion state, wedging a single-worker replica with a backlog.
+**Liveness guarantee.** It is structural rather than protocol: every piston cycles unconditionally, so
+the scan after a completion always sees the freed slot without anything having to ask for it. A
+request-driven refill would need a genuinely subtle rule instead - a worker must request its refill *after*
+`processStep` returns, never at pop time, because requesting before the CAS lets the refiller re-select the
+in-flight step and, under single-slot coalescing, never scan post-completion state, wedging a single-worker
+replica with a backlog.
 The other half of liveness is the doorbell: `Offer` admits into an EMPTY partition, so a sequential chain's
 next hop dispatches immediately rather than waiting out a cycle. The cache holds 2x the worker count.
 
@@ -1059,17 +1045,17 @@ next hop dispatches immediately rather than waiting out a cycle. The cache holds
 `recoverExpiredLeases` - running on `recoveryLoop` beside the other repairs (see "Background Recovery"),
 which is **THE** cadence for every background repair the engine performs.
 
-**Do not reintroduce any of the three mechanisms that used to sit here.** Each is individually plausible
-and each is strictly dominated:
+**Do not add any of these three mechanisms.** Each is individually plausible and each is strictly
+dominated:
 
 - **A due-backlog existence probe** (to cap the sweep when an idle replica missed a doorbell). A piston
   cycles unconditionally, so it covers that per shard, far sooner, with one band scan.
-- **An early-wake channel** (`shortenNextPoll` / `nudgeTimer` / `wakeTimer`). Every site that armed a wake
-  did it to make the poll ring the doorbell at the right instant, and nothing rings a doorbell from here:
+- **An early-wake channel** (a `shortenNextPoll`-style nudge). Every site that would arm a wake does it to
+  make the poll ring the doorbell at the right instant, and nothing rings a doorbell from here:
   every piston's scan predicate is already `not_before<=NOW_UTC()`, so a sleeping or backed-off step becomes
-  visible to the next cycle on its own. Verified by no-oping `shortenNextPoll` and running the full suite
-  green, sleep and retry fixtures included. It also carried a past-deadline-replace predicate defending
-  against a ~1-in-40 `sleepretrycomposeflow` wedge, which cannot arise with no deadline to replace.
+  visible to the next cycle on its own. Verified by no-oping the wake and running the full suite green,
+  sleep and retry fixtures included. A wake also needs a past-deadline-replace predicate, which defended
+  against a ~1-in-40 `sleepretrycomposeflow` wedge that cannot arise with no deadline to replace.
 - **A self-sizing deadline** (`MIN(lease_expires)`, scheduling the next sweep at the soonest future expiry).
   This is the one that reads as load-bearing and is not. Its period works out to
   `lease - age of the oldest in-flight step`, so with ordinary millisecond steps it sits at ~2.5 minutes
@@ -1088,20 +1074,20 @@ budget: a 5s budget makes the lease 35s, which a five-minute sweep dominates. Th
 which the next cycle selects like any other; a step that is `pending` with a future `lease_expires` is
 invisible to both (see the lease-extension guard in `persist.go`).
 
-**The pistons need no error clamp either.** A scan or fetch can fail on the same transient DB error that the
-poll's clamp used to cover, and swallowing it would be the mirror wedge: the shard's partition refills
-**empty** and its workers block in `Pop`. Under the trigger design that needed an explicit re-poll; now the
-next cycle is at most one interval away unconditionally, so the retry *is* the cadence. What a scan error
+**The pistons need no error clamp either.** A scan or fetch can fail on a transient DB error, and swallowing
+it would be the mirror wedge: the shard's partition refills **empty** and its workers block in `Pop`. No
+explicit re-poll is needed - the next cycle is at most one interval away unconditionally, so the retry *is*
+the cadence. What a scan error
 does is `planner.Clear` (this shard stops claiming a band it cannot serve) while leaving the cache
 partition intact - an error means "unknown", not "nothing is due". With the two loops split, the second
 half is the *Supplier's* to honour rather than a consequence of returning early, and it reads the
 distinction off `Plan.Tallied`. A fetch error clears neither: the tally already succeeded and is still
 true.
 
-*The trade from removing the early wake, restated:* `flow.Sleep(until)` and retry backoffs land within a
-cycle interval of their deadline rather than on a precise wake. At the derived ~67ms that is as good as the
-floor-gated path it replaced; at the `refillIntervalCap` (1s), or under a pinned bench interval, it can
-overshoot by that much. Acceptable for a durable sleep - do not reintroduce a timer to shave it.
+*The trade of having no early wake:* `flow.Sleep(until)` and retry backoffs land within a cycle interval of
+their deadline rather than on a precise wake. At the derived ~67ms that is as good as a floor-gated wake; at
+the `refillIntervalCap` (1s), or under a pinned bench interval, it can overshoot by that much. Acceptable for
+a durable sleep - do not add a timer to shave it.
 
 ### Round-trip minimization in `processStep`
 
@@ -1117,7 +1103,7 @@ not parallelism:
   (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
 - **Flow data** - runs after the claim+read, since it needs the `flow_id`.
 
-Fan-in accounting no longer issues sibling/subgraph COUNT queries at all - it reads the
+Fan-in accounting issues no sibling/subgraph COUNT queries at all - it reads the
 `cohort_arrivals`/`cohort_failures`/`cohort_size` counter columns.
 
 **Transaction constraint (do not reintroduce parallelism here):** a function receiving a `sequel.Executor` - which may
@@ -1168,16 +1154,16 @@ Pinned by `TestLineage_GotoEndFromFanOutSource` and `TestLineage_OverrideRejoini
 
 **A branch sees its flow's state, plus its element.** Each `forEach` branch's local `state` is the flow state with
 three injected fields: `<as>` (the element), `<as>Index` (its position), `<as>Count` (the cohort size). Nothing is
-removed. **There was once a "branch state strip"** - the engine deleted the source array from each branch's local
-state (an N-element forEach feeding `forEach -> A -> B -> C -> J` otherwise writes N copies of the array into every
-step row of every branch). **It was removed, and must not come back as a special case.** It was a byte optimization
-for the one carried field the engine happens to know the name of, while every *other* large carried field paid the
-same N x chain-length cost unaddressed; it made a branch's state a lie (the branch could not see the array its own
-element came from); and it is what made a failed fan-out's `final_state` come back *missing* the array - a failed
-cohort never reaches its fan-in, so the terminal-state merge bases on a completed sibling's branch-local snapshot,
-which is precisely the stripped one. De-duplicating large carried state is a general mechanism - **state refs**,
-below - not a per-field deletion. The source array is now *ref'd* (one stored copy, every branch pointing at it),
-which is the same byte saving without deleting anything or lying to the branch.
+removed. **Do not strip the source array from each branch's local state** as a special case (an N-element
+forEach feeding `forEach -> A -> B -> C -> J` otherwise writes N copies of the array into every step row of every
+branch, which is what tempts it). A strip is a byte optimization for the one carried field the engine happens to
+know the name of, while every *other* large carried field pays the same N x chain-length cost unaddressed; it makes
+a branch's state a lie (the branch cannot see the array its own element came from); and it makes a failed fan-out's
+`final_state` come back *missing* the array - a failed cohort never reaches its fan-in, so the terminal-state merge
+bases on a completed sibling's branch-local snapshot, which is precisely the stripped one. De-duplicating large
+carried state is a general mechanism - **state refs**, below - not a per-field deletion. The source array is
+*ref'd* (one stored copy, every branch pointing at it), which is the same byte saving without deleting anything or
+lying to the branch.
 
 **Downstream suppression via explicit clear** (below) remains the author-space way to drop a large source array past
 the fan-in.
@@ -1204,17 +1190,17 @@ fan-out's state means:
   one PK lookup per nesting level), never from the graph at large.
 
 **The strip is scoped to the cohort being closed, and BOTH halves of that scoping are load-bearing.** Stripping
-"every `forEach` in the graph" - which it briefly did - broke two things at once:
+"every `forEach` in the graph" breaks two things at once:
 
-- **Name collision (silent data loss).** It made the three injected names of *every* `as` globally reserved. A graph
-  with `forEach … as "page"` reserved `pageCount` for the whole workflow, so a task writing its own `pageCount` -
-  even one downstream of the fan-in, outside the cohort entirely - had it deleted from `final_state` while `History`
-  still showed the step had written it. The author was never told the name was reserved. Scoping by the merge base's
-  *lineage* fixes it: a tail outside any cohort (the ordinary completed flow, whose terminal step is downstream of
+- **Name collision (silent data loss).** It makes the three injected names of *every* `as` globally reserved. A graph
+  with `forEach … as "page"` reserves `pageCount` for the whole workflow, so a task writing its own `pageCount` -
+  even one downstream of the fan-in, outside the cohort entirely - has it deleted from `final_state` while `History`
+  still shows the step wrote it, and the author is never told the name was reserved. Scoping by the merge base's
+  *lineage* prevents it: a tail outside any cohort (the ordinary completed flow, whose terminal step is downstream of
   every fan-in) is inside no cohort and strips **nothing**.
-- **Nesting.** At an *inner* fan-in it also deleted the *outer* cohort's bookkeeping, so a step converging out of the
-  inner cohort - still inside the outer branch - could no longer see which outer element it was working on. Scoping
-  by `tr.From == spawnTaskName` fixes it: each cohort's names die at its **own** fan-in and no earlier.
+- **Nesting.** At an *inner* fan-in it also deletes the *outer* cohort's bookkeeping, so a step converging out of the
+  inner cohort - still inside the outer branch - loses which outer element it is working on. Scoping by
+  `tr.From == spawnTaskName` prevents it: each cohort's names die at its **own** fan-in and no earlier.
 
 The names are reserved only *within* their own cohort. Pinned by `engine/foreachstrip_test.go` (collision, nesting,
 and the failed-fan-out case the strip exists for), each verified to fail against the unscoped version.
@@ -1256,28 +1242,28 @@ failure (`failStep` with no `onError`), never on an onError-handled error or an 
 `fan_out_ordinal`, just `status='pending'` and the prior error/park slot cleared. The merge query sees one row per
 branch regardless of attempts, so retry can't double-count.
 
-**Do NOT replace the shared `cohort_arrivals` counter with per-member arrival state. It was built, measured
-and reverted (2026-07-19).** The idea is sound and keeps re-suggesting itself, so here is the record.
+**Do NOT replace the shared `cohort_arrivals` counter with per-member arrival state. It was built and measured,
+and it loses.** The idea is sound and keeps re-suggesting itself, so here is the evidence.
 
 *The motivation.* Every sibling of a cohort bumps `cohort_arrivals` on the SAME spawn row, and that row's write
 lock is held until COMMIT, so siblings serialize. That is real and measurable: at fan-out width 64 the wait was
-~84% of an arrival transaction locally. `docs/benchmark-cloud.md` also (wrongly - see below) blamed it for the
-~9,400 steps/s fan-out ceiling.
+~84% of an arrival transaction locally. It is tempting to blame it for the ~9,400 steps/s fan-out ceiling as
+well; that diagnosis is wrong (see below).
 
-*What was built.* `cohort_arrived` on each member's own row plus `cohort_resolved` on the spawn as an
+*The design.* `cohort_arrived` on each member's own row plus `cohort_resolved` on the spawn as an
 exactly-one-resolver claim, so a branch marks its own row, COMMITS, and only then counts the cohort and
 resolves it in a second transaction. Committing before counting is required, not stylistic: counting inside the
 arrival's own transaction lets the last two members each miss the other's uncommitted mark under READ
 COMMITTED, so neither resolves and the cohort strands silently forever.
 
-*It worked, and it did not pay.* Contention fell 12-40x locally and 4.4x on the cloud rig. Throughput went the
+*It works, and it does not pay.* Contention fell 12-40x locally and 4.4x on the cloud rig. Throughput went the
 wrong way: six A/B points on the ceiling rig (3x 8-vCPU shards, 4-vCPU engine, width 16, interleaved, n=3, fresh
 databases) gave +7.5%, -12.1%, -11.0%, -0.5%, -9.7%, -29.1%. Only the least production-like point was positive.
 **It degrades as load gets realistic** - it trades a lock wait for an extra transaction. The binding resource at
 the ceiling is connection occupancy and round trips - and a blocked lock IS connection occupancy: a sibling
-queued on the spawn row holds its connection for the whole wait. (An earlier phrasing here - "the scarce resource
-is round trips and connection occupancy, *not lock time*" - drew a false line: lock wait is a *driver* of
-occupancy, not a thing apart from it.) So relieving the lock pays only if the relief does not itself occupy
+queued on the spawn row holds its connection for the whole wait. Do not read that as "round trips and
+connection occupancy, *not lock time*": lock wait is a *driver* of occupancy, not a thing apart from it. So
+relieving the lock pays only if the relief does not itself occupy
 connections *more*. A second transaction does. A per-peer mutex does not - which is the next section.
 
 *Three collateral findings worth keeping:*
@@ -1286,12 +1272,11 @@ connections *more*. A second transaction does. A per-peer mutex does not - which
   contention. So production, where branches finish at different times, has less of this than any zero-delay
   benchmark - while the extra transaction costs the same. The two effects compound against the redesign.
 - **It does not reduce write amplification.** Marking each member's own row REDISTRIBUTES row versions rather
-  than removing them (5.59 -> 6.18 updates per step, HOT ratio flat). The hoped-for fix for the volume finding
-  is not there.
-- **The ceiling diagnosis in `docs/benchmark-cloud.md` was wrong** and has been corrected. Row-lock waits are
+  than removing them (5.59 -> 6.18 updates per step, HOT ratio flat), so it is no fix for write volume either.
+- **The cohort lock is not the fan-out ceiling.** Row-lock waits are
   ~15% of active backends, not "the great majority"; the "W serialized fsyncs" mechanism is refuted (width held
   fixed while varying workers moved lock wait 31x - the queue is `min(width, workers)` and the serialized
-  quantity is round trips inside the hold); and eliminating the lock entirely did not raise the ceiling. **What
+  quantity is round trips inside the hold); and eliminating the lock entirely does not raise the ceiling. **What
   binds at ~9,400 steps/s is an open question.**
 
 *If you are tempted again,* first show that the cohort row lock is the BINDING constraint on the target
@@ -1299,23 +1284,23 @@ workload - it was not, on any of six points. The measurement recipe is a single 
 sampling `pg_stat_activity` (`wait_event='transactionid'` is a row-lock wait, `'tuple'` is the queue behind it,
 exclude `ClientRead` from the denominator); it needs no engine rebuild and instruments both arms identically.
 
-**The lock's connection occupancy IS relievable per-peer - with a Go mutex, not a schema redesign (2026-07-21).**
-The reverted redesign attacked the lock the expensive way (per-member rows + a second transaction). The cheap way
+**The lock's connection occupancy IS relievable per-peer - with a Go mutex, not a schema redesign.**
+The per-member redesign attacks the lock the expensive way (per-member rows + a second transaction). The cheap way
 keeps the shared `cohort_arrivals` counter and its single-transaction atomicity untouched and instead serializes a
 cohort's arrivals THROUGH THIS PEER before they reach the database. Each worker takes a fixed striped Go mutex
 (`e.cohortLocks`, keyed on the cohort's spawn via `cohortLockStripe`) BEFORE opening the transition (`processStep`)
 or failure (`failStep`) transaction - the point a losing sibling would otherwise take its connection and then queue
-on the spawn row's write lock. The loser now parks on the mutex holding NO connection; the row stays the cross-peer
+on the spawn row's write lock. The loser parks on the mutex holding NO connection; the row stays the cross-peer
 source of truth, so the count and the fan-in trigger are byte-for-byte unchanged. Spawn-row connection occupancy
 drops from cohort-width to R (one in-flight arrival per peer).
 
-This is the counter-proof to the "not lock time" correction above: it relieves the *same* lock, adds NO round trip,
+This is the counter-proof to reading occupancy as "not lock time": it relieves the *same* lock, adds NO round trip,
 and throughput RISES where the per-member redesign fell. Measured locally (single peer, width 64, conc 64, 16-vCPU
-pool): the spawn-row `tuple` waiters - the queue the reverted section names - went 146 -> 0, width-64 throughput
+pool): the spawn-row `tuple` waiters - the queue named above - went 146 -> 0, width-64 throughput
 rose (~+30-40%, noisy locally) and p50 fell. It is **not** a ceiling fix: at width 256 it is throughput-NEUTRAL,
-because the binding lock there is no longer the spawn row (`tuple` -> 0) but relation-extension (`extend`, from the
-successor-INSERT firehose) plus closed-loop queue depth - consistent with the reverted section's finding that the
-cohort lock was never the ~9,400 ceiling. Freeing its connection occupancy helps the mid-width regime, not the
+because the binding lock there is not the spawn row (`tuple` -> 0) but relation-extension (`extend`, from the
+successor-INSERT firehose) plus closed-loop queue depth - consistent with the finding above that the cohort lock
+is not the ~9,400 ceiling. Freeing its connection occupancy helps the mid-width regime, not the
 ultimate ceiling, which stays open. A single-workload bench also UNDERSTATES it: the freed connections serve OTHER
 flows in a real multi-tenant engine, which the bench cannot see.
 
@@ -1333,8 +1318,8 @@ flows in a real multi-tenant engine, which the bench cannot see.
 - **Coalescing was considered and rejected.** Folding a peer's arrivals into one `+k` write would split a member's
   result-commit from its arrival-count, and either order leaves a crash window that strands (result committed,
   in-memory arrival lost on a peer crash -> the cohort never reaches `cohort_size`) or double-handles a member. The
-  single-transaction coupling of (own result + arrival) is the same invariant the reverted redesign's
-  commit-before-count wrestled with. Serialize-only keeps it intact, and connection occupancy was the whole cost.
+  single-transaction coupling of (own result + arrival) is the same invariant the per-member redesign's
+  commit-before-count has to wrestle with. Serialize-only keeps it intact, and connection occupancy was the whole cost.
 
 ### Candidate de-duplication: the partition (cross-peer) and the claim map (intra-peer)
 
@@ -1376,12 +1361,12 @@ claim miss fell **7.3% -> 0.1%** at unchanged throughput.
 **The reservation is a bounded WINDOW (1-2s), not a lifetime tied to the step. Both bounds were
 established by breaking them:**
 
-- **Too short - releasing when the CAS returns** was built and measured and barely worked (7.3% -> 5.7%).
+- **Too short - releasing when the CAS returns** barely works, measured (7.3% -> 5.7%).
   The gap to span runs from SELECTION to POP, not the round trip between them: the refiller selects a step
   whose claim is uncommitted, the entry sits in the cache, and by pop time a CAS-scoped reservation is long
   gone. The window must outlast the max interval between cycles (~1s) so a step is never
   re-selected while its own claim is still in flight.
-- **Too long - holding for the whole STEP** was tried next and is worse. A worker parked in a long
+- **Too long - holding for the whole STEP** is worse. A worker parked in a long
   `ExecuteTask` keeps its reservation for the entire task, so if that step's lease expires meanwhile (an
   overrun, a DB clock step) **no sibling worker can re-claim it and single-replica lease recovery stops
   working**. Caught by `TestLeaseFence_CompletionNoDuplicateSuccessor`, whose blocked first dispatch is
@@ -1416,12 +1401,12 @@ ever DELAY this replica's dispatch of a step by a bounded window, never prevent 
   refiller keeps re-selecting it, for up to the full ~2s. Three paths do this and all three relinquish -
   the recovery-defer reset and the `flow.Retry` rewind (both `execution.go`), and **`enqueueStep`**
   (`operations.go`), which covers the cold re-offer sites: the surgraph revive (three call sites), the
-  resume leaf, and the wedge sweep. The `enqueueStep` one was **missing**, and it is a *latent* bug that
-  the empty-partition `Offer` merely exposed: the reservation held either way, but declining the offer hid
-  it behind the refiller's cadence. With the offer admitted, the revived caller is popped at once, skipped,
-  and re-skipped until the window ages out - measured at `fixtures/completionraceflow_test.go` as 189 of
-  500 flows failing to drain in 30s. Adding it took that fixture to **2.2s, below its 5.9s pre-change
-  baseline**, because a revive no longer waits out a stale reservation at all. A relinquish for a step id
+  resume leaf, and the wedge sweep. The `enqueueStep` one is the easy one to miss, because only the
+  empty-partition `Offer` exposes it: the reservation holds either way, and a declined offer would hide it
+  behind the refiller's cadence. With the offer admitted and no relinquish, the revived caller is popped at
+  once, skipped, and re-skipped until the window ages out - measured at `fixtures/completionraceflow_test.go`
+  as 189 of 500 flows failing to drain in 30s, against **2.2s** for the whole fixture with it, because a
+  revive never waits out a stale reservation. A relinquish for a step id
   this replica never reserved (Fork's leaf, `Continue`) is a harmless no-op, which is why the guard belongs
   at the shared entry point rather than at each caller.
 
@@ -1441,12 +1426,13 @@ which a reader sampling on a cadence catches within seconds - so a piston servin
 residue class forever. The COUNT behind it is the MINIMUM of the piston's two loops, because either alone
 reports a piston that serves nothing as fully alive: one whose every SCAN fails turns its supply loop
 happily against an empty planner, and one whose every FETCH fails tallies honestly and claims its band while
-taking zero candidates. Both hold a residue class nobody else selects. See `internal/piston/CLAUDE.md`. Registration does NOT stamp it - intent is not evidence - so a
+taking zero candidates. Both hold a residue class nobody else selects. See `internal/piston/CLAUDE.md`. Registration
+does NOT stamp it - intent is not evidence - so a
 replica earns it on its first cycle, and the beat rides the read cadence when that evidence flips so the
 window is a read interval rather than a beat interval. A registered replica that claims nothing on a shard -
 one ranked out of its dispatchers there - still counts in the fleet, but giving it a residue class means
-*nothing ever selects those steps*. This shipped broken in the first cut (for an await-only replica, which
-then registered) and hung `fixtures/crossreplicaawait_test.go`, which uses exactly that configuration.
+*nothing ever selects those steps*. `fixtures/crossreplicaawait_test.go` uses exactly that configuration (an
+await-only replica that registers) and hangs if such a replica is given a class.
 
 **Everything fails open.** Solo dispatcher, unknown ordinal (self absent from the roster), an ordinal out of
 range for the divisor, a Sonar gone blind, or no Sonar at all - every one disables partitioning on that
@@ -1633,7 +1619,8 @@ commutative), which is why the scan is ordered by the branch's position in the s
 order. Pinned by `TestFailedFanOut_KeepsEveryBranchesIntermediateOutput`.
 
 `computeFinalState` also reads the DAG, not `step_depth`. The terminal state is the merge of the tail steps -
-completed steps with `successor_id = 0` (`mergeTerminalSteps`) - for a flow that is *not* a failed fan-out. The earlier `MAX(step_depth)` heuristic was wrong for
+completed steps with `successor_id = 0` (`mergeTerminalSteps`) - for a flow that is *not* a failed fan-out. The
+earlier `MAX(step_depth)` heuristic was wrong for
 any graph where an intra-thread `flow.Goto` self-loop sits inside a fan-out: each loop iteration pushes
 `step_depth + 1`, so the looping branch can outrun the fan-in/terminal step in depth, and `MAX(step_depth)` selected
 the dangling loop step (empty state). The tail-step merge is depth-agnostic: loop iterations carry
@@ -1671,22 +1658,22 @@ above the engine default. Sizing from the row (not in-memory config) is what kee
 it needs no upfront SELECT because `time_budget_ms` is already on the step row at claim time, the same read-locality
 reason `priority`/`fairness` are denormalized there. Consequence: a *crashed* worker is recovered no sooner than its
 step's `budget + leaseMargin`, so a flow's budget directly bounds its worst-case crash-recovery latency - which is the
-practical reason a host caps the budget. (The earlier config-sized lease and its "decrease `TimeBudget` mid-flight"
-re-dispatch trade-off are retired: each step's lease now follows its own frozen budget.)
+practical reason a host caps the budget. **Do not size the lease from engine config**: a config-sized lease lets a
+mid-flight `SetTimeBudget` decrease expire the lease under a still-running step and re-dispatch it; each step's
+lease follows its own frozen budget.
 
 ### Persisting a step's outcome: retry the WRITE, never the task (`persist.go`)
 
 The task has **already run** when its outcome is persisted - its side effects have fired - so this write is the
-only record that it ran. Before `persist` existed, a database error here left the step `running` with `error=''`
-and `attempt=0` (reading as perfectly healthy) and lease recovery re-dispatched it every `budget + leaseMargin`,
-**re-executing the task**, forever. Silent and eternal: `detectOrphanedFlows` could not see it, because a
-non-terminal step *did* exist. Reproduced against a live Postgres with a `\u0000` in state (no longer guarded on
-write - see the storability punt in `workflow/CLAUDE.md` - but `persist`'s classifier now turns such a
-rejected payload write into a clean step failure rather than the old eternal loop; the structural hazard was the
-point).
+only record that it ran. Left unhandled, a database error here leaves the step `running` with `error=''` and
+`attempt=0` (reading as perfectly healthy) and lease recovery re-dispatches it every `budget + leaseMargin`,
+**re-executing the task**, forever. Silent and eternal: `detectOrphanedFlows` cannot see it, because a
+non-terminal step *does* exist. Reproduced against a live Postgres with a `\u0000` in state (not guarded on
+write - see the storability punt in `workflow/CLAUDE.md`); `persist`'s classifier turns such a rejected payload
+write into a clean step failure instead.
 
 The rule is: **retry the WRITE, never the task.** Re-dispatching is the one recovery that re-fires side effects,
-and it was being used for failures the task had nothing to do with.
+and it must not be used for failures the task had nothing to do with.
 
 - **In-place retry, holding the lease.** A short exponential (1s/2s/4s). The errors this exists for - a failover, a
   dropped connection, a momentary connection-limit rejection - clear in **seconds**, so a blip is absorbed with
@@ -1720,7 +1707,7 @@ on any unknown error - would kill live flows on every routine failover, and a te
 **Lock contention is excluded, and that exclusion is load-bearing.** `Transact` already retries it to exhaustion;
 past that it reaches the recovery **defer** (rewind + re-poll), never the classifier. Terminalizing a flow because
 the database was busy would be exactly backwards, and it is why `processStep` tests `IsLockContentionError` *before*
-calling `failOnPersistError`. Consequence: the defer's `completed→pending` arm is now reached only by contention (or
+calling `failOnPersistError`. Consequence: the defer's `completed→pending` arm is reached only by contention (or
 by a classifier that could not write at all), which is what `TestLeaseFence_RecoveryResetFenced` drives it with.
 
 **A fuse that can itself be poisoned is not a fuse.** `failStep` is the only way out, and it reads other steps'
@@ -1734,8 +1721,8 @@ Two counters: `dwarf_steps_write_retried` (a blip absorbed - the database is fla
 `dwarf_steps_write_failed` (an **alarm**, like `dwarf_steps_unwedged`: the database was reachable and the outcome
 still could not be stored, so the payload is at fault and a latent bug exists). Pinned by `engine/persist_test.go` -
 a transient error absorbed with the task running **once**, a permanent one terminalized with the task running
-**once**, and a drain during the backoff releasing the lease instead of sleeping it out. Before the fix, both of the
-first two tests **hang forever**.
+**once**, and a drain during the backoff releasing the lease instead of sleeping it out. Without `persist`, both of
+the first two tests **hang forever**.
 
 ### Lease fencing (`lease_seq`) — at-least-once, never state corruption
 
@@ -1787,15 +1774,15 @@ re-claimed and is running concurrently — is exactly the one the bumped generat
 has exactly one fenced write to the dispatched step, and everything after it is safe:
 
 - **complete / goto / fan-out / fan-in-direct / flow-complete** — gated by the completion UPDATE
-  (`WHERE step_id=? AND status NOT IN ('terminated', 'cancelled') AND lease_seq=?`). Past it the step is `completed`, so no peer can
+  (`WHERE step_id=? AND status NOT IN ('terminated', 'cancelled') AND lease_seq=?`). Past it the step is `completed`,
+  so no peer can
   re-claim (claim needs `pending`); the entire transition transaction — successor inserts, `cohort_arrivals`
   bumps, `successor_id` writes, `fireFanInDirect`, `completeFlowSequential`, `insertFanInStep` — needs no fence.
-  `completeFlowSequential` in particular makes **no step write at all**: the gate already completed the step, so the
-  trailing `UPDATE dwarf_steps SET status='completed'` it used to run was a re-write of the same value — a wasted
-  transaction on every flow completion, and the one post-execution step write with neither a status guard nor a
-  fence. It was removed; do not reintroduce it. (Its only other effect was to bump the step's `updated_at` a second
-  time, to *after* `completeFlow`'s transaction — inflating the step's recorded task duration, which `History` and
-  the `FlowRenderer` compute as `updated_at - started_at`, by the cost of completing the flow.)
+  `completeFlowSequential` in particular makes **no step write at all**: the gate already completed the step.
+  **Do not add a trailing `UPDATE dwarf_steps SET status='completed'` there** - it re-writes the same value, costs
+  a transaction on every flow completion, is a post-execution step write with neither a status guard nor a fence,
+  and bumps the step's `updated_at` to *after* `completeFlow`'s transaction, inflating the recorded task duration
+  (`History` and the `FlowRenderer` compute it as `updated_at - started_at`) by the cost of completing the flow.
 - **fail** (`failStep`) — gated by the step-fail UPDATE, the transaction's first write, so a zero-row match
   wrote nothing: it commits the empty tx and returns `fenced=true`, and `failAndReturn` surfaces `nil` so the
   flow the peer is re-running is never failed. This closes the "late error → healthy-flow kill" case.
@@ -1852,8 +1839,7 @@ becomes the next step, and the failed step is marked `completed` - **with the ta
 **fresh** `RawFlow` seeded with the input snapshot plus `onErr` (`execution.go`), so anything the task wrote with
 `flow.Set` before returning its error never reaches the handler, the step's `changes` column, or `final_state`; and
 `failStep` writes only `status`/`parked`/`error`, never the changes. The two paths agree, so the contract does not
-depend on whether the author happened to declare a handler. (This doc previously claimed the opposite - "changes
-preserved" - which was never true of either path.)
+depend on whether the author happened to declare a handler.
 
 The rationale is the same one that governs everything else here: **execution is at-least-once**. If a worker loses
 its lease mid-task, a peer re-runs the task from the same input snapshot and *recomputes* its changes - so "what the
@@ -1863,7 +1849,8 @@ pass its tests and be wrong under lease recovery. It matches Go's own convention
 The deliberate channels for a task that has something to say to its handler: put it **in the error** (`onErr` carries
 message, status code, trace id, and properties), or give an external side effect **its own task**, so its success is
 durably recorded before anything downstream can fail. Pinned by `fixtures/errorchangesflow_test.go` (both error
-paths, plus a success control proving the write is only lost *because* of the error). Fan-out siblings are **not** cancelled - the errored branch
+paths, plus a success control proving the write is only lost *because* of the error). Fan-out siblings are **not**
+cancelled - the errored branch
 continues down its handler path and rejoins the cohort as a normal arrival (convergence is by cohort arrivals, not by
 cancellation). If there is no `onError` transition, the step fails via `failStep`.
 
@@ -1932,17 +1919,17 @@ rule is *when*: the child flow fails only **when it actually fails as a flow** -
 internal fan-out, means **after its cohort fully resolves**, running the *same* `cohort_failures` accounting a
 top-level flow runs (`failStep` for a failing last-arriver, the `processStep` cohort-arrival path for a
 completing last-arriver; both call `deliverFlowFailureToParent` when `failFlow` becomes true). It is **not** an
-eager terminalization on the first branch error. Failing the child eagerly (an earlier `failStep` short-circuit
-straight into `deliverSubgraphError`, bypassing cohort accounting) stranded the child's *other* live branches and
-any subgraph descendants they had parked on: every tree walk skips a terminal flow (`Resume`'s down-walk descends
-only `interrupted` children; `Terminate`/`allSubgraphFlows` stop at terminal nodes; the parked-caller wedge sweep
-sees a *terminal* caller step, not `running`+`parkedSubgraph`), so the stranded sub-tree had no path out but
-`Delete`. Deferring the child's failure to cohort resolution means every branch has settled (completed or failed)
+eager terminalization on the first branch error. **Do not fail the child eagerly** (a `failStep` short-circuit
+straight into `deliverSubgraphError`, bypassing cohort accounting): it strands the child's *other* live branches
+and any subgraph descendants they parked on, because every tree walk skips a terminal flow (`Resume`'s down-walk
+descends only `interrupted` children; `Terminate`/`allSubgraphFlows` stop at terminal nodes; the parked-caller
+wedge sweep sees a *terminal* caller step, not `running`+`parkedSubgraph`), so the stranded sub-tree has no path
+out but `Delete`. Deferring the child's failure to cohort resolution means every branch has settled (completed or failed)
 before the child terminalizes, so there is no live sibling to strand - and a sibling parked on a grandchild that
 *interrupts* propagates up normally, so the whole tree parks `interrupted` and a root `Resume` still threads down
-to it (rather than the grandchild's approval being silently cancelled). `deliverSubgraphError` remains, now used
-**only** by the wedge sweep (a wedged caller whose child already went terminal); the live failStep path no longer
-calls it. Defense in depth for any residual orphan (e.g. the Terminate-vs-spawn race) is
+to it (rather than the grandchild's approval being silently cancelled). `deliverSubgraphError` is used **only**
+by the wedge sweep (a wedged caller whose child already went terminal); the live failStep path does not call it.
+Defense in depth for any residual orphan (e.g. the Terminate-vs-spawn race) is
 `recoverOrphanedSubgraphChildren` (see "Background Recovery"). `fixtures`/`engine`
 `TestSubgraphCohortFail_NoStrandOnBranchFailure` pins the child staying `running` after one branch failed while a
 sibling is parked on a live grandchild, then converging to a clean terminal tree with the branch error surfaced
@@ -1957,9 +1944,9 @@ Each subgraph flow's row stores `surgraph_flow_id` *and* `surgraph_step_id` - th
 it belongs to. `completeSurgraphFlow` (and the interrupt/resume chain walks) look the surgraph step up by primary
 key, so they can never match a sibling at the same `(flow_id, step_depth)`. This matters for: (1) a fan-in race
 where a non-subgraph sibling at the same depth is momentarily `running`; (2) parallel subgraphs at one depth, each
-parked at `parked=1`. The PK lookup keeps each child flow bound to the step that launched it. (An earlier design
-also stored the caller's `surgraph_step_depth` and matched on depth; that was ambiguous across parallel callers at
-one depth and was removed - `surgraph_step_id` is the sole, precise link.)
+parked at `parked=1`. The PK lookup keeps each child flow bound to the step that launched it. **Do not link by the
+caller's step depth**: matching on depth is ambiguous across parallel callers at one depth; `surgraph_step_id` is
+the sole, precise link.
 
 ### Denormalized root pointer (`root_flow_id`)
 
@@ -1983,29 +1970,29 @@ Single-shard by construction: subgraph flows have parent-shard affinity, so a wh
 **Membership, not structure.** `root_flow_id` answers *which flows are in this tree* (the set); it does **not**
 encode *who is whose parent* (the structure). So it **augments**, never replaces, the `surgraph_flow_id`/
 `surgraph_step_id` links: `root_flow_id` is the **membership index** that loads the tree's rows in one scan, and
-the surgraph links - now read from those *in-memory* rows - are still what supplies the parent/caller/child
+the surgraph links - read from those *in-memory* rows - are what supplies the parent/caller/child
 *structure* every walk follows.
 
 **Where it is used.** All four tree walks fetch the whole tree in one `root_flow_id` scan
 (`WHERE root_flow_id = (SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)`) and derive their result **in
-memory** by following the loaded `surgraph_flow_id`/`surgraph_step_id` pointers - identical results to the former
-level-by-level recursion, but a fixed number of round-trips regardless of nesting depth. The subquery resolves the
+memory** by following the loaded `surgraph_flow_id`/`surgraph_step_id` pointers - the same result a
+level-by-level recursion gives, at a fixed number of round-trips regardless of nesting depth instead of one or two
+per level. The subquery resolves the
 tree first, so each walk works whether its starting flow is the root or a mid-tree node:
 
 - `allDescendantSubgraphFlows` (Delete cascade, `Fingerprint`) - BFS *down* from the given flow over the loaded
   rows (any status).
-- `allSubgraphFlows` (Terminate's descendant set) - BFS *down* through **non-terminal** nodes only, matching the old
-  walk, which also stopped descending at a terminal node. Mid-tree Terminate/Delete therefore keep their exact prior
-  "descendants of *this* node" semantics, not "the whole tree."
+- `allSubgraphFlows` (Terminate's descendant set) - BFS *down* through **non-terminal** nodes only, stopping at a
+  terminal node. Mid-tree Terminate/Delete therefore mean "descendants of *this* node", not "the whole tree."
 - `surgraphChain` (the ordered *up*-walk: Terminate, Resume, Fork, interrupt propagation) - follows
   `surgraph_flow_id`/`surgraph_step_id` pointers from the flow up to the root, collecting each ancestor's caller
-  step + token. One scan vs the former *two* queries per level.
+  step + token. One scan, where a level-by-level walk costs *two* queries per level.
 - `interruptedSubgraphChain` (Resume's *down*-walk) - one tree scan plus **one** batched query for every flow's
   interrupted leaf (`status=interrupted ... ORDER BY flow_id, updated_at, step_id`, first row per flow taken in
-  memory), then descends by `surgraph_step_id`. SQL still does the earliest-`updated_at` ordering, so there is no
-  fragile Go-side timestamp comparison (the leaf is still the one Snapshot reports).
+  memory), then descends by `surgraph_step_id`. SQL does the earliest-`updated_at` ordering, so there is no
+  fragile Go-side timestamp comparison (the leaf is the one Snapshot reports).
 
-`Fork`'s own tree-discovery still uses `surgraphChain` + per-flow child queries while it recurses (it needs the
+`Fork`'s own tree-discovery uses `surgraphChain` + per-flow child queries while it recurses (it needs the
 structure to clone, not just membership), and `deleteSubgraphFlowsRootedAt` stays step-scoped (`surgraph_step_id`).
 
 `History` assembly rides the same principle with its own two inline `root_flow_id` queries rather than a named
@@ -2013,13 +2000,14 @@ walk (it needs a *caller-step*-keyed child map with each child's `workflow_url`/
 `[]int` membership helpers don't supply): one query builds `surgraph_step_id -> latest child flow`
 (`ORDER BY flow_id`, last wins = the child the caller used), a second loads every tree flow's steps
 (`WHERE flow_id IN (SELECT ... root_flow_id ...)`), and the nested history is stitched **in memory**
-(`assembleHistory` recurses caller-step -> child). This replaced a per-step `WHERE surgraph_step_id=?` lookup -
-an N+1 over every step in the tree - so `History`/`HistoryMermaid` are now a fixed two round-trips regardless of
-nesting depth. (`idx_dwarf_flows_surgraph_step` still backs the remaining single-row `surgraph_step_id=?` lookups
+(`assembleHistory` recurses caller-step -> child). **Do not look children up per step** (`WHERE
+surgraph_step_id=?` for each caller) - that is an N+1 over every step in the tree; `History`/`HistoryMermaid` are a
+fixed two round-trips regardless of nesting depth. (`idx_dwarf_flows_surgraph_step` backs the remaining single-row
+`surgraph_step_id=?` lookups
 elsewhere - the retry-reap, the wedge sweep, and `Step`-navigation.)
 
 **Consistency.** Denormalized + write-once-at-create is low-risk, but a creation path that forgot to set it (or set
-it wrong on a fork descendant) would silently drop rows from tree scans - and, now that the structural walks ride
+it wrong on a fork descendant) would silently drop rows from tree scans - and, because the structural walks ride
 the same scan, mis-route a Terminate/Resume/Fork. `TestRootFlowID_*` (engine package, white-box) pins the three
 population paths: top-level self-root, subgraph inheritance, and Fork self-root + non-inheritance; `Continue`
 starting a fresh root. `fixtures/deepsubgraphflow_test.go` pins the walks themselves at depth 5: a leaf interrupt
@@ -2102,7 +2090,8 @@ correlation-id→key lookup (see "Tracing"); subgraph-child keys are read-only f
 ### Await
 
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
-`terminated`/`cancelled`/`interrupted`. Its shape is **read, park, read - at most twice, and never in a loop**: snapshot and
+`terminated`/`cancelled`/`interrupted`. Its shape is **read, park, read - at most twice, and never in a loop**:
+snapshot and
 return if the flow has already stopped; otherwise park on the **latch board** (`internal/latch`, held as
 `e.latches`) until it settles, then snapshot once more to build the outcome.
 
@@ -2135,7 +2124,7 @@ park is reported by the next sweep. Registration order is a latency question, no
   only path that can see a stop made by a **peer**, so it is the primary wake for the cross-replica case, not a
   backstop. Its `IN` lookup scales with concurrent **awaiters**, which is what lets the cadence stay tight
   without watching how fast the engine is running - but the recent-stop pre-scan beside it scales with the
-  **stop rate** instead, so the pass is no longer throughput-independent. See the pre-scan bullet below for
+  **stop rate** instead, so the pass is not throughput-independent. See the pre-scan bullet below for
   the axis swap and where it inverts.
 
 **A parked caller runs no query of its own, and that is a property to protect.** `await` parks for the whole
@@ -2237,7 +2226,7 @@ is already local and free, at the price of a write per await.
   lease recovery (which only resets `running` rows) can't re-dispatch the now-`completed` step - the flow strands
   `running` with every step terminal (a permanent orphan). `failStep`, the fan-in transaction, and `completeFlow` all
   write first. A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go` reproduce
-  the wedge without the fix. This write-first rule governs the flow-*advancing*/*terminating* transactions only; the
+  the wedge without write-first. This write-first rule governs the flow-*advancing*/*terminating* transactions only; the
   lifecycle mutations (`Resume`/`Terminate`/`failStep`/`Delete`) run the **opposite** (steps-first) order on purpose, so
   the two disciplines cross on row-locking engines - see "Transactions" for why that crossing is tolerated (retry-
   recovered) rather than reconciled, and do not "fix" one side into matching the other.
@@ -2247,7 +2236,7 @@ is already local and free, at the price of a write per await.
   (`sequel.IsLockContentionError`), it resets the step it had leased (`running` -> `pending`, `lease_expires=NOW`),
   so the step is claimable again. The reset is load-bearing on its own: `recoverExpiredLeases` only recovers running
   steps whose lease has *already* expired, and a freshly leased step holds a minutes-long lease, so without the
-  rewind the step (and its fan-in) would stall until the lease lapsed. It no longer needs a paired re-poll - the
+  rewind the step (and its fan-in) would stall until the lease lapsed. It needs no paired re-poll - the
   step goes back to `pending` and the next cycle selects it. Guarded by `WHERE status='running'`, so only the
   leased-and-uncommitted case is rewound.
 
@@ -2285,7 +2274,7 @@ successor and advance no `step_id`. Constants, their portability, and the normal
 `bench/CLAUDE.md`; the operator-facing version is in `docs/benchmark-cloud.md` and `docs/deployment.md`.
 
 **Connection pool sizing - fact-derived per shard (`poolsize.go`).** The operator provides facts on
-`ShardSpec` and the engine owns the measured constants (cloud benchmark campaign, `docs/benchmark-cloud.md`):
+`ShardSpec` and the engine owns the measured constants (measured on managed cloud Postgres, `docs/benchmark-cloud.md`):
 
 - **Two declared facts and one probe drive each shard's pool**, `idle = open/2` (warm core).
   `ShardSpec.VirtualCPUs` and the shard's Startup-probed RTT index `poolRatio`, a tier x RTT-bucket table
@@ -2367,7 +2356,7 @@ successor and advance no `step_id`. Constants, their portability, and the normal
   4,469 / 5,176 / 6,221 / 6,006 / 6,442 / 6,826 / 6,672 steps/s at M = 48 / 64 / 80 / 96 / 128 / 160 / 192
   (3x to 12x per vCPU). The rise from 3x to ~5x is large and real (+39%); everything from 5x upward is
   FLAT WITHIN NOISE. So 6.0x sits on the plateau rather than below it, and buying the last few percent
-  would cost roughly a doubling of connections - the same trade an earlier campaign measured from the
+  would cost roughly a doubling of connections - the same trade a separate measurement found from the
   other direction ("6x captures 90-94% of peak at every tier; the last 6-10% costs roughly a doubling",
   `bench/CLAUDE.md`). Tail moves the OTHER way past the plateau: p99 climbed 36.8s -> 90.5s -> 106.1s from
   5x to 10x to 12x while p50 fell, which is the over-connection direction showing up as tail rather than
@@ -2377,8 +2366,8 @@ successor and advance no `step_id`. Constants, their portability, and the normal
   CURVE.** 8 vCPU measured ~5% on identical arms (3,105 vs 3,263). 16 vCPU measured **~10%**, caught only
   because an arm with 0.1ms of ADDED netem delay beat its own base-distance twin by 10.1% (6,613 vs
   6,006) - which no distance effect can produce, so it prices the noise directly. Reading the 16-vCPU
-  curve against the 8-vCPU floor produced two false findings before that arm ran: a "plateau at 10x" and
-  an 80-vs-96 inversion, both of which are scatter. **Budget a repeated arm per campaign to price the
+  curve against the 8-vCPU floor produces two false findings: a "plateau at 10x" and an 80-vs-96 inversion,
+  both of which are scatter. **Budget a repeated arm per campaign to price the
   floor**, and treat within-condition comparisons (same distance, same session, adjacent arms) as the only
   ones resolving anything finer - at 0.169ms, 96 beat 80 by 11.3%, which is such a comparison and stands.
   Two design rules for the next such sweep: pin the pool (an unpinned one moves with probe variance, see
@@ -2452,7 +2441,8 @@ successor and advance no `step_id`. Constants, their portability, and the normal
   keep falling with cores; 64 vCPU and up hold the 32-vCPU curve rather than extrapolate it down.
   **Full compensation has a ceiling** regardless: 4 ms on 32 vCPU would need ~1,163 connections, so past
   ~1.5-2 ms a large instance cannot be compensated at all (which is why `poolRTTBuckets` stops at 2 ms and
-  every longer path clamps to that column) and the answer is more shards, not a bigger one. Same-zone RTT spans **0.053-0.96 ms** and cross-AZ same-region is ~1.1 ms -
+  every longer path clamps to that column) and the answer is more shards, not a bigger one. Same-zone RTT spans
+  **0.053-0.96 ms** and cross-AZ same-region is ~1.1 ms -
   both inside the compensated range; cross-region (10-40 ms) is far outside it.
 
   🔑 **NEVER FIT `k` FROM A LADDER THAT MOVES THE POOL WITH THE RTT.** `M` then becomes a linear function
@@ -2613,7 +2603,8 @@ then holds a pool sized for a fleet smaller than the one it is in, over-connecti
 its **pinned pools silently overwritten by derived ones** - the operator's explicit pin evaporates. With the
 lock spanning read through push, whichever writer goes second sees a settled world (the override applies last,
 or the recompute sees the override and leaves the pools alone). Lock order:
-`poolsLock` -> `shardsLock` (the counts are lock-free reads of the Sonars' published state, so they drop out of the order). Pinned by
+`poolsLock` -> `shardsLock` (the counts are lock-free reads of the Sonars' published state, so they drop out of the
+order). Pinned by
 `TestPoolSizing_ConcurrentRecomputeAppliesLatestR` and
 `TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride` (both drive the interleaving with the
 `slowPoolPush` seam rather than racing for it - staging the two counts through the registry itself and waiting for
@@ -2710,7 +2701,8 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   (`R` every registered replica, await-only included)
   of `max_connections`, read once per shard at Startup (`pg_settings`, `@@max_connections`,
   `@@MAX_CONNECTIONS`; SQLite and a failed read give 0 and skip). SQL Server reports 32767 unless "user
-  connections" is configured - always, on Azure SQL - so there the check effectively never fires. It never resizes anything: shrinking
+  connections" is configured - always, on Azure SQL - so there the check effectively never fires. It never resizes
+  anything: shrinking
   dispatchers to make room for idle readers is the wrong trade, and a fleet that size wants a pooler.
 - **A draining replica withdraws if its drain outlasts one registry read cadence** (`drainRuntime`, a timer
   armed before `crew.Drain` and joined after it): `Sonar.Withdraw` sets its rows' `working=0`, so its peers
@@ -2728,13 +2720,14 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
 - **Known residual: a crashed dispatcher holds its slot for the fresh window (40s).** The rank is drawn from
   rows still counted by `Replicas`, so a dispatcher that dies without shutting down keeps its rank until its
   row ages out, and the shard runs on `X-1` meanwhile. With `X >= 2` that is slower, not stopped; **all `X`
-  crashing together stops the shard for up to the window**. Ranking only rows with fresh dispatch evidence would shorten it, but a reader never
+  crashing together stops the shard for up to the window**. Ranking only rows with fresh dispatch evidence would
+  shorten it, but a reader never
   stamps that evidence, so it could never be promoted - the fix is not free.
 `engine_id` (random per process, fresh on restart) is the id a replica writes into `dwarf_peers`; it is
 also **stamped on every flow/step INSERT** (creator) **and overwritten by the claim CAS** (claimer) - forensic
 provenance there ("which replica created/ran this row"), deliberately unindexed.
 
-**A note on tests sharing the registry (`peers.go` / `poolsizing_test.go`).** Because the count is now DB-backed, two
+**A note on tests sharing the registry (`peers.go` / `poolsizing_test.go`).** Because the count is DB-backed, two
 engines given the same `NewEngineUnderTest` name (typically `t.Name()`) share one test database, so they share one
 `dwarf_peers` and count each other - which is exactly right for a genuine multi-replica test
 (`fixtures/crossreplicaawait_test.go`), and exactly wrong for a single test that spins up several *independent*
@@ -2810,7 +2803,8 @@ The worker count is split into two numbers, because they answer different questi
   this derivable where `N = M x T/db` is not.
 - **`turnstiles` (how many database calls may be admitted on a shard at once)** = `turnstilePassesPerConn x
   open`, eight turns per connection - deliberately MORE than the pool, so a queue forms in front of it (see
-  "Turn-taking on the database"; sizing it to the pool measured a 6x collapse). This is what lets the crew grow freely for long tasks without the
+  "Turn-taking on the database"; sizing it to the pool measured a 6x collapse). This is what lets the crew grow
+  freely for long tasks without the
   growth turning into pool contention, and the turn taken BEFORE a candidate is picked up is what regulates
   crew growth - by blocking, not by being consulted. See "Turn-taking on the database" below.
 
@@ -3007,14 +3001,15 @@ smallest known weight (conservative); all-unknown degrades to uniform. `Cordoned
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
-**Adaptive/AIMD budgeting was considered and rejected** (2026-07-13): discovering each shard's knee online
-(TCP-style probe-up/back-off) would eliminate the last declared fact, `VirtualCPUs` - but that fact is
-trivial for an operator to supply, and the engine has already shipped-and-removed one control loop (the
-per-task rate valve + breaker, 25959d0). The remaining exposure is honest and documented: a *wrong* declared
+**Do not add adaptive/AIMD budgeting.** Discovering each shard's knee online (TCP-style probe-up/back-off)
+would eliminate the last declared fact, `VirtualCPUs` - but that fact is trivial for an operator to supply,
+and a control loop in this engine has already failed on the wrong axis once (the per-task rate valve +
+breaker; see "Backpressure is the task's or host's job"). The remaining exposure is honest and documented: a *wrong*
+declared
 `VirtualCPUs`, or a deployment that isolates each replica's databases from the others (each then reads a
 registry containing only itself, sees a fleet of one, and over-connects). Both are declared-fact failures,
-the same contract the shard set already carries. Do not reintroduce a controller without a much stronger
-reason than tidiness.
+the same contract the shard set already carries. Do not add a controller without a much stronger reason
+than tidiness.
 
 The idle-drain / lifetime-recycle connection timers (`ConnMaxIdleTime` / `ConnMaxLifetime`, server-drivers only)
 are a database-layer mechanism — see `internal/database/CLAUDE.md`.
@@ -3026,7 +3021,7 @@ slots moved. The `SetMaxOpenConns` override *pins* every shard's pool and suppre
 `recomputePools` still applies roles under it and, when a shard's slots move, re-derives the cache, the refill
 cadences (which read the pinned pool) and the worker ceiling from the pinned size. What it does not do is react to
 the pin itself - a slot change is its only trigger. So every quantity derived from the pool must also be re-derived
-by `SetMaxOpenConns`, which today covers the worker ceiling and the turnstiles but **not the cache or the refill
+by `SetMaxOpenConns`, which covers the worker ceiling and the turnstiles but **not the cache or the refill
 cadences**: a live pin on an unchanged fleet leaves both sized for the previous pool until the next slot change.
 See the live-vs-derived split under "Configuration" and "Dispatchers", and the load-bearing rule there - "EVERY
 path that changes a pool must re-derive it," and "the cache follows the pool split": a new pool-derived quantity
@@ -3078,18 +3073,20 @@ fan-out). `Fork` resolves scheduling once for the whole cloned tree and binds it
 `status`. The selection index `(status, parked, priority, fairness_key, created_at, step_id)` and saturation index
 `(status, parked, task_url)` lead with the partitioning columns, so parked rows are physically excluded from every
 hot-path scan - no in-memory filter at refill time. (The selection index's trailing `(created_at, step_id)` serves
-the refiller's per-key oldest-first ordering; see `internal/migrations/CLAUDE.md`.) The `parked` value labels *why* the step is held:
+the refiller's per-key oldest-first ordering; see `internal/migrations/CLAUDE.md`.) The `parked` value labels *why*
+the step is held:
 
 - `parked=0` (`parkedNone`, default) - active. Selection sees it; `recoverExpiredLeases` recovers it if its lease
   expires; saturation counts it as one in-flight slot. (Also the precondition the claim CAS requires.)
 - `parked=1` (`parkedSubgraph`) - the step called `flow.Subgraph` and is waiting for the child. `status='running'`
   (logically running, blocked on its child) but excluded from selection, saturation, AND lease-expiry recovery. No
-  lease deadline - the row sits until `completeSurgraphFlow` flips it back to `(pending, parked=0)`. This replaced an
-  earlier `lease_expires = NOW + 7 days` "park" indicator that broke for subgraphs running longer than 7 days
-  (the lease lapsed, the parent recovered, the task re-ran, launching a duplicate child).
+  lease deadline - the row sits until `completeSurgraphFlow` flips it back to `(pending, parked=0)`. **Do not
+  model a park as a far-future lease** (`lease_expires = NOW + 7 days`): it breaks for any subgraph running longer
+  than the lease - the lease lapses, the parent is recovered, the task re-runs, launching a duplicate child.
 
 **Terminal status implies `parked=parkedNone`.** The park value is meaningful only while a step is actively waiting.
-Once terminal (`completed`/`failed`/`terminated`/`cancelled`), the park slot is gone, and the column must read `parkedNone`. Every
+Once terminal (`completed`/`failed`/`terminated`/`cancelled`), the park slot is gone, and the column must read
+`parkedNone`. Every
 terminal-transition code path resets `parked` in the same UPDATE (the `failStep` write, the `Terminate` cascade, the
 `processStep` terminal-flow guard). Without this, a step that was parked
 when its flow was terminated would sit terminal with non-zero `parked` - invisible to the selection index but never
@@ -3120,33 +3117,30 @@ a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Sta
 **3 refiller counters + 1 refiller histogram**, built by the PISTONS (`internal/piston`) from the meter
 this engine resolves once and hands each of them - one instrumentation scope per engine, whoever records
 into it. `initMetrics` deliberately does NOT build them: registering the same names twice on one meter
-is a duplicate-instrument conflict, and the two copies had already drifted in description and bucket
-boundaries. They are `dwarf_refill_candidates_selected` / `_discarded`, `dwarf_steps_stolen` and
+is a duplicate-instrument conflict, and two copies drift apart in description and bucket boundaries. They are
+`dwarf_refill_candidates_selected` / `_discarded`, `dwarf_steps_stolen` and
 `dwarf_refill_query_duration_seconds` {shard,phase}, where `phase` is four values - `band_keys`,
 `fetch_steps`, and the two non-query phases `planning` and `pushing`. Recording planning matters because it
 is the one cost that scales with fairness-key CARDINALITY (the lottery re-rolls per slot over every key).
 
-**There is deliberately no end-to-end `dwarf_refill_duration_seconds`.** It existed to expose the MERGED
-pass's straggler tax as its gap over the per-shard query max - a quantity the per-shard decoupling deleted
-along with the barrier that produced it. What was left was a coarse duplicate of the four phases, which say
-WHICH part was slow. Do not add it back without a question it answers that the phase split does not.
+**There is deliberately no end-to-end `dwarf_refill_duration_seconds`.** An end-to-end figure is only
+informative against a MERGED pass, whose straggler tax is its gap over the per-shard query max; with no
+barrier there is no such gap, and an end-to-end timer is a coarse duplicate of the four phases, which say
+WHICH part was slow. Do not add it without a question it answers that the phase split does not.
 
 **DO NOT SUM THE FOUR PHASES.** `band_keys` is emitted by the piston's tally loop and
 `planning`/`fetch_steps`/`pushing` by its supply loop, on independent cadences - so their sum is the total
 of two unrelated clocks and reconstructs no single object. There is no "a cycle" to reconstruct.
-These exist because **the refiller was the one hot-path subsystem with no timing instrument at all**, so the
-question "what binds at the ceiling" could not be asked of it - and `docs/benchmark-cloud.md`'s
-straggler-wait explanation for the flat 3-shard arm was inference, never a measurement (it has since been
-retracted; the arm was load-generator-bound). They were placed to discriminate three hypotheses that look
-identical from outside (the rules below record how each resolved):
+These exist because without them the refiller is the one hot-path subsystem with no timing instrument at all,
+and "what binds at the ceiling" cannot be asked of it - an unmeasured straggler-wait story for a flat 3-shard arm
+turned out to be a load-generator-bound arm. They discriminate three hypotheses that look identical from outside
+(the rules below record how each resolved):
 
 - **One shard is slow** - `refill_query_duration{shard}` diverges *between* shards. Recorded per shard
   around each shard's own scan, timing query + row scan.
-- **The cross-shard fan-out wait is the cost** - this one WON (max-over-shards measured 2.02x at 6 shards)
-  and was then *removed* by the per-shard refiller decoupling, which dissolved the instrument that measured
-  it: `dwarf_refill_duration_seconds` was the merged pass, and its gap over the per-shard query max was the
-  straggler tax. With no barrier there is no merged pass and no gap, so the instrument was retired rather
-  than left reporting a coarse duplicate of the phases (see above). A shard's own cycle time - which sets
+- **The cross-shard fan-out wait is the cost** - true of a barriered design (max-over-shards measured 2.02x
+  at 6 shards), which is why there is no barrier and no merged pass to time (see above). A shard's own cycle
+  time - which sets
   its partition's supply rate, `capacity_slice/max(supply period, floor)` - is set by the SUPPLY loop alone
   and has nothing to do with the band scan. Summing the four phases overstates it by the scan, which is the
   larger term by one to two orders of magnitude at depth (measured: a 1.6-2.1s scan against a 20-67ms supply
@@ -3154,9 +3148,8 @@ identical from outside (the rules below record how each resolved):
 - **The refiller oversupplies** - `discarded/selected` approaches 1. Every pass wholesale-replaces its
   shard's partition while being triggered after every `processStep` on that shard, so whenever it turns
   faster than the workers drain it throws away a batch it just paid to fetch. `Cache.Refill` returns the
-  discarded count for this. (Measured 0-10% pre-decoupling: dead then. The instrument stays because it is
-  the cheap readout that would catch the regime changing - and it is the gauge to re-tune the cycle interval
-  against if the supply rate is revisited.)
+  discarded count for this. It is the cheap readout that catches the regime changing, and the gauge to
+  re-tune the cycle interval against - see the oversupply paragraph below for when it is live.
 
 The `phase` label (`band_keys` / `fetch_steps`) separates phase 1 from phase 3, which matters for a reason
 found while writing the degradation harness: the band scan's plan flips between an index scan and a
@@ -3164,25 +3157,24 @@ found while writing the degradation harness: the band scan's plan flips between 
 That is indistinguishable from a slow shard without the phase split, and phase 1 is where the measured cost
 concentrates, so the split is what makes the band scan's backlog dependence visible at all.
 
-Explicit second-valued bucket boundaries (`refillBuckets`, now in `internal/piston`) are mandatory: the
+Explicit second-valued bucket boundaries (`refillBuckets`, in `internal/piston`) are mandatory: the
 OTEL defaults are tuned for millisecond-valued instruments and would file every sample in bucket 0. **The
 LOW end is load-bearing** - a warm band scan is ~0.29ms and the same query is ~100ms once its statistics go
 stale, which is the flip the `phase` label exists to expose, so boundaries starting at 0.0005 hide the
 healthy case in bucket 0.
 
-**What the instruments measured, as rules.** The campaign detail (rigs, dates, artifacts, per-arm
-numbers) is deliberately not here - it is measurement, it expires, and it lives with the benchmark
-worklist. These are the parts that would make a future change WRONG if unknown:
+**What the instruments measured, as rules.** The rig detail (dates, artifacts, per-arm numbers) is
+deliberately not here - it is measurement and it expires. These are the parts that would make a future change
+WRONG if unknown:
 
 - **The refiller is what binds** - candidate supply runs only 1.04-1.47x ahead of consumption. Treat it
   as a throughput-critical path, not a background chore.
-- **The "independent of the backlog" claim above is true of WIRE cost only, and the SERVER scan is now
-  CAPPED per key.** Phase 1's server-side scan was O(backlog) (`COUNT(*) OVER (PARTITION BY ...)` reads
-  every due row of a key); it is now `MAX(rn)` under `rn <= capacity`, so per key it touches at most
-  `capacity` rows (on Postgres 15+ a run-condition early-stop; elsewhere still a scan but without the
-  extra COUNT pass) - see "The phase-1 scan count is CAPPED, not exact" above. Fragmented backlogs (many
-  tiny keys) still cost O(distinct keys); do not cite the three-phase split as evidence that backlog depth
-  is free.
+- **The "independent of the backlog" claim above is true of WIRE cost only; the SERVER scan is O(due rows at
+  the band) on every dialect.** `MAX(rn)` under `rn <= capacity` caps the reported count and drops the second
+  window pass `COUNT(*) OVER` would add, but it does not stop the scan - not even on Postgres 15+, where the run
+  condition stops evaluation but still reads every tuple to find the partition boundary (see "The phase-1 scan
+  count is CAPPED, not exact" above and `internal/piston/CLAUDE.md`). Do not cite the three-phase split, or the
+  cap, as evidence that backlog depth is free.
 - **The band scan's client-observed "fixed floor" is CONNECTION-POOL WAIT, not query work** — measured
   by decomposing the client clock against `pg_stat_statements` and the pool-wait gauges (additive,
   every run), and causally: a dedicated refill connection collapses the floor to server + RTT. Its
@@ -3208,12 +3200,13 @@ worklist. These are the parts that would make a future change WRONG if unknown:
   it reintroduces the task-duration dependence `workerCeiling` exists to avoid, and under a mixed
   workload it fits a blend wrong for every class in it. The bound that matters is the lease margin,
   and `workerCeiling` already enforces it without knowing T.
-- **Do NOT expect a win from capping phase 3's per-shard fetch.** `rn <= perKey` filters AFTER the
-  window function, so it cuts rows *returned*, not rows *processed*. Built twice as an optimization,
-  measured twice (n=3 then n=5), phase-3 time unchanged both times, reverted. The over-fetch is a wire
-  cost and the wire is not where the time goes. (The slice rule now caps each shard's fetch at its own
-  plan slice as a *correctness* consequence of the global-plan split - fine, but do not credit it with a
-  phase-3 latency win, and do not add further caps chasing one.)
+- **Do NOT expect a win from tightening an `rn <=` cap on the window-shaped fetch** (mysql, sqlite).
+  `rn <= perKey` filters AFTER the window function, so it cuts rows *returned*, not rows *processed*:
+  measured twice as an optimization (n=3 then n=5), phase-3 time unchanged both times. The over-fetch there is
+  a wire cost and the wire is not where the time goes. What does cut phase 3 is a `LIMIT`/`TOP` inside a lateral
+  join, which is the pgx/mssql shape (see the phase-3 paragraph above). (The slice rule caps each shard's fetch at
+  its own plan slice as a *correctness* consequence of the global-plan split - do not credit it with a phase-3
+  latency win, and do not add further caps chasing one.)
 
 - **CAP the count, do NOT APPROXIMATE it - they are different, and only one is safe.** `count` becomes
   the planner's per-key remaining count (how many batch slots a key wins) AND sets the per-key fetch cap (phase 3's
@@ -3223,23 +3216,22 @@ worklist. These are the parts that would make a future change WRONG if unknown:
   is forbidden - the fairness allocation built on it breaks. A **cap** (`min(count, capacity)`, the
   current `MAX(rn) ... rn<=capacity`) is *not* an approximation: it is exact for `count < capacity` and
   saturated-correct above it, and lossless because the planner can never consume more than `capacity`
-  from one key. The cap does not enable the loose-index-scan shortcut (it still visits every due row
-  server-side off-Postgres, and up to `capacity` rows per key on PG); reviving a truly sub-linear phase 1
-  still needs distinct-key enumeration (skip-scan) AND a proof the fairness contract survives.
-- **The window functions are NOT the expensive part** (post-covering-index) - but note phase 1 now DOES
-  use `GROUP BY` (over a windowed subquery, with `MAX(CASE WHEN rn=1 ...)` for the oldest row - NOT the
-  rejected `HashAggregate`+per-key-`LATERAL` rewrite, which was slower). This `GROUP BY` measured *faster*
-  than the old double-window (`COUNT(*) OVER` + `ROW_NUMBER`) because it drops a full aggregation pass, not
-  because `GROUP BY` is cheap. General rule: re-derive the cost split after any change that moves the
+  from one key. The cap does not enable the loose-index-scan shortcut (the scan still visits every due row
+  server-side, on every dialect); a truly sub-linear phase 1 needs distinct-key enumeration (skip-scan) AND a
+  proof the fairness contract survives.
+- **The window functions are NOT the expensive part** (with the covering index) - and phase 1 DOES use
+  `GROUP BY` (over a windowed subquery, with `MAX(CASE WHEN rn=1 ...)` for the oldest row - NOT a
+  `HashAggregate`+per-key-`LATERAL` rewrite, which measured slower). This `GROUP BY` measured *faster* than a
+  double-window (`COUNT(*) OVER` + `ROW_NUMBER`) because it drops a full aggregation pass, not because
+  `GROUP BY` is cheap. General rule: re-derive the cost split after any change that moves the
   baseline.
 
-**The oversupply hypothesis was measured dead in the FUSED build** (`discarded/selected` 0-10%, never the
-~100% it predicted) **and is alive in the split one.** With the scan no longer pacing the supply loop, the
-`MinGap` floor became the binding supply rate, and the same rig measured **85% discard and +42% host CPU**
-at the derived cadence. Pacing the supply loop against the measured drain (~190ms there, against a derived
-17.8ms that fell below the 20ms floor) cut the fetches 4.4x and kept the throughput. So a high waste ratio
-now names a supply loop running ahead of the workers, which is a cadence-derivation question rather than a
-dead hypothesis - see `deriveRefillInterval`, which was calibrated when the scan capped it.
+**Oversupply is live with the loops split, though a fused loop hides it** (fused, `discarded/selected`
+measured 0-10%, because the scan paces supply). With the scan not pacing the supply loop, a cadence derived
+below the `MinGap` floor makes the floor the binding supply rate: measured **85% discard and +42% host CPU**
+at a derived 17.8ms. Pacing the supply loop against the measured drain (~190ms there) cut the fetches 4.4x and
+kept the throughput. So a high waste ratio names a supply loop running ahead of the workers - a
+cadence-derivation question; see `deriveRefillInterval` and its worker term.
 
 **SUPPLY IS NOT WHAT BINDS AT SATURATION, AND THE TALLIER BEING SLOW DOES NOT MAKE IT SO.** The band scan
 is O(due rows) and inflates hard under a deep backlog - measured on 8 vCPU with a single fairness key,
@@ -3257,7 +3249,7 @@ and I/O spent producing nothing, competing with real step work. Worth removing o
 removing it will NOT raise throughput, and any change justified by "the refiller is the constraint" is
 justified by a measurement nobody has made.
 
-**And the tax has now been PRICED, by varying backlog depth alone.** Same tier, pool, rate and distance,
+**And the tax is PRICED, by varying backlog depth alone.** Same tier, pool, rate and distance,
 `-max-outstanding` 20,000 against 100,000: the backlog sat 5x deeper, the band scan went **107ms ->
 322ms** (3x), and throughput moved **-1.0%** - inside noise. So tripling the scan's cost bought nothing,
 which is as direct a statement as the instruments can make that this path is off the critical one. Do not
@@ -3300,15 +3292,14 @@ time and reads engine state, and all of that is in-memory EXCEPT one query: `dwa
 `dwarf_steps_oldest_pending_age_seconds` (per priority band) come from `observePendingByBand`, one statement
 per shard. Keeping the query-backed set to those two is deliberate - a scrape should not be load.
 
-**Two gauges were removed from here and should not come back without a new argument.**
-`dwarf_task_concurrency_running` {task_url} cost a SECOND query per shard per scrape - on every replica, to
-produce R copies of one cluster-wide number - carried the least bounded label in the set, and asked a
+**Two gauges are deliberately absent and should not be added without a new argument.**
+`dwarf_task_concurrency_running` {task_url} costs a SECOND query per shard per scrape - on every replica, to
+produce R copies of one cluster-wide number - carries the least bounded label in the set, and asks a
 question that belongs to the host: per-downstream concurrency turns on the account/tenant identity the
 engine structurally cannot see, which is the same rule that keeps backpressure out of the engine (see
-"Backpressure is the task's or host's job"). `dwarf_steps_fairness_keys` was a per-replica sample of the
-LAST plan's distinct-key count, read from `planner.LastBand()`; it drove no decision and alarmed on nothing
-- a scheduling diagnostic that had served its purpose. `LastBand` itself stays, because the piston's and the
-planner's own tests assert on it.
+"Backpressure is the task's or host's job"). `dwarf_steps_fairness_keys` would be a per-replica sample of the
+LAST plan's distinct-key count, read from `planner.LastBand()`; it drives no decision and alarms on nothing.
+`LastBand` itself exists because the piston's and the planner's own tests assert on it.
 
 **`dwarf_state_in_flight_bytes` / `_steps` are the HELD-STATE pair, and three things about them are
 load-bearing.** Two atomics on the Engine, bracketed in `processStep` around the `ExecuteTask` call.
@@ -3363,15 +3354,15 @@ once fired only on `completed`, which broke it in two ways at once: the `status`
 value, so `sum by (status)` silently answered a completed/failed/terminated question with completions
 alone, and the in-flight panel this metric exists for - `flows_started` minus this - drifted upward
 permanently by every flow that did not finish cleanly. Both halves are pinned by
-`TestMetrics_TerminatedCountsEveryTerminalStatus`, which fails on all three of its assertions against the
-old behaviour (the test predates the `terminated`/`cancelled` status split and still exercises the same
-completed/failed/terminated shape). The terminate path counts the flows that were non-terminal when it
+`TestMetrics_TerminatedCountsEveryTerminalStatus`, which fails on all three of its assertions against a
+completions-only counter (it exercises the completed/failed/terminated shape). The terminate path counts the flows
+that were non-terminal when it
 scanned the tree, so a terminate racing a concurrent completion can over-count by one; that window is
 microseconds and the miscount is bounded to at most one flow, so it is not worth a round trip to close.
 `cancelled` (a graceful `Cancel` whose every loss was a cancellation) is tallied the same way, from both
 `failStep` and the cohort-fail path. **Every path that starts a flow must call
 `metricFlowStarted`** - `Create`, `Continue`, AND `Fork` (which builds its new root through its own
-`INSERT...SELECT` clone and so was silently missed): a fork's completion runs through the same `completeFlow`
+`INSERT...SELECT` clone and so is the easy one to miss): a fork's completion runs through the same `completeFlow`
 that increments `flows_terminated`, so a missing start makes the standard in-flight panel
 (`started - terminated`) drift negative by one per fork. Subgraph flows are counted too - the start
 path and `completeFlow` run for them - so no `surgraph_flow_id` filter; the `workflow` label lets dashboards
@@ -3441,8 +3432,8 @@ hands it to `createSubgraphFlow` → `createWithGraph` as the `parentTraceParent
 parents the subgraph's "workflow" span under it (rather than minting detached). Span IDs are fixed at
 `Start`, so it does not matter that the caller span (and the subgraph "workflow" span) have already ended
 by the time the subgraph's steps dispatch later - the children simply reference the recorded parent span
-ID. `createSubgraphFlow` no longer reads the parent flow's `trace_parent` column (it uses the live caller
-span instead); baggage is still inherited via its post-insert UPDATE.
+ID. `createSubgraphFlow` does not read the parent flow's `trace_parent` column (it uses the live caller span
+instead); baggage is inherited via its post-insert UPDATE.
 
 **Reentrancy → one span per dispatch.** The per-step span is created inside each `processStep` call, so a
 step that yields (`flow.Subgraph`/`flow.Interrupt`) and later re-dispatches produces **two** spans - one
@@ -3469,18 +3460,19 @@ be relevant after it ends." So retention is either operator-driven or an explici
 **Deletion is deferred: mark, then reap.** No path deletes rows inline. `DeleteOnCompletion`, `Delete`, and `Purge`
 all **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
 a dedicated **reaper** goroutine (`reaperLoop`, ~1min ticker) later removes the whole subtree set-based, keyed on
-`root_flow_id`. This closes the old strand race (a `Delete`/`Purge` deleting steps while a `Resume` revives the flow)
+`root_flow_id`. This closes the strand race (a `Delete`/`Purge` deleting steps while a `Resume` revives the flow)
 by construction - no rows are deleted where a lifecycle op could interleave (see "Deletion race gate" below) - and
 makes a disposable flow's **outcome observable** during its grace window.
 
 - **`FlowOptions.DeleteOnCompletion`** - the author declares a flow fire-and-forget (durable-execution jobs whose
   output and history are not needed). On success `completeFlow` stamps `delete_after_ms = deletionGrace` (hardcoded
   **1 min**; a per-flow duration would be retention policy, out of scope) **in the same transaction** that marks the
-  flow `completed`. An *event* trigger on success, not a clock: `failed`/`terminated`/`cancelled`/`interrupted` flows are **never**
+  flow `completed`. An *event* trigger on success, not a clock: `failed`/`terminated`/`cancelled`/`interrupted` flows
+  are **never**
   scheduled (a failed disposable job is exactly the one to keep as a `Fork` source). Root-only (`surgraph_flow_id=0`),
   not inherited by children (the reaper sweeps descendants via `root_flow_id`). During the grace window the flow stays
   `completed` and its **outcome is observable**: `Snapshot`/`Await`/`Run` return the completed `FlowOutcome` - this is
-  how a caller learns a disposable flow's result now that there is no stop callback. It is nonetheless *logically*
+  how a caller learns a disposable flow's result, since there is no stop callback. It is nonetheless *logically*
   gone: excluded from `List`, and `History` 404s (the full step detail is what the flow is discarding). After the
   window the reaper removes it and reads 404. (`Snapshot`/`Await` deliberately serve the outcome rather than 404 - a
   hard-immediate-404 for a redaction-critical `Delete` is a deferred sub-decision.)
@@ -3508,9 +3500,9 @@ root plus its descendants. It checks `reaperStop` between batches so `Shutdown` 
 whole-tree deletes, never mid-statement). No startup/shutdown/wake passes: deletion is latency-tolerant, so a flow
 that came due while a replica was down is removed on the next tick (single-replica) or by a peer's tick.
 
-**The tree delete is unconditional on descendant status - a deliberate change from the old inline `deleteFlow`.**
-The former `deleteFlow` returned 409 if *any* subgraph descendant was `running`; the deferred path stamps only the
-root (whose own status is 409-guarded, so a non-terminal root is never stamped) and the reaper deletes the whole
+**The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
+descendant. The deferred path stamps only the root (whose own status is 409-guarded, so a non-terminal root is never
+stamped) and the reaper deletes the whole
 `root_flow_id` tree regardless of descendant status. The only running descendant a terminal-rooted tree can hold is
 the **orphaned-child residue** (the Terminate-vs-spawn race: a live child whose parent already terminalized - see
 `recoverOrphanedSubgraphChildren`), a bug-state row the wedge sweep would terminate anyway. Deleting it is safe: a
@@ -3522,8 +3514,8 @@ the small in-window subset. (`deletionGrace`/`reapInterval` are `var` not `const
 engine-package tests force a reap via `reapDueFlows`; fixtures verify the observable public contract via `List`/
 `History`/`Snapshot`.)
 
-**Deletion race gate.** Because deletion is now an *orthogonal column*, not a status, stamping `delete_after_ms`
-alone does not serialize against `Resume`. The invariant that keeps the old strand bug closed is
+**Deletion race gate.** Because deletion is an *orthogonal column*, not a status, stamping `delete_after_ms`
+alone does not serialize against `Resume`. The invariant that keeps the strand race closed is
 **`delete_after_ms > 0 ⟹ terminal status`**, and the reaper reaps only terminal-rooted trees: DeleteOnCompletion
 stamps a `completed` root (immutable); `Delete`/`Purge` of a terminal flow stamp an immutable row; `Delete`/`Purge`
 of an `interrupted` flow flip it to `terminated` in the same UPDATE, mutually exclusive with `Resume`'s
@@ -3588,28 +3580,31 @@ outcomes (no `onError` → flow `failed`; with `onError` → routed to the handl
 
 ### Worker context (the engine lifetime)
 
-Workers, the timer, and the refiller share the engine's lifetime context (`e.lifetimeCtx`), created at Startup and
-cancelled only after `Shutdown` drains all three. So by the time the lifetime ctx is cancelled, every DB operation
+Workers, the background loops and the pistons share the engine's lifetime context (`e.lifetimeCtx`), created at
+Startup and cancelled only after `Shutdown` drains them all. So by the time the lifetime ctx is cancelled, every DB
+operation
 has committed - in-flight writes are never interrupted by ctx cancellation. The only *cancellable*, time-bounded ctx
 is the `ExecuteTask` call: `executeTask` derives it from the lifetime ctx with the step's `time_budget_ms`.
 
-### Shutdown ordering: workers, then timer, then recovery/reaper, then the pistons
+### Shutdown ordering: workers, then recovery/reaper/latch, then the pistons, then the Sonars
 
-`timerLoop` is terminated by a dedicated `timerStop` channel it selects on. It has no other channel: the
-early-wake path is gone (see "The timer is a RECOVERY sweep"), which also retired the hazard an earlier
-design carried, where a `wakeTimer` send could race a close and panic a worker mid-`processStep`.
+There is no timer goroutine and no wake channel to close (see "There is no timer goroutine"), so no send can
+race a close and panic a worker mid-`processStep`. `drainRuntime`:
 
 ```
+close(drainStop)                             // a worker asleep in a persist backoff releases its lease and exits
 close(reconcileStop); reconcileWorker.Wait() // in-memory only: nothing in flight to wait for
+arm withdrawal timer                         // gives up dispatcher slots if the drain outlasts a read cadence
 closeMetrics()                               // the gauge callback must not query a closing database
-cache.close(); turnstiles.Close()            // BOTH: a worker parks on one or waits on the other
-workers.Wait()
-close(timerStop);    timerWorker.Wait()
+cache.Close(); turnstiles.Close()            // BOTH: a worker parks on one or waits on the other
+crew.Drain(); withdrawal.Wait()
 close(recoveryStop); recoveryWorker.Wait()
 close(reaperStop);   reaperWorker.Wait()
+close(latchStop);    latchWorker.Wait()  // the detector stops before the board closes
 pistonCancel();      pistonPool.Wait()   // ctx is the pistons' only stop signal
 sonarCancel();       sonarPool.Wait()    // ditto - and they must outlive the pistons
 leaveFleet()                             // only now is the last possible beat behind us
+latches.Close(); lifetimeCancel()
 ```
 
 **The Sonars drain LAST, after the pistons, and that ordering is load-bearing.** This replica must stay
@@ -3625,8 +3620,8 @@ pure read and a beat is one idempotent UPDATE, so abandoning either mid-flight s
 
 `leaveFleet` runs on `context.Background()` rather than the lifetime ctx, which is cancelled moments later.
 
-A `cache.Refill` into an already-closed cache is a no-op. Never-closed nudge channels plus dedicated stop
-signals keep the drain free of ordering hazards.
+A `cache.Refill` into an already-closed cache is a no-op. Dedicated stop signals, and no wake channels at all,
+keep the drain free of ordering hazards.
 
 ### An unchecked `tx.ExecContext` inside `Transact` is SAFE - do not "fix" it
 
@@ -3654,8 +3649,8 @@ the latch says nothing about it.
 ### Transactions
 
 The multi-statement write paths each run under one `db.Transact`. **There is no single engine-wide row-lock
-order** - two disciplines coexist deliberately, and any earlier claim of a uniform "steps-first-then-flow"
-ordering was wrong:
+order** - two disciplines coexist deliberately; do not describe or "restore" a uniform "steps-first-then-flow"
+ordering:
 
 - **Flow-row-first (write-first).** Every flow-*advancing* / flow-*terminating* transaction takes the
   `dwarf_flows` row's write lock as its **first** statement, before touching steps: `processStep`'s transition
@@ -3665,12 +3660,13 @@ ordering was wrong:
   terminating step is marked `completed` in a standalone UPDATE *before* the disposition tx, so the flow row must
   be locked first for the disposition to be recoverable). Do not reorder these to read-first.
 - **Steps-first.** The lifecycle mutations update `dwarf_steps` before `dwarf_flows`: `Resume`, `Terminate`,
-  `failStep`, `handleInterrupt`, and `Delete`/`Purge` (the deletes run steps-before-flows, ascending id). `handleInterrupt` belongs here despite advancing the flow (running→interrupted): interrupt is
+  `failStep`, `handleInterrupt`, and `Delete`/`Purge` (the deletes run steps-before-flows, ascending id).
+  `handleInterrupt` belongs here despite advancing the flow (running→interrupted): interrupt is
   **non-terminating** and marks no step `completed` in a prior standalone UPDATE, so it carries **no** orphan-strand
   obligation - its only write-first requirement is that the *first* statement be a write (the `UPDATE dwarf_steps`
   satisfies it, keeping the SQLite deadlock closed). It is deliberately steps-first to match `Resume`/`Terminate`,
-  which walk the *same* surgraph chain, so the two never lock that chain's flow+step rows in opposite order (the
-  former deadlock cycle, now eliminated).
+  which walk the *same* surgraph chain, so the two never lock that chain's flow+step rows in opposite order (a
+  flow-first `handleInterrupt` forms a deadlock cycle with `Resume` - see below).
 
 `Create` inserts the flow row, then the entry step, then updates the flow (`created→running`) - flow-row-first in
 statement order, but into a **brand-new** flow whose rows no concurrent transaction can reach until commit, so it
@@ -3690,12 +3686,12 @@ forcing the flow-terminating transactions steps-first would reintroduce the SQLi
 and forcing `Terminate` flow-first buys nothing on SQLite (it serializes writes, so its only exposed deadlock is the
 read-first-upgrade one the write-first rule already closes) while giving `Terminate` a wider flow-row lock hold.
 
-The former `handleInterrupt` (flow-first) vs `Resume` (steps-first) cross on a shared interrupt chain - the more
-dangerous of the two, because it locked *two* overlapping resources (chain flow rows **and** chain step rows) in
-opposite order - was **eliminated** by making `handleInterrupt` steps-first (above): with `handleInterrupt`,
-`Resume`, and `Terminate` all acquiring that chain's steps before its flows, none can cycle against another. The
-move is safe precisely because interrupt is non-terminating (no orphan-strand obligation), and `handleInterrupt`
-still shares only the *single* flow row with the flow-first cluster (`advanceFlow`/`completeFlow` never lock a
+**Do not make `handleInterrupt` flow-first.** A flow-first `handleInterrupt` against steps-first `Resume` on a
+shared interrupt chain is the more dangerous cross, because it locks *two* overlapping resources (chain flow rows
+**and** chain step rows) in opposite order. With `handleInterrupt`, `Resume`, and `Terminate` all acquiring that
+chain's steps before its flows, none can cycle against another. Steps-first is safe for `handleInterrupt`
+precisely because interrupt is non-terminating (no orphan-strand obligation), and it shares only the *single* flow
+row with the flow-first cluster (`advanceFlow`/`completeFlow` never lock a
 sibling's step row), which cannot form a cycle - the same reason steps-first `Resume` already coexisted with them.
 
 Orthogonal to that tolerated cross (the deadlock stays retry-recovered; the lock order is **unchanged** - the
@@ -3733,13 +3729,13 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    is the last-resort alarm for the residual case the defer cannot cover (its own reset UPDATE losing to a contention
    storm). It runs on the same **dedicated `recoveryLoop`** as the wedge sweep (#4) - off `recoverExpiredLeases` for the
    same heavy-scan reason (its `NOT EXISTS` over `dwarf_steps` is latency-tolerant, while the poll is nudged
-   sub-second). **Both correctness conditions are on `dwarf_steps`, deliberately.** The age guard used to *be* the
-   flow row (`dwarf_flows.updated_at older than the threshold`), but the `touch`-column refactor froze that column
-   at go-`running` time (it moves only on a status change), so it stopped tracking per-step progress: it was then
-   *permanently* satisfied for any flow running past 5m, leaving the all-terminal check to trip on the brief
+   sub-second). **Both correctness conditions are on `dwarf_steps`, deliberately.** **Do not age-guard on the flow
+   row** (`dwarf_flows.updated_at older than the threshold`): the `touch` column keeps that timestamp frozen at
+   go-`running` time (it moves only on a status change), so it tracks no per-step progress and is *permanently*
+   satisfied for any flow running past 5m - leaving the all-terminal check to trip on the brief
    completed->successor window of every ordinary transition (a healthy long-running flow would be alarmed on any
-   sweep that sampled it). A step row's `updated_at` still moves on every `pending->running->terminal` transition,
-   so the guard now anchors there. The all-terminal check excludes every legitimate long-wait (a `running` task -
+   sweep that sampled it). A step row's `updated_at` moves on every `pending->running->terminal` transition, so
+   the guard anchors there. The all-terminal check excludes every legitimate long-wait (a `running` task -
    even a 10-minute one with no DB activity - a `pending` sleep/retry, a `running`+parked subgraph caller, an
    `interrupted` human wait), and the no-recent-step check excludes the completed->successor window (the
    just-`completed` step's `updated_at` is fresh, even under persist backoff). The frozen `f.updated_at` is kept
@@ -3753,7 +3749,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    condition could in principle never fire (a parked step is invisible to selection, and `parkedSubgraph` is
    invisible to lease recovery too). Runs on the **dedicated recovery goroutine** (`recoveryLoop`) on a plain
    `wedgeSweepInterval` (5m) ticker; the loop is drained before the pistons in `drainRuntime` since a recovered
-   park can re-offer a step. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation never trips a
+   park can re-offer a step. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation
+   never trips a
    false positive (the guard sits comfortably beyond normal subgraph-completion latency). Unlike orphan-flow detection
    this **does** auto-recover, because each recovery re-invokes a *normal, status-guarded* mechanism (the
    `parkedSubgraph` revive CAS, or a subtree `Terminate` guarded by `status NOT IN (terminal)`) rather than duplicating
@@ -3764,7 +3761,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      non-terminal child** (`surgraph_step_id = step_id`, status created/running/interrupted) is wedged - the child
      reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
      latest child (`flow_id DESC`): `completeSurgraphFlow` for a completed child, `deliverSubgraphError` for a
-     failed/terminated/cancelled/absent one. **The absent-child case (`childFlowID == 0`) is the one the whole sweep exists
+     failed/terminated/cancelled/absent one. **The absent-child case (`childFlowID == 0`) is the one the whole sweep
+     exists
      for** - a worker that committed the park and died before inserting the child leaves a step no lease can
      recover (`parkedSubgraph` carries no lease) - and it must skip every child-directed write: aiming them at
      id `0` made `computeFinalState` SELECT `WHERE flow_id=0`, hit `sql.ErrNoRows`, and roll the recovery back on
@@ -3778,19 +3776,21 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      the `NOT EXISTS` + latest-child logic.)
    - **orphaned subgraph child** (`recoverOrphanedSubgraphChildren`) - the **mirror image** of the above: a
      non-terminal child flow (`created`/`running`/`interrupted`) whose *parent flow* is already terminal
-     (`completed`/`failed`/`terminated`/`cancelled`). Where the `parkedSubgraph` case is a live caller whose child vanished,
+     (`completed`/`failed`/`terminated`/`cancelled`). Where the `parkedSubgraph` case is a live caller whose child
+     vanished,
      this is a live child whose caller/parent vanished. It is the residue of a `Terminate` that terminalized the
      tree in the narrow window **after the caller step parked but before the child flow was inserted**
      (`execution.go`: the park UPDATE commits, then `createSubgraphFlow` runs), so the teardown - working from a
-     scan taken before the child existed - missed it. (A fan-out sibling's `failStep` no longer produces this
-     residue: a subgraph child now fails via cohort accounting after every branch settles, never eagerly while a
+     scan taken before the child existed - missed it. (A fan-out sibling's `failStep` does not produce this
+     residue: a subgraph child fails via cohort accounting after every branch settles, never eagerly while a
      sibling is live - see "Failure back to the parent".) The orphan has no path out on its
      own: the terminal root 409s `Resume`/`Terminate`, the child's own key is read-only (400), and
      `recoverWedgedSubgraphParks` is blind because the caller step is *terminal*, not `running`+`parkedSubgraph`.
-     The sweep terminates the orphan's whole subtree (`terminateOrphanedSubtree`, which now *shares* `Terminate`'s
+     The sweep terminates the orphan's whole subtree (`terminateOrphanedSubtree`, which *shares* `Terminate`'s
      transaction via `terminateSubtree` rather than cloning it - no surgraph up-walk is wanted or exists, since the
      ancestor chain is already terminal; it differs only in taking a zero-row flow UPDATE as a benign no-op rather
-     than a 409), sharing the parent's terminal fate. An **`interrupted`** parent is deliberately *excluded* (not terminal - a `Resume` of the root
+     than a 409), sharing the parent's terminal fate. An **`interrupted`** parent is deliberately *excluded* (not
+     terminal - a `Resume` of the root
      revives that branch and a sibling child under it is healthy); the `parkWedgeThreshold` age guard excludes the
      sub-second window where a just-terminalized parent's sibling child is still being cleaned up by the normal
      completion/error path. It counts under `park_type="orphaned_child"`.
@@ -3855,14 +3855,14 @@ an opaque cursor encoding each shard's smallest-returned `flow_id`. `List` is st
 the whole call (the per-shard debug path is `ShardInfo` + `List(Shard=N)`).
 
 *Say this out loud in the public docs, do not quietly promise "newest first".* The Operations summary above, the
-`List` godoc, `Query.Limit`, and `docs/flows.md` all used to advertise a global newest-first order, which on a
+`List` godoc, `Query.Limit`, and `docs/flows.md` must not advertise a global newest-first order, which on a
 two-shard fleet visibly is not: `List(Limit:100)` returns shard 1's 50 newest, then shard 2's 50 newest, so shard 2's
 newest flow follows shard 1's oldest returned one - a reverse-chronological UI renders that as an interleaving
-artifact. The fix is the **doc**, not the code: merging by `created_at` (the tempting one) is exactly what the
+artifact. The answer is the **doc**, not the code: merging by `created_at` (the tempting one) is exactly what the
 clock-comparison argument above rejects, and there is no other cross-shard key. A caller needing one ordered view
 sorts the page itself - deciding what to trust - or pages a single shard with `Query.Shard`. Pinned by
 `TestList_NewestFirstIsPerShardNotGlobal`, which also asserts the global-order violation is *present*, so the code is
-never "fixed" back to the old promise by accident.
+never "fixed" into a global-order promise by accident.
 
 **`Query.Limit` is a per-shard cap, not a hard total - same honesty, same reason.** `perShardLimit =
 ceil(Limit/shards)` (`history.go`) is applied to each shard's query and the results are concatenated with no final
@@ -3909,7 +3909,7 @@ in a test-only package - because they are fired from production engine code, not
 
 **Consults are written inline at the site they affect, never wrapped in a helper.** A wrapper puts the fault's
 effect a jump away from the code it perturbs, which is exactly backwards for a seam whose whole purpose is to be
-readable at the point of perturbation. The two that were wrapped are now inline: the lost-delivery consult in
+readable at the point of perturbation. Two consults that are easy to wrap are inline: the lost-delivery consult in
 `deliverFlowFailureToParent` (`completion.go`) and the flow-row-write counter's two sites in `execution.go`. Both
 guard on `e.seams.Enabled()` first - the lost-delivery one because building its scope needs a **DB read** (a live
 binary must run neither the query nor the consult), the counter because formatting the flow id would otherwise
@@ -3917,8 +3917,8 @@ allocate a throwaway scope string on the hot path.
 
 **A rendezvous is two steps - *arm*, then *receive* - and which spelling to use is a question about the CALLER,
 not about taste.** Fusing the steps means a test can only arm AFTER the operation it wants to observe is already
-running, so every checkpoint reached in that gap is lost. Both workarounds for that were in the tree and both
-cost something real: a goroutine calling a blocking wait merely *moves* the race (it may not have registered
+running, so every checkpoint reached in that gap is lost. Both workarounds for that cost something real: a goroutine
+calling a blocking wait merely *moves* the race (it may not have registered
 before the checkpoint fires) and leaks on timeout; a `Break` closes the race honestly but **freezes the engine**,
 perturbing the timing under test and obliging a `Resume`. So:
 
