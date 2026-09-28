@@ -71,6 +71,33 @@ func (f *restartFleet) ceiling(shard int) int {
 	return total
 }
 
+// bound is the most the fleet may claim on one shard while its size moves between wantR-1 and wantR: every
+// live replica on its own wantR-1 share, except one on its wantR share - a survivor that has not shrunk yet
+// beside a joiner that has grown, or a leaver still holding its old share beside survivors that have grown.
+// The one excused is whichever loosens the bound most.
+//
+// PRICED PER REPLICA, from the RTT each probed, never from one fleet-wide budget. A replacement probes
+// afresh, and under a loaded suite on MariaDB the probes spanned 0.13-1.26 ms - budgets 48 to 91 on the same
+// server - so a bound taken from the original fleet failed a healthy rollout at 84 against 60.
+func (f *restartFleet) bound(shard, wantR, vcpus int) int {
+	spec := ShardSpec{Index: shard, VirtualCPUs: vcpus}
+	live := f.snapshot()
+	total, minExcused := 0, -1
+	for _, e := range live {
+		rtt := probedRTT(e, shard)
+		_, before := shardPool(spec, 0, dispatcherSlots(spec, wantR-1), rtt)
+		_, after := shardPool(spec, 0, dispatcherSlots(spec, wantR), rtt)
+		total += before
+		if minExcused < 0 || before-after < minExcused {
+			minExcused = before - after
+		}
+	}
+	if len(live) >= wantR {
+		total -= minExcused
+	}
+	return total
+}
+
 // awaitFleetSettled waits for every replica to agree on the fleet size and to hold the pool that size
 // implies FOR THAT REPLICA. Agreement on the count is what makes the assertions either side of it
 // meaningful: a per-replica reading that has not converged yet would let a stale pool pass for a settled
@@ -138,19 +165,19 @@ func awaitFleetSettled(t *testing.T, fleet *restartFleet, shard, wantR, vcpus in
 // deploy. `Join` closes that by announcing, waiting two read cadences, and only then sizing, so a joining
 // replica's whole claim during the window is its tiny bootstrap pool.
 //
-// THE BOUND IS THE BUDGET PLUS ONE POST-JOIN SHARE, and that is the engine's actual guarantee rather than
-// a slackened one. Join waits for peers to have DETECTED its row; each peer then applies the smaller pool
-// on its own reconcile tick, and a peer's apply cannot be observed from here - the pool size is local to
-// its process - so no wait can prove every peer has finished. joinFleet's grace shrinks that window but
-// cannot close it, which leaves one reachable worst case: every survivor still holding the pre-join split
-// (which sums to the whole budget) while the joiner has already grown into its post-join share. That is a
-// CEILING, not a tail - survivors are sized for R-1 so they can never sum past the budget, and the joiner
-// is sized for R.
+// THE BOUND IS EVERY REPLICA ON ITS R-1 SHARE EXCEPT ONE ON ITS R SHARE - the budget plus one post-join
+// share, on a uniform fleet - and that is the engine's actual guarantee rather than a slackened one. Join
+// waits for peers to have DETECTED its row; each peer then applies the smaller pool on its own reconcile
+// tick, and a peer's apply cannot be observed from here - the pool size is local to its process - so no
+// wait can prove every peer has finished. joinFleet's grace shrinks that window but cannot close it, which
+// leaves one reachable worst case: every survivor still holding the pre-join split while the joiner has
+// already grown into its post-join share. That is a CEILING, not a tail - survivors are sized for R-1 and
+// the joiner for R. Each replica's shares come from the RTT it probed itself (see restartFleet.bound).
 //
-// It still catches what this test exists for. A regression in the announce-before-consume ordering prices
-// the whole fleet at the R-1 split - R x budget/(R-1), or 4/3 of the budget at R=4 - which is above this
-// bound (5/4 of it), deterministically, on every step of every rollout. The margin is small on purpose: a
-// bound loose enough to be comfortable would stop distinguishing the two.
+// It still catches what this test exists for. A regression in the announce-before-consume ordering puts
+// the joiner on its R-1 share too, which exceeds this bound by the difference between its two shares (4
+// connections at a 48 budget), deterministically, on every step of every rollout. The margin is small on
+// purpose: a bound loose enough to be comfortable would stop distinguishing the two.
 //
 // What is priced is the CEILING each pool may acquire, not the connections open at that moment - lowering a
 // limit closes nothing, so the surplus of a shrinking pool drains as connections are returned. The ceiling
@@ -195,19 +222,12 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 	}
 	awaitFleetSettled(t, fleet, shard, replicas, vCPUs)
 
-	// The per-database budget the bound below is priced against. Taken as the MAX across the fleet rather
-	// than from one replica: each sizes from the RTT it measured itself, so the budgets differ slightly and
-	// only the largest bounds what any replica can claim. Derived from the policy at the distances actually
-	// probed rather than restated, so neither a ratio change nor a slower rig can silently invalidate this.
-	budget := 0
-	for _, e := range fleet.snapshot() {
-		budget = max(budget, shardBudget(vCPUs, probedRTT(e, shard)))
-	}
-
 	// Price the fleet continuously from here, so the assertion covers the transitions rather than the
-	// settled points either side of them - the settled points are exactly where nothing is at risk.
-	// peak is written only by the sampler and read only after its Wait, so it needs no lock of its own.
-	peak := 0
+	// settled points either side of them - the settled points are exactly where nothing is at risk. The
+	// bound is re-priced with every sample, before the claim, because the fleet it covers changes as
+	// replacements join. The worst sample is written only by the sampler and read only after its Wait, so
+	// it needs no lock of its own.
+	worstClaim, worstBound := 0, 0
 	samplerStop := make(chan struct{})
 	var sampler sync.WaitGroup
 	sampler.Go(func() {
@@ -217,7 +237,11 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 				return
 			default:
 			}
-			peak = max(peak, fleet.ceiling(shard))
+			bound := fleet.bound(shard, replicas, vCPUs)
+			claim := fleet.ceiling(shard)
+			if worstBound == 0 || claim-bound > worstClaim-worstBound {
+				worstClaim, worstBound = claim, bound
+			}
 			time.Sleep(time.Millisecond)
 		}
 	})
@@ -240,11 +264,6 @@ func TestPeerRollingRestart_FleetNeverExceedsTheShardBudget(t *testing.T) {
 
 	close(samplerStop)
 	sampler.Wait()
-	// budget + one post-join share: see the header. Never budget+bootstrap - that prices only the window in
-	// which the joiner has not grown yet, and the joiner growing before its peers shrink is the case that
-	// actually occurs.
-	bound := budget + budget/replicas
-	assert.True(peak <= bound,
-		"the fleet claimed %d connections against a bound of %d (%d budget + one %d share) during the rollout",
-		peak, bound, budget, budget/replicas)
+	assert.True(worstClaim <= worstBound,
+		"the fleet claimed %d connections against a bound of %d during the rollout", worstClaim, worstBound)
 }
