@@ -543,8 +543,8 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	if e.started.Load() {
 		e.recomputeWorkerCeiling(e.lifetimeCtx)
 		// The turnstiles are a function of the pool too, and for the same reason this path re-derives the
-		// ceiling: with an override set, recomputePools early-returns, so this is the only path left that
-		// can follow the pool. The override is an exact per-replica number and is never divided, so every
+		// ceiling: recomputePools pushes no pools under an override and runs only when a shard's slots move,
+		// so a pin on an unchanged fleet reaches the turnstiles through here or not at all. The override is an exact per-replica number and is never divided, so every
 		// shard takes the same count.
 		if e.turnstiles != nil {
 			for _, idx := range e.db.Indices() {

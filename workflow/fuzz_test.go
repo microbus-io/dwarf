@@ -151,10 +151,9 @@ func FuzzEscapeMermaid(f *testing.F) {
 // never returns). A watchdog converts a hang into a test failure so a regression (or replaying a
 // saved crasher) fails in bounded time instead of hanging the whole suite.
 //
-// KNOWN FAILING INPUT: boolexp v1.1.1 infinite-loops on ")(" (a close paren before an open paren):
-// evaluateBoolExp's paren-resolution loop sets parenStart but never finds a matching close, nets
-// parenDepth to 0 (so the invalid-parenthesis guard misses it), and re-runs forever.
-// This target will fail until boolexp is fixed; that failure is the point.
+// The saved corpus entry ")(" (a close paren before an open paren) is the regression pin for a hang
+// boolexp fixed in v1.1.2: before it, the paren scan netted depth back to 0 without progress and re-ran
+// forever. This target fails against any boolexp version that reintroduces that class.
 func FuzzWhenExpression(f *testing.F) {
 	f.Add(`amount > 100 && status == "ok"`, []byte(`{"amount":200,"status":"ok"}`))
 	f.Add(`x =~ "a+b*"`, []byte(`{"x":"aab"}`))

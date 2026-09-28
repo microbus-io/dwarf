@@ -134,9 +134,9 @@ engine:
   pools, and EVERY path that changes a pool must re-derive it** (`recomputeWorkerCeiling`): the ceiling encodes how
   fast a completion storm drains through `M` connections, so a shrunken pool must never leave a stale, too-high bound
   on exactly the storm the ceiling exists to contain. There are two such paths and both call it - `recomputePools`
-  (a fleet change) and `SetMaxOpenConns` (the live override). The override path is not optional: once an override is
-  set, `recomputePools` early-returns (the override pins the pools), so `SetMaxOpenConns` is the *only* path left that
-  can re-derive the ceiling. Pinned by `TestPoolSizing_CeilingFollowsLivePoolChange`.
+  (a fleet change) and `SetMaxOpenConns` (the live override). The override path is not optional: `recomputePools`
+  runs its derivations only when some shard's dispatcher slots moved, so a new pin landing on an unchanged fleet
+  reaches the ceiling through `SetMaxOpenConns` or not at all. Pinned by `TestPoolSizing_CeilingFollowsLivePoolChange`.
   `shardRTTMs` (the Startup RTT probes the ceiling is derived from) is published and read **under `shardsLock`** -
   its readers are the peer-signal goroutines and this live setter, while `Startup` reassigns it on a restart, and an
   unsynchronized map read/write is a *fatal throw*, not a recoverable panic.
@@ -183,6 +183,14 @@ one of those operations *is* choosing "inherit." The explicit-policy escape hatc
 (`graph.Validate()` after a nil check), then inserts the flow row (already `running`) and its entry-point
 step (`pending`) in one transaction and rings the doorbell - returning a running flow's key. The graph JSON is
 frozen at creation. There is no separate start call; `created` is never an externally-visible resting state.
+
+**The frozen graph is permanent: do not add a way to move a live flow onto a new graph.** A flow's position is a
+set of step rows naming tasks in the graph it was created with, plus cohort counters sized from that graph's
+edges; under an edited graph a pending step can name a task that no longer exists, a cohort can await branches
+the new graph never spawns, and there is no general rule for where such a flow resumes. Only `Create` and
+subgraph spawn call `LoadGraph`; `Fork` and `Continue` copy the stored graph verbatim. Task implementations may
+change freely behind stable names - that, and cancel-and-recreate via `Snapshot`, is the whole migration story,
+and `docs/upgrading.md` states it as the position.
 
 *Create-time validation is load-bearing, not just doc-hygiene.* A `LoadGraph` returning `(nil, nil)` is a
 clean 404 here (it would otherwise nil-deref in `EntryPoint()`); a structurally invalid graph is a 400. In
@@ -2974,8 +2982,9 @@ letting it through merely costs ordering. The consequence to hold in mind is tha
 therefore **silent**, visible only as ordering that is not happening.
 
 **Every path that changes a pool must re-size the turnstiles**, the same standing rule the worker ceiling,
-the cache and the refill interval obey: `Startup`, `recomputePools`, and `SetMaxOpenConns` (the last is not
-optional — once an override is set `recomputePools` early-returns, so it is the only path left). `Resize`
+the cache and the refill interval obey: `Startup`, `recomputePools`, and `SetMaxOpenConns`. The last is not
+optional: under an override `recomputePools` pushes no pool sizes and re-derives only when a shard's dispatcher
+slots move, so a new pin on an unchanged fleet reaches the turnstiles through `SetMaxOpenConns` alone. `Resize`
 moves the available count by the **delta**, never to the new ceiling, or an in-flight holder's turn would be
 handed out twice.
 
@@ -3012,12 +3021,16 @@ are a database-layer mechanism — see `internal/database/CLAUDE.md`.
 
 **Live re-sizing.** Derived sizing **is** live. `recomputePools` re-derives each shard's pool from the observed
 replica count and pushes `SetMaxOpenConns`/`SetMaxIdleConns` to every open shard, `Resize`s the candidate cache, and
-re-derives the worker ceiling - on every reconcile tick that finds a shard's count moved. The
-`SetMaxOpenConns` override is the opposite of "the live one": it *pins* every shard's pool and thereby **suppresses**
-the derived path (`recomputePools` early-returns once an override is set). See the live-vs-derived split at lines
-122-133 and 1506-1511, and the load-bearing rule there - "EVERY path that changes a pool must re-derive it," and "the
-cache follows the pool split": a new pool-derived quantity must be wired into `recomputePools`, not merely computed
-once at `Startup`.
+re-derives the worker ceiling and the refill cadences - on every reconcile tick that finds a shard's dispatcher
+slots moved. The `SetMaxOpenConns` override *pins* every shard's pool and suppresses only the pool **push**:
+`recomputePools` still applies roles under it and, when a shard's slots move, re-derives the cache, the refill
+cadences (which read the pinned pool) and the worker ceiling from the pinned size. What it does not do is react to
+the pin itself - a slot change is its only trigger. So every quantity derived from the pool must also be re-derived
+by `SetMaxOpenConns`, which today covers the worker ceiling and the turnstiles but **not the cache or the refill
+cadences**: a live pin on an unchanged fleet leaves both sized for the previous pool until the next slot change.
+See the live-vs-derived split under "Configuration" and "Dispatchers", and the load-bearing rule there - "EVERY
+path that changes a pool must re-derive it," and "the cache follows the pool split": a new pool-derived quantity
+must be wired into `recomputePools` AND `SetMaxOpenConns`, not merely computed once at `Startup`.
 
 ### Flow Scheduling (priority / fairness)
 

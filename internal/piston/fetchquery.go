@@ -52,9 +52,8 @@ const dueSteps = "status='" + workflow.StatusPending + "' AND parked=0" +
 // at the band), which is the same shape ScanBand has on every dialect, so it is a standing ceiling rather
 // than a new one.
 //
-// MINIMUM SERVER VERSIONS, all of them for the json argument rather than the join: PostgreSQL 9.4, MySQL
-// 8.0.4, MariaDB 10.6, SQL Server 2016. Only MariaDB's is above what the rest of the engine already
-// requires, and docs/deployment.md carries it.
+// MINIMUM SERVER VERSIONS for the json argument: PostgreSQL 9.4 and SQL Server 2016, both below what the
+// rest of the engine already requires. The mysql branch uses no JSON function, so it adds no floor.
 //
 // Non-UTF-8 bytes in a fairness key would be replaced with U+FFFD by the json encoding and would then match
 // nothing. Postgres, SQL Server and MySQL all reject such bytes in the text column the key came out of, so

@@ -489,9 +489,9 @@ func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string
 }
 
 // metricPeerCountChanged records that one shard's observed replica count moved. Deliberately driven from
-// the reconcile loop rather than from recomputePools: that one early-returns under a SetMaxOpenConns
-// override (pools are pinned, so there is nothing to re-derive), which is exactly the configuration a
-// benchmark runs - and a churn counter that reads zero because nobody looked is worse than none at all.
+// the reconcile loop rather than from recomputePools: that one returns early whenever no shard's dispatcher
+// slots moved, and a replica-count change need not move them (a reader or await-only replica joining, say)
+// - and a churn counter that reads zero because nobody looked is worse than none at all.
 func (e *Engine) metricPeerCountChanged(ctx context.Context, shardNum, from, to int) {
 	e.logger.InfoContext(ctx, "Fleet size changed", "shard", shardNum, "from", from, "to", to)
 	if e.metrics == nil {

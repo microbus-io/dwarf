@@ -13,7 +13,7 @@ All configuration is set with `Set*` methods, each returning an `error`. They sp
 change on a running engine: the **live** ones (`SetMaxOpenConns`, `SetTimeBudget`,
 `SetDefaultPriority`) take effect immediately, even after `Startup`; the **construction-time-only** ones
 (`SetShard`, `SetWorkers`, and the dependency-injection setters below) are rejected if called
-after `Startup`. `SetMaxOpenConns`, `SetTimeBudget`, and `SetDefaultPriority` are live.
+after `Startup`.
 
 | Method | Default | Purpose |
 |---|---|---|
@@ -345,6 +345,38 @@ That has three consequences worth knowing:
 - **A replica that dies needs no goodbye.** Its rows stop being refreshed and it drops out of both counts
   on its own; a clean shutdown deletes them outright and the fleet regrows immediately.
 
+## Reference configurations
+
+Measured points to start a capacity plan from. All are Cloud SQL for PostgreSQL 16 on a 1 TB SSD, in the
+same zone as the engine (round trip ≈ 0.3–0.9 ms), running a chain of no-op tasks against a fresh database.
+The full conditions for each are in the [cloud benchmarks](benchmark-cloud.md).
+
+| shards × database vCPUs | engine | steps/s | measured over |
+|---|---|---|---|
+| 1 × 2 | 1 replica, 32 vCPU | 1,101 | 60 s peak |
+| 1 × 8 | 1 replica, 32 vCPU | 3,679 peak, **3,105–3,263 sustained** | 60 s / 600 s |
+| 1 × 16 | 1 replica, 32 vCPU | 7,491 peak, **~6,100–6,300 sustained** | 60 s / 600 s |
+| 3 × 8 | 1 replica, 4 vCPU | ~9,400 (the engine host binds, at 79% CPU) | 60 s |
+| 6 × 8 | 1 replica, 16 vCPU | 13,900 (5 ms tasks) | 60 s, median of 3 |
+
+How to read it:
+
+- **Plan to the sustained figure, not the peak.** Over ten minutes an instance holds about 84% of what a
+  one-minute window reports.
+- **Adding replicas does not add database throughput.** One to eight replicas sharing one 16-vCPU shard
+  measured 6,800–7,200 steps/s; replicas are for availability and engine CPU. Run at least three.
+- **Size the engine at 1 vCPU per 6 database vCPUs**, and plan no more than ~10,000 steps/s per 4-vCPU
+  engine host.
+- **Fan-out costs the database more per step.** On one saturated shard a width-16 fan-out ran ~30% below
+  a linear chain (3,484 against 5,048 steps/s).
+- **Disk IOPS scale with disk size on most managed databases.** A 100 GB disk (~3,000 IOPS) throttles a
+  write-heavy workload that the same instance serves comfortably on a larger one; see
+  [Disk throughput](#disk-throughput).
+
+For example, for ~5,000 steps/s sustained: two 8-vCPU shards (each sustaining ~3,100, and each its own
+server), and 16 database vCPUs ÷ 6 ≈ 3 engine vCPUs, spread as three 2-vCPU replicas. Then measure your
+own workload against it, because task shape, payload size and round-trip time all move these numbers.
+
 ## Shutting down
 
 `Shutdown` drains gracefully: it stops accepting new work, then waits for every worker to finish the step it is
@@ -360,15 +392,27 @@ idempotent), but it is wasted work, and it re-fires side effects that had alread
 The engine imposes no ceiling on `TimeBudget`, so the number is yours: if you cap task budgets in your own layer,
 size the drain window above that cap. If you do not cap them, the drain is bounded only by your slowest task.
 
+For example, if your layer caps every task at 15 minutes, set the platform's termination grace period (on
+Kubernetes, `terminationGracePeriodSeconds`) to 15 minutes plus a margin for the process's own shutdown, such
+as 16 minutes. Container platforms commonly default this to well under a minute, which cuts short the drain
+of any task longer than that.
+
 A worker that is mid-way through *persisting* a step's outcome — retrying a write after a database blip — does not
 delay the drain: it notices the shutdown, hands the step back for another replica to pick up immediately, and exits.
 
 ## Crash recovery
 
-Recovery is built in and needs no operator action. Every in-flight step holds a time-based lease; if a
-worker crashes, the lease expires and a background poll returns the step to `pending` for re-execution.
-Multi-statement operations are transactional, and the design is self-healing across crash points — a flow
-left mid-transition is picked up and completed by the next poll. Steps that aren't idempotent under
-re-dispatch should be written defensively (the engine guarantees at-least-once dispatch, not exactly-once).
+Recovery of a crashed replica's work is built in. Every in-flight step holds a lease of its `TimeBudget`
+plus a 30-second margin; if the replica running it dies, the lease lapses and a background sweep, which
+runs every 5 minutes, returns the step to `pending` for another replica. So a step claimed by a crashed
+replica runs again within `TimeBudget` + 30 s + 5 minutes. Steps that were pending but not yet claimed
+are picked up by the surviving replicas within seconds. Steps that aren't idempotent under re-dispatch
+should be written defensively: the engine guarantees at-least-once dispatch, not exactly-once.
+
+One crash window is detected rather than repaired. A replica that dies after recording a step as completed
+but before inserting the step that follows it leaves the flow `running` with every step finished and
+nothing left to dispatch. The engine counts these in `dwarf_flows_orphaned` and does not re-drive them;
+they need manual recovery, described in the
+[Runbook](runbook.md#dwarf_flows_orphaned-is-non-zero).
 
 Next: [Testing](testing.md).

@@ -124,8 +124,12 @@ That makes task names a **long-lived compatibility surface**, longer-lived than 
    likely to outlive your assumption.
 4. Remove the task.
 
-**There is no way to move an existing flow onto a new graph.** This is the part to plan around, because the
-obvious escape hatches are not ones:
+**There is no way to move an existing flow onto a new graph, and that is permanent by design.** A flow's
+position is a set of steps in the graph it was created with; under a changed graph that step may no longer
+exist, or may lead somewhere its state was never shaped for, and there is no general answer to where such a
+flow should resume. So a graph is fixed at `Create` for the life of the flow, while the task implementations
+behind its steps remain free to change. This is the part to plan around, because the obvious escape hatches
+are not ones:
 
 - **`Fork` carries the frozen graph forward.** It clones the origin flow's stored graph verbatim into the
   new flow — it does not re-fetch the definition. A fork of a flow frozen against the old graph is still
