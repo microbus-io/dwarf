@@ -701,18 +701,25 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	reDispatchParent := false
 	var finalStateJSON []byte
 	// Serialize a failing BRANCH's arrival through the same per-peer stripe the success path uses (keyed on
-	// its cohort's spawn, stepLineageID), so a failed sibling parks on the Go mutex holding no connection
+	// its cohort's spawn, stepLineageID), so a failed sibling parks on the stripe holding no connection
 	// rather than piling onto the spawn row's write lock. A trunk step (lineage 0) fails the flow directly,
 	// with no cohort to contend, so it takes nothing. Only this bottom level is locked; propagateCohortFailure's
 	// ancestor bumps walk UP and stay DB-serialized, which is what keeps the stripe leaf-only and cycle-free.
 	// A simple defer suffices here: nothing in this transaction or its post-commit tail re-locks the stripe.
 	//
 	// Parked on holding NO TURN, the same as the success path: every caller of this reaches it holding one,
-	// and a turn held across a mutex is the occupancy the stripe exists to remove, one level up.
+	// and a turn held across a lock is the occupancy the stripe exists to remove, one level up. The wait keeps
+	// the step's lease alive; if it finds the step taken back, this worker no longer owns it - fenced.
 	if stepLineageID != 0 {
-		mu := &e.cohortLocks[cohortLockStripe(shardNum, stepLineageID)]
-		yieldHeldTurn(ctx, mu.Lock)
-		defer mu.Unlock()
+		stripe := &e.cohortLocks[cohortLockStripe(shardNum, stepLineageID)]
+		held := false
+		yieldHeldTurn(ctx, func() {
+			held = e.lockCohortStripe(ctx, stripe, db, shardNum, stepID, leaseSeq)
+		})
+		if !held {
+			return true, nil
+		}
+		defer stripe.unlock()
 	}
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		fenced = false

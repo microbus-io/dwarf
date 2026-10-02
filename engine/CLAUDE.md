@@ -1264,7 +1264,7 @@ the ceiling is connection occupancy and round trips - and a blocked lock IS conn
 queued on the spawn row holds its connection for the whole wait. Do not read that as "round trips and
 connection occupancy, *not lock time*": lock wait is a *driver* of occupancy, not a thing apart from it. So
 relieving the lock pays only if the relief does not itself occupy
-connections *more*. A second transaction does. A per-peer mutex does not - which is the next section.
+connections *more*. A second transaction does. A per-peer Go lock does not - which is the next section.
 
 *Three collateral findings worth keeping:*
 
@@ -1284,13 +1284,13 @@ workload - it was not, on any of six points. The measurement recipe is a single 
 sampling `pg_stat_activity` (`wait_event='transactionid'` is a row-lock wait, `'tuple'` is the queue behind it,
 exclude `ClientRead` from the denominator); it needs no engine rebuild and instruments both arms identically.
 
-**The lock's connection occupancy IS relievable per-peer - with a Go mutex, not a schema redesign.**
+**The lock's connection occupancy IS relievable per-peer - with a Go lock, not a schema redesign.**
 The per-member redesign attacks the lock the expensive way (per-member rows + a second transaction). The cheap way
 keeps the shared `cohort_arrivals` counter and its single-transaction atomicity untouched and instead serializes a
-cohort's arrivals THROUGH THIS PEER before they reach the database. Each worker takes a fixed striped Go mutex
+cohort's arrivals THROUGH THIS PEER before they reach the database. Each worker takes a fixed striped Go lock
 (`e.cohortLocks`, keyed on the cohort's spawn via `cohortLockStripe`) BEFORE opening the transition (`processStep`)
 or failure (`failStep`) transaction - the point a losing sibling would otherwise take its connection and then queue
-on the spawn row's write lock. The loser parks on the mutex holding NO connection; the row stays the cross-peer
+on the spawn row's write lock. The loser parks on the stripe holding NO connection; the row stays the cross-peer
 source of truth, so the count and the fan-in trigger are byte-for-byte unchanged. Spawn-row connection occupancy
 drops from cohort-width to R (one in-flight arrival per peer).
 
@@ -1306,15 +1306,44 @@ flows in a real multi-tenant engine, which the bench cannot see.
 
 *Implementation load-bearers (`processStep`, `failStep`, `cohortLockStripe`):*
 - **Fixed striped array, never resized.** A stripe array's mutual exclusion rests on a key always mapping to the
-  same mutex instance; a resize (e.g. to track a changing worker ceiling) would hand two goroutines different
-  mutexes for one key and silently lose exclusion. Sized generously (8192), not tuned: a collision is benign - two
+  same lock instance; a resize (e.g. to track a changing worker ceiling) would hand two goroutines different
+  locks for one key and silently lose exclusion. Sized generously (8192), not tuned: a collision is benign - two
   live cohorts sharing a stripe cost one arrival a brief connection-free wait, never correctness.
 - **Acquired before any DB work, at most one per worker, leaf-level only.** The stripe is the direct (bottom)
   cohort level; `propagateCohortFailure`'s ancestor bumps walk UP and stay DB-serialized. Because every worker
   takes its one stripe BEFORE holding any database lock and never takes a second, no Go/DB lock cycle can form.
 - **Released before `processStep`'s post-commit switch.** A non-contention persist error routes to
-  `failOnPersistError` -> `failStep`, which re-locks the SAME stripe, and `sync.Mutex` is not reentrant - so the
+  `failOnPersistError` -> `failStep`, which re-locks the SAME stripe, and the stripe is not reentrant - so the
   normal release is explicit there; the deferred unlock is only the panic backstop.
+- **A waiter keeps its lease alive, so each stripe is a FIFO lock with an explicit queue (`cohortStripe`), not a
+  `sync.Mutex`.** A parked arrival's step is already `completed` and flagged `advancing`, so a queue that outlasts
+  its lease lets the orphan sweep take it back: correct (the waiter's transition is fenced, the step replayed) but
+  the queue's work is done twice. So a waiter wakes every `min(leaseMargin, extension)/2` - derived from both, since
+  the tick must land before the extension it last made runs out - and extends its lease (`extendLease`, on a turn
+  of its own), abandoning as fenced if the extension finds the step taken back.
+  - *Why not the obvious locks.* A `sync.Mutex` has no timed acquire. A one-slot channel has one, but a waiter that
+    leaves its send queue to extend rejoins at the BACK, so with a queue longer than one interval the oldest
+    waiters are pushed back forever. And the extension cannot run on a helper goroutine while the waiter stays
+    blocked, since `processStep` spawns none. The explicit queue lets a waiter tick without giving up its entry,
+    and unlock HANDS the stripe to the head, so service order is arrival order.
+  - *A panic in a tick withdraws the waiter before propagating.* Left queued, its channel would be handed the
+    stripe by the next unlock with nobody to take it, and every later arrival would wait - and keep extending its
+    lease - forever, beyond even the sweep's reach.
+  - *`extendLease` only moves a lease forward.* A step claimed with a long budget that finishes early keeps it;
+    resetting to `NOW + extension` would cut it short. Its UPDATE matches only a lease that needs extending (so the
+    value always changes and MySQL's `RowsAffected` stays honest), and only a zero-row match pays a read to tell
+    "taken back" from "already long enough".
+  - *The first tick comes one interval after parking*, so a waiter that parks with less lease than that left - a
+    task that used most of its budget, then waited for its persist turn - can still lapse before it. The sweep
+    does not act on that (it also wants `orphanFlowThreshold` of quiet), but lease recovery can take a `running`
+    step waiting in `failStep`, as it could before. Ticking on arrival would close it at one more UPDATE on every
+    contended arrival, on the width-64 hot path; declined.
+  - *Cost.* The uncontended path allocates nothing; a waiter allocates a channel and a timer. A handoff admits no
+    barging, but `sync.Mutex` hands off too once a waiter has blocked past 1ms (starvation mode), which millisecond
+    transaction holds reach routinely - so the width measurements above, taken with `sync.Mutex`, were very likely
+    already in handoff mode. This lock has not been benchmarked at width. 8192 stripes are ~320KB per engine.
+  Pinned by `TestCohortStripe_FIFOAcrossTicks`, `TestCohortStripe_Abandon`, `TestCohortStripe_TickPanic` and
+  `TestCohortStripe_QueuedArrivalsKeepTheirLeases` (fails with the extension removed).
 - **Coalescing was considered and rejected.** Folding a peer's arrivals into one `+k` write would split a member's
   result-commit from its arrival-count, and either order leaves a crash window that strands (result committed,
   in-memory arrival lost on a peer crash -> the cohort never reaches `cohort_size`) or double-handles a member. The
@@ -2921,7 +2950,7 @@ per-call turn bounds is concurrent round trips, which is exactly what a connecti
 connection until it is closed, so the turn must be held until the reading is done, and a transaction takes
 one turn for the whole `Transact` rather than one per statement inside it. Equally, it must be handed BACK
 across any wait that is not the database — `yieldTurn` does that around the subgraph `LoadGraph`, the
-persist retry backoff, and the cohort stripe mutex. The stripe is the sharpest of the three: its whole
+persist retry backoff, and the cohort stripe lock. The stripe is the sharpest of the three: its whole
 purpose is that a losing sibling waits holding no connection, and a turn is that occupancy one level up, so
 holding one there would put a whole cohort's losers into the very queue the stripe exists to keep them out
 of. Callers holding connections without turns and

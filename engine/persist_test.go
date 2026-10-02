@@ -200,21 +200,36 @@ func TestPersist_LeaseExtensionStatusGuard(t *testing.T) {
 	})
 
 	// A `completed` step whose transition write is retrying IS still ours (that is the second persist site): the
-	// extension must land, the retry loop must run, and lease_expires must move out to ~persistLeaseExtensionMs.
+	// extension must land, the retry loop must run, and a lease shorter than the extension must move out to
+	// ~persistLeaseExtensionMs. A lease already longer is kept, not cut back - and the step is still not fenced,
+	// though the extension then changes nothing.
 	t.Run("completed_is_extended_not_fenced", func(t *testing.T) {
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusCompleted)
 		defer e.Shutdown(ctx)
+		failingWrite := func(calls *int) func() error {
+			return func() error {
+				*calls++
+				return errors.New("injected non-contention write error")
+			}
+		}
 
+		_, err := db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), 1000) WHERE step_id=1")
+		assert.NoError(err)
 		var writeCalls int
-		err := e.persist(ctx, db, 1, 1, 5, func() error {
-			writeCalls++
-			return errors.New("injected non-contention write error")
-		}, nil)
+		err = e.persist(ctx, db, 1, 1, 5, failingWrite(&writeCalls), nil)
 		assert.False(errors.Is(err, errPersistFenced), "a completed step we own (transition retry) must NOT be fenced")
 		assert.True(writeCalls > 1, "the retry loop must run for a step we still own, got %d write(s)", writeCalls)
 		after := leaseMsOut(t, db)
-		assert.True(after > 20000 && after < 60000, "lease_expires must be extended to ~persistLeaseExtensionMs (30s), got %.0fms", after)
+		assert.True(after > 20000 && after < 60000, "a short lease must be extended to ~persistLeaseExtensionMs (30s), got %.0fms", after)
+
+		_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), 999000) WHERE step_id=1")
+		assert.NoError(err)
+		writeCalls = 0
+		err = e.persist(ctx, db, 1, 1, 5, failingWrite(&writeCalls), nil)
+		assert.False(errors.Is(err, errPersistFenced), "a long lease needing no extension must not read as fenced")
+		assert.True(writeCalls > 1, "the retry loop must run for a step we still own, got %d write(s)", writeCalls)
+		assert.True(leaseMsOut(t, db) > 900000, "a long lease must be kept, not cut back to the extension")
 	})
 }
 

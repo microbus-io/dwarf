@@ -125,7 +125,7 @@ type Engine struct {
 	flowsTerminatedCount atomic.Int64
 
 	// cohortLocks serializes a fan-out cohort's arrivals THROUGH THIS PEER, so its siblings queue on a Go
-	// mutex holding no database connection instead of on the spawn step's row lock each holding one. The
+	// lock holding no database connection instead of on the spawn step's row lock each holding one. The
 	// arrival bump takes that row's write lock and holds it to COMMIT (processStep's transition tx, and the
 	// failure-side twin in failStep), so without this every sibling of a wide cohort ties up a connection in
 	// lock-wait - measured at fan-out width 64 as ~85% of the pool trapped and throughput inverting past
@@ -134,7 +134,8 @@ type Engine struct {
 	// truth, so the count and the fan-in trigger are unchanged. A fixed striped array, never resized - see
 	// cohortLockStripe. Only the DIRECT (bottom) cohort level is taken here; propagateCohortFailure's ancestor
 	// bumps walk UP and stay DB-serialized, which is why one leaf-level stripe per worker cannot form a cycle.
-	cohortLocks [cohortLockStripes]sync.Mutex
+	// Each stripe is a FIFO lock whose waiters keep their leases alive while queued - see cohortStripe.
+	cohortLocks [cohortLockStripes]cohortStripe
 
 	// claims holds the steps this replica has a claim CAS in flight on - the intra-peer half of candidate
 	// de-duplication, whose cross-peer half is the step_id partition (see partitionPredicate).

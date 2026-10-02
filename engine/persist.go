@@ -47,7 +47,8 @@ const (
 	// its time budget has only `leaseMargin` left, so sleeping through the backoff would put us PAST the lease:
 	// a peer re-claims the step, re-executes the task, and our late write is fenced and discarded - precisely
 	// the re-execution this exists to prevent. It is deliberately modest (the whole window is ~7s): a crash
-	// mid-retry strands the step for this long before lease recovery can take it.
+	// mid-retry strands the step for this long - or for what remained of its original lease, if that was longer,
+	// since an extension never shortens a lease - before lease recovery can take it.
 	persistLeaseExtensionMs = 30_000
 )
 
@@ -106,14 +107,8 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	// database is unreachable, which is exactly the case the retry loop is for - so fall through and try, with
 	// whatever lease we still hold (the margin is 30s and the window is ~7s, so there is room unless the task
 	// burned its entire budget).
-	res, xerr := db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE step_id=? AND lease_seq=? AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusCompleted+"')",
-		persistLeaseExtensionMs, stepID, leaseSeq,
-	)
-	if xerr == nil {
-		if n, _ := res.RowsAffected(); n == 0 {
-			return errPersistFenced
-		}
+	if held, xerr := e.extendLease(ctx, db, stepID, leaseSeq); xerr == nil && !held {
+		return errPersistFenced
 	}
 
 	for _, backoff := range e.persistBackoff {
@@ -158,6 +153,33 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		}
 	}
 	return errors.Trace(err)
+}
+
+// extendLease ensures a step's lease runs at least persistLeaseExtensionMs into the future, fenced on the lease
+// generation and on the two states a worker holds a step in (see persist for why the status guard is load-bearing).
+// It never shortens a lease: a step claimed with a long budget keeps it. It reports whether the step is still this
+// worker's: false, with no error, means it was re-claimed, rewound or terminalized.
+//
+// The UPDATE matches only a lease that needs extending, so its new expiry always differs from the old and
+// RowsAffected is honest on MySQL. A zero-row match is therefore ambiguous - taken back, or already long enough -
+// and only then a read settles which.
+func (e *Engine) extendLease(ctx context.Context, db *sequel.DB, stepID, leaseSeq int) (bool, error) {
+	const owned = " WHERE step_id=? AND lease_seq=? AND status IN ('" + workflow.StatusRunning + "', '" + workflow.StatusCompleted + "')"
+	res, err := db.ExecContext(ctx,
+		"UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), ?)"+owned+" AND lease_expires < DATE_ADD_MILLIS(NOW_UTC(), ?)",
+		persistLeaseExtensionMs, stepID, leaseSeq, persistLeaseExtensionMs,
+	)
+	if err != nil {
+		return false, errors.Trace(err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return true, nil
+	}
+	var held int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps"+owned, stepID, leaseSeq).Scan(&held); err != nil {
+		return false, errors.Trace(err)
+	}
+	return held > 0, nil
 }
 
 // releaseLease hands a step back for immediate re-dispatch, fenced on our lease generation. It resets from

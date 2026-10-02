@@ -24,7 +24,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
@@ -41,8 +40,8 @@ import (
 )
 
 const (
-	// cohortLockStripesLog2 sizes e.cohortLocks at 2^13 = 8192 stripes (~64KB of sync.Mutex). Fixed, never
-	// resized: a stripe array's mutual exclusion rests on a key always mapping to the same mutex instance,
+	// cohortLockStripesLog2 sizes e.cohortLocks at 2^13 = 8192 stripes (~320KB of cohortStripe). Fixed, never
+	// resized: a stripe array's mutual exclusion rests on a key always mapping to the same lock instance,
 	// which any resize would break for a holder in flight. The number is generous rather than tuned because
 	// a collision is benign - two live cohorts sharing a stripe cost one arrival a brief connection-free
 	// wait, never correctness - so there is no cliff to size against, only a birthday-bound to stay clear
@@ -1145,19 +1144,26 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// row's write lock, tying that connection up until the holder commits. cohortSpawnID (the dispatched
 	// step's lineage_id) is already in hand from the claim, so the key costs no read. It is released the
 	// instant persist returns (below), NOT at function exit: a non-contention persist error runs
-	// failOnPersistError -> failStep on this SAME stripe, and sync.Mutex is not reentrant. The deferred
+	// failOnPersistError -> failStep on this SAME stripe, and the stripe is not reentrant. The deferred
 	// unlock is only the panic backstop; the normal release is the explicit one before the switch.
-	var cohortMu *sync.Mutex
+	var cohortMu *cohortStripe
 	if fanInArrivals > 0 && cohortSpawnID != 0 {
-		cohortMu = &e.cohortLocks[cohortLockStripe(shardNum, cohortSpawnID)]
+		stripe := &e.cohortLocks[cohortLockStripe(shardNum, cohortSpawnID)]
 		// Park on the stripe holding NO turn. The stripe exists precisely so a losing sibling waits without
 		// occupying a connection, and a turn is that occupancy one level up - holding one here would put a
 		// whole cohort's losers into the turnstile, which is the queue the stripe was built to keep them
 		// out of. Yielding restores the property the stripe is for.
-		yieldTurn(ctx, &persistPass, cohortMu.Lock)
+		held := false
+		yieldTurn(ctx, &persistPass, func() {
+			held = e.lockCohortStripe(ctx, stripe, db, shardNum, stepID, leaseSeq)
+		})
+		if !held {
+			return nil // the step was taken back while it waited; its new owner replays it
+		}
+		cohortMu = stripe
 		defer func() {
 			if cohortMu != nil {
-				cohortMu.Unlock()
+				cohortMu.unlock()
 			}
 		}()
 	}
@@ -1439,9 +1445,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	})
 	if cohortMu != nil {
 		// Release before the post-commit switch: a non-contention error routes to failOnPersistError ->
-		// failStep, which re-locks this same stripe, and sync.Mutex is not reentrant. The arrival's DB work
+		// failStep, which re-locks this same stripe, and the stripe is not reentrant. The arrival's DB work
 		// is committed by here, so no sibling needs us to hold it any longer.
-		cohortMu.Unlock()
+		cohortMu.unlock()
 		cohortMu = nil
 	}
 	switch {
