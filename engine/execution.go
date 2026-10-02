@@ -1214,19 +1214,21 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// bump on the SPAWN step below. Grabbing the flow row for it serializes EVERY sibling of a cohort on
 			// one row - measured at fan-out width 64: 20 of 43 active backends queued on this exact statement,
 			// each holding a pool connection - to perform two writes that carry no information: the grab itself,
-			// and a step_id rewrite of 0 over 0 (step_id is already 0 throughout a fan-out). So the grab is
-			// DEFERRED to the arrival that actually resolves the cohort, which is the only one that inserts a
-			// fan-in step or fails the flow. This mirrors failStep/propagateCohortFailure - the failure-side twin
-			// of this path - which already bumps the same counters steps-first with no flow-row lock at all.
+			// and a step_id rewrite of 0 over 0 (step_id is 0 throughout a fan-out). So the grab is DEFERRED to
+			// the arrival that resolves the cohort, which is the only one that inserts a fan-in step or fails the
+			// flow. failStep/propagateCohortFailure, the failure-side twin of this path, bumps the same counters
+			// steps-first with no flow-row lock at all.
 			//
-			// Three properties are preserved, not traded:
-			//   - Write-first still holds: the bump IS a write, so it is the transaction's first statement and
-			//     the SQLite SHARED->EXCLUSIVE upgrade deadlock stays closed (the same argument that makes
-			//     handleInterrupt legitimately steps-first).
-			//   - The terminal-status guard is MOVED, never weakened: it still runs, unchanged, in front of
-			//     every write that can extend or terminalize the flow.
-			//   - Exactly-one-resolver is unaffected: it comes from the spawn row's write lock, held across the
-			//     bump and the re-read below within one transaction - never from the flow row.
+			// Three properties hold with the grab deferred:
+			//   - Write-first: the bump IS a write, so it is the transaction's first statement and the SQLite
+			//     SHARED->EXCLUSIVE upgrade deadlock stays closed (the same argument that makes handleInterrupt
+			//     legitimately steps-first).
+			//   - The terminal-status guard sits in front of every write that can extend or terminalize the flow.
+			//     A pure arrival on a flow Terminate already stopped is not guarded: its bump commits, and it is
+			//     the arrival's only write. Pinned by TestTerminateVsNonFinalCohortArrival_Deterministic and
+			//     TestTerminateVsLastCohortArrival_Deterministic.
+			//   - Exactly-one-resolver comes from the spawn row's write lock, held across the bump and the re-read
+			//     below within one transaction - never from the flow row.
 			// isPushTransition is excluded because a fan-out SOURCE writes cohort_size to its own step row and
 			// may carry successors, so it is not a pure arrival.
 			pureArrival := fanInArrivals > 0 && len(normalNexts) == 0 && !isPushTransition
@@ -1351,9 +1353,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				}
 				fullyResolved := size > 0 && arrivals >= size
 				// The cohort resolves here, so this arrival is about to extend (fan-in step) or terminalize
-				// (cohort failure) the flow - exactly the writes the terminal guard protects. A deferred grab is
-				// taken now, before either, so the guard sits in front of them just as it did when every arrival
-				// grabbed the row. A zero-row match means Terminate/failStep won the race: bail as a clean no-op.
+				// (cohort failure) the flow - exactly the writes the terminal guard protects - so a deferred grab is
+				// taken now, before either. A zero-row match means Terminate/failStep won the race: bail as a clean
+				// no-op, which still commits the bump (arrivals then equals size, never exceeds it). A graceful Cancel
+				// that landed while this step sat between its completion write and here marked nothing - every
+				// member is already completed - so it reaches the flow only through the mark the fan-in insert
+				// inherits (inheritCancel). Pinned by TestCancelVsLastCohortArrival_Deterministic.
 				if fullyResolved && !flowRowLocked {
 					ok, lerr := lockFlowRow()
 					if lerr != nil {
