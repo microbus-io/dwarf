@@ -1063,11 +1063,31 @@ dominated:
   *at* the instant a lease lapses instead of within a sweep of it, for a per-shard query every sweep plus a
   deadline field, a mutex, an error clamp and a fault seam.
 
-**Lease recovery costs latency, and the number is the constraint on shortening anything else.** Worst-case
-recovery is `budget + leaseMargin + wedgeSweepInterval` - at the defaults 2m + 30s + 5m. That is acceptable
-because the path runs only when a worker has already died. It stops being acceptable at a SHORT configured
-budget: a 5s budget makes the lease 35s, which a five-minute sweep dominates. The fix there is to **derive
-`recoveryLoop`'s ticker from the configured budget**, never a per-sweep query asking the database for it.
+**Lease recovery costs latency, and that cost is ACCEPTED.** Worst-case recovery of a claimed step is
+`budget + leaseMargin + wedgeSweepInterval` - 2m + 30s + 5m at the defaults, and ~10x the lease at a 2s budget
+(measured on a multi-process `kill -9`: a claimed step still `running` 134s after the crash, its flow's `Await`
+timed out at 90s). It is accepted because the path runs only when a replica dies without draining - a graceful
+shutdown releases its leases - and because a faster sweep is not cheap: `recoverExpiredLeases` reads every
+`running` non-parked row (`lease_expires` is not a seekable key in the selection index), so its cost grows with
+the in-flight count, and every dispatcher of a shard runs it, up to ~16 at 64 vCPU. Making that scan O(expired)
+needs a `lease_expires` index on `running` rows, maintained on every claim and completion of the hottest table.
+The orphan-flow repair (Background Recovery #3) carries the same 5-minute floor through `orphanFlowThreshold`, so
+a crash costs minutes on both paths regardless.
+
+If it must be shortened, four constraints hold:
+
+- **Derive the tick from `leaseMargin`, never from the engine's `TimeBudget`.** `FlowOptions.TimeBudget` is per
+  flow and each lease comes from its own step row, so an engine-wide budget bounds nothing - a 2s flow on a
+  2m-default engine still waits minutes. `leaseMargin` is the term every lease shares: a `leaseMargin/2` tick
+  bounds recovery at `lease + 15s`, at most 1.5x the lease, for every budget.
+- **Keep one ticker and run the heavy detectors every Nth tick.** They carry 5-minute age guards, so running them
+  more often finds nothing.
+- **Size the bound for ONE sweeper.** Several dispatchers sweeping a shard lower the expected wait to
+  ~`tick/(dispatchers+1)`, but the crash being recovered removed one, and the floor is two. Do not stagger or
+  coordinate sweepers: that is a peer signal, and it buys only the average.
+- **Measure the running-row scan first**, at a realistic in-flight count and the full dispatcher count.
+
+Never size the sweep from a per-sweep query asking the database for the next expiry (above).
 
 **Lease recovery is the ONLY thing that recovers a crashed worker**, because a piston never touches a
 `running` row - and it is *not* the backstop for anything else. A missed doorbell leaves a `pending` row,

@@ -98,12 +98,15 @@ func (e *Engine) runRecoverySweep(ctx context.Context) {
 // shard's next piston cycle (~67ms at the derived interval) selects it like any other, and the only
 // latency this cadence governs is how long a DEAD worker's step waits past its own lease.
 //
-// THE CADENCE COSTS RECOVERY LATENCY, and the number is worth knowing before shortening anything else:
-// worst case is `budget + leaseMargin + wedgeSweepInterval`, at the defaults 2m + 30s + 5m. That is
-// acceptable because the path runs only when a worker has already died. It stops being acceptable at a
-// SHORT configured budget - a 5s budget makes the lease 35s, which a five-minute sweep dominates - and the
-// fix there is to derive recoveryLoop's ticker from the configured budget, NOT to give this its own timer
-// or to size a wake from a per-sweep `MIN(lease_expires)` query.
+// THE CADENCE COSTS RECOVERY LATENCY, and it is accepted: worst case is `budget + leaseMargin +
+// wedgeSweepInterval` - 2m + 30s + 5m at the defaults, and ~10x the lease at a 2s budget (measured: a claimed
+// step still `running` 134s after a `kill -9`). The path runs only when a replica died without draining, and
+// a faster sweep is not cheap: this UPDATE reads every `running` non-parked row (`lease_expires` is not a
+// seekable key in the selection index), and every dispatcher of the shard runs it. If it must be shortened,
+// derive the tick from leaseMargin - the one term every lease shares - not from the engine's TimeBudget,
+// which bounds nothing because FlowOptions.TimeBudget is per flow; keep the heavy detectors on their own
+// every-Nth-tick cadence; and size the bound for ONE surviving sweeper. Do not give this its own timer or
+// size a wake from a per-sweep `MIN(lease_expires)` query.
 //
 // A failed UPDATE is logged and left for the next sweep. The sweep is idempotent and unconditional, so a
 // transient DB error costs one deferred pass and needs no retry or backoff of its own.
