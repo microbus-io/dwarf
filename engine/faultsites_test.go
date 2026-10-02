@@ -22,6 +22,7 @@ package engine
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ import (
 )
 
 // orphanShapeCount counts flows in the "orphan" shape on a shard: running with zero non-terminal steps (all
-// steps terminal, no successor) - exactly what detectOrphanedFlows alarms on and assertInvariants forbids.
+// steps terminal, no successor) - exactly what recoverOrphanedFlows alarms on and assertInvariants forbids.
 func orphanShapeCount(t *testing.T, e *Engine, shard int) int {
 	return enginetest.CountRows(t, e, shard,
 		"SELECT COUNT(*) FROM dwarf_flows f WHERE f.status='"+workflow.StatusRunning+"'"+
@@ -42,52 +43,70 @@ func orphanShapeCount(t *testing.T, e *Engine, shard int) int {
 			workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"'))")
 }
 
-// TestFaultSite_RecoveryResetErr pins the residual orphan hole the design explicitly calls out: when the
-// post-completion transaction fails AND the recovery defer's own reset UPDATE also fails, the step is stuck
-// `completed` and the flow strands `running` with every step terminal - the shape only detectOrphanedFlows
-// surfaces (log-only). This is the one fault outcome that is NOT self-healing, so it asserts the orphan
-// exists (by SQL) rather than a clean world.
+// TestFaultSite_RecoveryResetErr pins the one fault outcome the recovery defer cannot heal, and its repair. The
+// transition transaction exhausts its lock-contention retries - contention is the one failure persist hands to the
+// defer rather than retrying in place - and the defer's own completed->pending reset then fails too
+// (FaultRecoveryResetErr). A is left `completed` with advancing=1 on a `running` flow and no worker holds it: the
+// shape a worker that died in that window leaves. Once the age guard and A's lease lapse, the orphan sweep rewinds
+// it, dispatch replays it, and the flow completes - with A's task having run exactly once.
 func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	proxy := NewTestProxy()
-	g := workflow.NewGraph("Solo")
+	g := workflow.NewGraph("Pair")
 	g.SetEndpoint("A", "ftbreset/a")
-	g.AddTransition("A", workflow.END)
+	g.SetEndpoint("B", "ftbreset/b")
+	g.AddTransition("A", "B")
+	g.AddTransition("B", workflow.END)
 	proxy.HandleGraph("ftbreset/g", g)
-	var runs int
-	proxy.HandleTask("ftbreset/a", func(ctx context.Context, f *workflow.Flow) error { runs++; return nil })
+	var runsA, runsB atomic.Int32
+	proxy.HandleTask("ftbreset/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); return nil })
+	proxy.HandleTask("ftbreset/b", func(ctx context.Context, f *workflow.Flow) error { runsB.Add(1); return nil })
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	assert.NoError(e.Startup(t.Context()))
+	awaitStartupRecoverySweep(t, e) // it reads orphanFlowThreshold, which is written below
 
-	// A completes (marked `completed`), the flow-completion tx fails (FaultCompleteFlowCommit), then the
-	// recovery defer's reset also fails (FaultRecoveryResetErr) - so A never returns to `pending` and the flow
-	// never completes. Both fire once.
-	e.seams.Inject(FaultCompleteFlowCommit)
+	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transition gives up with a
+	// contention error; the reset fault fires once on the defer that follows.
+	e.seams.InjectN(seamsJoin(FaultContention, "A"), 8)
 	e.seams.Inject(FaultRecoveryResetErr)
 	fk, err := e.Create(ctx, "ftbreset/g", nil, nil)
 	assert.NoError(err)
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 
-	// Wait for the strand to settle: A `completed`, the flow still `running`.
-	got := enginetest.WaitUntil(t, 5*time.Second, func() bool {
-		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+workflow.StatusCompleted+"'", flowID) == 1 &&
-			enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusRunning+"'", flowID) == 1
-	})
-	assert.True(got, "expected the flow to strand running with A completed")
-	assert.Equal(1, runs) // the reset failed, so no re-dispatch
-
-	// The residual orphan exists - this is the last-resort alarm's input. detectOrphanedFlows is log-only with
-	// a 5m age guard, so it is asserted by shape, not by log.
-	assert.Equal(1, orphanShapeCount(t, e, shard))
-	if db, derr := e.db.Shard(shard); derr == nil {
-		e.detectOrphanedFlows(ctx, db, shard) // exercises the detector query; silent under the age guard
+	stranded := func() bool {
+		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND status='"+
+			workflow.StatusCompleted+"' AND advancing=1", flowID) == 1 &&
+			enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=?", flowID) == 1 &&
+			orphanShapeCount(t, e, shard) == 1
 	}
+	assert.True(enginetest.WaitUntil(t, 10*time.Second, stranded), "expected A completed and flagged, alone on a running flow")
+	time.Sleep(200 * time.Millisecond) // nothing else will move it: lease recovery never touches a completed step
+	assert.True(stranded(), "the stranded shape healed without the sweep")
+	assert.Equal(int32(1), runsA.Load())
+
+	db, err := e.db.Shard(shard)
+	assert.NoError(err)
+	e.orphanFlowThreshold = 0
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
+	assert.NoError(err)
+	time.Sleep(5 * time.Millisecond) // past the millisecond A was last touched in
+	e.recoverOrphanedFlows(ctx, db, shard)
+
+	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := e.Await(awaitCtx, fk)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, out.Status)
+	}
+	assert.Equal(int32(1), runsA.Load(), "A ran again instead of being replayed")
+	assert.Equal(int32(1), runsB.Load())
+	enginetest.AssertInvariants(t, e)
 }
 
 // TestFaultSite_SubgraphSpawnErr pins that a subgraph spawn failing AFTER the caller step parked

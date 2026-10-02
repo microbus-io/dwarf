@@ -79,7 +79,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 // A write that will NEVER land (an unstorable payload, a value past a column limit, a constraint violation) used
 // to leave the step `running` with error=” and attempt=0 - reading as perfectly healthy - while lease recovery
 // re-dispatched it every `budget + leaseMargin`, RE-EXECUTING THE TASK and re-firing its side effects, forever.
-// Silent and eternal: detectOrphanedFlows cannot see it, because a non-terminal step does exist.
+// Silent and eternal: recoverOrphanedFlows cannot see it, because a non-terminal step does exist.
 //
 // Now the retries exhaust and the classifier asks the database itself: the CLEAN write (failStep - a status and
 // an error message, none of the payload) lands, which proves the database is reachable and therefore that the

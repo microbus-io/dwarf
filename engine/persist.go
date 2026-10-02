@@ -31,7 +31,7 @@ import (
 // its side effects have fired - so the only record that it ran is the write we are holding. Before this existed,
 // a database error here left the step `running` with `error=”` and `attempt=0` (reading as perfectly healthy),
 // and lease recovery re-dispatched it every `budget + leaseMargin`, RE-EXECUTING THE TASK, forever. A silent,
-// eternal loop, invisible to detectOrphanedFlows because a non-terminal step does exist.
+// eternal loop, invisible to recoverOrphanedFlows because a non-terminal step does exist.
 //
 // The fix is to retry the WRITE, never the task:
 //
@@ -74,6 +74,10 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 	err := write()
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, errLeaseFenced) {
+		// The write's own lease fence rolled it back: we are a zombie, and a retry would be one too.
+		return errPersistFenced
 	}
 	if sequel.IsLockContentionError(err) {
 		// Transact already retried this to exhaustion; a second loop here would only prolong a contention storm.
@@ -145,6 +149,9 @@ func (e *Engine) persist(ctx context.Context, db *sequel.DB, shardNum, stepID, l
 		err = write()
 		if err == nil {
 			return nil
+		}
+		if errors.Is(err, errLeaseFenced) {
+			return errPersistFenced
 		}
 		if sequel.IsLockContentionError(err) {
 			return errors.Trace(err)

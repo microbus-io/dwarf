@@ -303,11 +303,12 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 // carrying a stale lease generation matches zero rows, so it cannot rewind a peer's freshly-claimed step.
 //
 // The completed->pending reset fires when a step is marked `completed` but its follow-up transition
-// transaction then fails; the defer rolls it back so it re-dispatches. A real peer can never re-claim a
-// `completed` step, so the race the fence defends against is unreachable in production - the test manufactures
-// its precondition: freeze the zombie at the reset (its step `completed` under generation N), force the step
-// back to `pending` (as lease recovery would) so a peer re-claims it (bumping to N+1) and drives the flow to
-// completion, then release the zombie. Its reset, fenced on generation N, must be a no-op.
+// transaction then fails; the defer rolls it back so it re-dispatches (as a replay - the task does not run
+// again). The one thing that takes a `completed` step back from under its worker in production is the orphan
+// sweep, and it bumps the generation as it does; the test manufactures the harder case, a take-back that does
+// not: freeze the zombie at the reset (its step `completed` under generation N), force the step back to `pending`
+// without a bump so a peer re-claims it (bumping to N+1) and drives the flow to completion, then release the
+// zombie. Its reset, fenced on generation N, must be a no-op.
 func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -390,8 +391,8 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	// Release the zombie: its reset carries the stale generation N and must match zero rows.
 	eng.seams.Resume(CheckpointBeforeRecoveryReset)
 
-	// A broken fence would rewind A completed->pending within milliseconds and re-dispatch it a third time
-	// after the flow already completed; the settle window makes the fence's zero-row match observable.
+	// A broken fence would rewind A completed->pending within milliseconds and re-dispatch it after the flow
+	// already completed; the settle window makes the fence's zero-row match observable.
 	time.Sleep(1 * time.Second)
 
 	var afterStatus string
@@ -400,7 +401,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 		"SELECT status, lease_seq FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&afterStatus, &afterSeq))
 	assert.Equal(workflow.StatusCompleted, afterStatus) // peer's step untouched, not rewound
 	assert.Equal(beforeSeq, afterSeq)                   // generation unchanged by the fenced reset
-	assert.Equal(int64(2), aCalls.Load())               // zombie + peer only, never a third dispatch
+	assert.Equal(int64(1), aCalls.Load())               // the zombie ran A; the peer replayed it, and nothing ran it again
 	enginetest.AssertInvariants(t, eng)
 }
 

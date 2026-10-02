@@ -89,11 +89,11 @@ func (e *Engine) initMetrics() error {
 	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by the shard they were placed on. The shard attribute measures PLACEMENT: pickShard is capacity-weighted random, so a skew here means the fleet's work is not spread the way the weights intended, and one shard's steps carry more than their share. Against dwarf_flows_terminated{shard} it is that shard's in-flight flow count. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
 	m.flowsTerminated = ctr("dwarf_flows_terminated", "Counts flows that have reached a terminal status, by the shard holding them and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, which is what makes dwarf_flows_started minus this a stable in-flight count rather than one that drifts upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
 	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed, by the shard holding them. The shard attribute is what turns this into per-shard dispatch throughput - the quantity a per-shard piston, pool and partition all separately govern, and the one a fleet-wide total hides.")
-	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps whose worker lease expired and were reset to pending for re-execution - the crash-recovery path. A nonzero rate means workers are dying or overrunning their lease.")
+	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps reset to pending because their worker is gone - a running step whose lease expired (its task runs again), or a completed step whose transition never committed (it is replayed from its recorded completion; its task does not run again) - the crash-recovery path. A nonzero rate means workers are dying or overrunning their lease.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
 	m.stepsWriteRetried = ctr("dwarf_steps_write_retried", "Counts in-place retries of a step's persistence write after a non-contention database error. The task is NOT re-executed; only the write is retried. A rising count tracks database flakiness, not workflow failure.")
 	m.stepsWriteFailed = ctr("dwarf_steps_write_failed", "Counts steps terminalized because their outcome could not be persisted while the database was reachable - i.e. the payload, not the database, was the problem. A nonzero value signals a latent bug (an unstorable value, a column/packet limit, a constraint violation), like dwarf_steps_unwedged.")
-	m.flowsOrphaned = ctr("dwarf_flows_orphaned", "Counts running flows detected as stranded by the orphan sweep - every step terminal, none touched within the threshold, no successor. A nonzero value signals a latent bug the processStep recovery defer could not cover, like dwarf_steps_unwedged; detection-only, the sweep does not re-drive the flow.")
+	m.flowsOrphaned = ctr("dwarf_flows_orphaned", "Counts running flows the orphan sweep found stranded and could not repair - every step terminal, none touched within the threshold, and no step whose transition never committed. A nonzero value signals a latent bug, like dwarf_steps_unwedged; the sweep does not re-drive such a flow.")
 	bytesCtr := func(name, desc string) metric.Int64Counter {
 		c, err := meter.Int64Counter(name, metric.WithDescription(desc), metric.WithUnit("By"))
 		if err != nil {
@@ -554,10 +554,11 @@ func (e *Engine) metricStepUnwedged(ctx context.Context, parkType string) {
 	e.metrics.stepsUnwedged.Add(ctx, 1, metric.WithAttributes(attribute.String("park_type", parkType)))
 }
 
-// metricOrphanedFlow is a detection-only alarm, not a statistic: the orphan sweep deliberately never re-drives
-// the flow (re-driving would duplicate transition-evaluation logic and a false positive could double-advance
-// it), so a nonzero value is a residual bug the recovery defer's own reset could not cover, surfaced for an
-// operator alongside the error log. Labelled by workflow, like the other flow counters.
+// metricOrphanedFlow is an alarm, not a statistic: it counts a stranded flow the orphan sweep could NOT repair,
+// because no step carries the advancing flag that marks a lost transition. The sweep never re-drives such a flow
+// (that would duplicate transition-evaluation logic, and a false positive could double-advance it), so a nonzero
+// value is a residual bug, surfaced for an operator alongside the error log. Labelled by workflow, like the other
+// flow counters.
 func (e *Engine) metricOrphanedFlow(ctx context.Context, workflowURL string) {
 	if e.metrics == nil {
 		return

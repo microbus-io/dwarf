@@ -36,15 +36,16 @@ registry.
 
 ## `dwarf_flows_orphaned` is non-zero
 
-**What it means.** A flow is `running`, every one of its steps has reached a terminal status, and nothing has
-touched it for five minutes. It has no successor step and nothing will create one. **This is the one alarm
-the engine deliberately does not repair** — re-driving the flow would mean re-deciding which transition
-should have been taken, and a false positive would double-advance it. The engine detects and counts; a human
-recovers.
+**What it means.** A flow is `running`, every one of its steps has reached a terminal status, nothing has
+touched it for five minutes, and none of its steps is one the engine knows it can safely resume. It has no
+successor step and nothing will create one. The engine repairs the common version of this shape — a replica
+killed between completing a step and creating its successor — by resuming that step from its recorded output,
+without running its task again, and counts it in `dwarf_steps_recovered`. A flow counted here is one it could
+not repair: re-driving it would mean re-deciding which transition should have been taken, and a false positive
+would double-advance it. The engine detects and counts; a human recovers.
 
-**Cause.** The window between a step being marked `completed` and the transaction that creates its successor.
-The engine normally rolls the step back and re-dispatches, but a replica killed hard mid-window cannot. Expect
-a handful after an ungraceful termination under load; expect zero otherwise.
+**Cause.** Not crash residue, which is repaired automatically. Expect zero; a non-zero count points at a latent
+bug, or at rows edited by hand.
 
 **Confirm.** The counter carries a `workflow` label, which narrows the search. Find the candidates:
 
@@ -68,13 +69,12 @@ eng.Terminate(ctx, flowKey, "orphaned by replica termination")
 newFlowKey, err := eng.Fork(ctx, lastGoodStepKey, nil)
 ```
 
-The fork is a new flow that replays from that step and inherits the original's priority, fairness and
+The fork is a new flow that re-runs from that step and inherits the original's priority, fairness and
 baggage. The original is preserved for audit. Pass state overrides as the third argument if the flow needs a
 correction to get past whatever it stalled on.
 
-**Escalate** if the count keeps climbing while no replica is being killed. That is a latent bug rather than
-crash residue, and the `workflow` label plus the affected flows' histories are what an engine maintainer
-needs.
+**Escalate** every occurrence. The `workflow` label plus the affected flows' histories are what an engine
+maintainer needs.
 
 ---
 

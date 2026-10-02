@@ -346,9 +346,9 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 }
 
 // TestOrphanDetection_EmitsMetric pins that the orphan sweep increments dwarf_flows_orphaned (labelled by
-// workflow) when it flags a stranded flow - the operability alarm that lets an operator alert on the residual
-// orphan the recovery defer could not cover without scraping the error log. It forges the same orphan shape the
-// log-only test uses (a completed flow flipped back to running, its step backdated stale) and asserts the count.
+// workflow) when it finds a stranded flow it cannot repair - the operability alarm that lets an operator alert on
+// such a residual orphan without scraping the error log. It forges the same orphan shape the
+// log test uses (a completed flow flipped back to running, its step backdated stale) and asserts the count.
 func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -387,21 +387,22 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 		return
 	}
 
-	// The Startup sweep runs detectOrphanedFlows too; let it finish before forging, or it counts the orphan
+	// The Startup sweep runs recoverOrphanedFlows too; let it finish before forging, or it counts the orphan
 	// a second time and this test's "exactly once" reads two.
 	awaitStartupRecoverySweep(t, eng)
 
-	// Forge the orphan shape: running flow, every step terminal and stale past the threshold.
+	// Forge the orphan shape: running flow, every step terminal and stale past the threshold, and no step flagged
+	// as advancing, so the sweep has no lost transition to re-run and counts the flow instead.
 	pastMs := -(eng.orphanFlowThreshold + time.Minute).Milliseconds()
 	_, err = db.ExecContext(ctx,
 		"UPDATE dwarf_flows SET status=?, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
 		workflow.StatusRunning, pastMs, flowID)
 	assert.NoError(err)
 	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?", pastMs, flowID)
+		"UPDATE dwarf_steps SET advancing=0, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?", pastMs, flowID)
 	assert.NoError(err)
 
-	eng.detectOrphanedFlows(ctx, db, shard)
+	eng.recoverOrphanedFlows(ctx, db, shard)
 
 	var rm metricdata.ResourceMetrics
 	if !assert.NoError(reader.Collect(ctx, &rm)) {

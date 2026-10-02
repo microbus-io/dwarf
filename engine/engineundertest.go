@@ -176,7 +176,7 @@ const (
 // --- Execution checkpoints ---
 const (
 	CheckpointResumeBeforeFlowWrite   = "resumeBeforeFlowWrite"   // Resume, just before its transaction's flow-status gate write
-	CheckpointBeforeTransitionTx      = "beforeTransitionTx"      // step execution, after the step is marked completed, before the transition transaction
+	CheckpointBeforeTransitionTx      = "beforeTransitionTx"      // step execution, after the step is marked completed, before whichever transaction transitions it
 	CheckpointCancelBeforeMark        = "cancelBeforeMark"        // Cancel, after its watermark transaction commits, before it marks the steps
 	CheckpointAfterCallerPark         = "afterCallerPark"         // step execution, after the subgraph caller step is parked, before the child is created
 	CheckpointBeforeRetryRewind       = "beforeRetryRewind"       // step execution, before the flow.Retry rewind transaction
@@ -235,7 +235,7 @@ const (
 	// and a test that forges a wedge/orphan shape and then drives one detector itself is racing it: the sweep
 	// sees the forged shape too and counts/logs it a second time. The pass is not instant - it is four scans on
 	// one goroutine sharing the engine's connection pool, so against a loaded server it lands seconds after
-	// Startup (measured on SQL Server: the sweep's own detectOrphanedFlows landed 27ms before a forge that
+	// Startup (measured on SQL Server: the sweep's own recoverOrphanedFlows landed 27ms before a forge that
 	// followed a Create+Await). Wait for this before forging; the wait is free once the sweep is behind (Visits).
 	CheckpointRecoverySweepDone = "recoverySweepDone" // runRecoverySweep(), one full recovery pass is over
 

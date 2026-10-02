@@ -165,7 +165,7 @@ sweeps ON ENTRY (Startup), concurrently with the test body, and it is four scans
 engine's pool - so on a loaded server it lands seconds in. The orphan detectors are the exposed ones, because
 the backdating a test does to *trigger* its own detector call satisfies the background pass's age guard too, and
 both then count the forged shape. `awaitStartupRecoverySweep` (engine `checkpointhelpers_test.go`) rendezvouses
-on `CheckpointRecoverySweepDone`. Measured: the sweep's own `detectOrphanedFlows` landed **27ms** before the
+on `CheckpointRecoverySweepDone`. Measured: the sweep's own `recoverOrphanedFlows` landed **27ms** before the
 test's on a run that happened to pass. The park detectors are not exposed - they run against fresh, un-backdated
 rows that their 5m guard excludes, while the tests drive their own call with `minAge=0`.
 

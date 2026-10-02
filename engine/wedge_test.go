@@ -29,7 +29,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// orphanLogCapture records the `flow` attribute of every "Orphaned flow" error log detectOrphanedFlows emits.
+// orphanLogCapture records the `flow` attribute of every "Orphaned flow" error log recoverOrphanedFlows emits.
 type orphanLogCapture struct {
 	mu    sync.Mutex
 	flows []string
@@ -394,9 +394,10 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 }
 
 // TestOrphanDetection_FlagsWedgedFlow forges the exact state the post-completion transition wedge leaves - a
-// `running` flow whose only step is `completed` (no successor) - and asserts detectOrphanedFlows logs it, while
-// a genuinely-running flow (with a live non-terminal step) is left alone even when equally old. Log-only by
-// design: the detector is the last-resort alarm, not a recovery, so the assertion is on the emitted error log.
+// `running` flow whose only step is `completed` (no successor) - and asserts recoverOrphanedFlows logs it, while
+// a genuinely-running flow (with a live non-terminal step) is left alone even when equally old. The forged step
+// carries no advancing flag, so the sweep has nothing to re-run and raises the alarm instead; the assertion is on
+// the emitted error log.
 func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -458,7 +459,7 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		return
 	}
 
-	// The Startup sweep runs detectOrphanedFlows too; let it finish before forging, or it logs the orphan a
+	// The Startup sweep runs recoverOrphanedFlows too; let it finish before forging, or it logs the orphan a
 	// second time and the "exactly one flagged" assertion below reads two.
 	awaitStartupRecoverySweep(t, e)
 
@@ -472,16 +473,17 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		"UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
 		pastMs, healthyFlowID)
 	assert.NoError(err)
-	// The detector's staleness guard is now on the STEP row, so the orphan's completed step must ALSO be
+	// The detector's staleness guard is on the STEP row, so the orphan's completed step must ALSO be
 	// backdated - a genuine orphan is one whose last step completed longer ago than the threshold. Without
 	// this the flow reads as a fresh completed->successor window, not a strand (see TestOrphanDetection_
-	// IgnoresCompletedSuccessorWindow).
+	// IgnoresCompletedSuccessorWindow). Clearing advancing makes it the strand the sweep cannot repair - one
+	// with no lost transition to re-run - which is the case that still raises the alarm.
 	_, err = db.ExecContext(ctx,
-		"UPDATE dwarf_steps SET updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
+		"UPDATE dwarf_steps SET advancing=0, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?",
 		pastMs, orphanFlowID)
 	assert.NoError(err)
 
-	e.detectOrphanedFlows(ctx, db, shard)
+	e.recoverOrphanedFlows(ctx, db, shard)
 
 	seen := capture.seen()
 	assert.Len(seen, 1, "exactly one flow should be flagged as orphaned")
@@ -545,7 +547,7 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 		workflow.StatusRunning, pastMs, flowID)
 	assert.NoError(err)
 
-	e.detectOrphanedFlows(ctx, db, shard)
+	e.recoverOrphanedFlows(ctx, db, shard)
 
 	assert.Len(capture.seen(), 0, "a flow whose step was just completed is mid-transition, not orphaned - it must not be flagged")
 }

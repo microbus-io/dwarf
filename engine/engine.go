@@ -296,7 +296,7 @@ type Engine struct {
 	awaitDefaultBudget  time.Duration // how long Await blocks when the caller's ctx carries no deadline (15m)
 	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
-	orphanFlowThreshold time.Duration // min age before a stepless running flow is reported orphaned (5m)
+	orphanFlowThreshold time.Duration // min age before a stranded running flow is repaired or reported orphaned (5m)
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (1m)
 	// persistBackoff is the outcome-write retry schedule, short and exponential because the errors it

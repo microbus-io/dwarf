@@ -136,6 +136,15 @@ func AssertInvariants(t *testing.T, e Engine) {
 			"SELECT COUNT(*) FROM dwarf_steps s WHERE"+
 				" (s.successor_id<>0 AND EXISTS (SELECT 1 FROM dwarf_steps t WHERE t.step_id=s.successor_id AND t.flow_id<>s.flow_id))"+
 				" OR (s.predecessor_id<>0 AND EXISTS (SELECT 1 FROM dwarf_steps t WHERE t.step_id=s.predecessor_id AND t.flow_id<>s.flow_id))")
+
+		// 8. A quiesced live flow holds no completed step still flagged advancing. Every transition that commits
+		// while the flow stays live clears the flag, so a survivor is a transition path that forgot to - and one
+		// the orphan sweep would replay, double-advancing the flow. A terminal flow keeps the flag on its tail;
+		// that is never read, and excluded.
+		check("completed step still advancing on a live flow",
+			"SELECT COUNT(*) FROM dwarf_steps s JOIN dwarf_flows f ON s.flow_id=f.flow_id"+
+				" WHERE f.status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
+				" AND s.status='"+workflow.StatusCompleted+"' AND s.advancing=1")
 	}
 }
 

@@ -17,6 +17,7 @@ schedule is what tells you whether to intervene or wait — and the answer is us
 | Situation | What happens | How long |
 |---|---|---|
 | A replica dies holding in-flight steps | Each step's lease lapses and the step returns to `pending` for another replica | Up to the flow's `TimeBudget` + 30s, then within the next 5-minute recovery sweep |
+| A replica dies after completing a step but before creating its successor | A sweep hands the step back and dispatch creates the successor from its recorded output — the task does **not** re-run | Once the flow has been idle 5 minutes and the step's lease has lapsed, within the next 5-minute recovery sweep |
 | A database blip mid-write | The step's outcome write retries in place, holding its lease — the task does **not** re-run | 1s, 2s, 4s; longer outages fall through to lease recovery |
 | A replica joins or leaves | Every peer re-reads the shared registry and re-divides each database's connection budget | Registry read every 250ms; a dead replica stops counting after 40s |
 | A doorbell is missed between replicas | The owning replica's next selection cycle finds the work by scanning | Under a second at the derived cycle rate |
@@ -55,7 +56,7 @@ matters is between counters that should **never** move and counters that are mer
 | Instrument | Means |
 |---|---|
 | `dwarf_steps_unwedged_total` | A step wedged and a sweep papered over it. The effect is repaired; the cause is not. |
-| `dwarf_flows_orphaned_total` | A running flow is stranded with every step terminal. **Detection only** — these need manual recovery. |
+| `dwarf_flows_orphaned_total` | A running flow is stranded with every step terminal, and the engine could not repair it. These need manual recovery. |
 | `dwarf_steps_write_failed_total` | A step's outcome could not be stored while the database was reachable, so the payload is at fault. |
 
 **Health — alert on sustained levels, not on any movement:**
@@ -63,7 +64,7 @@ matters is between counters that should **never** move and counters that are mer
 | Instrument | Read it as |
 |---|---|
 | `dwarf_steps_oldest_pending_age_seconds` | The honest backlog signal. Rising means dispatch is not keeping up. Aggregate with `max`, never `sum`. |
-| `dwarf_steps_recovered_total` | Leases lost to crashes or overruns. A steady trickle means tasks are overrunning their budget. |
+| `dwarf_steps_recovered_total` | Steps recovered because their worker was lost to a crash or an overrun. A steady trickle means tasks are overrunning their budget. |
 | `dwarf_peer_replicas` | The fleet size each replica believes in. Should equal your actual replica count. |
 | `dwarf_turnstile_available` / `_waiting` | Read as a pair. Sustained zero available with a deep wait queue means database connections are the binding constraint. |
 | `dwarf_steps_stolen_total` | Non-zero names a peer that is alive but not dispatching its share. |

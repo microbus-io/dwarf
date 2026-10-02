@@ -1667,7 +1667,7 @@ lease follows its own frozen budget.
 The task has **already run** when its outcome is persisted - its side effects have fired - so this write is the
 only record that it ran. Left unhandled, a database error here leaves the step `running` with `error=''` and
 `attempt=0` (reading as perfectly healthy) and lease recovery re-dispatches it every `budget + leaseMargin`,
-**re-executing the task**, forever. Silent and eternal: `detectOrphanedFlows` cannot see it, because a
+**re-executing the task**, forever. Silent and eternal: `recoverOrphanedFlows` cannot see it, because a
 non-terminal step *does* exist. Reproduced against a live Postgres with a `\u0000` in state (not guarded on
 write - see the storability punt in `workflow/CLAUDE.md`); `persist`'s classifier turns such a rejected payload
 write into a clean step failure instead.
@@ -1762,7 +1762,10 @@ changes nothing, reads "fenced", and returns without failing the flow - a perman
 alone, invisible to the SQLite suite. Keep every fenced step write moving a value (in practice: the status), and
 run anything touching these writes against a MySQL-family server (`fixtures/CLAUDE.md`).
 
-**`lease_seq` is bumped only where a lease is *granted* — the claim CAS.** `recoverExpiredLeases`' expired-lease
+**`lease_seq` is bumped where a lease is *granted* — the claim CAS — and where the orphan sweep takes a
+`completed` step back.** The sweep's rewind (`recoverOrphanedFlows`, `completed`→`pending`) must bump it: the
+worker it takes the step from is already past its completion gate, so without a new generation nothing would
+stop a slow worker's transition committing beside the re-dispatch's. `recoverExpiredLeases`' expired-lease
 reset (`running`→`pending`) leaves it untouched: the reset does not grant a lease, it only makes the step
 claimable, and the next claim bumps the generation. Consequence: a step reset-but-not-yet-reclaimed still
 carries the prior worker's generation, so that worker's write is *not* fenced — but this is the benign
@@ -1775,9 +1778,24 @@ has exactly one fenced write to the dispatched step, and everything after it is 
 
 - **complete / goto / fan-out / fan-in-direct / flow-complete** — gated by the completion UPDATE
   (`WHERE step_id=? AND status NOT IN ('terminated', 'cancelled') AND lease_seq=?`). Past it the step is `completed`,
-  so no peer can
-  re-claim (claim needs `pending`); the entire transition transaction — successor inserts, `cohort_arrivals`
-  bumps, `successor_id` writes, `fireFanInDirect`, `completeFlowSequential`, `insertFanInStep` — needs no fence.
+  so no claim can take it (claim needs `pending`). The one thing that can is the orphan sweep's rewind, which
+  bumps `lease_seq` - so the transition transaction carries ONE fenced write of its own, folded into a statement
+  it already makes on the dispatched row: the successor-link/cohort-size write, the cohort bump
+  (`bumpCohortArrivals`, a two-row statement), or `fireFanInDirect`'s cohort-size write. Each also clears
+  `advancing`; a zero-row match rolls the transaction back via `errLeaseFenced`, which `persist` turns into
+  `errPersistFenced` and a quiet abandon. Each fenced clear also requires `advancing=1`, which fences one more case:
+  persist re-running the transition after a COMMIT that landed but reported an error finds the flag cleared and
+  abandons instead of advancing the flow twice. (On MySQL the cohort bump's fence is `RowsAffected`, honest there
+  because every row it matches changes: arrivals rise, the flag goes 1 -> 0.) Pinned by
+  `TestOrphanSweep_ReplaysSlowWorkersStep` and `..._OtherTransitions`, which fail with the fence removed.
+  `completeFlowSequential` carries no fence, **because the re-dispatch is a replay**: it re-derives the slow
+  worker's own decision from the recorded completion rather than re-running the task, so both reach "complete the
+  flow" from the same state, and whichever commits second no-ops on the flow-row guard. Were the re-dispatch to
+  re-run the task instead, a non-deterministic task could route to a successor the slow worker's completion then
+  strands - a flow completed early, its decision from one run and its state from another. One transient remains:
+  if the slow worker completes the flow while the step sits rewound, the step is `pending` on a terminal flow until
+  a claim reaps it to the flow's status (seconds). Fencing the flow completion instead would close it at one more
+  statement on every flow completion, for a case that needs a worker stalled past its lease; declined.
   `completeFlowSequential` in particular makes **no step write at all**: the gate already completed the step.
   **Do not add a trailing `UPDATE dwarf_steps SET status='completed'` there** - it re-writes the same value, costs
   a transaction on every flow completion, is a post-execution step write with neither a status guard nor a fence,
@@ -1869,8 +1887,8 @@ only the shared fan-in target must be single-valued.)
 dispatched step's `lineage_id`, which is `0` for any step *outside* a cohort - so a trunk step routed into a fan-in
 node bumps `cohort_arrivals` on `step_id=0` (zero rows, no error) and then SELECTs that step: `sql.ErrNoRows`, which
 aborts the transition transaction. The `processStep` recovery defer then rewinds the just-`completed` step to
-`pending`, it re-dispatches, and **the task re-runs - side effects and all - in an unbounded hot loop** that hammers
-the database and never advances the flow (measured: 2,735 failed transitions in 2 seconds).
+`pending`, it is replayed, and it fails identically - **an unbounded hot loop** that hammers the database and never
+advances the flow (measured with a re-dispatch that re-ran the task: 2,735 failed transitions in 2 seconds).
 
 - **`validateLineage` rejects the edges that produce it.** Its `switch` tests `g.fanInNodes[tr.To]` **before**
   `tr.WithGoto, tr.OnError, tr.Switch` - **the order is load-bearing**. The engine treats *any* transition into a
@@ -2224,7 +2242,7 @@ is already local and free, at the price of a write per await.
   reason**, and the failure mode is worse than a transient error: the terminal step is marked `completed` by
   `processStep` *before* the disposition runs, so if the disposition's `Transact` exhausts its retries and errors,
   lease recovery (which only resets `running` rows) can't re-dispatch the now-`completed` step - the flow strands
-  `running` with every step terminal (a permanent orphan). `failStep`, the fan-in transaction, and `completeFlow` all
+  `running` with every step terminal until the orphan sweep rewinds the step, minutes later. `failStep`, the fan-in transaction, and `completeFlow` all
   write first. A high-volume soak (`fixtures/soakflow_test.go`) and `fixtures/completionraceflow_test.go` reproduce
   the wedge without write-first. This write-first rule governs the flow-*advancing*/*terminating* transactions only; the
   lifecycle mutations (`Resume`/`Terminate`/`failStep`/`Delete`) run the **opposite** (steps-first) order on purpose, so
@@ -3108,9 +3126,10 @@ byte counters).
 **8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
 (start path), `dwarf_flows_terminated` (completeFlow), `dwarf_steps_executed` (every terminal step
 disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered`
-(recoverExpiredLeases lease recovery), `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
-nonzero value flags a latent bug), `dwarf_flows_orphaned` (the orphan sweep's detection-only alarm - the
-flow-level sibling of `dwarf_steps_unwedged`, counted at the same site as its error log, never auto-recovered),
+(recoverExpiredLeases lease recovery, and the orphan sweep's rewinds), `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
+nonzero value flags a latent bug), `dwarf_flows_orphaned` (a stranded flow the orphan sweep could NOT repair
+because no step carries the `advancing` flag - the flow-level sibling of `dwarf_steps_unwedged`, counted at the
+same site as its error log; the flows it does repair count in `dwarf_steps_recovered`),
 and the two persist alarms `dwarf_steps_write_retried` / `dwarf_steps_write_failed` (detailed under "Persisting
 a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Startup).
 
@@ -3720,30 +3739,81 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
 2. **Terminal flow check** in `processStep` - after loading flow data, if the flow is `terminated`/`cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
-3. **Orphan flow detection** (`detectOrphanedFlows`, `wedge.go`) - logs an error for a `running` flow that is
-   stranded: **every step terminal AND no step touched for `orphanFlowThreshold` (5m)**. Such a flow (every step
-   terminal, no successor) is the shape the post-completion transition wedge produces (see "processStep - Normal
-   Completion" below). A bug signal; **auto-recovery is intentionally not attempted** - re-driving the flow would
-   duplicate transition-evaluation logic and a false positive could double-advance it. The real recovery is the
-   `processStep` recovery defer (which rolls the just-`completed` step back to `pending` to re-dispatch); this detector
-   is the last-resort alarm for the residual case the defer cannot cover (its own reset UPDATE losing to a contention
-   storm). It runs on the same **dedicated `recoveryLoop`** as the wedge sweep (#4) - off `recoverExpiredLeases` for the
-   same heavy-scan reason (its `NOT EXISTS` over `dwarf_steps` is latency-tolerant, while the poll is nudged
-   sub-second). **Both correctness conditions are on `dwarf_steps`, deliberately.** **Do not age-guard on the flow
-   row** (`dwarf_flows.updated_at older than the threshold`): the `touch` column keeps that timestamp frozen at
-   go-`running` time (it moves only on a status change), so it tracks no per-step progress and is *permanently*
-   satisfied for any flow running past 5m - leaving the all-terminal check to trip on the brief
-   completed->successor window of every ordinary transition (a healthy long-running flow would be alarmed on any
-   sweep that sampled it). A step row's `updated_at` moves on every `pending->running->terminal` transition, so
-   the guard anchors there. The all-terminal check excludes every legitimate long-wait (a `running` task -
-   even a 10-minute one with no DB activity - a `pending` sleep/retry, a `running`+parked subgraph caller, an
-   `interrupted` human wait), and the no-recent-step check excludes the completed->successor window (the
-   just-`completed` step's `updated_at` is fresh, even under persist backoff). The frozen `f.updated_at` is kept
-   only as a cheap index pre-filter (`idx_dwarf_flows_status`), narrowing the scan to flows old enough to qualify -
-   it can never exclude a real orphan (one has been running longer than the threshold). Logs at error level
-   (silent under the default discard logger) **and** increments `dwarf_flows_orphaned{workflow}` - the flow-level
-   sibling of `dwarf_steps_unwedged`, on the same "nonzero = latent bug" footing, so an operator can alert on it
-   without scraping logs. It is a detection-only alarm: unlike the wedge sweep it does **not** auto-recover.
+3. **Orphan flow repair** (`recoverOrphanedFlows`, `wedge.go`) - finds a `running` flow that is stranded:
+   **every step terminal AND no step touched for `orphanFlowThreshold` (5m)**, and rewinds to `pending` every
+   `completed` step still carrying **`advancing=1`** whose lease has lapsed. That is the shape a worker leaves when
+   it dies between the completion write and the transition transaction (see "processStep - Normal Completion"
+   below) - the only shape lease recovery cannot reach, since the step is `completed`. Dispatch then **replays** it
+   (see *A rewound step is REPLAYED* below): the task does not run again.
+
+   *The `advancing` flag is what makes this safe, and it costs no round trip.* The completion write sets it in the
+   statement it already runs; every transition transaction that commits while the flow stays live clears it in a
+   statement that already writes the dispatched row (see "Lease fencing"), and the transaction that terminalizes
+   the flow leaves it - harmless, since the sweep only rewinds a `running` flow and a terminal flow never becomes
+   running again. So `advancing=1` on a completed step of a running flow means exactly "this transition never
+   committed", and the sweep re-derives nothing: it never decides which transition should have been taken, and a
+   flow with no flagged step is never touched, so a false positive cannot double-advance it. **Do not re-drive a
+   stranded flow from the sweep by evaluating its transitions** - that duplicates `processStep`'s transition logic
+   and, without the flag, cannot tell a lost transition from a committed one (a counted cohort arrival is also
+   `completed` with `successor_id=0` on a running flow).
+
+   *A rewound step is REPLAYED, not re-run.* The transition is a pure function of the frozen graph, the step's
+   `state`, its `changes`, and three control facts the task's return carried only in memory: its `Goto` target, its
+   `Sleep`, and whether it was error-routed. The completion write records those three in `advance_goto`,
+   `advance_sleep_until` and `advance_on_error`, in the statement that sets the flag (the Cancel-covered reroute's
+   follow-up write records the route). The claim returns the flag and the three columns; when the flag is set,
+   `processStep` builds the carrier as usual - the claim reads `changes` as the prior changes, so the recorded
+   output is already in it - sets the recorded `Goto`/`Sleep` on it, skips the host call and the claim-time Cancel
+   preempt, and resumes at the completion write. Everything from there is the ordinary path, so the replay commits
+   exactly what the dead worker would have. Three consequences hold the design up:
+   - **The task's side effects fire once**, and the outcome cannot mix a decision from one run with state from
+     another - which is what lets `completeFlowSequential` stay unfenced (see "Lease fencing").
+   - **The task's own output is not merged into its input a second time.** A re-run would see its previous
+     `changes` as `priorChanges`, so a task computing `x = state.x + 1` would apply twice.
+   - **A Cancel that marked the rewound step lands at the completion write**, as for a step that was running when
+     Cancel landed: its changes stand and it routes to its `onError` handler, or is cancelled without one.
+     Preempting it at the claim would treat a step that ran as one that never did. A step already error-routed
+     needs nothing more, the same as on the live path.
+
+   The recovery defer's `completed`->`pending` reset and `releaseLease` on drain leave the flag set too, so they
+   replay as well. A replay is not counted in `dwarf_steps_executed` (the task ran once), its span carries
+   `workflow.replay=true`, and the claim keeps the step's `started_at` (as it does for a retry or a resumed park),
+   so its recorded duration and wait are the task's. The `Sleep` is recorded as a DEADLINE (`DATE_ADD_MILLIS(NOW_UTC(), ?)`, on the database
+   clock like every timestamp), and the claim returns what remains of it, so a replay keeps the original wake time
+   rather than restarting the sleep; one that has already passed applies none. A field the task
+   cleared reads as absent to the replay's `when` evaluation, where the live carrier held a JSON null for a
+   `Set(k, nil)` - the two spellings of a delete that the rest of the engine already treats as one.
+
+   *A slow worker is excluded, then fenced.* The scan skips a flow whose flagged step still holds an unexpired
+   lease (it is still its worker's), and the rewind bumps `lease_seq`, so a worker that outlived its lease rolls
+   its transition back at its fenced step-row write. The rewind runs behind a write-first flow-row lock guarded on
+   `running`, so a `Terminate` between the scan and the rewind wins. Rewinds count in `dwarf_steps_recovered` (a
+   dead worker's step, like lease recovery). A stranded flow with **no** flagged step is a bug signal: logged at
+   error level and counted by `dwarf_flows_orphaned{workflow}`, the flow-level sibling of `dwarf_steps_unwedged`,
+   and not repaired. That verdict is re-taken under the flow-row lock - still running, every step terminal, none
+   flagged - so a flow that went terminal, was repaired by a peer's sweep (every dispatcher of a shard sweeps it), or
+   moved on after the unlocked scan is not miscounted. Pinned by
+   `TestOrphanSweep_RecoversLostTransition` (a simulated dead worker, repaired by a surviving replica),
+   `TestOrphanSweep_ReplaysSlowWorkersStep` (plain, `Goto`, error-routed and `Sleep` replays) and
+   `..._OtherTransitions` (`fireFanInDirect`, flow completion) - the task runs once in each -
+   `TestFaultSite_RecoveryResetErr` (the defer's own reset failing, then the sweep's repair),
+   `TestBumpCohortArrivals_Fence`, and `enginetest.AssertInvariants`' check that no quiesced live flow holds a
+   `completed` step still flagged - the signature of a transition path that forgot to clear it.
+
+   Worst-case repair latency is `max(orphanFlowThreshold, budget + leaseMargin) + wedgeSweepInterval`. It runs on
+   the same **dedicated `recoveryLoop`** as the wedge sweep (#4), for the same heavy-scan reason (its `NOT EXISTS`
+   clauses over `dwarf_steps` are latency-tolerant). **Both staleness conditions are on `dwarf_steps`,
+   deliberately.** **Do not age-guard on the flow row** (`dwarf_flows.updated_at older than the threshold`): the
+   `touch` column keeps that timestamp frozen at go-`running` time (it moves only on a status change), so it tracks
+   no per-step progress and is *permanently* satisfied for any flow running past 5m - leaving the all-terminal
+   check to trip on the brief completed->successor window of every ordinary transition. A step row's `updated_at`
+   moves on every `pending->running->terminal` transition, so the guard anchors there. The all-terminal check
+   excludes every legitimate long-wait (a `running` task - even a 10-minute one with no DB activity - a `pending`
+   sleep/retry, a `running`+parked subgraph caller, an `interrupted` human wait), and the no-recent-step check
+   excludes the completed->successor window (the just-`completed` step's `updated_at` is fresh, even under persist
+   backoff). The frozen `f.updated_at` is kept only as a cheap index pre-filter (`idx_dwarf_flows_status`),
+   narrowing the scan to flows old enough to qualify - it can never exclude a real orphan (one has been running
+   longer than the threshold).
 4. **Parked-step wedge sweep** (`recoverWedgedSubgraphParks` + `recoverOrphanedSubgraphChildren`, `wedge.go`,
    called inline from `runRecoverySweep`) - defense in depth for the `parkedSubgraph` park, whose releasing
    condition could in principle never fire (a parked step is invisible to selection, and `parkedSubgraph` is
@@ -3751,8 +3821,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    `wedgeSweepInterval` (5m) ticker; the loop is drained before the pistons in `drainRuntime` since a recovered
    park can re-offer a step. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation
    never trips a
-   false positive (the guard sits comfortably beyond normal subgraph-completion latency). Unlike orphan-flow detection
-   this **does** auto-recover, because each recovery re-invokes a *normal, status-guarded* mechanism (the
+   false positive (the guard sits comfortably beyond normal subgraph-completion latency). Like the orphan-flow repair,
+   this auto-recovers because each recovery re-invokes a *normal, status-guarded* mechanism (the
    `parkedSubgraph` revive CAS, or a subtree `Terminate` guarded by `status NOT IN (terminal)`) rather than duplicating
    transition logic, so it is idempotent and harmless under a concurrent resolution, a false positive, or a peer
    replica sweeping the same shard. It runs **two mirror-image detectors** - a wedged caller (child gone) and an
@@ -3822,11 +3892,12 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
   (Transact exhausting contention retries under load, or a non-retryable DB error). The **`processStep` recovery
   defer** closes it: on any error return after the step was marked `completed`, it rolls the step back
   `completed` -> `pending` (guarded `WHERE status='completed'`, retried via Transact) so the normal re-dispatch
-  machinery re-runs the task and re-evaluates transitions (the failed transaction already rolled back its partial
-  writes, so the re-run starts clean). Same reset idiom the defer applies to the `running` -> `pending` lock-contention
-  case, generalized to post-completion. Re-execution on recovery is standard (lease recovery re-dispatches too), so
-  completion tasks must tolerate re-running. Residual hole: the reset UPDATE can itself lose to a contention storm,
-  leaving the step `completed` - surfaced (log-only) by `detectOrphanedFlows` (#3).
+  machinery replays the step from its recorded completion and re-evaluates transitions (the failed transaction
+  already rolled back its partial writes, so the replay starts clean) - the task does not run again. Same reset
+  idiom the defer applies to the `running` -> `pending` lock-contention case, generalized to post-completion. The
+  defer runs only on an error return, so a worker that DIES in the window (or whose reset UPDATE loses to a
+  contention storm) leaves the step `completed` with `advancing=1`; the orphan sweep (#3) rewinds it once its lease
+  lapses and the flow has been idle for the threshold, and it is replayed the same way.
 - **processStep - Flow Completion (no next steps)** - flow -> `completed` then step -> `completed`. A crash between
   leaves the step `running`; the lease expires, `recoverExpiredLeases` resets it, and the terminal-flow check marks it
   `completed`. Self-healing.
