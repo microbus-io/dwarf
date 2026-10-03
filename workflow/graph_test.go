@@ -1318,9 +1318,8 @@ func TestGraph_ValidatorAgreesWithIsFanOutSource(t *testing.T) {
 }
 
 // TestRender_NilGraphAndEmptyHistory pins the two degenerate inputs, both of which used to be the only plausible
-// candidates for the error return the renderers no longer have. Rendering builds into a strings.Builder, whose
-// writes cannot fail, so Render returns no error at all - the honest error lives one level up, in the engine's
-// HistoryMermaid, which writes to a caller-supplied sink that genuinely can fail.
+// candidates for an error return. Rendering builds into a strings.Builder, whose writes cannot fail, so Render
+// returns no error at all.
 func TestRender_NilGraphAndEmptyHistory(t *testing.T) {
 	assert := testarossa.For(t)
 

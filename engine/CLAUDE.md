@@ -541,8 +541,6 @@ already-expired await ctx, so the termination would silently never run.)
 
 **ShardInfo** - Per-shard health/size summary.
 
-**HistoryMermaid** - Writes the execution DAG as a Mermaid diagram to an `io.StringWriter`.
-
 **There is no inbound peer entry point.** `peers.go` records the two signal shapes that must never come
 back - a per-step work doorbell and a per-flow stop broadcast - and the standing rule above covers the
 third.
@@ -567,7 +565,7 @@ thread), and a later `Continue` of it would build on the subgraph's turns. **Rej
 `Delete(childKey)` into a whole-tree delete is a
 surprising blast radius, so the engine makes the caller name the root.
 
-What a subgraph-child key *is* good for: **introspection** - `Snapshot`, `Fingerprint`, `History`, `HistoryMermaid`,
+What a subgraph-child key *is* good for: **introspection** - `Snapshot`, `Fingerprint`, `History`,
 `Step` all operate on that child's own subtree - and **`Fork`**, which intentionally accepts any recorded step,
 including one deep inside a subgraph. `fixtures/subflowguardflow_test.go` pins both halves (the four 400 rejections,
 introspection + `List`-by-subgraph-URL still working).
@@ -1640,7 +1638,7 @@ is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
   (the fan-in step is created here; an earlier arriver's transition was only a counter bump), so its `successor_id`
   is still 0, while a loop iteration or a multi-step branch's interior step set `successor_id` when it created that
   successor. Without the conjunct, the task-name match alone overwrote those interior edges with the fan-in id,
-  corrupting the recorded DAG (spurious `step -> fan-in` edges in `History`/`HistoryMermaid`). Pinned by
+  corrupting the recorded DAG (spurious `step -> fan-in` edges in `History` and its rendered diagram). Pinned by
   `TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges`. The `successor_id` write targets the exit steps **by primary
   key** (ids collected during `insertFanInStep`'s cohort-member merge scan), not by the
   `(flow_id, lineage_id, task_name)` predicate - which is unindexed and deadlocked concurrent fan-ins on SQL Server
@@ -2068,7 +2066,7 @@ walk (it needs a *caller-step*-keyed child map with each child's `workflow_url`/
 (`ORDER BY flow_id`, last wins = the child the caller used), a second loads every tree flow's steps
 (`WHERE flow_id IN (SELECT ... root_flow_id ...)`), and the nested history is stitched **in memory**
 (`assembleHistory` recurses caller-step -> child). **Do not look children up per step** (`WHERE
-surgraph_step_id=?` for each caller) - that is an N+1 over every step in the tree; `History`/`HistoryMermaid` are a
+surgraph_step_id=?` for each caller) - that is an N+1 over every step in the tree; `History` is a
 fixed two round-trips regardless of nesting depth. (`idx_dwarf_flows_surgraph_step` backs the remaining single-row
 `surgraph_step_id=?` lookups
 elsewhere - the retry-reap, the wedge sweep, and `Step`-navigation.)

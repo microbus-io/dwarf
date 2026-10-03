@@ -295,7 +295,7 @@ untrusted returned flow.
 
 `FlowRenderer` produces a Mermaid flowchart from a `History` result. Diagnostic intent: answer "where did the time go
 in this flow?" at a glance. Defaults render top-down; `With*Colors` swap palettes; `WithLinks` enables per-node click
-directives. `HistoryMermaid` wraps it as an engine method writing to an `io.StringWriter`.
+directives. The engine has no rendering method of its own: a caller renders `History`'s result, choosing the options.
 
 ### CSS-variable theming model
 

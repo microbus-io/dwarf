@@ -328,5 +328,5 @@ than an engine fault: the engine imposes no flow lifetime. Find them with `List`
 
 For anything you escalate, capture: the alarm counter and its labels, `eng.History(ctx, flowKey)` for one
 affected flow, the dialect and version, replica count, and whether a deploy or a termination preceded it.
-`eng.HistoryMermaid` renders a flow's execution DAG, which is usually the fastest way to show what a stuck
-flow actually did.
+`workflow.NewFlowRenderer(steps).Render()` turns that history into a Mermaid diagram of the execution DAG, which
+is usually the fastest way to show what a stuck flow actually did.

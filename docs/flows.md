@@ -137,7 +137,6 @@ fp, status, err := eng.Fingerprint(ctx, flowKey)       // cheap change-detection
 steps,    err := eng.History(ctx, flowKey)             // []workflow.FlowStep, the full execution record
 step,     err := eng.Step(ctx, stepKey)                // one step by key
 summaries, next, err := eng.List(ctx, query)           // paginated flow listing
-err := eng.HistoryMermaid(ctx, flowKey, w)             // write the execution DAG as a Mermaid diagram
 ```
 
 `History` returns each step's task, depth, status, error, and timings — metadata only, **not** `state`/`changes`
@@ -313,7 +312,7 @@ Each operation adds these to the 503 and 500 every call can return:
 | `Create`, `Run` | invalid options, state or baggage; invalid graph; `ThreadKey` malformed or a subgraph child's | no graph for the URL; unknown `ThreadKey` | `Run` only: timed out awaiting the flow | |
 | `Await`, `Poll` | malformed key | unknown flow | `Await` only: timed out | |
 | `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
-| `History`, `HistoryMermaid` | malformed key | unknown flow, or one scheduled for deletion | | |
+| `History` | malformed key | unknown flow, or one scheduled for deletion | | |
 | `Step` | malformed key | unknown step | | |
 | `List`, `Purge` | malformed `ThreadKey`, invalid status or shard; `List` with a malformed cursor; `Purge` with no filter or with `IncludeSubgraphs` | unknown `ThreadKey` | | |
 | `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Delete` or `Terminate` won the race |

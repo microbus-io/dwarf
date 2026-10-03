@@ -19,7 +19,6 @@ package engine
 import (
 	"cmp"
 	"context"
-	"io"
 	"maps"
 	"math"
 	"math/rand/v2"
@@ -1398,17 +1397,3 @@ func (e *Engine) Continue(ctx context.Context, threadKey string, additionalState
 	return e.continueFlow(ctx, threadKey, additionalState)
 }
 
-// HistoryMermaid writes the execution DAG of a flow as a Mermaid diagram.
-func (e *Engine) HistoryMermaid(ctx context.Context, flowKey string, w io.StringWriter) error {
-	if err := e.ensureStarted(); err != nil {
-		return errors.Trace(err)
-	}
-	steps, err := e.history(ctx, flowKey)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	// Render cannot fail (it builds into a strings.Builder); the write to the caller's sink can.
-	mmd := workflow.NewFlowRenderer(steps).WithLinks("step").Render()
-	_, err = w.WriteString(mmd)
-	return errors.Trace(err)
-}

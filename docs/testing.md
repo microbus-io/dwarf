@@ -113,8 +113,8 @@ than a real network — which makes it excellent at surfacing concurrency bugs i
 crash recovery.
 
 **Inspecting execution.** `eng.History(ctx, flowKey)` returns the full step record (including nested
-subgraph history); `eng.HistoryMermaid(ctx, flowKey, w)` renders the execution DAG as a Mermaid diagram for
-eyeballing what ran in what order.
+subgraph history); `workflow.NewFlowRenderer(steps).Render()` turns it into a Mermaid diagram of the execution DAG
+for eyeballing what ran in what order.
 
 ## Multi-replica tests
 

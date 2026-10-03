@@ -1868,7 +1868,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	// next loop step. A step that transitions to a fan-in inserts no successor of its own (the fan-in step is
 	// created here, or its arrival is only a counter bump), so its successor_id is still 0; a loop iteration or a
 	// multi-step branch's interior step wrote its successor_id when it created that successor. Overwriting the
-	// latter corrupts the execution DAG (spurious `step -> fan-in` edges in History/HistoryMermaid).
+	// latter corrupts the execution DAG (spurious `step -> fan-in` edges in History).
 	exitTaskSet := make(map[string]bool)
 	for _, t := range fanInPredecessorTasks(graph, fanInTaskName) {
 		exitTaskSet[t] = true

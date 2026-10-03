@@ -26,8 +26,8 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestMermaidflow exercises the execution-history renderer (workflow.FlowRenderer) and the engine's
-// HistoryMermaid wrapper over a flow that hits every structural branch of the renderer: a linear head,
+// TestMermaidflow exercises the execution-history renderer (workflow.FlowRenderer) over the History of a
+// flow that hits every structural branch of the renderer: a linear head,
 // a dynamic fan-out + fan-in cohort, and a subgraph caller (whose SubHistory nests). It asserts robust
 // structural invariants of the Mermaid output rather than exact bytes, so it pins that the renderer runs
 // end-to-end and decomposes subgraphs/cohorts without pinning cosmetic formatting.
@@ -104,10 +104,9 @@ func TestMermaidflow(t *testing.T) {
 	t.Run("history_mermaid_structure", func(t *testing.T) {
 		assert := testarossa.For(t)
 
-		var sb strings.Builder
-		err := eng.HistoryMermaid(ctx, flowKey, &sb)
+		steps, err := eng.History(ctx, flowKey)
 		assert.NoError(err)
-		mmd := sb.String()
+		mmd := workflow.NewFlowRenderer(steps).WithLinks("step").Render()
 
 		assert.True(strings.HasPrefix(strings.TrimSpace(mmd), "flowchart"), "output should be a Mermaid flowchart")
 		// Every parent task node appears.
@@ -122,7 +121,7 @@ func TestMermaidflow(t *testing.T) {
 		// Chrome start/end sentinels are drawn.
 		assert.True(strings.Contains(mmd, "_start"), "expected _start chrome node")
 		assert.True(strings.Contains(mmd, "_end"), "expected _end chrome node")
-		// HistoryMermaid renders with WithLinks("step"), so per-node click directives are emitted.
+		// WithLinks("step") emits per-node click directives.
 		assert.True(strings.Contains(mmd, "click "), "expected click directives from WithLinks")
 	})
 
