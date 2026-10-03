@@ -409,10 +409,12 @@ replica runs again within `TimeBudget` + 30 s + 5 minutes. Steps that were pendi
 are picked up by the surviving replicas within seconds. Steps that aren't idempotent under re-dispatch
 should be written defensively: the engine guarantees at-least-once dispatch, not exactly-once.
 
-One crash window is detected rather than repaired. A replica that dies after recording a step as completed
-but before inserting the step that follows it leaves the flow `running` with every step finished and
-nothing left to dispatch. The engine counts these in `dwarf_flows_orphaned` and does not re-drive them;
-they need manual recovery, described in the
+One crash window is repaired differently. A replica that dies after recording a step as completed but
+before inserting the step that follows it leaves the flow `running` with nothing left to dispatch. Once
+the flow has been idle for 5 minutes and the step's lease has lapsed, the recovery sweep hands the step
+back, and dispatch creates its successor from the recorded output, without running the task again. These
+recoveries count in `dwarf_steps_recovered`. A flow the engine cannot repair this way counts in
+`dwarf_flows_orphaned` and needs manual recovery, described in the
 [Runbook](runbook.md#dwarf_flows_orphaned-is-non-zero).
 
 Next: [Testing](testing.md).

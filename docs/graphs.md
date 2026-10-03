@@ -42,7 +42,23 @@ what runs next.
 
 ```go
 g.AddTransition("Reserve", "Charge")   // Reserve always -> Charge
+g.AddTransition("Charge", "Ship")      // Charge always -> Ship
 g.AddTransition("Ship", workflow.END)  // Ship ends the flow
+```
+
+```mermaid
+graph LR
+    classDef task fill:#32a7c1,color:#f4f2ef,stroke:#32a7c1
+    classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
+    linkStyle default stroke:#32a7c1
+
+    t0["Reserve"]:::task
+    t1["Charge"]:::task
+    t2["Ship"]:::task
+    t0 --> t1
+    t1 --> t2
+    _start(( )):::term --> t0
+    t2 --> _end(( )):::term
 ```
 
 ### Conditional (`when`)
@@ -54,6 +70,22 @@ state fields:
 ```go
 g.AddTransitionWhen("Triage", "Escalate", "severity >= 3")
 g.AddTransitionWhen("Triage", "AutoResolve", "severity < 3")
+```
+
+```mermaid
+graph LR
+    classDef task fill:#32a7c1,color:#f4f2ef,stroke:#32a7c1
+    classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
+    linkStyle default stroke:#32a7c1
+
+    t0["Triage"]:::task
+    t0_when{"when"}:::term
+    t1["Escalate"]:::task
+    t2["AutoResolve"]:::task
+    t0 --> t0_when
+    t0_when -->|"severity #gt;= 3"| t1
+    t0_when -->|"severity #lt; 3"| t2
+    _start(( )):::term --> t0
 ```
 
 If **several** `when` transitions match, **all** of them fire in parallel — that's a fan-out (see
@@ -71,6 +103,24 @@ g.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
 g.AddTransitionSwitch("Router", "HandleLow", "true") // catch-all
 ```
 
+```mermaid
+graph LR
+    classDef task fill:#32a7c1,color:#f4f2ef,stroke:#32a7c1
+    classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
+    linkStyle default stroke:#32a7c1
+
+    t0["Router"]:::task
+    t0_switch{"switch"}:::term
+    t1["HandleHigh"]:::task
+    t2["HandleMid"]:::task
+    t3["HandleLow"]:::task
+    t0 --> t0_switch
+    t0_switch -->|"amount #gt;= 10000"| t1
+    t0_switch -->|"amount #gt;= 1000"| t2
+    t0_switch -->|"default"| t3
+    _start(( )):::term --> t0
+```
+
 Because only one branch ever runs, switch branches need no fan-in. A node that uses switch transitions must
 declare *every* success-path outgoing edge as switch — the validator rejects mixing switch with
 when/plain/forEach from the same source. (Error and goto transitions are orthogonal and still allowed.)
@@ -84,6 +134,22 @@ an unconditional edge from the source to each destination — the convenience fo
 ```go
 // Verify, ScoreCredit, and FraudCheck all fire after Intake and run in parallel.
 g.AddTransitionFanOut("Intake", "Verify", "ScoreCredit", "FraudCheck")
+```
+
+```mermaid
+graph LR
+    classDef task fill:#32a7c1,color:#f4f2ef,stroke:#32a7c1
+    classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
+    linkStyle default stroke:#32a7c1
+
+    t0["Intake"]:::task
+    t1["Verify"]:::task
+    t2["ScoreCredit"]:::task
+    t3["FraudCheck"]:::task
+    t0 --> t1
+    t0 --> t2
+    t0 --> t3
+    _start(( )):::term --> t0
 ```
 
 It creates only the outgoing edges; if the branches rejoin, the join node still needs `SetFanIn` (and
@@ -101,6 +167,18 @@ element, each receiving its element under the `as` key:
 g.AddTransitionForEach("Split", "Process", "lineItems", "item")
 ```
 
+```mermaid
+graph LR
+    classDef task fill:#32a7c1,color:#f4f2ef,stroke:#32a7c1
+    classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
+    linkStyle default stroke:#32a7c1
+
+    t0["Split"]:::task
+    t1["Process"]:::task
+    t0 -->|"for each"| t1
+    _start(( )):::term --> t0
+```
+
 Each branch also gets `<as>Index` (its position) and `<as>Count` (the cohort size) injected. An empty
 array spawns nothing; if `forEach` is the only outgoing transition, an empty array ends the flow there.
 
@@ -114,6 +192,20 @@ g.AddTransitionGoto("Evaluate", "Retry")   // taken only if a task calls flow.Go
 g.AddTransitionGoto("Evaluate", "Finish")
 ```
 
+```mermaid
+graph LR
+    classDef task fill:#32a7c1,color:#f4f2ef,stroke:#32a7c1
+    classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
+    linkStyle default stroke:#32a7c1
+
+    t0["Evaluate"]:::task
+    t1["Retry"]:::task
+    t2["Finish"]:::task
+    t0 -->|"goto"| t1
+    t0 -->|"goto"| t2
+    _start(( )):::term --> t0
+```
+
 See [`flow.Goto`](tasks.md#goto).
 
 ### Error handling (`onError`)
@@ -125,12 +217,45 @@ before failing the flow:
 g.AddTransitionOnError("Charge", "Refund") // any error from Charge -> Refund
 ```
 
+```mermaid
+graph LR
+    classDef task fill:#32a7c1,color:#f4f2ef,stroke:#32a7c1
+    classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
+    linkStyle default stroke:#32a7c1
+
+    t0["Charge"]:::task
+    t1["Refund"]:::task
+    t0 -->|"onError"| t1
+    _start(( )):::term --> t0
+```
+
 The error from `Charge` routes to `Refund` rather than failing the flow. The error is serialized into the
 state field `onErr` (as a structured error the handler can read), the failed step is marked completed, and
-the handler runs next. If no `onError` handler is declared, the flow fails. An
-`onError` transition can't combine with `forEach`, `goto`, or `switch`. If the failing task was part of a
-fan-out, its siblings keep running — the errored branch continues down its handler path and the cohort
-converges normally.
+the handler runs next. If no `onError` handler is declared, the flow fails. If the failing task was part
+of a fan-out, its siblings keep running — the errored branch continues down its handler path and the
+cohort converges normally.
+
+A task can have an `onError` transition alongside its other outgoing transitions, at most one per task.
+The success path and the error path are simply separate transitions:
+
+```go
+g.AddTransitionForEach("Plan", "Search", "queries", "query") // success: one branch per query
+g.AddTransitionOnError("Plan", "Apologize")                  // failure: handle the error
+```
+
+```mermaid
+graph LR
+    classDef task fill:#32a7c1,color:#f4f2ef,stroke:#32a7c1
+    classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
+    linkStyle default stroke:#32a7c1
+
+    t0["Plan"]:::task
+    t1["Search"]:::task
+    t2["Apologize"]:::task
+    t0 -->|"for each"| t1
+    t0 -->|"onError"| t2
+    _start(( )):::term --> t0
+```
 
 **An error voids the task's changes.** Anything the failing task wrote with `f.Set` before returning its
 error is discarded — the handler does not see it, and it never reaches the flow's final state. (Same on the
@@ -160,6 +285,22 @@ g.AddTransition("Process", "Summarize")
 g.SetFanIn("Summarize")                          // opts into fan-in validation
 g.SetReducer("results", workflow.ReducerAppend)  // each branch appends its result
 g.SetReducer("total", workflow.ReducerAdd)       // each branch adds its subtotal
+```
+
+```mermaid
+graph LR
+    classDef task fill:#32a7c1,color:#f4f2ef,stroke:#32a7c1
+    classDef term fill:#e5f4f3,color:#434343,stroke:#32a7c1
+    linkStyle default stroke:#32a7c1
+
+    t0["Split"]:::task
+    t1["Process"]:::task
+    t2["Summarize"]:::task
+    t2_reduce(("reduce")):::term
+    t2_reduce --> t2
+    t0 -->|"for each"| t1
+    t1 --> t2_reduce
+    _start(( )):::term --> t0
 ```
 
 A field with no reducer uses `replace` (last write wins). Remember: a task writes only its **delta** to a

@@ -50,12 +50,12 @@ func TestGreeting(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	// 1. Define a two-task graph: Greet -> Shout -> END.
-	g := workflow.NewGraph("Greet")
+	g := workflow.NewGraph("Welcome")
 	g.SetEndpoint("Greet", "greet") // node "Greet" dispatches to endpoint "greet"; first node bound is the entry point
 	g.SetEndpoint("Shout", "shout")
 	g.AddTransition("Greet", "Shout")
 	g.AddTransition("Shout", workflow.END)
-	proxy.HandleGraph("greet", g)
+	proxy.HandleGraph("welcome", g)
 
 	// 2. Register the tasks.
 	proxy.HandleTask("greet", func(ctx context.Context, f *workflow.Flow) error {
@@ -74,7 +74,7 @@ func TestGreeting(t *testing.T) {
 	eng.Startup(ctx)
 
 	// 4. Run a flow to completion.
-	_, out, err := eng.Run(ctx, "greet", map[string]any{"name": "ada"}, nil)
+	_, out, err := eng.Run(ctx, "welcome", map[string]any{"name": "ada"}, nil)
 	testarossa.NoError(t, err)
 	testarossa.Equal(t, workflow.StatusCompleted, out.Status)
 	testarossa.Equal(t, "HELLO ADA", out.State.GetString("message"))
@@ -91,16 +91,10 @@ database with `SetShard`, and manage its lifecycle explicitly. A standalone host
 two required methods:
 
 ```go
-type myHost struct {
-	graphs map[string]*workflow.Graph // your graph source
-}
+type myHost struct{}
 
-func (h *myHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) {
-	g, ok := h.graphs[name]
-	if !ok {
-		return nil, fmt.Errorf("unknown workflow %q", name)
-	}
-	return g, nil
+func (h *myHost) LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error) {
+	return fetch(ctx, workflowURL) // your registry / file / database / RPC
 }
 
 func (h *myHost) ExecuteTask(ctx context.Context, taskURL string, f *workflow.Flow) error {
@@ -113,7 +107,7 @@ That is the whole interface. Wire it up and start the engine:
 ```go
 eng := dwarf.NewEngine()
 eng.SetShard(engine.ShardSpec{Index: 1, DSN: "postgres://user:pass@db:5432/dwarf"})
-eng.SetHost(&myHost{graphs: loadGraphRegistry()})
+eng.SetHost(&myHost{})
 
 err := eng.Startup(ctx)
 if err != nil {

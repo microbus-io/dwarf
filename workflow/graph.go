@@ -257,8 +257,9 @@ func (g *Graph) AddTransitionForEach(from, to string, forEach string, as string)
 }
 
 // AddTransitionOnError adds a transition that is taken when the source task returns an error, instead of
-// failing the flow. It fires on ANY error - the engine never inspects the status code or the text - and it
-// preempts every other transition from that node, so it cannot combine with when/forEach/goto.
+// failing the flow. It fires on ANY error - the engine never inspects the status code or the text. When it
+// fires, none of the node's other outgoing transitions are evaluated; when the task succeeds, they are and
+// this one is not. A node may declare at most one onError transition, alongside any others.
 //
 // The error is delivered to the handler in the state field "onErr" (a structured error: message, status
 // code, trace id, properties; the stack frames are stripped).
