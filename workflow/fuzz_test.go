@@ -180,14 +180,25 @@ func FuzzWhenExpression(f *testing.F) {
 }
 
 // FuzzGraphJSON asserts the graph wire format is total: any bytes either fail to unmarshal or
-// yield a graph that Validate and re-marshal handle without panicking, and whose re-marshaled
-// form unmarshals again. The engine unmarshals this JSON on every step dispatch (frozen graph),
-// so the decoder must never trust its input.
+// yield a graph that Validate and re-marshal handle without panicking or hanging, and whose
+// re-marshaled form unmarshals again. The engine unmarshals this JSON on every step dispatch
+// (frozen graph), so the decoder must never trust its input.
+//
+// The second seed carries a when transition, so mutations reach boolexp through Graph.Validate -
+// the path an authored or stored graph takes - rather than only through FuzzWhenExpression. The
+// watchdog is for the same reason as there: the failure that path guards is a hang.
 func FuzzGraphJSON(f *testing.F) {
 	g := NewGraph("Fuzz")
 	g.SetEndpoint("A", "task/a")
 	g.AddTransition("A", End)
 	seed, _ := json.Marshal(g)
+	f.Add(seed)
+	g = NewGraph("FuzzWhen")
+	g.SetEndpoint("A", "task/a")
+	g.SetEndpoint("B", "task/b")
+	g.AddTransitionWhen("A", "B", "x > 1")
+	g.AddTransition("B", End)
+	seed, _ = json.Marshal(g)
 	f.Add(seed)
 	f.Add([]byte(`{"entryPoint":"A","tasks":[{"name":"A"}],"transitions":[{"from":"A","to":"A","onError":true}]}`))
 	f.Add([]byte(`{"tasks":null,"transitions":null}`))
@@ -197,7 +208,16 @@ func FuzzGraphJSON(f *testing.F) {
 		if err := json.Unmarshal(data, &g); err != nil {
 			return
 		}
-		_ = g.Validate() // any verdict is fine; panics and hangs are not
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_ = g.Validate() // any verdict is fine; panics and hangs are not
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("Validate hung on graph %q", data)
+		}
 		out, err := json.Marshal(&g)
 		if err != nil {
 			t.Fatalf("re-marshal failed for graph from %q: %v", data, err)
