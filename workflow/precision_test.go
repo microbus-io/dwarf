@@ -53,11 +53,12 @@ func TestFlow_PayloadIsValidatedCopiedAndUniform(t *testing.T) {
 
 		// A NaN cannot be marshalled. Before, this was rejected from a struct but ACCEPTED from a map, and
 		// only surfaced later as an opaque step failure from inside the orchestrator.
-		f := NewFlow()
+		rf := NewRawFlow()
+		f := &rf.Flow
 		yield, err := f.Interrupt(map[string]any{"score": math.NaN()}, nil)
 		assert.Error(err)
 		assert.False(yield)
-		_, armed := f.InterruptRequested()
+		_, armed := rf.InterruptRequested()
 		assert.False(armed, "a rejected payload must not arm the interrupt")
 
 		// Same value, struct shape: same outcome.
@@ -74,7 +75,8 @@ func TestFlow_PayloadIsValidatedCopiedAndUniform(t *testing.T) {
 		// The caller's map is live. Without the copy, mutating it after the call would edit the payload the
 		// orchestrator is about to persist, from under it.
 		payload := map[string]any{"question": "approve?"}
-		f := NewFlow()
+		rf := NewRawFlow()
+		f := &rf.Flow
 		yield, err := f.Interrupt(payload, nil)
 		assert.NoError(err)
 		assert.True(yield)
@@ -82,7 +84,7 @@ func TestFlow_PayloadIsValidatedCopiedAndUniform(t *testing.T) {
 		payload["question"] = "MUTATED"
 		payload["injected"] = true
 
-		got, armed := f.InterruptRequested()
+		got, armed := rf.InterruptRequested()
 		assert.True(armed)
 		assert.Equal("approve?", stateVal(got, "question"))
 		_, injected := stateVal(got, "injected"), got.Has("injected")

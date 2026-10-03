@@ -309,12 +309,13 @@ func TestFlow_Retry(t *testing.T) {
 	assert := testarossa.For(t)
 
 	// Within the horizon: should retry, and the backoff shape is recorded.
-	f := NewFlow()
+	rf := NewRawFlow()
+	f := &rf.Flow
 	f.stepCreatedAt = time.Now()
 	ok := f.Retry(time.Second, 2.0, 10*time.Second, time.Hour)
 	assert.True(ok)
 	assert.True(f.retry)
-	initialDelay, multiplier, maxDelay, requested := f.RetryRequested()
+	initialDelay, multiplier, maxDelay, requested := rf.RetryRequested()
 	assert.True(requested)
 	assert.Equal(time.Second, initialDelay)
 	assert.Equal(2.0, multiplier)

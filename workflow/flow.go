@@ -537,44 +537,6 @@ func (f *Flow) Sleep(duration time.Duration) {
 	f.sleepDuration = duration
 }
 
-// --- Control signal inspection ---
-
-// GotoRequested returns the task URL set by Goto, or empty if not set.
-func (f *Flow) GotoRequested() string {
-	return f.gotoNext
-}
-
-// RetryRequested returns the backoff parameters (initialDelay, multiplier, maxDelay) and true if Retry
-// was called.
-func (f *Flow) RetryRequested() (initialDelay time.Duration, multiplier float64, maxDelay time.Duration, ok bool) {
-	if !f.retry {
-		return 0, 0, 0, false
-	}
-	return f.backoffInitialDelay, f.backoffDelayMultiplier, f.backoffMaxDelay, true
-}
-
-// SleepRequested returns the duration set by Sleep, or zero if not set. The clamp is the trust boundary,
-// not a duplicate of Sleep's: this Flow may have been decoded off the wire from a remote task, so the field
-// is not necessarily a value Sleep ever vetted, and a negative duration would otherwise delay the next step
-// into the past.
-func (f *Flow) SleepRequested() time.Duration {
-	return max(f.sleepDuration, 0)
-}
-
-// InterruptRequested returns the interrupt payload and true if Interrupt was called.
-func (f *Flow) InterruptRequested() (State, bool) {
-	return f.interruptPayload, f.interrupt
-}
-
-// SubgraphRequested returns the request URL, input state, and true if Subgraph was called. The engine
-// loads the graph by URL.
-func (f *Flow) SubgraphRequested() (url string, input State, ok bool) {
-	if f.subgraphURL == "" {
-		return "", State{}, false
-	}
-	return f.subgraphURL, f.subgraphInput, true
-}
-
 // --- Internal helpers ---
 
 // diffAndApply marshals each field of source, compares against the snapshot,
