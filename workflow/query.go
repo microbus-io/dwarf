@@ -51,7 +51,7 @@ type Query struct {
 	IncludeSubgraphs bool `json:"includeSubgraphs,omitzero"`
 	// Shard restricts the query to a single 1-based shard. Zero queries all shards.
 	Shard int `json:"shard,omitzero"`
-	// Cursor is the opaque pagination cursor returned as NextCursor by the previous List call.
+	// Cursor is the opaque pagination cursor returned as nextCursor by the previous List call.
 	Cursor string `json:"cursor,omitzero"`
 	// Search is a case-insensitive substring matched against the flow's WorkflowURL, WorkflowName,
 	// current task name, Error, TerminateReason/CancelReason (the shared underlying column), and the flow

@@ -83,16 +83,14 @@ func (g *Graph) EntryPoint() string {
 	return g.entryPoint
 }
 
-// Nodes returns the list of nodes in the graph.
+// Nodes returns the graph's nodes. The slice is the graph's own storage, not a copy: read it, but do not
+// modify it or its elements. Change a graph through SetEndpoint and the AddTransition methods instead.
 func (g *Graph) Nodes() []Node {
-	result := make([]Node, len(g.nodes))
-	copy(result, g.nodes)
-	return result
+	return g.nodes
 }
 
-// Transitions returns the list of transitions in the graph. The returned slice
-// shares the graph's underlying storage; callers must not mutate it. The graph
-// is treated as immutable after Validate, so read-only iteration is safe.
+// Transitions returns the graph's transitions. The slice is the graph's own storage, not a copy: read it,
+// but do not modify it or its elements. Change a graph through the AddTransition methods instead.
 func (g *Graph) Transitions() []Transition {
 	return g.transitions
 }
@@ -366,11 +364,10 @@ func (g *Graph) SetReducer(field string, reducer Reducer) {
 	g.reducers[field] = reducer
 }
 
-// Reducers returns the reducer map for state fields. The returned map is a copy - like Nodes and
-// Transitions, a getter must not hand out a live handle to the graph's internals, or a caller mutating the
-// result would silently re-wire the fan-in merge of a graph already frozen onto running flows.
+// Reducers returns the graph's reducers, keyed by state field. The map is the graph's own storage, not a
+// copy: read it, but do not modify it. Change a field's reducer through SetReducer instead.
 func (g *Graph) Reducers() map[string]Reducer {
-	return maps.Clone(g.reducers)
+	return g.reducers
 }
 
 const fieldNameRule = "a state field name must start with an ASCII letter or underscore, followed by ASCII letters, digits, or underscores"

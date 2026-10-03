@@ -1295,7 +1295,7 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 // globally newest-first. A caller that needs one ordered view across shards sorts the page itself, choosing
 // what to trust; a UI that must not show interleaving artifacts can page one shard at a time with
 // Query.Shard.
-func (e *Engine) List(ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, string, error) {
+func (e *Engine) List(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, nextCursor string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return nil, "", errors.Trace(err)
 	}

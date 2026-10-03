@@ -49,7 +49,7 @@ limitations under the License.
 //	eng.Startup(ctx)
 //
 //	_, out, _ := eng.Run(ctx, "http://example/greet", map[string]any{"name": "ada"}, nil)
-//	fmt.Println(out.State["greeting"]) // hello ada
+//	fmt.Println(out.State.GetString("greeting")) // hello ada
 //
 // See the docs/ directory in the repository for guides on graphs, tasks, scheduling, observability, and
 // deployment.

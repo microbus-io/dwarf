@@ -33,8 +33,8 @@ func ContextWithBaggage(ctx context.Context, baggage State) context.Context {
 
 // BaggageFrom returns the flow's opaque baggage carried on ctx as a State, or a nil State if none was set.
 // It is the JSON-decoded form of what the host set in FlowOptions.Baggage at Create (numbers as float64,
-// etc.); a nil State indexes safely (state["k"] yields the zero value). It lives in the workflow package so
-// task code can read it without importing the engine.
+// etc.); a nil State reads safely (GetString and the other getters return the zero value). It lives in the
+// workflow package so task code can read it without importing the engine.
 func BaggageFrom(ctx context.Context) State {
 	baggage, _ := ctx.Value(baggageKey).(State)
 	return baggage

@@ -44,6 +44,6 @@ type FlowSummary struct {
 	// flow with its trace backend; it is a token-free correlation value, not a capability.
 	TraceID string `json:"traceID,omitzero"`
 	// Subgraph is true when this flow is a subgraph child (it has a parent caller step), false for a
-	// top-level/root flow. A list returns roots only unless Query.Subgraph opts subgraph children in.
+	// top-level/root flow. A list returns roots only unless Query.IncludeSubgraphs opts subgraph children in.
 	Subgraph bool `json:"subgraph,omitzero"`
 }
