@@ -13,7 +13,7 @@ and a v0.x release may change either. Version skew between replicas is not teste
 So the practical rule while dwarf is pre-1.0:
 
 > **Upgrading dwarf itself is a maintenance window, not a rolling deploy.** Stop the fleet, upgrade every
-> replica, start the fleet. Read the release notes first.
+> replica, start the fleet. Read the [release notes](https://github.com/microbus-io/dwarf/releases) first.
 
 This is a deliberate stance, not an oversight. Dwarf has no production community yet, so the cost of holding
 a compatibility line now is paid entirely in constrained design, with nobody on the other side benefiting
@@ -54,7 +54,8 @@ exist.
 
 ## Upgrading dwarf (v0.x)
 
-1. **Read the release notes** for schema or API changes. Assume both are possible.
+1. **Read the [release notes](https://github.com/microbus-io/dwarf/releases)** for schema or API changes.
+   Assume both are possible.
 2. **Take a database backup** of every shard, and know the restore consequences below before you need them.
 3. **Drain the fleet.** Stop every replica gracefully — see the drain window below. In-flight steps that are
    killed rather than drained will re-run after the upgrade, which is safe but wasteful.
@@ -157,13 +158,24 @@ re-run, completed work rewinds, deleted flows come back). See
 Recorded here so the eventual commitment is a decision rather than a discovery. None of this is in force
 today.
 
+**Versioning, from v1.0 on:**
+
+| Release | Contains |
+|---|---|
+| **PATCH** (`1.2.x`) | Bug fixes only. No database migration. |
+| **MINOR** (`1.x.0`) | New features, and any database change — always backward compatible. |
+| **MAJOR** (`x.0.0`) | Anything that breaks backward compatibility, in the API or the schema. |
+
+Release notes for every version are published on
+[GitHub Releases](https://github.com/microbus-io/dwarf/releases), the canonical record.
+
+Still to be committed to:
+
 - **Additive schema changes only** across supported versions — no dropped or renamed columns, no `NOT NULL`
   additions without a default — so an older replica can run against a newly migrated database.
 - **A defined skew window**, most likely one minor version, making a rolling upgrade of dwarf itself
   supported rather than a maintenance window.
 - **A stated downgrade position**, since forward-only migrations mean rollback needs either a documented
   guarantee or an explicit "restore instead."
-- **A CHANGELOG and a semver policy**, so an operator can tell from the version number whether a release
-  needs a window.
 
 Until those exist, treat every dwarf version bump as potentially breaking.

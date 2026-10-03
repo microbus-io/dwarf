@@ -3,6 +3,30 @@
 > Load when: editing schema/migrations or indexes, or writing any SQL query.
 > Coupled with: root `CLAUDE.md` — the engine issues these queries; see its landmine list.
 
+## The migration sequence: what must never change once deployed
+
+`database.Open` runs `db.Migrate(sequenceName, migrations.FS)` (`internal/database/database.go`). `sequel`
+records progress per **sequence name** in `sequel_migrations(seq_name, seq_num, completed)` and, on every open,
+runs only the files numbered **above the highest completed `seq_num`** for that name. Every rule below follows
+from that watermark.
+
+- **`sequenceName` (`"github.com/microbus-io/dwarf"`) never changes, and is never derived from the module
+  path.** A new name reads a watermark of 0 and replays `1.sql` against a database whose tables already exist -
+  at best a failed open, at worst a half-applied re-run. That includes a future `/v2` module path: the literal
+  stays as it is.
+- **A file that has shipped in a tagged release is immutable from v1.0 on.** An edit never runs on a database
+  already past that number, so editing it forks the schema - new installs get the edit, upgraded ones do not,
+  and nothing reports the difference. A change is a new `N+1.sql`. (Through v0.x, shipped files have been
+  edited in place by policy - there were no production databases to protect. That ends at v1.0.)
+- **Numbers only append.** The watermark is a `MAX`, not a set, so a file numbered at or below an applied number
+  (a skipped number filled in later, a `2a.sql` slotted between) is silently never run on an existing database.
+- **A new `N.sql` means a MINOR release at least, never a PATCH** (the published versioning policy in
+  `docs/upgrading.md`). A bug fix that needs a schema change ships as a minor version; one that breaks backward
+  compatibility (dropped or renamed column, `NOT NULL` without a default) ships as a major.
+- **One `N.sql` per change, covering every dialect.** The file is split on `;\n`; a statement carrying a
+  `-- DRIVER: <names>` line runs only on those drivers, an untagged one runs on all. A dialect's statement
+  missing from a shipped file cannot be added later by editing that file; it needs the next number.
+
 ## Schema Column Catalog
 
 The `migrations/*.sql` migration files carry **no prose comments by design** - only the functional
