@@ -41,7 +41,7 @@ import (
 
 // TestCompleteFlowVsTerminate_BothOrders pins the completeFlow-vs-Terminate race in both directions. The window:
 // the terminal step is already marked completed, and completeFlow is about to flip the flow to completed when
-// a Terminate arrives. Released completion-first the flow completes and the later Terminate 409s (terminal);
+// a Terminate arrives. Released completion-first the flow completes and the later Terminate is a no-op;
 // released Terminate-first the flow terminates and completeFlow's status-gate (status NOT IN terminal) no-ops.
 func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 	t.Parallel()
@@ -97,10 +97,8 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
-		// Terminate now arrives on a terminal flow: it 409s and the flow stays completed.
-		err = e.Terminate(ctx, fk, "test")
-		assert.Error(err)
-		assert.Equal(409, errors.StatusCode(err))
+		// Terminate now arrives on a terminal flow: a no-op, and the flow stays completed.
+		assert.NoError(e.Terminate(ctx, fk, "test"))
 		assert.Equal(workflow.StatusCompleted, enginetest.FlowStatus(t, e, fk))
 		enginetest.AssertInvariants(t, e)
 	})

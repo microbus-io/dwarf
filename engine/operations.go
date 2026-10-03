@@ -150,7 +150,7 @@ func (e *Engine) resolveThread(ctx context.Context, threadKey string) (shardNum,
 	).Scan(&threadID, &threadToken, &surgraphFlowID)
 	doneTurn()
 	if err == sql.ErrNoRows {
-		return 0, 0, "", errors.New("thread not found", http.StatusNotFound)
+		return 0, 0, "", errors.New("flow not found", http.StatusNotFound)
 	}
 	if err != nil {
 		return 0, 0, "", errors.Trace(err)
@@ -675,13 +675,12 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 		return errors.New("cannot terminate a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
 	if workflow.IsTerminalStatus(flowStatus) {
-		return errors.New("flow is already in terminal status", http.StatusConflict)
+		return nil // already ended: stopping a stopped flow is a no-op, as for Cancel
 	}
 
 	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
-	// sweep shares. A racing terminalization that empties the flow UPDATE is a 409 here: the caller asked to stop
-	// something that had already stopped.
-	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowToken, reason, engineseams.FaultTerminateCommit, true))
+	// sweep shares.
+	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowToken, reason, engineseams.FaultTerminateCommit))
 }
 
 // cancel marks every pending, running or interrupted step in the tree with cancelling=1. Each marked step

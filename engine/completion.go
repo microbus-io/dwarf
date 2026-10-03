@@ -315,6 +315,10 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 	return merged, nil
 }
 
+// errTreeSettled is an in-transaction sentinel: every flow of the tree was already terminal, so terminateSubtree
+// rolls back and reports success.
+var errTreeSettled = errors.New("tree already terminal")
+
 // terminateSubtree forcefully stops a flow and every non-terminal flow beneath it, in one transaction: the steps
 // first (write-first, per the flow-terminating-transaction rule), then each flow's `final_state`, then one
 // CASE-per-flow terminalization guarded on non-terminal status. It signals every flow it stopped.
@@ -326,12 +330,11 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 // terminated them could never execute, and the call itself was an expensive way (a full root_flow_id tree scan) to
 // learn the flow's own id and token, which the caller already holds.
 //
-// conflictIfSettled is the only behavioral difference between the two callers, and it is a real one: an operator
-// Terminate of an already-terminal flow is a 409 (the caller asked to stop something that had stopped), while the
-// orphan sweep racing a concurrent terminalization is a benign no-op (it asked for an outcome that already
-// happened). commitFault is a test-only seam name, checked before any write so a fired fault proves the whole
-// transaction rolls back atomically; pass "" for none.
-func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flowToken, reason, commitFault string, conflictIfSettled bool) error {
+// A tree that went terminal concurrently - every flow UPDATE matches zero rows - is a no-op, for both callers: the
+// transaction rolls back so the step writes never touch a frozen tree, and nothing is counted or signalled.
+// commitFault is a test-only seam name, checked before any write so a fired fault proves the whole transaction
+// rolls back atomically; pass "" for none.
+func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flowToken, reason, commitFault string) error {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
@@ -348,7 +351,9 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 
 	reason = strings.TrimSpace(reason)
 	finalStates := make([][]byte, len(allFlowIDs))
+	settled := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		settled = false
 		if commitFault != "" && e.seams.IsFault(commitFault) {
 			return errors.New("injected fault: " + commitFault)
 		}
@@ -387,11 +392,15 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if n, _ := res.RowsAffected(); n == 0 && conflictIfSettled {
-			return errors.New("flow is already in terminal status", http.StatusConflict)
+		if n, _ := res.RowsAffected(); n == 0 {
+			settled = true
+			return errTreeSettled
 		}
 		return nil
 	})
+	if settled {
+		return nil
+	}
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1200,7 +1209,7 @@ func (e *Engine) interruptedSubgraphChain(ctx context.Context, shardNum int, flo
 			// An interrupted flow on the descent always has an interrupted step; its absence means a
 			// concurrent Resume already resolved this leaf (a double-Resume race). Surface it as a 409,
 			// not a raw ErrNoRows (which resume() would trace into an opaque 500).
-			return nil, nil, nil, errors.New("flow is not paused at an interrupt", http.StatusConflict)
+			return nil, nil, nil, errors.New("flow is not interrupted", http.StatusConflict)
 		}
 		stepIDs = append(stepIDs, leaf)
 		child, ok := childByCallerStep[leaf]
@@ -1224,6 +1233,19 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
+	// Normalize the caller's resume data (a struct, map, or nil) into a State; an empty one stays "{}".
+	resumeState, err := workflow.NewState(data)
+	if err != nil {
+		return errors.Trace(err, http.StatusBadRequest)
+	}
+	resumeDataJSON := []byte("{}")
+	if resumeState.Len() > 0 {
+		resumeDataJSON, err = json.Marshal(resumeState)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	}
+
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
 		return errors.Trace(err)
@@ -1276,20 +1298,13 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	// ErrNoRows means the leaf step is gone (a concurrent Resume/state change) - a 409, not a false one.
 	// Any other scan error is a real DB failure; surface it rather than masking it as "not paused" (409).
 	if err == sql.ErrNoRows {
-		return errors.New("flow is not paused at an interrupt", http.StatusConflict)
+		return errors.New("flow is not interrupted", http.StatusConflict)
 	}
 	if err != nil {
 		return errors.Trace(err)
 	}
 	if !leafInterruptDone {
-		return errors.New("flow is not paused at an interrupt", http.StatusConflict)
-	}
-
-	// Normalize the caller's resume data (a struct, map, or nil) into a State; an empty one stays "{}".
-	resumeDataJSON := []byte("{}")
-	if resumeState, _ := workflow.NewState(data); resumeState.Len() > 0 {
-		b, _ := json.Marshal(resumeState)
-		resumeDataJSON = b
+		return errors.New("flow is not interrupted", http.StatusConflict)
 	}
 
 	// Test-only checkpoint: a breakpoint here lets a test freeze resume before its transaction so a racing

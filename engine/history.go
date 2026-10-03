@@ -196,7 +196,7 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, errors.New("step not found", http.StatusNotFound) // an unknown shard reads as an unknown step
 	}
 
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it

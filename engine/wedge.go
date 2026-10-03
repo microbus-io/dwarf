@@ -292,12 +292,11 @@ func (e *Engine) recoverOrphanedSubgraphChildren(ctx context.Context, db *sequel
 
 // terminateOrphanedSubtree terminates an orphaned subgraph child and its own non-terminal descendants, sharing
 // the public Terminate's transaction (terminateSubtree). No surgraph up-walk is needed - and none exists: the
-// ancestor chain is already terminal, which is precisely why the child is orphaned. A zero-row flow update is a
-// benign no-op rather than a 409: the child may have terminalized concurrently between the sweep's SELECT and
-// this write, which is the outcome the sweep wanted anyway.
+// ancestor chain is already terminal, which is precisely why the child is orphaned. A child that terminalized
+// concurrently between the sweep's SELECT and this write is a no-op, the outcome the sweep wanted anyway.
 func (e *Engine) terminateOrphanedSubtree(ctx context.Context, shard int, childFlowID int, childFlowToken string) error {
 	const reason = "parent flow terminated (orphan recovery)"
-	return errors.Trace(e.terminateSubtree(ctx, shard, childFlowID, childFlowToken, reason, "", false))
+	return errors.Trace(e.terminateSubtree(ctx, shard, childFlowID, childFlowToken, reason, ""))
 }
 
 // recoverOrphanedFlows repairs a `running` flow that is stranded - every step terminal AND no step touched for

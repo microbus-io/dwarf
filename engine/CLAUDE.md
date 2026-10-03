@@ -147,7 +147,7 @@ engine:
   these on a running engine would mean opening live connections and mutating a shard set that flow keys already
   encode (`SetShard` - see "Database Sharding"), resizing the worker pool + candidate
   cache (`SetWorkers`), or re-resolving a frozen provider - so the setter **rejects** it with an explicit error rather
-  than silently no-op'ing. The error wording is `"<what> cannot be changed after Startup"`.
+  than silently no-op'ing. The error is a 409, worded `"<what> cannot be changed after Startup"`.
 
 For the observability providers specifically (`SetLogger`/`SetMeterProvider`/`SetTracerProvider`): the engine
 resolves the logger/tracer/meter once at startup (the logger feeds the worker hot path and is read lock-free; the
@@ -251,11 +251,11 @@ ancestor chain is already terminal; and a child terminalizing settles its *one* 
 `surgraph_step_id` (a PK), not by walking to the root. (`surgraphChain` itself stays: `Resume`,
 `handleInterrupt`, and `Fork` are its real users.)
 
-**`terminateSubtree` is shared with the orphan sweep** (`terminateOrphanedSubtree`), which had been a
-near-duplicate of this transaction. The two differ in exactly one behavior, and it is a real one: a zero-row
-flow UPDATE (a racing terminalization) is a **409** for an operator Terminate - the caller asked to stop
-something that had already stopped - and a **benign no-op** for the sweep, which asked for an outcome that
-already happened.
+**`terminateSubtree` is shared with the orphan sweep** (`terminateOrphanedSubtree`), and both treat a tree
+that is already terminal the same way: a no-op returning nil, as `Cancel` and a repeated `Delete` are. A
+zero-row flow UPDATE (a racing terminalization) **rolls the transaction back** rather than committing: the step
+writes would otherwise flip a straggler on a frozen tree, and the post-commit loop would count every flow in
+it as ended a second time.
 
 **Cancel** - The graceful counterpart of Terminate: a cancellation is delivered as an error on each covered
 step's ordinary `onError` transition (detectable with `workflow.IsCancelled`), so an author can catch it and

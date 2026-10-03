@@ -365,7 +365,7 @@ func NewEngine() *Engine {
 
 // errSetAfterStartup is the error the construction-time-only setters return on a running engine.
 func errSetAfterStartup(what string) error {
-	return errors.New(what + " cannot be changed after Startup")
+	return errors.New("%s cannot be changed after Startup", what, http.StatusConflict)
 }
 
 // ShardSpec declares one database shard: the facts about it the operator can readily provide, from
@@ -414,15 +414,15 @@ func (e *Engine) SetShard(spec ShardSpec) error {
 		return errSetAfterStartup("shards")
 	}
 	if spec.Index < 1 {
-		return errors.New("shard index must be at least 1")
+		return errors.New("shard index must be at least 1", http.StatusBadRequest)
 	}
 	if spec.VirtualCPUs < 0 {
-		return errors.New("virtual CPUs must be >= 0")
+		return errors.New("virtual CPUs must be >= 0", http.StatusBadRequest)
 	}
 	e.shardsLock.Lock()
 	defer e.shardsLock.Unlock()
 	if _, ok := e.shardSpecs[spec.Index]; ok {
-		return errors.New("shard %d is already set", spec.Index)
+		return errors.New("shard %d is already set", spec.Index, http.StatusConflict)
 	}
 	if e.shardSpecs == nil {
 		e.shardSpecs = map[int]ShardSpec{}
@@ -665,10 +665,10 @@ func (e *Engine) SetDebugLogger() error {
 // and starts worker goroutines.
 func (e *Engine) Startup(ctx context.Context) error {
 	if e.started.Load() {
-		return errors.New("engine is already started")
+		return errors.New("engine is already started", http.StatusConflict)
 	}
 	if e.host == nil {
-		return errors.New("host is required")
+		return errors.New("host is required", http.StatusBadRequest)
 	}
 	// Per-shard pool sizes: the SetMaxOpenConns override pins every pool; otherwise each shard's budget
 	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools), split across the
@@ -1221,7 +1221,8 @@ func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) err
 }
 
 // Terminate forcefully, unconditionally stops a flow. In-flight work is abandoned immediately - it is not
-// awaited, and no handler runs. The flow reads "terminated" as soon as this returns.
+// awaited, and no handler runs. The flow reads "terminated" as soon as this returns. Terminating a flow that
+// has already ended is a no-op that returns nil and leaves its outcome as it was.
 func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)

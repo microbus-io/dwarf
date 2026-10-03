@@ -19,10 +19,12 @@ package engine
 import (
 	"context"
 	"math"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -39,20 +41,62 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	e.SetHost(noopHost{})
 	assert.NoError(e.Startup(t.Context()))
 
-	// Construction-time-only: rejected after Startup.
-	assert.Error(e.SetShard(ShardSpec{Index: 2, DSN: "file:other.sqlite"})) // shard set is immutable after Startup
-	assert.Error(e.SetWorkers(8))
-	assert.Error(e.SetEngineID(12345)) // id is registered at Startup and baked into signal-echo suppression
-	assert.Error(e.SetHost(noopHost{}))
-	assert.Error(e.SetLogger(nil))
-	assert.Error(e.SetDebugLogger())
-	assert.Error(e.SetMeterProvider(nil))
-	assert.Error(e.SetTracerProvider(nil))
+	// Construction-time-only: rejected after Startup, as a wrong-state 409.
+	for _, err := range []error{
+		e.SetShard(ShardSpec{Index: 2, DSN: "file:other.sqlite"}), // shard set is immutable after Startup
+		e.SetWorkers(8),
+		e.SetEngineID(12345), // id is registered at Startup and baked into signal-echo suppression
+		e.SetHost(noopHost{}),
+		e.SetLogger(nil),
+		e.SetDebugLogger(),
+		e.SetMeterProvider(nil),
+		e.SetTracerProvider(nil),
+		e.Startup(t.Context()),
+	} {
+		assert.Equal(http.StatusConflict, errors.StatusCode(err), "%v", err)
+	}
 
 	// Live: succeed after Startup.
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 	assert.NoError(e.SetDefaultPriority(5))
 	assert.NoError(e.SetMaxOpenConns(4))
+}
+
+// TestSetShard_RejectsBadSpecs pins the status codes of construction-time configuration mistakes: an invalid
+// spec or a missing host is a 400, a shard index set twice is a 409.
+func TestSetShard_RejectsBadSpecs(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	e := NewEngine()
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 0})))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: -1})))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
+	assert.Equal(http.StatusConflict, errors.StatusCode(e.SetShard(ShardSpec{Index: 1})))
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.Startup(t.Context()))) // no host
+}
+
+// TestOperations_UnmarshalableInputIs400 pins that Resume's data and Fork's overrides are rejected as bad
+// input before any lookup, like Create's initial state - not dropped, and not a 500.
+func TestOperations_UnmarshalableInputIs400(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	e.SetHost(noopHost{})
+	assert.NoError(e.Startup(t.Context()))
+
+	// The key is well-formed and unknown: with valid input each call is a 404, so a 400 is the input's.
+	const key = "1-1-abc"
+	assert.Equal(http.StatusNotFound, errors.StatusCode(e.Resume(t.Context(), key, nil)))
+	_, err := e.Fork(t.Context(), key, nil)
+	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
+
+	bad := map[string]any{"ch": make(chan int)}
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.Resume(t.Context(), key, bad)))
+	_, err = e.Fork(t.Context(), key, bad)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 }
 
 // TestSetEngineID_PinsIdentity pins SetEngineID: a positive id overrides the random default, while 0 and

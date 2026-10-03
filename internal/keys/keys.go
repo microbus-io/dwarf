@@ -42,15 +42,15 @@ func New(shardNum, id int, token string) string {
 func ParseFlowKey(flowKey string) (shardNum int, flowID int, flowToken string, err error) {
 	parts := strings.SplitN(flowKey, "-", 3)
 	if len(parts) != 3 {
-		return 0, 0, "", errors.New("invalid flow ID", http.StatusBadRequest)
+		return 0, 0, "", errors.New("invalid flow key", http.StatusBadRequest)
 	}
 	shardNum64, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil || shardNum64 < 1 {
-		return 0, 0, "", errors.New("invalid flow ID", http.StatusBadRequest)
+		return 0, 0, "", errors.New("invalid flow key", http.StatusBadRequest)
 	}
 	flowID64, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
-		return 0, 0, "", errors.New("invalid flow ID", http.StatusBadRequest)
+		return 0, 0, "", errors.New("invalid flow key", http.StatusBadRequest)
 	}
 	return int(shardNum64), int(flowID64), parts[2], nil
 }

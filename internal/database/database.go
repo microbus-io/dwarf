@@ -103,7 +103,7 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 	indices := make([]int, 0, len(shards))
 	for idx := range shards {
 		if idx < 1 {
-			return errors.New("shard index must be at least 1")
+			return errors.New("shard index must be at least 1", http.StatusBadRequest)
 		}
 		indices = append(indices, idx)
 	}
@@ -137,7 +137,7 @@ func (s *ShardSet) Open(ctx context.Context, cfg Config) error {
 		// share flow_id sequences and every cross-shard invariant breaks. Loud error, never silent.
 		if prev, ok := seen[dsn]; ok {
 			closeAll()
-			return errors.New("shards %d and %d resolve to the same DSN", prev, idx)
+			return errors.New("shards %d and %d resolve to the same DSN", prev, idx, http.StatusBadRequest)
 		}
 		seen[dsn] = idx
 		db, err := openShard(cfg, dsn, shards[idx])

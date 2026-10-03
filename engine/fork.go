@@ -44,9 +44,13 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if err != nil {
 		return "", errors.Trace(err)
 	}
+	overrides, err := workflow.NewState(stateOverrides)
+	if err != nil {
+		return "", errors.Trace(err, http.StatusBadRequest)
+	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
-		return "", errors.Trace(err)
+		return "", errors.New("step not found", http.StatusNotFound) // an unknown shard reads as an unknown step
 	}
 
 	// One turn for this operation's whole database interaction, taken at the entry point so nothing it
@@ -110,7 +114,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	mergedLeafState, err = mergeWithOverrides(mergedLeafState, stateOverrides)
+	mergedLeafState, err = mergeWithOverrides(mergedLeafState, overrides)
 	if err != nil {
 		return "", errors.Trace(err)
 	}
@@ -614,18 +618,14 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	return newFlowID, children, nil
 }
 
-func mergeWithOverrides(originalJSON []byte, overrides any) ([]byte, error) {
+func mergeWithOverrides(originalJSON []byte, overrides workflow.State) ([]byte, error) {
 	state, err := workflow.NewState(originalJSON)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	ov, err := workflow.NewState(overrides)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	// Replace-merge the overrides onto the leaf state; a nil override is a delete (Merge keeps the tombstone,
 	// DelNils enacts it).
-	if err := state.Merge(ov); err != nil {
+	if err := state.Merge(overrides); err != nil {
 		return nil, errors.Trace(err)
 	}
 	state.DelNils()
