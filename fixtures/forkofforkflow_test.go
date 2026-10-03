@@ -57,7 +57,7 @@ func TestForkOfForkflow(t *testing.T) {
 	g.AddTransition("A", "Y")
 	g.AddTransition("X", "J")
 	g.AddTransition("Y", "J")
-	g.AddTransition("J", workflow.END)
+	g.AddTransition("J", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("forkoffork.verify:428/g", g)
 

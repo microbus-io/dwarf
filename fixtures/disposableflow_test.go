@@ -46,12 +46,12 @@ func TestDisposableflow(t *testing.T) {
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("RunSub", "disposable.verify:428/run-sub")
-	parent.AddTransition("RunSub", workflow.END)
+	parent.AddTransition("RunSub", workflow.End)
 	proxy.HandleGraph("disposable.verify:428/parent", parent)
 
 	child := workflow.NewGraph("Child")
 	child.SetEndpoint("Work", "disposable.verify:428/work")
-	child.AddTransition("Work", workflow.END)
+	child.AddTransition("Work", workflow.End)
 	proxy.HandleGraph("disposable.verify:428/child", child)
 
 	proxy.HandleTask("disposable.verify:428/work", func(ctx context.Context, f *workflow.Flow) error {

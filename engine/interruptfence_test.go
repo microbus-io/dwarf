@@ -49,11 +49,11 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("Call", "fisw/call")
-	parent.AddTransition("Call", workflow.END)
+	parent.AddTransition("Call", workflow.End)
 	proxy.HandleGraph("fisw/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetEndpoint("X", "fisw/x")
-	child.AddTransition("X", workflow.END)
+	child.AddTransition("X", workflow.End)
 	proxy.HandleGraph("fisw/child", child)
 
 	proxy.HandleTask("fisw/call", func(ctx context.Context, f *workflow.Flow) error {

@@ -49,7 +49,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 		p := NewTestProxy()
 		g := workflow.NewGraph("Wake")
 		g.SetEndpoint("W", "xrwake/w")
-		g.AddTransition("W", workflow.END)
+		g.AddTransition("W", workflow.End)
 		assert.NoError(g.Validate())
 		p.HandleGraph("xrwake/g", g)
 		p.HandleTask("xrwake/w", func(ctx context.Context, f *workflow.Flow) error {
@@ -114,7 +114,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 		p := NewTestProxy()
 		g := workflow.NewGraph("XRRec")
 		g.SetEndpoint("A", "xrrec/a")
-		g.AddTransition("A", workflow.END)
+		g.AddTransition("A", workflow.End)
 		assert.NoError(g.Validate())
 		p.HandleGraph("xrrec/g", g)
 		// Idempotent: writes a constant (not an increment), so a re-run yields the same final_state.

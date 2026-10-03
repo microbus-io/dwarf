@@ -41,7 +41,7 @@ func TestRetryflow(t *testing.T) {
 	graph.SetEndpoint("TaskA", "retryflow.verify:428/task-a")
 	graph.SetEndpoint("Flaky", "retryflow.verify:428/flaky")
 	graph.SetEndpoint("TaskB", "retryflow.verify:428/task-b")
-	graph.AddTransitionChain("TaskA", "Flaky", "TaskB", workflow.END)
+	graph.AddTransitionChain("TaskA", "Flaky", "TaskB", workflow.End)
 	proxy.HandleGraph("retryflow.verify:428/retry", graph)
 
 	proxy.HandleTask("retryflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

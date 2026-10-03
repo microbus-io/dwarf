@@ -61,7 +61,7 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 	g.SetFanIn("Join")
 	g.AddTransitionForEach("Spawn", "Work", "items", "item")
 	g.AddTransition("Work", "Join")
-	g.AddTransition("Join", workflow.END)
+	g.AddTransition("Join", workflow.End)
 	assert.NoError(g.Validate()) // a legitimate graph: the wedge is forged in the DB below
 	proxy.HandleGraph("nocohort/g", g)
 

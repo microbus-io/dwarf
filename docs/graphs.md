@@ -31,7 +31,7 @@ distinct makes graphs easier to read; the engine itself imposes no casing.
 
 The **entry point** defaults to the first task bound. Override it with `g.SetEntryPoint("Reserve")`.
 
-`workflow.END` is the sentinel terminal target — a transition to `END` ends the flow.
+`workflow.End` is the sentinel terminal target — a transition to it ends the flow.
 
 ## Transitions
 
@@ -43,7 +43,7 @@ what runs next.
 ```go
 g.AddTransition("Reserve", "Charge")   // Reserve always -> Charge
 g.AddTransition("Charge", "Ship")      // Charge always -> Ship
-g.AddTransition("Ship", workflow.END)  // Ship ends the flow
+g.AddTransition("Ship", workflow.End)  // Ship ends the flow
 ```
 
 ```mermaid

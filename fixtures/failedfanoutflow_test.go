@@ -50,7 +50,7 @@ func TestFailedfanoutflow(t *testing.T) {
 	graph.AddTransition("Src", "C")
 	graph.AddTransition("A", "J")
 	graph.AddTransition("B", "J")
-	graph.AddTransitionChain("C", "J", workflow.END)
+	graph.AddTransitionChain("C", "J", workflow.End)
 	proxy.HandleGraph("failedfanoutflow.verify:428/failed-fan-out", graph)
 
 	proxy.HandleTask("failedfanoutflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {

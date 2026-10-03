@@ -81,7 +81,7 @@ func TestReducerDeleteflow(t *testing.T) {
 		}
 		g.AddTransition("Deleter", "Join")
 		g.AddTransition("Appender", "Join")
-		g.AddTransition("Join", workflow.END)
+		g.AddTransition("Join", workflow.End)
 		assert.NoError(g.Validate())
 		return g
 	}

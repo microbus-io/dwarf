@@ -32,7 +32,7 @@ func TestFanInMap_SimpleFanIn(t *testing.T) {
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
-	g.AddTransition("join", workflow.END)
+	g.AddTransition("join", workflow.End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 
@@ -51,7 +51,7 @@ func TestFanInMap_NestedFanOutFanIn(t *testing.T) {
 	g.AddTransition("inner2", "innerJoin")
 	g.AddTransition("innerJoin", "outerJoin")
 	g.AddTransition("outer2", "outerJoin")
-	g.AddTransition("outerJoin", workflow.END)
+	g.AddTransition("outerJoin", workflow.End)
 	g.SetFanIn("innerJoin")
 	g.SetFanIn("outerJoin")
 	assert.NoError(g.Validate())
@@ -67,7 +67,7 @@ func TestFanInMap_ForEachThenFanIn(t *testing.T) {
 	g := workflow.NewGraph("ForeachFanin")
 	g.AddTransitionForEach("s", "a", "items", "item")
 	g.AddTransition("a", "join")
-	g.AddTransition("join", workflow.END)
+	g.AddTransition("join", workflow.End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 
@@ -82,7 +82,7 @@ func TestFanInMap_ConditionalWhenFanIn(t *testing.T) {
 	g.AddTransitionWhen("s", "b", "x <= 0")
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
-	g.AddTransition("join", workflow.END)
+	g.AddTransition("join", workflow.End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 
@@ -97,7 +97,7 @@ func TestFanInMap_DirectEdgeToFanIn(t *testing.T) {
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "join")
 	g.AddTransition("a", "join")
-	g.AddTransition("join", workflow.END)
+	g.AddTransition("join", workflow.End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 
@@ -109,7 +109,7 @@ func TestFanInMap_NonFanOutSourceHasNoMapping(t *testing.T) {
 
 	g := workflow.NewGraph("Linear")
 	g.AddTransition("a", "b")
-	g.AddTransition("b", workflow.END)
+	g.AddTransition("b", workflow.End)
 	assert.NoError(g.Validate())
 
 	assert.Equal("", New(g).For("a"))
@@ -125,7 +125,7 @@ func TestFanInMap_RecomputesAfterJSONRoundTrip(t *testing.T) {
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
-	g.AddTransition("join", workflow.END)
+	g.AddTransition("join", workflow.End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 

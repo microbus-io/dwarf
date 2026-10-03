@@ -87,7 +87,7 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	g.SetEndpoint("A", "forkflow.verify:428/a")
 	g.SetEndpoint("B", "forkflow.verify:428/b")
 	g.SetEndpoint("C", "forkflow.verify:428/c")
-	g.AddTransitionChain("A", "B", "C", workflow.END)
+	g.AddTransitionChain("A", "B", "C", workflow.End)
 	proxy.HandleGraph("forkflow.verify:428/linear", g)
 
 	proxy.HandleTask("forkflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
@@ -149,7 +149,7 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 	g.SetEndpoint("A", "forkflow2.verify:428/a")
 	g.SetEndpoint("B", "forkflow2.verify:428/b")
 	g.SetEndpoint("C", "forkflow2.verify:428/c")
-	g.AddTransitionChain("A", "B", "C", workflow.END)
+	g.AddTransitionChain("A", "B", "C", workflow.End)
 	proxy.HandleGraph("forkflow2.verify:428/g", g)
 
 	proxy.HandleTask("forkflow2.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -203,7 +203,7 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	g := workflow.NewGraph("Threaded")
 	g.SetEndpoint("A", "forkflow3.verify:428/a")
 	g.SetEndpoint("B", "forkflow3.verify:428/b")
-	g.AddTransitionChain("A", "B", workflow.END)
+	g.AddTransitionChain("A", "B", workflow.End)
 	proxy.HandleGraph("forkflow3.verify:428/g", g)
 
 	proxy.HandleTask("forkflow3.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -259,7 +259,7 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 	g.SetEndpoint("Join", "forkflow4.verify:428/join")
 	g.SetFanIn("Join")
 	g.AddTransitionForEach("Seed", "Cell", "items", "item")
-	g.AddTransitionChain("Cell", "Join", workflow.END)
+	g.AddTransitionChain("Cell", "Join", workflow.End)
 	proxy.HandleGraph("forkflow4.verify:428/g", g)
 
 	proxy.HandleTask("forkflow4.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {
@@ -322,13 +322,13 @@ func subgraphForkProxy(childRuns *int32) *engine.TestProxy {
 	parent.SetEndpoint("A", "forksub.verify:428/a")
 	parent.SetEndpoint("RunSub", "forksub.verify:428/run-sub")
 	parent.SetEndpoint("C", "forksub.verify:428/c")
-	parent.AddTransitionChain("A", "RunSub", "C", workflow.END)
+	parent.AddTransitionChain("A", "RunSub", "C", workflow.End)
 	proxy.HandleGraph("forksub.verify:428/parent", parent)
 
 	child := workflow.NewGraph("Child")
 	child.SetEndpoint("X", "forksub.verify:428/x")
 	child.SetEndpoint("Y", "forksub.verify:428/y")
-	child.AddTransitionChain("X", "Y", workflow.END)
+	child.AddTransitionChain("X", "Y", workflow.End)
 	proxy.HandleGraph("forksub.verify:428/child", child)
 
 	proxy.HandleTask("forksub.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -520,19 +520,19 @@ func nestedSubgraphProxy(rec *budgetRec) *engine.TestProxy {
 	l0.SetEndpoint("A", "forknest.verify:428/a")
 	l0.SetEndpoint("CallL1", "forknest.verify:428/call-l1")
 	l0.SetEndpoint("Z", "forknest.verify:428/z")
-	l0.AddTransitionChain("A", "CallL1", "Z", workflow.END)
+	l0.AddTransitionChain("A", "CallL1", "Z", workflow.End)
 	proxy.HandleGraph("forknest.verify:428/outer", l0)
 
 	l1 := workflow.NewGraph("Middle")
 	l1.SetEndpoint("B", "forknest.verify:428/b")
 	l1.SetEndpoint("CallL2", "forknest.verify:428/call-l2")
 	l1.SetEndpoint("Y", "forknest.verify:428/y")
-	l1.AddTransitionChain("B", "CallL2", "Y", workflow.END)
+	l1.AddTransitionChain("B", "CallL2", "Y", workflow.End)
 	proxy.HandleGraph("forknest.verify:428/middle", l1)
 
 	l2 := workflow.NewGraph("Inner")
 	l2.SetEndpoint("C", "forknest.verify:428/c")
-	l2.AddTransitionChain("C", workflow.END)
+	l2.AddTransitionChain("C", workflow.End)
 	proxy.HandleGraph("forknest.verify:428/inner", l2)
 
 	proxy.HandleTask("forknest.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {

@@ -28,7 +28,7 @@ limitations under the License.
 //	g.SetEndpoint("Reserve", "inventory.reserve")
 //	g.SetEndpoint("Charge", "billing.charge")
 //	g.AddTransition("Reserve", "Charge")
-//	g.AddTransition("Charge", workflow.END)
+//	g.AddTransition("Charge", workflow.End)
 //
 // Transitions can be unconditional, conditional (AddTransitionWhen / AddTransitionSwitch), static
 // fan-out across named tasks (AddTransitionFanOut), dynamic fan-out over an array (AddTransitionForEach),

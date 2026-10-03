@@ -30,7 +30,7 @@ func TestCheckout(t *testing.T) {
     g.SetEndpoint("Reserve", "inventory.reserve")
     g.SetEndpoint("Charge", "billing.charge")
     g.AddTransition("Reserve", "Charge")
-    g.AddTransition("Charge", workflow.END)
+    g.AddTransition("Charge", workflow.End)
     proxy.HandleGraph("checkout", g)
 
     proxy.HandleTask("inventory.reserve", func(ctx context.Context, f *workflow.Flow) error {

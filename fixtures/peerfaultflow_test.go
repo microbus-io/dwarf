@@ -46,7 +46,7 @@ func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, r
 		g.SetEndpoint("A", name+"/a")
 		g.SetEndpoint("B", name+"/b")
 		g.AddTransition("A", "B")
-		g.AddTransition("B", workflow.END)
+		g.AddTransition("B", workflow.End)
 		assert.NoError(g.Validate())
 		p.HandleGraph(name+"/g", g)
 		for _, url := range []string{name + "/a", name + "/b"} {

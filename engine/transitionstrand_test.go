@@ -55,7 +55,7 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	g.SetEndpoint("A", "strand/a")
 	g.SetEndpoint("B", "strand/b")
 	g.AddTransition("A", "B")
-	g.AddTransition("B", workflow.END)
+	g.AddTransition("B", workflow.End)
 	proxy.HandleGraph("strand/g", g)
 	var runsA, runsB atomic.Int32
 	started := make(chan struct{}, 1)
@@ -222,9 +222,9 @@ func TestOrphanSweep_ReplaysSlowWorkersStep(t *testing.T) {
 			g.AddTransition("A", "B")
 			g.AddTransitionGoto("A", "C")
 			g.AddTransitionOnError("A", "D")
-			g.AddTransition("B", workflow.END)
-			g.AddTransition("C", workflow.END)
-			g.AddTransition("D", workflow.END)
+			g.AddTransition("B", workflow.End)
+			g.AddTransition("C", workflow.End)
+			g.AddTransition("D", workflow.End)
 			proxy.HandleGraph("slowstrand/g", g)
 			runs := map[string]*atomic.Int32{"A": {}, "B": {}, "C": {}, "D": {}}
 			var dSawErr atomic.Bool
@@ -284,7 +284,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 		g.AddTransitionForEach("A", "B", "items", "item")
 		g.AddTransition("B", "J")
 		g.SetFanIn("J")
-		g.AddTransition("J", workflow.END)
+		g.AddTransition("J", workflow.End)
 		proxy.HandleGraph("slowfanin/g", g)
 		var runsA, runsB, runsJ atomic.Int32
 		proxy.HandleTask("slowfanin/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); return nil })
@@ -303,7 +303,7 @@ func TestOrphanSweep_ReplaysSlowWorkersStep_OtherTransitions(t *testing.T) {
 		proxy := NewTestProxy()
 		g := workflow.NewGraph("SlowEnd")
 		g.SetEndpoint("A", "slowend/a")
-		g.AddTransition("A", workflow.END)
+		g.AddTransition("A", workflow.End)
 		proxy.HandleGraph("slowend/g", g)
 		var runsA atomic.Int32
 		proxy.HandleTask("slowend/a", func(ctx context.Context, f *workflow.Flow) error { runsA.Add(1); f.Set("done", true); return nil })
@@ -339,7 +339,7 @@ func TestBumpCohortArrivals_Fence(t *testing.T) {
 	g.AddTransition("B1", "J")
 	g.AddTransition("B2", "J")
 	g.SetFanIn("J")
-	g.AddTransition("J", workflow.END)
+	g.AddTransition("J", workflow.End)
 	proxy.HandleGraph("bump/g", g)
 	release := make(chan struct{})
 	var started atomic.Int32

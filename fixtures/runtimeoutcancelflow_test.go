@@ -59,7 +59,7 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 
 	graph := workflow.NewGraph("RunTimeoutCancel")
 	graph.SetEndpoint("Block", "runtimeoutcancelflow.verify:428/block")
-	graph.AddTransitionChain("Block", workflow.END)
+	graph.AddTransitionChain("Block", workflow.End)
 	proxy.HandleGraph("runtimeoutcancelflow.verify:428/run-timeout-cancel", graph)
 
 	proxy.HandleTask("runtimeoutcancelflow.verify:428/block", func(taskCtx context.Context, f *workflow.Flow) error {

@@ -52,7 +52,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Persist")
 	g.SetEndpoint("A", "p/transient/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("p/transient/wf", g)
 	proxy.HandleTask("p/transient/a", func(ctx context.Context, f *workflow.Flow) error {
@@ -95,7 +95,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Persist")
 	g.SetEndpoint("A", "p/permanent/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("p/permanent/wf", g)
 	proxy.HandleTask("p/permanent/a", func(ctx context.Context, f *workflow.Flow) error {
@@ -250,7 +250,7 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Drain")
 	g.SetEndpoint("A", "p/drain/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("p/drain/wf", g)
 	proxy.HandleTask("p/drain/a", func(ctx context.Context, f *workflow.Flow) error {

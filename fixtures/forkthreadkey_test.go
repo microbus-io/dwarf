@@ -48,13 +48,13 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 	parent.SetEndpoint("A", "fktk/a")
 	parent.SetEndpoint("RunInner", "fktk/run-inner")
 	parent.SetEndpoint("Z", "fktk/z")
-	parent.AddTransitionChain("A", "RunInner", "Z", workflow.END)
+	parent.AddTransitionChain("A", "RunInner", "Z", workflow.End)
 	assert.NoError(parent.Validate())
 	proxy.HandleGraph("fktk/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("X", "fktk/x")
-	inner.AddTransitionChain("X", workflow.END)
+	inner.AddTransitionChain("X", workflow.End)
 	assert.NoError(inner.Validate())
 	proxy.HandleGraph("fktk/inner", inner)
 

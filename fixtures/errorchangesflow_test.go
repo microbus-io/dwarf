@@ -54,15 +54,15 @@ func TestErrorchangesflow(t *testing.T) {
 	handled := workflow.NewGraph("HandledErrorChanges")
 	handled.SetEndpoint("Work", "errorchangesflow.verify:428/work")
 	handled.SetEndpoint("Rescue", "errorchangesflow.verify:428/rescue")
-	handled.AddTransition("Work", workflow.END)
+	handled.AddTransition("Work", workflow.End)
 	handled.AddTransitionOnError("Work", "Rescue")
-	handled.AddTransition("Rescue", workflow.END)
+	handled.AddTransition("Rescue", workflow.End)
 	proxy.HandleGraph("errorchangesflow.verify:428/handled", handled)
 
 	// Unhandled: the same task with no onError, so the flow fails.
 	unhandled := workflow.NewGraph("UnhandledErrorChanges")
 	unhandled.SetEndpoint("Work", "errorchangesflow.verify:428/work")
-	unhandled.AddTransition("Work", workflow.END)
+	unhandled.AddTransition("Work", workflow.End)
 	proxy.HandleGraph("errorchangesflow.verify:428/unhandled", unhandled)
 
 	var handlerSawScratch bool

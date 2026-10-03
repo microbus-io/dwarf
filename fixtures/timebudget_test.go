@@ -68,7 +68,7 @@ func TestTimeBudget_FrozenAtCreate(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("Task", "timebudget/task")
-	g.AddTransition("Task", workflow.END)
+	g.AddTransition("Task", workflow.End)
 	proxy.HandleGraph("timebudget/graph", g)
 	proxy.HandleTask("timebudget/task", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
@@ -109,7 +109,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Blocker")
 	g.SetEndpoint("Task", "timebudget/blocker")
-	g.AddTransition("Task", workflow.END)
+	g.AddTransition("Task", workflow.End)
 	proxy.HandleGraph("timebudget/blockergraph", g)
 	proxy.HandleTask("timebudget/blocker", func(ctx context.Context, f *workflow.Flow) error {
 		once.Do(func() { close(started) })
@@ -164,12 +164,12 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("RunInner", "timebudget/run-inner")
-	parent.AddTransition("RunInner", workflow.END)
+	parent.AddTransition("RunInner", workflow.End)
 	proxy.HandleGraph("timebudget/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("TaskX", "timebudget/task-x")
-	inner.AddTransition("TaskX", workflow.END)
+	inner.AddTransition("TaskX", workflow.End)
 	proxy.HandleGraph("timebudget/inner", inner)
 
 	proxy.HandleTask("timebudget/task-x", func(ctx context.Context, f *workflow.Flow) error { return nil })

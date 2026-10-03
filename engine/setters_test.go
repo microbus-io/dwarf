@@ -95,7 +95,7 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Prio")
 	g.SetEndpoint("A", "prio/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("prio/g", g)
 	proxy.HandleTask("prio/a", func(ctx context.Context, f *workflow.Flow) error { return nil })

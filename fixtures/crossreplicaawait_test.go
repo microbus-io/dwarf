@@ -41,7 +41,7 @@ func TestCrossReplicaAwait(t *testing.T) {
 
 	graph := workflow.NewGraph("Flow")
 	graph.SetEndpoint("Work", "crossreplica.verify:428/work")
-	graph.AddTransition("Work", workflow.END)
+	graph.AddTransition("Work", workflow.End)
 
 	// eng1: pure awaiter. Its task handler must never run (zero workers).
 	proxy1 := engine.NewTestProxy()

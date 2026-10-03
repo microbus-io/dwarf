@@ -55,7 +55,7 @@ func TestTwoReplicaflow(t *testing.T) {
 		g.SetEndpoint("C", "tworeplica.verify:428/c")
 		g.AddTransition("A", "B")
 		g.AddTransition("B", "C")
-		g.AddTransition("C", workflow.END)
+		g.AddTransition("C", workflow.End)
 		assert.NoError(g.Validate())
 		p.HandleGraph("tworeplica.verify:428/chain", g)
 		for task, url := range map[string]string{"A": "tworeplica.verify:428/a", "B": "tworeplica.verify:428/b", "C": "tworeplica.verify:428/c"} {
@@ -133,7 +133,7 @@ func TestTwoReplicaflow(t *testing.T) {
 		pb := engine.NewTestProxy() // executor
 		wg := workflow.NewGraph("Wake")
 		wg.SetEndpoint("W", "tworeplicawake.verify:428/w")
-		wg.AddTransition("W", workflow.END)
+		wg.AddTransition("W", workflow.End)
 		assert.NoError(wg.Validate())
 		pa.HandleGraph("tworeplicawake.verify:428/g", wg)
 		pb.HandleGraph("tworeplicawake.verify:428/g", wg)

@@ -50,7 +50,7 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("Solo")
 		g.SetEndpoint("A", prefix+"/a")
-		g.AddTransition("A", workflow.END)
+		g.AddTransition("A", workflow.End)
 		assert.NoError(g.Validate())
 		proxy.HandleGraph(prefix+"/g", g)
 		proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -122,7 +122,7 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("Gate")
 		g.SetEndpoint("Gate", prefix+"/gate")
-		g.AddTransition("Gate", workflow.END)
+		g.AddTransition("Gate", workflow.End)
 		assert.NoError(g.Validate())
 		proxy.HandleGraph(prefix+"/g", g)
 		proxy.HandleTask(prefix+"/gate", func(ctx context.Context, f *workflow.Flow) error {
@@ -245,7 +245,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	// Parent: one subgraph caller. Its Call step is the shared ancestor both child branches interrupt up to.
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("Call", "cip/call")
-	parent.AddTransition("Call", workflow.END)
+	parent.AddTransition("Call", workflow.End)
 	assert.NoError(parent.Validate())
 	proxy.HandleGraph("cip/parent", parent)
 	// Child: fan-out Split -> {IX, IY} -> J. Both branches interrupt with distinct payloads.
@@ -259,7 +259,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	child.AddTransition("Split", "IY")
 	child.AddTransition("IX", "J")
 	child.AddTransition("IY", "J")
-	child.AddTransition("J", workflow.END)
+	child.AddTransition("J", workflow.End)
 	assert.NoError(child.Validate())
 	proxy.HandleGraph("cip/child", child)
 

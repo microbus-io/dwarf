@@ -45,7 +45,7 @@ func TestDynamicfanoutflow(t *testing.T) {
 	graph.SetReducer("seenIndices", workflow.ReducerAppend)
 	graph.SetReducer("seenCounts", workflow.ReducerUnion)
 	graph.AddTransitionForEach("TaskA", "TaskB", "items", "item")
-	graph.AddTransitionChain("TaskB", "TaskC", workflow.END)
+	graph.AddTransitionChain("TaskB", "TaskC", workflow.End)
 	proxy.HandleGraph("dynamicfanoutflow.verify:428/dynamic-fan-out", graph)
 
 	proxy.HandleTask("dynamicfanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

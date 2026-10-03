@@ -76,11 +76,11 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("P", "wedgesub.verify:0/p")
-	parent.AddTransition("P", workflow.END)
+	parent.AddTransition("P", workflow.End)
 	proxy.HandleGraph("wedgesub.verify:0/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetEndpoint("K", "wedgesub.verify:0/k")
-	child.AddTransition("K", workflow.END)
+	child.AddTransition("K", workflow.End)
 	proxy.HandleGraph("wedgesub.verify:0/child", child)
 
 	proxy.HandleTask("wedgesub.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
@@ -179,11 +179,11 @@ func TestWedgeSweep_SubgraphCallerWithNoChildFails(t *testing.T) {
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("P", "wedgenochild.verify:0/p")
-	parent.AddTransition("P", workflow.END)
+	parent.AddTransition("P", workflow.End)
 	proxy.HandleGraph("wedgenochild.verify:0/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetEndpoint("K", "wedgenochild.verify:0/k")
-	child.AddTransition("K", workflow.END)
+	child.AddTransition("K", workflow.End)
 	proxy.HandleGraph("wedgenochild.verify:0/child", child)
 
 	proxy.HandleTask("wedgenochild.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
@@ -270,11 +270,11 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	// Orphan scenario: parent spawns a child whose entry task interrupts, so the child rests interrupted.
 	parent := workflow.NewGraph("OrphanParent")
 	parent.SetEndpoint("P", "orphanchild.verify:0/p")
-	parent.AddTransition("P", workflow.END)
+	parent.AddTransition("P", workflow.End)
 	proxy.HandleGraph("orphanchild.verify:0/parent", parent)
 	ichild := workflow.NewGraph("OrphanChild")
 	ichild.SetEndpoint("K", "orphanchild.verify:0/k")
-	ichild.AddTransition("K", workflow.END)
+	ichild.AddTransition("K", workflow.End)
 	proxy.HandleGraph("orphanchild.verify:0/child", ichild)
 	proxy.HandleTask("orphanchild.verify:0/p", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
@@ -292,11 +292,11 @@ func TestWedgeSweep_OrphanedSubgraphChildTerminated(t *testing.T) {
 	// Healthy control: parent whose child blocks (stays running), so the parent stays running+parked.
 	hparent := workflow.NewGraph("HealthyParent")
 	hparent.SetEndpoint("P", "orphanchild.verify:0/hp")
-	hparent.AddTransition("P", workflow.END)
+	hparent.AddTransition("P", workflow.End)
 	proxy.HandleGraph("orphanchild.verify:0/healthyparent", hparent)
 	hchild := workflow.NewGraph("HealthyChild")
 	hchild.SetEndpoint("K", "orphanchild.verify:0/hk")
-	hchild.AddTransition("K", workflow.END)
+	hchild.AddTransition("K", workflow.End)
 	proxy.HandleGraph("orphanchild.verify:0/healthychild", hchild)
 	proxy.HandleTask("orphanchild.verify:0/hp", func(ctx context.Context, f *workflow.Flow) error {
 		var out map[string]any
@@ -409,14 +409,14 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 
 	solo := workflow.NewGraph("Solo")
 	solo.SetEndpoint("A", "orphan.verify:0/a")
-	solo.AddTransition("A", workflow.END)
+	solo.AddTransition("A", workflow.End)
 	proxy.HandleGraph("orphan.verify:0/solo", solo)
 	proxy.HandleTask("orphan.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	// A separate graph whose task blocks, so its flow stays running with a live step - the healthy control.
 	blocked := workflow.NewGraph("Blocked")
 	blocked.SetEndpoint("B", "orphan.verify:0/b")
-	blocked.AddTransition("B", workflow.END)
+	blocked.AddTransition("B", workflow.End)
 	proxy.HandleGraph("orphan.verify:0/blocked", blocked)
 	proxy.HandleTask("orphan.verify:0/b", func(ctx context.Context, f *workflow.Flow) error {
 		<-release
@@ -512,7 +512,7 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 
 	solo := workflow.NewGraph("Solo")
 	solo.SetEndpoint("A", "orphanwin.verify:0/a")
-	solo.AddTransition("A", workflow.END)
+	solo.AddTransition("A", workflow.End)
 	proxy.HandleGraph("orphanwin.verify:0/solo", solo)
 	proxy.HandleTask("orphanwin.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 

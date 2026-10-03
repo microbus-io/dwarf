@@ -54,7 +54,7 @@ func TestGreeting(t *testing.T) {
 	g.SetEndpoint("Greet", "greet") // node "Greet" dispatches to endpoint "greet"; first node bound is the entry point
 	g.SetEndpoint("Shout", "shout")
 	g.AddTransition("Greet", "Shout")
-	g.AddTransition("Shout", workflow.END)
+	g.AddTransition("Shout", workflow.End)
 	proxy.HandleGraph("welcome", g)
 
 	// 2. Register the tasks.

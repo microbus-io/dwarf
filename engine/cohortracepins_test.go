@@ -71,7 +71,7 @@ func newCohortRaceRig(t *testing.T, prefix string) *cohortRaceRig {
 	g.AddTransition("A", "Y")
 	g.AddTransition("X", "J")
 	g.AddTransition("Y", "J")
-	g.AddTransition("J", workflow.END)
+	g.AddTransition("J", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph(prefix+"/g", g)
 	proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error { return nil })

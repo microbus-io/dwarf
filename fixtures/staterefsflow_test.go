@@ -60,7 +60,7 @@ func TestStaterefsflow(t *testing.T) {
 	graph.SetFanIn("Collect")
 	graph.SetReducer("transcript", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Split", "Page", "pages", "page")
-	graph.AddTransitionChain("Page", "Collect", workflow.END)
+	graph.AddTransitionChain("Page", "Collect", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("staterefsflow.verify:429/doc-refs", graph)
 
@@ -207,7 +207,7 @@ func TestStaterefsflow(t *testing.T) {
 		g.SetFanIn("Collect")
 		g.AddTransitionForEach("Split", "Page", "pages", "page")
 		g.AddTransitionChain("Page", "Collect")
-		g.AddTransitionChain("Collect", "After", workflow.END)
+		g.AddTransitionChain("Collect", "After", workflow.End)
 		assert.NoError(g.Validate())
 		proxy.HandleGraph("staterefsflow.verify:429/doc-refs-mutate", g)
 
@@ -273,7 +273,7 @@ func TestStaterefs_SingleFieldEntirelyByReference(t *testing.T) {
 	graph.SetEndpoint("A", "staterefsflow.verify:429/sole-a")
 	graph.SetEndpoint("B", "staterefsflow.verify:429/sole-b")
 	graph.SetEndpoint("C", "staterefsflow.verify:429/sole-c")
-	graph.AddTransitionChain("A", "B", "C", workflow.END)
+	graph.AddTransitionChain("A", "B", "C", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("staterefsflow.verify:429/sole", graph)
 

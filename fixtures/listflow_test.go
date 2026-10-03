@@ -39,7 +39,7 @@ func TestListflow(t *testing.T) {
 
 	graph := workflow.NewGraph("List")
 	graph.SetEndpoint("Only", "listflow.verify:428/only")
-	graph.AddTransition("Only", workflow.END)
+	graph.AddTransition("Only", workflow.End)
 	proxy.HandleGraph("listflow.verify:428/list", graph)
 
 	proxy.HandleTask("listflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {

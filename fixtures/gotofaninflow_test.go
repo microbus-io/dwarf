@@ -54,7 +54,7 @@ func TestGotoFanInFlow(t *testing.T) {
 	graph.AddTransitionForEach("Split", "Work", "items", "item")
 	// The escape hatch: when there is nothing to fan out on, the source steers straight to its fan-in.
 	graph.AddTransitionGoto("Split", "Join")
-	graph.AddTransitionChain("Work", "Join", workflow.END)
+	graph.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("gotofaninflow.verify:645/goto-fan-in", graph)
 
@@ -131,7 +131,7 @@ func TestGotoFanInFlow_NestedStaysInOuterCohort(t *testing.T) {
 	// The inner source's escape hatch: a cell with no chunks Goto's its inner fan-in directly.
 	graph.AddTransitionGoto("Cell", "JoinChunk")
 	graph.AddTransitionChain("Chunk", "JoinChunk")
-	graph.AddTransitionChain("JoinChunk", "JoinCell", workflow.END)
+	graph.AddTransitionChain("JoinChunk", "JoinCell", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("gotofaninflow.verify:645/nested-goto-fan-in", graph)
 

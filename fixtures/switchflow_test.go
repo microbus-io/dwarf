@@ -40,9 +40,9 @@ func TestSwitchflow(t *testing.T) {
 	graph.AddTransitionSwitch("Router", "HandleHigh", "amount >= 10000")
 	graph.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
 	graph.AddTransitionSwitch("Router", "HandleLow", "true")
-	graph.AddTransition("HandleHigh", workflow.END)
-	graph.AddTransition("HandleMid", workflow.END)
-	graph.AddTransition("HandleLow", workflow.END)
+	graph.AddTransition("HandleHigh", workflow.End)
+	graph.AddTransition("HandleMid", workflow.End)
+	graph.AddTransition("HandleLow", workflow.End)
 	proxy.HandleGraph("switchflow.verify:428/switch", graph)
 
 	// No-match graph: same router but no default arm.
@@ -52,8 +52,8 @@ func TestSwitchflow(t *testing.T) {
 	noMatchGraph.SetEndpoint("HandleMid", "switchflow.verify:428/handle-mid")
 	noMatchGraph.AddTransitionSwitch("Router", "HandleHigh", "amount >= 10000")
 	noMatchGraph.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
-	noMatchGraph.AddTransition("HandleHigh", workflow.END)
-	noMatchGraph.AddTransition("HandleMid", workflow.END)
+	noMatchGraph.AddTransition("HandleHigh", workflow.End)
+	noMatchGraph.AddTransition("HandleMid", workflow.End)
 	proxy.HandleGraph("switchflow.verify:428/switch-no-match", noMatchGraph)
 
 	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow) error {
@@ -136,8 +136,8 @@ func TestSwitchflow_NoMatch(t *testing.T) {
 	graph.SetEndpoint("HandleMid", "switchflow.verify:428/handle-mid")
 	graph.AddTransitionSwitch("Router", "HandleHigh", "amount >= 10000")
 	graph.AddTransitionSwitch("Router", "HandleMid", "amount >= 1000")
-	graph.AddTransition("HandleHigh", workflow.END)
-	graph.AddTransition("HandleMid", workflow.END)
+	graph.AddTransition("HandleHigh", workflow.End)
+	graph.AddTransition("HandleMid", workflow.End)
 	proxy.HandleGraph("switchflow.verify:428/switch-no-match", graph)
 
 	proxy.HandleTask("switchflow.verify:428/router", func(ctx context.Context, f *workflow.Flow) error {

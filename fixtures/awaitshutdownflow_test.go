@@ -49,7 +49,7 @@ func TestAwaitShutdownflow(t *testing.T) {
 	graph := workflow.NewGraph("AwaitShutdown")
 	graph.SetEndpoint("Gate", "awaitshutdownflow.verify:428/gate")
 	graph.SetEndpoint("After", "awaitshutdownflow.verify:428/after")
-	graph.AddTransitionChain("Gate", "After", workflow.END)
+	graph.AddTransitionChain("Gate", "After", workflow.End)
 	proxy.HandleGraph("awaitshutdownflow.verify:428/await-shutdown", graph)
 
 	// Gate arms a long sleep, deferring its successor's not_before ~1h out. The flow therefore rests

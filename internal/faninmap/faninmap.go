@@ -92,7 +92,7 @@ func New(g *workflow.Graph) *Map {
 				nextStack = fromStack
 			}
 
-			if tr.To == workflow.END {
+			if tr.To == workflow.End {
 				continue
 			}
 			// On a validated graph every path to a node carries the same lineage, so the first visit wins.

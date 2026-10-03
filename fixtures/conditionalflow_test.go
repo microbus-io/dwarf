@@ -45,7 +45,7 @@ func TestConditionalflow(t *testing.T) {
 	graph.AddTransitionWhen("TaskA", "TaskHigh", "score >= 50")
 	graph.AddTransitionWhen("TaskA", "TaskLow", "score < 50")
 	graph.AddTransition("TaskHigh", "TaskC")
-	graph.AddTransitionChain("TaskLow", "TaskC", workflow.END)
+	graph.AddTransitionChain("TaskLow", "TaskC", workflow.End)
 	proxy.HandleGraph("conditionalflow.verify:428/conditional", graph)
 
 	proxy.HandleTask("conditionalflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {
@@ -120,7 +120,7 @@ func TestConditionalflow_ExactIntegerComparison(t *testing.T) {
 	graph.AddTransitionWhen("TaskA", "TaskNoMatch", "orderID != 1234567890123456789")
 	graph.AddTransition("TaskMatch", "TaskDone")
 	graph.AddTransition("TaskNoMatch", "TaskDone")
-	graph.AddTransition("TaskDone", workflow.END)
+	graph.AddTransition("TaskDone", workflow.End)
 	proxy.HandleGraph("conditionalflow.verify:428/conditional-exact-id", graph)
 
 	proxy.HandleTask("conditionalflow.verify:428/exact-task-a", func(ctx context.Context, f *workflow.Flow) error {

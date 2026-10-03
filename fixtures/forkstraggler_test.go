@@ -41,7 +41,7 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("SL")
 	g.SetEndpoint("A", "sl/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("sl/g", g)
 	proxy.HandleTask("sl/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	// B is only ever the injected straggler; it must never be dispatched (the fix terminates its clone). Register

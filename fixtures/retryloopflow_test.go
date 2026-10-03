@@ -46,7 +46,7 @@ func TestRetryloopflow(t *testing.T) {
 	graph.AddTransitionOnError("TaskB", "Handler")
 	graph.AddTransition("TaskB", "TaskC")
 	graph.AddTransition("Handler", "TaskB")
-	graph.AddTransition("TaskC", workflow.END)
+	graph.AddTransition("TaskC", workflow.End)
 	proxy.HandleGraph("retryloopflow.verify:428/retry-loop", graph)
 
 	proxy.HandleTask("retryloopflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

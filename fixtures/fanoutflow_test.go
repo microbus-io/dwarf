@@ -48,7 +48,7 @@ func TestFanoutflow(t *testing.T) {
 	graph.AddTransition("TaskA", "TaskD")
 	graph.AddTransition("TaskB", "TaskE")
 	graph.AddTransition("TaskC", "TaskE")
-	graph.AddTransitionChain("TaskD", "TaskE", workflow.END)
+	graph.AddTransitionChain("TaskD", "TaskE", workflow.End)
 	proxy.HandleGraph("fanoutflow.verify:428/fan-out", graph)
 
 	proxy.HandleTask("fanoutflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

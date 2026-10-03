@@ -26,9 +26,9 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// END is a pseudo-node indicating that the workflow should terminate.
-// Use it as the target of a transition to mark a terminal path.
-const END = "END"
+// End is the pseudo-node a transition targets to end the flow. Its value, "END", is the name it carries
+// in a graph's JSON and in rendered diagrams.
+const End = "END"
 
 // Node describes a task or subgraph node registered in a workflow graph.
 // Name is the node's identifier within the graph, recorded on every step
@@ -100,13 +100,13 @@ func (g *Graph) Transitions() []Transition {
 // AddTransition* call is auto-registered with its URL equal to its name (see AddTransition). The name is the node's identity in the graph
 // (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
 // hands to the host's ExecuteTask and groups the saturation/concurrency metric by. The first node bound
-// becomes the default entry point unless SetEntryPoint is called explicitly. The pseudo-node END is not
+// becomes the default entry point unless SetEntryPoint is called explicitly. The pseudo-node End is not
 // registered.
 //
 // The same URL may be bound under multiple names. This is how a workflow author reuses the same task
 // code at distinct positions in the graph with different downstream transitions per position.
 func (g *Graph) SetEndpoint(name, url string) {
-	if name == END {
+	if name == End {
 		return
 	}
 	for i := range g.nodes {
@@ -122,10 +122,10 @@ func (g *Graph) SetEndpoint(name, url string) {
 }
 
 // URLOf returns the dispatch URL for a node identified by name. Returns the empty string
-// if the name is not registered. END maps to itself.
+// if the name is not registered. End maps to itself.
 func (g *Graph) URLOf(name string) string {
-	if name == END {
-		return END
+	if name == End {
+		return End
 	}
 	for _, n := range g.nodes {
 		if n.Name == name {
@@ -278,8 +278,8 @@ func (g *Graph) AddTransitionOnError(from, to string) {
 
 // AddTransitionChain wires an unconditional transition between each consecutive pair of names:
 // AddTransitionChain("A", "B", "C") is AddTransition("A", "B") followed by AddTransition("B", "C").
-// It is a convenience for linear segments; fewer than two names is a no-op. END belongs last (a node
-// after END would produce an invalid transition out of END). Mix with the other AddTransition* methods
+// It is a convenience for linear segments; fewer than two names is a no-op. End belongs last (a node
+// after End would produce an invalid transition out of End). Mix with the other AddTransition* methods
 // for branching, conditions, and loops.
 func (g *Graph) AddTransitionChain(names ...string) {
 	for i := 0; i+1 < len(names); i++ {
@@ -301,7 +301,7 @@ func (g *Graph) AddTransitionFanOut(from string, to ...string) {
 
 // autoRegister registers a new node if one does not exist for the name.
 func (g *Graph) autoRegister(name string) {
-	if name == END {
+	if name == End {
 		return
 	}
 	for _, n := range g.nodes {
@@ -400,7 +400,7 @@ func (g *Graph) Validate() error {
 		return errors.New("graph '%s' has no tasks", g.name)
 	}
 	nodeSet := make(map[string]bool, len(g.nodes)+1)
-	nodeSet[END] = true
+	nodeSet[End] = true
 	for _, t := range g.nodes {
 		if nodeSet[t.Name] {
 			return errors.New("duplicate node '%s' in graph '%s'", t.Name, g.name)
@@ -417,13 +417,13 @@ func (g *Graph) Validate() error {
 		if !nodeSet[fanInName] {
 			return errors.New("SetFanIn references unknown node '%s' in graph '%s'", fanInName, g.name)
 		}
-		if fanInName == END {
+		if fanInName == End {
 			return errors.New("SetFanIn cannot mark END in graph '%s'", g.name)
 		}
 	}
 	onErrorFrom := make(map[string]bool, len(g.nodes))
 	for _, tr := range g.transitions {
-		if tr.From == END {
+		if tr.From == End {
 			return errors.New("transition out of END to '%s' in graph '%s'; END is terminal and has no outgoing transitions", tr.To, g.name)
 		}
 		if !nodeSet[tr.From] {
@@ -498,7 +498,7 @@ func (g *Graph) Validate() error {
 		current := queue[0]
 		queue = queue[1:]
 		for _, tr := range g.transitions {
-			if tr.From == current && tr.To != END && !reachable[tr.To] {
+			if tr.From == current && tr.To != End && !reachable[tr.To] {
 				reachable[tr.To] = true
 				queue = append(queue, tr.To)
 			}
@@ -512,7 +512,7 @@ func (g *Graph) Validate() error {
 
 	hasEnd := false
 	for _, tr := range g.transitions {
-		if tr.To == END {
+		if tr.To == End {
 			hasEnd = true
 			break
 		}
@@ -628,7 +628,7 @@ func (g *Graph) validateLineage() error {
 				nextStack = fromStack
 			}
 
-			if tr.To == END {
+			if tr.To == End {
 				if len(nextStack) != 0 {
 					return errors.New(
 						"transition from '%s' to END in graph '%s' has unpopped fan-out frames %v; every branch must pass through a fan-in node before reaching END",

@@ -45,7 +45,7 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 	inner.SetEndpoint("Join", "sgif.verify:900/join")
 	inner.SetFanIn("Join")
 	inner.AddTransitionForEach("Seed", "Work", "items", "item")
-	inner.AddTransitionChain("Work", "Join", workflow.END)
+	inner.AddTransitionChain("Work", "Join", workflow.End)
 	proxy.HandleGraph("sgif.verify:900/inner", inner)
 	proxy.HandleTask("sgif.verify:900/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("sgif.verify:900/work", func(ctx context.Context, f *workflow.Flow) error {
@@ -66,7 +66,7 @@ func TestSubgraphInterruptFailflow(t *testing.T) {
 	// Parent: RunInner, no onError -> the delivered child failure fails the parent.
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("RunInner", "sgif.verify:900/run-inner")
-	parent.AddTransitionChain("RunInner", workflow.END)
+	parent.AddTransitionChain("RunInner", workflow.End)
 	proxy.HandleGraph("sgif.verify:900/parent", parent)
 	proxy.HandleTask("sgif.verify:900/run-inner", func(ctx context.Context, f *workflow.Flow) error {
 		yield, err := f.Subgraph("sgif.verify:900/inner", map[string]any{"items": []string{"ok", "wait", "bad"}}, nil)

@@ -59,13 +59,13 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 	parent := workflow.NewGraph("DepthParent")
 	parent.SetEndpoint("A", "depthsub.verify:428/a")
 	parent.SetEndpoint("Call", "depthsub.verify:428/call")
-	parent.AddTransitionChain("A", "Call", workflow.END)
+	parent.AddTransitionChain("A", "Call", workflow.End)
 	proxy.HandleGraph("depthsub.verify:428/parent", parent)
 
 	child := workflow.NewGraph("DepthChild")
 	child.SetEndpoint("Inner", "depthsub.verify:428/inner")
 	child.SetEndpoint("Inner2", "depthsub.verify:428/inner2")
-	child.AddTransitionChain("Inner", "Inner2", workflow.END)
+	child.AddTransitionChain("Inner", "Inner2", workflow.End)
 	proxy.HandleGraph("depthsub.verify:428/child", child)
 
 	proxy.HandleTask("depthsub.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -125,7 +125,7 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	g.AddTransition("Work", "J")        // normal: straight to fan-in
 	g.AddTransitionGoto("Work", "Deep") // goto: extend this branch one level deeper
 	g.AddTransition("Deep", "J")
-	g.AddTransition("J", workflow.END)
+	g.AddTransition("J", workflow.End)
 	proxy.HandleGraph("depthfanin.verify:428/g", g)
 
 	// gate1 holds element 1's shallow branch (Work -> J, depth 2) until the deep branch (Work -> Deep -> J,

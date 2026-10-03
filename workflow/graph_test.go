@@ -119,7 +119,7 @@ func TestGraph_Validate(t *testing.T) {
 	// Valid graph
 	g := NewGraph("Test")
 	g.AddTransition("svc/a", "svc/b")
-	g.AddTransition("svc/b", END)
+	g.AddTransition("svc/b", End)
 	assert.NoError(g.Validate())
 
 	// Empty name
@@ -146,9 +146,9 @@ func TestGraph_Validate(t *testing.T) {
 	// Reachable via goto
 	g6 := NewGraph("Test")
 	g6.AddTransition("svc/a", "svc/b")
-	g6.AddTransition("svc/b", END)
+	g6.AddTransition("svc/b", End)
 	g6.AddTransitionGoto("svc/a", "svc/c")
-	g6.AddTransition("svc/c", END)
+	g6.AddTransition("svc/c", End)
 	assert.NoError(g6.Validate())
 
 	// No END transition
@@ -167,25 +167,25 @@ func TestGraph_ValidateOnError(t *testing.T) {
 
 	// A single onError is fine.
 	ok := NewGraph("Test")
-	ok.AddTransition("svc/a", END)
+	ok.AddTransition("svc/a", End)
 	ok.AddTransitionOnError("svc/a", "svc/h")
-	ok.AddTransition("svc/h", END)
+	ok.AddTransition("svc/h", End)
 	assert.NoError(ok.Validate())
 
 	// Two onError transitions from the same node are rejected.
 	dup := NewGraph("Test")
-	dup.AddTransition("svc/a", END)
+	dup.AddTransition("svc/a", End)
 	dup.AddTransitionOnError("svc/a", "svc/h1")
-	dup.AddTransition("svc/h1", END)
+	dup.AddTransition("svc/h1", End)
 	dup.AddTransitionOnError("svc/a", "svc/h2")
-	dup.AddTransition("svc/h2", END)
+	dup.AddTransition("svc/h2", End)
 	assert.Error(dup.Validate())
 
 	// An onError transition carrying a 'when' (hand-crafted) is rejected.
 	cond := NewGraph("Test")
-	cond.AddTransition("svc/a", END)
+	cond.AddTransition("svc/a", End)
 	cond.SetEndpoint("svc/h", "svc/h")
-	cond.AddTransition("svc/h", END)
+	cond.AddTransition("svc/h", End)
 	cond.transitions = append(cond.transitions, Transition{From: "svc/a", To: "svc/h", OnError: true, When: "x > 0"})
 	assert.Error(cond.Validate())
 }
@@ -203,8 +203,8 @@ func TestGraph_ValidateFanOutConvergence(t *testing.T) {
 	bad.AddTransition("svc/s", "svc/b")
 	bad.AddTransition("svc/a", "svc/j")
 	bad.AddTransition("svc/b", "svc/k")
-	bad.AddTransition("svc/j", END)
-	bad.AddTransition("svc/k", END)
+	bad.AddTransition("svc/j", End)
+	bad.AddTransition("svc/k", End)
 	bad.SetFanIn("svc/j")
 	bad.SetFanIn("svc/k")
 	assert.Error(bad.Validate())
@@ -215,7 +215,7 @@ func TestGraph_ValidateFanOutConvergence(t *testing.T) {
 	good.AddTransition("svc/s", "svc/b")
 	good.AddTransition("svc/a", "svc/j")
 	good.AddTransition("svc/b", "svc/j")
-	good.AddTransition("svc/j", END)
+	good.AddTransition("svc/j", End)
 	good.SetFanIn("svc/j")
 	assert.NoError(good.Validate())
 }
@@ -238,7 +238,7 @@ func TestGraph_ValidateFanInFromOutsideCohort(t *testing.T) {
 	viaGoto.AddTransition("svc/c", "svc/j")
 	viaGoto.SetFanIn("svc/j")
 	viaGoto.AddTransition("svc/j", "svc/k")
-	viaGoto.AddTransition("svc/k", END)
+	viaGoto.AddTransition("svc/k", End)
 	viaGoto.AddTransitionGoto("svc/k", "svc/j") // K is not in a cohort: no frame to pop
 	assert.Error(viaGoto.Validate(), "a goto into a fan-in from outside a cohort must be rejected")
 
@@ -250,7 +250,7 @@ func TestGraph_ValidateFanInFromOutsideCohort(t *testing.T) {
 	viaOnError.AddTransition("svc/c", "svc/j")
 	viaOnError.SetFanIn("svc/j")
 	viaOnError.AddTransition("svc/j", "svc/k")
-	viaOnError.AddTransition("svc/k", END)
+	viaOnError.AddTransition("svc/k", End)
 	viaOnError.AddTransitionOnError("svc/k", "svc/j")
 	assert.Error(viaOnError.Validate(), "an onError into a fan-in from outside a cohort must be rejected")
 
@@ -262,7 +262,7 @@ func TestGraph_ValidateFanInFromOutsideCohort(t *testing.T) {
 	fromBranch.AddTransition("svc/b", "svc/j")
 	fromBranch.AddTransition("svc/c", "svc/j")
 	fromBranch.SetFanIn("svc/j")
-	fromBranch.AddTransition("svc/j", END)
+	fromBranch.AddTransition("svc/j", End)
 	fromBranch.AddTransitionGoto("svc/b", "svc/j")
 	assert.NoError(fromBranch.Validate(), "a goto into the fan-in from a cohort branch is legitimate")
 }
@@ -271,7 +271,7 @@ func TestGraph_AddTransitionChain(t *testing.T) {
 	assert := testarossa.For(t)
 
 	g := NewGraph("Chain")
-	g.AddTransitionChain("a", "b", "c", END)
+	g.AddTransitionChain("a", "b", "c", End)
 
 	trs := g.Transitions()
 	assert.Equal(3, len(trs))
@@ -280,7 +280,7 @@ func TestGraph_AddTransitionChain(t *testing.T) {
 	assert.Equal("b", trs[1].From)
 	assert.Equal("c", trs[1].To)
 	assert.Equal("c", trs[2].From)
-	assert.Equal(END, trs[2].To)
+	assert.Equal(End, trs[2].To)
 	// Chain wires plain unconditional edges, so it validates like the equivalent AddTransition calls.
 	assert.NoError(g.Validate())
 	// First node in the chain is the default entry point.
@@ -317,8 +317,8 @@ func TestGraph_TransitionOutOfENDRejected(t *testing.T) {
 	assert := testarossa.For(t)
 
 	g := NewGraph("BadEnd")
-	g.AddTransition("a", END)
-	g.AddTransition(END, "b") // END is terminal; an outgoing transition is invalid
+	g.AddTransition("a", End)
+	g.AddTransition(End, "b") // END is terminal; an outgoing transition is invalid
 	err := g.Validate()
 	if assert.Error(err) {
 		assert.Contains(err.Error(), "out of END")
@@ -330,15 +330,15 @@ func TestGraph_END(t *testing.T) {
 
 	g := NewGraph("Test")
 	g.AddTransition("svc/a", "svc/b")
-	g.AddTransitionGoto("svc/b", END)
+	g.AddTransitionGoto("svc/b", End)
 	g.AddTransition("svc/b", "svc/c")
-	g.AddTransition("svc/c", END)
+	g.AddTransition("svc/c", End)
 
 	// END should not appear in the task list
 	tasks := g.Nodes()
 	assert.Equal(3, len(tasks))
 	for _, task := range tasks {
-		assert.NotEqual(END, task.Name)
+		assert.NotEqual(End, task.Name)
 	}
 
 	// Graph should validate successfully
@@ -359,8 +359,8 @@ func TestGraph_Mermaid(t *testing.T) {
 	g := NewGraph("CreateOrder")
 	g.AddTransitionWhen("order.service/validate", "payment.service/charge", "valid == true")
 	g.AddTransitionWhen("order.service/validate", "order.service/reject", "valid != true")
-	g.AddTransition("payment.service/charge", END)
-	g.AddTransition("order.service/reject", END)
+	g.AddTransition("payment.service/charge", End)
+	g.AddTransition("order.service/reject", End)
 
 	mmd := NewGraphRenderer(g).Render()
 
@@ -378,9 +378,9 @@ func TestGraph_GotoTransition(t *testing.T) {
 
 	g := NewGraph("Test")
 	g.AddTransition("svc/a", "svc/b")
-	g.AddTransition("svc/b", END)
+	g.AddTransition("svc/b", End)
 	g.AddTransitionGoto("svc/a", "svc/c")
-	g.AddTransition("svc/c", END)
+	g.AddTransition("svc/c", End)
 
 	transitions := g.Transitions()
 	assert.Equal(4, len(transitions))
@@ -434,14 +434,14 @@ func TestGraph_ValidateWhenExpression(t *testing.T) {
 	g1.AddTransitionWhen("svc/a", "svc/c", "score > 5 && !guest")
 	g1.AddTransition("svc/b", "svc/join")
 	g1.AddTransition("svc/c", "svc/join")
-	g1.AddTransition("svc/join", END)
+	g1.AddTransition("svc/join", End)
 	g1.SetFanIn("svc/join")
 	assert.NoError(g1.Validate())
 
 	// Invalid expression
 	g2 := NewGraph("Test")
 	g2.AddTransitionWhen("svc/a", "svc/b", "(((")
-	g2.AddTransition("svc/b", END)
+	g2.AddTransition("svc/b", End)
 	err := g2.Validate()
 	assert.Error(err)
 	assert.Contains(err.Error(), "invalid 'when' expression")
@@ -465,7 +465,7 @@ func TestGraph_ValidateFieldNames(t *testing.T) {
 		g := NewGraph("Test")
 		g.AddTransitionForEach("svc/a", "svc/b", field, as)
 		g.AddTransition("svc/b", "svc/join")
-		g.AddTransition("svc/join", END)
+		g.AddTransition("svc/join", End)
 		g.SetFanIn("svc/join")
 		return g
 	}
@@ -497,9 +497,9 @@ func TestGraph_AddTransitionOnError(t *testing.T) {
 
 	g := NewGraph("Test")
 	g.AddTransition("svc/a", "svc/b")
-	g.AddTransition("svc/b", END)
+	g.AddTransition("svc/b", End)
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
-	g.AddTransition("svc/errHandler", END)
+	g.AddTransition("svc/errHandler", End)
 
 	transitions := g.Transitions()
 	assert.Equal(4, len(transitions))
@@ -514,9 +514,9 @@ func TestGraph_OnErrorJSONRoundTrip(t *testing.T) {
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
-	g.AddTransition("svc/a", END)
+	g.AddTransition("svc/a", End)
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
-	g.AddTransition("svc/errHandler", END)
+	g.AddTransition("svc/errHandler", End)
 
 	data, err := json.Marshal(g)
 	assert.NoError(err)
@@ -542,7 +542,7 @@ func TestGraph_MermaidForEachShape(t *testing.T) {
 
 	g := NewGraph("Test")
 	g.AddTransitionForEach("svc/start", "svc/worker", "items", "item")
-	g.AddTransition("svc/worker", END)
+	g.AddTransition("svc/worker", End)
 
 	mmd := NewGraphRenderer(g).Render()
 	// forEach is marked with a "for each" edge label, the same convention as onError/goto.
@@ -562,7 +562,7 @@ func TestGraph_MermaidFanInShape(t *testing.T) {
 	g.AddTransition("a", "c")
 	g.AddTransition("b", "join")
 	g.AddTransition("c", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 
@@ -581,7 +581,7 @@ func TestGraph_MermaidForEachFanInLabel(t *testing.T) {
 	g := NewGraph("Test")
 	g.AddTransitionForEach("svc/start", "svc/worker", "items", "item")
 	g.AddTransition("svc/worker", "svc/join")
-	g.AddTransition("svc/join", END)
+	g.AddTransition("svc/join", End)
 	g.SetFanIn("svc/join")
 	assert.NoError(g.Validate())
 
@@ -602,7 +602,7 @@ func TestGraph_MermaidNestedForEachLabels(t *testing.T) {
 	g.AddTransitionForEach("svc/inner", "svc/leaf", "docs", "doc")
 	g.AddTransition("svc/leaf", "svc/innerJoin")
 	g.AddTransition("svc/innerJoin", "svc/outerJoin")
-	g.AddTransition("svc/outerJoin", END)
+	g.AddTransition("svc/outerJoin", End)
 	g.SetFanIn("svc/innerJoin")
 	g.SetFanIn("svc/outerJoin")
 	assert.NoError(g.Validate())
@@ -618,9 +618,9 @@ func TestGraph_MermaidLabelsOnError(t *testing.T) {
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
-	g.AddTransition("svc/a", END)
+	g.AddTransition("svc/a", End)
 	g.AddTransitionOnError("svc/a", "svc/errHandler")
-	g.AddTransition("svc/errHandler", END)
+	g.AddTransition("svc/errHandler", End)
 
 	mmd := NewGraphRenderer(g).Render()
 	assert.Contains(mmd, `"onError"`)
@@ -630,7 +630,7 @@ func TestGraph_SelfLoopOnErrorRejected(t *testing.T) {
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
-	g.AddTransition("svc/a", END)
+	g.AddTransition("svc/a", End)
 	g.AddTransitionOnError("svc/a", "svc/a")
 
 	err := g.Validate()
@@ -648,7 +648,7 @@ func TestGraph_GotoSelfLoopAllowed(t *testing.T) {
 	// since the source becomes a fan-out source whose only fan-in is itself.)
 	g := NewGraph("Test")
 	g.AddTransitionGoto("svc/a", "svc/a")
-	g.AddTransition("svc/a", END)
+	g.AddTransition("svc/a", End)
 	assert.NoError(g.Validate())
 }
 
@@ -662,7 +662,7 @@ func TestLineage_SequentialNoFanOut(t *testing.T) {
 	// reached node is ill-formed (no scope to pop) and must be rejected.
 	g := NewGraph("Seq")
 	g.AddTransition("a", "b")
-	g.AddTransition("b", END)
+	g.AddTransition("b", End)
 	g.SetFanIn("b")
 	err := g.Validate()
 	assert.Error(err)
@@ -677,7 +677,7 @@ func TestLineage_SimpleFanOutFanIn(t *testing.T) {
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 }
@@ -696,7 +696,7 @@ func TestLineage_NestedFanOutFanIn(t *testing.T) {
 	g.AddTransition("innerJoin", "outerJoin")
 	// outer2 goes straight to outerJoin
 	g.AddTransition("outer2", "outerJoin")
-	g.AddTransition("outerJoin", END)
+	g.AddTransition("outerJoin", End)
 	g.SetFanIn("innerJoin")
 	g.SetFanIn("outerJoin")
 	assert.NoError(g.Validate())
@@ -708,7 +708,7 @@ func TestLineage_ForEachThenFanIn(t *testing.T) {
 	g := NewGraph("ForeachFanin")
 	g.AddTransitionForEach("s", "a", "items", "item")
 	g.AddTransition("a", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 }
@@ -721,7 +721,7 @@ func TestLineage_ConditionalWhenFanIn(t *testing.T) {
 	g.AddTransitionWhen("s", "b", "x <= 0")
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 }
@@ -739,7 +739,7 @@ func TestLineage_AliasedNodesInDifferentScopes(t *testing.T) {
 	g.AddTransitionForEach("s", "inner", "items", "item")
 	g.AddTransition("inner", "join")
 	g.AddTransition("join", "outer")
-	g.AddTransition("outer", END)
+	g.AddTransition("outer", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 }
@@ -755,7 +755,7 @@ func TestLineage_GotoStaysInScope(t *testing.T) {
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
 	g.AddTransitionGoto("a", "a")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 }
@@ -770,7 +770,7 @@ func TestLineage_OnErrorHandlerConvergesToFanIn(t *testing.T) {
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
 	g.AddTransition("handler", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 }
@@ -783,8 +783,8 @@ func TestLineage_EndWithUnpoppedFrame(t *testing.T) {
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
-	g.AddTransition("b", END) // skips the join — invalid
-	g.AddTransition("join", END)
+	g.AddTransition("b", End) // skips the join — invalid
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	err := g.Validate()
 	assert.Error(err)
@@ -800,7 +800,7 @@ func TestLineage_GotoEndFromFanOutSource(t *testing.T) {
 	g := NewGraph("GotoEndFromFanOut")
 	g.AddTransitionForEach("decide", "work", "items", "item")
 	g.AddTransition("work", "join")
-	g.AddTransitionGoto("decide", END)
+	g.AddTransitionGoto("decide", End)
 	g.AddTransition("join", "decide")
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
@@ -810,8 +810,8 @@ func TestLineage_GotoEndFromFanOutSource(t *testing.T) {
 	g2 := NewGraph("OnErrorEndFromFanOut")
 	g2.AddTransitionForEach("decide", "work", "items", "item")
 	g2.AddTransition("work", "join")
-	g2.AddTransitionOnError("decide", END)
-	g2.AddTransition("join", END)
+	g2.AddTransitionOnError("decide", End)
+	g2.AddTransition("join", End)
 	g2.SetFanIn("join")
 	assert.NoError(g2.Validate())
 
@@ -821,7 +821,7 @@ func TestLineage_GotoEndFromFanOutSource(t *testing.T) {
 	g3.AddTransitionForEach("decide", "work", "items", "item")
 	g3.AddTransition("work", "join")
 	g3.AddTransitionGoto("decide", "join")
-	g3.AddTransition("join", END)
+	g3.AddTransition("join", End)
 	g3.SetFanIn("join")
 	assert.NoError(g3.Validate())
 }
@@ -840,7 +840,7 @@ func TestLineage_OverrideRejoiningFanInRejected(t *testing.T) {
 	g.AddTransition("work", "join")
 	g.AddTransitionGoto("decide", "skip")
 	g.AddTransition("skip", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	err := g.Validate()
 	assert.Error(err)
@@ -852,7 +852,7 @@ func TestLineage_OverrideRejoiningFanInRejected(t *testing.T) {
 	g2.AddTransition("work", "join")
 	g2.AddTransitionOnError("decide", "recover")
 	g2.AddTransition("recover", "join")
-	g2.AddTransition("join", END)
+	g2.AddTransition("join", End)
 	g2.SetFanIn("join")
 	err = g2.Validate()
 	assert.Error(err)
@@ -863,7 +863,7 @@ func TestLineage_OverrideRejoiningFanInRejected(t *testing.T) {
 	g3.AddTransitionForEach("decide", "work", "items", "item")
 	g3.AddTransition("work", "join")
 	g3.AddTransitionGoto("decide", "work")
-	g3.AddTransition("join", END)
+	g3.AddTransition("join", End)
 	g3.SetFanIn("join")
 	err = g3.Validate()
 	assert.Error(err)
@@ -882,7 +882,7 @@ func TestLineage_DivergentStacksAtSameNode(t *testing.T) {
 	g.AddTransition("b", "shared")
 	g.AddTransition("shared", "join")
 	g.AddTransitionGoto("join", "shared") // back-edge from outer scope
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	err := g.Validate()
 	assert.Error(err)
@@ -894,7 +894,7 @@ func TestLineage_FanInOutsideAnyScope(t *testing.T) {
 
 	g := NewGraph("FaninNoScope")
 	g.AddTransition("a", "b")
-	g.AddTransition("b", END)
+	g.AddTransition("b", End)
 	g.SetFanIn("b")
 	err := g.Validate()
 	assert.Error(err)
@@ -912,7 +912,7 @@ func TestLineage_GotoCrossingScopeRejected(t *testing.T) {
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
 	g.AddTransition("join", "after")
-	g.AddTransition("after", END)
+	g.AddTransition("after", End)
 	g.AddTransitionGoto("a", "after") // jumps out of the cohort
 	g.SetFanIn("join")
 	err := g.Validate()
@@ -928,8 +928,8 @@ func TestLineage_FanOutSourceMissingFanIn(t *testing.T) {
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join") // a converges
-	g.AddTransition("b", END)    // b doesn't
-	g.AddTransition("join", END)
+	g.AddTransition("b", End)    // b doesn't
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	err := g.Validate()
 	assert.Error(err)
@@ -946,7 +946,7 @@ func TestLineage_FanOutDirectlyToFanIn(t *testing.T) {
 	g.AddTransition("s", "a")
 	g.AddTransition("s", "join") // direct
 	g.AddTransition("a", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 }
@@ -956,7 +956,7 @@ func TestLineage_SetFanInOnUnknownNodeRejected(t *testing.T) {
 
 	g := NewGraph("BadFaninName")
 	g.AddTransition("a", "b")
-	g.AddTransition("b", END)
+	g.AddTransition("b", End)
 	g.SetFanIn("c")
 	err := g.Validate()
 	assert.Error(err)
@@ -971,7 +971,7 @@ func TestLineage_FanInFlagSurvivesJSONRoundTrip(t *testing.T) {
 	g.AddTransition("s", "b")
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 
@@ -994,9 +994,9 @@ func TestGraph_SwitchValid(t *testing.T) {
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "i==2")
 	g.AddTransitionSwitch("router", "c", "true")
-	g.AddTransition("a", END)
-	g.AddTransition("b", END)
-	g.AddTransition("c", END)
+	g.AddTransition("a", End)
+	g.AddTransition("b", End)
+	g.AddTransition("c", End)
 	assert.NoError(g.Validate())
 	// Switch source must not be treated as a fan-out source.
 	assert.Expect(g.IsFanOutSource("router"), false)
@@ -1007,7 +1007,7 @@ func TestGraph_SwitchRejectsEmptyWhen(t *testing.T) {
 
 	g := NewGraph("SwitchNoWhen")
 	g.AddTransitionSwitch("router", "a", "")
-	g.AddTransition("a", END)
+	g.AddTransition("a", End)
 	err := g.Validate()
 	assert.Error(err)
 	assert.Contains(err.Error(), "requires a 'when' expression")
@@ -1019,8 +1019,8 @@ func TestGraph_SwitchRejectsMixWithPlain(t *testing.T) {
 	g := NewGraph("SwitchMixed")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransition("router", "b")
-	g.AddTransition("a", END)
-	g.AddTransition("b", END)
+	g.AddTransition("a", End)
+	g.AddTransition("b", End)
 	err := g.Validate()
 	assert.Error(err)
 	assert.Contains(err.Error(), "switch transition")
@@ -1032,8 +1032,8 @@ func TestGraph_SwitchRejectsMixWithWhen(t *testing.T) {
 	g := NewGraph("SwitchVsWhen")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionWhen("router", "b", "i==2")
-	g.AddTransition("a", END)
-	g.AddTransition("b", END)
+	g.AddTransition("a", End)
+	g.AddTransition("b", End)
 	err := g.Validate()
 	assert.Error(err)
 	assert.Contains(err.Error(), "switch transition")
@@ -1048,9 +1048,9 @@ func TestGraph_SwitchAllowedWithGoto(t *testing.T) {
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "true")
 	g.AddTransitionGoto("router", "c")
-	g.AddTransition("a", END)
-	g.AddTransition("b", END)
-	g.AddTransition("c", END)
+	g.AddTransition("a", End)
+	g.AddTransition("b", End)
+	g.AddTransition("c", End)
 	assert.NoError(g.Validate())
 }
 
@@ -1061,9 +1061,9 @@ func TestGraph_SwitchAllowedWithOnError(t *testing.T) {
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "true")
 	g.AddTransitionOnError("router", "handler")
-	g.AddTransition("a", END)
-	g.AddTransition("b", END)
-	g.AddTransition("handler", END)
+	g.AddTransition("a", End)
+	g.AddTransition("b", End)
+	g.AddTransition("handler", End)
 	assert.NoError(g.Validate())
 }
 
@@ -1075,9 +1075,9 @@ func TestGraph_SwitchNoFanInRequired(t *testing.T) {
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "i==2")
 	g.AddTransitionSwitch("router", "c", "true")
-	g.AddTransition("a", END)
-	g.AddTransition("b", END)
-	g.AddTransition("c", END)
+	g.AddTransition("a", End)
+	g.AddTransition("b", End)
+	g.AddTransition("c", End)
 	assert.NoError(g.Validate())
 }
 
@@ -1088,7 +1088,7 @@ func TestGraph_SwitchRejectsForEach(t *testing.T) {
 	// constructor; the validator must reject it.
 	g := NewGraph("SwitchForeach")
 	g.AddTransition("router", "a")
-	g.AddTransition("a", END)
+	g.AddTransition("a", End)
 	g.transitions = append(g.transitions, Transition{From: "router", To: "a", When: "true", Switch: true, ForEach: "items", As: "item"})
 	err := g.Validate()
 	assert.Error(err)
@@ -1101,8 +1101,8 @@ func TestGraph_SwitchMermaidDiamond(t *testing.T) {
 	g := NewGraph("SwitchRender")
 	g.AddTransitionSwitch("router", "a", "i==1")
 	g.AddTransitionSwitch("router", "b", "true")
-	g.AddTransition("a", END)
-	g.AddTransition("b", END)
+	g.AddTransition("a", End)
+	g.AddTransition("b", End)
 	assert.NoError(g.Validate())
 	m := NewGraphRenderer(g).Render()
 	// Diamond is emitted as a rhombus labeled "switch" with a per-source suffix.
@@ -1125,7 +1125,7 @@ func TestGraph_MermaidReduceCircle(t *testing.T) {
 	g.AddTransition("split", "b")
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 	m := NewGraphRenderer(g).Render()
@@ -1151,7 +1151,7 @@ func TestGraph_WhenMermaidDiamond(t *testing.T) {
 	g.AddTransitionWhen("router", "b", "i==2")
 	g.AddTransition("a", "join")
 	g.AddTransition("b", "join")
-	g.AddTransition("join", END)
+	g.AddTransition("join", End)
 	g.SetFanIn("join")
 	assert.NoError(g.Validate())
 	m := NewGraphRenderer(g).Render()
@@ -1188,7 +1188,7 @@ func TestGraph_MermaidEscapesInjection(t *testing.T) {
 	g := NewGraph(`Ord"er<x>`)
 	evil := "svc/pwn\"]:::term click n \"http\" `x` <img src=q onerror=alert(1)> [z] {q}"
 	g.AddTransitionWhen(evil, "svc/next", `a || b == "c"`)
-	g.AddTransition("svc/next", END)
+	g.AddTransition("svc/next", End)
 
 	m := NewGraphRenderer(g).Render()
 

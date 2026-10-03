@@ -50,7 +50,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 
 	g := workflow.NewGraph("AwaitPoll")
 	g.SetEndpoint("Block", "awaitpoll.verify:0/block")
-	g.AddTransition("Block", workflow.END)
+	g.AddTransition("Block", workflow.End)
 	proxy.HandleGraph("awaitpoll.verify:0/g", g)
 	proxy.HandleTask("awaitpoll.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
 		select {
@@ -140,7 +140,7 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 
 	g := workflow.NewGraph("PollTest")
 	g.SetEndpoint("Block", "polltest.verify:0/block")
-	g.AddTransition("Block", workflow.END)
+	g.AddTransition("Block", workflow.End)
 	proxy.HandleGraph("polltest.verify:0/g", g)
 	proxy.HandleTask("polltest.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
 		select {
@@ -205,7 +205,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 
 	g := workflow.NewGraph("NonSettled")
 	g.SetEndpoint("Block", "nonsettled.verify:0/block")
-	g.AddTransition("Block", workflow.END)
+	g.AddTransition("Block", workflow.End)
 	proxy.HandleGraph("nonsettled.verify:0/g", g)
 	proxy.HandleTask("nonsettled.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
 		select {

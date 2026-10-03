@@ -137,7 +137,7 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	g.SetEndpoint("taskA", "metricsflow.verify:428/a")
 	g.SetEndpoint("taskB", "metricsflow.verify:428/b")
 	g.AddTransition("taskA", "taskB")
-	g.AddTransition("taskB", workflow.END)
+	g.AddTransition("taskB", workflow.End)
 	proxy.HandleGraph("metricsflow.verify:428/g", g)
 	proxy.HandleTask("metricsflow.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("metricsflow.verify:428/b", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -217,7 +217,7 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("R")
 	g.SetEndpoint("A", "refillmetrics/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("refillmetrics/g", g)
 	proxy.HandleTask("refillmetrics/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -296,7 +296,7 @@ func TestMetrics_ForkCountsAsStarted(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Forked")
 	g.SetEndpoint("A", "forkmetric.verify:428/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("forkmetric.verify:428/g", g)
 	proxy.HandleTask("forkmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -360,7 +360,7 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Orphan")
 	g.SetEndpoint("A", "orphanmetric.verify:428/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("orphanmetric.verify:428/g", g)
 	proxy.HandleTask("orphanmetric.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
@@ -438,7 +438,7 @@ func TestMetrics_InFlightStateGauges(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("H")
 	g.SetEndpoint("A", "inflightstate.verify:428/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("inflightstate.verify:428/g", g)
 	proxy.HandleTask("inflightstate.verify:428/a", func(ctx context.Context, f *workflow.Flow) error {
@@ -530,7 +530,7 @@ func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
 	// A graph whose only task fails, with no onError, so the flow fails.
 	failing := workflow.NewGraph("Failing")
 	failing.SetEndpoint("boom", "termmetrics.verify:429/boom")
-	failing.AddTransition("boom", workflow.END)
+	failing.AddTransition("boom", workflow.End)
 	proxy.HandleGraph("termmetrics.verify:429/failing", failing)
 	proxy.HandleTask("termmetrics.verify:429/boom", func(ctx context.Context, f *workflow.Flow) error {
 		return errors.New("intentional failure")
@@ -539,7 +539,7 @@ func TestMetrics_EndedCountsEveryTerminalStatus(t *testing.T) {
 	// A graph whose only task interrupts, parking the flow so Terminate has something live to terminate.
 	parking := workflow.NewGraph("Parking")
 	parking.SetEndpoint("wait", "termmetrics.verify:429/wait")
-	parking.AddTransition("wait", workflow.END)
+	parking.AddTransition("wait", workflow.End)
 	proxy.HandleGraph("termmetrics.verify:429/parking", parking)
 	proxy.HandleTask("termmetrics.verify:429/wait", func(ctx context.Context, f *workflow.Flow) error {
 		_, _ = f.Interrupt(nil, nil)

@@ -149,7 +149,7 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 	g.SetFanIn("Join")
 	g.SetReducer("processed", workflow.ReducerAdd)
 	g.AddTransitionForEach("Seed", "Work", "pages", "page")
-	g.AddTransitionChain("Work", "Join", workflow.END)
+	g.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("refs/wf", g)
 
@@ -231,7 +231,7 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	g.SetFanIn("Join")
 	g.SetReducer("log", workflow.ReducerAppend)
 	g.AddTransitionForEach("Seed", "Work", "pages", "page")
-	g.AddTransitionChain("Work", "Join", workflow.END)
+	g.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("red/wf", g)
 
@@ -293,7 +293,7 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 	g.SetFanIn("Join")
 	g.SetReducer("log", workflow.ReducerAppend)
 	g.AddTransitionForEach("Seed", "Work", "pages", "page")
-	g.AddTransitionChain("Work", "Join", workflow.END)
+	g.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("sc/wf", g)
 

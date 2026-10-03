@@ -109,7 +109,7 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 		}
 		prev = node
 	}
-	g.AddTransition(prev, workflow.END)
+	g.AddTransition(prev, workflow.End)
 	proxy.HandleGraph(prefix+"/g", g)
 
 	// A distinct test-DB key per invocation: the same b.Name() runs multiple passes (warmup + measure), so

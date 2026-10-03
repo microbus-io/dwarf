@@ -379,7 +379,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	var running atomic.Int32
 	g := workflow.NewGraph("Grow")
 	g.SetEndpoint("Slow", "grow/slow")
-	g.AddTransition("Slow", workflow.END)
+	g.AddTransition("Slow", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("grow/g", g)
 	proxy.HandleTask("grow/slow", func(ctx context.Context, f *workflow.Flow) error {
@@ -463,7 +463,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Sat")
 	g.SetEndpoint("A", "sat/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("sat/g", g)
 	proxy.HandleTask("sat/a", func(ctx context.Context, f *workflow.Flow) error {
@@ -676,7 +676,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "shutdownrace/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("shutdownrace/g", g)
 	proxy.HandleTask("shutdownrace/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 

@@ -53,7 +53,7 @@ func TestForkInterruptedCohortFlow(t *testing.T) {
 	graph.AddTransition("Src", "A")
 	graph.AddTransition("Src", "B")
 	graph.AddTransition("A", "J")
-	graph.AddTransitionChain("B", "J", workflow.END)
+	graph.AddTransitionChain("B", "J", workflow.End)
 	proxy.HandleGraph("forkinterruptedcohortflow.verify:428/fork-interrupted-cohort", graph)
 
 	proxy.HandleTask("forkinterruptedcohortflow.verify:428/src", func(ctx context.Context, f *workflow.Flow) error {

@@ -216,7 +216,7 @@ the lease; the coarse worker-loop catch would have wedged the step. See "Host-ca
 
 The rejected alternative was two-valued getters (`(T, error)`). `f.GetString("x")` is used inline everywhere
 (conditions, arguments, struct literals), so it would force a temp var at every call site and the realistic
-outcome is `v, _ := f.GetInt(…)` - the same silent zero with more ceremony. **`Get(key, target) error` already is
+outcome is `v, _ := f.GetInt(…)` - the same silent zero with more ceremony. **`Get(key, target) (ok, err)` already is
 the two-valued form**, and is the documented escape hatch for a task that wants to *handle* a mistyped field.
 
 Absent and cleared keys are **not** a mismatch - they still yield the zero value, so the optional-field idiom is

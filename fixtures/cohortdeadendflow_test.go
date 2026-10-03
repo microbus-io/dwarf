@@ -63,7 +63,7 @@ func TestCohortDeadEndFlow(t *testing.T) {
 	// A branch's ONLY edge is conditional: item 0 sets ok=false and dead-ends before Join. Validate accepts
 	// this - statically every branch converges on Join.
 	graph.AddTransitionWhen("Work", "Join", "ok == true")
-	graph.AddTransitionChain("Join", workflow.END)
+	graph.AddTransitionChain("Join", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("cohortdeadendflow.verify:664/cohort-dead-end", graph)
 
@@ -126,7 +126,7 @@ func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 	graph.SetFanIn("Join")
 	graph.SetReducer("done", workflow.ReducerAdd)
 	graph.AddTransitionForEach("Spawn", "Work", "items", "item")
-	graph.AddTransitionChain("Work", "Join", workflow.END)
+	graph.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("cohortdeadendflow.verify:664/cohort-converges", graph)
 

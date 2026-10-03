@@ -57,7 +57,7 @@ func TestDeepsubgraphflow(t *testing.T) {
 		taskURL := "deepnest.verify:0/call" + strconv.Itoa(i)
 		g := workflow.NewGraph("G" + strconv.Itoa(i))
 		g.SetEndpoint("Call", taskURL)
-		g.AddTransition("Call", workflow.END)
+		g.AddTransition("Call", workflow.End)
 		proxy.HandleGraph(gURL, g)
 
 		level := i
@@ -77,7 +77,7 @@ func TestDeepsubgraphflow(t *testing.T) {
 	// Leaf level g4: interrupts, then bakes the resume answer into v.
 	leafG := workflow.NewGraph("Leaf")
 	leafG.SetEndpoint("Leaf", "deepnest.verify:0/leaf")
-	leafG.AddTransition("Leaf", workflow.END)
+	leafG.AddTransition("Leaf", workflow.End)
 	proxy.HandleGraph("deepnest.verify:0/g"+strconv.Itoa(depth), leafG)
 	proxy.HandleTask("deepnest.verify:0/leaf", func(ctx context.Context, f *workflow.Flow) error {
 		var rd map[string]any

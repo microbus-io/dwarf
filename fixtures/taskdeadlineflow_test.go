@@ -46,7 +46,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 
 	graph := workflow.NewGraph("Flow")
 	graph.SetEndpoint("Work", "taskdeadlineflow.verify:428/work")
-	graph.AddTransition("Work", workflow.END)
+	graph.AddTransition("Work", workflow.End)
 	proxy.HandleGraph("taskdeadlineflow.verify:428/flow", graph)
 
 	const budget = 300 * time.Millisecond

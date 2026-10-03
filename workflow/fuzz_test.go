@@ -186,7 +186,7 @@ func FuzzWhenExpression(f *testing.F) {
 func FuzzGraphJSON(f *testing.F) {
 	g := NewGraph("Fuzz")
 	g.SetEndpoint("A", "task/a")
-	g.AddTransition("A", END)
+	g.AddTransition("A", End)
 	seed, _ := json.Marshal(g)
 	f.Add(seed)
 	f.Add([]byte(`{"entryPoint":"A","tasks":[{"name":"A"}],"transitions":[{"from":"A","to":"A","onError":true}]}`))

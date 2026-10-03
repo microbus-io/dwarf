@@ -23,7 +23,7 @@ interfaces, and it handles scheduling, state, durability, and recovery.
 // a one-node graph whose "Hello" node runs the task at an endpoint URL, then ends.
 g := workflow.NewGraph("Greet")
 g.SetEndpoint("Hello", "http://example/hello") // node "Hello" dispatches to this endpoint URL
-g.AddTransition("Hello", workflow.END)
+g.AddTransition("Hello", workflow.End)
 
 // Wire URLs to what serves them. The engine knows graphs and tasks only by URL: the graph's URL
 // resolves to the graph, and each task's URL to the handler that runs it. TestProxy is an in-process

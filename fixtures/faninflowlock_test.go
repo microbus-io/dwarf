@@ -77,7 +77,7 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 		g.SetFanIn("Join")
 		g.SetReducer("legs", workflow.ReducerAdd)
 		g.AddTransitionForEach("Split", "Leg", "items", "item")
-		g.AddTransitionChain("Leg", "Join", workflow.END)
+		g.AddTransitionChain("Leg", "Join", workflow.End)
 		assert.NoError(g.Validate())
 		proxy.HandleGraph("fl/wf", g)
 

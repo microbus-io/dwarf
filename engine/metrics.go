@@ -40,7 +40,7 @@ const metricScope = "github.com/microbus-io/dwarf"
 // their event sites; the gauges are observable (async) and pulled by observeGauges at collection time.
 type engineMetrics struct {
 	flowsStarted        metric.Int64Counter
-	flowsEnded     metric.Int64Counter
+	flowsEnded          metric.Int64Counter
 	stepsExecuted       metric.Int64Counter
 	stepsRecovered      metric.Int64Counter
 	stepsUnwedged       metric.Int64Counter

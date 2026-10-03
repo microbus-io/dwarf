@@ -56,7 +56,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	g.SetFanIn("Join")
 	g.AddTransitionForEach("Spawn", "Work", "items", "item")
 	g.AddTransition("Work", "Join")
-	g.AddTransition("Join", workflow.END)
+	g.AddTransition("Join", workflow.End)
 	// The engine derives the fan-in routing at dispatch so an empty forEach routes to Join (fireFanInDirect)
 	// rather than completing at the source. Validate here just asserts the graph is well-formed.
 	assert.NoError(g.Validate())

@@ -81,8 +81,8 @@ orch.SetEndpoint("SubgraphFailed", "orch/failed")
 
 orch.AddTransition("CallSubgraph", "SubgraphSuccess")        // normal path
 orch.AddTransitionOnError("CallSubgraph", "SubgraphFailed")  // error path
-orch.AddTransition("SubgraphSuccess", workflow.END)
-orch.AddTransition("SubgraphFailed", workflow.END)
+orch.AddTransition("SubgraphSuccess", workflow.End)
+orch.AddTransition("SubgraphFailed", workflow.End)
 ```
 
 The three roles (the names don't matter — the *shape* does):

@@ -38,7 +38,7 @@ func TestPurgerunningflow(t *testing.T) {
 
 	graph := workflow.NewGraph("Flow")
 	graph.SetEndpoint("Work", "purgerunningflow.verify:428/work")
-	graph.AddTransition("Work", workflow.END)
+	graph.AddTransition("Work", workflow.End)
 	proxy.HandleGraph("purgerunningflow.verify:428/flow", graph)
 
 	// The task blocks until the test releases it, so the flow stays running across the Purge call.

@@ -48,7 +48,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("RunInner", "subgraphcohortfailwait.verify:0/run-inner")
-	parent.AddTransition("RunInner", workflow.END)
+	parent.AddTransition("RunInner", workflow.End)
 	proxy.HandleGraph("subgraphcohortfailwait.verify:0/parent", parent)
 
 	// Inner: Split fans out to {Boom, Slow}, both converging on Join. Boom fails immediately (no onError);
@@ -62,7 +62,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	inner.AddTransition("Split", "Slow")
 	inner.AddTransition("Boom", "Join")
 	inner.AddTransition("Slow", "Join")
-	inner.AddTransition("Join", workflow.END)
+	inner.AddTransition("Join", workflow.End)
 	inner.SetFanIn("Join")
 	proxy.HandleGraph("subgraphcohortfailwait.verify:0/inner", inner)
 

@@ -61,7 +61,7 @@ func TestFanInReplicaflow(t *testing.T) {
 		g.AddTransition("A", "D")
 		g.AddTransition("B", "E")
 		g.AddTransition("C", "E")
-		g.AddTransitionChain("D", "E", workflow.END)
+		g.AddTransitionChain("D", "E", workflow.End)
 		assert.NoError(g.Validate())
 		p.HandleGraph(base+"/graph", g)
 

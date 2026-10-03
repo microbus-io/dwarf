@@ -59,7 +59,7 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	// Parent: one task that runs the child subgraph and propagates its error (no onError -> parent fails).
 	parent := workflow.NewGraph("S2Parent")
 	parent.SetEndpoint("Call", "s2cohort.verify:0/call")
-	parent.AddTransition("Call", workflow.END)
+	parent.AddTransition("Call", workflow.End)
 	proxy.HandleGraph(parentURL, parent)
 
 	// Child: Split fans out to {Boom, Slow}, both converging at the Join fan-in. Boom fails; Slow parks on a
@@ -74,13 +74,13 @@ func TestSubgraphCohortFail_NoStrandOnBranchFailure(t *testing.T) {
 	child.AddTransition("Split", "Slow")
 	child.AddTransition("Boom", "Join")
 	child.AddTransition("Slow", "Join")
-	child.AddTransition("Join", workflow.END)
+	child.AddTransition("Join", workflow.End)
 	proxy.HandleGraph(childURL, child)
 
 	// Grandchild: a single task that blocks until released.
 	gc := workflow.NewGraph("S2Grandchild")
 	gc.SetEndpoint("Wait", "s2cohort.verify:0/wait")
-	gc.AddTransition("Wait", workflow.END)
+	gc.AddTransition("Wait", workflow.End)
 	proxy.HandleGraph(gcURL, gc)
 
 	proxy.HandleTask("s2cohort.verify:0/call", func(ctx context.Context, f *workflow.Flow) error {

@@ -57,13 +57,13 @@ func TestFanoutSubgraphflow(t *testing.T) {
 	parent.AddTransition("Entry", "Sub")
 	parent.AddTransition("A", "Join")
 	parent.AddTransition("B", "Join")
-	parent.AddTransitionChain("Sub", "Join", workflow.END)
+	parent.AddTransitionChain("Sub", "Join", workflow.End)
 	proxy.HandleGraph("fanoutsub.verify:428/parent", parent)
 
 	// Inner: a single trivial task, so the child completes as fast as possible to race the caller's park.
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("InnerEntry", "fanoutsub.verify:428/inner-entry")
-	inner.AddTransition("InnerEntry", workflow.END)
+	inner.AddTransition("InnerEntry", workflow.End)
 	proxy.HandleGraph("fanoutsub.verify:428/inner", inner)
 
 	noop := func(ctx context.Context, f *workflow.Flow) error { return nil }

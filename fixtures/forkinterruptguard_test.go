@@ -51,7 +51,7 @@ func TestFork_RejectsInterruptedKeptStep(t *testing.T) {
 	g.AddTransition("Src", "A")
 	g.AddTransition("Src", "B")
 	g.AddTransition("A", "J")
-	g.AddTransitionChain("B", "J", workflow.END)
+	g.AddTransitionChain("B", "J", workflow.End)
 	proxy.HandleGraph("forkguard.verify:0/g", g)
 	proxy.HandleTask("forkguard.verify:0/src", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("forkguard.verify:0/a", func(ctx context.Context, f *workflow.Flow) error { return nil })

@@ -42,7 +42,7 @@ func TestDeletetombstoneflow(t *testing.T) {
 	graph := workflow.NewGraph("DeleteTombstone")
 	graph.SetEndpoint("TaskA", "deletetombstoneflow.verify:428/task-a")
 	graph.SetEndpoint("TaskB", "deletetombstoneflow.verify:428/task-b")
-	graph.AddTransitionChain("TaskA", "TaskB", workflow.END)
+	graph.AddTransitionChain("TaskA", "TaskB", workflow.End)
 	proxy.HandleGraph("deletetombstoneflow.verify:428/delete-tombstone", graph)
 
 	// TaskA deletes "drop" (present in initial state) and keeps "keep".

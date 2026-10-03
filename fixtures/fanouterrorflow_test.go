@@ -52,7 +52,7 @@ func TestFanouterrorflow(t *testing.T) {
 	graph.AddTransition("TaskB", "TaskE")
 	graph.AddTransition("TaskC", "TaskE")
 	graph.AddTransition("TaskD", "TaskE")
-	graph.AddTransitionChain("Handler", "TaskE", workflow.END)
+	graph.AddTransitionChain("Handler", "TaskE", workflow.End)
 	proxy.HandleGraph("fanouterrorflow.verify:428/fan-out-error", graph)
 
 	proxy.HandleTask("fanouterrorflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

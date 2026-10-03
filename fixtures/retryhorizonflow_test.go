@@ -46,7 +46,7 @@ func TestRetryHorizonflow(t *testing.T) {
 	graph := workflow.NewGraph("RetryHorizon")
 	graph.SetEndpoint("Flaky", "retryhorizonflow.verify:428/flaky")
 	graph.SetEndpoint("Done", "retryhorizonflow.verify:428/done")
-	graph.AddTransitionChain("Flaky", "Done", workflow.END)
+	graph.AddTransitionChain("Flaky", "Done", workflow.End)
 	proxy.HandleGraph("retryhorizonflow.verify:428/retry-horizon", graph)
 
 	// Flaky reads its own policy from state: succeed once Attempt() reaches successAt (0 = never); otherwise

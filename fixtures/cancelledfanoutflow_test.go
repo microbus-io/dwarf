@@ -50,7 +50,7 @@ func TestCancelledfanoutflow(t *testing.T) {
 	graph.AddTransition("Source", "C")
 	graph.AddTransition("A", "J")
 	graph.AddTransition("B", "J")
-	graph.AddTransitionChain("C", "J", workflow.END)
+	graph.AddTransitionChain("C", "J", workflow.End)
 	proxy.HandleGraph("cancelledfanoutflow.verify:428/cancelled-fan-out", graph)
 
 	var executed atomic.Int32

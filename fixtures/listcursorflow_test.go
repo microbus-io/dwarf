@@ -46,7 +46,7 @@ func TestListCursorflow(t *testing.T) {
 
 	graph := workflow.NewGraph("ListCursor")
 	graph.SetEndpoint("Only", "listcursorflow.verify:428/only")
-	graph.AddTransition("Only", workflow.END)
+	graph.AddTransition("Only", workflow.End)
 	proxy.HandleGraph("listcursorflow.verify:428/list", graph)
 	proxy.HandleTask("listcursorflow.verify:428/only", func(ctx context.Context, f *workflow.Flow) error {
 		return nil

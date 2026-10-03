@@ -52,7 +52,7 @@ func TestSleepRetryComposeflow(t *testing.T) {
 
 	graph := workflow.NewGraph("SleepRetryCompose")
 	graph.SetEndpoint("Flaky", "sleepretrycomposeflow.verify:428/flaky")
-	graph.AddTransitionChain("Flaky", workflow.END)
+	graph.AddTransitionChain("Flaky", workflow.End)
 	proxy.HandleGraph("sleepretrycomposeflow.verify:428/compose", graph)
 
 	proxy.HandleTask("sleepretrycomposeflow.verify:428/flaky", func(ctx context.Context, f *workflow.Flow) error {

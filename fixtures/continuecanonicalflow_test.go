@@ -49,7 +49,7 @@ func TestContinuecanonicalflow(t *testing.T) {
 
 	graph := workflow.NewGraph("Tagging")
 	graph.SetEndpoint("Tag", "continuecanonical.verify:428/tag")
-	graph.AddTransition("Tag", workflow.END)
+	graph.AddTransition("Tag", workflow.End)
 	graph.SetReducer("tags", workflow.ReducerUnion)
 	proxy.HandleGraph("continuecanonical.verify:428/g", graph)
 

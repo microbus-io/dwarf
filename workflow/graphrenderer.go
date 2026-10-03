@@ -262,7 +262,7 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 	for _, e := range edgeOrder {
 		label := strings.Join(edgeLabels[e], " | ")
 		srcExits := exits[e.from]
-		if e.to == END {
+		if e.to == End {
 			for _, src := range srcExits {
 				endEdges = append(endEdges, endEdge{from: src, label: label})
 			}
@@ -289,7 +289,7 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 			fmt.Fprintf(b, "%s%s --> %s\n", indent, src, diamondID)
 		}
 		for _, arm := range arms {
-			if arm.to == END {
+			if arm.to == End {
 				endEdges = append(endEdges, endEdge{from: diamondID, label: arm.label})
 				continue
 			}

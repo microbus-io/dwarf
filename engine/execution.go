@@ -976,10 +976,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var realTasks []nextStep
 	routedToEnd := false
 	for _, t := range nextTasks {
-		if t.taskName == workflow.END {
+		if t.taskName == workflow.End {
 			routedToEnd = true
 		}
-		if t.taskName != "" && t.taskName != workflow.END {
+		if t.taskName != "" && t.taskName != workflow.End {
 			realTasks = append(realTasks, t)
 		}
 	}
@@ -1980,7 +1980,7 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 
 // dispatchURLOf resolves a graph node name to its dispatch URL.
 func dispatchURLOf(graph *workflow.Graph, name string) string {
-	if name == workflow.END {
+	if name == workflow.End {
 		return name
 	}
 	if u := graph.URLOf(name); u != "" {

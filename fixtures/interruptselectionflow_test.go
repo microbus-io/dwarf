@@ -96,7 +96,7 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	g.AddTransition("Src", "B")
 	g.AddTransition("A", "J")
 	g.AddTransition("B", "J")
-	g.AddTransition("J", workflow.END)
+	g.AddTransition("J", workflow.End)
 	proxy.HandleGraph("snapresume.verify:428/g", g)
 
 	gateB := make(chan struct{})
@@ -186,12 +186,12 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	parent.SetFanIn("Join")
 	parent.SetReducer("results", workflow.ReducerAppend)
 	parent.AddTransitionForEach("Seed", "Call", "items", "n")
-	parent.AddTransitionChain("Call", "Join", workflow.END)
+	parent.AddTransitionChain("Call", "Join", workflow.End)
 	proxy.HandleGraph("psub.verify:428/parent", parent)
 
 	child := workflow.NewGraph("PSChild")
 	child.SetEndpoint("Inner", "psub.verify:428/inner")
-	child.AddTransitionChain("Inner", workflow.END)
+	child.AddTransitionChain("Inner", workflow.End)
 	proxy.HandleGraph("psub.verify:428/child", child)
 
 	proxy.HandleTask("psub.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {

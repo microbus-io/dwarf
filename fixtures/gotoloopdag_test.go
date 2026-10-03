@@ -52,7 +52,7 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	graph.SetReducer("done", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Split", "Work", "items", "item")
 	graph.AddTransitionGoto("Work", "Work")
-	graph.AddTransitionChain("Work", "Join", workflow.END)
+	graph.AddTransitionChain("Work", "Join", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("gotoloopdag.verify:900/loop", graph)
 

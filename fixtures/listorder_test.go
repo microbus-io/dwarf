@@ -43,7 +43,7 @@ func TestList_NewestFirstIsPerShardNotGlobal(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "listorder/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("listorder/g", g)
 	proxy.HandleTask("listorder/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 

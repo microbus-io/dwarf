@@ -83,7 +83,7 @@ func TestRestartSurvival(t *testing.T) {
 		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("R1")
 		g.SetEndpoint("A", "r1/a")
-		g.AddTransition("A", workflow.END)
+		g.AddTransition("A", workflow.End)
 		assert.NoError(g.Validate())
 		proxy.HandleGraph("r1/g", g)
 		proxy.HandleTask("r1/a", func(ctx context.Context, f *workflow.Flow) error { aCalls.Add(1); return nil })
@@ -118,7 +118,7 @@ func TestRestartSurvival(t *testing.T) {
 		g.SetEndpoint("A", "r2/a")
 		g.SetEndpoint("B", "r2/b")
 		g.AddTransition("A", "B")
-		g.AddTransition("B", workflow.END)
+		g.AddTransition("B", workflow.End)
 		assert.NoError(g.Validate())
 		proxy.HandleGraph("r2/g", g)
 		// A sleeps before the transition, so successor B is inserted pending with a future not_before - a
@@ -164,7 +164,7 @@ func TestRestartSurvival(t *testing.T) {
 		proxy := engine.NewTestProxy()
 		parent := workflow.NewGraph("R3P")
 		parent.SetEndpoint("P0", "r3/p0")
-		parent.AddTransition("P0", workflow.END)
+		parent.AddTransition("P0", workflow.End)
 		assert.NoError(parent.Validate())
 		proxy.HandleGraph("r3/parent", parent)
 		proxy.HandleTask("r3/p0", func(ctx context.Context, f *workflow.Flow) error {
@@ -180,7 +180,7 @@ func TestRestartSurvival(t *testing.T) {
 		child.SetEndpoint("CA", "r3/ca")
 		child.SetEndpoint("CB", "r3/cb")
 		child.AddTransition("CA", "CB")
-		child.AddTransition("CB", workflow.END)
+		child.AddTransition("CB", workflow.End)
 		assert.NoError(child.Validate())
 		proxy.HandleGraph("r3/child", child)
 		// CA sleeps before transitioning, so the child rests with CB pending (future not_before) and the parent
@@ -225,7 +225,7 @@ func TestRestartSurvival(t *testing.T) {
 		g.SetEndpoint("Gate", "r4/gate")
 		g.SetEndpoint("Done", "r4/done")
 		g.AddTransition("Gate", "Done")
-		g.AddTransition("Done", workflow.END)
+		g.AddTransition("Done", workflow.End)
 		assert.NoError(g.Validate())
 		proxy.HandleGraph("r4/g", g)
 		proxy.HandleTask("r4/gate", func(ctx context.Context, f *workflow.Flow) error {

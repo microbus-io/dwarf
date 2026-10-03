@@ -122,8 +122,8 @@ type Engine struct {
 	// configured meter (the default provider is a no-op). They let an embedder read in-flight work
 	// (started - ended) with an atomic load - no OTEL reader, no query. Used by the open-loop load
 	// generator to bound outstanding flows; generally useful for backpressure.
-	flowsStartedCount    atomic.Int64
-	flowsEndedCount atomic.Int64
+	flowsStartedCount atomic.Int64
+	flowsEndedCount   atomic.Int64
 
 	// cohortLocks serializes a fan-out cohort's arrivals THROUGH THIS PEER, so its siblings queue on a Go
 	// lock holding no database connection instead of on the spawn step's row lock each holding one. The

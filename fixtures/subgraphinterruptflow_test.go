@@ -48,7 +48,7 @@ func TestSubgraphinterruptflow(t *testing.T) {
 	parent.SetEndpoint("TaskA", "subgraphinterruptflow.verify:428/task-a")
 	parent.SetEndpoint("RunInner", "subgraphinterruptflow.verify:428/run-inner")
 	parent.SetEndpoint("TaskZ", "subgraphinterruptflow.verify:428/task-z")
-	parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.END)
+	parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.End)
 	proxy.HandleGraph("subgraphinterruptflow.verify:428/parent", parent)
 
 	// Inner: X -> pause (interrupts) -> Y
@@ -56,7 +56,7 @@ func TestSubgraphinterruptflow(t *testing.T) {
 	inner.SetEndpoint("TaskX", "subgraphinterruptflow.verify:428/task-x")
 	inner.SetEndpoint("Pause", "subgraphinterruptflow.verify:428/pause")
 	inner.SetEndpoint("TaskY", "subgraphinterruptflow.verify:428/task-y")
-	inner.AddTransitionChain("TaskX", "Pause", "TaskY", workflow.END)
+	inner.AddTransitionChain("TaskX", "Pause", "TaskY", workflow.End)
 	proxy.HandleGraph("subgraphinterruptflow.verify:428/inner", inner)
 
 	proxy.HandleTask("subgraphinterruptflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

@@ -47,7 +47,7 @@ func TestInterruptpersistflow(t *testing.T) {
 	graph := workflow.NewGraph("InterruptPersist")
 	graph.SetEndpoint("ParkAfterWrite", "interruptpersistflow.verify:428/park-after-write")
 	graph.SetEndpoint("Verify", "interruptpersistflow.verify:428/verify")
-	graph.AddTransitionChain("ParkAfterWrite", "Verify", workflow.END)
+	graph.AddTransitionChain("ParkAfterWrite", "Verify", workflow.End)
 	proxy.HandleGraph("interruptpersistflow.verify:428/interrupt-persist", graph)
 
 	// creations counts how many times the task "created" the external resource. It must stay 1

@@ -69,7 +69,7 @@ func TestDuplicateEdge_WhenFanOutWidthTracksMatchingClauses(t *testing.T) {
 	graph.SetReducer("total", workflow.ReducerAdd)
 	graph.AddTransitionWhen("Split", "Work", "gate == 1")
 	graph.AddTransitionWhen("Split", "Work", "gate > 0")
-	graph.AddTransitionChain("Work", "Join", workflow.END)
+	graph.AddTransitionChain("Work", "Join", workflow.End)
 
 	// Validate has no duplicate-transition check, and it should not: two `when` edges to one target under
 	// DIFFERENT guards is a legitimate conditional fan-out, not an error.
@@ -143,7 +143,7 @@ func TestDuplicateEdge_CohortMemberOneRejectedByValidate(t *testing.T) {
 	graph.AddTransitionWhen("WorkA", "Join", "gate == 1")
 	graph.AddTransitionWhen("WorkA", "Join", "gate > 0")
 	graph.AddTransition("WorkB", "Join")
-	graph.AddTransitionChain("Join", workflow.END)
+	graph.AddTransitionChain("Join", workflow.End)
 
 	err := graph.Validate()
 	t.Logf("Validate() = %v", err)
@@ -168,7 +168,7 @@ func TestDuplicateEdge_CohortMemberAllRejectedByValidate(t *testing.T) {
 	graph.AddTransitionWhen("WorkA", "Join", "gate > 0")
 	graph.AddTransitionWhen("WorkB", "Join", "gate == 1")
 	graph.AddTransitionWhen("WorkB", "Join", "gate > 0")
-	graph.AddTransitionChain("Join", workflow.END)
+	graph.AddTransitionChain("Join", workflow.End)
 
 	err := graph.Validate()
 	t.Logf("Validate() = %v", err)
@@ -203,7 +203,7 @@ func TestDuplicateEdge_TrunkSourceIntoFanInIsDegenerate(t *testing.T) {
 	graph.SetReducer("total", workflow.ReducerAdd)
 	graph.AddTransitionWhen("Work", "Join", "gate == 1")
 	graph.AddTransitionWhen("Work", "Join", "gate > 0")
-	graph.AddTransitionChain("Join", workflow.END)
+	graph.AddTransitionChain("Join", workflow.End)
 
 	assert.NoError(graph.Validate(), "a trunk fan-out source converging directly on its fan-in validates")
 	proxy.HandleGraph("duplicateedgefaninflow.verify:701/dup-trunk", graph)

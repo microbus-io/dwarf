@@ -55,7 +55,7 @@ func TestFanOutOrdinalFlow(t *testing.T) {
 	graph.SetFanIn("Join")
 	graph.SetReducer("results", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Split", "Work", "items", "item")
-	graph.AddTransitionChain("Work", "Post", "Join", workflow.END)
+	graph.AddTransitionChain("Work", "Post", "Join", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("fanoutordinalflow.verify:828/fan-out-ordinal", graph)
 
@@ -116,7 +116,7 @@ func TestFanOutOrdinalFlow_Nested(t *testing.T) {
 	graph.AddTransitionForEach("Seed", "Cell", "cells", "cell")
 	graph.AddTransitionForEach("Cell", "Chunk", "chunks", "chunk")
 	graph.AddTransitionChain("Chunk", "JoinChunk")
-	graph.AddTransitionChain("JoinChunk", "JoinCell", workflow.END)
+	graph.AddTransitionChain("JoinChunk", "JoinCell", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("fanoutordinalflow.verify:828/nested-ordinal", graph)
 

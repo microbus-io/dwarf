@@ -46,12 +46,12 @@ func TestSubflowGuardflow(t *testing.T) {
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("TaskA", "subflowguard.verify:428/task-a")
 	parent.SetEndpoint("RunInner", "subflowguard.verify:428/run-inner")
-	parent.AddTransitionChain("TaskA", "RunInner", workflow.END)
+	parent.AddTransitionChain("TaskA", "RunInner", workflow.End)
 	proxy.HandleGraph("subflowguard.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("TaskX", "subflowguard.verify:428/task-x")
-	inner.AddTransitionChain("TaskX", workflow.END)
+	inner.AddTransitionChain("TaskX", workflow.End)
 	proxy.HandleGraph("subflowguard.verify:428/inner", inner)
 
 	var mu sync.Mutex

@@ -46,7 +46,7 @@ func stateLinear(proxy *TestProxy, prefix string, calls map[string]*int) {
 	g.SetEndpoint("A", prefix+"/a")
 	g.SetEndpoint("B", prefix+"/b")
 	g.AddTransition("A", "B")
-	g.AddTransition("B", workflow.END)
+	g.AddTransition("B", workflow.End)
 	proxy.HandleGraph(prefix+"/g", g)
 	proxy.HandleTask(prefix+"/a", func(ctx context.Context, f *workflow.Flow) error {
 		if c := calls["a"]; c != nil {

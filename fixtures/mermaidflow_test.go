@@ -52,14 +52,14 @@ func TestMermaidflow(t *testing.T) {
 	parent.SetFanIn("Collect")
 	parent.SetReducer("processed", workflow.ReducerAdd)
 	parent.AddTransitionForEach("Start", "Work", "items", "item")
-	parent.AddTransitionChain("Work", "Collect", "CallSub", "Finish", workflow.END)
+	parent.AddTransitionChain("Work", "Collect", "CallSub", "Finish", workflow.End)
 	proxy.HandleGraph("mermaidflow.verify:428/parent", parent)
 
 	// Inner subgraph: InnerA -> InnerB -> END
 	inner := workflow.NewGraph("MermaidInner")
 	inner.SetEndpoint("InnerA", "mermaidflow.verify:428/inner-a")
 	inner.SetEndpoint("InnerB", "mermaidflow.verify:428/inner-b")
-	inner.AddTransitionChain("InnerA", "InnerB", workflow.END)
+	inner.AddTransitionChain("InnerA", "InnerB", workflow.End)
 	proxy.HandleGraph("mermaidflow.verify:428/inner", inner)
 
 	proxy.HandleTask("mermaidflow.verify:428/start", func(ctx context.Context, f *workflow.Flow) error {

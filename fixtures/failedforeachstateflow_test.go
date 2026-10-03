@@ -56,7 +56,7 @@ func TestFailedforeachstateflow(t *testing.T) {
 	graph.SetFanIn("Join")
 	graph.SetReducer("seen", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Seed", "Cell", "items", "item")
-	graph.AddTransitionChain("Cell", "Join", workflow.END)
+	graph.AddTransitionChain("Cell", "Join", workflow.End)
 	proxy.HandleGraph("failedforeachstateflow.verify:428/g", graph)
 
 	proxy.HandleTask("failedforeachstateflow.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {

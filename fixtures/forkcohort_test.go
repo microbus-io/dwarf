@@ -52,7 +52,7 @@ func TestForkCohort_MultiStepBranchCountsBranchesNotMembers(t *testing.T) {
 	g.SetFanIn("J")
 	g.SetReducer("enriched", workflow.ReducerAppend)
 	g.AddTransitionForEach("Seed", "Cell", "cells", "cell")
-	g.AddTransitionChain("Cell", "Enrich", "J", workflow.END)
+	g.AddTransitionChain("Cell", "Enrich", "J", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("fkc/g", g)
 
@@ -151,7 +151,7 @@ func TestForkCohort_RewindMidBranchExcludesWholeBranch(t *testing.T) {
 	g.SetFanIn("J")
 	g.SetReducer("enriched", workflow.ReducerAppend)
 	g.AddTransitionForEach("Seed", "Cell", "cells", "cell")
-	g.AddTransitionChain("Cell", "Enrich", "J", workflow.END)
+	g.AddTransitionChain("Cell", "Enrich", "J", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("fkm/g", g)
 
@@ -238,7 +238,7 @@ func nestedForkGraph(t *testing.T, proxy *engine.TestProxy, brokenChunk string) 
 	g.AddTransitionForEach("Seed", "Cell", "cells", "cell")
 	g.AddTransitionForEach("Cell", "Chunk", "chunks", "chunk")
 	g.AddTransitionChain("Chunk", "JoinChunk")
-	g.AddTransitionChain("JoinChunk", "JoinCell", workflow.END)
+	g.AddTransitionChain("JoinChunk", "JoinCell", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("nfk/g", g)
 

@@ -49,7 +49,7 @@ func TestFanoutgotoendflow(t *testing.T) {
 	graph.SetEndpoint("Join", "fanoutgotoendflow.verify:428/join")
 	graph.SetFanIn("Join")
 	graph.AddTransition("Init", "Decide")
-	graph.AddTransitionGoto("Decide", workflow.END)
+	graph.AddTransitionGoto("Decide", workflow.End)
 	graph.AddTransitionForEach("Decide", "Work", "pending", "current")
 	graph.AddTransition("Work", "Join")
 	graph.AddTransition("Join", "Decide")
@@ -63,7 +63,7 @@ func TestFanoutgotoendflow(t *testing.T) {
 	// Round 0 fans out over pending; round 1 ends the flow.
 	proxy.HandleTask("fanoutgotoendflow.verify:428/decide", func(ctx context.Context, f *workflow.Flow) error {
 		if f.GetInt("rounds") > 0 {
-			f.Goto(workflow.END)
+			f.Goto(workflow.End)
 			return nil
 		}
 		f.SetInt("rounds", f.GetInt("rounds")+1)

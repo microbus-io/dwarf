@@ -37,7 +37,7 @@ func TestFairnessflow(t *testing.T) {
 
 	graph := workflow.NewGraph("Fairness")
 	graph.SetEndpoint("Tally", "fairnessflow.verify:428/tally")
-	graph.AddTransition("Tally", workflow.END)
+	graph.AddTransition("Tally", workflow.End)
 	proxy.HandleGraph("fairnessflow.verify:428/fairness", graph)
 
 	var mu sync.Mutex

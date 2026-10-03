@@ -36,7 +36,7 @@ type oneTaskHost struct{}
 func (oneTaskHost) LoadGraph(ctx context.Context, name string) (*workflow.Graph, error) {
 	g := workflow.NewGraph("OneTask")
 	g.SetEndpoint("Do", "do")
-	g.AddTransition("Do", workflow.END)
+	g.AddTransition("Do", workflow.End)
 	return g, nil
 }
 func (oneTaskHost) ExecuteTask(ctx context.Context, name string, f *workflow.Flow) error { return nil }

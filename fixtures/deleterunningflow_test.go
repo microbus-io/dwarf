@@ -46,7 +46,7 @@ func TestDeleteRunningflow(t *testing.T) {
 
 	graph := workflow.NewGraph("DeleteRunning")
 	graph.SetEndpoint("Block", "deleterunningflow.verify:428/block")
-	graph.AddTransitionChain("Block", workflow.END)
+	graph.AddTransitionChain("Block", workflow.End)
 	proxy.HandleGraph("deleterunningflow.verify:428/delete-running", graph)
 
 	proxy.HandleTask("deleterunningflow.verify:428/block", func(ctx context.Context, f *workflow.Flow) error {

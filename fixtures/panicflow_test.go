@@ -46,16 +46,16 @@ func TestPanicflow(t *testing.T) {
 	// Graph 1: a bare panicking task with no onError -> the flow fails.
 	bare := workflow.NewGraph("Bare")
 	bare.SetEndpoint("Boom", "panicflow.verify:0/boom")
-	bare.AddTransition("Boom", workflow.END)
+	bare.AddTransition("Boom", workflow.End)
 	proxy.HandleGraph("panicflow.verify:0/bare", bare)
 
 	// Graph 2: a panicking task with an onError handler -> the flow recovers via the handler.
 	handled := workflow.NewGraph("Handled")
 	handled.SetEndpoint("Boom", "panicflow.verify:0/boom")
 	handled.SetEndpoint("Rescue", "panicflow.verify:0/rescue")
-	handled.AddTransition("Boom", workflow.END)
+	handled.AddTransition("Boom", workflow.End)
 	handled.AddTransitionOnError("Boom", "Rescue")
-	handled.AddTransition("Rescue", workflow.END)
+	handled.AddTransition("Rescue", workflow.End)
 	proxy.HandleGraph("panicflow.verify:0/handled", handled)
 
 	// Graph 3: a task reading a mistyped state field with a typed getter. The getters panic rather than
@@ -64,9 +64,9 @@ func TestPanicflow(t *testing.T) {
 	mistyped := workflow.NewGraph("Mistyped")
 	mistyped.SetEndpoint("Read", "panicflow.verify:0/read")
 	mistyped.SetEndpoint("Rescue", "panicflow.verify:0/rescue")
-	mistyped.AddTransition("Read", workflow.END)
+	mistyped.AddTransition("Read", workflow.End)
 	mistyped.AddTransitionOnError("Read", "Rescue")
-	mistyped.AddTransition("Rescue", workflow.END)
+	mistyped.AddTransition("Rescue", workflow.End)
 	proxy.HandleGraph("panicflow.verify:0/mistyped", mistyped)
 
 	proxy.HandleTask("panicflow.verify:0/boom", func(ctx context.Context, f *workflow.Flow) error {

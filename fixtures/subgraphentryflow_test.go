@@ -40,19 +40,19 @@ func TestSubgraphentryflow(t *testing.T) {
 	outer := workflow.NewGraph("Outer")
 	outer.SetEndpoint("RunInner", "subgraphentryflow.verify:428/run-inner")
 	outer.SetEndpoint("RunTail", "subgraphentryflow.verify:428/run-tail")
-	outer.AddTransitionChain("RunInner", "RunTail", workflow.END)
+	outer.AddTransitionChain("RunInner", "RunTail", workflow.End)
 	proxy.HandleGraph("subgraphentryflow.verify:428/outer", outer)
 
 	// Inner subgraph: TaskInner -> END
 	inner := workflow.NewGraph("Inner")
 	inner.SetEndpoint("TaskInner", "subgraphentryflow.verify:428/task-inner")
-	inner.AddTransition("TaskInner", workflow.END)
+	inner.AddTransition("TaskInner", workflow.End)
 	proxy.HandleGraph("subgraphentryflow.verify:428/inner", inner)
 
 	// Tail subgraph: TaskTail -> END
 	tail := workflow.NewGraph("Tail")
 	tail.SetEndpoint("TaskTail", "subgraphentryflow.verify:428/task-tail")
-	tail.AddTransition("TaskTail", workflow.END)
+	tail.AddTransition("TaskTail", workflow.End)
 	proxy.HandleGraph("subgraphentryflow.verify:428/tail", tail)
 
 	proxy.HandleTask("subgraphentryflow.verify:428/task-inner", func(ctx context.Context, f *workflow.Flow) error {

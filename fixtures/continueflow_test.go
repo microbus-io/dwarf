@@ -34,7 +34,7 @@ func TestContinueflow(t *testing.T) {
 
 	graph := workflow.NewGraph("Counting")
 	graph.SetEndpoint("Increment", "continueflow.verify:428/increment")
-	graph.AddTransition("Increment", workflow.END)
+	graph.AddTransition("Increment", workflow.End)
 	proxy.HandleGraph("continueflow.verify:428/counting", graph)
 
 	proxy.HandleTask("continueflow.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {
@@ -86,7 +86,7 @@ func TestContinueInheritsThreadPolicy(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Policy")
 	g.SetEndpoint("T", "continuepolicy.verify:428/t")
-	g.AddTransition("T", workflow.END)
+	g.AddTransition("T", workflow.End)
 	proxy.HandleGraph("continuepolicy.verify:428/g", g)
 	proxy.HandleTask("continuepolicy.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
@@ -131,7 +131,7 @@ func TestCreateWithThreadKeyJoinsThread(t *testing.T) {
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Join")
 	g.SetEndpoint("T", "threadjoin.verify:428/t")
-	g.AddTransition("T", workflow.END)
+	g.AddTransition("T", workflow.End)
 	proxy.HandleGraph("threadjoin.verify:428/g", g)
 	proxy.HandleTask("threadjoin.verify:428/t", func(ctx context.Context, f *workflow.Flow) error { return nil })
 

@@ -171,7 +171,7 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	g.AddTransition("B1", "J")
 	g.AddTransition("B2", "J")
 	g.SetFanIn("J")
-	g.AddTransition("J", workflow.END)
+	g.AddTransition("J", workflow.End)
 	proxy.HandleGraph("queue/g", g)
 	release := make(chan struct{})
 	var started, runsB, runsJ atomic.Int32

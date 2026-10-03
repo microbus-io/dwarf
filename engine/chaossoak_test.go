@@ -242,7 +242,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 	for _, n := range []string{"A", "B", "C", "D"} {
 		lin.SetEndpoint(n, "chaossoak.verify:428/lin-"+n)
 	}
-	lin.AddTransitionChain("A", "B", "C", "D", workflow.END)
+	lin.AddTransitionChain("A", "B", "C", "D", workflow.End)
 	assert.NoError(lin.Validate())
 	proxy.HandleGraph("chaossoak.verify:428/linear", lin)
 	for _, n := range []string{"A", "B", "C", "D"} {
@@ -264,7 +264,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 	fan.AddTransition("P", "J")
 	fan.AddTransition("Q", "J")
 	fan.AddTransition("R", "J")
-	fan.AddTransition("J", workflow.END)
+	fan.AddTransition("J", workflow.End)
 	assert.NoError(fan.Validate())
 	proxy.HandleGraph("chaossoak.verify:428/fanout", fan)
 	proxy.HandleTask("chaossoak.verify:428/fan-s", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -280,7 +280,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 	// (c) parent + subgraph child; the child's middle task interrupts (mode 0) or retries once (mode 1).
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("P0", "chaossoak.verify:428/parent-p0")
-	parent.AddTransition("P0", workflow.END)
+	parent.AddTransition("P0", workflow.End)
 	assert.NoError(parent.Validate())
 	proxy.HandleGraph("chaossoak.verify:428/parent", parent)
 	proxy.HandleTask("chaossoak.verify:428/parent-p0", func(ctx context.Context, f *workflow.Flow) error {
@@ -295,7 +295,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 	child.SetEndpoint("CA", "chaossoak.verify:428/child-ca")
 	child.SetEndpoint("CB", "chaossoak.verify:428/child-cb")
 	child.SetEndpoint("CC", "chaossoak.verify:428/child-cc")
-	child.AddTransitionChain("CA", "CB", "CC", workflow.END)
+	child.AddTransitionChain("CA", "CB", "CC", workflow.End)
 	assert.NoError(child.Validate())
 	proxy.HandleGraph("chaossoak.verify:428/child", child)
 	proxy.HandleTask("chaossoak.verify:428/child-ca", func(ctx context.Context, f *workflow.Flow) error { return nil })

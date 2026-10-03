@@ -36,7 +36,7 @@ limitations under the License.
 //	proxy := engine.NewTestProxy()
 //	g := workflow.NewGraph("Greet")
 //	g.SetEndpoint("Hello", "http://example/hello") // node "Hello" dispatches to this endpoint URL
-//	g.AddTransition("Hello", workflow.END)
+//	g.AddTransition("Hello", workflow.End)
 //	proxy.HandleGraph("http://example/greet", g)
 //	proxy.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {
 //		f.SetString("greeting", "hello "+f.GetString("name"))

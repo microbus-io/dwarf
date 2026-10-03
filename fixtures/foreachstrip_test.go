@@ -52,7 +52,7 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 	g.SetFanIn("Join")
 	g.SetReducer("done", workflow.ReducerAdd)
 	g.AddTransitionForEach("Split", "Page", "pages", "page")
-	g.AddTransitionChain("Page", "Join", workflow.END)
+	g.AddTransitionChain("Page", "Join", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("c/wf", g)
 
@@ -109,7 +109,7 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 	g.AddTransitionForEach("Split", "Page", "pages", "page")
 	g.AddTransitionForEach("Page", "Chunk", "chunks", "chunk")
 	g.AddTransitionChain("Chunk", "JoinChunk")
-	g.AddTransitionChain("JoinChunk", "JoinPage", workflow.END)
+	g.AddTransitionChain("JoinChunk", "JoinPage", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("n/wf", g)
 
@@ -179,7 +179,7 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	g.SetEndpoint("Join", "ff/join")
 	g.SetFanIn("Join")
 	g.AddTransitionForEach("Split", "Page", "pages", "page")
-	g.AddTransitionChain("Page", "Join", workflow.END)
+	g.AddTransitionChain("Page", "Join", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("ff/wf", g)
 
@@ -234,7 +234,7 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	g.SetReducer("cells", workflow.ReducerAppend)
 	g.SetReducer("enriched", workflow.ReducerAppend)
 	g.AddTransitionForEach("Seed", "Cell", "items", "item")
-	g.AddTransitionChain("Cell", "Enrich", "Join", workflow.END)
+	g.AddTransitionChain("Cell", "Enrich", "Join", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("ms/wf", g)
 

@@ -40,7 +40,7 @@ func TestShardedflow(t *testing.T) {
 
 	graph := workflow.NewGraph("Sharded")
 	graph.SetEndpoint("Record", "shardedflow.verify:428/record")
-	graph.AddTransition("Record", workflow.END)
+	graph.AddTransition("Record", workflow.End)
 	proxy.HandleGraph("shardedflow.verify:428/sharded", graph)
 
 	var mu sync.Mutex

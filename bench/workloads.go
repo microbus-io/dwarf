@@ -78,7 +78,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 		linear.SetEndpoint(n, "bench/nop")
 		names = append(names, n)
 	}
-	names = append(names, workflow.END)
+	names = append(names, workflow.End)
 	linear.AddTransitionChain(names...)
 	h.graphs["bench/linear"] = linear
 
@@ -89,7 +89,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	fanout.SetEndpoint("Join", "bench/nop")
 	fanout.SetFanIn("Join")
 	fanout.AddTransitionForEach("Split", "Work", "items", "item")
-	fanout.AddTransitionChain("Work", "Join", workflow.END)
+	fanout.AddTransitionChain("Work", "Join", workflow.End)
 	h.graphs["bench/fanout"] = fanout
 	fanoutItems := make([]int, fanOutWidth)
 	for i := range fanoutItems {
@@ -118,7 +118,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 		state.SetEndpoint(n, "bench/state")
 		stateNames = append(stateNames, n)
 	}
-	stateNames = append(stateNames, workflow.END)
+	stateNames = append(stateNames, workflow.End)
 	state.AddTransitionChain(stateNames...)
 	h.graphs["bench/state"] = state
 
@@ -187,7 +187,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 		carry.SetEndpoint(n, "bench/carry")
 		carryNames = append(carryNames, n)
 	}
-	carryNames = append(carryNames, workflow.END)
+	carryNames = append(carryNames, workflow.End)
 	carry.AddTransitionChain(carryNames...)
 	h.graphs["bench/carry"] = carry
 
@@ -203,7 +203,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	carryFanOut.SetFanIn("Join")
 	carryFanOut.SetReducer("steps", workflow.ReducerAdd)
 	carryFanOut.AddTransitionForEach("Split", "Work", "items", "item")
-	carryFanOut.AddTransitionChain("Work", "Enrich", "Join", workflow.END)
+	carryFanOut.AddTransitionChain("Work", "Enrich", "Join", workflow.End)
 	h.graphs["bench/carryfanout"] = carryFanOut
 
 	// llm: ONE step per flow, so a flow's wall time is exactly the -task-delay. The multi-step workloads
@@ -212,7 +212,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	// its (connection-derived) resident set to keep thousands of minutes-long tasks in flight at once.
 	llm := workflow.NewGraph("LLM")
 	llm.SetEndpoint("Call", "bench/nop") // the delay lives in the host's ExecuteTask (-task-delay)
-	llm.AddTransition("Call", workflow.END)
+	llm.AddTransition("Call", workflow.End)
 	h.graphs["bench/llm"] = llm
 
 	// interrupt: an entry gate that interrupts once (the soak's load generator resumes it), then
@@ -225,7 +225,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	interrupt := workflow.NewGraph("Interrupt")
 	interrupt.SetEndpoint("Gate", "bench/gate")
 	interrupt.SetEndpoint("Work", "bench/nop")
-	interrupt.AddTransitionChain("Gate", "Work", workflow.END)
+	interrupt.AddTransitionChain("Gate", "Work", workflow.End)
 	h.graphs["bench/interrupt"] = interrupt
 
 	return map[string]*workload{

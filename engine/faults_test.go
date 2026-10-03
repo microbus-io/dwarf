@@ -41,7 +41,7 @@ func linear2(proxy *TestProxy, prefix string, calls map[string]*int) {
 	g.SetEndpoint("A", prefix+"/a")
 	g.SetEndpoint("B", prefix+"/b")
 	g.AddTransition("A", "B")
-	g.AddTransition("B", workflow.END)
+	g.AddTransition("B", workflow.End)
 	proxy.HandleGraph(prefix+"/g", g)
 	for _, node := range []string{"a", "b"} {
 		n := node
@@ -124,14 +124,14 @@ func TestFault_ExecuteTask(t *testing.T) {
 	})
 	bare := workflow.NewGraph("Bare")
 	bare.SetEndpoint("Work", "fexec/work")
-	bare.AddTransition("Work", workflow.END)
+	bare.AddTransition("Work", workflow.End)
 	proxy.HandleGraph("fexec/bare", bare)
 	handled := workflow.NewGraph("Handled")
 	handled.SetEndpoint("Work", "fexec/work")
 	handled.SetEndpoint("Rescue", "fexec/rescue")
-	handled.AddTransition("Work", workflow.END)
+	handled.AddTransition("Work", workflow.End)
 	handled.AddTransitionOnError("Work", "Rescue")
-	handled.AddTransition("Rescue", workflow.END)
+	handled.AddTransition("Rescue", workflow.End)
 	proxy.HandleGraph("fexec/handled", handled)
 
 	e := NewEngineUnderTest(t.Name())
@@ -163,7 +163,7 @@ func TestFault_PanicExecuteTask(t *testing.T) {
 	proxy.HandleTask("fpanic/boom", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	g := workflow.NewGraph("Boom")
 	g.SetEndpoint("Boom", "fpanic/boom")
-	g.AddTransition("Boom", workflow.END)
+	g.AddTransition("Boom", workflow.End)
 	proxy.HandleGraph("fpanic/g", g)
 
 	e := NewEngineUnderTest(t.Name())
@@ -188,7 +188,7 @@ func TestFault_LoadGraph(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("G")
 	g.SetEndpoint("A", "floadg/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("floadg/g", g)
 	proxy.HandleTask("floadg/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
@@ -264,7 +264,7 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "fcfc/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("fcfc/g", g)
 	var runs int
 	proxy.HandleTask("fcfc/a", func(ctx context.Context, f *workflow.Flow) error { runs++; return nil })
@@ -293,7 +293,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "flease/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("flease/g", g)
 	// Atomic: the worker goroutine writes it while the test goroutine waits on it below.
 	var runs atomic.Int32
@@ -331,7 +331,7 @@ func TestFault_DropSignalStop(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "fsig/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("fsig/g", g)
 	proxy.HandleTask("fsig/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
@@ -355,7 +355,7 @@ func TestFault_DropDoorbell(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "fdoor/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("fdoor/g", g)
 	proxy.HandleTask("fdoor/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
@@ -383,11 +383,11 @@ func TestFault_SubgraphReviveLost(t *testing.T) {
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("Parent")
 	parent.SetEndpoint("Call", "fsub/call")
-	parent.AddTransition("Call", workflow.END)
+	parent.AddTransition("Call", workflow.End)
 	proxy.HandleGraph("fsub/parent", parent)
 	child := workflow.NewGraph("Child")
 	child.SetEndpoint("X", "fsub/x")
-	child.AddTransition("X", workflow.END)
+	child.AddTransition("X", workflow.End)
 	proxy.HandleGraph("fsub/child", child)
 	proxy.HandleTask("fsub/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("fsub/call", func(ctx context.Context, f *workflow.Flow) error {
@@ -440,7 +440,7 @@ func TestFault_ReapMidTree(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "freap/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("freap/g", g)
 	proxy.HandleTask("freap/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
@@ -476,7 +476,7 @@ func TestFault_RefillScanErr(t *testing.T) {
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
 	g.SetEndpoint("A", "frefill/a")
-	g.AddTransition("A", workflow.END)
+	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("frefill/g", g)
 	proxy.HandleTask("frefill/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
 

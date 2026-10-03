@@ -49,7 +49,7 @@ func TestDeleteResumeRace(t *testing.T) {
 	g.SetEndpoint("Gate", "drr/gate")
 	g.SetEndpoint("Done", "drr/done")
 	g.AddTransition("Gate", "Done")
-	g.AddTransition("Done", workflow.END)
+	g.AddTransition("Done", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("drr/g", g)
 	// Gate interrupts on its first dispatch (yield=true); a Resume re-dispatches it (yield=false) and it

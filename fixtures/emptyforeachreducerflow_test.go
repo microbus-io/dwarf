@@ -50,7 +50,7 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 	graph.SetReducer("sum", workflow.ReducerAdd)
 	graph.SetReducer("processed", workflow.ReducerAdd)
 	graph.AddTransitionForEach("TaskA", "TaskB", "items", "item")
-	graph.AddTransitionChain("TaskB", "TaskC", workflow.END)
+	graph.AddTransitionChain("TaskB", "TaskC", workflow.End)
 	// Validate requires the fan-out to converge on a SetFanIn node, which is what makes the empty-cohort path
 	// route to the fan-in (fireFanInDirect) rather than fall into its complete-at-the-source fallback. (The
 	// routing map itself is derived engine-side at dispatch, not stored on the graph by Validate.)

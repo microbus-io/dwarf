@@ -62,12 +62,12 @@ func TestSoakflow(t *testing.T) {
 	soakGraph.AddTransitionOnError("BoomR", "Recover")
 	soakGraph.AddTransition("BoomR", "Join")
 	soakGraph.AddTransition("Recover", "Join")
-	soakGraph.AddTransitionChain("BoomF", "Join", workflow.END)
+	soakGraph.AddTransitionChain("BoomF", "Join", workflow.End)
 	proxy.HandleGraph("soakflow.verify:428/soak", soakGraph)
 
 	innerGraph := workflow.NewGraph("Inner")
 	innerGraph.SetEndpoint("InnerEntry", "soakflow.verify:428/inner-entry")
-	innerGraph.AddTransition("InnerEntry", workflow.END)
+	innerGraph.AddTransition("InnerEntry", workflow.End)
 	proxy.HandleGraph("soakflow.verify:428/inner", innerGraph)
 
 	proxy.HandleTask("soakflow.verify:428/seed", func(ctx context.Context, f *workflow.Flow) error {

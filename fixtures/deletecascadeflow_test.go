@@ -57,20 +57,20 @@ func TestDeletecascadeflow(t *testing.T) {
 	root.SetEndpoint("TaskA", "deletecascadeflow.verify:428/task-a")
 	root.SetEndpoint("RunChild", "deletecascadeflow.verify:428/run-child")
 	root.SetEndpoint("TaskZ", "deletecascadeflow.verify:428/task-z")
-	root.AddTransitionChain("TaskA", "RunChild", "TaskZ", workflow.END)
+	root.AddTransitionChain("TaskA", "RunChild", "TaskZ", workflow.End)
 	proxy.HandleGraph("deletecascadeflow.verify:428/root", root)
 
 	// Child: ChildWork -> RunGrandchild
 	child := workflow.NewGraph("Child")
 	child.SetEndpoint("ChildWork", "deletecascadeflow.verify:428/child-work")
 	child.SetEndpoint("RunGrandchild", "deletecascadeflow.verify:428/run-grandchild")
-	child.AddTransitionChain("ChildWork", "RunGrandchild", workflow.END)
+	child.AddTransitionChain("ChildWork", "RunGrandchild", workflow.End)
 	proxy.HandleGraph("deletecascadeflow.verify:428/child", child)
 
 	// Grandchild: GrandchildWork
 	grandchild := workflow.NewGraph("Grandchild")
 	grandchild.SetEndpoint("GrandchildWork", "deletecascadeflow.verify:428/grandchild-work")
-	grandchild.AddTransition("GrandchildWork", workflow.END)
+	grandchild.AddTransition("GrandchildWork", workflow.End)
 	proxy.HandleGraph("deletecascadeflow.verify:428/grandchild", grandchild)
 
 	proxy.HandleTask("deletecascadeflow.verify:428/task-a", func(ctx context.Context, f *workflow.Flow) error {

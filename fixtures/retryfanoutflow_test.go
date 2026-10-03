@@ -48,7 +48,7 @@ func TestRetryfanoutflow(t *testing.T) {
 	graph.SetFanIn("Join")
 	graph.SetReducer("results", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Enter", "Increment", "elements", "element")
-	graph.AddTransitionChain("Increment", "Join", workflow.END)
+	graph.AddTransitionChain("Increment", "Join", workflow.End)
 	proxy.HandleGraph("retryfanoutflow.verify:428/retry-fan-out", graph)
 
 	proxy.HandleTask("retryfanoutflow.verify:428/enter", func(ctx context.Context, f *workflow.Flow) error {
