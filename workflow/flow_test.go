@@ -85,7 +85,7 @@ func TestFlow_GetComplex(t *testing.T) {
 	err := f.Set("order", &Order{ID: "abc", Total: 100})
 	assert.NoError(err)
 	var got Order
-	err = f.Get("order", &got)
+	_, err = f.Get("order", &got)
 	assert.NoError(err)
 	assert.Equal("abc", got.ID)
 	assert.Equal(100, got.Total)
@@ -107,7 +107,7 @@ func TestFlow_SetTracksChanges(t *testing.T) {
 	assert.Equal("1", stateVal(f.changes, "a")) // stored decoded, not as raw JSON bytes
 }
 
-func TestFlow_ParseStateAndSetChanges(t *testing.T) {
+func TestFlow_ParseAndSetChanges(t *testing.T) {
 	assert := testarossa.For(t)
 	f := NewFlow()
 	f.Set("name", "Alice")
@@ -119,7 +119,7 @@ func TestFlow_ParseStateAndSetChanges(t *testing.T) {
 		Name  string `json:"name"`
 		Score int    `json:"score"`
 	}
-	err := f.ParseState(&view)
+	err := f.Parse(&view)
 	assert.NoError(err)
 	assert.Equal("Alice", view.Name)
 	assert.Equal(10, view.Score)
@@ -145,7 +145,7 @@ func TestFlow_SetChangesNoChanges(t *testing.T) {
 	var view struct {
 		Name string `json:"name"`
 	}
-	err := f.ParseState(&view)
+	err := f.Parse(&view)
 	assert.NoError(err)
 	// No modifications
 	err = f.SetChanges(view, snap)
@@ -217,14 +217,14 @@ func TestFlow_GetTreatsJSONNullAsAbsent(t *testing.T) {
 	assert.Equal("", f.GetString("x"))
 	assert.Equal(0, f.GetInt("y"))
 
-	// ParseState skips null-valued fields rather than overwriting the target's zero.
+	// Parse skips null-valued fields rather than overwriting the target's zero.
 	var view struct {
 		X string `json:"x"`
 		Y int    `json:"y"`
 	}
 	view.X = "preset"
 	view.Y = 99
-	err := f.ParseState(&view)
+	err := f.Parse(&view)
 	assert.NoError(err)
 	assert.Equal("preset", view.X)
 	assert.Equal(99, view.Y)
@@ -412,5 +412,39 @@ func TestFlow_TypedGetterPanicsOnTypeMismatch(t *testing.T) {
 
 	// Get reports the mismatch as an error instead - the escape hatch for a task that wants to handle it.
 	var n int
-	assert.Error(f.Get("retryAfter", &n))
+	_, err := f.Get("retryAfter", &n)
+	assert.Error(err)
+}
+
+// TestFlow_GetReportsPresence pins Get's three outcomes as its godoc states them: a present field is
+// assigned and reports ok, an absent or cleared one reports !ok and leaves a default in place, and a type
+// mismatch is returned as an error rather than panicking.
+func TestFlow_GetReportsPresence(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	f := NewFlow()
+	f.SetInt("limit", 25)
+	f.SetString("name", "ada")
+	f.Del("gone")
+
+	limit := 10
+	ok, err := f.Get("limit", &limit)
+	assert.NoError(err)
+	assert.True(ok)
+	assert.Equal(25, limit)
+
+	fallback := 10
+	ok, err = f.Get("missing", &fallback)
+	assert.NoError(err)
+	assert.False(ok, "an absent field is not reported present")
+	assert.Equal(10, fallback, "and the default survives")
+	ok, err = f.Get("gone", &fallback)
+	assert.NoError(err)
+	assert.False(ok, "a cleared field reads as absent")
+	assert.Equal(10, fallback)
+
+	var n int
+	ok, err = f.Get("name", &n)
+	assert.Error(err, "a mismatch is an error, not a panic")
+	assert.False(ok)
 }

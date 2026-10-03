@@ -168,7 +168,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 			// Reading it is what forces the decode, which is the whole point of the -carry-read arm: the
 			// never-read arm should hold the document's BYTES and this one its expanded Go form.
 			var doc []map[string]any
-			if err := f.Get("doc", &doc); err != nil {
+			if _, err := f.Get("doc", &doc); err != nil {
 				return fmt.Errorf("carry: reading the carried document: %w", err)
 			}
 			if len(doc) != len(records) {

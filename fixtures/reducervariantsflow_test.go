@@ -101,7 +101,7 @@ func TestReducervariantsflow(t *testing.T) {
 		f.SetBool("rAny", f.GetBool("anyOk"))
 		f.SetString("rWord", f.GetString("word"))
 		var obj map[string]any
-		_ = f.Get("obj", &obj)
+		_, _ = f.Get("obj", &obj)
 		f.Set("rObj", obj)
 		return nil
 	})

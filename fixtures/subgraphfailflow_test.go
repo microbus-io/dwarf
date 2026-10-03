@@ -98,7 +98,7 @@ func TestSubgraphfailflow(t *testing.T) {
 		})
 		proxy.HandleTask("subgraphfailflow.verify:428/recover", func(ctx context.Context, f *workflow.Flow) error {
 			var onErr errors.TracedError
-			_ = f.Get("onErr", &onErr)
+			_, _ = f.Get("onErr", &onErr)
 			f.SetString("result", "recovered: "+onErr.Error())
 			return nil
 		})

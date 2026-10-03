@@ -78,7 +78,7 @@ func TestErrorchangesflow(t *testing.T) {
 	proxy.HandleTask("errorchangesflow.verify:428/rescue", func(ctx context.Context, f *workflow.Flow) error {
 		handlerSawScratch = f.Has("scratch")
 		var onErr map[string]any
-		_ = f.Get("onErr", &onErr)
+		_, _ = f.Get("onErr", &onErr)
 		if msg, ok := onErr["error"].(string); ok {
 			handlerSawErr = msg
 		}

@@ -242,7 +242,8 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	})
 	proxy.HandleTask("red/join", func(ctx context.Context, f *workflow.Flow) error {
 		var log []string
-		assert.NoError(f.Get("log", &log))
+		_, err := f.Get("log", &log)
+		assert.NoError(err)
 		f.SetInt("logLen", len(log))
 		return nil
 	})
@@ -306,7 +307,8 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 	proxy.HandleTask("sc/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	proxy.HandleTask("sc/join", func(ctx context.Context, f *workflow.Flow) error {
 		var log []string
-		assert.NoError(f.Get("log", &log))
+		_, err := f.Get("log", &log)
+		assert.NoError(err)
 		f.SetInt("logLen", len(log))
 		return nil
 	})

@@ -63,7 +63,7 @@ func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
 // state, which is what the flow's final state is built from, so a test reads them off the outcome.
 func recordCancellation(ctx context.Context, f *workflow.Flow) error {
 	var te errors.TracedError
-	_ = f.Get("onErr", &te)
+	_, _ = f.Get("onErr", &te)
 	f.SetBool("recovered", workflow.IsCancelled(&te))
 	return nil
 }

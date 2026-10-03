@@ -263,11 +263,13 @@ func (s State) SetJSON(name string, data json.RawMessage) {
 	s.d[name] = data
 }
 
-// Get unmarshals the field named name into target, a non-nil pointer, coercing through JSON (so a stored
-// float64 reads into an int, a stored object into a struct, etc.). It returns ok=true only when the field is
-// present and was assigned. An absent or cleared field (Go nil or JSON null) returns (false, nil), leaving
-// target untouched. A value that cannot be unmarshalled into target's type returns (false, err). Use this to
-// HANDLE a type mismatch; the typed getters (GetInt, ...) panic on one instead.
+// Get unmarshals the field named name into target, a non-nil pointer, and reports whether the field was
+// present. It coerces through JSON, so a stored number reads into an int or a float64 and a stored object
+// into a struct or a map.
+//
+// An absent or cleared field (removed with Del, or set to nil) returns (false, nil) and leaves target
+// untouched. A present value that cannot be unmarshalled into target's type returns (false, err); the typed
+// getters (GetInt, ...) panic on the same mismatch instead.
 func (s State) Get(name string, target any) (ok bool, err error) {
 	raw, exists := s.d[name]
 	if !exists || isCleared(raw) {
@@ -364,9 +366,10 @@ func (s State) IsDeleted(name string) bool {
 	return ok && isCleared(v)
 }
 
-// Parse unmarshals the state's fields into target (a struct pointer, matched by JSON tag, or any other
-// JSON-unmarshalable target). Fields present in the state but absent from a struct target are ignored;
-// cleared fields are skipped. A zero State is a no-op.
+// Parse unmarshals the state's fields into target, typically a pointer to a struct whose fields are matched
+// by their JSON tags; any JSON-unmarshalable target works, a map included. State fields with no matching
+// struct field are ignored, cleared fields are skipped, and struct fields with no matching state field keep
+// their values. Parsing a zero State does nothing and returns nil.
 func (s State) Parse(target any) error {
 	if s.d == nil {
 		return nil

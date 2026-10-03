@@ -150,12 +150,24 @@ func (f *Flow) GetBool(name string) bool { return f.state.GetBool(name) }
 // if the field holds anything but a duration in nanoseconds.
 func (f *Flow) GetDuration(name string) time.Duration { return f.state.GetDuration(name) }
 
-// Get unmarshals a state field into the target. Use this for complex types (structs, maps, etc.), and to
-// handle a type mismatch rather than fail the step on it - unlike the typed getters, Get reports one as an
-// error instead of panicking. An absent or cleared field leaves the target untouched and returns nil.
-func (f *Flow) Get(name string, target any) error {
-	_, err := f.state.Get(name, target)
-	return err
+// Get unmarshals the state field named name into target, a non-nil pointer, and reports whether the field
+// was present. It reads the step's input state together with anything this task has already set.
+//
+// It coerces through JSON, so a stored number reads into an int or a float64 and a stored object into a
+// struct or a map. Use it for those, and wherever a type mismatch should be handled rather than fail the
+// step: Get returns the mismatch as an error, where the typed getters (GetInt, ...) panic.
+//
+// An absent or cleared field returns (false, nil) and leaves target untouched, so a default set beforehand
+// survives:
+//
+//	limit := 10
+//	if _, err := f.Get("limit", &limit); err != nil {
+//		return err
+//	}
+//
+// A present value that cannot be unmarshalled into target's type returns (false, err).
+func (f *Flow) Get(name string, target any) (ok bool, err error) {
+	return f.state.Get(name, target)
 }
 
 // Has reports whether a state field exists. A cleared slot (JSON null) reads
@@ -164,21 +176,24 @@ func (f *Flow) Has(name string) bool {
 	return f.state.Has(name)
 }
 
-// ParseState unmarshals state fields into the target struct.
-// Fields are matched by their JSON tag names. Fields in state that are not in the struct are ignored.
+// Parse unmarshals the flow's state into target, typically a pointer to a struct whose fields are matched by
+// their JSON tags. It reads the step's input state together with anything this task has already set. State
+// fields with no matching struct field are ignored, cleared fields are skipped, and struct fields with no
+// matching state field keep their values.
 //
-// To write the struct back after modifying it, take a Snapshot first and pass it to SetChanges - that is
-// what records the task's output:
+// Parse only reads. To write a modified struct back as the task's output, take a Snapshot before parsing and
+// pass it to SetChanges, which records the fields that differ from it:
 //
 //	snap := f.Snapshot()
 //	var order Order
-//	f.ParseState(&order)
+//	if err := f.Parse(&order); err != nil {
+//		return err
+//	}
 //	order.Status = "charged"
-//	f.SetChanges(order, snap)
-//
-// A task's output is its changes, never the state map: state is the immutable input snapshot the engine
-// wrote when it created the step, and only changes are read back and persisted.
-func (f *Flow) ParseState(target any) error {
+//	if err := f.SetChanges(order, snap); err != nil {
+//		return err
+//	}
+func (f *Flow) Parse(target any) error {
 	return f.state.Parse(target)
 }
 

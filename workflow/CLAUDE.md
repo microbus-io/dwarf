@@ -20,14 +20,13 @@ Each step has three JSON columns: `state` (input snapshot), `changes` (output de
 step's `state` is `merge(currentState, changes)`. This immutability enables checkpointing, restart, and recovery.
 
 **A task's output is its `changes`, never the state map - the public API must not offer a raw-state write.**
-`Flow.SetState` (marshal a struct into `state`, tracking nothing) was **deleted**: the engine reads back only
-`changes`, so such a write could never be persisted. It read as the natural write-side twin of `ParseState` -
-`ParseState(&order)` / mutate / `SetState(order)` - and the result was **silent, inconsistent data loss**:
-`processStep` saw an empty `changes` and persisted the *prior* attempt's, so the write never reached the next step's
-`state` nor `final_state`, while `evaluateTransitions` routed off `RawState()`, which *did* contain it. The flow
-branched on a value it then threw away. `ParseState`'s godoc now shows the correct pairing (`Snapshot` ->
-`ParseState` -> mutate -> `SetChanges(source, snap)`). `RawFlow.SetRawState` remains - it is the engine's own
-seeding path, not task-facing.
+The engine reads back only `changes`, so a write into `state` alone (marshal a struct into it, tracking nothing)
+is never persisted. Such a method reads as the natural write-side twin of `Parse` - `Parse(&order)` / mutate /
+write - and the result is **silent, inconsistent data loss**: `processStep` sees an empty `changes` and persists
+the *prior* attempt's, so the write never reaches the next step's `state` nor `final_state`, while
+`evaluateTransitions` routes off `RawState()`, which *does* contain it. The flow branches on a value it then
+throws away. The correct pairing, which `Parse`'s godoc shows, is `Snapshot` -> `Parse` -> mutate ->
+`SetChanges(source, snap)`. `RawFlow.SetRawState` is the engine's own seeding path, not task-facing.
 
 **State mutation on retry:** on `flow.Retry()`, the engine merges `state + changes` back into `state` so the task
 sees its own prior output next attempt; `changes` is preserved. `Resume` does **not** mutate `state`: it writes the

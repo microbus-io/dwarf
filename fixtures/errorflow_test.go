@@ -61,7 +61,7 @@ func TestErrorflow(t *testing.T) {
 	})
 	proxy.HandleTask("errorflow.verify:428/handler", func(ctx context.Context, f *workflow.Flow) error {
 		var onErr errors.TracedError
-		err := f.Get("onErr", &onErr)
+		_, err := f.Get("onErr", &onErr)
 		if err != nil || onErr.Error() == "" {
 			f.SetString("result", "recovered:no-error")
 		} else {
