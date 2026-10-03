@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -38,11 +39,11 @@ import (
 // caller step's step_depth, so the child's entry step (and thus its whole subtree) is numbered as a
 // continuation of the caller (callerStepDepth+1).
 func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState workflow.State, baggageJSON []byte, callerTraceParent string) (string, error) {
-	// FaultSubgraphSpawnErr simulates the spawn failing after the caller step already parked (processStep's
+	// engineseams.FaultSubgraphSpawnErr simulates the spawn failing after the caller step already parked (processStep's
 	// park-then-create ordering): no child is inserted, and the caller must be failed cleanly (failAndReturn)
 	// rather than left parked forever. Scoped by the child workflow URL.
-	if e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultSubgraphSpawnErr, subgraphWorkflowURL)) {
-		return "", errors.New("injected fault: "+FaultSubgraphSpawnErr+" "+subgraphWorkflowURL, http.StatusInternalServerError)
+	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultSubgraphSpawnErr, subgraphWorkflowURL)) {
+		return "", errors.New("injected fault: "+engineseams.FaultSubgraphSpawnErr+" "+subgraphWorkflowURL, http.StatusInternalServerError)
 	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
@@ -478,15 +479,15 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	// Test checkpoint: a breakpoint here freezes completion just before its transaction (holding no lock, so a
 	// racing Terminate can commit), letting a test drive the completeFlow-vs-Terminate race in either order.
 	// Placed before the transaction, not inside, for the same SQLite-deadlock reason as
-	// CheckpointResumeBeforeFlowWrite.
-	e.seams.Checkpoint(ctx, CheckpointBeforeCompleteFlowWrite)
+	// engineseams.CheckpointResumeBeforeFlowWrite.
+	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeCompleteFlowWrite)
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		completed = false
-		// FaultCompleteFlowCommit fails the flow-completion transaction after processStep has already
+		// engineseams.FaultCompleteFlowCommit fails the flow-completion transaction after processStep has already
 		// marked the terminal step completed, so the test proves the write-first ordering + recovery defer
 		// keep the flow from stranding `running` with every step terminal. Non-retryable (a plain error).
-		if e.seams.IsFault(FaultCompleteFlowCommit) {
-			return errors.New("injected fault: " + FaultCompleteFlowCommit)
+		if e.seams.IsFault(engineseams.FaultCompleteFlowCommit) {
+			return errors.New("injected fault: " + engineseams.FaultCompleteFlowCommit)
 		}
 		// Write-first: take the flow row's write lock before computeFinalState's reads. Without this the
 		// transaction is read-first (SELECT graph + terminal steps, then UPDATE), and on SQLite with
@@ -579,17 +580,17 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 
 // completeSurgraphFlow re-dispatches a parked surgraph step after its child completes.
 func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, surgraphStepID int, subgraphFinalStateJSON []byte) error {
-	// FaultSubgraphReviveLost simulates the revive being lost after the child went terminal (the wedge the
+	// engineseams.FaultSubgraphReviveLost simulates the revive being lost after the child went terminal (the wedge the
 	// parked-step sweep exists to catch): the caller step stays running+parkedSubgraph with no live child,
 	// so the test proves recoverWedgedSubgraphParks re-drives the release. Returns nil so the caller path
 	// believes it succeeded, exactly as a lost revive would look.
-	if e.seams.IsFault(FaultSubgraphReviveLost) {
+	if e.seams.IsFault(engineseams.FaultSubgraphReviveLost) {
 		return nil
 	}
-	// FaultCompleteSurgraphErr makes the revive fail with a synthetic non-contention error (consumed per attempt),
+	// engineseams.FaultCompleteSurgraphErr makes the revive fail with a synthetic non-contention error (consumed per attempt),
 	// so a test can prove persist re-drives it on retry rather than losing it - the whole point of the re-drive.
-	if e.seams.IsFault(FaultCompleteSurgraphErr) {
-		return errors.New("injected fault: " + FaultCompleteSurgraphErr)
+	if e.seams.IsFault(engineseams.FaultCompleteSurgraphErr) {
+		return errors.New("injected fault: " + engineseams.FaultCompleteSurgraphErr)
 	}
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
@@ -602,7 +603,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 	// Test checkpoint: a breakpoint here freezes the worker after the child completed but before the caller
 	// revive, so a test can Terminate the caller in exactly the window the revive's running+parkedSubgraph guard
 	// exists to survive (the revive must not resurrect the just-terminated caller).
-	e.seams.Checkpoint(ctx, CheckpointBeforeReviveWrite)
+	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeReviveWrite)
 	reDispatch := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		reDispatch = false
@@ -1016,7 +1017,7 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 	if parentStepID == 0 {
 		return false, nil
 	}
-	// FaultDeliverFailureErr simulates this re-dispatch being lost: the child still commits terminal (this
+	// engineseams.FaultDeliverFailureErr simulates this re-dispatch being lost: the child still commits terminal (this
 	// runs inside its terminating tx, after the flow row was marked failed), but the parked caller is never
 	// re-armed - the wedge shape (caller running+parkedSubgraph with a terminal child) that
 	// recoverWedgedSubgraphParks must backstop. Returning (false, nil), not an error, so the child's
@@ -1029,11 +1030,11 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 	// build its scope, so the Enabled gate short-circuits ahead of the SELECT: a live binary runs neither the
 	// query nor any consult.
 	if e.seams.Enabled() {
-		lost := e.seams.IsFault(FaultDeliverFailureErr)
+		lost := e.seams.IsFault(engineseams.FaultDeliverFailureErr)
 		if !lost {
 			var taskName string
 			if err := tx.QueryRowContext(ctx, "SELECT task_name FROM dwarf_steps WHERE step_id=?", parentStepID).Scan(&taskName); err == nil {
-				lost = e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultDeliverFailureErr, strings.TrimSpace(taskName)))
+				lost = e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultDeliverFailureErr, strings.TrimSpace(taskName)))
 			}
 		}
 		if lost {
@@ -1297,15 +1298,15 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 	// write below rolls this transaction back (409) instead of falsely succeeding. Placed *before* the
 	// transaction, not mid-tx: on SQLite the racing Delete would deadlock against this transaction's write
 	// lock if frozen inside it. No-op in production.
-	e.seams.Checkpoint(ctx, CheckpointResumeBeforeFlowWrite)
+	e.seams.Checkpoint(ctx, engineseams.CheckpointResumeBeforeFlowWrite)
 
 	lost := false
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		lost = false
-		// FaultResumeCommit fails this transaction once, before any write, so the test proves it rolls back
+		// engineseams.FaultResumeCommit fails this transaction once, before any write, so the test proves it rolls back
 		// atomically (the flow stays interrupted, its steps untouched) and a retry then resumes cleanly.
-		if e.seams.IsFault(FaultResumeCommit) {
-			return errors.New("injected fault: " + FaultResumeCommit)
+		if e.seams.IsFault(engineseams.FaultResumeCommit) {
+			return errors.New("injected fault: " + engineseams.FaultResumeCommit)
 		}
 		allStepIDs := append([]any{leafStepID}, parkStepIDs...)
 		clearPlaceholders := strings.Repeat("?,", len(allStepIDs)-1) + "?"

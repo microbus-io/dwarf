@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -66,22 +67,22 @@ func TestReviveVsTerminate_Deterministic(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze the worker at the caller revive, after the child completed (its completion transaction committed).
-	e.Seams().Break(engine.CheckpointBeforeReviveWrite)
+	engineseams.Seams(e).Break(engineseams.CheckpointBeforeReviveWrite)
 	fk, err := e.Create(ctx, "rvc/parent", nil, nil)
 	assert.NoError(err)
-	assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeReviveWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeReviveWrite")
+	assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeReviveWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeReviveWrite")
 
 	// Terminate wins: the parked caller step is flipped terminated under the terminate transaction.
 	assert.NoError(e.Terminate(ctx, fk, "test"))
 
 	// Release the revive: its running+parkedSubgraph guard matches zero rows, so the terminated caller is not
 	// resurrected to pending and not re-dispatched.
-	e.Seams().Resume(engine.CheckpointBeforeReviveWrite)
+	engineseams.Seams(e).Resume(engineseams.CheckpointBeforeReviveWrite)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.DB().Shard(shardNum)
+	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
 	var callStatus string
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", flowID).Scan(&callStatus))

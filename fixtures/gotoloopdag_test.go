@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -85,7 +86,7 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	assert.Equal([]string{"a", "b"}, done)
 
 	shard, _ := parseFlowShard(flowKey)
-	db, err := eng.DB().Shard(shard)
+	db, err := engineseams.DB(eng).Shard(shard)
 	assert.NoError(err)
 	var joinStepID int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE task_name='Join'").Scan(&joinStepID))

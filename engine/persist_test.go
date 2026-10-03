@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -65,7 +66,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))
-	e.seams.InjectN(seamsJoin(FaultPersistErr, "A"), 1) // ONE failing attempt, then the database is fine again
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1) // ONE failing attempt, then the database is fine again
 
 	_, outcome, err := e.Run(ctx, "p/transient/wf", nil, nil)
 	assert.NoError(err)
@@ -108,12 +109,12 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	e.SetHost(proxy)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.Startup(t.Context()))
-	e.seams.InjectN(seamsJoin(FaultPersistErr, "A"), 1000) // every attempt fails: the payload, not the database
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1000) // every attempt fails: the payload, not the database
 
 	_, outcome, err := e.Run(ctx, "p/permanent/wf", nil, nil)
 	assert.NoError(err)
 	assert.Equal(workflow.StatusFailed, outcome.Status, "a write that will never land must terminalize the flow, not loop")
-	assert.Contains(outcome.Error, FaultPersistErr, "the flow's error must name the driver's actual failure")
+	assert.Contains(outcome.Error, engineseams.FaultPersistErr, "the flow's error must name the driver's actual failure")
 
 	// The whole point: ONE execution. Every extra run here is a side effect fired again.
 	assert.Equal(int32(1), runs.Load(), "the task must execute exactly once, not once per lease expiry forever")
@@ -264,7 +265,7 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 	// select on drainStop, Shutdown would block for this long.
 	e.persistBackoff = []time.Duration{30 * time.Second}
 	assert.NoError(e.Startup(ctx))
-	e.seams.InjectN(seamsJoin(FaultPersistErr, "A"), 1000)
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPersistErr, "A"), 1000)
 
 	_, err := e.Create(ctx, "p/drain/wf", nil, nil)
 	assert.NoError(err)

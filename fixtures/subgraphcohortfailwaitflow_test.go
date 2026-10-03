@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
@@ -136,7 +137,7 @@ func TestSubgraphCohortFailWaitflow(t *testing.T) {
 	awaitCtx, cancelAwait := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelAwait()
 	awaitCh := make(chan outcome, 1)
-	parked := eng.Seams().Waiter(seamsJoin(engine.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
+	parked := engineseams.Seams(eng).Waiter(engineseams.Join(engineseams.CheckpointAwaitParked, child)) // armed before the goroutine that trips it
 	go func() {
 		o, e := eng.Await(awaitCtx, child)
 		awaitCh <- outcome{o, e}

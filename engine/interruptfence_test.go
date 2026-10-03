@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
@@ -35,7 +36,7 @@ import (
 // caller out of parkedSubgraph and strand the parent revive — so the fence must undo the re-park, which only a
 // full rollback can do.
 //
-// FaultInterruptStaleWrite forces the in-tx leaf lease_seq to look re-granted on the FIRST interrupt attempt
+// engineseams.FaultInterruptStaleWrite forces the in-tx leaf lease_seq to look re-granted on the FIRST interrupt attempt
 // (exactly as a real peer re-claim would). The transaction rolls back, the worker abandons, and the child step
 // stays running-and-leased; once its short lease lapses the background poll re-dispatches it and the SECOND
 // attempt (fault consumed) drives the real interrupt up the whole chain with no strand. A root Resume then
@@ -80,7 +81,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	e.leaseMargin = 100 * time.Millisecond // lease = budget+margin = 300ms, so lease recovery re-dispatches fast
 	assert.NoError(e.Startup(t.Context()))
 
-	e.seams.Inject(FaultInterruptStaleWrite)
+	e.seams.Inject(engineseams.FaultInterruptStaleWrite)
 	fk, err := e.Create(ctx, "fisw/parent", nil, nil)
 	assert.NoError(err)
 
@@ -209,8 +210,8 @@ func TestInterruptFence_LeafResetToPendingDoesNotCommitChainInterrupt(t *testing
 		assert := testarossa.For(t)
 		e, db := setup(t, workflow.StatusRunning)
 		defer e.Shutdown(ctx)
-		e.seams.Inject(FaultInterruptChainWrite)
-		defer e.seams.Withdraw(FaultInterruptChainWrite)
+		e.seams.Inject(engineseams.FaultInterruptChainWrite)
+		defer e.seams.Withdraw(engineseams.FaultInterruptChainWrite)
 
 		err := e.handleInterrupt(ctx, 1, db, 2, 7, 2, "ctok", "u", []byte(`{"answer":"x"}`), mustState(map[string]any{"ask": "approve?"}))
 		assert.Error(err, "a failed chain UPDATE must surface as an error so Transact retries it, NOT be swallowed as a fence")

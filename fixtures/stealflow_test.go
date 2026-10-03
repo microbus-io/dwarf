@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -116,10 +117,10 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 // controls.
 func awaitSteal(t *testing.T, e *engine.Engine, work func()) bool {
 	t.Helper()
-	ch := e.Seams().Waiter(engine.CheckpointRefillStole)
-	before := e.Seams().Visits(engine.CheckpointRefillStole)
+	ch := engineseams.Seams(e).Waiter(engineseams.CheckpointRefillStole)
+	before := engineseams.Seams(e).Visits(engineseams.CheckpointRefillStole)
 	work()
-	if e.Seams().Visits(engine.CheckpointRefillStole) != before {
+	if engineseams.Seams(e).Visits(engineseams.CheckpointRefillStole) != before {
 		return true
 	}
 	select {
@@ -168,8 +169,8 @@ func TestStealLatencyPoisonflow(t *testing.T) {
 	drainFlows(t, 30*time.Second, creator, name, 4)
 
 	// Slow every operation this replica makes, from here on.
-	for _, idx := range crippled.DB().Indices() {
-		db, err := crippled.DB().Shard(idx)
+	for _, idx := range engineseams.DB(crippled).Indices() {
+		db, err := engineseams.DB(crippled).Shard(idx)
 		if !assert.NoError(err) {
 			return
 		}
@@ -227,17 +228,17 @@ func TestStealHoldsOffAHealthyFleetflow(t *testing.T) {
 	// armed.
 	enginetest.AwaitShardCycles(t, healthy, 1, 2)
 	enginetest.AwaitShardCycles(t, crippled, 1, 2)
-	stoleBefore := healthy.Seams().Visits(engine.CheckpointRefillStole) +
-		crippled.Seams().Visits(engine.CheckpointRefillStole)
-	cyclesBefore := healthy.Seams().Visits(engine.CheckpointRefillCycleDone) +
-		crippled.Seams().Visits(engine.CheckpointRefillCycleDone)
+	stoleBefore := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillStole) +
+		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillStole)
+	cyclesBefore := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillCycleDone) +
+		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillCycleDone)
 
 	enginetest.AwaitShardCycles(t, healthy, 1, 10)
 	enginetest.AwaitShardCycles(t, crippled, 1, 10)
-	stole := healthy.Seams().Visits(engine.CheckpointRefillStole) +
-		crippled.Seams().Visits(engine.CheckpointRefillStole) - stoleBefore
-	cycles := healthy.Seams().Visits(engine.CheckpointRefillCycleDone) +
-		crippled.Seams().Visits(engine.CheckpointRefillCycleDone) - cyclesBefore
+	stole := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillStole) +
+		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillStole) - stoleBefore
+	cycles := engineseams.Seams(healthy).Visits(engineseams.CheckpointRefillCycleDone) +
+		engineseams.Seams(crippled).Visits(engineseams.CheckpointRefillCycleDone) - cyclesBefore
 	assert.True(2*stole < cycles,
 		"a fleet whose every class can fill its own batch must mostly not steal (stole on %d of %d cycles)",
 		stole, cycles)

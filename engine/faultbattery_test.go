@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -141,14 +142,14 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		// A's transition tx fails once after A was marked completed with a NON-contention error: persist retries
 		// the transaction in place, so it lands and A runs only ONCE. (It used to run twice - the recovery defer
 		// rewound and re-dispatched it, re-executing the task to recover from a database blip.)
-		{"transitionCommit", func(e *Engine) { e.seams.Inject(seamsJoin(FaultTransitionCommit, "A")) }, 1, 1},
+		{"transitionCommit", func(e *Engine) { e.seams.Inject(engineseams.Join(engineseams.FaultTransitionCommit, "A")) }, 1, 1},
 		// A's transition tx returns a retryable lock-contention error: Transact retries the closure inside the
 		// tx, transparently - A runs only once.
-		{"contention", func(e *Engine) { e.seams.Inject(seamsJoin(FaultContention, "A")) }, 1, 1},
+		{"contention", func(e *Engine) { e.seams.Inject(engineseams.Join(engineseams.FaultContention, "A")) }, 1, 1},
 		// B's flow-completion tx fails once after B was marked completed (B is the terminal node) with a
 		// non-contention error: persist retries the transaction in place, so B runs only ONCE. (It used to run
 		// twice - the recovery defer rewound and re-dispatched it.)
-		{"completeFlowCommit", func(e *Engine) { e.seams.Inject(FaultCompleteFlowCommit) }, 1, 1},
+		{"completeFlowCommit", func(e *Engine) { e.seams.Inject(engineseams.FaultCompleteFlowCommit) }, 1, 1},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -200,7 +201,7 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		// A's completion write carries a stale lease generation (a zombie): the fence rejects it, so the step
 		// stays claimable and lease recovery re-runs it cleanly - A ran twice, state preserved.
 		*calls["a"], *calls["b"] = 0, 0
-		e.seams.Inject(seamsJoin(FaultLeaseStaleWrite, "A"))
+		e.seams.Inject(engineseams.Join(engineseams.FaultLeaseStaleWrite, "A"))
 		fk, err := e.Create(ctx, "fbatlease/g", nil, nil)
 		assert.NoError(err)
 		// The 300ms lease must lapse before recovery resets the fenced step; drive the backstop until it does

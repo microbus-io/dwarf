@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -157,16 +158,16 @@ func TestTerminateVsNonFinalCohortArrival_Deterministic(t *testing.T) {
 	r := newCohortRaceRig(t, "tnfa")
 
 	// X completes first, so its arrival is the non-final one. Freeze it before its transition.
-	r.e.seams.Break(CheckpointBeforeTransitionTx)
+	r.e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
 	r.releaseX()
-	assert.True(r.e.seams.WaitTimeout(ctx, CheckpointBeforeTransitionTx, 10*time.Second), "X never reached checkpoint CheckpointBeforeTransitionTx")
+	assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "X never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
 
 	assert.NoError(r.e.Terminate(ctx, r.fk, "test"))
 	before, stepsBefore := r.flowRow(t), r.stepCount(t)
 	assert.Equal(workflow.StatusTerminated, before.status)
 
 	// Release X: its arrival bumps the spawn's counter on the terminated flow.
-	r.e.seams.Resume(CheckpointBeforeTransitionTx)
+	r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
 	r.awaitArrivals(t, 1)
 
 	arrivals, size := r.arrivals(t)
@@ -192,16 +193,16 @@ func TestTerminateVsLastCohortArrival_Deterministic(t *testing.T) {
 	r.releaseX()
 	r.awaitArrivals(t, 1)
 
-	r.e.seams.Break(CheckpointBeforeTransitionTx)
+	r.e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
 	r.releaseY()
-	assert.True(r.e.seams.WaitTimeout(ctx, CheckpointBeforeTransitionTx, 10*time.Second), "Y never reached checkpoint CheckpointBeforeTransitionTx")
+	assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "Y never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
 
 	assert.NoError(r.e.Terminate(ctx, r.fk, "test"))
 	before, stepsBefore := r.flowRow(t), r.stepCount(t)
 	assert.Equal(workflow.StatusTerminated, before.status)
 
 	// Release Y: its bump resolves the cohort, and the guard turns the rest of the transition into a no-op.
-	r.e.seams.Resume(CheckpointBeforeTransitionTx)
+	r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
 	r.awaitArrivals(t, 2)
 
 	arrivals, size := r.arrivals(t)
@@ -228,14 +229,14 @@ func TestCancelVsLastCohortArrival_Deterministic(t *testing.T) {
 	r.releaseX()
 	r.awaitArrivals(t, 1)
 
-	r.e.seams.Break(CheckpointBeforeTransitionTx)
+	r.e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
 	r.releaseY()
-	assert.True(r.e.seams.WaitTimeout(ctx, CheckpointBeforeTransitionTx, 10*time.Second), "Y never reached checkpoint CheckpointBeforeTransitionTx")
+	assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "Y never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
 
 	assert.NoError(r.e.Cancel(ctx, r.fk, "withdrawn"))
 	assert.Equal(workflow.StatusRunning, r.flowRow(t).status) // Cancel does not stop the flow; the mark does
 
-	r.e.seams.Resume(CheckpointBeforeTransitionTx)
+	r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
 	enginetest.AwaitFlowStatus(t, r.e, r.fk, workflow.StatusCancelled, 10*time.Second)
 
 	arrivals, size := r.arrivals(t)

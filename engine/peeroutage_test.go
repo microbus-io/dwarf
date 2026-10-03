@@ -293,7 +293,7 @@ func runFleetOutage(t *testing.T, outage time.Duration) (worstOpen, settledOpen,
 // But the stall that makes the rows look dead is the same stall that holds each replica's own BEAT, and both
 // are released together. Measured at a 45-second outage - comfortably past the window - no replica ever
 // published a smaller fleet, because the held beats re-stamp every row alongside the reads that resume.
-// Suppressing the beats at the moment of resume (FaultPeerBeatErr, injected just before the bytes flow) is
+// Suppressing the beats at the moment of resume (engineseams.FaultPeerBeatErr, injected just before the bytes flow) is
 // what makes the fleet fall to one and the pools grow to the full 48 - confirming both that the window really
 // had lapsed and that the beats are what carry the fleet across it. So the storm needs peers that genuinely
 // died, which is a different test and an instant one (see TestPeerFault_BlindHoldsThePoolsAndFailsOpen, which

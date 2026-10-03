@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
@@ -230,7 +231,7 @@ func run() error {
 			setters = append(setters, eng.SetMaxOpenConns(*maxOpenConns))
 		}
 		if *refillIntervalMs > 0 {
-			setters = append(setters, eng.SetRefillInterval(time.Duration(*refillIntervalMs)*time.Millisecond))
+			setters = append(setters, engineseams.SetRefillInterval(eng, time.Duration(*refillIntervalMs)*time.Millisecond))
 		}
 		for _, setter := range setters {
 			if setter != nil {

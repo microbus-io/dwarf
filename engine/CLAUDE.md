@@ -1024,9 +1024,9 @@ stale, with the entire due backlog streamed every few ms.
 **Do not move the fuse back into the derivation as a clamp on the period.** `MinGap` bounds the quiet time
 between the END of one cycle and the START of the next, and that is the STRONGER form: a start-to-start
 minimum cannot bound a cycle that outruns it, which is exactly the deep-backlog case the fuse exists for. Inert in
-the derived path (~67ms), so a healthy configuration pays nothing, and
-`SetRefillInterval` lowers the gap to match a pinned interval when that is tighter, so a bench sweep can
-still measure the unlimited arm; it never raises it, so a 500ms pin keeps the ordinary 20ms gap.
+the derived path (~67ms), so a healthy configuration pays nothing, and the bench's refill-interval override
+(`setRefillInterval`, reached through `internal/engineseams`) lowers the gap to match a pinned interval when that
+is tighter, so a bench sweep can still measure the unlimited arm; it never raises it, so a 500ms pin keeps the ordinary 20ms gap.
 
 Liveness is unaffected: a cycle always runs, so a drained-early partition waits at most the remainder of the
 period. Pinned by `TestRefillInterval_DeepBacklogLiveness` (a deep backlog still drains under a period
@@ -4062,11 +4062,16 @@ deterministically:
 
 **Both are inert in production by construction:** every consult short-circuits on the `enabled` bool the engine
 passes to `seamster.New` (cached from `testing.Testing()` in `NewEngine`), so a production binary pays a single
-bool read per site and neither seam can arm or fire. The mechanism lives in the `seamster` package;
-`engineundertest.go` holds **only the names** (a pure catalogue folded in beside the test-support constructor
-and the `DB`/`Seams` accessors), so the valid set stays discoverable and a test cannot arm a fault or
-checkpoint no site consumes. The names stay in `package engine` - unlike the shared test helpers, which belong
-in a test-only package - because they are fired from production engine code, not only from tests.
+bool read per site and neither seam can arm or fire. The mechanism lives in the `seamster` package; the
+names, `Join` for their targeted forms, and the `DB`/`Seams` accessors live in `internal/engineseams`, so the
+valid set stays discoverable, a test cannot arm a fault or checkpoint no site consumes, and none of it is on
+the engine's exported surface. `engineundertest.go`'s `init` fills the two accessors (function variables taking
+`any`, since `engineseams` cannot import `engine`).
+
+**`engineseams` must stay production-safe:** engine production code imports it for the names, so it must not
+import `testing`, `testarossa` or anything test-only - which is why the names cannot live in
+`internal/enginetest`, the shared test helpers. And it must not import `engine`, or the pair is an import
+cycle.
 
 **Consults are written inline at the site they affect, never wrapped in a helper.** A wrapper puts the fault's
 effect a jump away from the code it perturbs, which is exactly backwards for a seam whose whole purpose is to be

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -54,14 +55,14 @@ func TestCancelInTransitionGap(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze A after its completion write, before the transition inserts B.
-	e.seams.Break(CheckpointBeforeTransitionTx)
+	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cgap/g", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint CheckpointBeforeTransitionTx")
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
 
 	// Cancel lands in the gap: A is completed and B does not exist, so the per-step mark finds nothing.
 	assert.NoError(e.Cancel(ctx, fk, "gap reason"))
-	e.seams.Resume(CheckpointBeforeTransitionTx)
+	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
 
 	outcome, err := e.Await(ctx, fk)
 	if !assert.NoError(err) {
@@ -119,10 +120,10 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 	<-aStarted
 
 	// Cancel commits its watermark while A is running, and is held before it marks anything.
-	e.seams.Break(CheckpointCancelBeforeMark)
+	e.seams.Break(engineseams.CheckpointCancelBeforeMark)
 	cancelled := make(chan error, 1)
 	go func() { cancelled <- e.Cancel(ctx, fk, "window") }()
-	assert.True(e.seams.WaitTimeout(ctx, CheckpointCancelBeforeMark, 10*time.Second), "Cancel never reached its mark")
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointCancelBeforeMark, 10*time.Second), "Cancel never reached its mark")
 
 	// A finishes unmarked; B inherits the cancellation (A is at or below the watermark and was not covered),
 	// is preempted, and routes to H - inserted above the watermark, unmarked.
@@ -134,7 +135,7 @@ func TestCancelMarkSparesAHandlerInsertedAfterTheWatermark(t *testing.T) {
 	}
 
 	// Now the mark runs, with H in flight.
-	e.seams.Resume(CheckpointCancelBeforeMark)
+	e.seams.Resume(engineseams.CheckpointCancelBeforeMark)
 	assert.NoError(<-cancelled)
 	close(hGo)
 

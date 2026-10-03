@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -34,7 +35,7 @@ func flowBudgetMs(t *testing.T, e *engine.Engine, flowKey string) int {
 	assert := testarossa.For(t)
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	db, err := e.DB().Shard(shardNum)
+	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&ms)
@@ -48,7 +49,7 @@ func entryStepBudgetMs(t *testing.T, e *engine.Engine, flowKey string) int {
 	assert := testarossa.For(t)
 	shardNum, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	db, err := e.DB().Shard(shardNum)
+	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
 	var ms int
 	err = db.QueryRowContext(context.Background(), "SELECT time_budget_ms FROM dwarf_steps WHERE flow_id=? ORDER BY step_id LIMIT_OFFSET(1, 0)", flowID).Scan(&ms)
@@ -134,7 +135,7 @@ func TestTimeBudget_LeaseSizedFromRow(t *testing.T) {
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.DB().Shard(shardNum)
+	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
 	var leaseRemainingMs float64
 	var budgetMs int
@@ -194,7 +195,7 @@ func TestTimeBudget_InheritedBySubgraph(t *testing.T) {
 	// The child flow (surgraph_flow_id > 0) carries the parent's 45s budget, not the 30s default.
 	shardNum, _, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.DB().Shard(shardNum)
+	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
 	var childBudgetMs int
 	err = db.QueryRowContext(ctx, "SELECT time_budget_ms FROM dwarf_flows WHERE surgraph_flow_id > 0 ORDER BY flow_id DESC LIMIT_OFFSET(1, 0)").Scan(&childBudgetMs)

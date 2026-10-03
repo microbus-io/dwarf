@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -143,7 +144,7 @@ func TestPeerRegistryBlindflow(t *testing.T) {
 	// stopped existing.
 	drainFlows(t, 30*time.Second, creator, name, 4)
 	for _, e := range []*engine.Engine{creator, eng1, eng2} {
-		e.Seams().InjectN(engine.FaultPeerReadErr, 1<<20)
+		engineseams.Seams(e).InjectN(engineseams.FaultPeerReadErr, 1<<20)
 	}
 
 	before := ran["1"].Load() + ran["2"].Load()
@@ -179,13 +180,13 @@ func TestPeerStalledDispatcherflow(t *testing.T) {
 
 	// eng2's supply cycle fails from here on. It goes on beating - so it stays in the POOL divisor, which is
 	// correct, it still holds connections - but publishes no dispatch evidence.
-	eng2.Seams().InjectN(engine.FaultRefillScanErr, 1<<20)
+	engineseams.Seams(eng2).InjectN(engineseams.FaultRefillScanErr, 1<<20)
 
 	// Arm BEFORE the work exists, then check Visits after: a steal landing between the two lines is caught by
 	// the channel, one before them by the count. The reverse order reintroduces the race the split-arm Waiter
 	// exists to remove.
-	stole := eng1.Seams().Waiter(engine.CheckpointRefillStole)
-	visitsBefore := eng1.Seams().Visits(engine.CheckpointRefillStole)
+	stole := engineseams.Seams(eng1).Waiter(engineseams.CheckpointRefillStole)
+	visitsBefore := engineseams.Seams(eng1).Visits(engineseams.CheckpointRefillStole)
 
 	before := ran["1"].Load()
 	keys := createFlows(t, creator, name, 20)
@@ -204,7 +205,7 @@ func TestPeerStalledDispatcherflow(t *testing.T) {
 	// 4.3s, 6.7s and 31.2s on runs where this steal assertion passed, so the clock was reporting the suite's
 	// load and not the mechanism. The takeover itself is one grace (4 cycle periods, ~100ms here) behind the
 	// first Create. Measured ~150ms.
-	stolen := visitsBefore != eng1.Seams().Visits(engine.CheckpointRefillStole)
+	stolen := visitsBefore != engineseams.Seams(eng1).Visits(engineseams.CheckpointRefillStole)
 	if !stolen {
 		select {
 		case <-stole:

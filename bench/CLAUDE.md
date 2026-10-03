@@ -353,6 +353,7 @@ masquerade as a partitioning cost), `-fairness-keys`, `-vcpus`, `-max-open-conns
 run — the only way to see the crew shrink), `-stats-interval` (periodic readout), `-pprof` (CPU + heap
 profiles).
 
-Test-only knobs the bench CANNOT reach: `Engine.Seams()` and `Engine.DB()` panic outside a test binary, so
-fault injection and `sequel`'s `SimulateRTT` are available to fixtures but not here. Reaching them from a
+Test-only knobs the bench CANNOT reach: the engine's seams are enabled only under `testing.Testing()`, so
+arming one from `internal/engineseams` in a bench binary does nothing, and fault injection and `sequel`'s
+`SimulateRTT` are available to fixtures but not here. Reaching them from a
 benchmark needs real API, not a back door.

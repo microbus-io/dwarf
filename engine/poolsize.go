@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 )
@@ -632,7 +633,7 @@ func effectiveVirtualCPUs(declared int) int {
 // clear the parallel register + read + probe, which are a couple of statements per shard.
 const startupBootstrapConns = 4
 
-// slowPoolPushDelay is how long the FaultSlowPoolPush seam stalls a recompute between reading R and pushing
+// slowPoolPushDelay is how long the engineseams.FaultSlowPoolPush seam stalls a recompute between reading R and pushing
 // the derived sizes. Test-only (the fault is inert in production); a var so it stays adjustable.
 var slowPoolPushDelay = 200 * time.Millisecond
 
@@ -696,7 +697,7 @@ func (e *Engine) recomputePools() {
 	// recompute here to hold a stale reading while a peer's fresher one races past (see TestPoolSizing_-
 	// ConcurrentRecomputeAppliesLatestR). Deliberately a FAULT, not a checkpoint: a breakpoint would freeze
 	// the racing recompute at this same site too, and the test needs it to run through.
-	if e.seams.IsFault(FaultSlowPoolPush) {
+	if e.seams.IsFault(engineseams.FaultSlowPoolPush) {
 		time.Sleep(slowPoolPushDelay)
 	}
 	postSplitConns := 0
@@ -738,7 +739,7 @@ func (e *Engine) recomputePools() {
 			db.SetMaxOpenConns(open)
 			db.SetMaxIdleConns(idle)
 			if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
-				e.seams.Variable(seamsJoin(VariablePoolIdle, strconv.Itoa(idx)), idle)
+				e.seams.Variable(engineseams.Join(engineseams.VariablePoolIdle, strconv.Itoa(idx)), idle)
 			}
 			// The turnstile follows the pool for the same reason the cache and the worker ceiling do: it
 			// orders access to the connections this replica actually holds, and the pool just changed. Resize

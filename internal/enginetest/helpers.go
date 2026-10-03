@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -58,7 +59,7 @@ func FlowStatus(t *testing.T, e Engine, flowKey string) string {
 	assert := testarossa.For(t)
 	shard, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
-	db, err := e.DB().Shard(shard)
+	db, err := engineseams.DB(e).Shard(shard)
 	assert.NoError(err)
 	var status string
 	assert.NoError(db.QueryRowContext(context.Background(), "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&status))
@@ -69,7 +70,7 @@ func FlowStatus(t *testing.T, e Engine, flowKey string) string {
 func CountRows(t *testing.T, e Engine, shard int, query string, args ...any) int {
 	t.Helper()
 	assert := testarossa.For(t)
-	db, err := e.DB().Shard(shard)
+	db, err := engineseams.DB(e).Shard(shard)
 	if !assert.NoError(err) {
 		return -1
 	}

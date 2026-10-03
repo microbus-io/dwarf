@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
@@ -75,7 +76,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	awaitPartition(t, e, 1, 3, -1)
 
 	// The registry stops answering on this shard.
-	e.seams.InjectN(FaultPeerReadErr, 1<<20)
+	e.seams.InjectN(engineseams.FaultPeerReadErr, 1<<20)
 
 	// The fleet is HELD. Even after the peers' rows are deleted outright, this replica cannot see it, so it
 	// must go on sizing for three - the safe direction, and the one a blip must not undo.
@@ -94,7 +95,7 @@ func TestPeerFault_BlindHoldsThePoolsAndFailsOpen(t *testing.T) {
 	// Reading resumes. The first reading back must not shrink the fleet - this is the correlated stall,
 	// where a database hiccup makes every row look stale at once and every replica would otherwise size for
 	// a fleet of one simultaneously. It settles on the reading after that.
-	e.seams.Withdraw(FaultPeerReadErr)
+	e.seams.Withdraw(engineseams.FaultPeerReadErr)
 	assert.Equal(budget8(e, 1), awaitPoolSize(t, db, budget8(e, 1)), "the fleet really did shrink, so the budget comes back")
 	assert.Equal(1, e.replicasOn(1))
 }
@@ -127,7 +128,7 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 	assert.Equal(open8(e, 2, 2), awaitPoolSize(t, db2, open8(e, 2, 2)))
 
 	// Blind shard 1 only, then take the peer away everywhere.
-	e.seams.InjectN(seamsJoin(FaultPeerReadErr, "1"), 1<<20)
+	e.seams.InjectN(engineseams.Join(engineseams.FaultPeerReadErr, "1"), 1<<20)
 	assert.NoError(e.db.OnEach(context.Background(), func(ctx context.Context, sdb *sequel.DB, shard int) error {
 		_, derr := sdb.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=6001")
 		return derr
@@ -174,7 +175,7 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 
 	// The peer loses the ability to prove it is alive. It keeps running - it just goes silent in the
 	// registry - so nothing about it changes except what its own row says.
-	peer.seams.InjectN(FaultPeerBeatErr, 1<<20)
+	peer.seams.InjectN(engineseams.FaultPeerBeatErr, 1<<20)
 
 	// The worker drops it from the WORK divisor once its dispatch evidence ages out, and stops partitioning:
 	// with one dispatcher left there is nothing to divide, so the survivor selects everything. That is the

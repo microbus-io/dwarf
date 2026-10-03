@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -427,17 +428,17 @@ func TestChaosSoak_Faults(t *testing.T) {
 		scoped bool // append a random task node name as the scope
 	}
 	faultSpecs := []faultSpec{
-		{FaultTransitionCommit, true},
-		{FaultContention, true},
-		{FaultLeaseStaleWrite, true},
-		{FaultCompleteFlowCommit, false},
-		{FaultDropSignalStop, false},
-		{FaultDropDoorbell, false},
-		{FaultSubgraphReviveLost, false},
-		{FaultRefillScanErr, false},
+		{engineseams.FaultTransitionCommit, true},
+		{engineseams.FaultContention, true},
+		{engineseams.FaultLeaseStaleWrite, true},
+		{engineseams.FaultCompleteFlowCommit, false},
+		{engineseams.FaultDropSignalStop, false},
+		{engineseams.FaultDropDoorbell, false},
+		{engineseams.FaultSubgraphReviveLost, false},
+		{engineseams.FaultRefillScanErr, false},
 	}
 	if longsoak {
-		faultSpecs = append(faultSpecs, faultSpec{FaultReapMidTree, false})
+		faultSpecs = append(faultSpecs, faultSpec{engineseams.FaultReapMidTree, false})
 	}
 	// The graph-node names across the three chaos shapes (the scope for task-scoped faults).
 	taskNodes := []string{"A", "B", "C", "D", "S", "P", "Q", "R", "J", "P0", "CA", "CB", "CC"}
@@ -448,7 +449,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 		fs := faultSpecs[rng.intn(len(faultSpecs))]
 		armedMu.Lock()
 		if fs.scoped {
-			eng.seams.Inject(seamsJoin(fs.name, taskNodes[rng.intn(len(taskNodes))]))
+			eng.seams.Inject(engineseams.Join(fs.name, taskNodes[rng.intn(len(taskNodes))]))
 			armed[fs.name] = taskNodes[rng.intn(len(taskNodes))]
 		} else {
 			eng.seams.Inject(fs.name)
@@ -525,7 +526,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 	armedMu.Lock()
 	for name, scope := range armed {
 		if scope != "" {
-			eng.seams.Withdraw(seamsJoin(name, scope))
+			eng.seams.Withdraw(engineseams.Join(name, scope))
 		} else {
 			eng.seams.Withdraw(name)
 		}

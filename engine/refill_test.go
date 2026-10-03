@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/pipeline"
 
 	"github.com/microbus-io/dwarf/workflow"
@@ -96,8 +97,8 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	assert.NoError(e.SetHost(proxy))
 	assert.NoError(e.Startup(t.Context()))
 
-	// FaultDropDoorbell removes the local Offer entirely, so nothing but a cycle can discover this step.
-	e.seams.InjectN(FaultDropDoorbell, 1<<20)
+	// engineseams.FaultDropDoorbell removes the local Offer entirely, so nothing but a cycle can discover this step.
+	e.seams.InjectN(engineseams.FaultDropDoorbell, 1<<20)
 	k, err := e.Create(ctx, "notrigger/g", nil, nil)
 	if !assert.NoError(err) {
 		return
@@ -110,7 +111,7 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 	}
 }
 
-// TestRefillInterval_OverridePinsAndRestores pins the benchmarking override (SetRefillInterval): a
+// TestRefillInterval_OverridePinsAndRestores pins the benchmarking override (setRefillInterval): a
 // positive value pins every piston's period, and <=0 restores derivation. It exists so a scan-rate sweep
 // can hold the period at a series of fixed values; the derived value is otherwise not externally settable.
 func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
@@ -144,7 +145,7 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 
 	// The override pins BOTH loops - it exists to measure the refiller unpaced, and pacing half of it would
 	// measure neither arm.
-	assert.NoError(e.SetRefillInterval(42 * time.Millisecond))
+	assert.NoError(e.setRefillInterval(42 * time.Millisecond))
 	ti, _ := e.pistons[1].TallyCadence()
 	si, _ := e.pistons[1].SupplyCadence()
 	assert.Equal(42*time.Millisecond, ti, "the override pins the tally loop live")
@@ -153,7 +154,7 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 	// Restoring must restore BOTH loops. A regression that re-derived only the tally cadence would leave the
 	// supply loop pinned at the sweep's last value forever - and the sweep that set it has moved on, so the
 	// arm it is still pacing at is one nobody is measuring.
-	assert.NoError(e.SetRefillInterval(0))
+	assert.NoError(e.setRefillInterval(0))
 	ti, tg := e.pistons[1].TallyCadence()
 	si, sg := e.pistons[1].SupplyCadence()
 	assert.Equal(derived, ti, "<=0 restores derivation")
@@ -301,7 +302,7 @@ func TestRefillInterval_DeepBacklogLiveness(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(proxy)
 	e.SetWorkers(1)                                            // capacity 2, against a backlog of 10
-	assert.NoError(e.SetRefillInterval(50 * time.Millisecond)) // the over-limiting regime; must still drain, just slower
+	assert.NoError(e.setRefillInterval(50 * time.Millisecond)) // the over-limiting regime; must still drain, just slower
 	assert.NoError(e.Startup(t.Context()))
 
 	keys := make([]string, 10)
@@ -405,4 +406,40 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 			assert.Equal(oldest, one[key][0], "the single fetched row for %q is its oldest step", key)
 		}
 	}
+}
+
+// TestRefillInterval_OverrideSerializesWithAPoolRecompute pins that the override takes poolsLock.
+// recomputePools reads the override and then pushes cadences under that lock, so an override stored between
+// the two would be overwritten by derived cadences and stay lost until the next role change. Holding the lock
+// here stands in for a recompute mid-flight: the override must apply nothing until it is released.
+func TestRefillInterval_OverrideSerializesWithAPoolRecompute(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.Startup(t.Context()))
+	derived, _ := e.pistons[1].SupplyCadence()
+	const pinned = 42 * time.Millisecond
+	if !assert.NotEqual(pinned, derived, "fixture: the pin must differ from the derived period") {
+		return
+	}
+
+	e.poolsLock.Lock()
+	done := make(chan struct{})
+	go func() {
+		assert.NoError(e.setRefillInterval(pinned))
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Error("the override applied while a pool recompute held poolsLock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	si, _ := e.pistons[1].SupplyCadence()
+	assert.Equal(derived, si, "nothing is pushed while a recompute holds the lock")
+	e.poolsLock.Unlock()
+	<-done
+	si, _ = e.pistons[1].SupplyCadence()
+	assert.Equal(pinned, si, "the override applies once the recompute is done")
 }

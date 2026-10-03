@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/candidates"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -69,8 +70,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		graph, lerr = e.host.LoadGraph(loaderCtx, workflowURL)
 		return lerr
 	})
-	if err == nil && e.seams.Enabled() && e.seams.IsFault(seamsJoin(FaultLoadGraph, workflowURL)) {
-		err = errors.New("injected fault: "+FaultLoadGraph+" "+workflowURL, http.StatusInternalServerError)
+	if err == nil && e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultLoadGraph, workflowURL)) {
+		err = errors.New("injected fault: "+engineseams.FaultLoadGraph+" "+workflowURL, http.StatusInternalServerError)
 	}
 	if err != nil {
 		return "", errors.Trace(err)
@@ -529,13 +530,13 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 	// test waiting on "the flow stopped" should observe the DB-committed stop regardless of wake delivery.
 	// Inert in production: the Enabled gate short-circuits before the scoped name is built.
 	if e.seams.Enabled() { // Enabled gates the assembled name in production
-		e.seams.Checkpoint(ctx, CheckpointFlowStopped)
-		e.seams.Checkpoint(ctx, seamsJoin(CheckpointFlowStopped, flowKey, status))
+		e.seams.Checkpoint(ctx, engineseams.CheckpointFlowStopped)
+		e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, status))
 	}
-	// FaultDropSignalStop simulates a lost terminal wake - a worker crash between the commit and the
+	// engineseams.FaultDropSignalStop simulates a lost terminal wake - a worker crash between the commit and the
 	// signal - so a test can prove Await still returns without one, via the latch detector reading the
 	// committed row.
-	if e.seams.IsFault(FaultDropSignalStop) {
+	if e.seams.IsFault(engineseams.FaultDropSignalStop) {
 		return
 	}
 	// Guarded, not merely documented: a release is a promise that the flow has settled, and the caller acts
@@ -575,9 +576,9 @@ func (e *Engine) signalStop(ctx context.Context, flowKey string, status string) 
 // revive, resume, fork's leaf, the wedge sweep - where that value is not in hand; the hot paths use
 // enqueueStepDue instead and skip the lookup.
 func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
-	// FaultDropDoorbell simulates a lost work doorbell so a test can prove the pending step is still picked
+	// engineseams.FaultDropDoorbell simulates a lost work doorbell so a test can prove the pending step is still picked
 	// up by a later refiller scan rather than stranding.
-	if e.seams.IsFault(FaultDropDoorbell) {
+	if e.seams.IsFault(engineseams.FaultDropDoorbell) {
 		return
 	}
 	// Every caller of this cold path is RE-offering a step this replica already dispatched once - a revived
@@ -621,8 +622,8 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 // replica just wrote. Use it only where due-ness is certain (the caller's own sleep/not_before branch
 // already diverged) and the priority is the value just bound into the INSERT/reset.
 func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int) {
-	// FaultDropDoorbell: see enqueueStep.
-	if e.seams.IsFault(FaultDropDoorbell) {
+	// engineseams.FaultDropDoorbell: see enqueueStep.
+	if e.seams.IsFault(engineseams.FaultDropDoorbell) {
 		return
 	}
 	// ONLY A DISPATCHER MAY RING ITS OWN BELL. The cache admits a step for any shard, and whoever pops it
@@ -680,7 +681,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
 	// sweep shares. A racing terminalization that empties the flow UPDATE is a 409 here: the caller asked to stop
 	// something that had already stopped.
-	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowToken, reason, FaultTerminateCommit, true))
+	return errors.Trace(e.terminateSubtree(ctx, shardNum, flowID, flowToken, reason, engineseams.FaultTerminateCommit, true))
 }
 
 // cancel marks every pending, running or interrupted step in the tree with cancelling=1. Each marked step
@@ -774,7 +775,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	if err != nil {
 		return errors.Trace(err)
 	}
-	e.seams.Checkpoint(ctx, CheckpointCancelBeforeMark)
+	e.seams.Checkpoint(ctx, engineseams.CheckpointCancelBeforeMark)
 	// The mark reaches only steps at or below their flow's watermark. A step above it was inserted after the
 	// watermark committed, and its insert already decided its mark - inherited if its source was reached by
 	// this Cancel, not if its source was covered. Unbounded, the mark would catch the onError handler of a
@@ -813,8 +814,8 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 
 	// Test checkpoint: a breakpoint here freezes Delete just before its transaction (holding no lock, so a
 	// racing Resume can commit), letting a test drive the Delete-vs-Resume race in either order. Placed before
-	// the transaction, not inside, for the same SQLite-deadlock reason as CheckpointResumeBeforeFlowWrite.
-	e.seams.Checkpoint(ctx, CheckpointBeforeDeleteWrite)
+	// the transaction, not inside, for the same SQLite-deadlock reason as engineseams.CheckpointResumeBeforeFlowWrite.
+	e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeDeleteWrite)
 	return errors.Trace(db.Transact(ctx, func(tx *sequel.Tx) error {
 		var flowStatus string
 		var surgraphFlowID, deleteAfterMs int

@@ -216,7 +216,7 @@ func TestLatchResolve_RecentStopScanIsOnlyAnOptimization(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.DB().Shard(shard)
+	db, err := e.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
 	}

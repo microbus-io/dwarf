@@ -17,7 +17,7 @@ limitations under the License.
 // Package enginetest holds the engine test helpers that are shared across package boundaries - by the
 // white-box tests that stay in package engine AND by the black-box tests in the fixtures package. A helper
 // lands here only when it is (a) used from more than one package and (b) expressible through the engine's
-// exported test surface alone (the DB and Seams accessors and the public operations). A helper that needs an
+// public operations and the internal/engineseams accessors alone. A helper that needs an
 // unexported internal (driveLeaseRecovery calling recoverExpiredLeases, startSolo touching testConnCap, the
 // peer-row writers) cannot live here and stays in package engine with the white-box tests that use it.
 //
@@ -31,37 +31,23 @@ package enginetest
 import (
 	"context"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/testarossa"
 )
 
-// Engine is the slice of *engine.Engine's exported test surface these helpers use. Defining it here (rather
-// than importing engine) is what keeps this package free of the import cycle described in the package doc;
-// *engine.Engine satisfies it structurally.
+// Engine is the slice of *engine.Engine's exported surface these helpers use; the shard set and the seams
+// are reached through internal/engineseams. Defining it here (rather than importing engine) is what keeps
+// this package free of the import cycle described in the package doc; *engine.Engine satisfies it
+// structurally.
 type Engine interface {
-	DB() *database.ShardSet
-	Seams() *seamster.Seamster
 	Run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (string, *workflow.FlowOutcome, error)
 	Await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error)
-}
-
-// checkpointFlowStopped MUST match checkpointFlowStopped. It is duplicated (not imported) only because
-// importing engine here would form the cycle the package doc explains; a drift makes AwaitFlowStatus's wait
-// time out and the test fail loudly, so it cannot go silently wrong.
-const checkpointFlowStopped = "flowStopped"
-
-// seamsJoin MUST join a targeted seam name the way the engine's own seamsJoin does. It is duplicated (not
-// imported) for the same cycle reason as checkpointFlowStopped above; a drift makes a wait here target a name
-// nothing fires, so it times out and fails loudly rather than going quietly wrong.
-func seamsJoin(parts ...string) string {
-	return strings.Join(parts, ":")
 }
 
 // AssertInvariants is the reusable end-of-test sweep that proves a workload never *created* any of the states
@@ -77,8 +63,8 @@ func AssertInvariants(t *testing.T, e Engine) {
 	terminal := "('" + workflow.StatusCompleted + "', '" + workflow.StatusFailed + "', '" + workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "')"
 	nonTerminal := "('" + workflow.StatusCreated + "', '" + workflow.StatusPending + "', '" + workflow.StatusRunning + "', '" + workflow.StatusInterrupted + "')"
 
-	for shard := 1; shard <= e.DB().NumShards(); shard++ {
-		db, err := e.DB().Shard(shard)
+	for shard := 1; shard <= engineseams.DB(e).NumShards(); shard++ {
+		db, err := engineseams.DB(e).Shard(shard)
 		if !assert.NoError(err) {
 			continue
 		}
@@ -158,9 +144,9 @@ func AssertInvariants(t *testing.T, e Engine) {
 // the earlier occurrence (wait on such a status with a Waiter armed around the specific trigger instead).
 func AwaitFlowStatus(t *testing.T, e Engine, flowKey, want string, timeout time.Duration) {
 	t.Helper()
-	stopped := seamsJoin(checkpointFlowStopped, flowKey, want)
-	reached := e.Seams().Waiter(stopped) // arm first...
-	if e.Seams().Visits(stopped) > 0 {
+	stopped := engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, want)
+	reached := engineseams.Seams(e).Waiter(stopped) // arm first...
+	if engineseams.Seams(e).Visits(stopped) > 0 {
 		return // ...then catch a stop that beat us to it
 	}
 	select {
@@ -267,9 +253,9 @@ func AwaitShardCycles(t *testing.T, e Engine, shards, extra int) {
 	// Every shard scans before any shard's pushes are awaited, so no shard can satisfy its push count
 	// against a plan built before a peer had reported.
 	for shard := 1; shard <= shards; shard++ {
-		AwaitVisits(t, e.Seams(), extra, time.Minute, seamsJoin(piston.CheckpointTallyDone, strconv.Itoa(shard)))
+		AwaitVisits(t, engineseams.Seams(e), extra, time.Minute, engineseams.Join(piston.CheckpointTallyDone, strconv.Itoa(shard)))
 	}
 	for shard := 1; shard <= shards; shard++ {
-		AwaitVisits(t, e.Seams(), extra, time.Minute, seamsJoin(piston.CheckpointCycleDone, strconv.Itoa(shard)))
+		AwaitVisits(t, engineseams.Seams(e), extra, time.Minute, engineseams.Join(piston.CheckpointCycleDone, strconv.Itoa(shard)))
 	}
 }

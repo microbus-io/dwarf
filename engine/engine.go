@@ -36,6 +36,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/candidates"
 	"github.com/microbus-io/dwarf/internal/claimstracker"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/lru"
 	"github.com/microbus-io/dwarf/internal/peers"
@@ -562,20 +563,22 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	return nil
 }
 
-// SetRefillInterval is an expert override that PINS every piston's cycle period to d, replacing the value
-// the engine derives from capacity/vCPUs/R (deriveRefillInterval). d <= 0 restores derivation. Operators
-// normally never call this - the derived period tracks the cache sizing it depends on automatically.
+// setRefillInterval is the benchmark override that PINS every piston's cycle period to d, replacing the
+// value the engine derives from capacity/vCPUs/R (deriveRefillInterval); d <= 0 restores derivation. Reached
+// from the bench through internal/engineseams, never by a host.
 //
-// The override exists for benchmarking (scan-rate sweeps): the period is measured, not tuned, so finding
-// its optimum needs to hold it at a series of fixed values - INCLUDING values below the 20ms minimum gap,
-// since the unlimited-scanning arm is one of the measured reference points (it costs 8% candidate churn
-// and a 77% worse p99 while buying no throughput, and that number has to stay reproducible). So a pinned
-// interval also lowers the pipeline's MinGap to match when it is the tighter of the two; restoring
-// derivation restores the default gap. Without that the fuse would silently clamp every sub-20ms arm of a
-// sweep to 20ms and quietly flatten the interesting end of the curve.
+// The override exists for scan-rate sweeps: the period is measured, not tuned, so finding its optimum needs
+// to hold it at a series of fixed values - INCLUDING values below the 20ms minimum gap, since the
+// unlimited-scanning arm is one of the measured reference points (it costs 8% candidate churn and a 77% worse
+// p99 while buying no throughput, and that number has to stay reproducible). So a pinned interval also lowers
+// the pipeline's MinGap to match when it is the tighter of the two; restoring derivation restores the default
+// gap. Without that the fuse would silently clamp every sub-20ms arm of a sweep to 20ms.
 //
-// Live: applies on the next recomputeRefillIntervals, and this triggers one immediately on a running engine.
-func (e *Engine) SetRefillInterval(d time.Duration) error {
+// Live, under poolsLock: recomputePools reads the override and then pushes cadences, so a store landing
+// between the two would be overwritten by derived cadences and stay lost until the next role change.
+func (e *Engine) setRefillInterval(d time.Duration) error {
+	e.poolsLock.Lock()
+	defer e.poolsLock.Unlock()
 	e.refillIntervalOverride.Store(int64(d))
 	if e.started.Load() {
 		e.recomputeRefillIntervals()
@@ -781,7 +784,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 		db.SetMaxOpenConns(open)
 		db.SetMaxIdleConns(idle)
 		if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
-			e.seams.Variable(seamsJoin(VariablePoolIdle, strconv.Itoa(idx)), idle)
+			e.seams.Variable(engineseams.Join(engineseams.VariablePoolIdle, strconv.Itoa(idx)), idle)
 		}
 		// Sized here rather than in initRuntime because it is derived from the pool this loop just set,
 		// and the workers initRuntime starts must never see an unsized shard - which, this failing open,
@@ -856,8 +859,8 @@ func (e *Engine) initRuntime() error {
 	// a subgraph child's or a peer's Await parks alongside it.
 	if e.seams.Enabled() {
 		e.latches.SetOnPark(func(flowKey string) {
-			e.seams.Checkpoint(e.lifetimeCtx, CheckpointAwaitParked)
-			e.seams.Checkpoint(e.lifetimeCtx, seamsJoin(CheckpointAwaitParked, flowKey))
+			e.seams.Checkpoint(e.lifetimeCtx, engineseams.CheckpointAwaitParked)
+			e.seams.Checkpoint(e.lifetimeCtx, engineseams.Join(engineseams.CheckpointAwaitParked, flowKey))
 		})
 	}
 	e.latchStop = make(chan struct{})

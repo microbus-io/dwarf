@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -81,11 +82,11 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 
 	// Freeze resume at the checkpoint before its transaction, then launch it. The wait returns once resume is
 	// frozen there, whether it arrives before or after the wait is armed.
-	e.seams.Break(CheckpointResumeBeforeFlowWrite)
+	e.seams.Break(engineseams.CheckpointResumeBeforeFlowWrite)
 	resumeDone := make(chan error, 1)
 	go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 
-	assert.True(e.seams.WaitTimeout(ctx, CheckpointResumeBeforeFlowWrite, 10*time.Second), "Resume never reached the checkpoint")
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointResumeBeforeFlowWrite, 10*time.Second), "Resume never reached the checkpoint")
 
 	// Resume is frozen before its flow-status gate write. Drive a Delete to completion: it flips the flow
 	// interrupted->terminated and stamps delete_after_ms under the flow-row lock.
@@ -93,7 +94,7 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 
 	// Release Resume: its transaction now runs, the gate write finds the flow no longer interrupted, and the
 	// whole transaction rolls back.
-	e.seams.Resume(CheckpointResumeBeforeFlowWrite)
+	e.seams.Resume(engineseams.CheckpointResumeBeforeFlowWrite)
 	select {
 	case resumeErr := <-resumeDone:
 		assert.Error(resumeErr)
@@ -224,16 +225,16 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze A after it is marked completed, before it inserts B.
-	e.seams.Break(CheckpointBeforeTransitionTx)
+	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cvt/g", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint CheckpointBeforeTransitionTx")
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
 
 	// Terminate wins while A's transition is held: the flow goes terminated under the flow-row lock.
 	assert.NoError(e.Terminate(ctx, fk, "test"))
 
 	// Release A: its transition tx's guard (status NOT IN terminal) matches zero rows and inserts nothing.
-	e.seams.Resume(CheckpointBeforeTransitionTx)
+	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
@@ -291,16 +292,16 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 	defer close(xRelease)
 
 	// Freeze the caller after it parked, before createSubgraphFlow inserts the child.
-	e.seams.Break(CheckpointAfterCallerPark)
+	e.seams.Break(engineseams.CheckpointAfterCallerPark)
 	fk, err := e.Create(ctx, "cvs/parent", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, CheckpointAfterCallerPark, 10*time.Second), "engine never reached checkpoint CheckpointAfterCallerPark")
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointAfterCallerPark, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointAfterCallerPark")
 
 	// Terminate the tree while the child does not yet exist: teardown works from a scan taken before the child.
 	assert.NoError(e.Terminate(ctx, fk, "test"))
 
 	// Release the caller: createSubgraphFlow now inserts the child under the already-terminated parent - orphan.
-	e.seams.Resume(CheckpointAfterCallerPark)
+	e.seams.Resume(engineseams.CheckpointAfterCallerPark)
 
 	shardNum, parentFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
@@ -365,16 +366,16 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	// Freeze A before its retry rewind.
-	e.seams.Break(CheckpointBeforeRetryRewind)
+	e.seams.Break(engineseams.CheckpointBeforeRetryRewind)
 	fk, err := e.Create(ctx, "rrc/g", nil, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, CheckpointBeforeRetryRewind, 10*time.Second), "engine never reached checkpoint CheckpointBeforeRetryRewind")
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeRetryRewind, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeRetryRewind")
 
 	// Terminate wins: A's running step is flipped terminated under the terminate transaction.
 	assert.NoError(e.Terminate(ctx, fk, "test"))
 
 	// Release A: the rewind's status='running' guard matches zero rows, so the terminated step is not revived.
-	e.seams.Resume(CheckpointBeforeRetryRewind)
+	e.seams.Resume(engineseams.CheckpointBeforeRetryRewind)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)

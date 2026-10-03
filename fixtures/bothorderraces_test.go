@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -35,7 +36,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// The checkpoint rendezvous is e.Seams().WaitTimeout; awaitFlowStatus (checkpointhelpers_test.go) is the
+// The checkpoint rendezvous is engineseams.Seams(e).WaitTimeout; awaitFlowStatus (checkpointhelpers_test.go) is the
 // flow-status wait shared by every checkpoint-driven test.
 
 // TestCompleteFlowVsTerminate_BothOrders pins the completeFlow-vs-Terminate race in both directions. The window:
@@ -66,17 +67,17 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 		defer e.Shutdown(ctx)
 
 		// Freeze the worker just before completeFlow's transaction (A is already marked completed).
-		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
+		engineseams.Seams(e).Break(engineseams.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
+		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeCompleteFlowWrite")
 
 		// Terminate wins while completion is held: the flow goes terminated under the flow-row lock.
 		assert.NoError(e.Terminate(ctx, fk, "test"))
 
 		// Release completion: its status-gate write (status NOT IN terminal) matches zero rows - a clean no-op,
 		// the flow stays terminated.
-		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
+		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, e, fk))
 		enginetest.AssertInvariants(t, e)
@@ -89,11 +90,11 @@ func TestCompleteFlowVsTerminate_BothOrders(t *testing.T) {
 		defer e.Shutdown(ctx)
 
 		// Freeze at the same window, then release completion FIRST so the flow completes.
-		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
+		engineseams.Seams(e).Break(engineseams.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
-		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
+		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeCompleteFlowWrite")
+		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
 		enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, 10*time.Second)
 
 		// Terminate now arrives on a terminal flow: it 409s and the flow stays completed.
@@ -163,22 +164,22 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		fk := createInterrupted(t, e, "dvr1/g")
 
 		// Freeze both operations before their transactions, then launch them.
-		e.Seams().Break(engine.CheckpointResumeBeforeFlowWrite)
-		e.Seams().Break(engine.CheckpointBeforeDeleteWrite)
+		engineseams.Seams(e).Break(engineseams.CheckpointResumeBeforeFlowWrite)
+		engineseams.Seams(e).Break(engineseams.CheckpointBeforeDeleteWrite)
 		resumeDone := make(chan error, 1)
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointResumeBeforeFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointResumeBeforeFlowWrite")
-		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeDeleteWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeDeleteWrite")
+		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointResumeBeforeFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointResumeBeforeFlowWrite")
+		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeDeleteWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeDeleteWrite")
 
 		// Resume wins: released first, it flips interrupted->running and returns cleanly (the gate re-dispatches
 		// and blocks, so the flow rests running).
-		e.Seams().Resume(engine.CheckpointResumeBeforeFlowWrite)
+		engineseams.Seams(e).Resume(engineseams.CheckpointResumeBeforeFlowWrite)
 		assert.NoError(<-resumeDone)
 
 		// Delete now sees a running flow -> 409, and never stamps deletion.
-		e.Seams().Resume(engine.CheckpointBeforeDeleteWrite)
+		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeDeleteWrite)
 		delErr := <-deleteDone
 		assert.Error(delErr)
 		assert.Equal(409, errors.StatusCode(delErr))
@@ -196,22 +197,22 @@ func TestDeleteVsResume_BothOrders(t *testing.T) {
 		defer close(gateBlock)
 		fk := createInterrupted(t, e, "dvr2/g")
 
-		e.Seams().Break(engine.CheckpointResumeBeforeFlowWrite)
-		e.Seams().Break(engine.CheckpointBeforeDeleteWrite)
+		engineseams.Seams(e).Break(engineseams.CheckpointResumeBeforeFlowWrite)
+		engineseams.Seams(e).Break(engineseams.CheckpointBeforeDeleteWrite)
 		resumeDone := make(chan error, 1)
 		deleteDone := make(chan error, 1)
 		go func() { resumeDone <- e.Resume(ctx, fk, nil) }()
 		go func() { deleteDone <- e.Delete(ctx, fk) }()
-		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointResumeBeforeFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointResumeBeforeFlowWrite")
-		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeDeleteWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeDeleteWrite")
+		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointResumeBeforeFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointResumeBeforeFlowWrite")
+		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeDeleteWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeDeleteWrite")
 
 		// Delete wins: released first, it flips interrupted->terminated and stamps deletion, returning cleanly.
-		e.Seams().Resume(engine.CheckpointBeforeDeleteWrite)
+		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeDeleteWrite)
 		assert.NoError(<-deleteDone)
 
 		// Resume now finds the flow no longer interrupted: its gate write matches zero rows, the whole
 		// transaction rolls back, and it returns an honest 409 (not a silent success).
-		e.Seams().Resume(engine.CheckpointResumeBeforeFlowWrite)
+		engineseams.Seams(e).Resume(engineseams.CheckpointResumeBeforeFlowWrite)
 		resErr := <-resumeDone
 		assert.Error(resErr)
 		assert.Equal(409, errors.StatusCode(resErr))
@@ -295,7 +296,7 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	assert.NoError(err)
 	shard, parentFlowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.DB().Shard(shard)
+	db, err := engineseams.DB(e).Shard(shard)
 	assert.NoError(err)
 
 	callPayload := func() string {

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -45,10 +46,10 @@ import (
 // so nothing is traded away by leaving generous room for a loaded server and for -race.
 func awaitPropagatedInterrupts(t *testing.T, eng *engine.Engine, flowKey string, want int) {
 	t.Helper()
-	seams := eng.Seams()
+	seams := engineseams.Seams(eng)
 	for {
-		reached := seams.Waiter(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
-		got := seams.Visits(seamsJoin(engine.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
+		reached := seams.Waiter(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
+		got := seams.Visits(engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, workflow.StatusInterrupted))
 		if got >= want {
 			return
 		}

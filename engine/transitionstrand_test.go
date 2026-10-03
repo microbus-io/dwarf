@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -153,10 +154,10 @@ func slowWorkerReplay(t *testing.T, proxy *TestProxy, flowURL string, initial an
 	assert.NoError(e.Startup(t.Context()))
 	awaitStartupRecoverySweep(t, e)
 
-	e.seams.Break(CheckpointBeforeTransitionTx)
+	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, flowURL, initial, nil)
 	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint CheckpointBeforeTransitionTx")
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
 	shard, flowID, _, err = keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	db, err := e.db.Shard(shard)
@@ -177,7 +178,7 @@ func slowWorkerReplay(t *testing.T, proxy *TestProxy, flowURL string, initial an
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND lease_seq>?", flowID, stalledSeq),
 		"the sweep did not take A back")
 
-	e.seams.Resume(CheckpointBeforeTransitionTx)
+	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
 	awaitCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	out, err := e.Await(awaitCtx, fk)

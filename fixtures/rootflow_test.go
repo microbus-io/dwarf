@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -29,7 +30,7 @@ import (
 // rootFlowIDOf reads the denormalized root_flow_id column for a flow id.
 func rootFlowIDOf(t *testing.T, e *engine.Engine, shard, flowID int) int {
 	t.Helper()
-	db, err := e.DB().Shard(shard)
+	db, err := engineseams.DB(e).Shard(shard)
 	if err != nil {
 		t.Fatalf("shard: %v", err)
 	}
@@ -90,7 +91,7 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 	assert.Equal(parentFlowID, rootFlowIDOf(t, e, shard, parentFlowID))
 
 	// The subgraph child inherits the parent's root_flow_id.
-	db, _ := e.DB().Shard(shard)
+	db, _ := engineseams.DB(e).Shard(shard)
 	var childFlowID, childRoot int
 	err = db.QueryRowContext(ctx,
 		"SELECT flow_id, root_flow_id FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID,

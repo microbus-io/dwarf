@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -86,8 +87,8 @@ func (e *Engine) runRecoverySweep(ctx context.Context) {
 	})
 	// Test rendezvous: this pass is over, so every detector below has already read the database. A test that
 	// FORGES a wedge/orphan shape and then drives one detector itself must wait for this, or the background
-	// pass races its forge and the shape is counted twice (see CheckpointRecoverySweepDone).
-	e.seams.Checkpoint(ctx, CheckpointRecoverySweepDone)
+	// pass races its forge and the shape is counted twice (see engineseams.CheckpointRecoverySweepDone).
+	e.seams.Checkpoint(ctx, engineseams.CheckpointRecoverySweepDone)
 }
 
 // recoverExpiredLeases resets every running step whose lease has expired, on every shard. It is the ONLY

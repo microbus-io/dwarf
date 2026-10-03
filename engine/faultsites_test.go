@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -46,7 +47,7 @@ func orphanShapeCount(t *testing.T, e *Engine, shard int) int {
 // TestFaultSite_RecoveryResetErr pins the one fault outcome the recovery defer cannot heal, and its repair. The
 // transition transaction exhausts its lock-contention retries - contention is the one failure persist hands to the
 // defer rather than retrying in place - and the defer's own completed->pending reset then fails too
-// (FaultRecoveryResetErr). A is left `completed` with advancing=1 on a `running` flow and no worker holds it: the
+// (engineseams.FaultRecoveryResetErr). A is left `completed` with advancing=1 on a `running` flow and no worker holds it: the
 // shape a worker that died in that window leaves. Once the age guard and A's lease lapse, the orphan sweep rewinds
 // it, dispatch replays it, and the flow completes - with A's task having run exactly once.
 func TestFaultSite_RecoveryResetErr(t *testing.T) {
@@ -72,8 +73,8 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 
 	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transition gives up with a
 	// contention error; the reset fault fires once on the defer that follows.
-	e.seams.InjectN(seamsJoin(FaultContention, "A"), 8)
-	e.seams.Inject(FaultRecoveryResetErr)
+	e.seams.InjectN(engineseams.Join(engineseams.FaultContention, "A"), 8)
+	e.seams.Inject(engineseams.FaultRecoveryResetErr)
 	fk, err := e.Create(ctx, "ftbreset/g", nil, nil)
 	assert.NoError(err)
 	shard, flowID, _, err := keys.ParseFlowKey(fk)
@@ -135,7 +136,7 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 
 	// The caller parks, then createSubgraphFlow errors (no child inserted): failAndReturn must fail the caller
 	// step (un-parked) and the flow, not strand it parked.
-	e.seams.Inject(seamsJoin(FaultSubgraphSpawnErr, "ftbspawn/child"))
+	e.seams.Inject(engineseams.Join(engineseams.FaultSubgraphSpawnErr, "ftbspawn/child"))
 	fk, out := batteryRun(t, e, "ftbspawn/parent")
 	assert.Equal(workflow.StatusFailed, out.Status)
 
@@ -198,7 +199,7 @@ func TestFaultSite_TerminateCommit(t *testing.T) {
 	assert.NoError(err)
 
 	// The Terminate transaction fails once: Terminate errors and nothing changed (still interrupted).
-	e.seams.Inject(FaultTerminateCommit)
+	e.seams.Inject(engineseams.FaultTerminateCommit)
 	err = e.Terminate(ctx, fk, "boom")
 	assert.Error(err)
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
@@ -229,7 +230,7 @@ func TestFaultSite_ResumeCommit(t *testing.T) {
 	assert.NoError(err)
 
 	// The Resume transaction fails once: Resume errors and the flow is still interrupted (leaf still parked).
-	e.seams.Inject(FaultResumeCommit)
+	e.seams.Inject(engineseams.FaultResumeCommit)
 	err = e.Resume(ctx, fk, nil)
 	assert.Error(err)
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND status='"+workflow.StatusInterrupted+"'", flowID))
@@ -268,7 +269,7 @@ func TestFaultSite_ForkCommit(t *testing.T) {
 	forkStepKey := keys.New(shard, aStepID, aStepToken)
 
 	// The clone transaction fails once: Fork errors, the origin is byte-identical, and no clone rows exist.
-	e.seams.Inject(FaultForkCommit)
+	e.seams.Inject(engineseams.FaultForkCommit)
 	_, err = e.Fork(ctx, forkStepKey, nil)
 	assert.Error(err)
 	assert.Equal(originFS, readFinalState(t, e, originKey), "origin final_state mutated by a rolled-back Fork")
@@ -316,7 +317,7 @@ func TestFaultSite_DeliverFailureErr(t *testing.T) {
 
 	// The child fails, but its re-dispatch of the parked caller is lost: the caller wedges running+parkedSubgraph
 	// with a terminal (failed) child.
-	e.seams.Inject(FaultDeliverFailureErr)
+	e.seams.Inject(engineseams.FaultDeliverFailureErr)
 	fk, err := e.Create(ctx, "ftbdeliver/parent", nil, nil)
 	assert.NoError(err)
 	shard, _, _, err := keys.ParseFlowKey(fk)
@@ -394,8 +395,8 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 
 	// Drop each level's FIRST failure-delivery independently (scoped by the parked caller's task name). Each
 	// caller's sweep-driven re-delivery (the second consult of its scope) succeeds, so the sweep can recover it.
-	e.seams.Inject(seamsJoin(FaultDeliverFailureErr, "Call2"))
-	e.seams.Inject(seamsJoin(FaultDeliverFailureErr, "Call1"))
+	e.seams.Inject(engineseams.Join(engineseams.FaultDeliverFailureErr, "Call2"))
+	e.seams.Inject(engineseams.Join(engineseams.FaultDeliverFailureErr, "Call1"))
 	fk, err := e.Create(ctx, "ftbdeep/root", nil, nil)
 	assert.NoError(err)
 	shard, rootFlowID, _, err := keys.ParseFlowKey(fk)
@@ -432,7 +433,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 }
 
 // TestFaultSite_ReapSelectErr pins the reaper's resilience to a transient due-root SELECT failure (sibling to
-// FaultReapMidTree, which covers the delete half): the pass logs and bails without deleting, and the NEXT
+// engineseams.FaultReapMidTree, which covers the delete half): the pass logs and bails without deleting, and the NEXT
 // pass reaps cleanly.
 func TestFaultSite_ReapSelectErr(t *testing.T) {
 	t.Parallel()
@@ -459,7 +460,7 @@ func TestFaultSite_ReapSelectErr(t *testing.T) {
 	time.Sleep(5 * time.Millisecond) // let the 1ms window elapse
 
 	// The due-root SELECT errors: the pass bails without deleting, so the flow is still present.
-	e.seams.Inject(FaultReapSelectErr)
+	e.seams.Inject(engineseams.FaultReapSelectErr)
 	e.reapDueFlows(ctx)
 	assert.Equal(1, shardFlowCount(t, e, shard)) // not deleted - the scan bailed
 

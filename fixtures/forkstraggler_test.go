@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -58,7 +59,7 @@ func TestForkStraggler_NormalizedToTerminated(t *testing.T) {
 	}
 	shardNum, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	db, err := e.DB().Shard(shardNum)
+	db, err := engineseams.DB(e).Shard(shardNum)
 	assert.NoError(err)
 
 	// The completed entry step A is the fork point.

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
@@ -83,7 +84,7 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := e.DB().Shard(shardNum)
+	db, err := engineseams.DB(e).Shard(shardNum)
 	if !assert.NoError(err) {
 		return
 	}

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -112,7 +113,7 @@ func TestFork_SubgraphChildGetsThreadTokenAndStepID(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	db, err := eng.DB().Shard(shardNum)
+	db, err := engineseams.DB(eng).Shard(shardNum)
 	if !assert.NoError(err) {
 		return
 	}

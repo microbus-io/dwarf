@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -31,7 +32,7 @@ import (
 
 // TestSubgraphChildStopSignal_DroppedThenBackstopped is the dropped-wake variant of
 // TestSubgraphErrorWaitflow. That fixture proves a failing subgraph child's signalStop wakes an Await blocked
-// on its (read-only) child key promptly. Here we arm FaultDropSignalStop so the child's terminal wake is LOST
+// on its (read-only) child key promptly. Here we arm engineseams.FaultDropSignalStop so the child's terminal wake is LOST
 // (the first signalStop consult is the child's failure; the fault fires once and is consumed there, so the
 // root's later wake is delivered normally). The child-key Await must STILL return - via the latch detector,
 // which reads the child's committed stop out of the flow row - rather than hanging to the caller's ctx
@@ -114,10 +115,10 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 	// Let the Await goroutine register its waiter and block on the still-running child.
 	time.Sleep(100 * time.Millisecond)
 
-	// Drop the child's terminal wake: with FaultDropSignalStop armed, the child's failStep signalStop delivers
+	// Drop the child's terminal wake: with engineseams.FaultDropSignalStop armed, the child's failStep signalStop delivers
 	// nothing. The fault fires once and is consumed on the child's (first) stop, so the root's later wake is
 	// unaffected.
-	e.seams.Inject(FaultDropSignalStop)
+	e.seams.Inject(engineseams.FaultDropSignalStop)
 	close(release) // the child now fails via failStep's subgraph-child path, whose signalStop is dropped
 
 	// Despite the lost signal, Await(childKey) must still return - the only remaining wake path is the latch

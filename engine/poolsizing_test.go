@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -276,7 +277,7 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 // TestPoolSizing_IdleCoreTracksTheDerivedPool pins the half of shardPool nothing else witnesses. database/sql
 // reports the configured max OPEN size through DBStats.MaxOpenConnections, but never the configured max idle
 // (DBStats.Idle counts connections currently idle - traffic, not configuration), so the derived idle core is
-// read back through the VariablePoolIdle recording the sizing sites make.
+// read back through the engineseams.VariablePoolIdle recording the sizing sites make.
 //
 // It is half the open size, floored at 2, and it must follow the open size down as the fleet grows: an idle
 // core left at the R=1 width would hold connections a departing replica's share no longer entitles it to.
@@ -293,7 +294,7 @@ func TestPoolSizing_IdleCoreTracksTheDerivedPool(t *testing.T) {
 
 	idle := func() int {
 		t.Helper()
-		v, ok := e.seams.Capture(seamsJoin(VariablePoolIdle, "1"))
+		v, ok := e.seams.Capture(engineseams.Join(engineseams.VariablePoolIdle, "1"))
 		if !ok {
 			t.Fatal("the sizing path never recorded a derived idle size for shard 1")
 		}
@@ -585,7 +586,7 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 	// Stall the first recompute (one-shot) after it has read a fleet of 2, before it pushes the R=2 share.
 	insertPeerRows(t, e, 1001)
 	awaitPeerCount(t, e, 1, 2)
-	e.seams.InjectN(FaultSlowPoolPush, 1)
+	e.seams.InjectN(engineseams.FaultSlowPoolPush, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		e.recomputePools()
@@ -634,7 +635,7 @@ func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
 	// A recompute reads a fleet of 2 (derived 24) and stalls before pushing.
 	insertPeerRows(t, e, 1001)
 	awaitPeerCount(t, e, 1, 2)
-	e.seams.InjectN(FaultSlowPoolPush, 1)
+	e.seams.InjectN(engineseams.FaultSlowPoolPush, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		e.recomputePools()

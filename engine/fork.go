@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -134,11 +135,11 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	var newRootFlowID int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		cc.newLeafStepID = 0
-		// FaultForkCommit fails this transaction once, before the clone runs, so the test proves the whole
+		// engineseams.FaultForkCommit fails this transaction once, before the clone runs, so the test proves the whole
 		// clone rolls back atomically (origin byte-identical, zero partial clone rows) and a retry then
 		// forks cleanly - pinning Fork's "crash mid-clone rolls back, origin never mutated" claim.
-		if e.seams.IsFault(FaultForkCommit) {
-			return errors.New("injected fault: " + FaultForkCommit)
+		if e.seams.IsFault(engineseams.FaultForkCommit) {
+			return errors.New("injected fault: " + engineseams.FaultForkCommit)
 		}
 		id, cloneErr := e.cloneTree(ctx, tx, cc, rootFlowID)
 		if cloneErr != nil {

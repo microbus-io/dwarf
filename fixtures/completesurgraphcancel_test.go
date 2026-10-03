@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -30,7 +31,7 @@ import (
 
 // TestCompleteSurgraph_vs_TerminateRoot_BothOrders is the subgraph-child variant of
 // TestCompleteFlowVsTerminate_BothOrders (which raced a top-level completeFlow against Terminate). Here the flow
-// completing at engine.CheckpointBeforeCompleteFlowWrite is a subgraph CHILD, so its completion additionally drives
+// completing at engineseams.CheckpointBeforeCompleteFlowWrite is a subgraph CHILD, so its completion additionally drives
 // completeSurgraphFlow's revive of the parked caller - and the racing Terminate is a whole-tree teardown from the
 // root. The window: the child's terminal step is already marked completed and completeFlow is about to flip the
 // child flow to completed (which would then revive the caller) when a Terminate(root) arrives.
@@ -94,7 +95,7 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		assert := testarossa.For(t)
 		shard, flowID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
-		db, err := e.DB().Shard(shard)
+		db, err := engineseams.DB(e).Shard(shard)
 		assert.NoError(err)
 		var s string
 		assert.NoError(db.QueryRowContext(context.Background(), "SELECT status FROM dwarf_steps WHERE flow_id=? AND task_name='Call'", flowID).Scan(&s))
@@ -112,14 +113,14 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 
 		// Freeze the child's worker just before its completeFlow transaction (X is already marked completed, the
 		// caller is running+parkedSubgraph).
-		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
+		engineseams.Seams(e).Break(engineseams.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
+		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeCompleteFlowWrite")
 
 		// Release completion FIRST: the child completes and completeSurgraphFlow revives the caller, which
 		// re-dispatches and blocks (running).
-		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
+		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
 		select {
 		case <-callResumed:
 		case <-time.After(10 * time.Second):
@@ -146,10 +147,10 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		defer close(callBlock)
 
 		// Freeze the child at the same window.
-		e.Seams().Break(engine.CheckpointBeforeCompleteFlowWrite)
+		engineseams.Seams(e).Break(engineseams.CheckpointBeforeCompleteFlowWrite)
 		fk, err := e.Create(ctx, url, nil, nil)
 		assert.NoError(err)
-		assert.True(e.Seams().WaitTimeout(ctx, engine.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engine.CheckpointBeforeCompleteFlowWrite")
+		assert.True(engineseams.Seams(e).WaitTimeout(ctx, engineseams.CheckpointBeforeCompleteFlowWrite, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeCompleteFlowWrite")
 
 		// Terminate wins while the child's completion is held: the whole tree (root, its parked Call caller, and the
 		// still-running child) is terminalized under the terminate transaction.
@@ -159,7 +160,7 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		// Release completion: the child's status-gate (status NOT IN terminal) matches zero rows - a clean no-op.
 		// completeFlow returns completed=false, so completeSurgraphFlow never runs and the terminated caller is not
 		// resurrected to pending.
-		e.Seams().Resume(engine.CheckpointBeforeCompleteFlowWrite)
+		engineseams.Seams(e).Resume(engineseams.CheckpointBeforeCompleteFlowWrite)
 
 		// Confirm nothing revived the caller: the flow stays terminated, the caller stays terminated, and no
 		// orphan/wedge shape was created. Two pushing cycles close the window rather than a duration - a
