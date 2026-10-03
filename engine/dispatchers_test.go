@@ -624,6 +624,9 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 	_, err := e.Create(ctx, "rsweep/g", nil, nil)
 	assert.NoError(err)
 	<-started
+	// The startup pass runs the same lease reset as a dispatcher: one still in flight resets the lease
+	// forged below before the reader half can observe it.
+	awaitStartupRecoverySweep(t, e)
 
 	db, err := e.db.Shard(1)
 	assert.NoError(err)
