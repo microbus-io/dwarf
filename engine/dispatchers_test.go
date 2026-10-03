@@ -155,6 +155,229 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	}
 }
 
+// TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish pins the demotion path for a replica
+// with work under way: it stops dispatching at once, but keeps a dispatcher's share of the pool and
+// turnstile - the budget divided among the dispatchers and itself - until the steps it already claimed have
+// finished, so their completions do not queue on the reader pool. It states it is draining in its registry
+// row throughout, for peers to divide by. Once the steps finish it shrinks to the reader pool and clears
+// the statement on its own, and no step runs twice.
+func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	const flows = 5
+	release := make(chan struct{})
+	var runs atomic.Int32
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Demote")
+	g.SetEndpoint("Slow", "demote/slow")
+	g.AddTransition("Slow", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("demote/g", g)
+	proxy.HandleTask("demote/slow", func(ctx context.Context, f *workflow.Flow) error {
+		runs.Add(1)
+		<-release
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.testConnCap = 0 // assert the real derived pool sizes, not the test-mode connection cap
+	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetEngineID(readerID))
+	spec := ShardSpec{Index: 1, VirtualCPUs: 4} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
+	assert.NoError(e.SetShard(spec))
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	assert.True(e.dispatchesOn(1), "alone, the replica dispatches")
+	// Held, it drains alongside a 2-slot cut, so the budget divides three ways.
+	_, heldOpen := shardPool(spec, 0, 3, probedRTT(e, 1))
+	if !assert.True(heldOpen > readerOpenConns, "fixture: the held pool must exceed the reader pool") {
+		return
+	}
+
+	var keys []string
+	for range flows {
+		fk, err := e.Create(ctx, "demote/g", nil, nil)
+		assert.NoError(err)
+		keys = append(keys, fk)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for runs.Load() < flows && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !assert.Equal(int32(flows), runs.Load(), "every task is parked in flight") {
+		close(release)
+		return
+	}
+
+	joinFakeFleet(t, e)
+	if rank, _ := e.sonarFor(1).Rank(); !assert.Equal(3, rank, "fixture: readerID must rank below a 2-slot cut") {
+		close(release)
+		return
+	}
+	assert.False(e.dispatchesOn(1), "demoted: it claims nothing new")
+	assert.True(e.pistons[1].Idle())
+	assert.Equal(int64(flows), e.inFlightOn(1))
+	assert.Equal(heldOpen, db.DB.Stats().MaxOpenConnections, "the pool is held while steps are in flight")
+	assert.Equal(turnstilePassesPerConn*heldOpen, e.turnstiles.Turnstile(1).Size(), "and so is the turnstile")
+	assert.Equal(1, awaitDrainingRow(t, db, readerID, 1), "the drain is stated for peers to count")
+
+	// Another replica starts draining: the held share narrows with every other pool on the shard.
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_peers SET draining=1 WHERE engine_id=1006")
+	assert.NoError(err)
+	_, narrower := shardPool(spec, 0, 4, probedRTT(e, 1))
+	assert.Equal(narrower, awaitPoolSize(t, db, narrower), "a held pool follows the draining count")
+
+	close(release)
+	for _, fk := range keys {
+		outcome, err := e.Await(ctx, fk)
+		if assert.NoError(err) {
+			assert.Equal(workflow.StatusCompleted, outcome.Status)
+		}
+	}
+	// The reconcile loop releases the pool on its own once the count reaches zero.
+	assert.Equal(readerOpenConns, awaitPoolSize(t, db, readerOpenConns), "the pool shrinks once the steps finish")
+	assert.Equal(int64(0), e.inFlightOn(1))
+	assert.Equal(0, awaitDrainingRow(t, db, readerID, 0), "the statement is cleared once the pool is released")
+	// Read after the statement clears: the push resizes the turnstile after the pool, before the statement.
+	assert.Equal(turnstilePassesPerConn*readerOpenConns, e.turnstiles.Turnstile(1).Size())
+	assert.Equal(int32(flows), runs.Load(), "no step ran twice")
+}
+
+// TestDispatchers_PromotionWhileHeldClearsTheHold pins the other exit from a held pool: a replica demoted
+// with steps in flight and promoted again before they finish takes the dispatcher's pool back directly and
+// stops stating it is draining.
+func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("Repromote")
+	g.SetEndpoint("Slow", "repromote/slow")
+	g.AddTransition("Slow", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("repromote/g", g)
+	proxy.HandleTask("repromote/slow", func(ctx context.Context, f *workflow.Flow) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.testConnCap = 0
+	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetEngineID(readerID))
+	spec := ShardSpec{Index: 1, VirtualCPUs: 4} // two dispatcher slots, and a budget whose 3-way share beats the reader pool
+	assert.NoError(e.SetShard(spec))
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	_, soloOpen := shardPool(spec, 0, 1, probedRTT(e, 1))
+	_, heldOpen := shardPool(spec, 0, 3, probedRTT(e, 1))
+
+	fk, err := e.Create(ctx, "repromote/g", nil, nil)
+	assert.NoError(err)
+	<-started
+	joinFakeFleet(t, e)
+	assert.False(e.dispatchesOn(1))
+	assert.Equal(heldOpen, db.DB.Stats().MaxOpenConnections, "held while the step is in flight")
+	assert.Equal(1, awaitDrainingRow(t, db, readerID, 1))
+
+	// Promoted with the step still in flight: the dispatcher's pool, not the held share, and no drain stated.
+	leaveFakeFleet(t, e)
+	assert.True(e.dispatchesOn(1), "promoted again")
+	assert.Equal(int64(1), e.inFlightOn(1), "fixture: the step is still in flight")
+	assert.Equal(soloOpen, db.DB.Stats().MaxOpenConnections, "the promotion takes the dispatcher pool, not the held share")
+	e.poolsLock.Lock()
+	_, pending := e.heldDivisors[1]
+	e.poolsLock.Unlock()
+	assert.False(pending, "the promotion clears the hold")
+	assert.Equal(0, awaitDrainingRow(t, db, readerID, 0), "and lowers the statement")
+
+	close(release)
+	outcome, err := e.Await(ctx, fk)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, outcome.Status)
+	}
+}
+
+// TestDispatchers_OverrideReleasesAHold pins that a SetMaxOpenConns override landing while a pool is held
+// releases the hold. The override pins every pool and dispatches every shard, so there is no budget left to
+// divide; a hold left recorded would keep the draining statement up - shrinking every peer's pool - for the
+// life of the process.
+func TestDispatchers_OverrideReleasesAHold(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	release := make(chan struct{})
+	started := make(chan struct{})
+	proxy := NewTestProxy()
+	g := workflow.NewGraph("OverrideHold")
+	g.SetEndpoint("Slow", "overridehold/slow")
+	g.AddTransition("Slow", workflow.END)
+	assert.NoError(g.Validate())
+	proxy.HandleGraph("overridehold/g", g)
+	proxy.HandleTask("overridehold/slow", func(ctx context.Context, f *workflow.Flow) error {
+		close(started)
+		<-release
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	defer close(release) // below the Shutdown defer, so it unwinds first and frees the drain
+	e.testConnCap = 0
+	assert.NoError(e.SetHost(proxy))
+	assert.NoError(e.SetEngineID(readerID))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 4}))
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+
+	_, err = e.Create(ctx, "overridehold/g", nil, nil)
+	assert.NoError(err)
+	<-started
+	joinFakeFleet(t, e)
+	assert.False(e.dispatchesOn(1))
+	assert.Equal(1, awaitDrainingRow(t, db, readerID, 1), "fixture: the pool is held")
+
+	assert.NoError(e.SetMaxOpenConns(10))
+	e.recomputePools()
+	assert.True(e.dispatchesOn(1), "the override dispatches every shard")
+	e.poolsLock.Lock()
+	_, pending := e.heldDivisors[1]
+	e.poolsLock.Unlock()
+	assert.False(pending, "the override releases the hold though the step is still in flight")
+	assert.Equal(0, awaitDrainingRow(t, db, readerID, 0), "and lowers the statement")
+	assert.Equal(10, db.DB.Stats().MaxOpenConnections, "the pinned pool stands")
+}
+
+// awaitDrainingRow polls one replica's registry row until its draining column reads want, or 10s pass, and
+// returns the last value read. The statement reaches the row on the Sonar's next pass, not synchronously.
+func awaitDrainingRow(t *testing.T, db *sequel.DB, id int64, want int) int {
+	t.Helper()
+	var got int
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := db.QueryRowContext(t.Context(), "SELECT draining FROM dwarf_peers WHERE engine_id=?", id).Scan(&got); err != nil {
+			t.Errorf("read draining for %d: %v", id, err)
+			return got
+		}
+		if got == want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestDispatchers_RankedReplicaSplitsTheBudget is the other side of the cut: a replica ranked inside it
 // dispatches, with the shard's budget divided by the slot count rather than by the whole fleet.
 func TestDispatchers_RankedReplicaSplitsTheBudget(t *testing.T) {
@@ -178,6 +401,44 @@ func TestDispatchers_RankedReplicaSplitsTheBudget(t *testing.T) {
 	assert.True(e.dispatchesOn(1))
 	_, open := shardPool(ShardSpec{VirtualCPUs: 8}, 0, slots, probedRTT(e, 1))
 	assert.Equal(open, db.DB.Stats().MaxOpenConnections, "the budget divides by %d dispatchers, not 7 replicas", slots)
+}
+
+// TestDispatchers_DrainingReplicasDivideTheBudget pins the peer side of a held pool: replicas outside the
+// dispatcher cut that state they are draining a share are added to the divisor, so a demoted or withdrawn
+// replica finishing its steps shrinks every dispatcher's pool rather than putting the shard over its budget.
+// When the statements clear, the pools grow back to the dispatcher split.
+func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	e.testConnCap = 0
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetEngineID(dispatcherID))
+	spec := ShardSpec{Index: 1, VirtualCPUs: 8}
+	assert.NoError(e.SetShard(spec))
+	assert.NoError(e.Startup(t.Context()))
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+
+	joinFakeFleet(t, e)
+	slots := dispatcherSlots(spec, len(fakeFleet)+1)
+	if !assert.True(e.dispatchesOn(1), "fixture: dispatcherID must rank inside the cut") {
+		return
+	}
+	_, split := shardPool(spec, 0, slots, probedRTT(e, 1))
+	assert.Equal(split, db.DB.Stats().MaxOpenConnections)
+
+	setDraining := func(flag int) {
+		_, err := db.ExecContext(t.Context(), "UPDATE dwarf_peers SET draining=? WHERE engine_id IN (1005, 1006)", flag)
+		assert.NoError(err)
+	}
+	setDraining(1)
+	_, wide := shardPool(spec, 0, slots+2, probedRTT(e, 1))
+	assert.Equal(wide, awaitPoolSize(t, db, wide), "two draining replicas divide the budget with the dispatchers")
+
+	setDraining(0)
+	assert.Equal(split, awaitPoolSize(t, db, split), "cleared statements return the pool to the dispatcher split")
 }
 
 // TestDispatchers_OverrideDispatchesEveryReplica pins the pooler path: with SetMaxOpenConns pinning the
@@ -374,7 +635,8 @@ func TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads(t *testing.T) {
 // TestDispatchers_DrainGivesUpTheSlotBeforeWaiting pins that a shutting-down replica hands its dispatcher
 // slots on at the START of its drain. It takes on no new work from that moment, but its row stays fresh
 // until it leaves at the end, and a fresh row keeps its rank - so a shard whose dispatchers all drained at
-// once would otherwise run nothing until the slowest in-flight task finished.
+// once would otherwise run nothing until the slowest in-flight task finished. The same write states it is
+// draining, so the replica taking the slot divides the budget with it rather than growing into its share.
 func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -410,9 +672,10 @@ func TestDispatchers_DrainGivesUpTheSlotBeforeWaiting(t *testing.T) {
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var working int
-		err := db.QueryRowContext(ctx, "SELECT working FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&working)
+		var working, draining int
+		err := db.QueryRowContext(ctx, "SELECT working, draining FROM dwarf_peers WHERE engine_id=?", e.engineID).Scan(&working, &draining)
 		if err == nil && working == 0 {
+			assert.Equal(1, draining, "withdrawn from a shard it dispatched, it states the share it still holds")
 			return // withdrawn while the task is still holding the drain open
 		}
 		time.Sleep(time.Millisecond)

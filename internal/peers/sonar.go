@@ -51,8 +51,11 @@ limitations under the License.
 // that may dispatch, on a per-shard score every replica computes the same way - so "the replicas ranked
 // below k" is a set the whole fleet agrees on with no coordination. Partition is the (replicas, ordinal) pair that splits candidate selection across the replicas that
 // actually serve this shard, in the shape a dispatcher consumes: ok=false means "select everything".
-// BlindFor is how long it has been since the registry was last read successfully, which an owner should
-// surface: a Sonar that cannot read holds every one of its published values frozen.
+// Draining is how many other replicas state that they hold a dispatcher-sized share of the shard's budget
+// from outside the cut, which an owner dividing that budget adds to its dispatcher count; SetDraining and
+// Withdraw make the same statement for this replica. BlindFor is how long it has been since the registry
+// was last read successfully, which an owner should surface: a Sonar that cannot read holds every one of its
+// published values frozen.
 //
 // A failed read publishes NOTHING - every getter keeps reporting the last good reading - because a read
 // that did not happen is not evidence that anybody left.
@@ -163,6 +166,7 @@ type partition struct {
 type standing struct {
 	rank       int
 	candidates int
+	draining   int
 }
 
 // Profile is what a replica states about itself in its registry row, written when the row is created or
@@ -210,10 +214,15 @@ type Sonar struct {
 	standing atomic.Pointer[standing]
 	// profile is what this replica states about itself in its row - see SetProfile.
 	profile atomic.Pointer[Profile]
-	// rowMu serializes the two writes that decide what the row states: register (run by Join and by the
-	// repair on the driving goroutine) and Withdraw (run by the owner, from any goroutine). Interleaved, a
-	// repair that loaded the profile just before Withdraw flipped it would INSERT the row after Withdraw's
-	// UPDATE had matched nothing, and the replica would stay ranked for the drain it withdrew from.
+	// draining is what this replica states in its row about a share of the budget it holds from outside the
+	// dispatcher cut - see SetDraining. Unlike the profile it moves during the life of the process, so the
+	// beat carries it.
+	draining atomic.Bool
+	// rowMu serializes the writes that decide what the row states: register (run by Join and by the repair
+	// on the driving goroutine), the beat (which carries the draining statement), and Withdraw (run by the
+	// owner, from any goroutine). Interleaved, a repair that loaded the profile just before Withdraw flipped
+	// it would INSERT the row after Withdraw's UPDATE had matched nothing, and the replica would stay ranked
+	// for the drain it withdrew from; a beat would put back the draining value Withdraw replaced.
 	rowMu sync.Mutex
 	// part is the dispatcher count and this replica's ordinal in it, published as ONE value. They are two
 	// halves of a single decision - an ordinal only means anything against the count it was derived from -
@@ -234,6 +243,7 @@ type Sonar struct {
 	// it, so a pass that merely looks at the evidence cannot swallow a turn.
 	lastTurns      uint64
 	beatDispatched bool
+	beatDraining   bool
 	nextBeat       time.Time
 	// healthySince is when the current unbroken run of successful reads began; zero before the first one.
 	// Reset whenever a sustained gap interrupts the run, which is what stops blind time from counting toward
@@ -425,6 +435,24 @@ func (s *Sonar) Rank() (rank, candidates int) {
 	return st.rank, max(1, st.candidates)
 }
 
+// Draining is how many OTHER replicas state they are draining a dispatcher-sized share of this shard's
+// budget from outside the dispatcher cut - see SetDraining. An owner dividing the budget among dispatchers
+// adds it to the dispatcher count. Held across the reading that ended a blind spell like the rank, so a
+// fall is believed a reading late and a rise at once.
+func (s *Sonar) Draining() int {
+	return s.standing.Load().draining
+}
+
+// SetDraining states whether this replica holds a dispatcher-sized share of the shard's connection budget
+// while outside the dispatcher cut, for peers to count in Draining. Published by the next pass rather than
+// the next beat.
+//
+// Raise it after resizing into the draining share and lower it after resizing out of it, so peers never
+// divide by fewer shares than are held.
+func (s *Sonar) SetDraining(draining bool) {
+	s.draining.Store(draining)
+}
+
 // SetProfile states the facts this replica writes into its registry row. Call it before Join: the row is
 // written at registration and at a repair, never by the beat, so a later change reaches the registry only
 // if the row is ever re-created.
@@ -538,13 +566,21 @@ func (s *Sonar) untilNextPass() time.Duration {
 // a shutdown draining tasks already in flight - so that another replica takes over its dispatcher slots
 // for the length of the drain rather than after it. It also sticks: a later registration repair writes
 // the same flag.
-func (s *Sonar) Withdraw(ctx context.Context) error {
+//
+// draining raises the SetDraining statement in the same write; a statement already raised stays raised.
+func (s *Sonar) Withdraw(ctx context.Context, draining bool) error {
 	s.rowMu.Lock()
 	defer s.rowMu.Unlock()
 	p := *s.profile.Load()
 	p.Working = false
 	s.profile.Store(&p)
-	_, err := s.db.ExecContext(ctx, "UPDATE dwarf_peers SET working=0 WHERE engine_id=?", s.engineID)
+	draining = draining || s.draining.Load()
+	s.draining.Store(draining)
+	flag := 0
+	if draining {
+		flag = 1
+	}
+	_, err := s.db.ExecContext(ctx, "UPDATE dwarf_peers SET working=0, draining=? WHERE engine_id=?", flag, s.engineID)
 	return errors.Trace(err)
 }
 
@@ -568,8 +604,8 @@ func (s *Sonar) Leave(ctx context.Context) error {
 // The RowsAffected test is safe on MySQL, which counts CHANGED rather than matched rows, because both
 // callers are clear of the one case that would trip it - an existing row whose seen_at already holds this
 // millisecond. Join runs before anything has beaten, and the repair path has just OBSERVED the row absent.
-// This replica is the only writer of its own row, and rowMu orders this against the one other write it
-// makes (Withdraw), so that observation cannot be raced.
+// This replica is the only writer of its own row, and rowMu orders this against its other writes (the beat
+// and Withdraw), so that observation cannot be raced.
 func (s *Sonar) register(ctx context.Context) error {
 	// FaultBeatErr covers this as well as the beat, and the reason is the repair below: a Sonar that observes
 	// itself absent re-registers, so gating only the beat would let a replica which cannot prove its liveness
@@ -585,9 +621,13 @@ func (s *Sonar) register(ctx context.Context) error {
 	if prof.Working {
 		working = 1
 	}
+	draining := 0
+	if s.draining.Load() {
+		draining = 1
+	}
 	res, err := s.db.ExecContext(ctx,
-		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), working=?, rtt_us=? WHERE engine_id=?",
-		working, prof.RTT.Microseconds(), s.engineID)
+		"UPDATE dwarf_peers SET seen_at=NOW_UTC(), working=?, draining=?, rtt_us=? WHERE engine_id=?",
+		working, draining, prof.RTT.Microseconds(), s.engineID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -599,8 +639,8 @@ func (s *Sonar) register(ctx context.Context) error {
 		return nil
 	}
 	_, err = s.db.ExecContext(ctx,
-		"INSERT INTO dwarf_peers (engine_id, seen_at, working, rtt_us) VALUES (?, NOW_UTC(), ?, ?)",
-		s.engineID, working, prof.RTT.Microseconds())
+		"INSERT INTO dwarf_peers (engine_id, seen_at, working, draining, rtt_us) VALUES (?, NOW_UTC(), ?, ?, ?)",
+		s.engineID, working, draining, prof.RTT.Microseconds())
 	return errors.Trace(err)
 }
 
@@ -621,12 +661,22 @@ func (s *Sonar) pass(ctx context.Context) {
 	now := s.now()
 	s.lastPass = now
 	turns, dispatched := s.dispatchEvidence()
-	if !now.Before(s.nextBeat) || dispatched != s.beatDispatched {
-		s.publishBeat(ctx, dispatched)
+	// rowMu spans the read of the draining statement and the write that carries it: Withdraw writes the
+	// same column, and a beat that loaded the statement before Withdraw and wrote after it would put back
+	// the value Withdraw replaced.
+	s.rowMu.Lock()
+	draining := s.draining.Load()
+	beat := !now.Before(s.nextBeat) || dispatched != s.beatDispatched || draining != s.beatDraining
+	if beat {
+		s.publishBeat(ctx, dispatched, draining)
+	}
+	s.rowMu.Unlock()
+	if beat {
 		// Only a beat may advance the published turn count: a pass that looked at the evidence without
 		// publishing it must leave it for the next beat to carry.
 		s.lastTurns = turns
 		s.beatDispatched = dispatched
+		s.beatDraining = draining
 		s.nextBeat = now.Add(s.beat)
 	}
 	rows, err := s.read(ctx)
@@ -656,7 +706,7 @@ func (s *Sonar) dispatchEvidence() (turns uint64, dispatched bool) {
 //
 // A failed write is not retried. Retrying a broken registry write turns a database blip into a write storm,
 // and the next beat is one interval away regardless.
-func (s *Sonar) publishBeat(ctx context.Context, dispatched bool) {
+func (s *Sonar) publishBeat(ctx context.Context, dispatched, draining bool) {
 	// FaultBeatErr drops the write, so this replica stops refreshing its own row while everything else about
 	// it goes on working. That is what a replica which can no longer prove its liveness looks like from a
 	// PEER's side, and a test can occupy that side no other way short of killing a process.
@@ -669,6 +719,11 @@ func (s *Sonar) publishBeat(ctx context.Context, dispatched bool) {
 	set := "seen_at=NOW_UTC()"
 	if dispatched {
 		set += ", dispatched_at=NOW_UTC()"
+	}
+	if draining {
+		set += ", draining=1"
+	} else {
+		set += ", draining=0"
 	}
 	_, err := s.db.ExecContext(ctx,
 		"UPDATE dwarf_peers SET "+set+" WHERE engine_id=?", s.engineID)
@@ -702,7 +757,7 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	}
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT engine_id, DATE_DIFF_MILLIS(NOW_UTC(), seen_at) AS seen_age_ms,"+
-			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms, working"+
+			" DATE_DIFF_MILLIS(NOW_UTC(), dispatched_at) AS dispatch_age_ms, working, draining"+
 			" FROM dwarf_peers ORDER BY engine_id")
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -711,11 +766,12 @@ func (s *Sonar) read(ctx context.Context) ([]peer, error) {
 	var out []peer
 	for rows.Next() {
 		var p peer
-		var working int
-		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs, &working); err != nil {
+		var working, draining int
+		if err := rows.Scan(&p.engineID, &p.seenAgeMs, &p.dispatchAgeMs, &working, &draining); err != nil {
 			return nil, errors.Trace(err)
 		}
 		p.working = working != 0
+		p.draining = draining != 0
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
@@ -780,10 +836,14 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 	// every reading gapped. A reader on a sick database would then never be promoted, and a shard whose
 	// dispatchers left would run nothing. Against the raw reading, two consecutive readings that agree are
 	// believed whether or not either was gapped. Pinned by TestPeers_RankPromotesThroughSustainedGaps.
-	raw := standing{rank: v.rank, candidates: v.candidates}
+	raw := standing{rank: v.rank, candidates: v.candidates, draining: v.draining}
 	next := raw
 	if gapped {
-		next = standing{rank: max(s.lastRaw.rank, raw.rank), candidates: max(s.lastRaw.candidates, raw.candidates)}
+		next = standing{
+			rank:       max(s.lastRaw.rank, raw.rank),
+			candidates: max(s.lastRaw.candidates, raw.candidates),
+			draining:   max(s.lastRaw.draining, raw.draining),
+		}
 	}
 	s.lastRaw = raw
 	s.standing.Store(&next)

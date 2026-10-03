@@ -139,7 +139,50 @@ deliberately:
 - **`Withdraw` takes a replica out of the ranking without taking it out of the fleet**: it sets the row's
   `working=0` and makes a later repair write the same value. An owner calls it when it stops taking on work
   but still holds connections - a drain long enough to be worth it - so another replica takes over its
-  dispatcher slots for the length of the drain rather than after it. Pinned by `TestPeers_WithdrawDropsTheReplicaFromEveryRanking`.
+  dispatcher slots for the length of the drain rather than after it. It states `draining` in the same
+  write, and `rowMu` serializes it against the beat, which carries the same column - unserialized, a beat
+  that loaded the statement before `Withdraw` and wrote after it puts the old value back. Pinned by
+  `TestPeers_WithdrawDropsTheReplicaFromEveryRanking`, `TestPeers_WithdrawStatesDraining` and
+  `TestPeers_BeatCannotUndoAWithdrawal`.
+- **`Draining` counts the OTHER fresh rows that state they hold a dispatcher-sized share from outside the
+  cut** - a demoted replica finishing its claimed steps, or a withdrawn one finishing its drain. The owner
+  adds it to its dispatcher count when dividing the budget, so the share being drained is divided around
+  rather than grown into. It is a separate column, not a value of `working`, because the two are
+  independent: a demoted replica is still working and must stay ranked (dropping it would move every
+  peer's rank and the slot count), while a withdrawn one is not working and is still draining. Folding both
+  into one column makes it a four-valued enum that every reader of `working` would have to decode.
+
+  **This is not the "I dispatch" flag `dispatched_at` forbids.** That trap is a claim the PARTITION reads: a
+  replica that set it and wedged would own a residue class forever. `draining` feeds only the pool divisor,
+  so a replica stuck stating it costs every pool on the shard one share of headroom - the safe direction -
+  and strands nothing. It is a statement that MOVES during the life of the process, so the beat carries it
+  (and a change is published by the next pass, like a change in dispatch evidence), and a registration
+  repair rewrites it. Its count is held across a gapped reading like the rank: a rise shrinks pools and is
+  believed at once, a fall waits a reading. Pinned by `TestPeers_ClassifyCountsDraining`,
+  `TestPeers_DrainingRidesTheReadCadenceWhenItFlips` and `TestPeers_DrainingFallIsWithheldAcrossAGap`.
+
+  **The divisor is `dispatcher slots + draining`, and only replicas OUTSIDE the cut state anything.** The
+  rank already says who the dispatchers are, so a dispatcher states nothing, and the flag flips only when a
+  replica leaves the cut with work still in flight. With `B` the shard's budget, `X` its dispatcher slots and
+  `D` the other replicas draining, everyone dividing by the same count keeps the shard on budget during a
+  DEMOTION drain: four dispatchers and one draining replica each hold a fifth. A SHUTDOWN
+  drain is narrower: the owner's reconcile loop has stopped by then, so the withdrawn replica keeps the
+  `B/X` share it had while its peers divide by `X+1`, and the shard is over by `B/(X(X+1))` for the drain.
+
+  **Known residual, accepted: a demotion with work in flight runs over budget for up to about two scan
+  intervals.** The replica taking the slot sizes its pool from its own reading of the fleet. The replica it
+  displaced shrinks to the held share `B/(X+D+1)` on its own reading and raises `draining` on its next pass;
+  each peer then needs a reading and a reconcile tick to divide by it. Until then the shard is over by about
+  that held share - at `X=2`, `4B/3` at the peak, `B` once settled; at `X=4`, `6B/5`. Both stay within the
+  budget-plus-one-share bound a join already accepts. A displaced replica with nothing in flight is over only
+  until its own reading, and then by the two connections of the reader pool.
+
+  **Do not close it with a flag every share-holder raises, dispatchers included** (a "holds a pool" column
+  peers count instead of the cut). It closes the window only by registering every working newcomer as a
+  holder before its rank is known - shrinking the fleet for every replica that then ranks out - and it
+  makes every role change, on every replica, order a flag write against a pool push, where `draining` asks
+  that only of a replica leaving the cut. Several moving parts on the common path to shorten a sub-second
+  window on an event that happens a few times per deploy. Do not fold `draining` into `working` either (see above).
 
 **A failed read publishes nothing at all.** A read that did not happen is not an observation that anybody
 left. Pinned by `TestPeers_FailedReadHoldsTheLastGoodFleet` and

@@ -190,6 +190,26 @@ func TestPeers_ClassifyCountsAndOrdinal(t *testing.T) {
 	assert.Equal([]int64{90}, v.dead)
 }
 
+// TestPeers_ClassifyCountsDraining pins the draining count: every OTHER fresh row stating it drains a
+// dispatcher-sized share, whatever its working flag or dispatch evidence - a demoted replica finishing its
+// steps is still working, one draining at shutdown has withdrawn - and never this replica, which accounts
+// for its own share.
+func TestPeers_ClassifyCountsDraining(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	v := classify([]peer{
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},                     // dispatching
+		{engineID: 20, seenAgeMs: 100, dispatchAgeMs: 30000, working: true, draining: true},   // demoted, finishing
+		{engineID: 30, seenAgeMs: 100, dispatchAgeMs: 30000, working: false, draining: true},  // withdrawn at shutdown
+		{engineID: 40, seenAgeMs: 100, dispatchAgeMs: 30000, working: true},                   // reader
+		{engineID: selfID, seenAgeMs: 50, dispatchAgeMs: 50, working: true, draining: true},   // us
+		{engineID: 90, seenAgeMs: 60000, dispatchAgeMs: 60000, working: true, draining: true}, // stale
+	}, selfID, true, 1, testWindows)
+	assert.Equal(2, v.draining, "two fresh peers drain a share; self and the stale row do not count")
+	assert.Equal(4, v.candidates, "a demoted replica draining its steps stays in the ranking")
+}
+
 // TestPeers_ClassifySelfAbsenceCutsBothWays pins the asymmetry that keeps a replica missing from its own
 // registry from doing damage in the dangerous direction. It still counts ITSELF toward the pool divisor - it
 // demonstrably exists, and under-counting there over-sizes every pool - but it must not appoint itself a
@@ -363,7 +383,7 @@ func TestPeers_RegisterWritesTheProfile(t *testing.T) {
 	r := newRig(t)
 	r.s.SetProfile(Profile{RTT: 1250 * time.Microsecond, Working: false})
 	assert.NoError(r.s.register(ctx))
-	r.s.publishBeat(ctx, false)
+	r.s.publishBeat(ctx, false, false)
 	var working int
 	var rttUs int64
 	assert.NoError(r.db.QueryRowContext(ctx,
@@ -414,7 +434,7 @@ func TestPeers_WithdrawDropsTheReplicaFromEveryRanking(t *testing.T) {
 	r := newRig(t)
 	assert.NoError(r.s.register(ctx))
 	assert.True(r.row(t, selfID).working, "a Sonar given no profile registers as working")
-	assert.NoError(r.s.Withdraw(ctx))
+	assert.NoError(r.s.Withdraw(ctx, false))
 	assert.False(r.row(t, selfID).working, "withdrawn in place")
 	_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", selfID)
 	assert.NoError(err)
@@ -438,12 +458,119 @@ func TestPeers_WithdrawSurvivesARacingRepair(t *testing.T) {
 		r.s.SetProfile(Profile{Working: true})
 		var wg sync.WaitGroup
 		wg.Go(func() { assert.NoError(r.s.register(ctx)) })
-		wg.Go(func() { assert.NoError(r.s.Withdraw(ctx)) })
+		wg.Go(func() { assert.NoError(r.s.Withdraw(ctx, false)) })
 		wg.Wait()
 		if !assert.False(r.row(t, selfID).working, "round %d: a racing repair re-ranked the withdrawn replica", i) {
 			return
 		}
 	}
+}
+
+// TestPeers_WithdrawStatesDraining pins that a withdrawal can state, in the same write, that the replica
+// still holds a dispatcher's share while it drains - and that a registration repair keeps the statement,
+// as it keeps the working flag.
+func TestPeers_WithdrawStatesDraining(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	assert.NoError(r.s.register(ctx))
+	assert.False(r.row(t, selfID).draining, "a fresh registration states no drain")
+	assert.NoError(r.s.Withdraw(ctx, true))
+	row := r.row(t, selfID)
+	assert.False(row.working)
+	assert.True(row.draining, "withdrawn and draining in one write")
+	_, err := r.db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", selfID)
+	assert.NoError(err)
+	assert.NoError(r.s.register(ctx))
+	assert.True(r.row(t, selfID).draining, "and a repair writes the same statement")
+}
+
+// TestPeers_BeatCannotUndoAWithdrawal pins that the beat and Withdraw are serialized. The beat carries the
+// draining statement, and one that loaded it before Withdraw raised it and wrote after Withdraw's UPDATE
+// would put the old value back - leaving a withdrawn replica's share uncounted by every peer until the next
+// pass.
+func TestPeers_BeatCannotUndoAWithdrawal(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	// ONE rig, reset between rounds, for the same connection-budget reason as the repair race above.
+	r := newRig(t)
+	assert.NoError(r.s.register(ctx))
+	for i := range 400 {
+		r.s.SetProfile(Profile{Working: true})
+		r.s.SetDraining(false)
+		_, err := r.db.ExecContext(ctx, "UPDATE dwarf_peers SET working=1, draining=0 WHERE engine_id=?", selfID)
+		assert.NoError(err)
+		r.s.nextBeat = time.Time{} // every round's pass beats
+		var wg sync.WaitGroup
+		wg.Go(func() { r.s.pass(ctx) })
+		wg.Go(func() { assert.NoError(r.s.Withdraw(ctx, true)) })
+		wg.Wait()
+		if !assert.True(r.row(t, selfID).draining, "round %d: a racing beat undid the withdrawal's statement", i) {
+			return
+		}
+	}
+}
+
+// TestPeers_DrainingRidesTheReadCadenceWhenItFlips pins that a change in the draining statement is
+// published by the next pass rather than the next beat, in both directions - raised, so peers divide around
+// the share promptly, and lowered, so they grow back into it promptly.
+func TestPeers_DrainingRidesTheReadCadenceWhenItFlips(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	assert.NoError(r.s.register(ctx))
+	r.s.pass(ctx)
+	due := r.s.nextBeat
+
+	r.s.SetDraining(true)
+	r.clk.advance(r.s.scan)
+	r.s.pass(ctx)
+	assert.True(r.s.nextBeat.After(due), "a raised statement beats off-cadence")
+	assert.True(r.row(t, selfID).draining)
+
+	due = r.s.nextBeat
+	r.s.SetDraining(false)
+	r.clk.advance(r.s.scan)
+	r.s.pass(ctx)
+	assert.True(r.s.nextBeat.After(due), "and so does a lowered one")
+	assert.False(r.row(t, selfID).draining)
+}
+
+// TestPeers_DrainingFallIsWithheldAcrossAGap pins the draining count's version of the correlated-stall
+// guard. A fall in the count grows every dispatcher's pool, so the reading that ends a blind spell cannot
+// lower it; a rise shrinks pools and is believed at once.
+func TestPeers_DrainingFallIsWithheldAcrossAGap(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	draining := []peer{
+		{engineID: 1, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true, draining: true},
+		{engineID: 2, seenAgeMs: 100, dispatchAgeMs: staleAge, working: false, draining: true},
+		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+	}
+	settled := []peer{
+		{engineID: 1, seenAgeMs: 100, dispatchAgeMs: staleAge, working: true},
+		{engineID: 2, seenAgeMs: 100, dispatchAgeMs: staleAge, working: false},
+		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+	}
+
+	r.s.observe(ctx, draining, nil)
+	assert.Equal(2, r.s.Draining())
+
+	r.clk.advance(3 * r.s.scan)
+	r.s.observe(ctx, settled, nil)
+	assert.Equal(2, r.s.Draining(), "the reading that ends a blind spell cannot lower the count")
+	r.clk.advance(r.s.scan)
+	r.s.observe(ctx, settled, nil)
+	assert.Equal(0, r.s.Draining(), "confirmed on the next reading")
+
+	r.clk.advance(3 * r.s.scan)
+	r.s.observe(ctx, draining, nil)
+	assert.Equal(2, r.s.Draining(), "a rise is always safe to believe")
 }
 
 // TestPeers_RankPromotionIsWithheldAcrossAGap pins the rank's version of the correlated-stall guard. After a
@@ -572,7 +699,7 @@ func TestPeers_RegisterInsertsThenUpdatesAndBeatNeverCreates(t *testing.T) {
 
 	assert.NoError(r.s.Leave(ctx))
 	assert.Len(r.ids(t), 0)
-	r.s.publishBeat(ctx, true)
+	r.s.publishBeat(ctx, true, false)
 	assert.Len(r.ids(t), 0, "a beat must never re-create a deleted row")
 }
 

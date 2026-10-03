@@ -240,9 +240,10 @@ func dispatcherSlots(spec ShardSpec, replicas int) int {
 	return min(replicas, max(want, min(2, replicas)))
 }
 
-// slotsOn is this replica's role on one shard: how many replicas dispatch it when this one is among them,
-// or 0 when it is not. It is the pool divisor, the piston's on/off switch and the doorbell's gate in one
-// number.
+// slotsOn is this replica's role on one shard: how many dispatcher-sized shares its budget divides into
+// when this replica dispatches it - the dispatchers plus every replica draining a share from outside the
+// cut - or 0 when it does not. It is the pool divisor, the piston's on/off switch and the doorbell's gate
+// in one number.
 //
 // The slots are derived from the replicas that MAY dispatch, not from every registered one: an await-only
 // replica holds connections but takes no rank, and counting it would divide the budget among more
@@ -269,7 +270,18 @@ func (e *Engine) slotsOn(shard int, spec ShardSpec) int {
 	if rank >= slots {
 		return 0
 	}
-	return slots
+	return slots + s.Draining()
+}
+
+// heldDivisor is what a replica holding a pool for in-flight steps on a shard it no longer dispatches
+// divides the budget by: the same count its peers divide by, which counts it among the draining.
+func (e *Engine) heldDivisor(shard int, spec ShardSpec) int {
+	s := e.sonarFor(shard)
+	if s == nil {
+		return 1
+	}
+	_, candidates := s.Rank()
+	return dispatcherSlots(spec, candidates) + s.Draining() + 1
 }
 
 // slotsByShard is every open shard's current role (slotsOn), read once so that everything derived from
@@ -295,14 +307,39 @@ func (e *Engine) dispatchesOn(shard int) bool {
 	return b == nil || b.Load()
 }
 
+// shardRole is this replica's standing on one shard in one run.
+type shardRole struct {
+	// dispatching is whether this replica claims steps on the shard.
+	dispatching atomic.Bool
+	// inFlight counts the steps this replica's workers are processing on the shard, claim to transition.
+	inFlight atomic.Int64
+}
+
+// roleOn is one shard's role in the current run's map, or nil before the first Startup and for a shard
+// that run did not open.
+func (e *Engine) roleOn(shard int) *shardRole {
+	roles := e.roles.Load()
+	if roles == nil {
+		return nil
+	}
+	return (*roles)[shard]
+}
+
 // dispatchFlag is one shard's role flag in the current run's map, or nil before the first Startup and
 // for a shard that run did not open.
 func (e *Engine) dispatchFlag(shard int) *atomic.Bool {
-	flags := e.dispatching.Load()
-	if flags == nil {
-		return nil
+	if r := e.roleOn(shard); r != nil {
+		return &r.dispatching
 	}
-	return (*flags)[shard]
+	return nil
+}
+
+// inFlightOn is how many steps this replica's workers are processing on one shard.
+func (e *Engine) inFlightOn(shard int) int64 {
+	if r := e.roleOn(shard); r != nil {
+		return r.inFlight.Load()
+	}
+	return 0
 }
 
 // readMaxConnections returns the server's connection limit for one shard, or 0 when it cannot say - SQLite
@@ -642,7 +679,16 @@ func (e *Engine) recomputePools() {
 			changed = true
 		}
 	}
-	if !changed && len(observed) == len(e.lastAppliedSlots) {
+	// A held pool is pushed again when its steps have finished or the fleet's draining count has moved, with
+	// no role of this replica's having moved.
+	heldMoved := false
+	for idx, divisor := range e.heldDivisors {
+		if e.inFlightOn(idx) == 0 || e.heldDivisor(idx, specs[idx]) != divisor {
+			heldMoved = true
+			break
+		}
+	}
+	if !changed && !heldMoved && len(observed) == len(e.lastAppliedSlots) {
 		return
 	}
 	e.lastAppliedSlots = observed
@@ -665,6 +711,22 @@ func (e *Engine) recomputePools() {
 		if slots == 0 {
 			e.applyRole(idx, false)
 		}
+		// Demoted with steps still in flight: hold a share sized like the peers' divisor until they finish,
+		// so their completions do not queue on the reader pool. Decided before the override split: an override
+		// dispatches every shard, so it lands as a release here, and a hold left recorded would keep the
+		// draining statement up and re-push on every tick for the life of the process.
+		held := slots == 0 && e.inFlightOn(idx) > 0
+		divisor := slots
+		if held {
+			divisor = e.heldDivisor(idx, specs[idx])
+			if _, ok := e.heldDivisors[idx]; !ok {
+				e.logger.Info("Shard pool held for in-flight steps", "shard", idx)
+			}
+			e.heldDivisors[idx] = divisor
+		} else if _, ok := e.heldDivisors[idx]; ok {
+			delete(e.heldDivisors, idx)
+			e.logger.Info("Shard pool hold released", "shard", idx)
+		}
 		if override != 0 {
 			if slots > 0 {
 				postSplitConns += override
@@ -672,7 +734,7 @@ func (e *Engine) recomputePools() {
 		} else {
 			// Zero-value spec = the default shard's sizing; a missing RTT (an unprobed shard) falls to the
 			// uncompensated bucket, which is the under-connecting direction.
-			idle, open := shardPool(specs[idx], 0, slots, rtts[idx])
+			idle, open := shardPool(specs[idx], 0, divisor, rtts[idx])
 			db.SetMaxOpenConns(open)
 			db.SetMaxIdleConns(idle)
 			if e.seams.Enabled() { // Enabled gates the assembled name and the boxed value in production
@@ -688,6 +750,11 @@ func (e *Engine) recomputePools() {
 			if slots > 0 {
 				postSplitConns += open
 			}
+		}
+		// After the push: the statement must never lower a peer's divisor while this replica still holds a
+		// share from outside the cut.
+		if sonar := e.sonarFor(idx); sonar != nil {
+			sonar.SetDraining(held)
 		}
 		if slots > 0 {
 			e.applyRole(idx, true)

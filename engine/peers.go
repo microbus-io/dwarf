@@ -33,12 +33,15 @@ import (
 // in that shard's registry and publishes what reading it implies. The rationale for the mechanism lives in
 // internal/peers; what matters here is the shape of what it publishes and what the engine does with it.
 //
-// Three numbers, from one reading:
+// What one reading yields:
 //
 //   - Replicas and Rank choose that shard's DISPATCHERS: the replicas ranked below dispatcherSlots(Replicas)
 //     split the shard's connection budget, because it belongs to the shard's database and N replicas each
 //     holding the whole budget would overshoot it N times over. Everyone else holds a small reader pool
 //     there, so the budget divides by a count bounded by the shard's size rather than the fleet's.
+//   - Draining counts the replicas outside the cut still holding a dispatcher's share while they finish
+//     steps they claimed; the budget divides by the dispatchers plus them, so their shares are divided
+//     around rather than grown into.
 //   - Partition divides that shard's WORK - the residue class of step_id each replica selects - across the
 //     replicas that demonstrably serve it. A replica that does not dispatch a shard idles its piston there,
 //     stops stamping its dispatch evidence, and drops out of the partition with no rule of its own.
@@ -213,11 +216,13 @@ func (e *Engine) sleepPeerGrace(ctx context.Context, d time.Duration) {
 }
 
 // withdrawFromFleet flags this replica's row on every shard as running no steps, so its peers take over
-// its dispatcher slots at their next reading. Called at the start of a drain; best effort - a shard whose
-// write fails keeps this replica ranked until the row ages out or leaveFleet deletes it.
+// its dispatcher slots at their next reading - and as draining on every shard it dispatches, so they divide
+// the budget with it until it leaves (a shard whose pool is already held states draining already). Called at
+// the start of a drain; best effort - a shard whose write fails keeps this replica ranked until the row ages
+// out or leaveFleet deletes it.
 func (e *Engine) withdrawFromFleet(ctx context.Context) {
 	for idx, s := range e.sonars {
-		if err := s.Withdraw(ctx); err != nil {
+		if err := s.Withdraw(ctx, e.dispatchesOn(idx)); err != nil {
 			e.logger.ErrorContext(ctx, "Withdrawing from the fleet", "shard", idx, "error", err)
 		}
 	}

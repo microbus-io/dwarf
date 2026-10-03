@@ -253,7 +253,10 @@ constants are in the [cloud benchmarks](benchmark-cloud.md).
 > two for a shard of up to 4 vCPUs, four at 8 vCPUs, sixteen at 64 — never more than there are replicas,
 > and at least two once there are two, so one replica failing does not stop a shard. Every other replica
 > holds just **two connections** to that shard, enough to create flows, answer reads and wait on outcomes,
-> and runs none of its steps. So a shard's connections stay near its budget plus about one per extra
+> and runs none of its steps. A replica that stops dispatching a shard — another replica took its place, or
+> it is shutting down — keeps a dispatcher-sized share until the steps it already started there finish, and
+> the shard's dispatchers make room for it, so that work completes at full speed. So a shard's connections
+> stay near its budget plus about one per extra
 > replica, rather than growing with the fleet — a host running many replicas for its own traffic does not
 > over-connect its workflow databases. Different shards pick different dispatchers, so the work spreads
 > across the fleet. It all resizes live as the fleet scales in or out, with nothing to declare, and a

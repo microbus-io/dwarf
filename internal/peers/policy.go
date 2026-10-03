@@ -32,6 +32,10 @@ type peer struct {
 	// configured to run no steps, or draining at shutdown - is kept out of the ranking and nothing else: it
 	// still counts in replicas, and the partition never reads it.
 	working bool
+	// draining is the peer's statement that it holds a dispatcher-sized share of the shard's connection
+	// budget from OUTSIDE the dispatcher cut: it stopped dispatching - demoted, or withdrawn at shutdown - and
+	// is still finishing the steps it claimed.
+	draining bool
 }
 
 // windows are the three thresholds one classification applies, in milliseconds to match the ages the
@@ -56,6 +60,8 @@ type view struct {
 	// await-only - and rank is this replica's 0-based rendezvous place among them.
 	candidates int
 	rank       int
+	// draining is how many OTHER fresh replicas state they are draining a dispatcher-sized share.
+	draining int
 	// selfSeen reports whether this replica has a row at all - the trigger for the registration repair.
 	// Distinct from having a FRESH one: a row that exists but has aged out is a liveness problem the beat
 	// fixes on its own, while a missing row is refreshed by nobody.
@@ -108,6 +114,9 @@ func classify(rows []peer, self int64, selfWorking bool, shard int, w windows) v
 			continue
 		}
 		v.replicas++
+		if p.draining && p.engineID != self {
+			v.draining++
+		}
 		if p.working {
 			v.candidates++
 			if p.engineID != self && outranks(rendezvousScore(p.engineID, shard), p.engineID, selfScore, self) {

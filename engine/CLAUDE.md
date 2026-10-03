@@ -2539,8 +2539,9 @@ successor and advance no `step_id`. Constants, their portability, and the normal
   below).
 
 - **The derived budget is per DATABASE, so the shard's DISPATCHERS split it**: each of the `X` replicas
-  that dispatch a shard takes `max(2, round(budget/X))`, and every other replica holds the reader pool
-  (1 idle, 2 open). The knee belongs to the shard's server, not to one replica. Which replicas dispatch is
+  that dispatch a shard takes `max(2, round(budget/(X+D)))`, where `D` counts the replicas draining a share
+  from outside the cut (see "Dispatchers"), and every other replica holds the reader pool (1 idle, 2 open).
+  The knee belongs to the shard's server, not to one replica. Which replicas dispatch is
   never declared: the engine reads it from the shared `dwarf_peers` registry (see "Dispatchers"), and every
   role change pushes recomputed pools to the open shards immediately. The `SetMaxOpenConns` override is a
   per-replica exact number and is never divided.
@@ -2685,7 +2686,8 @@ two, each further replica adds its minimum pool to a budget that does not grow -
 past its knee). The realistic fleet that reaches it is not a large dwarf deployment but a host scaled wide
 for its own traffic, every instance paying for connections to shards it barely uses. So each shard has
 `X = dispatcherSlots(spec, R)` **dispatchers** that split the budget, and every other replica holds a
-**reader pool** (1 idle, 2 open) and runs no step there. Connections per shard become `budget + ~R` held,
+**reader pool** (1 idle, 2 open) and runs no step there - except a demoted one still finishing the steps
+it claimed, which holds a share until they are done (below). Connections per shard become `budget + ~R` held,
 most of the `R` idle, instead of `max(budget, 2R)` active.
 
 - **Two budgets, and they must not be conflated.** The **knee** (`shardBudget`) bounds *active* connections
@@ -2777,13 +2779,52 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   fresh - and keeps its rank - for the whole drain, which can be minutes, and a small shard whose dispatchers
   all drained at once (a scale-in, a rollout with `maxUnavailable >= 2`) would run nothing until the slowest
   task finished. **The withdrawal has a cost, which is why it waits:** the peers grow into the freed share
-  while the drainer still holds it, so for a drain the shard is one share over. A drain that ends at once
-  pays that for nothing (`leaveFleet` hands the slot on as fast), and in a rolling restart the overlap stacks
+  while the drainer still holds it. `Withdraw` therefore also states `draining` on every shard where the
+  replica holds a dispatcher's share, and peers add the draining count to the divisor - the slot passes,
+  but the share is divided around rather than grown into (the drainer keeps the pool it had, so the shard
+  is over by the difference between that share and the narrower one, not by a whole share). A drain that
+  ends at once pays even that for nothing (`leaveFleet` hands the slot on as fast), and in a rolling restart
+  the overlap stacks
   with the replacement's bootstrap pool - withdrawing unconditionally measured 71 connections against the 67
   bound of `TestPeerRollingRestart_FleetNeverExceedsTheShardBudget` on Postgres. **Do not gate it on a count of
   tasks in flight instead:** read at the instant the drain starts, it misses a worker that has claimed a step
   and not yet entered the task. Pinned by `TestDispatchers_DrainGivesUpTheSlotBeforeWaiting` and
   `TestDispatchers_DrainingDispatcherHandsItsSlotToAPeer`.
+- **A DEMOTED dispatcher keeps a dispatcher's share until the steps it claimed have finished**
+  (`recomputePools`, `heldDivisors`). Demotion is routine: a graceful leave deletes the row and
+  passes the slot at once, and the replacement - or the same replica back under a pinned `SetEngineID` -
+  displaces whoever took it. Shrunk straight to the reader pool, the in-flight completions queue on two
+  connections: about 12,000 of them at ~5 ms each fill the 30 s lease margin, stalling every flow behind
+  them and letting leases lapse into re-execution if the recovery sweep lands in the window.
+  - It stops claiming at once (`applyRole(false)`), but its pool and turnstile are sized at
+    `heldDivisor` - the dispatcher count plus every draining replica, itself included - and it states
+    `draining` so its peers divide by the same count. Once every peer has read it the shard is back on
+    budget (the window before that is in `internal/peers/CLAUDE.md` under `Draining`); the dispatchers lose
+    a slice of their pool for the length of the drain, which is the trade being made.
+  - **The count is `shardRole.inFlight`, incremented in the crew callback after `TryClaim` and decremented
+    when `processStep` returns** - claim through transition, nothing asynchronous after it. A worker that
+    popped a candidate and has not reached the callback is not counted; it is one step through a narrower
+    pool, not a backlog.
+  - **Released when the count reaches ZERO**, checked on each reconcile tick (`recomputePools` re-pushes when
+    a held shard drained or the draining count moved, even with no role change). **All at once, by
+    decision:** one long task holds the share - and keeps every dispatcher on the shard a slice smaller - for
+    its whole duration, and holds stack across a rolling deploy. A release threshold (shrink once the reader
+    pool could clear the rest within N seconds) would end holds sooner, but it is a fixed constant, a
+    tunable, and a stall bounded by it; the simple rule was chosen over it. Revisit with a measurement of
+    hold durations under a long-task workload, not by argument. Do not hold the full pre-demotion pool
+    instead of dividing: that leaves the shard a share over budget for as long as the slowest task.
+  - **Ordering:** the pool is pushed first and `SetDraining` follows it, both ways, so the statement never
+    lowers a peer's divisor while this replica still holds a share from outside the cut. It cannot make the
+    handoff instantaneous: until every peer has read the statement the shard runs over by about the held
+    share, for up to about two scan intervals - an accepted residual whose bound, and the alternative not to
+    build, are in `internal/peers/CLAUDE.md` under `Draining`.
+  - A re-promotion while held clears the hold and takes the dispatcher pool directly. A `SetMaxOpenConns`
+    override landing while held releases the hold too - the hold is decided before the override branch -
+    since the override pins every pool and leaves no budget to divide; left recorded, the hold would keep
+    the statement up for the life of the process.
+  Pinned by `TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish`,
+  `TestDispatchers_PromotionWhileHeldClearsTheHold`, `TestDispatchers_OverrideReleasesAHold` and
+  `TestDispatchers_DrainingReplicasDivideTheBudget`.
 - **Known residual: a crashed dispatcher holds its slot for the fresh window (40s).** The rank is drawn from
   rows still counted by `Replicas`, so a dispatcher that dies without shutting down keeps its rank until its
   row ages out, and the shard runs on `X-1` meanwhile. With `X >= 2` that is slower, not stopped; **all `X`

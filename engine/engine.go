@@ -172,12 +172,17 @@ type Engine struct {
 	// own. Per shard because the roles are: a fleet change on one shard must not re-push every other
 	// shard's unchanged sizes, and an unchanged one must not mask a change elsewhere.
 	lastAppliedSlots map[int]int
-	// dispatching is whether this replica dispatches each shard - the doorbell's gate and pickShard's
-	// preference. Startup builds a fresh map per run and PUBLISHES it through the pointer: a host still
-	// serving through a Shutdown/Startup restart reads it from Create, and a map assigned in place under
-	// that read is a fatal throw. Each published map is read-only; its flags are flipped by applyRole under
-	// poolsLock. Read through dispatchFlag.
-	dispatching atomic.Pointer[map[int]*atomic.Bool]
+	// roles is this replica's standing on each shard: whether it dispatches there - the doorbell's gate and
+	// pickShard's preference - and how many steps its workers are processing there. Startup builds a fresh
+	// map per run and PUBLISHES it through the pointer: a host still serving through a Shutdown/Startup
+	// restart reads it from Create, and a map assigned in place under that read is a fatal throw. Each
+	// published map is read-only; its dispatch flags are flipped by applyRole under poolsLock, and its
+	// in-flight counts are moved lock-free by the workers. Read through dispatchFlag and inFlightOn.
+	roles atomic.Pointer[map[int]*shardRole]
+	// heldDivisors is, for each shard this replica stopped dispatching while its workers still had steps in
+	// flight there, the divisor its held pool was last sized with: the pool and turnstile keep a share until
+	// those steps finish. Owned by poolsLock.
+	heldDivisors map[int]int
 	// shardMaxConns is each shard's server connection limit, read once at Startup (0 = unknown), and
 	// fleetOverLimit is whether checkFleetFits last found the fleet over it. The first is written in
 	// Startup before the reconcile loop starts; the second is owned by poolsLock.
@@ -334,6 +339,7 @@ func NewEngine() *Engine {
 	// directly, and records it here; the reconcile loop then dedupes against that.
 	e.lastAppliedSlots = map[int]int{}
 	e.fleetOverLimit = map[int]bool{}
+	e.heldDivisors = map[int]int{}
 	e.leaseMargin = 30 * time.Second
 	// The detector's cost scales with concurrent AWAITERS, not with step throughput - one small indexed
 	// IN-lookup per shard holding one, and nothing at all when nobody is waiting - so the cadence is picked
@@ -734,14 +740,15 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// rather than taken as already reported.
 	e.poolsLock.Lock()
 	e.fleetOverLimit = map[int]bool{}
+	e.heldDivisors = map[int]int{}
 	e.poolsLock.Unlock()
-	// One flag per open shard, rebuilt per run and filled in by the sizing loop below, before anything that
+	// One role per open shard, rebuilt per run and filled in by the sizing loop below, before anything that
 	// could ring a doorbell is running.
-	flags := make(map[int]*atomic.Bool, len(shards))
+	roles := make(map[int]*shardRole, len(shards))
 	for idx := range shards {
-		flags[idx] = &atomic.Bool{}
+		roles[idx] = &shardRole{}
 	}
-	e.dispatching.Store(&flags)
+	e.roles.Store(&roles)
 
 	// Announce this replica on every shard, wait for peers to notice, and read each shard's fleet back -
 	// then size every pool from the derived budget split by THAT shard's count. Those are the real sizes,
@@ -942,6 +949,12 @@ func (e *Engine) initRuntime() error {
 			// on a step nobody is running.
 			release()
 			return nil
+		}
+		// Counted from before the claim to after the transition, so a demotion landing anywhere in between
+		// sees the step and keeps the pool its completion will write through.
+		if r := e.roleOn(shard); r != nil {
+			r.inFlight.Add(1)
+			defer r.inFlight.Add(-1)
 		}
 		return e.processStep(ctx, shard, stepID, release)
 	})
