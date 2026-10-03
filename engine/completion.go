@@ -22,7 +22,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -1093,7 +1092,7 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 			rows.Close()
 			return nil, nil, nil, errors.Trace(err)
 		}
-		term := slices.Contains(terminalStatuses, status)
+		term := workflow.IsTerminalStatus(status)
 		byID[id] = node{token: token, terminal: term, workflowURL: workflowURL}
 		if parent != 0 {
 			childrenByParent[parent] = append(childrenByParent[parent], id)

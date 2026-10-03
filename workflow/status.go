@@ -37,9 +37,6 @@ func IsValidStatus(s string) bool {
 	return false
 }
 
-// TerminalStatuses lists every flow/step status that is terminal (immutable, no further advancement).
-var TerminalStatuses = []string{StatusCompleted, StatusFailed, StatusTerminated, StatusCancelled}
-
 // IsTerminalStatus reports whether s is one of the terminal flow/step statuses.
 func IsTerminalStatus(s string) bool {
 	switch s {

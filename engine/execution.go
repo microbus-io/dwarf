@@ -21,7 +21,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -307,7 +306,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	e.metricStateReadBytes(ctx, workflowURL, "resume_data", len(resumeDataJSON))
 	e.metricStateReadBytes(ctx, workflowURL, "subgraph_result", len(subgraphResultJSON))
 
-	if slices.Contains(terminalStatuses, flowStatus) {
+	if workflow.IsTerminalStatus(flowStatus) {
 		reapPass := turnstile.WaitTurn(ctx)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=?",

@@ -67,16 +67,13 @@ const (
 	parkedSubgraph = 1
 )
 
-// terminalStatuses lists every flow/step status that is terminal (immutable, no further advancement). Kept as
-// a slice - rather than only the pre-joined SQL form below - so it stays inspectable/iterable in Go, not just
-// consumable as SQL text. Backed by workflow.TerminalStatuses so this list and workflow's own terminal-status
-// predicate can never drift apart.
-var terminalStatuses = workflow.TerminalStatuses
-
-// terminalStatusesSQL is terminalStatuses pre-joined into a quoted literal ready to inline into a WHERE clause,
-// e.g. "status IN (" + terminalStatusesSQL + ")" or "status NOT IN (" + terminalStatusesSQL + ")". Computed once
-// at package init. Never bind this as a parameter - a bound status defeats the SQL Server / SQLite filtered index.
-var terminalStatusesSQL = "'" + strings.Join(terminalStatuses, "', '") + "'"
+// terminalStatusesSQL is every terminal flow/step status pre-joined into a quoted literal ready to inline into a
+// WHERE clause, e.g. "status IN (" + terminalStatusesSQL + ")" or "status NOT IN (" + terminalStatusesSQL + ")".
+// Never bind this as a parameter - a bound status defeats the SQL Server / SQLite filtered index. In Go, test a
+// status with workflow.IsTerminalStatus; TestTerminalStatusesSQL_MatchesIsTerminalStatus keeps the two in step.
+var terminalStatusesSQL = "'" + strings.Join([]string{
+	workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
+}, "', '") + "'"
 
 // The recovery/await/reap timing knobs (leaseMargin, wedgeSweepInterval, parkWedgeThreshold,
 // orphanFlowThreshold, deletionGrace, reapInterval, awaitDefaultBudget) are per-engine fields on Engine

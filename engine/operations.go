@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -674,7 +673,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 	if surgraphFlowID != 0 {
 		return errors.New("cannot terminate a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	if slices.Contains(terminalStatuses, flowStatus) {
+	if workflow.IsTerminalStatus(flowStatus) {
 		return errors.New("flow is already in terminal status", http.StatusConflict)
 	}
 

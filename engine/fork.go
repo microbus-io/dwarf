@@ -94,7 +94,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	if !slices.Contains(terminalStatuses, rootStatus) {
+	if !workflow.IsTerminalStatus(rootStatus) {
 		return "", errors.New("can only fork a terminal flow (status: %s)", rootStatus, http.StatusConflict)
 	}
 	// A flow scheduled for deletion is on its way out; unlike Continue (which searches for a base), Fork names
@@ -367,7 +367,7 @@ func (e *Engine) cloneOneFlow(ctx context.Context, tx *sequel.Tx, cc *forkClone,
 	var stragglers []int
 	for i := range keep {
 		s := &keep[i]
-		if s.oldID != rewind && !slices.Contains(terminalStatuses, s.status) {
+		if s.oldID != rewind && !workflow.IsTerminalStatus(s.status) {
 			s.status = workflow.StatusTerminated
 			stragglers = append(stragglers, s.oldID)
 		}
