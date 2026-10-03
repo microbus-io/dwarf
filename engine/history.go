@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -118,9 +119,16 @@ func (e *Engine) loadSubgraphChildren(ctx context.Context, db *sequel.DB, flowID
 	return childByCaller, errors.Trace(rows.Err())
 }
 
+// treeStep is one step loaded by loadTreeSteps, with the step_ids that History assembly keys on.
+type treeStep struct {
+	id, predID, succID int
+	step               workflow.FlowStep
+}
+
 // loadTreeSteps loads every step of every flow in flowID's subgraph tree (one query, keyed on the
-// root_flow_id membership index), grouped by owning flow_id and ordered within each flow.
-func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int, flowID int) (map[int][]workflow.FlowStep, error) {
+// root_flow_id membership index), grouped by owning flow_id and ordered within each flow. DAG edges never
+// leave their flow, so every predecessor_id/successor_id resolves to a key among the loaded rows.
+func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int, flowID int) (map[int][]treeStep, error) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT flow_id, step_id, step_token, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked, engine_id FROM dwarf_steps"+
 			" WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)) ORDER BY flow_id, step_depth, step_id",
@@ -130,31 +138,43 @@ func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, shardNum int,
 		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
-	stepsByFlow := map[int][]workflow.FlowStep{}
+	stepsByFlow := map[int][]treeStep{}
+	keyOf := map[int]string{}
 	for rows.Next() {
 		var step workflow.FlowStep
-		var stepFlowID, stepID, parked int
+		var stepFlowID, stepID, predID, succID, parked int
 		var stepToken, errMsg string
-		err := rows.Scan(&stepFlowID, &stepID, &stepToken, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &step.PredecessorID, &step.SuccessorID, &parked, &step.EngineID)
+		err := rows.Scan(&stepFlowID, &stepID, &stepToken, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &predID, &succID, &parked, &step.EngineID)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		step.StepID = stepID
 		step.Parked = parked != 0
 		step.StepKey = keys.New(shardNum, stepID, stepToken)
 		step.Error = strings.TrimSpace(errMsg)
-		stepsByFlow[stepFlowID] = append(stepsByFlow[stepFlowID], step)
+		keyOf[stepID] = step.StepKey
+		stepsByFlow[stepFlowID] = append(stepsByFlow[stepFlowID], treeStep{id: stepID, predID: predID, succID: succID, step: step})
 	}
-	return stepsByFlow, errors.Trace(rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, errors.Trace(err)
+	}
+	for _, tree := range stepsByFlow {
+		for i := range tree {
+			tree[i].step.PredecessorKey = keyOf[tree[i].predID]
+			tree[i].step.SuccessorKey = keyOf[tree[i].succID]
+		}
+	}
+	return stepsByFlow, nil
 }
 
 // assembleHistory builds one flow's history from the pre-loaded tree maps, recursively attaching each
 // surgraph caller step's latest child subhistory. Purely in memory - no per-step query. Each flow has one
 // surgraph parent, so the recursion visits every flow at most once (no cycle guard needed).
-func assembleHistory(flowID int, childByCaller map[int]subgraphChild, stepsByFlow map[int][]workflow.FlowStep) []workflow.FlowStep {
-	steps := stepsByFlow[flowID]
-	for i := range steps {
-		child, ok := childByCaller[steps[i].StepID]
+func assembleHistory(flowID int, childByCaller map[int]subgraphChild, stepsByFlow map[int][]treeStep) []workflow.FlowStep {
+	tree := stepsByFlow[flowID]
+	steps := make([]workflow.FlowStep, len(tree))
+	for i, ts := range tree {
+		steps[i] = ts.step
+		child, ok := childByCaller[ts.id]
 		if !ok {
 			continue
 		}
@@ -199,17 +219,14 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 		return nil, errors.Trace(err)
 	}
 	fs := &workflow.FlowStep{
-		StepKey:       stepKey,
-		StepID:        stepID,
-		StepDepth:     stepDepth,
-		TaskName:      taskName,
-		Attempt:       attempt,
-		PredecessorID: predID,
-		SuccessorID:   succID,
-		Status:        statusStr,
-		Error:         strings.TrimSpace(errMsg),
-		CreatedAt:     createdAt,
-		UpdatedAt:     updatedAt,
+		StepKey:   stepKey,
+		StepDepth: stepDepth,
+		TaskName:  taskName,
+		Attempt:   attempt,
+		Status:    statusStr,
+		Error:     strings.TrimSpace(errMsg),
+		CreatedAt: createdAt,
+		UpdatedAt: updatedAt,
 	}
 	fs.State, err = workflow.NewState(stateJSON)
 	if err != nil {
@@ -310,17 +327,16 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	// Resolve predecessor/successor step keys for navigation. The cross-flow
+	// Resolve the DAG-edge and navigation neighbors to step keys. The cross-flow
 	// fallbacks above still land on the same shard (subgraph flows have shard
-	// affinity with their parent), so one IN query fetches both rows.
-	if effectivePredID > 0 || effectiveSuccID > 0 {
-		var ids []any
-		if effectivePredID > 0 {
-			ids = append(ids, effectivePredID)
+	// affinity with their parent), so one IN query fetches every row.
+	var ids []any
+	for _, id := range []int{predID, succID, effectivePredID, effectiveSuccID} {
+		if id > 0 && !slices.Contains(ids, any(id)) {
+			ids = append(ids, id)
 		}
-		if effectiveSuccID > 0 && effectiveSuccID != effectivePredID {
-			ids = append(ids, effectiveSuccID)
-		}
+	}
+	if len(ids) > 0 {
 		placeholders := strings.Repeat("?,", len(ids))
 		placeholders = placeholders[:len(placeholders)-1]
 		nrows, err := db.QueryContext(ctx,
@@ -339,6 +355,12 @@ func (e *Engine) step(ctx context.Context, stepKey string) (*workflow.FlowStep, 
 				return nil, errors.Trace(err)
 			}
 			key := keys.New(shardNum, nid, ntoken)
+			if nid == predID {
+				fs.PredecessorKey = key
+			}
+			if nid == succID {
+				fs.SuccessorKey = key
+			}
 			if nid == effectivePredID {
 				fs.PrevKey = key
 			}

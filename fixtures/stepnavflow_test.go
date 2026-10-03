@@ -25,9 +25,9 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestStepnavflow verifies that the Step endpoint populates PrevKey/NextKey navigation links. For a
-// linear A->B->C flow, the middle step B must resolve to A as its previous and C as its next, so a UI
-// can offer ?step= links across the execution DAG.
+// TestStepnavflow verifies that History and Step report a step's DAG edges as step keys, and that Step
+// populates the PrevKey/NextKey navigation links. For a linear A->B->C flow, the middle step B must
+// resolve to A as its previous and C as its next, so a UI can offer ?step= links across the execution DAG.
 func TestStepnavflow(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -60,22 +60,20 @@ func TestStepnavflow(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	// Locate the middle step: the one with both a predecessor and a successor in the DAG.
-	var midKey string
-	for _, s := range steps {
-		if s.PredecessorID != 0 && s.SuccessorID != 0 {
-			midKey = s.StepKey
-		}
-	}
-	if !assert.NotEqual("", midKey) {
+	if !assert.Len(steps, 3) {
 		return
 	}
+	// History records the A->B->C edges as step keys.
+	assert.Equal(steps[0].StepKey, steps[1].PredecessorKey)
+	assert.Equal(steps[2].StepKey, steps[1].SuccessorKey)
 
-	mid, err := eng.Step(ctx, midKey)
+	mid, err := eng.Step(ctx, steps[1].StepKey)
 	if !assert.NoError(err) {
 		return
 	}
-	// The Step endpoint must resolve both navigation neighbors.
-	assert.NotEqual("", mid.PrevKey)
-	assert.NotEqual("", mid.NextKey)
+	// Step reports the same edges, and in a flow with no subgraph the navigation neighbors match them.
+	assert.Equal(steps[1].PredecessorKey, mid.PredecessorKey)
+	assert.Equal(steps[1].SuccessorKey, mid.SuccessorKey)
+	assert.Equal(steps[0].StepKey, mid.PrevKey)
+	assert.Equal(steps[2].StepKey, mid.NextKey)
 }

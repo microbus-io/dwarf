@@ -1212,17 +1212,17 @@ func TestFlow_MermaidEscapesInjection(t *testing.T) {
 	// Malicious task name, subgraph (workflow) name, and title carried through a flow's rendered history.
 	steps := []FlowStep{
 		{
-			StepID:   1,
+			StepKey:  "1-1-a",
 			TaskName: "svc/pwn\"]:::term <img src=q onerror=alert(1)> |z|",
 			Status:   StatusCompleted,
 		},
 		{
-			StepID:          2,
+			StepKey:         "1-2-b",
 			TaskName:        "svc/caller",
-			PredecessorID:   1,
+			PredecessorKey:  "1-1-a",
 			Subgraph:        true,
 			SubWorkflowName: `Evil"]<img>`,
-			SubHistory:      []FlowStep{{StepID: 3, TaskName: "svc/inner", Status: StatusCompleted}},
+			SubHistory:      []FlowStep{{StepKey: "1-3-c", TaskName: "svc/inner", Status: StatusCompleted}},
 			Status:          StatusCompleted,
 		},
 	}

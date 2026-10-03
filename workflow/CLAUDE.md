@@ -316,8 +316,8 @@ for text - the generated classDef omits `color:`, host CSS sets it, and Mermaid 
 
 ### DAG-edge model
 
-The execution DAG is reconstructed from `PredecessorID`/`SuccessorID`, NOT `step_depth`. Every edge is recorded on at
-least one endpoint - fan-out via each child's `PredecessorID`, fan-in via each cohort exit's `SuccessorID`, linear on
+The execution DAG is reconstructed from `PredecessorKey`/`SuccessorKey`, NOT `step_depth`. Every edge is recorded on at
+least one endpoint - fan-out via each child's `PredecessorKey`, fan-in via each cohort exit's `SuccessorKey`, linear on
 both - and the rendered edge set is their deduped union, exact for arbitrary nesting.
 
 ### Subgraph caller decomposition
@@ -351,7 +351,7 @@ time would be inside `subgraph_wall_time` but invisible on any rendered edge.
 
 ### Fan-out cohort wrappers
 
-Two-or-more steps sharing one `PredecessorID` get wrapped in an invisible Mermaid `subgraph` block (empty label, no
+Two-or-more steps sharing one `PredecessorKey` get wrapped in an invisible Mermaid `subgraph` block (empty label, no
 fill, no stroke) - purely a layout container so siblings cluster near their parent. Edges always go between actual
 task nodes; nothing terminates at the cohort wrapper.
 

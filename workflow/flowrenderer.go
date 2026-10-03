@@ -206,35 +206,43 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 	}
 	subBlocks := map[int]subBlock{}
 
-	for i := range steps {
-		s := steps[i]
-		if s.StepID == 0 {
+	// Steps are numbered by position for node IDs and edge lookups; the edges name their ends by key.
+	idOf := make(map[string]int, len(steps))
+	for i, s := range steps {
+		if s.StepKey != "" {
+			idOf[s.StepKey] = i + 1
+		}
+	}
+
+	for _, s := range steps {
+		id := idOf[s.StepKey]
+		if id == 0 {
 			continue
 		}
-		nodeID := fmt.Sprintf("%ss%d", prefix, s.StepID)
-		byID[s.StepID] = &renderNode{entries: []string{nodeID}, exits: []string{nodeID}}
+		nodeID := fmt.Sprintf("%ss%d", prefix, id)
+		byID[id] = &renderNode{entries: []string{nodeID}, exits: []string{nodeID}}
 		if s.Subgraph && len(s.SubHistory) > 0 {
-			subPrefix := fmt.Sprintf("%ss%d_sub", prefix, s.StepID)
+			subPrefix := fmt.Sprintf("%ss%d_sub", prefix, id)
 			var body strings.Builder
 			subHeads, subTails := r.renderSteps(&body, subPrefix, s.SubHistory)
-			blockID := fmt.Sprintf("%ss%d_sg", prefix, s.StepID)
+			blockID := fmt.Sprintf("%ss%d_sg", prefix, id)
 			label := s.SubWorkflowName
 			var callEdgeLabel string
 			for _, sub := range s.SubHistory {
-				if sub.PredecessorID == 0 && sub.HasStarted() && !sub.StartedAt.IsZero() && !sub.CreatedAt.IsZero() {
+				if sub.PredecessorKey == "" && sub.HasStarted() && !sub.StartedAt.IsZero() && !sub.CreatedAt.IsZero() {
 					if d := sub.StartedAt.Sub(sub.CreatedAt); d > 0 {
 						callEdgeLabel = flowFormatDuration(d)
 					}
 					break
 				}
 			}
-			subBlocks[s.StepID] = subBlock{blockID: blockID, label: label, body: body.String(), innerHeads: subHeads, callEdgeLabel: callEdgeLabel}
+			subBlocks[id] = subBlock{blockID: blockID, label: label, body: body.String(), innerHeads: subHeads, callEdgeLabel: callEdgeLabel}
 			if len(subTails) > 0 {
-				byID[s.StepID].exits = subTails
+				byID[id].exits = subTails
 			}
 		}
-		stepByID[s.StepID] = s
-		order = append(order, s.StepID)
+		stepByID[id] = s
+		order = append(order, id)
 	}
 
 	emitClick := func(nodeID, stepKey string) {
@@ -275,11 +283,11 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 
 	childrenOf := map[int][]int{}
 	for _, id := range order {
-		s := stepByID[id]
-		if s.PredecessorID == 0 {
+		pid := idOf[stepByID[id].PredecessorKey]
+		if pid == 0 {
 			continue
 		}
-		childrenOf[s.PredecessorID] = append(childrenOf[s.PredecessorID], id)
+		childrenOf[pid] = append(childrenOf[pid], id)
 	}
 	cohortOf := map[int]int{}
 	for parentID, kids := range childrenOf {
@@ -353,11 +361,11 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 	}
 	for _, id := range order {
 		s := stepByID[id]
-		if s.PredecessorID != 0 {
-			addEdge(s.PredecessorID, id)
+		if pid := idOf[s.PredecessorKey]; pid != 0 {
+			addEdge(pid, id)
 		}
-		if s.SuccessorID != 0 {
-			addEdge(id, s.SuccessorID)
+		if sid := idOf[s.SuccessorKey]; sid != 0 {
+			addEdge(id, sid)
 		}
 	}
 

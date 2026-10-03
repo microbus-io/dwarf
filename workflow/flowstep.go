@@ -21,7 +21,6 @@ import "time"
 // FlowStep is a single step in a flow's execution history.
 type FlowStep struct {
 	StepKey   string `json:"stepKey,omitzero"`
-	StepID    int    `json:"stepID,omitzero"`
 	StepDepth int    `json:"stepDepth,omitzero"`
 	TaskName  string `json:"taskName,omitzero"`
 	Attempt   int    `json:"attempt,omitzero"`
@@ -30,12 +29,17 @@ type FlowStep struct {
 	// per-process value that changes when a replica restarts, so it is a correlation and
 	// work-distribution signal (which replica ran this step), not a stable address. Zero when unset.
 	EngineID int64 `json:"engineID,omitzero"`
-	// PredecessorID and SuccessorID are this step's neighbors in the execution DAG.
-	// 0 means no such edge (entry / exit step).
-	PredecessorID int `json:"predecessorID,omitzero"`
-	SuccessorID   int `json:"successorID,omitzero"`
-	// PrevKey and NextKey are the external step keys of the resolved navigation neighbors,
-	// ready for use as ?step= links. Populated only by the Step endpoint.
+	// PredecessorKey and SuccessorKey are the keys of this step's neighbors in its flow's execution
+	// graph, empty where none is recorded. Not every edge is recorded on both ends: a fan-out step
+	// leaves SuccessorKey empty while each child names it as PredecessorKey, and each step joining a
+	// fan-in names the fan-in step as SuccessorKey. A flow's full edge set is the union of the pairs
+	// of all its steps.
+	PredecessorKey string `json:"predecessorKey,omitzero"`
+	SuccessorKey   string `json:"successorKey,omitzero"`
+	// PrevKey and NextKey are the step keys of the previous and next steps on a linear walk of the
+	// execution timeline. Unlike PredecessorKey and SuccessorKey, the walk passes through subgraphs:
+	// it skips the subgraph caller step, entering the child flow at its first step and leaving it to
+	// the caller's neighbor in the parent flow. Set only by Engine.Step; empty in History.
 	PrevKey          string     `json:"prevKey,omitzero"`
 	NextKey          string     `json:"nextKey,omitzero"`
 	Subgraph         bool       `json:"subgraph,omitzero"`
