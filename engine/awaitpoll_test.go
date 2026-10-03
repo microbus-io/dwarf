@@ -18,12 +18,14 @@ package engine
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -122,6 +124,53 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 		return
 	}
 	rel()
+}
+
+// TestAwait_DefaultBudgetIsADeadlineError pins the timeout a caller gets when its ctx names no deadline
+// and the wait runs out on await's default budget instead. ctx.Err() is nil then, so Await must still
+// report a 408 that wraps context.DeadlineExceeded, and Run must not return a nil error beside its nil
+// outcome.
+func TestAwait_DefaultBudgetIsADeadlineError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	proxy := NewTestProxy()
+	release := make(chan struct{})
+
+	g := workflow.NewGraph("AwaitPoll")
+	g.SetEndpoint("Block", "awaitpoll.verify:0/block")
+	g.AddTransition("Block", workflow.End)
+	proxy.HandleGraph("awaitpoll.verify:0/g", g)
+	proxy.HandleTask("awaitpoll.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	defer close(release) // before Shutdown, which waits for the blocked task
+	e.SetHost(proxy)
+	e.awaitDefaultBudget = 200 * time.Millisecond
+	assert.NoError(e.Startup(t.Context()))
+
+	flowKey, err := e.Create(ctx, "awaitpoll.verify:0/g", nil, nil)
+	if !assert.NoError(err) {
+		return
+	}
+	out, err := e.Await(ctx, flowKey)
+	assert.Nil(out)
+	assert.True(errors.Is(err, context.DeadlineExceeded), "Await: %v", err)
+	assert.Equal(http.StatusRequestTimeout, errors.StatusCode(err))
+
+	runKey, out, err := e.Run(ctx, "awaitpoll.verify:0/g", nil, nil)
+	assert.NotEqual("", runKey)
+	assert.Nil(out)
+	assert.True(errors.Is(err, context.DeadlineExceeded), "Run: %v", err)
+	assert.Equal(http.StatusRequestTimeout, errors.StatusCode(err))
 }
 
 // TestPoll_RunningThenStopped pins the difference between Poll and Await on a deadline: while the flow is still

@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"cmp"
 	"context"
 	"io"
 	"maps"
@@ -1347,13 +1348,9 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (*workflow.FlowOutco
 		return nil, err
 	}
 	if !outcome.Stopped() {
-		// await returned a non-terminal outcome only because the wait ran out. Usually that is the caller's
-		// own ctx, but a caller that named no deadline runs out on the engine's budget instead - and then
-		// there is no ctx error to carry, so this must name the timeout itself rather than trace a nil.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, errors.Trace(ctxErr, http.StatusRequestTimeout)
-		}
-		return nil, errors.New("timed out awaiting flow", http.StatusRequestTimeout)
+		// The wait ran out: the caller's ctx, or await's default budget for a ctx with no deadline, which
+		// leaves ctx.Err() nil.
+		return nil, errors.New("timed out awaiting flow", cmp.Or(ctx.Err(), context.DeadlineExceeded), http.StatusRequestTimeout)
 	}
 	return outcome, nil
 }

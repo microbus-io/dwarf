@@ -2205,9 +2205,11 @@ bookkeeping, which is unit-tested directly and cheaper to keep correct than to p
 unbounded wait somehow - a flow that never stops otherwise blocks its caller for the life of the process - but
 the budget applies *only* where the caller expressed nothing; an explicit deadline is honored as given, however
 long. It is set high on purpose: a parked caller is free (previous paragraph), so a shorter budget would buy
-nothing and would cut short waits callers legitimately asked for. Note the consequence at the `Await` boundary:
-when the budget (rather than the caller's ctx) expires, **`ctx.Err()` is nil**, so `Await` must name the timeout
-itself instead of tracing that nil - tracing it returns a nil error alongside a non-stopped outcome.
+nothing and would cut short waits callers legitimately asked for. Note the consequence at the `Await` and `Run`
+boundaries: when the budget (rather than the caller's ctx) expires, **`ctx.Err()` is nil**, so both wrap
+`cmp.Or(ctx.Err(), context.DeadlineExceeded)` rather than tracing `ctx.Err()` - tracing a nil returns a nil error
+beside a nil outcome. Either way the 408 satisfies `errors.Is(err, context.DeadlineExceeded)`. Pinned by
+`TestAwait_DefaultBudgetIsADeadlineError`.
 
 **Shutdown closes the board**, which wakes every parked caller with `latch.ErrClosed` and `await` turns into a
 503. `drainRuntime` stops the detector *before* closing the board (a `Sweep` in flight is not interrupted by

@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -867,12 +868,13 @@ func (e *Engine) run(ctx context.Context, workflowURL string, initialState any, 
 		return flowKey, nil, errors.Trace(err)
 	}
 	if !outcome.Stopped() {
-		// The caller's ctx expired before the flow stopped. The flow is durable and already running on the
+		// The wait ran out before the flow stopped: the caller's ctx, or await's default budget for a ctx with
+		// no deadline, which leaves ctx.Err() nil. The flow is durable and already running on the
 		// engine's own worker lifetime, independent of this call - so do NOT tear it down. Terminating here
 		// would destroy healthy, in-progress work (a durable retry-until-success job especially) just because
 		// the caller stopped waiting - an availability footgun. Return the flowKey with a timeout error
 		// instead, so the caller keeps a handle to re-Await/Snapshot/Terminate on its own terms.
-		return flowKey, nil, errors.Trace(ctx.Err(), http.StatusRequestTimeout)
+		return flowKey, nil, errors.New("timed out awaiting flow", cmp.Or(ctx.Err(), context.DeadlineExceeded), http.StatusRequestTimeout)
 	}
 	return flowKey, outcome, nil
 }
