@@ -1256,7 +1256,7 @@ with OnError recovery and made the fanouterrorflow fixture flaky). A branch that
 does **not** bump `cohort_failures` - its step is marked `completed` and routed to the handler, so the cohort still
 converges and the flow recovers via the handler -> fan-in path; likewise a `terminated`/`cancelled` member (from an
 external `Terminate`) does not escalate. So the invariant is precise: escalate only on a genuinely-unhandled branch
-failure (`failStep` with no `onError`), never on an onError-handled error or an externally-terminated sibling.
+failure (`failStep` with no `onError`), never on an onError-handled error or an externally terminated or cancelled sibling.
 
 **Retry rejoins its cohort naturally.** `flow.Retry` rewinds the failed step in place - same `step_id`, `lineage_id`,
 `fan_out_ordinal`, just `status='pending'` and the prior error/park slot cleared. The merge query sees one row per
@@ -3197,7 +3197,7 @@ Once terminal (`completed`/`failed`/`terminated`/`cancelled`), the park slot is 
 `parkedNone`. Every
 terminal-transition code path resets `parked` in the same UPDATE (the `failStep` write, the `Terminate` cascade, the
 `processStep` terminal-flow guard). Without this, a step that was parked
-when its flow was terminated would sit terminal with non-zero `parked` - invisible to the selection index but never
+when its flow reached a terminal status would sit terminal with non-zero `parked` - invisible to the selection index but never
 re-leased. A `Fork` clone writes each step's `parked` explicitly (the re-parked ancestor callers to `parkedSubgraph`,
 all other cloned steps to `parkedNone`), so cloned rows never inherit a stale non-zero `parked`.
 
@@ -3214,7 +3214,7 @@ the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_e
 byte counters).
 
 **8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
-(start path), `dwarf_flows_terminated` (completeFlow), `dwarf_steps_executed` (every terminal step
+(start path), `dwarf_flows_ended` (completeFlow), `dwarf_steps_executed` (every terminal step
 disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered`
 (recoverExpiredLeases lease recovery, and the orphan sweep's rewinds), `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
 nonzero value flags a latent bug), `dwarf_flows_orphaned` (a stranded flow the orphan sweep could NOT repair
@@ -3456,15 +3456,15 @@ nothing about now, while `max_over_time` on the plain gauge gives a WINDOWED pea
 free. It also carried a footgun the gauge does not: the two roles peak at different moments, so summing
 them reported a mark that never occurred.
 
-**Fidelity choices:** `flows_terminated` counts every terminal status it is called with - completed
+**Fidelity choices:** `flows_ended` counts every terminal status it is called with - completed
 (`completeFlow`), failed (`failStep`, and the cohort-resolution path in `processStep` that fails a flow
-without going through it), and terminated (`terminateSubtree`, per flow of the tree it terminalized). It
-once fired only on `completed`, which broke it in two ways at once: the `status` attribute had a single
-value, so `sum by (status)` silently answered a completed/failed/terminated question with completions
-alone, and the in-flight panel this metric exists for - `flows_started` minus this - drifted upward
-permanently by every flow that did not finish cleanly. Both halves are pinned by
-`TestMetrics_TerminatedCountsEveryTerminalStatus`, which fails on all three of its assertions against a
-completions-only counter (it exercises the completed/failed/terminated shape). The terminate path counts the flows
+without going through it), and terminated (`terminateSubtree`, per flow of the tree it terminalized). Do not
+narrow it to `completed`: that breaks it in two ways at once - the `status` attribute has a single value, so
+`sum by (status)` silently answers a completed/failed/terminated question with completions alone, and the
+in-flight panel this metric exists for - `flows_started` minus this - drifts upward permanently by every flow
+that did not finish cleanly. Both halves are pinned by `TestMetrics_EndedCountsEveryTerminalStatus`, which
+fails on all three of its assertions against a completions-only counter (it exercises the
+completed/failed/terminated shape). The terminate path counts the flows
 that were non-terminal when it
 scanned the tree, so a terminate racing a concurrent completion can over-count by one; that window is
 microseconds and the miscount is bounded to at most one flow, so it is not worth a round trip to close.
@@ -3472,8 +3472,8 @@ microseconds and the miscount is bounded to at most one flow, so it is not worth
 `failStep` and the cohort-fail path. **Every path that starts a flow must call
 `metricFlowStarted`** - `Create`, `Continue`, AND `Fork` (which builds its new root through its own
 `INSERT...SELECT` clone and so is the easy one to miss): a fork's completion runs through the same `completeFlow`
-that increments `flows_terminated`, so a missing start makes the standard in-flight panel
-(`started - terminated`) drift negative by one per fork. Subgraph flows are counted too - the start
+that increments `flows_ended`, so a missing start makes the standard in-flight panel
+(`started - ended`) drift negative by one per fork. Subgraph flows are counted too - the start
 path and `completeFlow` run for them - so no `surgraph_flow_id` filter; the `workflow` label lets dashboards
 slice root-vs-subgraph. `TestMetrics_EmittedOnRun` pins emission with an in-memory SDK `ManualReader`.
 

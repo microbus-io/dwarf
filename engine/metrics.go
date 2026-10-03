@@ -40,7 +40,7 @@ const metricScope = "github.com/microbus-io/dwarf"
 // their event sites; the gauges are observable (async) and pulled by observeGauges at collection time.
 type engineMetrics struct {
 	flowsStarted        metric.Int64Counter
-	flowsTerminated     metric.Int64Counter
+	flowsEnded     metric.Int64Counter
 	stepsExecuted       metric.Int64Counter
 	stepsRecovered      metric.Int64Counter
 	stepsUnwedged       metric.Int64Counter
@@ -86,8 +86,8 @@ func (e *Engine) initMetrics() error {
 	}
 	// Counter instrument names carry no _total suffix; the Prometheus exporter appends it at scrape time.
 	// Unit-denominated counters end with the unit (…_bytes), per the Prometheus naming convention.
-	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by the shard they were placed on. The shard attribute measures PLACEMENT: pickShard is capacity-weighted random, so a skew here means the fleet's work is not spread the way the weights intended, and one shard's steps carry more than their share. Against dwarf_flows_terminated{shard} it is that shard's in-flight flow count. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
-	m.flowsTerminated = ctr("dwarf_flows_terminated", "Counts flows that have reached a terminal status, by the shard holding them and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, which is what makes dwarf_flows_started minus this a stable in-flight count rather than one that drifts upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
+	m.flowsStarted = ctr("dwarf_flows_started", "Counts flows that have been started, by the shard they were placed on. The shard attribute measures PLACEMENT: pickShard is capacity-weighted random, so a skew here means the fleet's work is not spread the way the weights intended, and one shard's steps carry more than their share. Against dwarf_flows_ended{shard} it is that shard's in-flight flow count. Note a closed-loop caller makes starts and terminations equal by construction - only an open-loop arrival rate lets a shortfall here indict the CALLER rather than the engine.")
+	m.flowsEnded = ctr("dwarf_flows_ended", "Counts flows that have reached a terminal status, by the shard holding them and BY WHICH terminal status - completed, failed, terminated, or cancelled. All four are counted, which is what makes dwarf_flows_started minus this a stable in-flight count rather than one that drifts upward by every flow that did not finish cleanly. Subgraph children are counted here and as starts, so a tree nets to zero. Split by status for the failure/termination/cancellation rates; dwarf_steps_executed{status} is the step-level view of the same thing.")
 	m.stepsExecuted = ctr("dwarf_steps_executed", "Counts steps that have been executed, by the shard holding them. The shard attribute is what turns this into per-shard dispatch throughput - the quantity a per-shard piston, pool and partition all separately govern, and the one a fleet-wide total hides.")
 	m.stepsRecovered = ctr("dwarf_steps_recovered", "Counts steps reset to pending because their worker is gone - a running step whose lease expired (its task runs again), or a completed step whose transition never committed (it is replayed from its recorded completion; its task does not run again) - the crash-recovery path. A nonzero rate means workers are dying or overrunning their lease.")
 	m.stepsUnwedged = ctr("dwarf_steps_unwedged", "Counts parked steps recovered by the wedge sweep, labelled by park type. A nonzero value signals a latent bug whose effect the sweep papered over.")
@@ -425,7 +425,7 @@ func (e *Engine) observePendingByBand(ctx context.Context) (countByBand, oldestS
 // --- Inline counter helpers (no-op until initMetrics has run). ---
 
 // metricFlowStarted counts a flow start against the shard it was PLACED on. Every start path must call it
-// (Create, Continue and Fork), or the standard in-flight panel - started minus terminated - drifts by one
+// (Create, Continue and Fork), or the standard in-flight panel - started minus ended - drifts by one
 // per uncounted flow.
 func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string, shardNum int) {
 	e.flowsStartedCount.Add(1)
@@ -436,12 +436,12 @@ func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string, shar
 		attribute.String("workflow", workflowURL), attribute.String("shard", strconv.Itoa(shardNum))))
 }
 
-func (e *Engine) metricFlowTerminated(ctx context.Context, workflowURL, status string, shardNum int) {
-	e.flowsTerminatedCount.Add(1)
+func (e *Engine) metricFlowEnded(ctx context.Context, workflowURL, status string, shardNum int) {
+	e.flowsEndedCount.Add(1)
 	if e.metrics == nil {
 		return
 	}
-	e.metrics.flowsTerminated.Add(ctx, 1, metric.WithAttributes(
+	e.metrics.flowsEnded.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("workflow", workflowURL), attribute.String("status", status),
 		attribute.String("shard", strconv.Itoa(shardNum))))
 }

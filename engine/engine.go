@@ -117,13 +117,13 @@ type Engine struct {
 	// (claimer) as forensic provenance, deliberately unindexed.
 	engineID int64
 
-	// flowsStartedCount / flowsTerminatedCount are cheap in-memory lifecycle counts, incremented
-	// alongside the dwarf_flows_started / dwarf_flows_terminated OTEL counters but WITHOUT needing a
+	// flowsStartedCount / flowsEndedCount are cheap in-memory lifecycle counts, incremented
+	// alongside the dwarf_flows_started / dwarf_flows_ended OTEL counters but WITHOUT needing a
 	// configured meter (the default provider is a no-op). They let an embedder read in-flight work
-	// (started - terminated) with an atomic load - no OTEL reader, no query. Used by the open-loop load
+	// (started - ended) with an atomic load - no OTEL reader, no query. Used by the open-loop load
 	// generator to bound outstanding flows; generally useful for backpressure.
 	flowsStartedCount    atomic.Int64
-	flowsTerminatedCount atomic.Int64
+	flowsEndedCount atomic.Int64
 
 	// cohortLocks serializes a fan-out cohort's arrivals THROUGH THIS PEER, so its siblings queue on a Go
 	// lock holding no database connection instead of on the spawn step's row lock each holding one. The
@@ -587,12 +587,12 @@ func (e *Engine) setRefillInterval(d time.Duration) error {
 }
 
 // FlowsStarted returns the count of flows this engine has started (Create/Continue/Fork/subgraph),
-// a cheap atomic read that needs no configured meter. FlowsTerminated is its completion counterpart;
-// started - terminated approximates in-flight work for backpressure.
+// a cheap atomic read that needs no configured meter. FlowsEnded is its completion counterpart;
+// started - ended approximates in-flight work for backpressure.
 func (e *Engine) FlowsStarted() int64 { return e.flowsStartedCount.Load() }
 
-// FlowsTerminated returns the count of flows this engine has completed/failed/terminated/cancelled. See FlowsStarted.
-func (e *Engine) FlowsTerminated() int64 { return e.flowsTerminatedCount.Load() }
+// FlowsEnded returns the count of flows this engine has completed/failed/terminated/cancelled. See FlowsStarted.
+func (e *Engine) FlowsEnded() int64 { return e.flowsEndedCount.Load() }
 
 // SetHost registers the host the engine reaches the outside world through: it loads graphs and executes
 // tasks. Host has exactly two methods, LoadGraph and ExecuteTask, both required; the engine sends nothing

@@ -221,7 +221,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 // nothing to bind on). Open loop is what puts the refiller under the deep backlog it exists for, and it
 // separates two latencies the closed loop conflates: admission (the Create call) and end-to-end.
 //
-// Outstanding is bounded to maxOutstanding (created - Sum(FlowsTerminated) across engines, a cheap
+// Outstanding is bounded to maxOutstanding (created - Sum(FlowsEnded) across engines, a cheap
 // atomic read - no per-flow Await, which under a deep backlog would park tens of thousands of callers and
 // put every one of their flow ids in the latch detector's per-shard lookup). Completion latency is SAMPLED
 // by a small bounded pool of
@@ -237,14 +237,14 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		}
 		return &workflow.FlowOptions{FairnessKey: fmt.Sprintf("k%d", rand.IntN(fairnessKeys))}
 	}
-	terminated := func() int64 {
+	ended := func() int64 {
 		var n int64
 		for _, e := range engines {
-			n += e.FlowsTerminated()
+			n += e.FlowsEnded()
 		}
 		return n
 	}
-	baseTerminated := terminated()
+	baseEnded := ended()
 
 	var (
 		measuring atomic.Bool
@@ -267,8 +267,8 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 		creatorsWG  sync.WaitGroup
 		awaitWG     sync.WaitGroup
 	)
-	// outstanding = created - (terminated - baseTerminated). Read cheaply from the engine atomics.
-	outstanding := func() int64 { return created.Load() - (terminated() - baseTerminated) }
+	// outstanding = created - (ended - baseEnded). Read cheaply from the engine atomics.
+	outstanding := func() int64 { return created.Load() - (ended() - baseEnded) }
 
 	// Sampled completion latency: a bounded pool, cancelled at stop so a still-pending sample never
 	// blocks the drain. One in `sampleEvery` created flows is measured.

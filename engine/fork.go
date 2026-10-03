@@ -160,8 +160,8 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	newFlowKey := keys.New(shardNum, newRootFlowID, cc.rootFlowToken)
 	e.logger.InfoContext(ctx, "Flow forked", "fromRoot", rootFlowID, "forkStep", forkStepID, "to", newRootFlowID)
 	// A fork starts a new, self-contained root flow, and its completion runs through the same completeFlow
-	// that increments dwarf_flows_terminated - so it MUST also be counted here, or the standard in-flight
-	// panel (started - terminated) drifts negative by one per fork. Create and Continue count their starts
+	// that increments dwarf_flows_ended - so it MUST also be counted here, or the standard in-flight
+	// panel (started - ended) drifts negative by one per fork. Create and Continue count their starts
 	// at the same point; Fork's own INSERT...SELECT clone path simply never did.
 	e.metricFlowStarted(ctx, cc.rootWorkflowURL, shardNum)
 	e.enqueueStep(ctx, shardNum, cc.newLeafStepID)

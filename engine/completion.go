@@ -401,13 +401,13 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 		fid := allFlowIDs[i].(int)
 		e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, fid), "to", workflow.StatusTerminated)
 		// Counted per flow, alongside the signal and on the same set, because every one of these was started
-		// (createWithGraph counts subgraph children too) and the in-flight panel is started minus terminated.
+		// (createWithGraph counts subgraph children too) and the in-flight panel is started minus ended.
 		// The set is the flows that were non-terminal when the tree was scanned; one that terminalized in the
 		// window between that scan and this commit is excluded by the UPDATE's own status guard but still
 		// counted here, so a terminate racing a completion can over-count by one. That window is microseconds
 		// against a miscount that used to be EVERY failed and terminated flow, so it is not worth a second
 		// round trip to close.
-		e.metricFlowTerminated(ctx, urlByFlowID[fid], workflow.StatusTerminated, shardNum)
+		e.metricFlowEnded(ctx, urlByFlowID[fid], workflow.StatusTerminated, shardNum)
 		e.signalStop(ctx, cid, workflow.StatusTerminated)
 	}
 	return nil
@@ -563,7 +563,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 	}
 
 	e.logger.InfoContext(ctx, "Flow status transition", "flow", keys.CorrelationID(shardNum, flowID), "to", workflow.StatusCompleted)
-	e.metricFlowTerminated(ctx, workflowURL, workflow.StatusCompleted, shardNum)
+	e.metricFlowEnded(ctx, workflowURL, workflow.StatusCompleted, shardNum)
 	compositeID := keys.New(shardNum, flowID, flowToken)
 
 	e.signalStop(ctx, compositeID, workflow.StatusCompleted)
@@ -818,7 +818,7 @@ func (e *Engine) failStep(ctx context.Context, shardNum int, stepID int, leaseSe
 	// counted as started - a subgraph child included, since createWithGraph is the shared insert path. The
 	// child's failure additionally travels to its parent's flow.Subgraph call, but that is delivery, not a
 	// second termination.
-	e.metricFlowTerminated(ctx, flowWorkflowURL, flowStatus, shardNum)
+	e.metricFlowEnded(ctx, flowWorkflowURL, flowStatus, shardNum)
 
 	if isSubgraphChild {
 		e.signalStop(ctx, keys.New(shardNum, flowID, flowToken), flowStatus)

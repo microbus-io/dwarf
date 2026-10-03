@@ -190,7 +190,7 @@ func TestSoakflow(t *testing.T) {
 				lastActive = len(active)
 				lastProgress = time.Now()
 			} else if time.Since(lastProgress) > 60*time.Second {
-				break // no flow has terminated in 60s: a real stall, not just a slow server
+				break // no flow has ended in 60s: a real stall, not just a slow server
 			}
 			if len(active) > 0 {
 				time.Sleep(50 * time.Millisecond)
