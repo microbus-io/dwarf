@@ -17,8 +17,8 @@ So the practical rule while dwarf is pre-1.0:
 
 This is a deliberate stance, not an oversight. Dwarf has no production community yet, so the cost of holding
 a compatibility line now is paid entirely in constrained design, with nobody on the other side benefiting
-from it. Once there is real usage, v1.0 will need to commit to the discipline sketched at the bottom of this
-page. Until then, the freedom to change the schema is worth more than the promise not to.
+from it. From v1.0, upgrades follow the versioning promise at the bottom of this page. Until then, the freedom
+to change the schema is worth more than the promise not to.
 
 ## Two operations, only one of which is risky
 
@@ -153,29 +153,21 @@ that is a database restore rather than a deploy — and a restore has workflow-l
 re-run, completed work rewinds, deleted flows come back). See
 **[Backup and restore](backup-and-restore.md)** before doing it.
 
-## What v1.0 will need to promise
+## What v1.0 will promise
 
-Recorded here so the eventual commitment is a decision rather than a discovery. None of this is in force
-today.
+Recorded here so the commitment is a decision rather than a discovery. None of this is in force before v1.0.
 
-**Versioning, from v1.0 on:**
-
-| Release | Contains |
-|---|---|
-| **PATCH** (`1.2.x`) | Bug fixes only. No database migration. |
-| **MINOR** (`1.x.0`) | New features, and any database change — always backward compatible. |
-| **MAJOR** (`x.0.0`) | Anything that breaks backward compatibility, in the API or the schema. |
+| Release | What it may change | How to upgrade |
+|---|---|---|
+| **PATCH** (`1.2.x`) | Bug fixes only. No database migration. | **Rolling deploy.** A patch release runs side by side with earlier patches of the same minor version, so replicas can be replaced one at a time. |
+| **MINOR** (`1.x.0`) | New features and fixes. API contracts are kept: an application written against an earlier `1.x` builds against it unchanged. May change the database. | **May need a maintenance window**, as described above for v0.x. The release notes say whether it does. |
+| **MAJOR** (`x.0.0`) | Changes that break API contracts. May change the database. | **May require changes to your application and a rebuild**, as well as a maintenance window. |
 
 Release notes for every version are published on
 [GitHub Releases](https://github.com/microbus-io/dwarf/releases), the canonical record.
 
-Still to be committed to:
+**Downgrades are not supported automatically.** Migrations are forward-only, so going back to an earlier
+version across a database change means undoing that change by hand or restoring a backup of the database
+taken before the upgrade. A PATCH carries no database change, so it can be rolled back like any deploy.
 
-- **Additive schema changes only** across supported versions — no dropped or renamed columns, no `NOT NULL`
-  additions without a default — so an older replica can run against a newly migrated database.
-- **A defined skew window**, most likely one minor version, making a rolling upgrade of dwarf itself
-  supported rather than a maintenance window.
-- **A stated downgrade position**, since forward-only migrations mean rollback needs either a documented
-  guarantee or an explicit "restore instead."
-
-Until those exist, treat every dwarf version bump as potentially breaking.
+Until v1.0, treat every dwarf version bump as potentially breaking.

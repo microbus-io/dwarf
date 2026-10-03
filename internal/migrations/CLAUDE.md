@@ -21,8 +21,10 @@ from that watermark.
 - **Numbers only append.** The watermark is a `MAX`, not a set, so a file numbered at or below an applied number
   (a skipped number filled in later, a `2a.sql` slotted between) is silently never run on an existing database.
 - **A new `N.sql` means a MINOR release at least, never a PATCH** (the published versioning policy in
-  `docs/upgrading.md`). A bug fix that needs a schema change ships as a minor version; one that breaks backward
-  compatibility (dropped or renamed column, `NOT NULL` without a default) ships as a major.
+  `docs/upgrading.md`). A PATCH must run side by side with the earlier patches of its minor version during a
+  rolling deploy, so it carries no migration - and no change to what replicas write to or expect from the
+  shared tables either, such as a new meaning for an existing column or status. A MINOR may change the
+  database and may need a maintenance window; the release notes say whether it does.
 - **One `N.sql` per change, covering every dialect.** The file is split on `;\n`; a statement carrying a
   `-- DRIVER: <names>` line runs only on those drivers, an untagged one runs on all. A dialect's statement
   missing from a shipped file cannot be added later by editing that file; it needs the next number.
