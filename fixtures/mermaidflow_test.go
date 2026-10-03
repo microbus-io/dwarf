@@ -133,17 +133,15 @@ func TestMermaidflow(t *testing.T) {
 		assert.NoError(err)
 		assert.True(len(steps) > 0, "history should have steps")
 
-		// Exercise the option setters (direction, title, custom palettes) and confirm a clean render.
+		// Exercise the option setters (direction, custom palettes) and confirm a clean render.
 		mmd := workflow.NewFlowRenderer(steps).
 			WithLeftRight().
-			WithTitle("Mermaid Test").
 			WithPrimaryColors("#112233", "#ffffff").
 			WithSecondaryColors("#445566", "#ffffff").
 			WithErrorColors("#aa0000", "#ffffff").
 			WithAttentionColors("#cc8800", "#000000").
 			Render()
 		assert.True(strings.Contains(mmd, "LR"), "WithLeftRight should orient the flowchart left-to-right")
-		assert.True(strings.Contains(mmd, "Mermaid Test"), "WithTitle should embed the title")
 		assert.True(strings.Contains(mmd, "#112233"), "custom primary fill should appear in a classDef/style")
 	})
 }

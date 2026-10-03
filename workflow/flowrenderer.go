@@ -45,7 +45,6 @@ type FlowRenderer struct {
 	attentionFill string
 	attentionText string
 	direction     string
-	title         string
 	linkParam     string
 }
 
@@ -128,12 +127,6 @@ func (r *FlowRenderer) WithLeftRight() *FlowRenderer {
 	return r
 }
 
-// WithTitle renders text as a caption node above the chart. Empty (the default) renders no caption.
-func (r *FlowRenderer) WithTitle(text string) *FlowRenderer {
-	r.title = text
-	return r
-}
-
 // WithLinks makes every step node clickable, emitting a Mermaid click directive that navigates to
 // "?<paramName>=<stepKey>" - so a host page can turn the diagram into a step inspector by reading that query
 // parameter. Empty (the default) emits no click directives.
@@ -163,9 +156,6 @@ func (r *FlowRenderer) Render() string {
 	fmt.Fprintf(&b, "    linkStyle default stroke:%s\n", r.primaryFill)
 	b.WriteString("\n")
 
-	if r.title != "" {
-		fmt.Fprintf(&b, "    _title{{\"%s\"}}:::term -.-> _start\n", escapeMermaid(r.title))
-	}
 	showEnd := !hasInflightStep(r.steps)
 
 	b.WriteString("    _start((\" \")):::term\n")

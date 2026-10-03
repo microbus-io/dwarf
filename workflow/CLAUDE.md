@@ -363,7 +363,7 @@ spot where time went, not reconcile to the millisecond).
 
 ### Mermaid escaping (author-controlled strings)
 
-Task names, workflow/subgraph names, graph titles, and `when`-expressions are **author-controlled** and land in a
+Task names, workflow/subgraph names, and `when`-expressions are **author-controlled** and land in a
 diagram a host renders in a UI, so every one of them passes through the single `escapeMermaid` helper (defined in
 `flowrenderer.go`, shared by both renderers). **Go `%q` is not Mermaid escaping** and must never be used for these:
 Mermaid honors no backslash escaping inside a label, so a raw `"` ends the label and lets the rest inject
@@ -371,10 +371,8 @@ node/edge/`click` syntax, and `<`/`>`/`` ` `` pass straight through into the lab
 vector). `escapeMermaid` rewrites `" ' < > `` ` `` [ ] { } ( ) | #` to their Mermaid character references (`#quot;`,
 `#lt;`, `#124;`, …), each rendering as the literal glyph; `#` is escaped **first** so an input already shaped like
 `#quot;` cannot survive as a live reference (`strings.NewReplacer` is a single non-overlapping pass). Every sink
-supplies its own surrounding quotes (`["%s"]`, `-->|"%s"|`, `{{"%s"}}`, `subgraph id ["%s"]`) and escapes only the
-content. The lone deliberate `%q` left is `themeCSS` in the graph frontmatter (host-controlled CSS, YAML-quoted); the
-frontmatter **title** is `escapeMermaid`'d then wrapped in plain quotes (escaping strips every `"`, so it is a valid
-YAML scalar *and* neutralizes markup that `%q` would have passed into the rendered caption). Engine-generated edge
+supplies its own surrounding quotes (`["%s"]`, `-->|"%s"|`, `subgraph id ["%s"]`) and escapes only the
+content. Neither renderer draws a title: the page that shows a diagram labels it. Engine-generated edge
 labels (durations) are escaped too, harmlessly, so no sink is a `%q` exception a future edit could cargo-cult. Pinned
 by `TestEscapeMermaid`, `TestGraph_MermaidEscapesInjection`, `TestFlow_MermaidEscapesInjection`.
 

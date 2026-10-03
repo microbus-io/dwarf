@@ -1229,10 +1229,10 @@ func TestEscapeMermaid(t *testing.T) {
 func TestGraph_MermaidEscapesInjection(t *testing.T) {
 	assert := testarossa.For(t)
 
-	// A malicious workflow author names the graph, a task, and a when-expression with Mermaid/HTML
-	// metacharacters, aiming to break out of the ["..."] label and inject node/edge/click syntax or
-	// an <img> XSS payload into a host UI that renders the diagram.
-	g := NewGraph(`Ord"er<x>`)
+	// A malicious workflow author names a task and a when-expression with Mermaid/HTML metacharacters,
+	// aiming to break out of the ["..."] label and inject node/edge/click syntax or an <img> XSS payload
+	// into a host UI that renders the diagram.
+	g := NewGraph("Order")
 	evil := "svc/pwn\"]:::term click n \"http\" `x` <img src=q onerror=alert(1)> [z] {q}"
 	g.AddTransitionWhen(evil, "svc/next", `a || b == "c"`)
 	g.AddTransition("svc/next", End)
@@ -1241,11 +1241,8 @@ func TestGraph_MermaidEscapesInjection(t *testing.T) {
 
 	// No raw metacharacter survives to end a label or inject markup/directives.
 	assert.NotContains(m, `<img`)
-	assert.NotContains(m, `<x>`)
 	assert.NotContains(m, "`x`")
 	assert.NotContains(m, `"]:::term`)
-	// The frontmatter title (author-controlled graph name) is escaped, not passed through by %q.
-	assert.Contains(m, `title: "Ord#quot;er#lt;x#gt;"`)
 	// Metacharacters are rewritten to Mermaid character references in node and edge labels.
 	assert.Contains(m, `#lt;img`)
 	assert.Contains(m, `#quot;`)
@@ -1256,7 +1253,7 @@ func TestGraph_MermaidEscapesInjection(t *testing.T) {
 func TestFlow_MermaidEscapesInjection(t *testing.T) {
 	assert := testarossa.For(t)
 
-	// Malicious task name, subgraph (workflow) name, and title carried through a flow's rendered history.
+	// Malicious task name and subgraph (workflow) name carried through a flow's rendered history.
 	steps := []FlowStep{
 		{
 			StepKey:  "1-1-a",
@@ -1274,16 +1271,14 @@ func TestFlow_MermaidEscapesInjection(t *testing.T) {
 		},
 	}
 
-	m := NewFlowRenderer(steps).WithTitle(`T"itle<x>`).Render()
+	m := NewFlowRenderer(steps).Render()
 
-	// No raw metacharacter survives in node labels, the subgraph block title, or the chart title.
+	// No raw metacharacter survives in node labels or the subgraph block title.
 	assert.NotContains(m, `<img`)
-	assert.NotContains(m, `<x>`)
 	assert.NotContains(m, `"]:::term`)
 	// Escaped forms are emitted instead.
 	assert.Contains(m, `#lt;img`)
 	assert.Contains(m, `#quot;`)
-	assert.Contains(m, `_title{{"T#quot;itle#lt;x#gt;"}}`)
 }
 
 // stripProto is shared by the graph's error messages and the flow renderer's node labels (it replaced a
@@ -1329,9 +1324,9 @@ func TestGraph_ValidatorAgreesWithIsFanOutSource(t *testing.T) {
 func TestRender_NilGraphAndEmptyHistory(t *testing.T) {
 	assert := testarossa.For(t)
 
-	// A nil graph renders empty rather than panicking on r.g.name.
+	// A nil graph renders empty rather than panicking.
 	assert.Equal("", NewGraphRenderer(nil).Render())
-	assert.Equal("", NewGraphRenderer(nil).WithTitleLabel(true).WithLeftRight().Render())
+	assert.Equal("", NewGraphRenderer(nil).WithLeftRight().Render())
 
 	// An empty history renders a well-formed (if bare) flowchart.
 	assert.Contains(NewFlowRenderer(nil).Render(), "flowchart")

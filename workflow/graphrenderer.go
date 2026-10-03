@@ -38,7 +38,6 @@ type GraphRenderer struct {
 	secondaryFill string
 	secondaryText string
 	direction     string
-	titleLabel    bool
 	linkParam     string
 }
 
@@ -51,7 +50,6 @@ func NewGraphRenderer(g *Graph) *GraphRenderer {
 		secondaryFill: defaultSecondaryFill,
 		secondaryText: defaultSecondaryText,
 		direction:     "LR",
-		titleLabel:    true,
 	}
 }
 
@@ -81,13 +79,6 @@ func (r *GraphRenderer) WithLeftRight() *GraphRenderer {
 	return r
 }
 
-// WithTitleLabel toggles the Mermaid frontmatter title (the graph's display name) rendered as a
-// caption above the chart.
-func (r *GraphRenderer) WithTitleLabel(show bool) *GraphRenderer {
-	r.titleLabel = show
-	return r
-}
-
 // WithLinks enables click directives on every task node.
 func (r *GraphRenderer) WithLinks(paramName string) *GraphRenderer {
 	r.linkParam = paramName
@@ -105,13 +96,6 @@ func (r *GraphRenderer) Render() string {
 		return ""
 	}
 	var b strings.Builder
-	if r.titleLabel {
-		// The author-controlled graph name is painted into .flowchartTitleText (the built-in themes
-		// ignore titleColor on the flowchart caption). themeCSS is host-controlled and kept
-		// YAML-quoted via %q.
-		titleCSS := fmt.Sprintf(".flowchartTitleText { fill: %s; }", r.primaryFill)
-		fmt.Fprintf(&b, "---\ntitle: \"%s\"\nconfig:\n  themeCSS: %q\n---\n", escapeMermaid(r.g.name), titleCSS)
-	}
 	fmt.Fprintf(&b, "graph %s\n", r.direction)
 	fmt.Fprintf(&b, "    classDef task fill:%s,color:%s,stroke:%s\n", r.primaryFill, r.primaryText, r.primaryFill)
 	fmt.Fprintf(&b, "    classDef term fill:%s,color:%s,stroke:%s\n", r.secondaryFill, r.secondaryText, r.primaryFill)
