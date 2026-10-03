@@ -377,3 +377,26 @@ frontmatter **title** is `escapeMermaid`'d then wrapped in plain quotes (escapin
 YAML scalar *and* neutralizes markup that `%q` would have passed into the rendered caption). Engine-generated edge
 labels (durations) are escaped too, harmlessly, so no sink is a `%q` exception a future edit could cargo-cult. Pinned
 by `TestEscapeMermaid`, `TestGraph_MermaidEscapesInjection`, `TestFlow_MermaidEscapesInjection`.
+
+## Fuzz targets (`fuzz_test.go`)
+
+Six targets here and two in `internal/keys` (`FuzzParseFlowKey`, `FuzzParseStepKey`), all pure - no database.
+Plain `go test` runs every seed and every saved corpus entry under `testdata/fuzz/<Target>/`, so a found input
+stays a regression test on every push. What `go test` never runs is **discovery**.
+
+**Discovery is run by hand, not on a schedule, and that is a decision.** Its finds concentrate in the first
+minutes on new or changed code, and the fuzzed surfaces (key parsing, reducers, state merge, Mermaid escaping,
+`when` expressions, the graph and flow wire formats) change rarely - a nightly job would mostly re-fuzz code
+nobody touched, and needs someone to triage its failures. Do not add discovery to the push workflow either: a
+time-boxed fuzz run fails nondeterministically, on pushes that did not cause it.
+
+Run it when it can find something - after changing a fuzzed surface, or after bumping `boolexp` - one target
+per invocation:
+
+```
+go test ./workflow -run '^$' -fuzz '^FuzzGraphJSON$' -fuzztime 2m
+```
+
+A failure writes the input under `testdata/fuzz/<Target>/`. Commit it with the fix: it becomes a permanent
+seed. A target whose failure mode is a hang (`FuzzWhenExpression`, `FuzzGraphJSON`) runs the call under a 3s
+watchdog so a hang fails the test instead of stalling it; keep that on any target reaching `boolexp`.
