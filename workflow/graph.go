@@ -39,17 +39,60 @@ type Node struct {
 	URL  string
 }
 
+// The kinds of transition, held in Transition.Kind. The empty kind is an ordinary transition: taken when
+// the source task succeeds and its When (if any) holds, with every matching ordinary transition taken, so
+// several matches fan out.
+const (
+	// TransitionSwitch is taken when the source task succeeds, by the first switch transition from the
+	// node whose When holds. It never fans out.
+	TransitionSwitch = "switch"
+	// TransitionGoto is taken only when the source task calls flow.Goto with its destination.
+	TransitionGoto = "goto"
+	// TransitionError is taken when the source task returns an error.
+	TransitionError = "error"
+)
+
 // Transition defines a possible transition between two nodes in a workflow graph.
 // From and To are node names, not URLs.
 type Transition struct {
-	From     string `json:"from"`
-	To       string `json:"to"`
-	When     string `json:"when,omitzero"`
-	WithGoto bool   `json:"withGoto,omitzero"`
-	ForEach  string `json:"forEach,omitzero"` // dynamic fan-out over a state field
-	As       string `json:"as,omitzero"`      // alias for the current element during forEach fan-out
-	OnError  bool   `json:"onError,omitzero"` // taken when the source task returns an error
-	Switch   bool   `json:"switch,omitzero"`  // first-match-wins among siblings; never fans out
+	From string `json:"from"`
+	To   string `json:"to"`
+	// Kind is empty for an ordinary transition, or TransitionSwitch, TransitionGoto or TransitionError.
+	Kind string `json:"kind,omitzero"`
+	// When is a boolean expression over the flow's state. It conditions an ordinary or switch transition,
+	// and is required on a switch.
+	When string `json:"when,omitzero"`
+	// ForEach names a state array to fan out over, one branch per element, on an ordinary transition.
+	ForEach string `json:"forEach,omitzero"`
+	// As names the element in each forEach branch's state.
+	As string `json:"as,omitzero"`
+}
+
+// UnmarshalJSON decodes a transition, also accepting the boolean withGoto, onError and switch fields in place
+// of Kind.
+func (t *Transition) UnmarshalJSON(data []byte) error {
+	type plain Transition
+	var v struct {
+		plain
+		WithGoto bool `json:"withGoto"`
+		OnError  bool `json:"onError"`
+		Switch   bool `json:"switch"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*t = Transition(v.plain)
+	if t.Kind == "" {
+		switch {
+		case v.OnError:
+			t.Kind = TransitionError
+		case v.WithGoto:
+			t.Kind = TransitionGoto
+		case v.Switch:
+			t.Kind = TransitionSwitch
+		}
+	}
+	return nil
 }
 
 // Graph is the definition of a workflow. It describes the tasks, transitions between them,
@@ -207,7 +250,7 @@ func (g *Graph) AddTransitionWhen(from, to string, when string) {
 func (g *Graph) AddTransitionSwitch(from, to string, when string) {
 	g.autoRegister(from)
 	g.autoRegister(to)
-	g.transitions = append(g.transitions, Transition{From: from, To: to, When: when, Switch: true})
+	g.transitions = append(g.transitions, Transition{From: from, To: to, Kind: TransitionSwitch, When: when})
 }
 
 // AddTransitionGoto adds a transition that is only taken when the source task calls
@@ -215,7 +258,7 @@ func (g *Graph) AddTransitionSwitch(from, to string, when string) {
 func (g *Graph) AddTransitionGoto(from, to string) {
 	g.autoRegister(from)
 	g.autoRegister(to)
-	g.transitions = append(g.transitions, Transition{From: from, To: to, WithGoto: true})
+	g.transitions = append(g.transitions, Transition{From: from, To: to, Kind: TransitionGoto})
 }
 
 // AddTransitionForEach adds a dynamic fan-out transition: 'forEach' names a state field holding an ARRAY,
@@ -273,7 +316,7 @@ func (g *Graph) AddTransitionForEach(from, to string, forEach string, as string)
 func (g *Graph) AddTransitionOnError(from, to string) {
 	g.autoRegister(from)
 	g.autoRegister(to)
-	g.transitions = append(g.transitions, Transition{From: from, To: to, OnError: true})
+	g.transitions = append(g.transitions, Transition{From: from, To: to, Kind: TransitionError})
 }
 
 // AddTransitionChain wires an unconditional transition between each consecutive pair of names:
@@ -315,7 +358,7 @@ func (g *Graph) autoRegister(name string) {
 // ErrorTransition returns the error transition from the given node name, if one exists.
 func (g *Graph) ErrorTransition(name string) (Transition, bool) {
 	for _, tr := range g.transitions {
-		if tr.From == name && tr.OnError {
+		if tr.From == name && tr.Kind == TransitionError {
 			return tr, true
 		}
 	}
@@ -341,7 +384,7 @@ func (g *Graph) IsFanIn(name string) bool {
 func (g *Graph) IsFanOutSource(name string) bool {
 	var normalCount int
 	for _, tr := range g.transitions {
-		if tr.From != name || tr.WithGoto || tr.OnError || tr.Switch {
+		if tr.From != name || tr.Kind != "" {
 			continue
 		}
 		if tr.ForEach != "" {
@@ -432,31 +475,30 @@ func (g *Graph) Validate() error {
 		if !nodeSet[tr.To] {
 			return errors.New("transition from '%s' to unknown node '%s' in graph '%s'", tr.From, tr.To, g.name)
 		}
-		if tr.ForEach != "" && tr.WithGoto {
-			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine forEach and withGoto", tr.From, tr.To, g.name)
+		switch tr.Kind {
+		case "", TransitionSwitch, TransitionGoto, TransitionError:
+		default:
+			return errors.New("transition from '%s' to '%s' in graph '%s' has unknown kind '%s'", stripProto(tr.From), stripProto(tr.To), g.name, tr.Kind)
+		}
+		if tr.ForEach != "" && tr.Kind != "" {
+			return errors.New("%s transition from '%s' to '%s' in graph '%s' cannot have 'forEach'; only an ordinary transition fans out", tr.Kind, stripProto(tr.From), stripProto(tr.To), g.name)
 		}
 		if tr.As != "" && tr.ForEach == "" {
 			return errors.New("transition from '%s' to '%s' in graph '%s' has 'as' without 'forEach'", tr.From, tr.To, g.name)
 		}
-		if tr.OnError && (tr.ForEach != "" || tr.WithGoto) {
-			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine onError with forEach or withGoto", tr.From, tr.To, g.name)
+		if tr.When != "" && (tr.Kind == TransitionGoto || tr.Kind == TransitionError) {
+			return errors.New("%s transition from '%s' to '%s' in graph '%s' cannot have a 'when' expression; it is taken whenever its trigger fires", tr.Kind, stripProto(tr.From), stripProto(tr.To), g.name)
 		}
-		if tr.OnError && tr.When != "" {
-			return errors.New("onError transition from '%s' to '%s' in graph '%s' cannot have a 'when' expression; onError is unconditional (it fires whenever the source task errors)", stripProto(tr.From), stripProto(tr.To), g.name)
-		}
-		if tr.OnError {
+		if tr.Kind == TransitionError {
 			if onErrorFrom[tr.From] {
-				return errors.New("node '%s' in graph '%s' has more than one onError transition; only one is allowed (ErrorTransition takes the first)", stripProto(tr.From), g.name)
+				return errors.New("node '%s' in graph '%s' has more than one error transition; only one is allowed (ErrorTransition takes the first)", stripProto(tr.From), g.name)
 			}
 			onErrorFrom[tr.From] = true
 		}
-		if tr.Switch && (tr.ForEach != "" || tr.WithGoto || tr.OnError) {
-			return errors.New("transition from '%s' to '%s' in graph '%s' cannot combine switch with forEach, withGoto, or onError", stripProto(tr.From), stripProto(tr.To), g.name)
-		}
-		if tr.Switch && tr.When == "" {
+		if tr.Kind == TransitionSwitch && tr.When == "" {
 			return errors.New("switch transition from '%s' to '%s' in graph '%s' requires a 'when' expression (use \"true\" for the default branch)", stripProto(tr.From), stripProto(tr.To), g.name)
 		}
-		if tr.OnError && tr.From == tr.To {
+		if tr.Kind == TransitionError && tr.From == tr.To {
 			return errors.New("transition from '%s' to itself in graph '%s' would loop unboundedly; use flow.Retry in the task body for bounded retries with backoff", stripProto(tr.From), g.name)
 		}
 		if tr.When != "" {
@@ -480,15 +522,15 @@ func (g *Graph) Validate() error {
 
 	hasSwitchFrom := make(map[string]bool, len(g.nodes))
 	for _, tr := range g.transitions {
-		if tr.Switch {
+		if tr.Kind == TransitionSwitch {
 			hasSwitchFrom[tr.From] = true
 		}
 	}
 	for _, tr := range g.transitions {
-		if !hasSwitchFrom[tr.From] || tr.Switch || tr.OnError || tr.WithGoto {
+		if !hasSwitchFrom[tr.From] || tr.Kind != "" {
 			continue
 		}
-		return errors.New("node '%s' in graph '%s' mixes a switch transition with a non-switch success-path transition to '%s'; convert all outgoing success-path transitions to switch (use when=\"true\" for the default), or use withGoto for explicit overrides", stripProto(tr.From), g.name, stripProto(tr.To))
+		return errors.New("node '%s' in graph '%s' mixes a switch transition with a non-switch success-path transition to '%s'; convert all outgoing success-path transitions to switch (use when=\"true\" for the default), or use a goto transition for explicit overrides", stripProto(tr.From), g.name, stripProto(tr.To))
 	}
 
 	reachable := make(map[string]bool)
@@ -581,11 +623,11 @@ func (g *Graph) validateLineage() error {
 			}
 			var nextStack []string
 			switch {
-			// The fan-in arm MUST precede the goto/onError/switch arm. The engine treats any transition
+			// The fan-in arm MUST precede the goto/error/switch arm. The engine treats any transition
 			// whose target is a fan-in node as a cohort arrival - it does not care which kind of edge
-			// carried it - so a withGoto/onError/switch edge into a fan-in from a node with no fan-out
+			// carried it - so a goto/error/switch edge into a fan-in from a node with no fan-out
 			// frame is exactly the "arrive at a cohort that does not exist" shape, and at runtime it bumps
-			// cohort_arrivals on step_id=0 and hot-loops the flow. Testing goto/onError/switch first (as
+			// cohort_arrivals on step_id=0 and hot-loops the flow. Testing goto/error/switch first (as
 			// this switch once did) skipped the frame-pop check for precisely the edges that can reach a
 			// fan-in from outside a cohort.
 			case g.fanInNodes[tr.To]:
@@ -614,13 +656,13 @@ func (g *Graph) validateLineage() error {
 					)
 				}
 				fanOutToFanIn[fanOutSource] = tr.To
-			// A goto/onError/switch edge is a runtime override the task body chooses, not a structural
+			// A goto/error/switch edge is a runtime override the task body chooses, not a structural
 			// branch of the fan-out, so it pushes no frame: the cohort it would push is one the engine
 			// never spawns. Without this arm a fan-out source can route nowhere but its own branches -
 			// its `goto END` inherits the source's own frame and trips the END check below - which
 			// rejects "fan out over the array, or end the flow when the task decides there is nothing
 			// to do". The arm must stay BELOW the fan-in arm; see that comment for why.
-			case tr.WithGoto, tr.OnError, tr.Switch:
+			case tr.Kind != "":
 				nextStack = fromStack
 			case fromIsFanOut:
 				nextStack = append(stackCopy(fromStack), from)

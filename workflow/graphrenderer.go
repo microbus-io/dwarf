@@ -173,18 +173,14 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 	switchArms := map[string][]diamondArm{}
 	whenArms := map[string][]diamondArm{}
 	for _, tr := range g.transitions {
-		if tr.WithGoto || tr.OnError {
-			continue
-		}
-		if tr.Switch {
+		switch {
+		case tr.Kind == TransitionSwitch:
 			label := tr.When
 			if label == "true" {
 				label = "default"
 			}
 			switchArms[tr.From] = append(switchArms[tr.From], diamondArm{to: tr.To, label: label})
-			continue
-		}
-		if tr.When != "" && tr.ForEach == "" {
+		case tr.Kind == "" && tr.When != "" && tr.ForEach == "":
 			whenArms[tr.From] = append(whenArms[tr.From], diamondArm{to: tr.To, label: tr.When})
 		}
 	}
@@ -220,11 +216,8 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 	edgeOrder := []edge{}
 	edgeLabels := map[edge][]string{}
 	for _, tr := range g.transitions {
-		if tr.Switch && !tr.WithGoto && !tr.OnError {
-			continue
-		}
-		if tr.When != "" && tr.ForEach == "" && !tr.WithGoto && !tr.OnError && !tr.Switch {
-			continue
+		if tr.Kind == TransitionSwitch || (tr.Kind == "" && tr.When != "" && tr.ForEach == "") {
+			continue // drawn through the source's switch or when diamond
 		}
 		e := edge{tr.From, tr.To}
 		if _, ok := edgeLabels[e]; !ok {
@@ -233,26 +226,12 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 		}
 		var label string
 		switch {
+		case tr.Kind == TransitionGoto:
+			label = "goto"
+		case tr.Kind == TransitionError:
+			label = "onError"
 		case tr.ForEach != "":
 			label = "for each"
-		case tr.Switch:
-			label = "case " + tr.When
-		case tr.When != "":
-			label = "when " + tr.When
-		}
-		if tr.WithGoto {
-			if label != "" {
-				label = "goto; " + label
-			} else {
-				label = "goto"
-			}
-		}
-		if tr.OnError {
-			if label != "" {
-				label = "onError; " + label
-			} else {
-				label = "onError"
-			}
 		}
 		if label != "" {
 			edgeLabels[e] = append(edgeLabels[e], label)

@@ -1159,7 +1159,7 @@ still reports `completed` in the shapes where it eventually does.
 
 **An override edge out of a fan-out source pushes NO lineage frame, because the runtime spawns no cohort for
 one.** `isPushTransition` is already false for a `Goto`/`onError`, so `Graph.validateLineage` mirrors it (the
-`tr.WithGoto, tr.OnError, tr.Switch` arm; why that arm sits below the fan-in arm is argued at the fan-in arm
+`tr.Kind != ""` arm; why that arm sits below the fan-in arm is argued at the fan-in arm
 itself, and `Switch` is inert there - a fan-out source cannot carry a switch edge). What the mirror buys is that
 each of these is settled at `Create` rather than at dispatch:
 
@@ -1884,16 +1884,16 @@ elapsed-time guard is one call away inside any task.
 
 Transitions are evaluated after a task completes successfully:
 
-1. If the task called `flow.Goto(target)`, only `withGoto` transitions matching that target are taken.
+1. If the task called `flow.Goto(target)`, only the `goto` transition to that target is taken.
 2. Otherwise, all non-goto, non-error transitions are evaluated: those without `when` always taken; those with `when`
    taken if the expression matches the merged state.
-3. `forEach` transitions iterate a state array and spawn one task per element. `forEach` cannot combine with
-   `withGoto`.
+3. `forEach` transitions iterate a state array and spawn one task per element. Only an ordinary transition (empty
+   `Kind`) carries `forEach`.
 4. Multiple matches -> all taken in parallel (fan-out).
 5. No matches -> the flow completes.
 
 **Error transitions.** When a task returns an error, the failed task's `onError` transition fires and preempts any
-other transition (`onError` is exclusive with `when`/`forEach`/`withGoto`, so it is unconditional). The error is
+other transition (an `error` transition carries no `when` or `forEach`, so it is unconditional). The error is
 serialized as a `TracedError` into state field `onErr` **with its stack frames stripped** (`Stack=nil` on a
 shallow copy, so the shared error object keeps its stack for logs) - `onErr` rides into `changes`->`final_state`
 and is readable by a state-bearing flow reader (`Snapshot`'s `final_state`, `Step`'s `state`/`changes` - not
@@ -1940,8 +1940,8 @@ aborts the transition transaction. The `processStep` recovery defer then rewinds
 advances the flow (measured with a re-dispatch that re-ran the task: 2,735 failed transitions in 2 seconds).
 
 - **`validateLineage` rejects the edges that produce it.** Its `switch` tests `g.fanInNodes[tr.To]` **before**
-  `tr.WithGoto, tr.OnError, tr.Switch` - **the order is load-bearing**. The engine treats *any* transition into a
-  fan-in node as a cohort arrival and does not care which kind of edge carried it, so testing the goto/onError/switch
+  the `tr.Kind != ""` arm - **the order is load-bearing**. The engine treats *any* transition into a
+  fan-in node as a cohort arrival and does not care which kind of edge carried it, so testing the goto/error/switch
   arm first (as it once did) skipped the frame-pop check for precisely the edge kinds that can reach a fan-in from
   outside a cohort. A goto into the fan-in from *inside* a cohort stays legal - that branch has a frame to pop.
 - **`processStep` guards it at runtime** (`fanInArrivals > 0 && cohortSpawnID == 0` -> `failAndReturn`). Not

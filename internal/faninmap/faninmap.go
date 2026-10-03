@@ -70,7 +70,7 @@ func New(g *workflow.Graph) *Map {
 			}
 			var nextStack []string
 			switch {
-			case tr.WithGoto, tr.OnError, tr.Switch:
+			case tr.Kind != "":
 				// Control-flow edges neither push nor pop a fan-out frame.
 				nextStack = fromStack
 			case g.IsFanIn(tr.To):

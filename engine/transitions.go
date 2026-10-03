@@ -39,14 +39,14 @@ type nextStep struct {
 func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workflow.RawFlow) ([]nextStep, error) {
 	if gotoTarget := flow.GotoRequested(); gotoTarget != "" {
 		for _, tr := range graph.Transitions() {
-			if tr.From != currentTask || !tr.WithGoto {
+			if tr.From != currentTask || tr.Kind != workflow.TransitionGoto {
 				continue
 			}
 			if tr.To == gotoTarget {
 				return []nextStep{{taskName: tr.To}}, nil
 			}
 		}
-		return nil, errors.New("task '%s' requested goto to '%s' but no WithGoto transition exists from this task", stripProto(currentTask), stripProto(gotoTarget))
+		return nil, errors.New("task '%s' requested goto to '%s' but no goto transition exists from this task", stripProto(currentTask), stripProto(gotoTarget))
 	}
 
 	// Switch/When transitions share one boolexp.Normalize of the flow state instead of one per edge,
@@ -66,11 +66,11 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 	}
 
 	for _, tr := range graph.Transitions() {
-		if tr.From != currentTask || !tr.Switch {
+		if tr.From != currentTask || tr.Kind != workflow.TransitionSwitch {
 			continue
 		}
 		for _, sw := range graph.Transitions() {
-			if sw.From != currentTask || !sw.Switch {
+			if sw.From != currentTask || sw.Kind != workflow.TransitionSwitch {
 				continue
 			}
 			symbols, err := normalize()
@@ -90,14 +90,8 @@ func evaluateTransitions(graph *workflow.Graph, currentTask string, flow *workfl
 
 	var candidates []nextStep
 	for _, tr := range graph.Transitions() {
-		if tr.From != currentTask {
-			continue
-		}
-		if tr.WithGoto {
-			continue
-		}
-		if tr.OnError {
-			continue
+		if tr.From != currentTask || tr.Kind != "" {
+			continue // a switch from this node returned above; goto and error transitions are not evaluated here
 		}
 		taken := false
 		if tr.When == "" {
@@ -166,7 +160,7 @@ func fanInPredecessorTasks(graph *workflow.Graph, fanInTask string) []string {
 	seen := map[string]bool{}
 	var names []string
 	for _, tr := range graph.Transitions() {
-		if tr.To == fanInTask && !tr.WithGoto && !tr.OnError && !seen[tr.From] {
+		if tr.To == fanInTask && tr.Kind != workflow.TransitionGoto && tr.Kind != workflow.TransitionError && !seen[tr.From] {
 			seen[tr.From] = true
 			names = append(names, tr.From)
 		}

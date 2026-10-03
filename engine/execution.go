@@ -786,7 +786,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// names no node, so it fails here with the error the transition would have given it, rather than as a column
 	// overflow on the completion write (retried, then classified as a payload fault).
 	if gotoTarget := resultFlow.GotoRequested(); len(gotoTarget) > maxGotoTargetLen {
-		err = errors.New("task '%s' requested goto to '%s' but no WithGoto transition exists from this task", stripProto(taskName), stripProto(gotoTarget))
+		err = errors.New("task '%s' requested goto to '%s' but no goto transition exists from this task", stripProto(taskName), stripProto(gotoTarget))
 		return errors.Trace(e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName))
 	}
 

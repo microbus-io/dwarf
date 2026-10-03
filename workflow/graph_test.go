@@ -186,7 +186,7 @@ func TestGraph_ValidateOnError(t *testing.T) {
 	cond.AddTransition("svc/a", End)
 	cond.SetURL("svc/h", "svc/h")
 	cond.AddTransition("svc/h", End)
-	cond.transitions = append(cond.transitions, Transition{From: "svc/a", To: "svc/h", OnError: true, When: "x > 0"})
+	cond.transitions = append(cond.transitions, Transition{From: "svc/a", To: "svc/h", Kind: TransitionError, When: "x > 0"})
 	assert.Error(cond.Validate())
 }
 
@@ -220,7 +220,7 @@ func TestGraph_ValidateFanOutConvergence(t *testing.T) {
 	assert.NoError(good.Validate())
 }
 
-// TestGraph_ValidateFanInFromOutsideCohort pins the check that a withGoto/onError/switch edge into a
+// TestGraph_ValidateFanInFromOutsideCohort pins the check that a goto/error/switch edge into a
 // fan-in node is subject to the same frame-pop rule as a normal edge. The engine treats ANY transition
 // into a fan-in node as a cohort arrival, so such an edge from a node with no fan-out frame arrives at a
 // cohort that does not exist: at runtime it bumps cohort_arrivals on step_id=0, the transition tx aborts
@@ -384,10 +384,10 @@ func TestGraph_GotoTransition(t *testing.T) {
 
 	transitions := g.Transitions()
 	assert.Equal(4, len(transitions))
-	assert.False(transitions[0].WithGoto) // svc/a -> svc/b
-	assert.False(transitions[1].WithGoto) // svc/b -> END
-	assert.True(transitions[2].WithGoto)  // svc/a -> svc/c (goto)
-	assert.False(transitions[3].WithGoto) // svc/c -> END
+	assert.NotEqual(TransitionGoto, transitions[0].Kind) // svc/a -> svc/b
+	assert.NotEqual(TransitionGoto, transitions[1].Kind) // svc/b -> END
+	assert.Equal(TransitionGoto, transitions[2].Kind)    // svc/a -> svc/c (goto)
+	assert.NotEqual(TransitionGoto, transitions[3].Kind) // svc/c -> END
 
 	// Goto transitions should have a "goto" label in Mermaid
 	mmd := NewGraphRenderer(g).Render()
@@ -402,7 +402,7 @@ func TestGraph_GotoTransition(t *testing.T) {
 	var restored Graph
 	err = json.Unmarshal(data, &restored)
 	assert.NoError(err)
-	assert.True(restored.Transitions()[2].WithGoto)
+	assert.Equal(TransitionGoto, restored.Transitions()[2].Kind)
 }
 
 func TestGraph_TransitionNoWhen(t *testing.T) {
@@ -504,8 +504,7 @@ func TestGraph_AddTransitionOnError(t *testing.T) {
 	transitions := g.Transitions()
 	assert.Equal(4, len(transitions))
 
-	// AddTransitionOnError: OnError=true
-	assert.True(transitions[2].OnError)
+	assert.Equal(TransitionError, transitions[2].Kind)
 
 	assert.NoError(g.Validate())
 }
@@ -529,12 +528,60 @@ func TestGraph_OnErrorJSONRoundTrip(t *testing.T) {
 	// Find the onError transition.
 	var found bool
 	for _, tr := range restored.Transitions() {
-		if tr.OnError {
+		if tr.Kind == TransitionError {
 			assert.Equal("svc/errHandler", tr.To)
 			found = true
 		}
 	}
 	assert.True(found)
+}
+
+// TestTransition_DecodesBooleanKinds pins that a graph stored with the boolean withGoto, onError and switch
+// fields decodes with the matching Kind. Each flow row freezes its graph's JSON, and an unknown field
+// decodes silently, so without this a goto, error or switch transition would come back as an ordinary one
+// and the flow would route down it.
+func TestTransition_DecodesBooleanKinds(t *testing.T) {
+	assert := testarossa.For(t)
+
+	data := []byte(`{"name":"Legacy","entryPoint":"A","tasks":[{"name":"A","url":"a"},{"name":"B","url":"b"},{"name":"C","url":"c"},{"name":"D","url":"d"}],"transitions":[` +
+		`{"from":"A","to":"B","when":"x > 1","switch":true},` +
+		`{"from":"A","to":"C","when":"true","switch":true},` +
+		`{"from":"A","to":"D","withGoto":true},` +
+		`{"from":"B","to":"D","onError":true},` +
+		`{"from":"B","to":"END"},{"from":"C","to":"END"},{"from":"D","to":"END"}]}`)
+	var g Graph
+	assert.NoError(json.Unmarshal(data, &g))
+	kinds := []string{}
+	for _, tr := range g.Transitions() {
+		kinds = append(kinds, tr.Kind)
+	}
+	assert.Equal([]string{TransitionSwitch, TransitionSwitch, TransitionGoto, TransitionError, "", "", ""}, kinds)
+	assert.NoError(g.Validate())
+
+	// Re-encoded, the transition carries kind only.
+	out, err := json.Marshal(&g)
+	assert.NoError(err)
+	assert.Contains(string(out), `"kind":"goto"`)
+	assert.NotContains(string(out), `withGoto`)
+}
+
+// TestTransition_ValidateKind pins the rules a Kind brings: an unknown kind, a forEach on anything but an
+// ordinary transition, and a when on a goto or error transition are all rejected.
+func TestTransition_ValidateKind(t *testing.T) {
+	assert := testarossa.For(t)
+
+	for _, tr := range []Transition{
+		{From: "A", To: "B", Kind: "sometimes"},
+		{From: "A", To: "B", Kind: TransitionGoto, ForEach: "items"},
+		{From: "A", To: "B", Kind: TransitionGoto, When: "x > 1"},
+		{From: "A", To: "B", Kind: TransitionError, When: "x > 1"},
+	} {
+		g := NewGraph("Kinds")
+		g.AddTransition("A", End)
+		g.AddTransition("B", End)
+		g.transitions = append(g.transitions, tr)
+		assert.Error(g.Validate(), "%+v", tr)
+	}
 }
 
 func TestGraph_MermaidForEachShape(t *testing.T) {
@@ -1042,7 +1089,7 @@ func TestGraph_SwitchRejectsMixWithWhen(t *testing.T) {
 func TestGraph_SwitchAllowedWithGoto(t *testing.T) {
 	assert := testarossa.For(t)
 
-	// WithGoto is an explicit task-requested override; it preempts Switch
+	// A goto is an explicit task-requested override; it preempts a switch
 	// evaluation at runtime, so the two kinds can coexist from one source.
 	g := NewGraph("SwitchWithGoto")
 	g.AddTransitionSwitch("router", "a", "i==1")
@@ -1089,7 +1136,7 @@ func TestGraph_SwitchRejectsForEach(t *testing.T) {
 	g := NewGraph("SwitchForeach")
 	g.AddTransition("router", "a")
 	g.AddTransition("a", End)
-	g.transitions = append(g.transitions, Transition{From: "router", To: "a", When: "true", Switch: true, ForEach: "items", As: "item"})
+	g.transitions = append(g.transitions, Transition{From: "router", To: "a", Kind: TransitionSwitch, When: "true", ForEach: "items", As: "item"})
 	err := g.Validate()
 	assert.Error(err)
 	assert.Contains(err.Error(), "switch")

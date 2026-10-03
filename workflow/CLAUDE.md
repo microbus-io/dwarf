@@ -278,7 +278,7 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   queue in the pool rather than overwhelm downstream. Jitter would add latency for no throughput benefit.
 - **`flow.Sleep(duration)`** - delay the *next* step's execution by setting its `not_before`. The timer adapts to
   wake when the sleep expires. In fan-out, only the last sibling's sleep affects the fan-in point.
-- **`flow.Goto(target)`** - override transition routing: skip normal evaluation and follow the `withGoto` transition
+- **`flow.Goto(target)`** - override transition routing: skip normal evaluation and follow the `goto` transition
   to `target`, if registered. Goto transitions are never taken during normal evaluation.
 - **`flow.Interrupt(payload)`** - pause and park the flow. The payload is stored in `interrupt_payload` and propagated
   up the surgraph chain. The task should return normally after. The engine sets the flow `interrupted`; a caller
