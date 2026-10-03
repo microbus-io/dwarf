@@ -102,7 +102,7 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 	for i := 0; i < benchChainLen; i++ {
 		node := fmt.Sprintf("T%d", i)
 		url := fmt.Sprintf("%s/t%d", prefix, i)
-		g.SetEndpoint(node, url)
+		g.SetURL(node, url)
 		proxy.HandleTask(url, func(ctx context.Context, f *workflow.Flow) error { return nil })
 		if prev != "" {
 			g.AddTransition(prev, node)

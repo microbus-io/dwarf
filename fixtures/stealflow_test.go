@@ -66,8 +66,8 @@ func stealFleet(t *testing.T, name string, crippledWorkers int, crippledDelay ti
 	build := func(replica string) *engine.TestProxy {
 		p := engine.NewTestProxy()
 		g := workflow.NewGraph("Chain")
-		g.SetEndpoint("A", name+"/a")
-		g.SetEndpoint("B", name+"/b")
+		g.SetURL("A", name+"/a")
+		g.SetURL("B", name+"/b")
 		g.AddTransition("A", "B")
 		g.AddTransition("B", workflow.End)
 		assert.NoError(g.Validate())
@@ -277,8 +277,8 @@ func TestStealTwoBadApplesflow(t *testing.T) {
 	build := func(replica string, delay time.Duration) *engine.TestProxy {
 		p := engine.NewTestProxy()
 		g := workflow.NewGraph("Chain")
-		g.SetEndpoint("A", name+"/a")
-		g.SetEndpoint("B", name+"/b")
+		g.SetURL("A", name+"/a")
+		g.SetURL("B", name+"/b")
 		g.AddTransition("A", "B")
 		g.AddTransition("B", workflow.End)
 		assert.NoError(g.Validate())

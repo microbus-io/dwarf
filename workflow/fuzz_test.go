@@ -189,13 +189,13 @@ func FuzzWhenExpression(f *testing.F) {
 // watchdog is for the same reason as there: the failure that path guards is a hang.
 func FuzzGraphJSON(f *testing.F) {
 	g := NewGraph("Fuzz")
-	g.SetEndpoint("A", "task/a")
+	g.SetURL("A", "task/a")
 	g.AddTransition("A", End)
 	seed, _ := json.Marshal(g)
 	f.Add(seed)
 	g = NewGraph("FuzzWhen")
-	g.SetEndpoint("A", "task/a")
-	g.SetEndpoint("B", "task/b")
+	g.SetURL("A", "task/a")
+	g.SetURL("B", "task/b")
 	g.AddTransitionWhen("A", "B", "x > 1")
 	g.AddTransition("B", End)
 	seed, _ = json.Marshal(g)

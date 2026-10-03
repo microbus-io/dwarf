@@ -43,8 +43,8 @@ import (
 // twice) from a transparent in-tx retry (task ran once).
 func stateLinear(proxy *TestProxy, prefix string, calls map[string]*int) {
 	g := workflow.NewGraph("Lin")
-	g.SetEndpoint("A", prefix+"/a")
-	g.SetEndpoint("B", prefix+"/b")
+	g.SetURL("A", prefix+"/a")
+	g.SetURL("B", prefix+"/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
 	proxy.HandleGraph(prefix+"/g", g)

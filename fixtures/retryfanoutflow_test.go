@@ -42,9 +42,9 @@ func TestRetryfanoutflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("RetryFanOut")
-	graph.SetEndpoint("Enter", "retryfanoutflow.verify:428/enter")
-	graph.SetEndpoint("Increment", "retryfanoutflow.verify:428/increment")
-	graph.SetEndpoint("Join", "retryfanoutflow.verify:428/join")
+	graph.SetURL("Enter", "retryfanoutflow.verify:428/enter")
+	graph.SetURL("Increment", "retryfanoutflow.verify:428/increment")
+	graph.SetURL("Join", "retryfanoutflow.verify:428/join")
 	graph.SetFanIn("Join")
 	graph.SetReducer("results", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Enter", "Increment", "elements", "element")

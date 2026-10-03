@@ -55,7 +55,7 @@ func TestCrossShardPriorityflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("CrossShardPriority")
-	graph.SetEndpoint("Record", "crossshardpriority.verify:428/record")
+	graph.SetURL("Record", "crossshardpriority.verify:428/record")
 	graph.AddTransition("Record", workflow.End)
 	proxy.HandleGraph("crossshardpriority.verify:428/priority", graph)
 

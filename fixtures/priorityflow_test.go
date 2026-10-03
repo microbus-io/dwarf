@@ -37,7 +37,7 @@ func TestPriorityflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("Priority")
-	graph.SetEndpoint("Record", "priorityflow.verify:428/record")
+	graph.SetURL("Record", "priorityflow.verify:428/record")
 	graph.AddTransition("Record", workflow.End)
 	proxy.HandleGraph("priorityflow.verify:428/priority", graph)
 

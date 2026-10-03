@@ -43,9 +43,9 @@ func TestEmptyforeachreducerflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("EmptyForEachReducer")
-	graph.SetEndpoint("TaskA", "emptyforeachreducerflow.verify:428/task-a")
-	graph.SetEndpoint("TaskB", "emptyforeachreducerflow.verify:428/task-b")
-	graph.SetEndpoint("TaskC", "emptyforeachreducerflow.verify:428/task-c")
+	graph.SetURL("TaskA", "emptyforeachreducerflow.verify:428/task-a")
+	graph.SetURL("TaskB", "emptyforeachreducerflow.verify:428/task-b")
+	graph.SetURL("TaskC", "emptyforeachreducerflow.verify:428/task-c")
 	graph.SetFanIn("TaskC")
 	graph.SetReducer("sum", workflow.ReducerAdd)
 	graph.SetReducer("processed", workflow.ReducerAdd)

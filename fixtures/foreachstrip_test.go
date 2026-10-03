@@ -46,9 +46,9 @@ func TestForEachStrip_ScopedToItsOwnCohort(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("Collide")
-	g.SetEndpoint("Split", "c/split")
-	g.SetEndpoint("Page", "c/page")
-	g.SetEndpoint("Join", "c/join")
+	g.SetURL("Split", "c/split")
+	g.SetURL("Page", "c/page")
+	g.SetURL("Join", "c/join")
 	g.SetFanIn("Join")
 	g.SetReducer("done", workflow.ReducerAdd)
 	g.AddTransitionForEach("Split", "Page", "pages", "page")
@@ -101,7 +101,7 @@ func TestForEachStrip_NestedOuterSurvivesInnerFanIn(t *testing.T) {
 	// Split -forEach(pages, as=page)-> Page -forEach(chunks, as=chunk)-> Chunk -> JoinChunk -> JoinPage
 	g := workflow.NewGraph("Nested")
 	for _, n := range []string{"Split", "Page", "Chunk", "JoinChunk", "JoinPage"} {
-		g.SetEndpoint(n, "n/"+n)
+		g.SetURL(n, "n/"+n)
 	}
 	g.SetFanIn("JoinChunk")
 	g.SetFanIn("JoinPage")
@@ -174,9 +174,9 @@ func TestForEachStrip_FailedFanOutStillStrips(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("FailFan")
-	g.SetEndpoint("Split", "ff/split")
-	g.SetEndpoint("Page", "ff/page")
-	g.SetEndpoint("Join", "ff/join")
+	g.SetURL("Split", "ff/split")
+	g.SetURL("Page", "ff/page")
+	g.SetURL("Join", "ff/join")
 	g.SetFanIn("Join")
 	g.AddTransitionForEach("Split", "Page", "pages", "page")
 	g.AddTransitionChain("Page", "Join", workflow.End)
@@ -228,7 +228,7 @@ func TestFailedFanOut_KeepsEveryBranchesIntermediateOutput(t *testing.T) {
 	// Two-STEP branches: Cell writes, then Enrich writes. Cell's output survives only in Enrich's `state`.
 	g := workflow.NewGraph("MultiStepBranch")
 	for _, n := range []string{"Seed", "Cell", "Enrich", "Join"} {
-		g.SetEndpoint(n, "ms/"+n)
+		g.SetURL(n, "ms/"+n)
 	}
 	g.SetFanIn("Join")
 	g.SetReducer("cells", workflow.ReducerAppend)

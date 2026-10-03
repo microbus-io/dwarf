@@ -51,7 +51,7 @@ func TestPersist_TransientWriteErrorIsAbsorbedWithoutReExecution(t *testing.T) {
 	var runs atomic.Int32
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Persist")
-	g.SetEndpoint("A", "p/transient/a")
+	g.SetURL("A", "p/transient/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("p/transient/wf", g)
@@ -94,7 +94,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 	var runs atomic.Int32
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Persist")
-	g.SetEndpoint("A", "p/permanent/a")
+	g.SetURL("A", "p/permanent/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("p/permanent/wf", g)
@@ -249,7 +249,7 @@ func TestPersist_DrainReleasesTheLeaseInsteadOfSleepingItOut(t *testing.T) {
 	var runs atomic.Int32
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Drain")
-	g.SetEndpoint("A", "p/drain/a")
+	g.SetURL("A", "p/drain/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("p/drain/wf", g)

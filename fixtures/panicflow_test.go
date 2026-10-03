@@ -45,14 +45,14 @@ func TestPanicflow(t *testing.T) {
 
 	// Graph 1: a bare panicking task with no onError -> the flow fails.
 	bare := workflow.NewGraph("Bare")
-	bare.SetEndpoint("Boom", "panicflow.verify:0/boom")
+	bare.SetURL("Boom", "panicflow.verify:0/boom")
 	bare.AddTransition("Boom", workflow.End)
 	proxy.HandleGraph("panicflow.verify:0/bare", bare)
 
 	// Graph 2: a panicking task with an onError handler -> the flow recovers via the handler.
 	handled := workflow.NewGraph("Handled")
-	handled.SetEndpoint("Boom", "panicflow.verify:0/boom")
-	handled.SetEndpoint("Rescue", "panicflow.verify:0/rescue")
+	handled.SetURL("Boom", "panicflow.verify:0/boom")
+	handled.SetURL("Rescue", "panicflow.verify:0/rescue")
 	handled.AddTransition("Boom", workflow.End)
 	handled.AddTransitionOnError("Boom", "Rescue")
 	handled.AddTransition("Rescue", workflow.End)
@@ -62,8 +62,8 @@ func TestPanicflow(t *testing.T) {
 	// hand back a zero value the task never wrote, and this is what makes that safe: the panic is caught at
 	// the task-call boundary, so the mistyped read is an ordinary step failure the graph's onError handles.
 	mistyped := workflow.NewGraph("Mistyped")
-	mistyped.SetEndpoint("Read", "panicflow.verify:0/read")
-	mistyped.SetEndpoint("Rescue", "panicflow.verify:0/rescue")
+	mistyped.SetURL("Read", "panicflow.verify:0/read")
+	mistyped.SetURL("Rescue", "panicflow.verify:0/rescue")
 	mistyped.AddTransition("Read", workflow.End)
 	mistyped.AddTransitionOnError("Read", "Rescue")
 	mistyped.AddTransition("Rescue", workflow.End)

@@ -75,7 +75,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	names := make([]string, 0, chainSteps+1)
 	for i := range chainSteps {
 		n := fmt.Sprintf("T%d", i)
-		linear.SetEndpoint(n, "bench/nop")
+		linear.SetURL(n, "bench/nop")
 		names = append(names, n)
 	}
 	names = append(names, workflow.End)
@@ -84,9 +84,9 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 
 	// fanout
 	fanout := workflow.NewGraph("FanOut")
-	fanout.SetEndpoint("Split", "bench/nop")
-	fanout.SetEndpoint("Work", "bench/nop")
-	fanout.SetEndpoint("Join", "bench/nop")
+	fanout.SetURL("Split", "bench/nop")
+	fanout.SetURL("Work", "bench/nop")
+	fanout.SetURL("Join", "bench/nop")
 	fanout.SetFanIn("Join")
 	fanout.AddTransitionForEach("Split", "Work", "items", "item")
 	fanout.AddTransitionChain("Work", "Join", workflow.End)
@@ -115,7 +115,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	stateNames := make([]string, 0, stateSteps+1)
 	for i := range stateSteps {
 		n := fmt.Sprintf("S%d", i)
-		state.SetEndpoint(n, "bench/state")
+		state.SetURL(n, "bench/state")
 		stateNames = append(stateNames, n)
 	}
 	stateNames = append(stateNames, workflow.End)
@@ -184,7 +184,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	carryNames := make([]string, 0, chainSteps+1)
 	for i := range chainSteps {
 		n := fmt.Sprintf("C%d", i)
-		carry.SetEndpoint(n, "bench/carry")
+		carry.SetURL(n, "bench/carry")
 		carryNames = append(carryNames, n)
 	}
 	carryNames = append(carryNames, workflow.End)
@@ -196,10 +196,10 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	// is the anchor its branches point at; the branches are multi-step so the cost is N x D copies rather
 	// than N. Widen it with -fanout-width, the same knob the fanout workload uses.
 	carryFanOut := workflow.NewGraph("CarryFanOut")
-	carryFanOut.SetEndpoint("Split", "bench/carry")
-	carryFanOut.SetEndpoint("Work", "bench/carry")
-	carryFanOut.SetEndpoint("Enrich", "bench/carry")
-	carryFanOut.SetEndpoint("Join", "bench/carry")
+	carryFanOut.SetURL("Split", "bench/carry")
+	carryFanOut.SetURL("Work", "bench/carry")
+	carryFanOut.SetURL("Enrich", "bench/carry")
+	carryFanOut.SetURL("Join", "bench/carry")
 	carryFanOut.SetFanIn("Join")
 	carryFanOut.SetReducer("steps", workflow.ReducerAdd)
 	carryFanOut.AddTransitionForEach("Split", "Work", "items", "item")
@@ -211,7 +211,7 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 	// sane window. This is the shape that validates the derived worker ceiling: the pool must grow past
 	// its (connection-derived) resident set to keep thousands of minutes-long tasks in flight at once.
 	llm := workflow.NewGraph("LLM")
-	llm.SetEndpoint("Call", "bench/nop") // the delay lives in the host's ExecuteTask (-task-delay)
+	llm.SetURL("Call", "bench/nop") // the delay lives in the host's ExecuteTask (-task-delay)
 	llm.AddTransition("Call", workflow.End)
 	h.graphs["bench/llm"] = llm
 
@@ -223,8 +223,8 @@ func registerWorkloads(h *benchHost, payloadBytes, fanOutWidth, chainSteps int, 
 		return err
 	}
 	interrupt := workflow.NewGraph("Interrupt")
-	interrupt.SetEndpoint("Gate", "bench/gate")
-	interrupt.SetEndpoint("Work", "bench/nop")
+	interrupt.SetURL("Gate", "bench/gate")
+	interrupt.SetURL("Work", "bench/nop")
 	interrupt.AddTransitionChain("Gate", "Work", workflow.End)
 	h.graphs["bench/interrupt"] = interrupt
 

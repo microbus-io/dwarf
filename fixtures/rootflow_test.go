@@ -52,11 +52,11 @@ func TestRootFlowID_CreateAndSubgraph(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("P", "rootid.verify:0/p")
+	parent.SetURL("P", "rootid.verify:0/p")
 	parent.AddTransition("P", workflow.End)
 	proxy.HandleGraph("rootid.verify:0/parent", parent)
 	child := workflow.NewGraph("Child")
-	child.SetEndpoint("K", "rootid.verify:0/k")
+	child.SetURL("K", "rootid.verify:0/k")
 	child.AddTransition("K", workflow.End)
 	proxy.HandleGraph("rootid.verify:0/child", child)
 
@@ -112,8 +112,8 @@ func TestRootFlowID_ForkIsItsOwnRoot(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Lin")
-	g.SetEndpoint("A", "rootidfork.verify:0/a")
-	g.SetEndpoint("B", "rootidfork.verify:0/b")
+	g.SetURL("A", "rootidfork.verify:0/a")
+	g.SetURL("B", "rootidfork.verify:0/b")
 	g.AddTransition("A", "B")
 	g.AddTransition("B", workflow.End)
 	proxy.HandleGraph("rootidfork.verify:0/lin", g)
@@ -164,7 +164,7 @@ func TestRootFlowID_ContinueStartsFreshRoot(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("Turn")
-	g.SetEndpoint("T", "rootidcont.verify:0/t")
+	g.SetURL("T", "rootidcont.verify:0/t")
 	g.AddTransition("T", workflow.End)
 	proxy.HandleGraph("rootidcont.verify:0/turn", g)
 	proxy.HandleTask("rootidcont.verify:0/t", func(ctx context.Context, f *workflow.Flow) error { return nil })

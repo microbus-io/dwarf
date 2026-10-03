@@ -8,18 +8,18 @@ your host's `LoadGraph`. This guide covers the full graph-authoring API.
 
 ## Tasks
 
-A graph is a set of tasks connected by transitions. Bind a task with `SetEndpoint`, giving a **node name**
+A graph is a set of tasks connected by transitions. Bind a task with `SetURL`, giving a **node name**
 (its identity in the graph) and a **URL** (the address your host's `ExecuteTask` resolves to reach it):
 
 ```go
 g := workflow.NewGraph("Checkout")
-g.SetEndpoint("Reserve", "inventory.reserve")
-g.SetEndpoint("Charge", "billing.charge")
-g.SetEndpoint("Ship", "fulfillment.ship")
+g.SetURL("Reserve", "inventory.reserve")
+g.SetURL("Charge", "billing.charge")
+g.SetURL("Ship", "fulfillment.ship")
 ```
 
 `NewGraph` takes only the display name; the workflow's resolve URL is a separate opaque key passed to
-`Create`/`Run`/`LoadGraph`, not carried on the graph. `SetEndpoint` creates the node if new and updates its
+`Create`/`Run`/`LoadGraph`, not carried on the graph. `SetURL` creates the node if new and updates its
 URL if it already exists. The node name and URL can differ, which lets the same task URL appear at several
 positions under different names. The engine passes the URL to your executor; your executor decides what that
 address means (a function key, an HTTP endpoint, a message topic).

@@ -138,7 +138,7 @@ func TestSetDefaultPriority_RejectsNonPositive(t *testing.T) {
 	// The guard rejects rather than clamps: the accepted value is the one the engine dispatches with.
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Prio")
-	g.SetEndpoint("A", "prio/a")
+	g.SetURL("A", "prio/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("prio/g", g)

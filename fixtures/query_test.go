@@ -38,11 +38,11 @@ func TestQuery_WorkflowName(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 	alpha := workflow.NewGraph("AlphaFlow")
-	alpha.SetEndpoint("A", "q.verify:0/a")
+	alpha.SetURL("A", "q.verify:0/a")
 	alpha.AddTransition("A", workflow.End)
 	proxy.HandleGraph("q.verify:0/alpha", alpha)
 	beta := workflow.NewGraph("BetaFlow")
-	beta.SetEndpoint("B", "q.verify:0/b")
+	beta.SetURL("B", "q.verify:0/b")
 	beta.AddTransition("B", workflow.End)
 	proxy.HandleGraph("q.verify:0/beta", beta)
 	proxy.HandleTask("q.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
@@ -110,7 +110,7 @@ func TestQuery_StatusFilter(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("StatusFlow")
-	g.SetEndpoint("A", "qs.verify:0/a")
+	g.SetURL("A", "qs.verify:0/a")
 	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("qs.verify:0/g", g)
 	proxy.HandleTask("qs.verify:0/a", func(context.Context, *workflow.Flow) error { return nil })
@@ -160,11 +160,11 @@ func TestQuery_SearchEscapesWildcards(t *testing.T) {
 	// Display names: only "Under_Score" contains a LIKE metacharacter. URLs and task names carry none, and
 	// flow tokens are hex, so the underscore appears in exactly one searched column across all flows.
 	plain := workflow.NewGraph("PlainName")
-	plain.SetEndpoint("A", "q.esc:0/a")
+	plain.SetURL("A", "q.esc:0/a")
 	plain.AddTransition("A", workflow.End)
 	proxy.HandleGraph("q.esc:0/plain", plain)
 	under := workflow.NewGraph("Under_Score")
-	under.SetEndpoint("B", "q.esc:0/b")
+	under.SetURL("B", "q.esc:0/b")
 	under.AddTransition("B", workflow.End)
 	proxy.HandleGraph("q.esc:0/under", under)
 	proxy.HandleTask("q.esc:0/a", func(context.Context, *workflow.Flow) error { return nil })

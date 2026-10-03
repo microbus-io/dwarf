@@ -47,8 +47,8 @@ func TestAwaitShutdownflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("AwaitShutdown")
-	graph.SetEndpoint("Gate", "awaitshutdownflow.verify:428/gate")
-	graph.SetEndpoint("After", "awaitshutdownflow.verify:428/after")
+	graph.SetURL("Gate", "awaitshutdownflow.verify:428/gate")
+	graph.SetURL("After", "awaitshutdownflow.verify:428/after")
 	graph.AddTransitionChain("Gate", "After", workflow.End)
 	proxy.HandleGraph("awaitshutdownflow.verify:428/await-shutdown", graph)
 

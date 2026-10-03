@@ -50,9 +50,9 @@ func TestFailedforeachstateflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("FailedForEachState")
-	graph.SetEndpoint("Seed", "failedforeachstateflow.verify:428/seed")
-	graph.SetEndpoint("Cell", "failedforeachstateflow.verify:428/cell")
-	graph.SetEndpoint("Join", "failedforeachstateflow.verify:428/join")
+	graph.SetURL("Seed", "failedforeachstateflow.verify:428/seed")
+	graph.SetURL("Cell", "failedforeachstateflow.verify:428/cell")
+	graph.SetURL("Join", "failedforeachstateflow.verify:428/join")
 	graph.SetFanIn("Join")
 	graph.SetReducer("seen", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Seed", "Cell", "items", "item")

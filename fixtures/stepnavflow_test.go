@@ -40,9 +40,9 @@ func TestStepnavflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Flow")
-	graph.SetEndpoint("TaskA", "stepnavflow.verify:428/task-a")
-	graph.SetEndpoint("TaskB", "stepnavflow.verify:428/task-b")
-	graph.SetEndpoint("TaskC", "stepnavflow.verify:428/task-c")
+	graph.SetURL("TaskA", "stepnavflow.verify:428/task-a")
+	graph.SetURL("TaskB", "stepnavflow.verify:428/task-b")
+	graph.SetURL("TaskC", "stepnavflow.verify:428/task-c")
 	graph.AddTransitionChain("TaskA", "TaskB", "TaskC", workflow.End)
 	proxy.HandleGraph("stepnavflow.verify:428/flow", graph)
 	noop := func(ctx context.Context, f *workflow.Flow) error { return nil }

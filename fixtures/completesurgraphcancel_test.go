@@ -56,13 +56,13 @@ func TestCompleteSurgraph_vs_TerminateRoot_BothOrders(t *testing.T) {
 		proxy := engine.NewTestProxy()
 
 		parent := workflow.NewGraph("Parent")
-		parent.SetEndpoint("Call", prefix+"/call")
+		parent.SetURL("Call", prefix+"/call")
 		parent.AddTransition("Call", workflow.End)
 		assert.NoError(parent.Validate())
 		proxy.HandleGraph(prefix+"/parent", parent)
 
 		child := workflow.NewGraph("Child")
-		child.SetEndpoint("X", prefix+"/x")
+		child.SetURL("X", prefix+"/x")
 		child.AddTransition("X", workflow.End)
 		assert.NoError(child.Validate())
 		proxy.HandleGraph(prefix+"/child", child)

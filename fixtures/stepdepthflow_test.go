@@ -57,14 +57,14 @@ func TestStepDepth_SubgraphContinuesFromCaller(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	parent := workflow.NewGraph("DepthParent")
-	parent.SetEndpoint("A", "depthsub.verify:428/a")
-	parent.SetEndpoint("Call", "depthsub.verify:428/call")
+	parent.SetURL("A", "depthsub.verify:428/a")
+	parent.SetURL("Call", "depthsub.verify:428/call")
 	parent.AddTransitionChain("A", "Call", workflow.End)
 	proxy.HandleGraph("depthsub.verify:428/parent", parent)
 
 	child := workflow.NewGraph("DepthChild")
-	child.SetEndpoint("Inner", "depthsub.verify:428/inner")
-	child.SetEndpoint("Inner2", "depthsub.verify:428/inner2")
+	child.SetURL("Inner", "depthsub.verify:428/inner")
+	child.SetURL("Inner2", "depthsub.verify:428/inner2")
 	child.AddTransitionChain("Inner", "Inner2", workflow.End)
 	proxy.HandleGraph("depthsub.verify:428/child", child)
 
@@ -116,10 +116,10 @@ func TestStepDepth_FanInIsMaxCohortDepthPlus1(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	g := workflow.NewGraph("DepthFanIn")
-	g.SetEndpoint("Seed", "depthfanin.verify:428/seed")
-	g.SetEndpoint("Work", "depthfanin.verify:428/work")
-	g.SetEndpoint("Deep", "depthfanin.verify:428/deep")
-	g.SetEndpoint("J", "depthfanin.verify:428/j")
+	g.SetURL("Seed", "depthfanin.verify:428/seed")
+	g.SetURL("Work", "depthfanin.verify:428/work")
+	g.SetURL("Deep", "depthfanin.verify:428/deep")
+	g.SetURL("J", "depthfanin.verify:428/j")
 	g.SetFanIn("J")
 	g.AddTransitionForEach("Seed", "Work", "items", "n")
 	g.AddTransition("Work", "J")        // normal: straight to fan-in

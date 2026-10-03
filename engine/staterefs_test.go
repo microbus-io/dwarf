@@ -143,9 +143,9 @@ func TestStateRefs_CarryAcrossFanOut(t *testing.T) {
 
 	const doc = 20000
 	g := workflow.NewGraph("Refs")
-	g.SetEndpoint("Seed", "refs/seed")
-	g.SetEndpoint("Work", "refs/work")
-	g.SetEndpoint("Join", "refs/join")
+	g.SetURL("Seed", "refs/seed")
+	g.SetURL("Work", "refs/work")
+	g.SetURL("Join", "refs/join")
 	g.SetFanIn("Join")
 	g.SetReducer("processed", workflow.ReducerAdd)
 	g.AddTransitionForEach("Seed", "Work", "pages", "page")
@@ -225,9 +225,9 @@ func TestStateRefs_ReducedFieldIsResolvedAndReanchored(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("Reduced")
-	g.SetEndpoint("Seed", "red/seed")
-	g.SetEndpoint("Work", "red/work")
-	g.SetEndpoint("Join", "red/join")
+	g.SetURL("Seed", "red/seed")
+	g.SetURL("Work", "red/work")
+	g.SetURL("Join", "red/join")
 	g.SetFanIn("Join")
 	g.SetReducer("log", workflow.ReducerAppend)
 	g.AddTransitionForEach("Seed", "Work", "pages", "page")
@@ -287,9 +287,9 @@ func TestStateRefs_SpawnCombinedFieldIsNotAnchored(t *testing.T) {
 	assert.NoError(e.Startup(t.Context()))
 
 	g := workflow.NewGraph("SpawnCombined")
-	g.SetEndpoint("Seed", "sc/seed")
-	g.SetEndpoint("Work", "sc/work")
-	g.SetEndpoint("Join", "sc/join")
+	g.SetURL("Seed", "sc/seed")
+	g.SetURL("Work", "sc/work")
+	g.SetURL("Join", "sc/join")
 	g.SetFanIn("Join")
 	g.SetReducer("log", workflow.ReducerAppend)
 	g.AddTransitionForEach("Seed", "Work", "pages", "page")

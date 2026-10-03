@@ -40,8 +40,8 @@ func TestDeletetombstoneflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("DeleteTombstone")
-	graph.SetEndpoint("TaskA", "deletetombstoneflow.verify:428/task-a")
-	graph.SetEndpoint("TaskB", "deletetombstoneflow.verify:428/task-b")
+	graph.SetURL("TaskA", "deletetombstoneflow.verify:428/task-a")
+	graph.SetURL("TaskB", "deletetombstoneflow.verify:428/task-b")
 	graph.AddTransitionChain("TaskA", "TaskB", workflow.End)
 	proxy.HandleGraph("deletetombstoneflow.verify:428/delete-tombstone", graph)
 

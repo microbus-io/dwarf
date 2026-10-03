@@ -41,7 +41,7 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 
 	buildInner := func(proxy *engine.TestProxy) {
 		inner := workflow.NewGraph("Inner")
-		inner.SetEndpoint("Do", "sgfof.verify:900/do")
+		inner.SetURL("Do", "sgfof.verify:900/do")
 		inner.AddTransitionChain("Do", workflow.End)
 		proxy.HandleGraph("sgfof.verify:900/inner", inner)
 		proxy.HandleTask("sgfof.verify:900/do", func(ctx context.Context, f *workflow.Flow) error {
@@ -60,9 +60,9 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 		buildInner(proxy)
 
 		g := workflow.NewGraph("Outer")
-		g.SetEndpoint("Split", "sgfof.verify:900/split")
-		g.SetEndpoint("Branch", "sgfof.verify:900/branch-prop")
-		g.SetEndpoint("Join", "sgfof.verify:900/join")
+		g.SetURL("Split", "sgfof.verify:900/split")
+		g.SetURL("Branch", "sgfof.verify:900/branch-prop")
+		g.SetURL("Join", "sgfof.verify:900/join")
 		g.SetFanIn("Join")
 		g.SetReducer("outs", workflow.ReducerAppend)
 		g.AddTransitionForEach("Split", "Branch", "items", "item")
@@ -97,9 +97,9 @@ func TestSubgraphFanOutFailflow(t *testing.T) {
 		buildInner(proxy)
 
 		g := workflow.NewGraph("Outer2")
-		g.SetEndpoint("Split", "sgfof.verify:900/split2")
-		g.SetEndpoint("Branch", "sgfof.verify:900/branch-recover")
-		g.SetEndpoint("Join", "sgfof.verify:900/join2")
+		g.SetURL("Split", "sgfof.verify:900/split2")
+		g.SetURL("Branch", "sgfof.verify:900/branch-recover")
+		g.SetURL("Join", "sgfof.verify:900/join2")
 		g.SetFanIn("Join")
 		g.SetReducer("outs", workflow.ReducerAppend)
 		g.AddTransitionForEach("Split", "Branch", "items", "item")

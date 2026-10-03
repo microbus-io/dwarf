@@ -187,8 +187,8 @@ display name (surfaced in rendering and denormalized onto the flow row as `workf
 tasks, transitions, and optional reducers for fan-in state merging. The graph does **not** carry its own
 resolve URL: the resolve key is a separate opaque `workflowURL` passed to `Create`/`Run`/`LoadGraph` and stored
 on the flow (`workflow_url`); the engine never keeps it on the graph. Each node is bound to its dispatch
-endpoint with `graph.SetEndpoint(nodeName, url)` (create-or-update); the same endpoint may be bound under
-multiple node names.
+URL with `graph.SetURL(nodeName, url)` (create-or-update); the same URL may be bound under multiple node
+names.
 
 **Naming convention.** Graph and task (node) names are PascalCase (`Reserve`, `Charge`) - graph-topology
 identifiers, kept visually distinct from the lowercased dispatch URLs and the camelCase state fields. The engine

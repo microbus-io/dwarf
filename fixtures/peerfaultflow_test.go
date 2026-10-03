@@ -43,8 +43,8 @@ func peerFleet(t *testing.T, name string) (creator, eng1, eng2 *engine.Engine, r
 	buildProxy := func(replica string) *engine.TestProxy {
 		p := engine.NewTestProxy()
 		g := workflow.NewGraph("Pair")
-		g.SetEndpoint("A", name+"/a")
-		g.SetEndpoint("B", name+"/b")
+		g.SetURL("A", name+"/a")
+		g.SetURL("B", name+"/b")
 		g.AddTransition("A", "B")
 		g.AddTransition("B", workflow.End)
 		assert.NoError(g.Validate())

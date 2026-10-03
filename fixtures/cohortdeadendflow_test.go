@@ -55,9 +55,9 @@ func TestCohortDeadEndFlow(t *testing.T) {
 	var joinRan int32
 
 	graph := workflow.NewGraph("CohortDeadEnd")
-	graph.SetEndpoint("Spawn", "cohortdeadendflow.verify:664/spawn")
-	graph.SetEndpoint("Work", "cohortdeadendflow.verify:664/work")
-	graph.SetEndpoint("Join", "cohortdeadendflow.verify:664/join")
+	graph.SetURL("Spawn", "cohortdeadendflow.verify:664/spawn")
+	graph.SetURL("Work", "cohortdeadendflow.verify:664/work")
+	graph.SetURL("Join", "cohortdeadendflow.verify:664/join")
 	graph.SetFanIn("Join")
 	graph.AddTransitionForEach("Spawn", "Work", "items", "item")
 	// A branch's ONLY edge is conditional: item 0 sets ok=false and dead-ends before Join. Validate accepts
@@ -120,9 +120,9 @@ func TestCohortDeadEndFlow_TrunkStillCompletes(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("CohortConverges")
-	graph.SetEndpoint("Spawn", "cohortdeadendflow.verify:664/c-spawn")
-	graph.SetEndpoint("Work", "cohortdeadendflow.verify:664/c-work")
-	graph.SetEndpoint("Join", "cohortdeadendflow.verify:664/c-join")
+	graph.SetURL("Spawn", "cohortdeadendflow.verify:664/c-spawn")
+	graph.SetURL("Work", "cohortdeadendflow.verify:664/c-work")
+	graph.SetURL("Join", "cohortdeadendflow.verify:664/c-join")
 	graph.SetFanIn("Join")
 	graph.SetReducer("done", workflow.ReducerAdd)
 	graph.AddTransitionForEach("Spawn", "Work", "items", "item")

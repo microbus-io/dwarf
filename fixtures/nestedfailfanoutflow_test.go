@@ -37,11 +37,11 @@ func TestNestedfailfanoutflow(t *testing.T) {
 
 	// 3x3 nested forEach: taskA -> forEach(outers) -> taskO -> forEach(inners) -> taskI -> joinI -> joinO -> END
 	graph := workflow.NewGraph("Nested")
-	graph.SetEndpoint("TaskA", "nestedfailfanoutflow.verify:428/task-a")
-	graph.SetEndpoint("TaskO", "nestedfailfanoutflow.verify:428/task-o")
-	graph.SetEndpoint("TaskI", "nestedfailfanoutflow.verify:428/task-i")
-	graph.SetEndpoint("JoinI", "nestedfailfanoutflow.verify:428/join-i")
-	graph.SetEndpoint("JoinO", "nestedfailfanoutflow.verify:428/join-o")
+	graph.SetURL("TaskA", "nestedfailfanoutflow.verify:428/task-a")
+	graph.SetURL("TaskO", "nestedfailfanoutflow.verify:428/task-o")
+	graph.SetURL("TaskI", "nestedfailfanoutflow.verify:428/task-i")
+	graph.SetURL("JoinI", "nestedfailfanoutflow.verify:428/join-i")
+	graph.SetURL("JoinO", "nestedfailfanoutflow.verify:428/join-o")
 	graph.SetFanIn("JoinI")
 	graph.SetFanIn("JoinO")
 	graph.AddTransitionForEach("TaskA", "TaskO", "outers", "outerItem")

@@ -43,7 +43,7 @@ func TestSearchLiteralflow(t *testing.T) {
 	urls := []string{"a_b", "axb", "50%off"}
 	for _, u := range urls {
 		g := workflow.NewGraph("SearchWF")
-		g.SetEndpoint("Only", "searchliteral.verify:428/only")
+		g.SetURL("Only", "searchliteral.verify:428/only")
 		g.AddTransition("Only", workflow.End)
 		proxy.HandleGraph(u, g)
 	}

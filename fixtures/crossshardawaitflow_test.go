@@ -53,7 +53,7 @@ func TestCrossShardReplicaAwait(t *testing.T) {
 	const shards = 2
 
 	graph := workflow.NewGraph("Flow")
-	graph.SetEndpoint("Work", "crossshardawait.verify:428/work")
+	graph.SetURL("Work", "crossshardawait.verify:428/work")
 	graph.AddTransition("Work", workflow.End)
 
 	// eng1: pure awaiter, zero workers. Its handler must never run.

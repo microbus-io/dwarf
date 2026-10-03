@@ -37,9 +37,9 @@ func TestInterruptflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Interrupt")
-	graph.SetEndpoint("TaskA", "interruptflow.verify:428/task-a")
-	graph.SetEndpoint("AwaitInput", "interruptflow.verify:428/await-input")
-	graph.SetEndpoint("Compose", "interruptflow.verify:428/compose")
+	graph.SetURL("TaskA", "interruptflow.verify:428/task-a")
+	graph.SetURL("AwaitInput", "interruptflow.verify:428/await-input")
+	graph.SetURL("Compose", "interruptflow.verify:428/compose")
 	graph.AddTransitionChain("TaskA", "AwaitInput", "Compose", workflow.End)
 	proxy.HandleGraph("interruptflow.verify:428/interrupt", graph)
 

@@ -48,12 +48,12 @@ func TestSubgraphErrorWaitflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("RunInner", "subgrapherrwait.verify:0/run-inner")
+	parent.SetURL("RunInner", "subgrapherrwait.verify:0/run-inner")
 	parent.AddTransition("RunInner", workflow.End)
 	proxy.HandleGraph("subgrapherrwait.verify:0/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("Boom", "subgrapherrwait.verify:0/boom")
+	inner.SetURL("Boom", "subgrapherrwait.verify:0/boom")
 	inner.AddTransition("Boom", workflow.End)
 	proxy.HandleGraph("subgrapherrwait.verify:0/inner", inner)
 

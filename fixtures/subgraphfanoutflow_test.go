@@ -39,11 +39,11 @@ func TestSubgraphfanoutflow(t *testing.T) {
 
 	// Outer graph: A -> {NormalB, RunSub, NormalD} -> E
 	outer := workflow.NewGraph("SubFanOut")
-	outer.SetEndpoint("TaskA", "subgraphfanoutflow.verify:428/task-a")
-	outer.SetEndpoint("NormalB", "subgraphfanoutflow.verify:428/normal-b")
-	outer.SetEndpoint("RunSub", "subgraphfanoutflow.verify:428/run-sub")
-	outer.SetEndpoint("NormalD", "subgraphfanoutflow.verify:428/normal-d")
-	outer.SetEndpoint("TaskE", "subgraphfanoutflow.verify:428/task-e")
+	outer.SetURL("TaskA", "subgraphfanoutflow.verify:428/task-a")
+	outer.SetURL("NormalB", "subgraphfanoutflow.verify:428/normal-b")
+	outer.SetURL("RunSub", "subgraphfanoutflow.verify:428/run-sub")
+	outer.SetURL("NormalD", "subgraphfanoutflow.verify:428/normal-d")
+	outer.SetURL("TaskE", "subgraphfanoutflow.verify:428/task-e")
 	outer.SetFanIn("TaskE")
 	outer.AddTransition("TaskA", "NormalB")
 	outer.AddTransition("TaskA", "RunSub")
@@ -55,8 +55,8 @@ func TestSubgraphfanoutflow(t *testing.T) {
 
 	// Sub graph: X -> Y
 	sub := workflow.NewGraph("Sub")
-	sub.SetEndpoint("TaskX", "subgraphfanoutflow.verify:428/task-x")
-	sub.SetEndpoint("TaskY", "subgraphfanoutflow.verify:428/task-y")
+	sub.SetURL("TaskX", "subgraphfanoutflow.verify:428/task-x")
+	sub.SetURL("TaskY", "subgraphfanoutflow.verify:428/task-y")
 	sub.AddTransitionChain("TaskX", "TaskY", workflow.End)
 	proxy.HandleGraph("subgraphfanoutflow.verify:428/sub", sub)
 

@@ -33,9 +33,9 @@ func TestGotoflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("Goto")
-	graph.SetEndpoint("TaskA", "gotoflow.verify:428/task-a")
-	graph.SetEndpoint("TaskB", "gotoflow.verify:428/task-b")
-	graph.SetEndpoint("TaskC", "gotoflow.verify:428/task-c")
+	graph.SetURL("TaskA", "gotoflow.verify:428/task-a")
+	graph.SetURL("TaskB", "gotoflow.verify:428/task-b")
+	graph.SetURL("TaskC", "gotoflow.verify:428/task-c")
 	graph.AddTransition("TaskA", "TaskB")
 	graph.AddTransitionGoto("TaskB", "TaskA")
 	graph.AddTransitionChain("TaskB", "TaskC", workflow.End)
@@ -91,7 +91,7 @@ func TestGotoflow_BadGoto(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("BadGoto")
-	graph.SetEndpoint("BadGotoer", "gotoflow.verify:428/bad-gotoer")
+	graph.SetURL("BadGotoer", "gotoflow.verify:428/bad-gotoer")
 	graph.AddTransition("BadGotoer", workflow.End)
 	proxy.HandleGraph("gotoflow.verify:428/bad-goto", graph)
 

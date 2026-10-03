@@ -37,9 +37,9 @@ func TestBasicflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Basic")
-	graph.SetEndpoint("TaskA", "basicflow.verify:428/task-a")
-	graph.SetEndpoint("TaskB", "basicflow.verify:428/task-b")
-	graph.SetEndpoint("TaskC", "basicflow.verify:428/task-c")
+	graph.SetURL("TaskA", "basicflow.verify:428/task-a")
+	graph.SetURL("TaskB", "basicflow.verify:428/task-b")
+	graph.SetURL("TaskC", "basicflow.verify:428/task-c")
 	graph.AddTransitionChain("TaskA", "TaskB", "TaskC", workflow.End)
 	proxy.HandleGraph("basicflow.verify:428/basic", graph)
 

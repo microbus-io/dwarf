@@ -82,7 +82,7 @@ func TestRestartSurvival(t *testing.T) {
 
 		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("R1")
-		g.SetEndpoint("A", "r1/a")
+		g.SetURL("A", "r1/a")
 		g.AddTransition("A", workflow.End)
 		assert.NoError(g.Validate())
 		proxy.HandleGraph("r1/g", g)
@@ -115,8 +115,8 @@ func TestRestartSurvival(t *testing.T) {
 
 		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("R2")
-		g.SetEndpoint("A", "r2/a")
-		g.SetEndpoint("B", "r2/b")
+		g.SetURL("A", "r2/a")
+		g.SetURL("B", "r2/b")
 		g.AddTransition("A", "B")
 		g.AddTransition("B", workflow.End)
 		assert.NoError(g.Validate())
@@ -163,7 +163,7 @@ func TestRestartSurvival(t *testing.T) {
 
 		proxy := engine.NewTestProxy()
 		parent := workflow.NewGraph("R3P")
-		parent.SetEndpoint("P0", "r3/p0")
+		parent.SetURL("P0", "r3/p0")
 		parent.AddTransition("P0", workflow.End)
 		assert.NoError(parent.Validate())
 		proxy.HandleGraph("r3/parent", parent)
@@ -177,8 +177,8 @@ func TestRestartSurvival(t *testing.T) {
 		})
 
 		child := workflow.NewGraph("R3C")
-		child.SetEndpoint("CA", "r3/ca")
-		child.SetEndpoint("CB", "r3/cb")
+		child.SetURL("CA", "r3/ca")
+		child.SetURL("CB", "r3/cb")
 		child.AddTransition("CA", "CB")
 		child.AddTransition("CB", workflow.End)
 		assert.NoError(child.Validate())
@@ -222,8 +222,8 @@ func TestRestartSurvival(t *testing.T) {
 
 		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("R4")
-		g.SetEndpoint("Gate", "r4/gate")
-		g.SetEndpoint("Done", "r4/done")
+		g.SetURL("Gate", "r4/gate")
+		g.SetURL("Done", "r4/done")
 		g.AddTransition("Gate", "Done")
 		g.AddTransition("Done", workflow.End)
 		assert.NoError(g.Validate())

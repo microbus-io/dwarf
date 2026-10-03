@@ -226,7 +226,7 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 			var body strings.Builder
 			subHeads, subTails := r.renderSteps(&body, subPrefix, s.SubHistory)
 			blockID := fmt.Sprintf("%ss%d_sg", prefix, id)
-			label := s.SubWorkflowName
+			label := s.SubgraphName
 			var callEdgeLabel string
 			for _, sub := range s.SubHistory {
 				if sub.PredecessorKey == "" && sub.HasStarted() && !sub.StartedAt.IsZero() && !sub.CreatedAt.IsZero() {

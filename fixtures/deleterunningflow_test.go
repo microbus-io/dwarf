@@ -45,7 +45,7 @@ func TestDeleteRunningflow(t *testing.T) {
 	release := make(chan struct{})
 
 	graph := workflow.NewGraph("DeleteRunning")
-	graph.SetEndpoint("Block", "deleterunningflow.verify:428/block")
+	graph.SetURL("Block", "deleterunningflow.verify:428/block")
 	graph.AddTransitionChain("Block", workflow.End)
 	proxy.HandleGraph("deleterunningflow.verify:428/delete-running", graph)
 

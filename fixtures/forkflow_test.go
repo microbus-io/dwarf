@@ -84,9 +84,9 @@ func TestForkflow_LinearWithOverride(t *testing.T) {
 	var bRuns atomic.Int32
 
 	g := workflow.NewGraph("Linear")
-	g.SetEndpoint("A", "forkflow.verify:428/a")
-	g.SetEndpoint("B", "forkflow.verify:428/b")
-	g.SetEndpoint("C", "forkflow.verify:428/c")
+	g.SetURL("A", "forkflow.verify:428/a")
+	g.SetURL("B", "forkflow.verify:428/b")
+	g.SetURL("C", "forkflow.verify:428/c")
 	g.AddTransitionChain("A", "B", "C", workflow.End)
 	proxy.HandleGraph("forkflow.verify:428/linear", g)
 
@@ -146,9 +146,9 @@ func TestForkflow_RecoverFailedStep(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	g := workflow.NewGraph("Recoverable")
-	g.SetEndpoint("A", "forkflow2.verify:428/a")
-	g.SetEndpoint("B", "forkflow2.verify:428/b")
-	g.SetEndpoint("C", "forkflow2.verify:428/c")
+	g.SetURL("A", "forkflow2.verify:428/a")
+	g.SetURL("B", "forkflow2.verify:428/b")
+	g.SetURL("C", "forkflow2.verify:428/c")
 	g.AddTransitionChain("A", "B", "C", workflow.End)
 	proxy.HandleGraph("forkflow2.verify:428/g", g)
 
@@ -201,8 +201,8 @@ func TestForkflow_ContinueExcludesFork(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	g := workflow.NewGraph("Threaded")
-	g.SetEndpoint("A", "forkflow3.verify:428/a")
-	g.SetEndpoint("B", "forkflow3.verify:428/b")
+	g.SetURL("A", "forkflow3.verify:428/a")
+	g.SetURL("B", "forkflow3.verify:428/b")
 	g.AddTransitionChain("A", "B", workflow.End)
 	proxy.HandleGraph("forkflow3.verify:428/g", g)
 
@@ -254,9 +254,9 @@ func TestForkflow_FanoutForkOfFork(t *testing.T) {
 	overrides := map[int]bool{} // indices forced to succeed via override carry "fix<idx>"=true
 
 	g := workflow.NewGraph("Fan")
-	g.SetEndpoint("Seed", "forkflow4.verify:428/seed")
-	g.SetEndpoint("Cell", "forkflow4.verify:428/cell")
-	g.SetEndpoint("Join", "forkflow4.verify:428/join")
+	g.SetURL("Seed", "forkflow4.verify:428/seed")
+	g.SetURL("Cell", "forkflow4.verify:428/cell")
+	g.SetURL("Join", "forkflow4.verify:428/join")
 	g.SetFanIn("Join")
 	g.AddTransitionForEach("Seed", "Cell", "items", "item")
 	g.AddTransitionChain("Cell", "Join", workflow.End)
@@ -319,15 +319,15 @@ func subgraphForkProxy(childRuns *int32) *engine.TestProxy {
 	proxy := engine.NewTestProxy()
 
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("A", "forksub.verify:428/a")
-	parent.SetEndpoint("RunSub", "forksub.verify:428/run-sub")
-	parent.SetEndpoint("C", "forksub.verify:428/c")
+	parent.SetURL("A", "forksub.verify:428/a")
+	parent.SetURL("RunSub", "forksub.verify:428/run-sub")
+	parent.SetURL("C", "forksub.verify:428/c")
 	parent.AddTransitionChain("A", "RunSub", "C", workflow.End)
 	proxy.HandleGraph("forksub.verify:428/parent", parent)
 
 	child := workflow.NewGraph("Child")
-	child.SetEndpoint("X", "forksub.verify:428/x")
-	child.SetEndpoint("Y", "forksub.verify:428/y")
+	child.SetURL("X", "forksub.verify:428/x")
+	child.SetURL("Y", "forksub.verify:428/y")
 	child.AddTransitionChain("X", "Y", workflow.End)
 	proxy.HandleGraph("forksub.verify:428/child", child)
 
@@ -517,21 +517,21 @@ func nestedSubgraphProxy(rec *budgetRec) *engine.TestProxy {
 	proxy := engine.NewTestProxy()
 
 	l0 := workflow.NewGraph("Outer")
-	l0.SetEndpoint("A", "forknest.verify:428/a")
-	l0.SetEndpoint("CallL1", "forknest.verify:428/call-l1")
-	l0.SetEndpoint("Z", "forknest.verify:428/z")
+	l0.SetURL("A", "forknest.verify:428/a")
+	l0.SetURL("CallL1", "forknest.verify:428/call-l1")
+	l0.SetURL("Z", "forknest.verify:428/z")
 	l0.AddTransitionChain("A", "CallL1", "Z", workflow.End)
 	proxy.HandleGraph("forknest.verify:428/outer", l0)
 
 	l1 := workflow.NewGraph("Middle")
-	l1.SetEndpoint("B", "forknest.verify:428/b")
-	l1.SetEndpoint("CallL2", "forknest.verify:428/call-l2")
-	l1.SetEndpoint("Y", "forknest.verify:428/y")
+	l1.SetURL("B", "forknest.verify:428/b")
+	l1.SetURL("CallL2", "forknest.verify:428/call-l2")
+	l1.SetURL("Y", "forknest.verify:428/y")
 	l1.AddTransitionChain("B", "CallL2", "Y", workflow.End)
 	proxy.HandleGraph("forknest.verify:428/middle", l1)
 
 	l2 := workflow.NewGraph("Inner")
-	l2.SetEndpoint("C", "forknest.verify:428/c")
+	l2.SetURL("C", "forknest.verify:428/c")
 	l2.AddTransitionChain("C", workflow.End)
 	proxy.HandleGraph("forknest.verify:428/inner", l2)
 

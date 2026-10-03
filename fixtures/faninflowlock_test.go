@@ -71,9 +71,9 @@ func TestFanInFlowLock_NonFinalArrivalTakesNoFlowRowWrite(t *testing.T) {
 		assert.NoError(e.Startup(t.Context()))
 
 		g := workflow.NewGraph("Fan")
-		g.SetEndpoint("Split", "fl/split")
-		g.SetEndpoint("Leg", "fl/leg")
-		g.SetEndpoint("Join", "fl/join")
+		g.SetURL("Split", "fl/split")
+		g.SetURL("Leg", "fl/leg")
+		g.SetURL("Join", "fl/join")
 		g.SetFanIn("Join")
 		g.SetReducer("legs", workflow.ReducerAdd)
 		g.AddTransitionForEach("Split", "Leg", "items", "item")

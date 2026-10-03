@@ -54,14 +54,14 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 
 	// Main graph: A -> B -> forEach(items) -> C -> {onError -> ErrorHandler} -> D -> {when} -> superSubCall or E -> {goto} -> Z
 	superGraph := workflow.NewGraph("Super")
-	superGraph.SetEndpoint("TaskA", "superflow.verify:428/task-a")
-	superGraph.SetEndpoint("TaskB", "superflow.verify:428/task-b")
-	superGraph.SetEndpoint("TaskC", "superflow.verify:428/task-c")
-	superGraph.SetEndpoint("ErrorHandler", "superflow.verify:428/error-handler")
-	superGraph.SetEndpoint("TaskD", "superflow.verify:428/task-d")
-	superGraph.SetEndpoint("SuperSubCall", "superflow.verify:428/super-sub-call")
-	superGraph.SetEndpoint("TaskE", "superflow.verify:428/task-e")
-	superGraph.SetEndpoint("TaskZ", "superflow.verify:428/task-z")
+	superGraph.SetURL("TaskA", "superflow.verify:428/task-a")
+	superGraph.SetURL("TaskB", "superflow.verify:428/task-b")
+	superGraph.SetURL("TaskC", "superflow.verify:428/task-c")
+	superGraph.SetURL("ErrorHandler", "superflow.verify:428/error-handler")
+	superGraph.SetURL("TaskD", "superflow.verify:428/task-d")
+	superGraph.SetURL("SuperSubCall", "superflow.verify:428/super-sub-call")
+	superGraph.SetURL("TaskE", "superflow.verify:428/task-e")
+	superGraph.SetURL("TaskZ", "superflow.verify:428/task-z")
 	superGraph.SetFanIn("TaskD")
 	superGraph.SetFanIn("TaskE")
 	superGraph.AddTransition("TaskA", "TaskB")
@@ -79,8 +79,8 @@ func superflowSetup(t *testing.T, numShards int) (*engine.Engine, *engine.TestPr
 
 	// Sub graph: SubTaskA -> SubTaskB -> END
 	subGraph := workflow.NewGraph("SuperSub")
-	subGraph.SetEndpoint("SubTaskA", "superflow.verify:428/sub-task-a")
-	subGraph.SetEndpoint("SubTaskB", "superflow.verify:428/sub-task-b")
+	subGraph.SetURL("SubTaskA", "superflow.verify:428/sub-task-a")
+	subGraph.SetURL("SubTaskB", "superflow.verify:428/sub-task-b")
 	subGraph.AddTransitionChain("SubTaskA", "SubTaskB", workflow.End)
 	proxy.HandleGraph("superflow.verify:428/super-sub", subGraph)
 

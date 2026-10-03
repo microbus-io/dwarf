@@ -38,7 +38,7 @@ func TestListflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("List")
-	graph.SetEndpoint("Only", "listflow.verify:428/only")
+	graph.SetURL("Only", "listflow.verify:428/only")
 	graph.AddTransition("Only", workflow.End)
 	proxy.HandleGraph("listflow.verify:428/list", graph)
 

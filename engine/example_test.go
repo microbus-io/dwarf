@@ -46,7 +46,7 @@ func Example() {
 
 	graphs := map[string]*workflow.Graph{}
 	g := workflow.NewGraph("Greet")
-	g.SetEndpoint("Hello", "Hello")
+	g.SetURL("Hello", "Hello")
 	g.AddTransition("Hello", workflow.End)
 	graphs["greet"] = g
 

@@ -45,17 +45,17 @@ func TestSubgraphinterruptflow(t *testing.T) {
 
 	// Parent: A -> runInner -> Z
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("TaskA", "subgraphinterruptflow.verify:428/task-a")
-	parent.SetEndpoint("RunInner", "subgraphinterruptflow.verify:428/run-inner")
-	parent.SetEndpoint("TaskZ", "subgraphinterruptflow.verify:428/task-z")
+	parent.SetURL("TaskA", "subgraphinterruptflow.verify:428/task-a")
+	parent.SetURL("RunInner", "subgraphinterruptflow.verify:428/run-inner")
+	parent.SetURL("TaskZ", "subgraphinterruptflow.verify:428/task-z")
 	parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.End)
 	proxy.HandleGraph("subgraphinterruptflow.verify:428/parent", parent)
 
 	// Inner: X -> pause (interrupts) -> Y
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("TaskX", "subgraphinterruptflow.verify:428/task-x")
-	inner.SetEndpoint("Pause", "subgraphinterruptflow.verify:428/pause")
-	inner.SetEndpoint("TaskY", "subgraphinterruptflow.verify:428/task-y")
+	inner.SetURL("TaskX", "subgraphinterruptflow.verify:428/task-x")
+	inner.SetURL("Pause", "subgraphinterruptflow.verify:428/pause")
+	inner.SetURL("TaskY", "subgraphinterruptflow.verify:428/task-y")
 	inner.AddTransitionChain("TaskX", "Pause", "TaskY", workflow.End)
 	proxy.HandleGraph("subgraphinterruptflow.verify:428/inner", inner)
 

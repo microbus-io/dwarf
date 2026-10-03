@@ -66,10 +66,10 @@ func TestReducerDeleteflow(t *testing.T) {
 	// transitions in the requested order so the fan_out_ordinal is deterministic.
 	buildGraph := func(name string, deleterFirst bool) *workflow.Graph {
 		g := workflow.NewGraph(name)
-		g.SetEndpoint("Spawn", "reducerdelete.verify:428/spawn")
-		g.SetEndpoint("Deleter", "reducerdelete.verify:428/deleter")
-		g.SetEndpoint("Appender", "reducerdelete.verify:428/appender")
-		g.SetEndpoint("Join", "reducerdelete.verify:428/join")
+		g.SetURL("Spawn", "reducerdelete.verify:428/spawn")
+		g.SetURL("Deleter", "reducerdelete.verify:428/deleter")
+		g.SetURL("Appender", "reducerdelete.verify:428/appender")
+		g.SetURL("Join", "reducerdelete.verify:428/join")
 		g.SetFanIn("Join")
 		g.SetReducer("log", workflow.ReducerAppend)
 		if deleterFirst {

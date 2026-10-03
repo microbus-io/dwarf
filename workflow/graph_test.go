@@ -71,8 +71,8 @@ func TestGraph_DefaultEntryPoint(t *testing.T) {
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
-	g.SetEndpoint("svc/first", "svc/first")
-	g.SetEndpoint("svc/second", "svc/second")
+	g.SetURL("svc/first", "svc/first")
+	g.SetURL("svc/second", "svc/second")
 
 	assert.Equal("svc/first", g.EntryPoint())
 }
@@ -81,8 +81,8 @@ func TestGraph_ExplicitEntryPoint(t *testing.T) {
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
-	g.SetEndpoint("svc/first", "svc/first")
-	g.SetEndpoint("svc/second", "svc/second")
+	g.SetURL("svc/first", "svc/first")
+	g.SetURL("svc/second", "svc/second")
 	g.SetEntryPoint("svc/second")
 
 	assert.Equal("svc/second", g.EntryPoint())
@@ -106,8 +106,8 @@ func TestGraph_DuplicateTaskIgnored(t *testing.T) {
 	assert := testarossa.For(t)
 
 	g := NewGraph("Test")
-	g.SetEndpoint("svc/a", "svc/a")
-	g.SetEndpoint("svc/a", "svc/a")
+	g.SetURL("svc/a", "svc/a")
+	g.SetURL("svc/a", "svc/a")
 	g.AddTransition("svc/a", "svc/b")
 
 	assert.Equal(2, len(g.Nodes()))
@@ -124,7 +124,7 @@ func TestGraph_Validate(t *testing.T) {
 
 	// Empty name
 	g2 := NewGraph("")
-	g2.SetEndpoint("svc/a", "svc/a")
+	g2.SetURL("svc/a", "svc/a")
 	assert.Error(g2.Validate())
 
 	// No tasks
@@ -133,14 +133,14 @@ func TestGraph_Validate(t *testing.T) {
 
 	// Entry point not in task list
 	g4 := NewGraph("Test")
-	g4.SetEndpoint("svc/a", "svc/a")
+	g4.SetURL("svc/a", "svc/a")
 	g4.SetEntryPoint("svc/missing")
 	assert.Error(g4.Validate())
 
 	// Unreachable task
 	g5 := NewGraph("Test")
 	g5.AddTransition("svc/a", "svc/b")
-	g5.SetEndpoint("svc/c", "svc/c")
+	g5.SetURL("svc/c", "svc/c")
 	assert.Error(g5.Validate())
 
 	// Reachable via goto
@@ -184,7 +184,7 @@ func TestGraph_ValidateOnError(t *testing.T) {
 	// An onError transition carrying a 'when' (hand-crafted) is rejected.
 	cond := NewGraph("Test")
 	cond.AddTransition("svc/a", End)
-	cond.SetEndpoint("svc/h", "svc/h")
+	cond.SetURL("svc/h", "svc/h")
 	cond.AddTransition("svc/h", End)
 	cond.transitions = append(cond.transitions, Transition{From: "svc/a", To: "svc/h", OnError: true, When: "x > 0"})
 	assert.Error(cond.Validate())
@@ -732,10 +732,10 @@ func TestLineage_AliasedNodesInDifferentScopes(t *testing.T) {
 	// The same task URL is registered under two distinct names so that one copy lives
 	// inside a fan-out scope (per element) and a second copy lives at the outer scope.
 	g := NewGraph("Alias")
-	g.SetEndpoint("s", "host/s")
-	g.SetEndpoint("inner", "host/work") // inside fan-out
-	g.SetEndpoint("outer", "host/work") // outside fan-out
-	g.SetEndpoint("join", "host/join")
+	g.SetURL("s", "host/s")
+	g.SetURL("inner", "host/work") // inside fan-out
+	g.SetURL("outer", "host/work") // outside fan-out
+	g.SetURL("join", "host/join")
 	g.AddTransitionForEach("s", "inner", "items", "item")
 	g.AddTransition("inner", "join")
 	g.AddTransition("join", "outer")
@@ -1217,13 +1217,13 @@ func TestFlow_MermaidEscapesInjection(t *testing.T) {
 			Status:   StatusCompleted,
 		},
 		{
-			StepKey:         "1-2-b",
-			TaskName:        "svc/caller",
-			PredecessorKey:  "1-1-a",
-			Subgraph:        true,
-			SubWorkflowName: `Evil"]<img>`,
-			SubHistory:      []FlowStep{{StepKey: "1-3-c", TaskName: "svc/inner", Status: StatusCompleted}},
-			Status:          StatusCompleted,
+			StepKey:        "1-2-b",
+			TaskName:       "svc/caller",
+			PredecessorKey: "1-1-a",
+			Subgraph:       true,
+			SubgraphName:   `Evil"]<img>`,
+			SubHistory:     []FlowStep{{StepKey: "1-3-c", TaskName: "svc/inner", Status: StatusCompleted}},
+			Status:         StatusCompleted,
 		},
 	}
 
@@ -1292,7 +1292,7 @@ func TestRender_NilGraphAndEmptyHistory(t *testing.T) {
 	// A graph that would FAIL Validate still renders: a diagram is a diagnostic, and the moment an author most
 	// wants to see a graph is the moment it is malformed.
 	g := NewGraph("Broken")
-	g.SetEndpoint("A", "svc/a")
+	g.SetURL("A", "svc/a")
 	g.AddTransition("A", "Undeclared") // no END edge, target never declared -> Validate rejects it
 	assert.Error(g.Validate())
 	mmd := NewGraphRenderer(g).Render()

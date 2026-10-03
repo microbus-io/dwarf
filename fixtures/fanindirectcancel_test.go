@@ -50,9 +50,9 @@ func TestFanInDirectTerminate_NoExtendTerminatedFlow(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("FIDC")
-	g.SetEndpoint("Spawn", "fidc/spawn")
-	g.SetEndpoint("Work", "fidc/work")
-	g.SetEndpoint("Join", "fidc/join")
+	g.SetURL("Spawn", "fidc/spawn")
+	g.SetURL("Work", "fidc/work")
+	g.SetURL("Join", "fidc/join")
 	g.SetFanIn("Join")
 	g.AddTransitionForEach("Spawn", "Work", "items", "item")
 	g.AddTransition("Work", "Join")

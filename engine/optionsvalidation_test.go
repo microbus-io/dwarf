@@ -37,7 +37,7 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 	ctx := context.Background()
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
-	g.SetEndpoint("A", "fopt/a")
+	g.SetURL("A", "fopt/a")
 	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("fopt/g", g)
 	proxy.HandleTask("fopt/a", func(ctx context.Context, f *workflow.Flow) error { return nil })

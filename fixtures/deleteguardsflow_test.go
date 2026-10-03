@@ -49,8 +49,8 @@ func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("ForkGuard")
-	graph.SetEndpoint("A", "deleteguardsflow.verify:428/a")
-	graph.SetEndpoint("B", "deleteguardsflow.verify:428/b")
+	graph.SetURL("A", "deleteguardsflow.verify:428/a")
+	graph.SetURL("B", "deleteguardsflow.verify:428/b")
 	graph.AddTransitionChain("A", "B", workflow.End)
 	proxy.HandleGraph("deleteguardsflow.verify:428/g", graph)
 	// B reports its own step key, which is the only way to obtain one for a DeleteOnCompletion flow: such a
@@ -148,7 +148,7 @@ func TestDeleteguardsflow_ContinueSkipsADeletedTurn(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("ContinueGuard")
-	graph.SetEndpoint("Turn", "deleteguardsflow2.verify:428/turn")
+	graph.SetURL("Turn", "deleteguardsflow2.verify:428/turn")
 	graph.AddTransitionChain("Turn", workflow.End)
 	proxy.HandleGraph("deleteguardsflow2.verify:428/g", graph)
 	// Each turn stamps which base it was built from, so the surviving base is identifiable in the outcome.

@@ -85,7 +85,7 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
-	g.SetEndpoint("A", "doc/a")
+	g.SetURL("A", "doc/a")
 	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("doc/solo", g)
 	proxy.HandleTask("doc/a", func(ctx context.Context, f *workflow.Flow) error {
@@ -115,7 +115,7 @@ func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
-	g.SetEndpoint("A", "doc/aw-a")
+	g.SetURL("A", "doc/aw-a")
 	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("doc/await", g)
 	proxy.HandleTask("doc/aw-a", func(ctx context.Context, f *workflow.Flow) error {
@@ -159,7 +159,7 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
-	g.SetEndpoint("A", "doc/run-a")
+	g.SetURL("A", "doc/run-a")
 	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("doc/run", g)
 	proxy.HandleTask("doc/run-a", func(ctx context.Context, f *workflow.Flow) error {
@@ -191,11 +191,11 @@ func TestPurge_ReaperRemovesTree(t *testing.T) {
 
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("Run", "pr/run")
+	parent.SetURL("Run", "pr/run")
 	parent.AddTransition("Run", workflow.End)
 	proxy.HandleGraph("pr/parent", parent)
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("X", "pr/x")
+	inner.SetURL("X", "pr/x")
 	inner.AddTransition("X", workflow.End)
 	proxy.HandleGraph("pr/inner", inner)
 	proxy.HandleTask("pr/x", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -238,7 +238,7 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Failing")
-	g.SetEndpoint("A", "doc/fail-a")
+	g.SetURL("A", "doc/fail-a")
 	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("doc/failing", g)
 	proxy.HandleTask("doc/fail-a", func(ctx context.Context, f *workflow.Flow) error {
@@ -273,13 +273,13 @@ func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("A", "doc/sg-a")
-	parent.SetEndpoint("RunInner", "doc/sg-run-inner")
+	parent.SetURL("A", "doc/sg-a")
+	parent.SetURL("RunInner", "doc/sg-run-inner")
 	parent.AddTransitionChain("A", "RunInner", workflow.End)
 	proxy.HandleGraph("doc/sg-parent", parent)
 
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("X", "doc/sg-x")
+	inner.SetURL("X", "doc/sg-x")
 	inner.AddTransition("X", workflow.End)
 	proxy.HandleGraph("doc/sg-inner", inner)
 
@@ -327,7 +327,7 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
-	g.SetEndpoint("A", "doc/conc-a")
+	g.SetURL("A", "doc/conc-a")
 	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("doc/conc", g)
 	proxy.HandleTask("doc/conc-a", func(ctx context.Context, f *workflow.Flow) error {

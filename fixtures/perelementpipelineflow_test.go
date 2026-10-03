@@ -39,12 +39,12 @@ func TestPerelementpipelineflow(t *testing.T) {
 
 	// S -> forEach(items) -> H -> {A, B} -> M -> L
 	graph := workflow.NewGraph("PerElementPipeline")
-	graph.SetEndpoint("TaskS", "perelementpipelineflow.verify:428/task-s")
-	graph.SetEndpoint("TaskH", "perelementpipelineflow.verify:428/task-h")
-	graph.SetEndpoint("TaskA", "perelementpipelineflow.verify:428/task-a")
-	graph.SetEndpoint("TaskB", "perelementpipelineflow.verify:428/task-b")
-	graph.SetEndpoint("TaskM", "perelementpipelineflow.verify:428/task-m")
-	graph.SetEndpoint("TaskL", "perelementpipelineflow.verify:428/task-l")
+	graph.SetURL("TaskS", "perelementpipelineflow.verify:428/task-s")
+	graph.SetURL("TaskH", "perelementpipelineflow.verify:428/task-h")
+	graph.SetURL("TaskA", "perelementpipelineflow.verify:428/task-a")
+	graph.SetURL("TaskB", "perelementpipelineflow.verify:428/task-b")
+	graph.SetURL("TaskM", "perelementpipelineflow.verify:428/task-m")
+	graph.SetURL("TaskL", "perelementpipelineflow.verify:428/task-l")
 	graph.SetFanIn("TaskM")
 	graph.SetFanIn("TaskL")
 	graph.SetReducer("mergedItems", workflow.ReducerUnion)

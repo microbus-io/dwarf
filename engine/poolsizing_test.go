@@ -378,7 +378,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 	release := make(chan struct{})
 	var running atomic.Int32
 	g := workflow.NewGraph("Grow")
-	g.SetEndpoint("Slow", "grow/slow")
+	g.SetURL("Slow", "grow/slow")
 	g.AddTransition("Slow", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("grow/g", g)
@@ -462,7 +462,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Sat")
-	g.SetEndpoint("A", "sat/a")
+	g.SetURL("A", "sat/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("sat/g", g)
@@ -675,7 +675,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	// (2) Started, then shut down - the shutdown race, reached through the public API.
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Solo")
-	g.SetEndpoint("A", "shutdownrace/a")
+	g.SetURL("A", "shutdownrace/a")
 	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("shutdownrace/g", g)
 	proxy.HandleTask("shutdownrace/a", func(ctx context.Context, f *workflow.Flow) error { return nil })

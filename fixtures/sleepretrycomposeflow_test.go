@@ -51,7 +51,7 @@ func TestSleepRetryComposeflow(t *testing.T) {
 	const lowerBound = 350.0 // ms; below Sleep+backoff (400) but well above either alone (200)
 
 	graph := workflow.NewGraph("SleepRetryCompose")
-	graph.SetEndpoint("Flaky", "sleepretrycomposeflow.verify:428/flaky")
+	graph.SetURL("Flaky", "sleepretrycomposeflow.verify:428/flaky")
 	graph.AddTransitionChain("Flaky", workflow.End)
 	proxy.HandleGraph("sleepretrycomposeflow.verify:428/compose", graph)
 

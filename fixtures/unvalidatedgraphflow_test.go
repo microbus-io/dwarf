@@ -58,10 +58,10 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 
 		var workRuns, joinRuns, afterRuns atomic.Int64
 		g := workflow.NewGraph("Unvalidated")
-		g.SetEndpoint("Spawn", "unvalidated.verify:428/spawn")
-		g.SetEndpoint("Work", "unvalidated.verify:428/work")
-		g.SetEndpoint("Join", "unvalidated.verify:428/join")
-		g.SetEndpoint("After", "unvalidated.verify:428/after")
+		g.SetURL("Spawn", "unvalidated.verify:428/spawn")
+		g.SetURL("Work", "unvalidated.verify:428/work")
+		g.SetURL("Join", "unvalidated.verify:428/join")
+		g.SetURL("After", "unvalidated.verify:428/after")
 		g.SetFanIn("Join")
 		g.AddTransitionForEach("Spawn", "Work", "items", "item")
 		g.AddTransition("Work", "Join")
@@ -110,8 +110,8 @@ func TestUnvalidatedGraphflow(t *testing.T) {
 		assert := testarossa.For(t)
 		proxy := engine.NewTestProxy()
 		g := workflow.NewGraph("Invalid")
-		g.SetEndpoint("Entry", "invalid.verify:428/entry")
-		g.SetEndpoint("Orphan", "invalid.verify:428/orphan") // has an endpoint but nothing transitions to it
+		g.SetURL("Entry", "invalid.verify:428/entry")
+		g.SetURL("Orphan", "invalid.verify:428/orphan") // has a URL but nothing transitions to it
 		g.AddTransition("Entry", workflow.End)
 		proxy.HandleGraph("invalid.verify:428/g", g)
 		proxy.HandleTask("invalid.verify:428/entry", func(ctx context.Context, f *workflow.Flow) error { return nil })

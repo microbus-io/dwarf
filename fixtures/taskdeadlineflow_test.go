@@ -45,7 +45,7 @@ func TestTaskdeadlineflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("Flow")
-	graph.SetEndpoint("Work", "taskdeadlineflow.verify:428/work")
+	graph.SetURL("Work", "taskdeadlineflow.verify:428/work")
 	graph.AddTransition("Work", workflow.End)
 	proxy.HandleGraph("taskdeadlineflow.verify:428/flow", graph)
 

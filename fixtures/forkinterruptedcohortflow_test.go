@@ -45,10 +45,10 @@ func TestForkInterruptedCohortFlow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("ForkInterruptedCohort")
-	graph.SetEndpoint("Src", "forkinterruptedcohortflow.verify:428/src")
-	graph.SetEndpoint("A", "forkinterruptedcohortflow.verify:428/a") // fails, no onError
-	graph.SetEndpoint("B", "forkinterruptedcohortflow.verify:428/b") // interrupts
-	graph.SetEndpoint("J", "forkinterruptedcohortflow.verify:428/j")
+	graph.SetURL("Src", "forkinterruptedcohortflow.verify:428/src")
+	graph.SetURL("A", "forkinterruptedcohortflow.verify:428/a") // fails, no onError
+	graph.SetURL("B", "forkinterruptedcohortflow.verify:428/b") // interrupts
+	graph.SetURL("J", "forkinterruptedcohortflow.verify:428/j")
 	graph.SetFanIn("J")
 	graph.AddTransition("Src", "A")
 	graph.AddTransition("Src", "B")

@@ -61,8 +61,8 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Ünicödé 日本語 Graph") // the graph itself is a stored payload (the `graph` column)
-	graph.SetEndpoint("Write", "unicoderoundtripflow.verify:428/write")
-	graph.SetEndpoint("Ask", "unicoderoundtripflow.verify:428/ask")
+	graph.SetURL("Write", "unicoderoundtripflow.verify:428/write")
+	graph.SetURL("Ask", "unicoderoundtripflow.verify:428/ask")
 	graph.AddTransitionChain("Write", "Ask", workflow.End)
 	assert.NoError(graph.Validate())
 	proxy.HandleGraph("unicoderoundtripflow.verify:428/wf", graph)

@@ -38,20 +38,20 @@ func TestSubgraphentryflow(t *testing.T) {
 
 	// Outer graph: RunInner -> RunTail -> END
 	outer := workflow.NewGraph("Outer")
-	outer.SetEndpoint("RunInner", "subgraphentryflow.verify:428/run-inner")
-	outer.SetEndpoint("RunTail", "subgraphentryflow.verify:428/run-tail")
+	outer.SetURL("RunInner", "subgraphentryflow.verify:428/run-inner")
+	outer.SetURL("RunTail", "subgraphentryflow.verify:428/run-tail")
 	outer.AddTransitionChain("RunInner", "RunTail", workflow.End)
 	proxy.HandleGraph("subgraphentryflow.verify:428/outer", outer)
 
 	// Inner subgraph: TaskInner -> END
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("TaskInner", "subgraphentryflow.verify:428/task-inner")
+	inner.SetURL("TaskInner", "subgraphentryflow.verify:428/task-inner")
 	inner.AddTransition("TaskInner", workflow.End)
 	proxy.HandleGraph("subgraphentryflow.verify:428/inner", inner)
 
 	// Tail subgraph: TaskTail -> END
 	tail := workflow.NewGraph("Tail")
-	tail.SetEndpoint("TaskTail", "subgraphentryflow.verify:428/task-tail")
+	tail.SetURL("TaskTail", "subgraphentryflow.verify:428/task-tail")
 	tail.AddTransition("TaskTail", workflow.End)
 	proxy.HandleGraph("subgraphentryflow.verify:428/tail", tail)
 

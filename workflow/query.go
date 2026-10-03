@@ -49,7 +49,8 @@ type Query struct {
 	// Purge rejects this flag with a 400 (a subgraph child is purged only as part of its root's subtree,
 	// never directly - doing so would strand its parent); Purge always targets roots only.
 	IncludeSubgraphs bool `json:"includeSubgraphs,omitzero"`
-	// Shard restricts the query to a single 1-based shard. Zero queries all shards.
+	// Shard restricts the query to the shard with this index, as declared in the engine's shard spec.
+	// Zero queries all shards.
 	Shard int `json:"shard,omitzero"`
 	// Cursor is the opaque pagination cursor returned as nextCursor by the previous List call.
 	Cursor string `json:"cursor,omitzero"`

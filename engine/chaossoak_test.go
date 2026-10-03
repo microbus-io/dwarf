@@ -240,7 +240,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 	// (a) linear 4-task chain.
 	lin := workflow.NewGraph("Linear")
 	for _, n := range []string{"A", "B", "C", "D"} {
-		lin.SetEndpoint(n, "chaossoak.verify:428/lin-"+n)
+		lin.SetURL(n, "chaossoak.verify:428/lin-"+n)
 	}
 	lin.AddTransitionChain("A", "B", "C", "D", workflow.End)
 	assert.NoError(lin.Validate())
@@ -251,11 +251,11 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 
 	// (b) fan-out 3 branches -> fan-in J with an append reducer.
 	fan := workflow.NewGraph("FanOut")
-	fan.SetEndpoint("S", "chaossoak.verify:428/fan-s")
+	fan.SetURL("S", "chaossoak.verify:428/fan-s")
 	for _, n := range []string{"P", "Q", "R"} {
-		fan.SetEndpoint(n, "chaossoak.verify:428/fan-"+n)
+		fan.SetURL(n, "chaossoak.verify:428/fan-"+n)
 	}
-	fan.SetEndpoint("J", "chaossoak.verify:428/fan-j")
+	fan.SetURL("J", "chaossoak.verify:428/fan-j")
 	fan.SetFanIn("J")
 	fan.SetReducer("log", workflow.ReducerAppend)
 	fan.AddTransition("S", "P")
@@ -279,7 +279,7 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 
 	// (c) parent + subgraph child; the child's middle task interrupts (mode 0) or retries once (mode 1).
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("P0", "chaossoak.verify:428/parent-p0")
+	parent.SetURL("P0", "chaossoak.verify:428/parent-p0")
 	parent.AddTransition("P0", workflow.End)
 	assert.NoError(parent.Validate())
 	proxy.HandleGraph("chaossoak.verify:428/parent", parent)
@@ -292,9 +292,9 @@ func registerChaosGraphs(t *testing.T, proxy *TestProxy) {
 	})
 
 	child := workflow.NewGraph("Child")
-	child.SetEndpoint("CA", "chaossoak.verify:428/child-ca")
-	child.SetEndpoint("CB", "chaossoak.verify:428/child-cb")
-	child.SetEndpoint("CC", "chaossoak.verify:428/child-cc")
+	child.SetURL("CA", "chaossoak.verify:428/child-ca")
+	child.SetURL("CB", "chaossoak.verify:428/child-cb")
+	child.SetURL("CC", "chaossoak.verify:428/child-cc")
 	child.AddTransitionChain("CA", "CB", "CC", workflow.End)
 	assert.NoError(child.Validate())
 	proxy.HandleGraph("chaossoak.verify:428/child", child)

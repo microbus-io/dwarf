@@ -48,7 +48,7 @@ func TestCrossReplica_LostTerminalWake_AwaiterPolls(t *testing.T) {
 	buildProxy := func(onRun func()) *TestProxy {
 		p := NewTestProxy()
 		g := workflow.NewGraph("Wake")
-		g.SetEndpoint("W", "xrwake/w")
+		g.SetURL("W", "xrwake/w")
 		g.AddTransition("W", workflow.End)
 		assert.NoError(g.Validate())
 		p.HandleGraph("xrwake/g", g)
@@ -113,7 +113,7 @@ func TestCrossReplica_ClaimedStepRecoveredByPeer(t *testing.T) {
 	buildProxy := func() *TestProxy {
 		p := NewTestProxy()
 		g := workflow.NewGraph("XRRec")
-		g.SetEndpoint("A", "xrrec/a")
+		g.SetURL("A", "xrrec/a")
 		g.AddTransition("A", workflow.End)
 		assert.NoError(g.Validate())
 		p.HandleGraph("xrrec/g", g)

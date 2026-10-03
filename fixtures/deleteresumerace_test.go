@@ -46,8 +46,8 @@ func TestDeleteResumeRace(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("DRR")
-	g.SetEndpoint("Gate", "drr/gate")
-	g.SetEndpoint("Done", "drr/done")
+	g.SetURL("Gate", "drr/gate")
+	g.SetURL("Done", "drr/done")
 	g.AddTransition("Gate", "Done")
 	g.AddTransition("Done", workflow.End)
 	assert.NoError(g.Validate())

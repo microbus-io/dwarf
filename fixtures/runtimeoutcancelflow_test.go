@@ -58,7 +58,7 @@ func TestRuntimeoutcancelflow(t *testing.T) {
 	defer cancel()
 
 	graph := workflow.NewGraph("RunTimeoutCancel")
-	graph.SetEndpoint("Block", "runtimeoutcancelflow.verify:428/block")
+	graph.SetURL("Block", "runtimeoutcancelflow.verify:428/block")
 	graph.AddTransitionChain("Block", workflow.End)
 	proxy.HandleGraph("runtimeoutcancelflow.verify:428/run-timeout-cancel", graph)
 

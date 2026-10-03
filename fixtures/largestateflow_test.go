@@ -44,7 +44,7 @@ func TestLargeFinalStateflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	g := workflow.NewGraph("LargeState")
-	g.SetEndpoint("Carry", "largestateflow.verify:428/carry")
+	g.SetURL("Carry", "largestateflow.verify:428/carry")
 	g.AddTransition("Carry", workflow.End)
 	proxy.HandleGraph("largestateflow.verify:428/g", g)
 	// No-op task: the initial-state payload rides through unchanged into final_state at completion.

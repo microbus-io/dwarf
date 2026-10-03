@@ -45,9 +45,9 @@ func TestFanIn_GotoLoopBranchKeepsInteriorDAGEdges(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("GotoLoopDAG")
-	graph.SetEndpoint("Split", "gotoloopdag.verify:900/split")
-	graph.SetEndpoint("Work", "gotoloopdag.verify:900/work")
-	graph.SetEndpoint("Join", "gotoloopdag.verify:900/join")
+	graph.SetURL("Split", "gotoloopdag.verify:900/split")
+	graph.SetURL("Work", "gotoloopdag.verify:900/work")
+	graph.SetURL("Join", "gotoloopdag.verify:900/join")
 	graph.SetFanIn("Join")
 	graph.SetReducer("done", workflow.ReducerAppend)
 	graph.AddTransitionForEach("Split", "Work", "items", "item")

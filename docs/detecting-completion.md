@@ -75,9 +75,9 @@ be **retried independently** — a delivery that must not be lost belongs here, 
 
 ```go
 orch := workflow.NewGraph("ProcessOrder")
-orch.SetEndpoint("CallSubgraph", "orch/call")
-orch.SetEndpoint("SubgraphSuccess", "orch/success")
-orch.SetEndpoint("SubgraphFailed", "orch/failed")
+orch.SetURL("CallSubgraph", "orch/call")
+orch.SetURL("SubgraphSuccess", "orch/success")
+orch.SetURL("SubgraphFailed", "orch/failed")
 
 orch.AddTransition("CallSubgraph", "SubgraphSuccess")        // normal path
 orch.AddTransitionOnError("CallSubgraph", "SubgraphFailed")  // error path

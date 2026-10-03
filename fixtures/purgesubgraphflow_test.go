@@ -43,13 +43,13 @@ func TestPurgeSubgraphflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("TaskA", "purgesub.verify:428/task-a")
-	parent.SetEndpoint("RunInner", "purgesub.verify:428/run-inner")
+	parent.SetURL("TaskA", "purgesub.verify:428/task-a")
+	parent.SetURL("RunInner", "purgesub.verify:428/run-inner")
 	parent.AddTransitionChain("TaskA", "RunInner", workflow.End)
 	proxy.HandleGraph("purgesub.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("TaskX", "purgesub.verify:428/task-x")
+	inner.SetURL("TaskX", "purgesub.verify:428/task-x")
 	inner.AddTransitionChain("TaskX", workflow.End)
 	proxy.HandleGraph("purgesub.verify:428/inner", inner)
 

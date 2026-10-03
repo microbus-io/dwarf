@@ -37,12 +37,12 @@ func TestAliasflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Alias")
-	graph.SetEndpoint("S", "aliasflow.verify:428/task-s")
-	graph.SetEndpoint("A", "aliasflow.verify:428/task-a")
-	graph.SetEndpoint("B", "aliasflow.verify:428/task-b")
-	graph.SetEndpoint("C", "aliasflow.verify:428/task-c")
-	graph.SetEndpoint("BPrime", "aliasflow.verify:428/task-b") // same URL as "B"
-	graph.SetEndpoint("D", "aliasflow.verify:428/task-d")
+	graph.SetURL("S", "aliasflow.verify:428/task-s")
+	graph.SetURL("A", "aliasflow.verify:428/task-a")
+	graph.SetURL("B", "aliasflow.verify:428/task-b")
+	graph.SetURL("C", "aliasflow.verify:428/task-c")
+	graph.SetURL("BPrime", "aliasflow.verify:428/task-b") // same URL as "B"
+	graph.SetURL("D", "aliasflow.verify:428/task-d")
 	graph.AddTransition("S", "A")
 	graph.AddTransitionGoto("S", "BPrime")
 	graph.AddTransitionChain("A", "B", "C", workflow.End)

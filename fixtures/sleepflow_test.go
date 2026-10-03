@@ -38,9 +38,9 @@ func TestSleepflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Delay")
-	graph.SetEndpoint("TaskA", "sleepflow.verify:428/task-a")
-	graph.SetEndpoint("TaskB", "sleepflow.verify:428/task-b")
-	graph.SetEndpoint("TaskC", "sleepflow.verify:428/task-c")
+	graph.SetURL("TaskA", "sleepflow.verify:428/task-a")
+	graph.SetURL("TaskB", "sleepflow.verify:428/task-b")
+	graph.SetURL("TaskC", "sleepflow.verify:428/task-c")
 	graph.AddTransitionChain("TaskA", "TaskB", "TaskC", workflow.End)
 	proxy.HandleGraph("sleepflow.verify:428/delay", graph)
 

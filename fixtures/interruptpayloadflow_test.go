@@ -46,8 +46,8 @@ func TestInterruptpayloadflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Interrupt")
-	graph.SetEndpoint("Setup", "interruptpayloadflow.verify:428/setup")
-	graph.SetEndpoint("Ask", "interruptpayloadflow.verify:428/ask")
+	graph.SetURL("Setup", "interruptpayloadflow.verify:428/setup")
+	graph.SetURL("Ask", "interruptpayloadflow.verify:428/ask")
 	graph.AddTransitionChain("Setup", "Ask", workflow.End)
 	proxy.HandleGraph("interruptpayloadflow.verify:428/interrupt", graph)
 

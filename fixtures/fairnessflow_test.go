@@ -36,7 +36,7 @@ func TestFairnessflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("Fairness")
-	graph.SetEndpoint("Tally", "fairnessflow.verify:428/tally")
+	graph.SetURL("Tally", "fairnessflow.verify:428/tally")
 	graph.AddTransition("Tally", workflow.End)
 	proxy.HandleGraph("fairnessflow.verify:428/fairness", graph)
 

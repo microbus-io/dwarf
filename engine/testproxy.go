@@ -57,7 +57,7 @@ func (p *TestProxy) HandleGraph(name string, graph *workflow.Graph) {
 }
 
 // HandleTask registers a task handler under the given name.
-// The name should match the task URL registered via graph.SetEndpoint.
+// The name should match the task URL registered via graph.SetURL.
 func (p *TestProxy) HandleTask(name string, handler TaskHandler) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

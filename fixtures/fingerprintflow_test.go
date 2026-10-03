@@ -43,9 +43,9 @@ func TestFingerprintflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Fingerprint")
-	graph.SetEndpoint("TaskA", "fingerprintflow.verify:428/task-a")
-	graph.SetEndpoint("Pause", "fingerprintflow.verify:428/pause")
-	graph.SetEndpoint("Done", "fingerprintflow.verify:428/done")
+	graph.SetURL("TaskA", "fingerprintflow.verify:428/task-a")
+	graph.SetURL("Pause", "fingerprintflow.verify:428/pause")
+	graph.SetURL("Done", "fingerprintflow.verify:428/done")
 	graph.AddTransitionChain("TaskA", "Pause", "Done", workflow.End)
 	proxy.HandleGraph("fingerprintflow.verify:428/fingerprint", graph)
 

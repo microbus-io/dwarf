@@ -25,8 +25,8 @@ import (
 // Build a linear workflow graph and validate it.
 func ExampleGraph() {
 	g := workflow.NewGraph("Checkout")
-	g.SetEndpoint("Reserve", "inventory.reserve")
-	g.SetEndpoint("Charge", "billing.charge")
+	g.SetURL("Reserve", "inventory.reserve")
+	g.SetURL("Charge", "billing.charge")
 	g.AddTransitionChain("Reserve", "Charge", workflow.End)
 
 	fmt.Println("name:", g.Name())

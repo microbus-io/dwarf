@@ -61,13 +61,13 @@ func TestBaggageflow(t *testing.T) {
 
 	// Parent: A -> runInner -> END; Inner: X -> END.
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("TaskA", "baggageflow.verify:428/task-a")
-	parent.SetEndpoint("RunInner", "baggageflow.verify:428/run-inner")
+	parent.SetURL("TaskA", "baggageflow.verify:428/task-a")
+	parent.SetURL("RunInner", "baggageflow.verify:428/run-inner")
 	parent.AddTransitionChain("TaskA", "RunInner", workflow.End)
 	proxy.HandleGraph("baggageflow.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("TaskX", "baggageflow.verify:428/task-x")
+	inner.SetURL("TaskX", "baggageflow.verify:428/task-x")
 	inner.AddTransition("TaskX", workflow.End)
 	proxy.HandleGraph("baggageflow.verify:428/inner", inner)
 

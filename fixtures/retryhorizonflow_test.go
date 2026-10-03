@@ -44,8 +44,8 @@ func TestRetryHorizonflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("RetryHorizon")
-	graph.SetEndpoint("Flaky", "retryhorizonflow.verify:428/flaky")
-	graph.SetEndpoint("Done", "retryhorizonflow.verify:428/done")
+	graph.SetURL("Flaky", "retryhorizonflow.verify:428/flaky")
+	graph.SetURL("Done", "retryhorizonflow.verify:428/done")
 	graph.AddTransitionChain("Flaky", "Done", workflow.End)
 	proxy.HandleGraph("retryhorizonflow.verify:428/retry-horizon", graph)
 

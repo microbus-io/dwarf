@@ -49,7 +49,7 @@ func TestRetryCancelRaceflow(t *testing.T) {
 	var invocations atomic.Int32
 
 	graph := workflow.NewGraph("RetryCancelRace")
-	graph.SetEndpoint("Work", "retrycancelraceflow.verify:428/work")
+	graph.SetURL("Work", "retrycancelraceflow.verify:428/work")
 	graph.AddTransitionChain("Work", workflow.End)
 	proxy.HandleGraph("retrycancelraceflow.verify:428/retry-cancel-race", graph)
 

@@ -59,7 +59,7 @@ func TestConcurrentContinueflow(t *testing.T) {
 	releaseTask := func() { releaseOnce.Do(func() { close(release) }) }
 
 	graph := workflow.NewGraph("Counting")
-	graph.SetEndpoint("Increment", "concurrentcontinue.verify:428/increment")
+	graph.SetURL("Increment", "concurrentcontinue.verify:428/increment")
 	graph.AddTransition("Increment", workflow.End)
 	proxy.HandleGraph("concurrentcontinue.verify:428/counting", graph)
 	proxy.HandleTask("concurrentcontinue.verify:428/increment", func(ctx context.Context, f *workflow.Flow) error {

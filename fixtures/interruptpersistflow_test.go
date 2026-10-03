@@ -45,8 +45,8 @@ func TestInterruptpersistflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("InterruptPersist")
-	graph.SetEndpoint("ParkAfterWrite", "interruptpersistflow.verify:428/park-after-write")
-	graph.SetEndpoint("Verify", "interruptpersistflow.verify:428/verify")
+	graph.SetURL("ParkAfterWrite", "interruptpersistflow.verify:428/park-after-write")
+	graph.SetURL("Verify", "interruptpersistflow.verify:428/verify")
 	graph.AddTransitionChain("ParkAfterWrite", "Verify", workflow.End)
 	proxy.HandleGraph("interruptpersistflow.verify:428/interrupt-persist", graph)
 

@@ -37,9 +37,9 @@ func TestDynamicfanoutflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("DynamicFanOut")
-	graph.SetEndpoint("TaskA", "dynamicfanoutflow.verify:428/task-a")
-	graph.SetEndpoint("TaskB", "dynamicfanoutflow.verify:428/task-b")
-	graph.SetEndpoint("TaskC", "dynamicfanoutflow.verify:428/task-c")
+	graph.SetURL("TaskA", "dynamicfanoutflow.verify:428/task-a")
+	graph.SetURL("TaskB", "dynamicfanoutflow.verify:428/task-b")
+	graph.SetURL("TaskC", "dynamicfanoutflow.verify:428/task-c")
 	graph.SetFanIn("TaskC")
 	graph.SetReducer("processed", workflow.ReducerAdd)
 	graph.SetReducer("seenIndices", workflow.ReducerAppend)

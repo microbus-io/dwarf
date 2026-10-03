@@ -39,7 +39,7 @@ func TestShardinfoflow(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	graph := workflow.NewGraph("Flow")
-	graph.SetEndpoint("Only", "shardinfoflow.verify:428/only")
+	graph.SetURL("Only", "shardinfoflow.verify:428/only")
 	graph.AddTransition("Only", workflow.End)
 	proxy.HandleGraph("shardinfoflow.verify:428/flow", graph)
 
@@ -77,13 +77,13 @@ func TestShardinfoflow(t *testing.T) {
 		nonEmptyShards := 0
 		for i, s := range shards {
 			// Shards are 1-indexed and returned in order.
-			assert.Equal(i+1, s.Shard)
-			assert.Equal("", s.Error, "shard %d unreachable", s.Shard)
+			assert.Equal(i+1, s.Index)
+			assert.Equal("", s.Error, "shard %d unreachable", s.Index)
 			totalFlows += s.Flows
 			if s.Flows > 0 {
 				nonEmptyShards++
 				// A shard holding flows must also hold their steps.
-				assert.True(s.Steps > 0, "shard %d has flows but no steps", s.Shard)
+				assert.True(s.Steps > 0, "shard %d has flows but no steps", s.Index)
 			}
 		}
 		// Every created flow is accounted for across the shards.

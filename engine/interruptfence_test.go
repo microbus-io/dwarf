@@ -48,11 +48,11 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 	proxy := NewTestProxy()
 
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("Call", "fisw/call")
+	parent.SetURL("Call", "fisw/call")
 	parent.AddTransition("Call", workflow.End)
 	proxy.HandleGraph("fisw/parent", parent)
 	child := workflow.NewGraph("Child")
-	child.SetEndpoint("X", "fisw/x")
+	child.SetURL("X", "fisw/x")
 	child.AddTransition("X", workflow.End)
 	proxy.HandleGraph("fisw/child", child)
 

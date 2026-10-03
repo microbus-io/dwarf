@@ -49,8 +49,8 @@ func TestSubgraphfailflow(t *testing.T) {
 
 	// Inner: X -> boom (fails)
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("TaskX", "subgraphfailflow.verify:428/task-x")
-	inner.SetEndpoint("Boom", "subgraphfailflow.verify:428/boom")
+	inner.SetURL("TaskX", "subgraphfailflow.verify:428/task-x")
+	inner.SetURL("Boom", "subgraphfailflow.verify:428/boom")
 	inner.AddTransitionChain("TaskX", "Boom", workflow.End)
 	proxy.HandleGraph("subgraphfailflow.verify:428/inner", inner)
 
@@ -66,10 +66,10 @@ func TestSubgraphfailflow(t *testing.T) {
 
 		// Parent: A -> runInner -> Z, with runInner --onError--> recover.
 		parent := workflow.NewGraph("Recoverparent")
-		parent.SetEndpoint("TaskA", "subgraphfailflow.verify:428/task-a")
-		parent.SetEndpoint("RunInner", "subgraphfailflow.verify:428/run-inner-recover")
-		parent.SetEndpoint("TaskZ", "subgraphfailflow.verify:428/task-z")
-		parent.SetEndpoint("Recover", "subgraphfailflow.verify:428/recover")
+		parent.SetURL("TaskA", "subgraphfailflow.verify:428/task-a")
+		parent.SetURL("RunInner", "subgraphfailflow.verify:428/run-inner-recover")
+		parent.SetURL("TaskZ", "subgraphfailflow.verify:428/task-z")
+		parent.SetURL("Recover", "subgraphfailflow.verify:428/recover")
 		parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.End)
 		parent.AddTransitionOnError("RunInner", "Recover")
 		parent.AddTransition("Recover", workflow.End)
@@ -122,9 +122,9 @@ func TestSubgraphfailflow(t *testing.T) {
 
 		// Parent: A -> runInner -> Z, no onError handler.
 		parent := workflow.NewGraph("Failparent")
-		parent.SetEndpoint("TaskA", "subgraphfailflow.verify:428/task-a2")
-		parent.SetEndpoint("RunInner", "subgraphfailflow.verify:428/run-inner-fail")
-		parent.SetEndpoint("TaskZ", "subgraphfailflow.verify:428/task-z2")
+		parent.SetURL("TaskA", "subgraphfailflow.verify:428/task-a2")
+		parent.SetURL("RunInner", "subgraphfailflow.verify:428/run-inner-fail")
+		parent.SetURL("TaskZ", "subgraphfailflow.verify:428/task-z2")
 		parent.AddTransitionChain("TaskA", "RunInner", "TaskZ", workflow.End)
 		proxy.HandleGraph("subgraphfailflow.verify:428/failparent", parent)
 

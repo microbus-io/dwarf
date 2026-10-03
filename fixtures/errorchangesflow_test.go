@@ -52,8 +52,8 @@ func TestErrorchangesflow(t *testing.T) {
 
 	// Handled: Work errors after writing, and an onError handler runs next.
 	handled := workflow.NewGraph("HandledErrorChanges")
-	handled.SetEndpoint("Work", "errorchangesflow.verify:428/work")
-	handled.SetEndpoint("Rescue", "errorchangesflow.verify:428/rescue")
+	handled.SetURL("Work", "errorchangesflow.verify:428/work")
+	handled.SetURL("Rescue", "errorchangesflow.verify:428/rescue")
 	handled.AddTransition("Work", workflow.End)
 	handled.AddTransitionOnError("Work", "Rescue")
 	handled.AddTransition("Rescue", workflow.End)
@@ -61,7 +61,7 @@ func TestErrorchangesflow(t *testing.T) {
 
 	// Unhandled: the same task with no onError, so the flow fails.
 	unhandled := workflow.NewGraph("UnhandledErrorChanges")
-	unhandled.SetEndpoint("Work", "errorchangesflow.verify:428/work")
+	unhandled.SetURL("Work", "errorchangesflow.verify:428/work")
 	unhandled.AddTransition("Work", workflow.End)
 	proxy.HandleGraph("errorchangesflow.verify:428/unhandled", unhandled)
 

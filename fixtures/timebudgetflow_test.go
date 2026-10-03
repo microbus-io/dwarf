@@ -38,8 +38,8 @@ func TestTimebudgetflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("TimeBudget")
-	graph.SetEndpoint("TaskA", "timebudgetflow.verify:428/task-a")
-	graph.SetEndpoint("Slow", "timebudgetflow.verify:428/slow")
+	graph.SetURL("TaskA", "timebudgetflow.verify:428/task-a")
+	graph.SetURL("Slow", "timebudgetflow.verify:428/slow")
 	graph.AddTransitionChain("TaskA", "Slow", workflow.End)
 	proxy.HandleGraph("timebudgetflow.verify:428/time-budget", graph)
 

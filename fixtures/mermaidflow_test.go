@@ -44,11 +44,11 @@ func TestMermaidflow(t *testing.T) {
 
 	// Parent: Start -> (forEach items -> Work) -> Collect (fan-in) -> CallSub (subgraph) -> Finish -> END
 	parent := workflow.NewGraph("MermaidParent")
-	parent.SetEndpoint("Start", "mermaidflow.verify:428/start")
-	parent.SetEndpoint("Work", "mermaidflow.verify:428/work")
-	parent.SetEndpoint("Collect", "mermaidflow.verify:428/collect")
-	parent.SetEndpoint("CallSub", "mermaidflow.verify:428/call-sub")
-	parent.SetEndpoint("Finish", "mermaidflow.verify:428/finish")
+	parent.SetURL("Start", "mermaidflow.verify:428/start")
+	parent.SetURL("Work", "mermaidflow.verify:428/work")
+	parent.SetURL("Collect", "mermaidflow.verify:428/collect")
+	parent.SetURL("CallSub", "mermaidflow.verify:428/call-sub")
+	parent.SetURL("Finish", "mermaidflow.verify:428/finish")
 	parent.SetFanIn("Collect")
 	parent.SetReducer("processed", workflow.ReducerAdd)
 	parent.AddTransitionForEach("Start", "Work", "items", "item")
@@ -57,8 +57,8 @@ func TestMermaidflow(t *testing.T) {
 
 	// Inner subgraph: InnerA -> InnerB -> END
 	inner := workflow.NewGraph("MermaidInner")
-	inner.SetEndpoint("InnerA", "mermaidflow.verify:428/inner-a")
-	inner.SetEndpoint("InnerB", "mermaidflow.verify:428/inner-b")
+	inner.SetURL("InnerA", "mermaidflow.verify:428/inner-a")
+	inner.SetURL("InnerB", "mermaidflow.verify:428/inner-b")
 	inner.AddTransitionChain("InnerA", "InnerB", workflow.End)
 	proxy.HandleGraph("mermaidflow.verify:428/inner", inner)
 

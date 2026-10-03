@@ -46,19 +46,19 @@ func TestPurgeLoopflow(t *testing.T) {
 
 	// A trivial one-task graph used for the plain completed flows.
 	tiny := workflow.NewGraph("Tiny")
-	tiny.SetEndpoint("Only", "purgeloop.verify:428/only")
+	tiny.SetURL("Only", "purgeloop.verify:428/only")
 	tiny.AddTransition("Only", workflow.End)
 	proxy.HandleGraph("purgeloop.verify:428/tiny", tiny)
 	proxy.HandleTask("purgeloop.verify:428/only", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	// A parent graph that runs one subgraph child, so one purged root owns a subtree.
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("RunInner", "purgeloop.verify:428/run-inner")
+	parent.SetURL("RunInner", "purgeloop.verify:428/run-inner")
 	parent.AddTransition("RunInner", workflow.End)
 	proxy.HandleGraph("purgeloop.verify:428/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("TaskX", "purgeloop.verify:428/task-x")
+	inner.SetURL("TaskX", "purgeloop.verify:428/task-x")
 	inner.AddTransition("TaskX", workflow.End)
 	proxy.HandleGraph("purgeloop.verify:428/inner", inner)
 
@@ -81,7 +81,7 @@ func TestPurgeLoopflow(t *testing.T) {
 
 	// A graph that blocks forever, standing in for a concurrently-running flow that no filter matches.
 	block := workflow.NewGraph("Block")
-	block.SetEndpoint("Wait", "purgeloop.verify:428/wait")
+	block.SetURL("Wait", "purgeloop.verify:428/wait")
 	block.AddTransition("Wait", workflow.End)
 	proxy.HandleGraph("purgeloop.verify:428/block", block)
 	release := make(chan struct{})

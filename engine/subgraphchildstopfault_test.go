@@ -44,13 +44,13 @@ func TestSubgraphChildStopSignal_DroppedThenBackstopped(t *testing.T) {
 
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("Parent")
-	parent.SetEndpoint("RunInner", "scss/run-inner")
+	parent.SetURL("RunInner", "scss/run-inner")
 	parent.AddTransition("RunInner", workflow.End)
 	assert.NoError(parent.Validate())
 	proxy.HandleGraph("scss/parent", parent)
 
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("Boom", "scss/boom")
+	inner.SetURL("Boom", "scss/boom")
 	inner.AddTransition("Boom", workflow.End)
 	assert.NoError(inner.Validate())
 	proxy.HandleGraph("scss/inner", inner)

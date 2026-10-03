@@ -85,7 +85,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 	// entry step is guaranteed to still be pending - not yet claimed - when Cancel lands on it.
 	proxy.HandleGraph("gracefulcancelflow.verify:428/holder", func() *workflow.Graph {
 		g := workflow.NewGraph("Holder")
-		g.SetEndpoint("Hold", "gracefulcancelflow.verify:428/hold")
+		g.SetURL("Hold", "gracefulcancelflow.verify:428/hold")
 		g.AddTransition("Hold", workflow.End)
 		return g
 	}())
@@ -117,7 +117,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("preempted_no_onerror", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("PreemptNoOnError")
-		graph.SetEndpoint("B", "gracefulcancelflow.verify:428/pno-b")
+		graph.SetURL("B", "gracefulcancelflow.verify:428/pno-b")
 		graph.AddTransition("B", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/preempt-no-onerror", graph)
 		var bRan atomic.Bool
@@ -157,8 +157,8 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("preempted_with_onerror", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("PreemptWithOnError")
-		graph.SetEndpoint("B", "gracefulcancelflow.verify:428/pw-b")
-		graph.SetEndpoint("Handler", "gracefulcancelflow.verify:428/pw-handler")
+		graph.SetURL("B", "gracefulcancelflow.verify:428/pw-b")
+		graph.SetURL("Handler", "gracefulcancelflow.verify:428/pw-handler")
 		graph.AddTransition("B", workflow.End)
 		graph.AddTransitionOnError("B", "Handler")
 		graph.AddTransition("Handler", workflow.End)
@@ -199,8 +199,8 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("ran_covered_no_onerror", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("RanCoveredNoOnError")
-		graph.SetEndpoint("C", "gracefulcancelflow.verify:428/rcn-c")
-		graph.SetEndpoint("D", "gracefulcancelflow.verify:428/rcn-d")
+		graph.SetURL("C", "gracefulcancelflow.verify:428/rcn-c")
+		graph.SetURL("D", "gracefulcancelflow.verify:428/rcn-d")
 		graph.AddTransitionChain("C", "D", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/ran-covered-no-onerror", graph)
 		running := make(chan struct{})
@@ -250,10 +250,10 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("ran_covered_with_onerror", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("RanCoveredWithOnError")
-		graph.SetEndpoint("C", "gracefulcancelflow.verify:428/rcw-c")
-		graph.SetEndpoint("D", "gracefulcancelflow.verify:428/rcw-d")
-		graph.SetEndpoint("Handler", "gracefulcancelflow.verify:428/rcw-handler")
-		graph.SetEndpoint("Tail", "gracefulcancelflow.verify:428/rcw-tail")
+		graph.SetURL("C", "gracefulcancelflow.verify:428/rcw-c")
+		graph.SetURL("D", "gracefulcancelflow.verify:428/rcw-d")
+		graph.SetURL("Handler", "gracefulcancelflow.verify:428/rcw-handler")
+		graph.SetURL("Tail", "gracefulcancelflow.verify:428/rcw-tail")
 		graph.AddTransitionChain("C", "D", workflow.End)
 		graph.AddTransitionOnError("C", "Handler")
 		graph.AddTransitionChain("Handler", "Tail", workflow.End)
@@ -316,8 +316,8 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("retry_then_preempted", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("RetryThenPreempted")
-		graph.SetEndpoint("G", "gracefulcancelflow.verify:428/rtp-g")
-		graph.SetEndpoint("Handler", "gracefulcancelflow.verify:428/rtp-handler")
+		graph.SetURL("G", "gracefulcancelflow.verify:428/rtp-g")
+		graph.SetURL("Handler", "gracefulcancelflow.verify:428/rtp-handler")
 		graph.AddTransition("G", workflow.End)
 		graph.AddTransitionOnError("G", "Handler")
 		graph.AddTransition("Handler", workflow.End)
@@ -368,15 +368,15 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("subgraph_caller_sees_child_result", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("SubgraphCallerSeesChildResult")
-		graph.SetEndpoint("E", "gracefulcancelflow.verify:428/scr-e")
-		graph.SetEndpoint("F", "gracefulcancelflow.verify:428/scr-f")
-		graph.SetEndpoint("Handler", "gracefulcancelflow.verify:428/scr-handler")
+		graph.SetURL("E", "gracefulcancelflow.verify:428/scr-e")
+		graph.SetURL("F", "gracefulcancelflow.verify:428/scr-f")
+		graph.SetURL("Handler", "gracefulcancelflow.verify:428/scr-handler")
 		graph.AddTransitionChain("E", "F", workflow.End)
 		graph.AddTransitionOnError("E", "Handler")
 		graph.AddTransition("Handler", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-caller-sees-child-result", graph)
 		child := workflow.NewGraph("SubgraphChild")
-		child.SetEndpoint("K", "gracefulcancelflow.verify:428/scr-k")
+		child.SetURL("K", "gracefulcancelflow.verify:428/scr-k")
 		child.AddTransition("K", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/scr-child", child)
 
@@ -439,15 +439,15 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("subgraph_cancelled_while_child_runs", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("SubgraphCancelledWhileChildRuns")
-		graph.SetEndpoint("E", "gracefulcancelflow.verify:428/scw-e")
-		graph.SetEndpoint("F", "gracefulcancelflow.verify:428/scw-f")
-		graph.SetEndpoint("Handler", "gracefulcancelflow.verify:428/scw-handler")
+		graph.SetURL("E", "gracefulcancelflow.verify:428/scw-e")
+		graph.SetURL("F", "gracefulcancelflow.verify:428/scw-f")
+		graph.SetURL("Handler", "gracefulcancelflow.verify:428/scw-handler")
 		graph.AddTransitionChain("E", "F", workflow.End)
 		graph.AddTransitionOnError("E", "Handler")
 		graph.AddTransition("Handler", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-cancelled-while-child-runs", graph)
 		child := workflow.NewGraph("SubgraphChildHeld")
-		child.SetEndpoint("K", "gracefulcancelflow.verify:428/scw-k")
+		child.SetURL("K", "gracefulcancelflow.verify:428/scw-k")
 		child.AddTransition("K", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/scw-child", child)
 
@@ -510,8 +510,8 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("interrupt_resumed_is_preempted", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("InterruptResumedIsPreempted")
-		graph.SetEndpoint("I", "gracefulcancelflow.verify:428/irp-i")
-		graph.SetEndpoint("Handler", "gracefulcancelflow.verify:428/irp-handler")
+		graph.SetURL("I", "gracefulcancelflow.verify:428/irp-i")
+		graph.SetURL("Handler", "gracefulcancelflow.verify:428/irp-handler")
 		graph.AddTransition("I", workflow.End)
 		graph.AddTransitionOnError("I", "Handler")
 		graph.AddTransition("Handler", workflow.End)
@@ -560,9 +560,9 @@ func TestGracefulCancelFlow(t *testing.T) {
 	fanOut := func(name string, w engine.TaskHandler) string {
 		url := "gracefulcancelflow.verify:428/" + name
 		g := workflow.NewGraph(name)
-		g.SetEndpoint("Src", url+"-src")
-		g.SetEndpoint("W", url+"-w")
-		g.SetEndpoint("Join", url+"-join")
+		g.SetURL("Src", url+"-src")
+		g.SetURL("W", url+"-w")
+		g.SetURL("Join", url+"-join")
 		g.AddTransitionForEach("Src", "W", "items", "item")
 		g.AddTransition("W", "Join")
 		g.SetFanIn("Join")
@@ -711,11 +711,11 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("subgraph_child_cancellation_propagates", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("SubgraphChildCancellationPropagates")
-		graph.SetEndpoint("E", "gracefulcancelflow.verify:428/sccp-e")
+		graph.SetURL("E", "gracefulcancelflow.verify:428/sccp-e")
 		graph.AddTransition("E", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-child-cancellation-propagates", graph)
 		child := workflow.NewGraph("SubgraphChildCancellationPropagatesChild")
-		child.SetEndpoint("K", "gracefulcancelflow.verify:428/sccp-k")
+		child.SetURL("K", "gracefulcancelflow.verify:428/sccp-k")
 		child.AddTransition("K", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/sccp-child", child)
 
@@ -762,11 +762,11 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("subgraph_error_keeps_status_code", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("SubgraphErrorKeepsStatusCode")
-		graph.SetEndpoint("E", "gracefulcancelflow.verify:428/sesc-e")
+		graph.SetURL("E", "gracefulcancelflow.verify:428/sesc-e")
 		graph.AddTransition("E", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/subgraph-error-keeps-status-code", graph)
 		child := workflow.NewGraph("SubgraphErrorKeepsStatusCodeChild")
-		child.SetEndpoint("K", "gracefulcancelflow.verify:428/sesc-k")
+		child.SetURL("K", "gracefulcancelflow.verify:428/sesc-k")
 		child.AddTransition("K", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/sesc-child", child)
 		proxy.HandleTask("gracefulcancelflow.verify:428/sesc-e", func(ctx context.Context, f *workflow.Flow) error {
@@ -803,11 +803,11 @@ func TestGracefulCancelFlow(t *testing.T) {
 	t.Run("guards", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("Guards")
-		graph.SetEndpoint("P", "gracefulcancelflow.verify:428/g-p")
+		graph.SetURL("P", "gracefulcancelflow.verify:428/g-p")
 		graph.AddTransition("P", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/guards", graph)
 		child := workflow.NewGraph("GuardsChild")
-		child.SetEndpoint("Q", "gracefulcancelflow.verify:428/g-q")
+		child.SetURL("Q", "gracefulcancelflow.verify:428/g-q")
 		child.AddTransition("Q", workflow.End)
 		proxy.HandleGraph("gracefulcancelflow.verify:428/guards-child", child)
 		var childKey atomic.Value

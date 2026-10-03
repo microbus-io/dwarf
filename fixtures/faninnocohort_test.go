@@ -55,9 +55,9 @@ func TestFanInNoCohort_FailsInsteadOfHotLooping(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("NoCohort")
-	g.SetEndpoint("Spawn", "nocohort/spawn")
-	g.SetEndpoint("Work", "nocohort/work")
-	g.SetEndpoint("Join", "nocohort/join")
+	g.SetURL("Spawn", "nocohort/spawn")
+	g.SetURL("Work", "nocohort/work")
+	g.SetURL("Join", "nocohort/join")
 	g.SetFanIn("Join")
 	g.AddTransitionForEach("Spawn", "Work", "items", "item")
 	g.AddTransition("Work", "Join")

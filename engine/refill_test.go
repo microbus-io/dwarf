@@ -43,8 +43,8 @@ func TestRefillDecoupled_MultiShardDrains(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Chain")
-	g.SetEndpoint("A", "msd/nop")
-	g.SetEndpoint("B", "msd/nop")
+	g.SetURL("A", "msd/nop")
+	g.SetURL("B", "msd/nop")
 	g.AddTransitionChain("A", "B", workflow.End)
 	proxy.HandleGraph("msd/g", g)
 	proxy.HandleTask("msd/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -87,7 +87,7 @@ func TestRefillInterval_OneCyclePerPistonNoTrigger(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("One")
-	g.SetEndpoint("Do", "notrigger/nop")
+	g.SetURL("Do", "notrigger/nop")
 	g.AddTransition("Do", workflow.End)
 	proxy.HandleGraph("notrigger/g", g)
 	proxy.HandleTask("notrigger/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -293,7 +293,7 @@ func TestRefillInterval_DeepBacklogLiveness(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("One")
-	g.SetEndpoint("Do", "refillfloorliveness.verify:428/nop")
+	g.SetURL("Do", "refillfloorliveness.verify:428/nop")
 	g.AddTransition("Do", workflow.End)
 	proxy.HandleGraph("refillfloorliveness.verify:428/one", g)
 	proxy.HandleTask("refillfloorliveness.verify:428/nop", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -333,7 +333,7 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Scan")
-	g.SetEndpoint("A", "scan/a")
+	g.SetURL("A", "scan/a")
 	g.AddTransition("A", workflow.End)
 	assert.NoError(g.Validate())
 	proxy.HandleGraph("scan/g", g)

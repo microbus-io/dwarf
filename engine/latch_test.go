@@ -69,13 +69,13 @@ func TestLatchResolve_ReportsStoppedFlowsOnly(t *testing.T) {
 	release := make(chan struct{})
 
 	done := workflow.NewGraph("Done")
-	done.SetEndpoint("Done", "latchresolve.verify:0/done")
+	done.SetURL("Done", "latchresolve.verify:0/done")
 	done.AddTransition("Done", workflow.End)
 	proxy.HandleGraph("latchresolve.verify:0/done", done)
 	proxy.HandleTask("latchresolve.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
 
 	blocked := workflow.NewGraph("Blocked")
-	blocked.SetEndpoint("Block", "latchresolve.verify:0/block")
+	blocked.SetURL("Block", "latchresolve.verify:0/block")
 	blocked.AddTransition("Block", workflow.End)
 	proxy.HandleGraph("latchresolve.verify:0/blocked", blocked)
 	proxy.HandleTask("latchresolve.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
@@ -134,7 +134,7 @@ func TestLatchResolve_ChunksWithoutDroppingKeys(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Done")
-	g.SetEndpoint("Done", "latchchunk.verify:0/done")
+	g.SetURL("Done", "latchchunk.verify:0/done")
 	g.AddTransition("Done", workflow.End)
 	proxy.HandleGraph("latchchunk.verify:0/done", g)
 	proxy.HandleTask("latchchunk.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -190,7 +190,7 @@ func TestLatchResolve_RecentStopScanIsOnlyAnOptimization(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("Done")
-	g.SetEndpoint("Done", "latchrecent.verify:0/done")
+	g.SetURL("Done", "latchrecent.verify:0/done")
 	g.AddTransition("Done", workflow.End)
 	proxy.HandleGraph("latchrecent.verify:0/done", g)
 	proxy.HandleTask("latchrecent.verify:0/done", func(ctx context.Context, f *workflow.Flow) error { return nil })

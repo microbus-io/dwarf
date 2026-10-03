@@ -38,9 +38,9 @@ func TestRetryflow(t *testing.T) {
 	assert.NoError(eng.Startup(t.Context()))
 
 	graph := workflow.NewGraph("Retry")
-	graph.SetEndpoint("TaskA", "retryflow.verify:428/task-a")
-	graph.SetEndpoint("Flaky", "retryflow.verify:428/flaky")
-	graph.SetEndpoint("TaskB", "retryflow.verify:428/task-b")
+	graph.SetURL("TaskA", "retryflow.verify:428/task-a")
+	graph.SetURL("Flaky", "retryflow.verify:428/flaky")
+	graph.SetURL("TaskB", "retryflow.verify:428/task-b")
 	graph.AddTransitionChain("TaskA", "Flaky", "TaskB", workflow.End)
 	proxy.HandleGraph("retryflow.verify:428/retry", graph)
 

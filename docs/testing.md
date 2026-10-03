@@ -27,8 +27,8 @@ func TestCheckout(t *testing.T) {
     proxy := engine.NewTestProxy()
 
     g := workflow.NewGraph("Checkout")
-    g.SetEndpoint("Reserve", "inventory.reserve")
-    g.SetEndpoint("Charge", "billing.charge")
+    g.SetURL("Reserve", "inventory.reserve")
+    g.SetURL("Charge", "billing.charge")
     g.AddTransition("Reserve", "Charge")
     g.AddTransition("Charge", workflow.End)
     proxy.HandleGraph("checkout", g)
@@ -55,7 +55,7 @@ func TestCheckout(t *testing.T) {
 ```
 
 `TestProxy.HandleGraph(name, graph)` registers a graph; `HandleTask(url, handler)` registers a task by its
-URL (the address bound with `SetEndpoint`). The handler signature is the same `func(ctx, *workflow.Flow) error`
+URL (the address bound with `SetURL`). The handler signature is the same `func(ctx, *workflow.Flow) error`
 you write in production.
 
 ## Configuring the test engine

@@ -39,14 +39,14 @@ func TestDynamicsubgraphflow(t *testing.T) {
 
 	// Parent graph: single task
 	parent := workflow.NewGraph("DynamicSubgraph")
-	parent.SetEndpoint("Parent", "dynamicsubgraphflow.verify:428/parent")
+	parent.SetURL("Parent", "dynamicsubgraphflow.verify:428/parent")
 	parent.AddTransition("Parent", workflow.End)
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/dynamic-subgraph", parent)
 
 	// Inner graph: InnerA -> InnerB
 	inner := workflow.NewGraph("Inner")
-	inner.SetEndpoint("InnerA", "dynamicsubgraphflow.verify:428/inner-a")
-	inner.SetEndpoint("InnerB", "dynamicsubgraphflow.verify:428/inner-b")
+	inner.SetURL("InnerA", "dynamicsubgraphflow.verify:428/inner-a")
+	inner.SetURL("InnerB", "dynamicsubgraphflow.verify:428/inner-b")
 	inner.AddTransitionChain("InnerA", "InnerB", workflow.End)
 	proxy.HandleGraph("dynamicsubgraphflow.verify:428/inner", inner)
 

@@ -87,10 +87,10 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 
 	proxy := engine.NewTestProxy()
 	g := workflow.NewGraph("SnapResume")
-	g.SetEndpoint("Src", "snapresume.verify:428/src")
-	g.SetEndpoint("A", "snapresume.verify:428/a")
-	g.SetEndpoint("B", "snapresume.verify:428/b")
-	g.SetEndpoint("J", "snapresume.verify:428/j")
+	g.SetURL("Src", "snapresume.verify:428/src")
+	g.SetURL("A", "snapresume.verify:428/a")
+	g.SetURL("B", "snapresume.verify:428/b")
+	g.SetURL("J", "snapresume.verify:428/j")
 	g.SetFanIn("J")
 	g.AddTransition("Src", "A")
 	g.AddTransition("Src", "B")
@@ -180,9 +180,9 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	proxy := engine.NewTestProxy()
 
 	parent := workflow.NewGraph("PSParent")
-	parent.SetEndpoint("Seed", "psub.verify:428/seed")
-	parent.SetEndpoint("Call", "psub.verify:428/call")
-	parent.SetEndpoint("Join", "psub.verify:428/join")
+	parent.SetURL("Seed", "psub.verify:428/seed")
+	parent.SetURL("Call", "psub.verify:428/call")
+	parent.SetURL("Join", "psub.verify:428/join")
 	parent.SetFanIn("Join")
 	parent.SetReducer("results", workflow.ReducerAppend)
 	parent.AddTransitionForEach("Seed", "Call", "items", "n")
@@ -190,7 +190,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	proxy.HandleGraph("psub.verify:428/parent", parent)
 
 	child := workflow.NewGraph("PSChild")
-	child.SetEndpoint("Inner", "psub.verify:428/inner")
+	child.SetURL("Inner", "psub.verify:428/inner")
 	child.AddTransitionChain("Inner", workflow.End)
 	proxy.HandleGraph("psub.verify:428/child", child)
 

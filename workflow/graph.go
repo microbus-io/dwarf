@@ -84,7 +84,7 @@ func (g *Graph) EntryPoint() string {
 }
 
 // Nodes returns the graph's nodes. The slice is the graph's own storage, not a copy: read it, but do not
-// modify it or its elements. Change a graph through SetEndpoint and the AddTransition methods instead.
+// modify it or its elements. Change a graph through SetURL and the AddTransition methods instead.
 func (g *Graph) Nodes() []Node {
 	return g.nodes
 }
@@ -95,7 +95,7 @@ func (g *Graph) Transitions() []Transition {
 	return g.transitions
 }
 
-// SetEndpoint binds a node (identified by its graph name) to the given dispatch URL, creating the node
+// SetURL binds a node (identified by its graph name) to the given dispatch URL, creating the node
 // if it does not exist and updating its URL if it does. It is optional: a node first named inside an
 // AddTransition* call is auto-registered with its URL equal to its name (see AddTransition). The name is the node's identity in the graph
 // (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
@@ -105,7 +105,7 @@ func (g *Graph) Transitions() []Transition {
 //
 // The same URL may be bound under multiple names. This is how a workflow author reuses the same task
 // code at distinct positions in the graph with different downstream transitions per position.
-func (g *Graph) SetEndpoint(name, url string) {
+func (g *Graph) SetURL(name, url string) {
 	if name == End {
 		return
 	}
@@ -143,23 +143,23 @@ func (g *Graph) SetEntryPoint(name string) {
 
 // AddTransition adds an unconditional transition between two nodes.
 //
-// # Naming a node that was never bound with SetEndpoint
+// # Naming a node that was never bound with SetURL
 //
 // Every AddTransition* method auto-registers a node it has not seen before, binding it to a dispatch URL equal to
 // ITS OWN NAME. That is deliberate, and it is what makes the concise form work:
 //
 //	g.AddTransition("billing.charge", "billing.receipt")   // two nodes whose names ARE their dispatch URLs
 //
-// Use SetEndpoint when the node's graph identity should differ from where it dispatches - to give a task a
+// Use SetURL when the node's graph identity should differ from where it dispatches - to give a task a
 // readable position in the graph, or to reuse one task's code at several positions:
 //
-//	g.SetEndpoint("Charge", "billing.charge")
-//	g.SetEndpoint("Retry", "billing.charge")   // same task, a second position with its own transitions
+//	g.SetURL("Charge", "billing.charge")
+//	g.SetURL("Retry", "billing.charge")   // same task, a second position with its own transitions
 //
 // The consequence worth knowing: because an unbound node is a VALID node (dispatching as its own name), a
-// forgotten SetEndpoint is not a build-time error and Validate cannot catch it. The graph is well-formed; it just
+// forgotten SetURL is not a build-time error and Validate cannot catch it. The graph is well-formed; it just
 // names a task the host does not serve, and the host rejects it on that node's first dispatch. If you use
-// SetEndpoint for a graph's nodes, use it for all of them.
+// SetURL for a graph's nodes, use it for all of them.
 func (g *Graph) AddTransition(from, to string) {
 	g.autoRegister(from)
 	g.autoRegister(to)
@@ -309,7 +309,7 @@ func (g *Graph) autoRegister(name string) {
 			return
 		}
 	}
-	g.SetEndpoint(name, name)
+	g.SetURL(name, name)
 }
 
 // ErrorTransition returns the error transition from the given node name, if one exists.
@@ -641,7 +641,7 @@ func (g *Graph) validateLineage() error {
 			if prior, seen := stacks[tr.To]; seen {
 				if !stackEqual(prior, nextStack) {
 					return errors.New(
-						"node '%s' in graph '%s' is reachable with two different lineage stacks (%v and %v); register a separate alias node via SetEndpoint to disambiguate",
+						"node '%s' in graph '%s' is reachable with two different lineage stacks (%v and %v); register a separate alias node via SetURL to disambiguate",
 						stripProto(tr.To), g.name, prior, nextStack,
 					)
 				}

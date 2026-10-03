@@ -181,8 +181,8 @@ func assembleHistory(flowID int, childByCaller map[int]subgraphChild, stepsByFlo
 		sub := assembleHistory(child.flowID, childByCaller, stepsByFlow)
 		if len(sub) > 0 {
 			steps[i].Subgraph = true
-			steps[i].SubWorkflowURL = child.workflowURL
-			steps[i].SubWorkflowName = child.workflowName
+			steps[i].SubgraphURL = child.workflowURL
+			steps[i].SubgraphName = child.workflowName
 			steps[i].SubHistory = sub
 		}
 	}
@@ -883,11 +883,11 @@ func (e *Engine) shardInfo(ctx context.Context) ([]ShardSummary, error) {
 		ctx, doneTurn := e.dbTurn(ctx, shardIdx)
 		defer doneTurn()
 		r := &results[pos[shardIdx]]
-		r.Shard = shardIdx
+		r.Index = shardIdx
 		start := time.Now()
 		var one int
 		err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one)
-		r.LatencyMs = int(time.Since(start) / time.Millisecond)
+		r.Latency = time.Since(start)
 		if err != nil {
 			r.Error = err.Error()
 			return nil

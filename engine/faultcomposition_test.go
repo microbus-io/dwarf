@@ -67,10 +67,10 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("FC-Fan")
-	g.SetEndpoint("A", "fcfan/a")
-	g.SetEndpoint("X", "fcfan/x")
-	g.SetEndpoint("Y", "fcfan/y")
-	g.SetEndpoint("J", "fcfan/j")
+	g.SetURL("A", "fcfan/a")
+	g.SetURL("X", "fcfan/x")
+	g.SetURL("Y", "fcfan/y")
+	g.SetURL("J", "fcfan/j")
 	g.SetFanIn("J")
 	g.AddTransition("A", "X")
 	g.AddTransition("A", "Y")
@@ -140,12 +140,12 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 
 	proxy := NewTestProxy()
 	parent := workflow.NewGraph("FC-Parent")
-	parent.SetEndpoint("Call", "fcsub/call")
+	parent.SetURL("Call", "fcsub/call")
 	parent.AddTransition("Call", workflow.End)
 	proxy.HandleGraph("fcsub/parent", parent)
 	child := workflow.NewGraph("FC-Child")
-	child.SetEndpoint("X", "fcsub/x")
-	child.SetEndpoint("Y", "fcsub/y")
+	child.SetURL("X", "fcsub/x")
+	child.SetURL("Y", "fcsub/y")
 	child.AddTransition("X", "Y")
 	child.AddTransition("Y", workflow.End)
 	proxy.HandleGraph("fcsub/child", child)
@@ -214,7 +214,7 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	ctx := context.Background()
 	proxy := NewTestProxy()
 	g := workflow.NewGraph("FC-Wake")
-	g.SetEndpoint("A", "fcwake/a")
+	g.SetURL("A", "fcwake/a")
 	g.AddTransition("A", workflow.End)
 	proxy.HandleGraph("fcwake/g", g)
 	proxy.HandleTask("fcwake/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
@@ -268,7 +268,7 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 	proxy := NewTestProxy()
 
 	root := workflow.NewGraph("FC-Root")
-	root.SetEndpoint("Call", "fcdeep/root-call")
+	root.SetURL("Call", "fcdeep/root-call")
 	root.AddTransition("Call", workflow.End)
 	proxy.HandleGraph("fcdeep/root", root)
 	for _, lvl := range []struct{ url, task, child string }{
@@ -276,14 +276,14 @@ func TestFaultComposition_DeepSubgraphReviveLoss(t *testing.T) {
 		{"fcdeep/l2", "fcdeep/l2-call", "fcdeep/l3"},
 	} {
 		g := workflow.NewGraph("FC-" + lvl.url)
-		g.SetEndpoint("Call", lvl.task)
+		g.SetURL("Call", lvl.task)
 		g.AddTransition("Call", workflow.End)
 		proxy.HandleGraph(lvl.url, g)
 		proxy.HandleTask(lvl.task, subgraphTask(lvl.child))
 	}
 	// l3 is the leaf child - a plain one-node flow, no further nesting.
 	l3 := workflow.NewGraph("FC-L3")
-	l3.SetEndpoint("Leaf", "fcdeep/l3-leaf")
+	l3.SetURL("Leaf", "fcdeep/l3-leaf")
 	l3.AddTransition("Leaf", workflow.End)
 	proxy.HandleGraph("fcdeep/l3", l3)
 	proxy.HandleTask("fcdeep/l3-leaf", func(ctx context.Context, f *workflow.Flow) error { return nil })

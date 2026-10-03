@@ -51,7 +51,7 @@ func TestAwait_WakesWhenNoSignalIsDelivered(t *testing.T) {
 	defer rel()
 
 	g := workflow.NewGraph("AwaitPoll")
-	g.SetEndpoint("Block", "awaitpoll.verify:0/block")
+	g.SetURL("Block", "awaitpoll.verify:0/block")
 	g.AddTransition("Block", workflow.End)
 	proxy.HandleGraph("awaitpoll.verify:0/g", g)
 	proxy.HandleTask("awaitpoll.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
@@ -139,7 +139,7 @@ func TestAwait_DefaultBudgetIsADeadlineError(t *testing.T) {
 	release := make(chan struct{})
 
 	g := workflow.NewGraph("AwaitPoll")
-	g.SetEndpoint("Block", "awaitpoll.verify:0/block")
+	g.SetURL("Block", "awaitpoll.verify:0/block")
 	g.AddTransition("Block", workflow.End)
 	proxy.HandleGraph("awaitpoll.verify:0/g", g)
 	proxy.HandleTask("awaitpoll.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
@@ -188,7 +188,7 @@ func TestPoll_RunningThenStopped(t *testing.T) {
 	defer rel()
 
 	g := workflow.NewGraph("PollTest")
-	g.SetEndpoint("Block", "polltest.verify:0/block")
+	g.SetURL("Block", "polltest.verify:0/block")
 	g.AddTransition("Block", workflow.End)
 	proxy.HandleGraph("polltest.verify:0/g", g)
 	proxy.HandleTask("polltest.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {
@@ -253,7 +253,7 @@ func TestAwait_IgnoresANonSettledWake(t *testing.T) {
 	defer rel()
 
 	g := workflow.NewGraph("NonSettled")
-	g.SetEndpoint("Block", "nonsettled.verify:0/block")
+	g.SetURL("Block", "nonsettled.verify:0/block")
 	g.AddTransition("Block", workflow.End)
 	proxy.HandleGraph("nonsettled.verify:0/g", g)
 	proxy.HandleTask("nonsettled.verify:0/block", func(ctx context.Context, f *workflow.Flow) error {

@@ -56,11 +56,13 @@ import (
 
 // ShardSummary is the health/size summary of a single database shard.
 type ShardSummary struct {
-	Shard     int    `json:"shard,omitzero"`
-	Error     string `json:"error,omitzero"`
-	LatencyMs int    `json:"latencyMs,omitzero"`
-	Steps     int    `json:"steps,omitzero"`
-	Flows     int    `json:"flows,omitzero"`
+	// Index is the shard's index, as declared in its ShardSpec.
+	Index int    `json:"index,omitzero"`
+	Error string `json:"error,omitzero"`
+	// Latency is the round trip of a trivial query to the shard.
+	Latency time.Duration `json:"latency,omitzero"`
+	Steps   int           `json:"steps,omitzero"`
+	Flows   int           `json:"flows,omitzero"`
 }
 
 const (
