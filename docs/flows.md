@@ -287,4 +287,47 @@ before the reaper removes it — so a fire-and-forget caller can still `Run` it 
 summaries, err := eng.ShardInfo(ctx)    // per-shard health and size
 ```
 
+## Errors
+
+Every error the engine returns carries an HTTP-style status code. Read it with `errors.StatusCode(err)` from
+`github.com/microbus-io/errors`; a host serving the engine over HTTP can pass it through as the response
+status. A workflow's own failure is not an error: it is the outcome's `Status` (see [The outcome](#the-outcome)).
+
+| Code | Meaning | Retry? |
+|---|---|---|
+| 400 | The request is malformed: a key that does not parse, a subgraph child's key where a root key is required, invalid options or query, a value that is not JSON-marshalable, an invalid graph | No - fix the request |
+| 404 | The key names no flow or step (including one already deleted), or `LoadGraph` found no graph | No |
+| 408 | `Await` or `Run` returned before the flow stopped; the flow keeps running | Await again |
+| 409 | The flow is in the wrong state for the operation, or a concurrent operation got there first | Re-read the flow, then decide |
+| 503 | The engine is not started, is shutting down, or every shard is cordoned | Yes |
+| 500 | A database error or an engine fault | Yes, if transient |
+
+A 408 also satisfies `errors.Is(err, context.DeadlineExceeded)`, or wraps the caller's own context error
+when the context was cancelled. An error returned by your host's `LoadGraph` reaches `Create` and `Run` with
+its own status code.
+
+Each operation adds these to the 503 and 500 every call can return:
+
+| Operation | 400 | 404 | 408 | 409 |
+|---|---|---|---|---|
+| `Create`, `Run` | invalid options, state or baggage; invalid graph; `ThreadKey` malformed or a subgraph child's | no graph for the URL; unknown `ThreadKey` | `Run` only: timed out awaiting the flow | |
+| `Await`, `Poll` | malformed key | unknown flow | `Await` only: timed out | |
+| `Snapshot`, `Fingerprint` | malformed key | unknown flow | | |
+| `History`, `HistoryMermaid` | malformed key | unknown flow, or one scheduled for deletion | | |
+| `Step` | malformed key | unknown step | | |
+| `List`, `Purge` | malformed `ThreadKey`, invalid status or shard; `List` with a malformed cursor; `Purge` with no filter or with `IncludeSubgraphs` | unknown `ThreadKey` | | |
+| `Resume` | malformed key, a subgraph child's key, data not JSON-marshalable | unknown flow | | the flow is not interrupted, including when a `Delete` or `Terminate` won the race |
+| `Cancel`, `Terminate` | malformed key, a subgraph child's key | unknown flow | | |
+| `Fork` | malformed key, overrides not JSON-marshalable | unknown step | | the flow is not terminal, is scheduled for deletion, or holds an unresolved interrupt off the fork path |
+| `Continue` | malformed key, a subgraph child's key, `additionalState` not JSON-marshalable | unknown flow | | the thread's latest flow is not completed, including when a concurrent `Continue` won |
+| `Delete` | malformed key, a subgraph child's key | unknown flow | | the flow is running |
+
+Stopping or deleting what is already stopped or deleted is not an error. `Cancel` and `Terminate` on a flow
+that has ended, and `Delete` on a flow already scheduled for deletion, return nil and change nothing, so a
+call whose response was lost is safe to repeat.
+
+Configuration returns 400 for an invalid value (a setter's argument, a `ShardSpec`, a missing host at
+`Startup`) and 409 for a call in the wrong state: a construction-time setter after `Startup`, `Startup` on a
+started engine, or a shard index set twice.
+
 Next: [Fan-out & subgraphs](fan-out-and-subgraphs.md).

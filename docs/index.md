@@ -38,7 +38,7 @@ If you're new, read in this order:
 Then dip into the topic guides as you need them:
 
 - **[Driving flows](flows.md)** — every method on the engine: creating, running, inspecting,
-  pausing/resuming, terminating, forking, continuing a thread, and retention.
+  pausing/resuming, terminating, forking, continuing a thread, retention, and the error codes each returns.
 - **[Detecting completion](detecting-completion.md)** — the ways to learn a flow's outcome (`Await` vs.
   orchestration) and how to make follow-up delivery reliable.
 - **[Fan-out & subgraphs](fan-out-and-subgraphs.md)** — running work in parallel and calling
