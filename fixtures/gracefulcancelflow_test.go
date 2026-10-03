@@ -557,7 +557,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 	})
 
 	// fanOut builds Src -forEach(items as item)-> W -> Join(fan-in) -> END, with W's behaviour supplied.
-	fanOut := func(name string, w engine.TaskHandler) string {
+	fanOut := func(name string, w func(ctx context.Context, f *workflow.Flow) error) string {
 		url := "gracefulcancelflow.verify:428/" + name
 		g := workflow.NewGraph(name)
 		g.SetURL("Src", url+"-src")

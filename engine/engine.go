@@ -1396,4 +1396,3 @@ func (e *Engine) Continue(ctx context.Context, threadKey string, additionalState
 	}
 	return e.continueFlow(ctx, threadKey, additionalState)
 }
-

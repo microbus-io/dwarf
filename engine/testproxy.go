@@ -25,10 +25,6 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// TaskHandler is the signature for a test task handler. Read the flow's baggage, if any, with
-// workflow.BaggageFrom(ctx).
-type TaskHandler func(ctx context.Context, flow *workflow.Flow) error
-
 // TestProxy routes graph fetches and task dispatches to registered handlers. It implements the Host
 // interface for use with Engine.SetHost.
 //
@@ -37,14 +33,14 @@ type TaskHandler func(ctx context.Context, flow *workflow.Flow) error
 type TestProxy struct {
 	mu     sync.RWMutex
 	graphs map[string]*workflow.Graph
-	tasks  map[string]TaskHandler
+	tasks  map[string]func(ctx context.Context, flow *workflow.Flow) error
 }
 
 // NewTestProxy creates a new test proxy with empty handler registries.
 func NewTestProxy() *TestProxy {
 	return &TestProxy{
 		graphs: make(map[string]*workflow.Graph),
-		tasks:  make(map[string]TaskHandler),
+		tasks:  make(map[string]func(ctx context.Context, flow *workflow.Flow) error),
 	}
 }
 
@@ -57,8 +53,9 @@ func (p *TestProxy) HandleGraph(name string, graph *workflow.Graph) {
 }
 
 // HandleTask registers a task handler under the given name.
-// The name should match the task URL registered via graph.SetURL.
-func (p *TestProxy) HandleTask(name string, handler TaskHandler) {
+// The name should match the task URL registered via graph.SetURL. The handler reads the flow's baggage,
+// if any, with workflow.BaggageFrom(ctx).
+func (p *TestProxy) HandleTask(name string, handler func(ctx context.Context, flow *workflow.Flow) error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.tasks[name] = handler
