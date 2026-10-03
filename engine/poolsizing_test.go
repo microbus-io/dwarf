@@ -429,16 +429,21 @@ func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
 	assert.NoError(e.Startup(t.Context()))
 
-	derived := int(e.workers.Load()) // the ceiling for the derived pool of 48
+	derived := int(e.workers.Load())
 	assert.True(derived > 1000, "the derived ceiling is large (got %d)", derived)
+	// The derived pool scales with the probed RTT (48 at a local RTT, past 96 from ~1.4ms), so the grow step is
+	// sized from it rather than from a constant a slow probe can overtake.
+	db, err := e.db.Shard(1)
+	assert.NoError(err)
+	derivedOpen := db.DB.Stats().MaxOpenConnections
 
-	// Shrink the pool 12x (the external-pooler case): the ceiling must shrink with it.
+	// Shrink the pool to 4 (the external-pooler case): the ceiling must shrink with it.
 	assert.NoError(e.SetMaxOpenConns(4))
 	shrunk := int(e.workers.Load())
 	assert.True(shrunk < derived/8, "the ceiling followed the pool down (was %d, now %d)", derived, shrunk)
 
 	// And back up: a larger pool drains a storm faster, so it permits more workers.
-	assert.NoError(e.SetMaxOpenConns(96))
+	assert.NoError(e.SetMaxOpenConns(2 * derivedOpen))
 	grown := int(e.workers.Load())
 	assert.True(grown > derived, "the ceiling followed the pool up (derived %d, now %d)", derived, grown)
 }
