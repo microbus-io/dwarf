@@ -33,7 +33,7 @@ func TestGraph_BuilderAndMarshal(t *testing.T) {
 
 	assert.Equal("CreateOrder", g.Name())
 	assert.Equal("order.service/validate", g.EntryPoint())
-	assert.Equal(3, len(g.Nodes()))
+	assert.Equal(3, len(g.Tasks()))
 
 	data, err := json.Marshal(g)
 	assert.NoError(err)
@@ -44,7 +44,7 @@ func TestGraph_BuilderAndMarshal(t *testing.T) {
 
 	assert.Equal("CreateOrder", restored.Name())
 	assert.Equal("order.service/validate", restored.EntryPoint())
-	assert.Equal(3, len(restored.Nodes()))
+	assert.Equal(3, len(restored.Tasks()))
 	assert.Equal(2, len(restored.Transitions()))
 	assert.Equal("valid == true", restored.Transitions()[0].When)
 	assert.Equal(ReducerAppend, restored.reducers["messages"])
@@ -95,7 +95,7 @@ func TestGraph_AutoRegisterTasks(t *testing.T) {
 	g.AddTransition("svc/a", "svc/b")
 	g.AddTransitionWhen("svc/b", "svc/c", "done == true")
 
-	tasks := g.Nodes()
+	tasks := g.Tasks()
 	assert.Equal(3, len(tasks))
 	assert.Equal("svc/a", tasks[0].Name)
 	assert.Equal("svc/b", tasks[1].Name)
@@ -110,7 +110,7 @@ func TestGraph_DuplicateTaskIgnored(t *testing.T) {
 	g.SetURL("svc/a", "svc/a")
 	g.AddTransition("svc/a", "svc/b")
 
-	assert.Equal(2, len(g.Nodes()))
+	assert.Equal(2, len(g.Tasks()))
 }
 
 func TestGraph_Validate(t *testing.T) {
@@ -335,7 +335,7 @@ func TestGraph_END(t *testing.T) {
 	g.AddTransition("svc/c", End)
 
 	// END should not appear in the task list
-	tasks := g.Nodes()
+	tasks := g.Tasks()
 	assert.Equal(3, len(tasks))
 	for _, task := range tasks {
 		assert.NotEqual(End, task.Name)
@@ -1007,7 +1007,7 @@ func TestLineage_SetFanInOnUnknownNodeRejected(t *testing.T) {
 	g.SetFanIn("c")
 	err := g.Validate()
 	assert.Error(err)
-	assert.Contains(err.Error(), "unknown node")
+	assert.Contains(err.Error(), "unknown task")
 }
 
 func TestLineage_FanInFlagSurvivesJSONRoundTrip(t *testing.T) {

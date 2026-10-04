@@ -36,7 +36,7 @@ external service. Two tables carry data you supply.
 Two things worth stating plainly. **Step history is a full audit trail by design** — every intermediate state
 a flow passed through is retained, not just the final one, which is what makes `Fork` and post-hoc debugging
 possible. And **the graph is copied per flow**, so a graph carrying anything sensitive in its structure or
-node names is duplicated once per flow that runs it.
+task names is duplicated once per flow that runs it.
 
 A large field carried unchanged across many steps is stored once and referenced, rather than copied into
 every row. That is a storage optimisation with no bearing on access: readers resolve it transparently, so it

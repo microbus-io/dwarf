@@ -1,6 +1,6 @@
 # Building graphs
 
-> **For developers** defining workflows. This is the graph-authoring API: the nodes, transitions, conditions
+> **For developers** defining workflows. This is the graph-authoring API: the tasks, transitions, conditions
 > and reducers that decide what runs when. Writing the task bodies themselves is [Writing tasks](tasks.md).
 
 A `workflow.Graph` is the definition of a workflow. You build one in code and hand it to the engine via
@@ -8,7 +8,7 @@ your host's `LoadGraph`. This guide covers the full graph-authoring API.
 
 ## Tasks
 
-A graph is a set of tasks connected by transitions. Bind a task with `SetURL`, giving a **node name**
+A graph is a set of tasks connected by transitions. Bind a task with `SetURL`, giving a **task name**
 (its identity in the graph) and a **URL** (the address your host's `ExecuteTask` resolves to reach it):
 
 ```go
@@ -19,12 +19,12 @@ g.SetURL("Ship", "fulfillment.ship")
 ```
 
 `NewGraph` takes only the display name; the workflow's resolve URL is a separate opaque key passed to
-`Create`/`Run`/`LoadGraph`, not carried on the graph. `SetURL` creates the node if new and updates its
-URL if it already exists. The node name and URL can differ, which lets the same task URL appear at several
+`Create`/`Run`/`LoadGraph`, not carried on the graph. `SetURL` creates the task if new and updates its
+URL if it already exists. The task name and URL can differ, which lets the same task URL appear at several
 positions under different names. The engine passes the URL to your executor; your executor decides what that
 address means (a function key, an HTTP endpoint, a message topic).
 
-By convention, **graph and task (node) names are PascalCase** (`Reserve`, `Charge`) — they are
+By convention, **graph and task names are PascalCase** (`Reserve`, `Charge`) — they are
 graph-topology identifiers, distinct from the lowercased URLs they dispatch to and from the camelCase
 **state fields** tasks read and write (`lineItems`, `loopsLeft`). Keeping the three namespaces visually
 distinct makes graphs easier to read; the engine itself imposes no casing.
@@ -121,7 +121,7 @@ graph LR
     _start(( )):::term --> t0
 ```
 
-Because only one branch ever runs, switch branches need no fan-in. A node that uses switch transitions must
+Because only one branch ever runs, switch branches need no fan-in. A task that uses switch transitions must
 declare *every* success-path outgoing edge as switch — the validator rejects mixing switch with
 when/plain/forEach from the same source. (Error and goto transitions are orthogonal and still allowed.)
 
@@ -152,7 +152,7 @@ graph LR
     _start(( )):::term --> t0
 ```
 
-It creates only the outgoing edges; if the branches rejoin, the join node still needs `SetFanIn` (and
+It creates only the outgoing edges; if the branches rejoin, the join task still needs `SetFanIn` (and
 usually a reducer). Its linear sibling is `AddTransitionChain("A", "B", "C")`, which wires consecutive
 pairs (`A -> B -> C`). Use `AddTransitionForEach` below instead when the parallel branches are *dynamic* —
 one instance of a single task per runtime array element.
@@ -277,7 +277,7 @@ Two ways to say something to your handler, both explicit:
 
 When parallel branches (from multiple `when` matches or a `forEach`) converge on a single task, that task
 is a **fan-in**: the engine waits for all siblings, merges their `changes` field-by-field, and runs the
-target once. Mark the convergence node and wire non-default merges:
+target once. Mark the convergence task and wire non-default merges:
 
 ```go
 g.AddTransitionForEach("Split", "Process", "lineItems", "item")
@@ -328,7 +328,7 @@ if err != nil {
 
 ## Inspection
 
-Read-only inspectors include `Name`, `EntryPoint`, `Nodes`, `Transitions`, `Reducers`, `URLOf`,
+Read-only inspectors include `Name`, `EntryPoint`, `Tasks`, `Transitions`, `Reducers`, `URLOf`,
 `IsFanIn`, and `IsFanOutSource`. A graph carries only its definition; the fan-out-to-fan-in routing map
 is an engine-side optimization derived from the definition at dispatch, not part of the
 graph. Graphs marshal to and from JSON (`MarshalJSON`/`UnmarshalJSON`), which is how the engine freezes a

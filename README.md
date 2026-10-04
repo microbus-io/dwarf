@@ -20,9 +20,9 @@ interfaces, and it handles scheduling, state, durability, and recovery.
 
 ```go
 // Define the workflow:
-// a one-node graph whose "Hello" node runs the task at a URL, then ends.
+// a one-task graph whose "Hello" task runs at a URL, then ends.
 g := workflow.NewGraph("Greet")
-g.SetURL("Hello", "http://example/hello") // node "Hello" dispatches to this URL
+g.SetURL("Hello", "http://example/hello") // task "Hello" dispatches to this URL
 g.AddTransition("Hello", workflow.End)
 
 // Wire URLs to what serves them. The engine knows graphs and tasks only by URL: the graph's URL

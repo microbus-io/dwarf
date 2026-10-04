@@ -40,7 +40,7 @@ type Host interface {
 	LoadGraph(ctx context.Context, workflowURL string) (*workflow.Graph, error)
 
 	// ExecuteTask executes a single task within a workflow. taskURL is the task's dispatch URL (the real
-	// downstream address), not the graph node name. The flow carrier has its state pre-populated; the
+	// downstream address), not the task's name in the graph. The flow carrier has its state pre-populated; the
 	// executor should call the task and let it write changes to the flow. The flow's opaque baggage rides
 	// on ctx - read it with workflow.BaggageFrom(ctx) (e.g. to mint a token).
 	//

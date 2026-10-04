@@ -1025,9 +1025,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// on a SetFanIn node, and rejects a route to END that leaves the outer frame unpopped - so this is
 		// defense in depth for a graph frozen before those checks.)
 		if lineageID != 0 {
-			reason := "has no fan-in node to converge on"
+			reason := "has no fan-in task to converge on"
 			if routedToEnd {
-				reason = "routed to END without converging on its fan-in node"
+				reason = "routed to END without converging on its fan-in task"
 			}
 			return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
 				errors.New("fan-out source '%s' is inside a cohort but %s", taskName, reason),
@@ -1050,7 +1050,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// completes here.
 		if lineageID != 0 {
 			return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
-				errors.New("task '%s' is inside a fan-out cohort but matched no onward transition; every branch must reach a fan-in node", taskName),
+				errors.New("task '%s' is inside a fan-out cohort but matched no onward transition; every branch must reach a fan-in task", taskName),
 				taskName)
 		}
 		return e.persistStepYielding(ctx, db, shardNum, stepID, leaseSeq, flowID, flowToken, taskName, &persistPass, func() error {
@@ -1092,7 +1092,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	// instead of hot-looping forever.
 	if fanInArrivals > 0 && cohortSpawnID == 0 {
 		return e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken,
-			errors.New("task '%s' is routed to fan-in node '%s' but is not part of a fan-out cohort", taskName, fanInTaskName),
+			errors.New("task '%s' is routed to fan-in task '%s' but is not part of a fan-out cohort", taskName, fanInTaskName),
 			taskName)
 	}
 

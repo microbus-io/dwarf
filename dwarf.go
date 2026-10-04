@@ -35,7 +35,7 @@ limitations under the License.
 //
 //	mux := engine.NewHostMux()
 //	g := workflow.NewGraph("Greet")
-//	g.SetURL("Hello", "http://example/hello") // node "Hello" dispatches to this URL
+//	g.SetURL("Hello", "http://example/hello") // task "Hello" dispatches to this URL
 //	g.AddTransition("Hello", workflow.End)
 //	mux.HandleGraph("http://example/greet", g)
 //	mux.HandleTask("http://example/hello", func(ctx context.Context, f *workflow.Flow) error {

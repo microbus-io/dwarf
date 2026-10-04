@@ -51,7 +51,7 @@ func TestGreeting(t *testing.T) {
 
 	// 1. Define a two-task graph: Greet -> Shout -> END.
 	g := workflow.NewGraph("Welcome")
-	g.SetURL("Greet", "greet") // node "Greet" dispatches to URL "greet"; first node bound is the entry point
+	g.SetURL("Greet", "greet") // task "Greet" dispatches to URL "greet"; the first task bound is the entry point
 	g.SetURL("Shout", "shout")
 	g.AddTransition("Greet", "Shout")
 	g.AddTransition("Shout", workflow.End)

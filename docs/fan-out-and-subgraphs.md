@@ -60,7 +60,7 @@ it from the flow's state past the fan-in.
 ## Fan-in
 
 When parallel branches converge on a single task, that task is a **fan-in**. The engine waits for every
-sibling, merges their `changes` field-by-field, and runs the target once. Mark the convergence node with
+sibling, merges their `changes` field-by-field, and runs the target once. Mark the convergence task with
 `SetFanIn` and wire each non-default field with a reducer:
 
 ```go
@@ -89,13 +89,13 @@ results are stable. The reducers available are listed in [Concepts → Reducer](
 
 A few rules worth knowing:
 
-- **All branches of one fan-out must converge on the same fan-in node**, and `Validate()` enforces it at
-  `Create`. The engine picks the convergence node from whichever sibling finishes last, so branches routed
+- **All branches of one fan-out must converge on the same fan-in task**, and `Validate()` enforces it at
+  `Create`. The engine picks the convergence task from whichever sibling finishes last, so branches routed
   to *different* fan-ins would make the result depend on finish order. Branches may take different
   intermediate paths — only the fan-in they end at must agree.
-- **A goto or error transition out of the fan-out node bypasses the fan-out, so it must not rejoin it.**
+- **A goto or error transition out of the fan-out task bypasses the fan-out, so it must not rejoin it.**
   Taking one means no branches are spawned at all, so `Validate()` accepts it only where that holds together:
-  to `workflow.End`, straight to the fan-in node (which then runs once on the source's own state, exactly as an empty
+  to `workflow.End`, straight to the fan-in task (which then runs once on the source's own state, exactly as an empty
   array does), or onto a path that never reaches the fan-in. Routing it into a *branch*, or onto a path that
   later leads back into the fan-in, is rejected at `Create` — the fan-in would be waiting on a set of branches
   that was never created. This is what makes the "fan out over the array, or end the flow when there is
@@ -139,8 +139,8 @@ child and parks the parent step (`yield == true` — return immediately); when t
 re-runs and the call returns `yield == false` with the child's final state unmarshaled into the trailing
 `out` pointer (`*struct`, `*map[string]any`, or `nil` to ignore).
 
-To invoke a single unit of work in isolation, declare a one-node workflow and `Subgraph` it. A bare task is
-only ever a node in a graph, never an independently invocable child on its own.
+To invoke a single unit of work in isolation, declare a one-task workflow and `Subgraph` it. A task only
+ever runs as part of a graph, never as an independently invocable child on its own.
 
 - Pass `nil` input for "no arguments"; pass `f.Snapshot()` to forward the parent's entire state.
 - Pass a struct or `map[string]any` as `in` to hand the child exactly the fields it expects — no need to

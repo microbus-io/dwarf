@@ -26,15 +26,15 @@ import (
 	"github.com/microbus-io/errors"
 )
 
-// End is the pseudo-node a transition targets to end the flow. Its value, "END", is the name it carries
+// End is the target a transition names to end the flow; it is not a task. Its value, "END", is the name it carries
 // in a graph's JSON and in rendered diagrams.
 const End = "END"
 
-// Node describes a task or subgraph node registered in a workflow graph.
-// Name is the node's identifier within the graph, recorded on every step
+// Task describes one task in a workflow graph.
+// Name is the task's identifier within the graph, recorded on every step
 // that executes it (see FlowStep.TaskName). URL is the dispatch target the
-// engine calls when the node is reached.
-type Node struct {
+// engine calls when the task is reached.
+type Task struct {
 	Name string
 	URL  string
 }
@@ -44,7 +44,7 @@ type Node struct {
 // several matches fan out.
 const (
 	// TransitionSwitch is taken when the source task succeeds, by the first switch transition from the
-	// node whose When holds. It never fans out.
+	// task whose When holds. It never fans out.
 	TransitionSwitch = "switch"
 	// TransitionGoto is taken only when the source task calls flow.Goto with its destination.
 	TransitionGoto = "goto"
@@ -52,8 +52,8 @@ const (
 	TransitionError = "error"
 )
 
-// Transition defines a possible transition between two nodes in a workflow graph.
-// From and To are node names, not URLs.
+// Transition defines a possible transition between two tasks in a workflow graph.
+// From and To are task names, not URLs.
 type Transition struct {
 	From string `json:"from"`
 	To   string `json:"to"`
@@ -100,7 +100,7 @@ func (t *Transition) UnmarshalJSON(data []byte) error {
 type Graph struct {
 	name        string
 	entryPoint  string
-	nodes       []Node
+	tasks       []Task
 	transitions []Transition
 	reducers    map[string]Reducer
 	fanInNodes  map[string]bool
@@ -121,15 +121,15 @@ func (g *Graph) Name() string {
 	return g.name
 }
 
-// EntryPoint returns the node name of the entry point of the graph.
+// EntryPoint returns the task name of the entry point of the graph.
 func (g *Graph) EntryPoint() string {
 	return g.entryPoint
 }
 
-// Nodes returns the graph's nodes. The slice is the graph's own storage, not a copy: read it, but do not
+// Tasks returns the graph's tasks. The slice is the graph's own storage, not a copy: read it, but do not
 // modify it or its elements. Change a graph through SetURL and the AddTransition methods instead.
-func (g *Graph) Nodes() []Node {
-	return g.nodes
+func (g *Graph) Tasks() []Task {
+	return g.tasks
 }
 
 // Transitions returns the graph's transitions. The slice is the graph's own storage, not a copy: read it,
@@ -138,12 +138,12 @@ func (g *Graph) Transitions() []Transition {
 	return g.transitions
 }
 
-// SetURL binds a node (identified by its graph name) to the given dispatch URL, creating the node
-// if it does not exist and updating its URL if it does. It is optional: a node first named inside an
-// AddTransition* call is auto-registered with its URL equal to its name (see AddTransition). The name is the node's identity in the graph
+// SetURL binds a task (identified by its graph name) to the given dispatch URL, creating the task
+// if it does not exist and updating its URL if it does. It is optional: a task first named inside an
+// AddTransition* call is auto-registered with its URL equal to its name (see AddTransition). The name is the task's identity in the graph
 // (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
-// hands to the host's ExecuteTask and groups the saturation/concurrency metric by. The first node bound
-// becomes the default entry point unless SetEntryPoint is called explicitly. The pseudo-node End is not
+// hands to the host's ExecuteTask and groups the saturation/concurrency metric by. The first task bound
+// becomes the default entry point unless SetEntryPoint is called explicitly. End is not
 // registered.
 //
 // The same URL may be bound under multiple names. This is how a workflow author reuses the same task
@@ -152,25 +152,25 @@ func (g *Graph) SetURL(name, url string) {
 	if name == End {
 		return
 	}
-	for i := range g.nodes {
-		if g.nodes[i].Name == name {
-			g.nodes[i].URL = url
+	for i := range g.tasks {
+		if g.tasks[i].Name == name {
+			g.tasks[i].URL = url
 			return
 		}
 	}
-	g.nodes = append(g.nodes, Node{Name: name, URL: url})
+	g.tasks = append(g.tasks, Task{Name: name, URL: url})
 	if g.entryPoint == "" {
 		g.entryPoint = name
 	}
 }
 
-// URLOf returns the dispatch URL for a node identified by name. Returns the empty string
+// URLOf returns the dispatch URL for a task identified by name. Returns the empty string
 // if the name is not registered. End maps to itself.
 func (g *Graph) URLOf(name string) string {
 	if name == End {
 		return End
 	}
-	for _, n := range g.nodes {
+	for _, n := range g.tasks {
 		if n.Name == name {
 			return n.URL
 		}
@@ -179,43 +179,43 @@ func (g *Graph) URLOf(name string) string {
 }
 
 // SetEntryPoint sets the entry point of the graph explicitly, overriding the default
-// (first task added). The argument is a node name.
+// (first task added). The argument is a task name.
 func (g *Graph) SetEntryPoint(name string) {
 	g.entryPoint = name
 }
 
-// AddTransition adds an unconditional transition between two nodes.
+// AddTransition adds an unconditional transition between two tasks.
 //
-// # Naming a node that was never bound with SetURL
+// # Naming a task that was never bound with SetURL
 //
-// Every AddTransition* method auto-registers a node it has not seen before, binding it to a dispatch URL equal to
+// Every AddTransition* method auto-registers a task it has not seen before, binding it to a dispatch URL equal to
 // ITS OWN NAME. That is deliberate, and it is what makes the concise form work:
 //
-//	g.AddTransition("billing.charge", "billing.receipt")   // two nodes whose names ARE their dispatch URLs
+//	g.AddTransition("billing.charge", "billing.receipt")   // two tasks whose names ARE their dispatch URLs
 //
-// Use SetURL when the node's graph identity should differ from where it dispatches - to give a task a
+// Use SetURL when the task's graph identity should differ from where it dispatches - to give a task a
 // readable position in the graph, or to reuse one task's code at several positions:
 //
 //	g.SetURL("Charge", "billing.charge")
 //	g.SetURL("Retry", "billing.charge")   // same task, a second position with its own transitions
 //
-// The consequence worth knowing: because an unbound node is a VALID node (dispatching as its own name), a
+// The consequence worth knowing: because an unbound task is a VALID task (dispatching as its own name), a
 // forgotten SetURL is not a build-time error and Validate cannot catch it. The graph is well-formed; it just
-// names a task the host does not serve, and the host rejects it on that node's first dispatch. If you use
-// SetURL for a graph's nodes, use it for all of them.
+// names a task the host does not serve, and the host rejects it on that task's first dispatch. If you use
+// SetURL for a graph's tasks, use it for all of them.
 func (g *Graph) AddTransition(from, to string) {
 	g.autoRegister(from)
 	g.autoRegister(to)
 	g.transitions = append(g.transitions, Transition{From: from, To: to})
 }
 
-// AddTransitionWhen adds a conditional transition between two nodes: the edge is taken when the 'when'
+// AddTransitionWhen adds a conditional transition between two tasks: the edge is taken when the 'when'
 // expression evaluates true against the flow's state.
 //
-// Every When transition from a node is evaluated INDEPENDENTLY, so two of them are a conditional
+// Every When transition from a task is evaluated INDEPENDENTLY, so two of them are a conditional
 // PARALLEL FAN-OUT, not an if/else - if both conditions hold, both branches run. Even when they are
 // mutually exclusive by construction, the source is still a fan-out source, so it requires a downstream
-// convergence node marked with SetFanIn - Validate rejects the graph otherwise, complaining that a branch
+// convergence task marked with SetFanIn - Validate rejects the graph otherwise, complaining that a branch
 // reached END with an unpopped fan-out frame.
 //
 // For an if/else - exactly one branch runs, no fan-in needed - use AddTransitionSwitch, which is
@@ -230,21 +230,21 @@ func (g *Graph) AddTransition(from, to string) {
 //	g.AddTransitionSwitch("Check", "Reject", "true")   // catch-all
 //
 // Use When when a genuinely parallel fan-out should be conditional (each branch opts in on its own
-// condition, all surviving branches converging on one SetFanIn node).
+// condition, all surviving branches converging on one SetFanIn task).
 func (g *Graph) AddTransitionWhen(from, to string, when string) {
 	g.autoRegister(from)
 	g.autoRegister(to)
 	g.transitions = append(g.transitions, Transition{From: from, To: to, When: when})
 }
 
-// AddTransitionSwitch adds a first-match-wins transition between two nodes. Multiple
+// AddTransitionSwitch adds a first-match-wins transition between two tasks. Multiple
 // Switch transitions from the same source are evaluated in registration order and only
 // the first whose 'when' expression evaluates true fires; the rest are skipped. If no
-// Switch matches the flow ends at the source node, so the last Switch from a node is
+// Switch matches the flow ends at the source task, so the last Switch from a task is
 // typically a catch-all with when="true". Only one branch ever runs, so a downstream
 // SetFanIn is not required.
 //
-// A node that uses Switch transitions must declare every successful-path outgoing
+// A task that uses Switch transitions must declare every successful-path outgoing
 // transition as Switch (the validator rejects mixing Switch with When/plain/ForEach
 // from the same source). OnError and Goto transitions are orthogonal and remain allowed.
 func (g *Graph) AddTransitionSwitch(from, to string, when string) {
@@ -270,7 +270,7 @@ func (g *Graph) AddTransitionGoto(from, to string) {
 //	<as>Index   the element's 0-based position in the array
 //	<as>Count   the number of elements, i.e. the cohort size
 //
-// The branches must converge on a single node marked with SetFanIn (Validate rejects a fan-out that does
+// The branches must converge on a single task marked with SetFanIn (Validate rejects a fan-out that does
 // not), where their outputs are merged by the fields' reducers - see SetReducer, and note that a branch
 // writing to a reducer-managed field writes its DELTA, not the accumulated value. The three injected
 // fields do not survive the fan-out: they are branch-private, so the flow's state past the fan-in - and
@@ -278,7 +278,7 @@ func (g *Graph) AddTransitionGoto(from, to string) {
 // different key if a downstream task needs it.
 //
 // An EMPTY array spawns no branches, but the flow does NOT stop there: it routes straight to the fan-in
-// node, which runs with the source task's own state and output and no branch contributions. So a fan-in
+// task, which runs with the source task's own state and output and no branch contributions. So a fan-in
 // task must tolerate a cohort of zero (a reducer-managed field simply keeps its incoming value, and any
 // per-element output it expected is absent), and the branch task must tolerate never running at all.
 //
@@ -299,8 +299,8 @@ func (g *Graph) AddTransitionForEach(from, to string, forEach string, as string)
 
 // AddTransitionOnError adds a transition that is taken when the source task returns an error, instead of
 // failing the flow. It fires on ANY error - the engine never inspects the status code or the text. When it
-// fires, none of the node's other outgoing transitions are evaluated; when the task succeeds, they are and
-// this one is not. A node may declare at most one onError transition, alongside any others.
+// fires, none of the task's other outgoing transitions are evaluated; when the task succeeds, they are and
+// this one is not. A task may declare at most one onError transition, alongside any others.
 //
 // The error is delivered to the handler in the state field "onErr" (a structured error: message, status
 // code, trace id, properties; the stack frames are stripped).
@@ -321,7 +321,7 @@ func (g *Graph) AddTransitionOnError(from, to string) {
 
 // AddTransitionChain wires an unconditional transition between each consecutive pair of names:
 // AddTransitionChain("A", "B", "C") is AddTransition("A", "B") followed by AddTransition("B", "C").
-// It is a convenience for linear segments; fewer than two names is a no-op. End belongs last (a node
+// It is a convenience for linear segments; fewer than two names is a no-op. End belongs last (a task
 // after End would produce an invalid transition out of End). Mix with the other AddTransition* methods
 // for branching, conditions, and loops.
 func (g *Graph) AddTransitionChain(names ...string) {
@@ -333,21 +333,21 @@ func (g *Graph) AddTransitionChain(names ...string) {
 // AddTransitionFanOut wires an unconditional transition from one source to each of several destinations:
 // AddTransitionFanOut("A", "B", "C") is AddTransition("A", "B") followed by AddTransition("A", "C"), so B
 // and C both fire and run in parallel. It is a convenience for static fan-out; no destinations is a no-op.
-// It creates only the outgoing edges - if the branches later rejoin at a node, that node still needs
+// It creates only the outgoing edges - if the branches later rejoin at a task, that task still needs
 // SetFanIn (and usually a reducer) wired separately. Distinct from AddTransitionForEach, which fans out
-// dynamically over a runtime collection rather than across statically-named nodes.
+// dynamically over a runtime collection rather than across statically-named tasks.
 func (g *Graph) AddTransitionFanOut(from string, to ...string) {
 	for _, dest := range to {
 		g.AddTransition(from, dest)
 	}
 }
 
-// autoRegister registers a new node if one does not exist for the name.
+// autoRegister registers a new task if one does not exist for the name.
 func (g *Graph) autoRegister(name string) {
 	if name == End {
 		return
 	}
-	for _, n := range g.nodes {
+	for _, n := range g.tasks {
 		if n.Name == name {
 			return
 		}
@@ -355,7 +355,7 @@ func (g *Graph) autoRegister(name string) {
 	g.SetURL(name, name)
 }
 
-// ErrorTransition returns the error transition from the given node name, if one exists.
+// ErrorTransition returns the error transition from the given task name, if one exists.
 func (g *Graph) ErrorTransition(name string) (Transition, bool) {
 	for _, tr := range g.transitions {
 		if tr.From == name && tr.Kind == TransitionError {
@@ -365,7 +365,7 @@ func (g *Graph) ErrorTransition(name string) (Transition, bool) {
 	return Transition{}, false
 }
 
-// SetFanIn marks a node as a fan-in nexus. Opts the graph into the lineage validator.
+// SetFanIn marks a task as a fan-in nexus. Opts the graph into the lineage validator.
 func (g *Graph) SetFanIn(name string) {
 	if g.fanInNodes == nil {
 		g.fanInNodes = make(map[string]bool)
@@ -373,12 +373,12 @@ func (g *Graph) SetFanIn(name string) {
 	g.fanInNodes[name] = true
 }
 
-// IsFanIn reports whether the named node is a fan-in nexus.
+// IsFanIn reports whether the named task is a fan-in nexus.
 func (g *Graph) IsFanIn(name string) bool {
 	return g.fanInNodes[name]
 }
 
-// IsFanOutSource reports whether the named node has 2+ non-goto/non-error outgoing
+// IsFanOutSource reports whether the named task has 2+ non-goto/non-error outgoing
 // transitions, or any forEach outgoing transition. Switch transitions are exclusive
 // (only one branch ever fires) and therefore do not count toward fan-out.
 func (g *Graph) IsFanOutSource(name string) bool {
@@ -439,41 +439,41 @@ func (g *Graph) Validate() error {
 	if g.name == "" {
 		return errors.New("graph name is required")
 	}
-	if len(g.nodes) == 0 {
+	if len(g.tasks) == 0 {
 		return errors.New("graph '%s' has no tasks", g.name)
 	}
-	nodeSet := make(map[string]bool, len(g.nodes)+1)
+	nodeSet := make(map[string]bool, len(g.tasks)+1)
 	nodeSet[End] = true
-	for _, t := range g.nodes {
+	for _, t := range g.tasks {
 		if nodeSet[t.Name] {
-			return errors.New("duplicate node '%s' in graph '%s'", t.Name, g.name)
+			return errors.New("duplicate task '%s' in graph '%s'", t.Name, g.name)
 		}
 		nodeSet[t.Name] = true
 		if t.URL == "" {
-			return errors.New("node '%s' in graph '%s' has no URL", t.Name, g.name)
+			return errors.New("task '%s' in graph '%s' has no URL", t.Name, g.name)
 		}
 	}
 	if !nodeSet[g.entryPoint] {
-		return errors.New("entry point '%s' is not a registered node in graph '%s'", g.entryPoint, g.name)
+		return errors.New("entry point '%s' is not a registered task in graph '%s'", g.entryPoint, g.name)
 	}
 	for fanInName := range g.fanInNodes {
 		if !nodeSet[fanInName] {
-			return errors.New("SetFanIn references unknown node '%s' in graph '%s'", fanInName, g.name)
+			return errors.New("SetFanIn references unknown task '%s' in graph '%s'", fanInName, g.name)
 		}
 		if fanInName == End {
 			return errors.New("SetFanIn cannot mark END in graph '%s'", g.name)
 		}
 	}
-	onErrorFrom := make(map[string]bool, len(g.nodes))
+	onErrorFrom := make(map[string]bool, len(g.tasks))
 	for _, tr := range g.transitions {
 		if tr.From == End {
 			return errors.New("transition out of END to '%s' in graph '%s'; END is terminal and has no outgoing transitions", tr.To, g.name)
 		}
 		if !nodeSet[tr.From] {
-			return errors.New("transition from unknown node '%s' to '%s' in graph '%s'", tr.From, tr.To, g.name)
+			return errors.New("transition from unknown task '%s' to '%s' in graph '%s'", tr.From, tr.To, g.name)
 		}
 		if !nodeSet[tr.To] {
-			return errors.New("transition from '%s' to unknown node '%s' in graph '%s'", tr.From, tr.To, g.name)
+			return errors.New("transition from '%s' to unknown task '%s' in graph '%s'", tr.From, tr.To, g.name)
 		}
 		switch tr.Kind {
 		case "", TransitionSwitch, TransitionGoto, TransitionError:
@@ -491,7 +491,7 @@ func (g *Graph) Validate() error {
 		}
 		if tr.Kind == TransitionError {
 			if onErrorFrom[tr.From] {
-				return errors.New("node '%s' in graph '%s' has more than one error transition; only one is allowed (ErrorTransition takes the first)", stripProto(tr.From), g.name)
+				return errors.New("task '%s' in graph '%s' has more than one error transition; only one is allowed (ErrorTransition takes the first)", stripProto(tr.From), g.name)
 			}
 			onErrorFrom[tr.From] = true
 		}
@@ -520,7 +520,7 @@ func (g *Graph) Validate() error {
 		}
 	}
 
-	hasSwitchFrom := make(map[string]bool, len(g.nodes))
+	hasSwitchFrom := make(map[string]bool, len(g.tasks))
 	for _, tr := range g.transitions {
 		if tr.Kind == TransitionSwitch {
 			hasSwitchFrom[tr.From] = true
@@ -530,7 +530,7 @@ func (g *Graph) Validate() error {
 		if !hasSwitchFrom[tr.From] || tr.Kind != "" {
 			continue
 		}
-		return errors.New("node '%s' in graph '%s' mixes a switch transition with a non-switch success-path transition to '%s'; convert all outgoing success-path transitions to switch (use when=\"true\" for the default), or use a goto transition for explicit overrides", stripProto(tr.From), g.name, stripProto(tr.To))
+		return errors.New("task '%s' in graph '%s' mixes a switch transition with a non-switch success-path transition to '%s'; convert all outgoing success-path transitions to switch (use when=\"true\" for the default), or use a goto transition for explicit overrides", stripProto(tr.From), g.name, stripProto(tr.To))
 	}
 
 	reachable := make(map[string]bool)
@@ -546,9 +546,9 @@ func (g *Graph) Validate() error {
 			}
 		}
 	}
-	for _, t := range g.nodes {
+	for _, t := range g.tasks {
 		if !reachable[t.Name] {
-			return errors.New("node '%s' is not reachable from entry point '%s' in graph '%s'", t.Name, g.entryPoint, g.name)
+			return errors.New("task '%s' is not reachable from entry point '%s' in graph '%s'", t.Name, g.entryPoint, g.name)
 		}
 	}
 
@@ -567,27 +567,27 @@ func (g *Graph) Validate() error {
 }
 
 // validateLineage checks fan-out/fan-in convergence: every fan-out's branches must converge on the same
-// fan-in, every branch must pop its frame before END, and no node may be reached with two different lineage
+// fan-in, every branch must pop its frame before END, and no task may be reached with two different lineage
 // stacks. It builds a local fan-out->fan-in map to run these checks and stores nothing on the graph; the
 // engine derives the same map at dispatch (internal/faninmap) for routing.
 func (g *Graph) validateLineage() error {
 	fanOutToFanIn := make(map[string]string)
 
-	// Memoized IsFanOutSource, not a second copy of it: the BFS below revisits a node once per incoming
+	// Memoized IsFanOutSource, not a second copy of it: the BFS below revisits a task once per incoming
 	// edge, and this predicate must stay in lockstep with the engine's routing (internal/faninmap and
 	// processStep both branch on IsFanOutSource) - a validator that disagreed with the router about what
 	// fans out would bless a graph the engine then mis-executes.
 	//
-	// It is a SET, not a node->bool table: the "every fan-out source needs a fan-in" check below iterates
-	// its KEYS, so storing an explicit false would enrol every node in the graph as a fan-out source.
-	isFanOutSource := make(map[string]bool, len(g.nodes))
-	for _, t := range g.nodes {
+	// It is a SET, not a task->bool table: the "every fan-out source needs a fan-in" check below iterates
+	// its KEYS, so storing an explicit false would enrol every task in the graph as a fan-out source.
+	isFanOutSource := make(map[string]bool, len(g.tasks))
+	for _, t := range g.tasks {
 		if g.IsFanOutSource(t.Name) {
 			isFanOutSource[t.Name] = true
 		}
 	}
 
-	stacks := make(map[string][]string, len(g.nodes))
+	stacks := make(map[string][]string, len(g.tasks))
 	queue := []string{g.entryPoint}
 	stacks[g.entryPoint] = nil
 
@@ -624,8 +624,8 @@ func (g *Graph) validateLineage() error {
 			var nextStack []string
 			switch {
 			// The fan-in arm MUST precede the goto/error/switch arm. The engine treats any transition
-			// whose target is a fan-in node as a cohort arrival - it does not care which kind of edge
-			// carried it - so a goto/error/switch edge into a fan-in from a node with no fan-out
+			// whose target is a fan-in task as a cohort arrival - it does not care which kind of edge
+			// carried it - so a goto/error/switch edge into a fan-in from a task with no fan-out
 			// frame is exactly the "arrive at a cohort that does not exist" shape, and at runtime it bumps
 			// cohort_arrivals on step_id=0 and hot-loops the flow. Testing goto/error/switch first (as
 			// this switch once did) skipped the frame-pop check for precisely the edges that can reach a
@@ -638,7 +638,7 @@ func (g *Graph) validateLineage() error {
 				} else {
 					if len(fromStack) == 0 {
 						return errors.New(
-							"transition from '%s' to fan-in node '%s' in graph '%s' has no fan-out frame to pop",
+							"transition from '%s' to fan-in task '%s' in graph '%s' has no fan-out frame to pop",
 							stripProto(from), stripProto(tr.To), g.name,
 						)
 					}
@@ -647,11 +647,11 @@ func (g *Graph) validateLineage() error {
 				}
 				// All branches of one fan-out must converge on the SAME fan-in. The cohort shares a spawn
 				// step, and the cohort-resolution path picks the fan-in from whichever sibling completes
-				// last - so divergent fan-in targets make the convergence node nondeterministic. A prior
+				// last - so divergent fan-in targets make the convergence task nondeterministic. A prior
 				// mapping to a different fan-in is that divergence.
 				if prior, ok := fanOutToFanIn[fanOutSource]; ok && prior != tr.To {
 					return errors.New(
-						"fan-out source '%s' in graph '%s' has branches converging on different fan-in nodes ('%s' and '%s'); all siblings of a fan-out must converge on the same fan-in",
+						"fan-out source '%s' in graph '%s' has branches converging on different fan-in tasks ('%s' and '%s'); all siblings of a fan-out must converge on the same fan-in",
 						stripProto(fanOutSource), g.name, stripProto(prior), stripProto(tr.To),
 					)
 				}
@@ -673,7 +673,7 @@ func (g *Graph) validateLineage() error {
 			if tr.To == End {
 				if len(nextStack) != 0 {
 					return errors.New(
-						"transition from '%s' to END in graph '%s' has unpopped fan-out frames %v; every branch must pass through a fan-in node before reaching END",
+						"transition from '%s' to END in graph '%s' has unpopped fan-out frames %v; every branch must pass through a fan-in task before reaching END",
 						stripProto(from), g.name, nextStack,
 					)
 				}
@@ -683,7 +683,7 @@ func (g *Graph) validateLineage() error {
 			if prior, seen := stacks[tr.To]; seen {
 				if !stackEqual(prior, nextStack) {
 					return errors.New(
-						"node '%s' in graph '%s' is reachable with two different lineage stacks (%v and %v); register a separate alias node via SetURL to disambiguate",
+						"task '%s' in graph '%s' is reachable with two different lineage stacks (%v and %v); register a separate alias task via SetURL to disambiguate",
 						stripProto(tr.To), g.name, prior, nextStack,
 					)
 				}
@@ -697,7 +697,7 @@ func (g *Graph) validateLineage() error {
 	for source := range isFanOutSource {
 		if _, ok := fanOutToFanIn[source]; !ok {
 			return errors.New(
-				"fan-out source '%s' in graph '%s' has no fan-in node downstream; mark the convergence node with SetFanIn",
+				"fan-out source '%s' in graph '%s' has no fan-in task downstream; mark the convergence task with SetFanIn",
 				stripProto(source), g.name,
 			)
 		}
@@ -725,8 +725,8 @@ func (g *Graph) MarshalJSON() ([]byte, error) {
 		URL   string `json:"url,omitzero"`
 		FanIn bool   `json:"fanIn,omitzero"`
 	}
-	jsonTasks := make([]jsonTask, len(g.nodes))
-	for i, t := range g.nodes {
+	jsonTasks := make([]jsonTask, len(g.tasks))
+	for i, t := range g.tasks {
 		jsonTasks[i] = jsonTask{Name: t.Name, URL: t.URL, FanIn: g.fanInNodes[t.Name]}
 	}
 	type jsonGraph struct {
@@ -773,13 +773,13 @@ func (g *Graph) UnmarshalJSON(data []byte) error {
 	}
 	g.name = jg.Name
 	g.entryPoint = jg.EntryPoint
-	g.nodes = make([]Node, len(jg.Tasks))
+	g.tasks = make([]Task, len(jg.Tasks))
 	g.fanInNodes = nil
 	for i, jt := range jg.Tasks {
-		g.nodes[i].Name = jt.Name
-		g.nodes[i].URL = jt.URL
-		if g.nodes[i].URL == "" {
-			g.nodes[i].URL = jt.Name
+		g.tasks[i].Name = jt.Name
+		g.tasks[i].URL = jt.URL
+		if g.tasks[i].URL == "" {
+			g.tasks[i].URL = jt.Name
 		}
 		if jt.FanIn {
 			if g.fanInNodes == nil {

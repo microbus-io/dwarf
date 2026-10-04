@@ -132,16 +132,16 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 	// The graph carries no URL of its own; use the entry node's URL host as the "own host"
 	// for stripping the local host:port from node labels (cosmetic). Bare keys (no "://") yield "".
 	ownHost := hostOf(g.URLOf(g.entryPoint))
-	ids := make(map[string]string, len(g.nodes))
-	labels := make(map[string]string, len(g.nodes))
-	for i, t := range g.nodes {
+	ids := make(map[string]string, len(g.tasks))
+	labels := make(map[string]string, len(g.tasks))
+	for i, t := range g.tasks {
 		ids[t.Name] = fmt.Sprintf("%st%d", prefix, i)
 		labels[t.Name] = stripHostPort(t.Name, ownHost)
 	}
 
-	entries := make(map[string][]string, len(g.nodes))
-	exits := make(map[string][]string, len(g.nodes))
-	for _, t := range g.nodes {
+	entries := make(map[string][]string, len(g.tasks))
+	exits := make(map[string][]string, len(g.tasks))
+	for _, t := range g.tasks {
 		if g.fanInNodes[t.Name] {
 			entries[t.Name] = []string{ids[t.Name] + "_reduce"}
 		} else {
@@ -189,7 +189,7 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 		}
 	}
 
-	for _, t := range g.nodes {
+	for _, t := range g.tasks {
 		emitOneNode(t.Name, indent)
 	}
 
@@ -261,7 +261,7 @@ func (r *GraphRenderer) renderBody(b *strings.Builder, indent string, prefix str
 			}
 		}
 	}
-	for _, t := range g.nodes {
+	for _, t := range g.tasks {
 		emitDiamond(t.Name, "_switch", switchArms[t.Name])
 		emitDiamond(t.Name, "_when", whenArms[t.Name])
 	}

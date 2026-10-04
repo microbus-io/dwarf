@@ -247,8 +247,8 @@ The result is unmarshaled into the trailing `out` pointer (a `*struct` for type 
 for dynamic access, or `nil` to ignore it). Pass `nil` input for "no arguments," or `f.Snapshot()` to forward
 the parent's whole state. See [Fan-out & subgraphs → Subgraphs](fan-out-and-subgraphs.md#subgraphs).
 
-To invoke a single unit of work as an isolated child, declare a one-node workflow and `Subgraph` it. A bare task
-is only ever a node in a graph; it is not an independently invocable unit.
+To invoke a single unit of work as an isolated child, declare a one-task workflow and `Subgraph` it. A task
+only ever runs as part of a graph; it is not an independently invocable unit.
 
 ## Baggage (host context)
 

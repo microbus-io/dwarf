@@ -186,11 +186,11 @@ conditions. Built in code with the `workflow.Graph` API via `NewGraph(name)`. Ea
 display name (surfaced in rendering and denormalized onto the flow row as `workflow_name`), an entry point,
 tasks, transitions, and optional reducers for fan-in state merging. The graph does **not** carry its own
 resolve URL: the resolve key is a separate opaque `workflowURL` passed to `Create`/`Run`/`LoadGraph` and stored
-on the flow (`workflow_url`); the engine never keeps it on the graph. Each node is bound to its dispatch
-URL with `graph.SetURL(nodeName, url)` (create-or-update); the same URL may be bound under multiple node
+on the flow (`workflow_url`); the engine never keeps it on the graph. Each task is bound to its dispatch
+URL with `graph.SetURL(taskName, url)` (create-or-update); the same URL may be bound under multiple task
 names.
 
-**Naming convention.** Graph and task (node) names are PascalCase (`Reserve`, `Charge`) - graph-topology
+**Naming convention.** Graph and task names are PascalCase (`Reserve`, `Charge`) - graph-topology
 identifiers, kept visually distinct from the lowercased dispatch URLs and the camelCase state fields. The engine
 imposes no casing; this is a fixture/example convention only.
 

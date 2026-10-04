@@ -43,8 +43,8 @@ inherits the thread's policy. A nonexistent `ThreadKey` is rejected with a 404, 
 400 — a child runs on its own private thread so it cannot contaminate its parent's continuation chain, so address the
 root flow instead.
 
-To run a single unit of work with the engine's durability and scheduling, declare a one-node workflow and
-create a flow for it like any other. A bare task is only ever a node in a graph, not an independently
+To run a single unit of work with the engine's durability and scheduling, declare a one-task workflow and
+create a flow for it like any other. A task only ever runs as part of a graph, not as an independently
 invocable unit.
 
 > `Run`'s Go `error` is reserved for infrastructure failures (database, context deadline). A *workflow*
@@ -183,7 +183,7 @@ err := eng.Cancel(ctx, flowKey, "customer withdrew the order") // surfaced as Ca
 
 - **Every step in progress when you call it is covered.** A step that has not started yet does not run. A step
   that is already running finishes, and then its next transition is not taken.
-- **A covered step receives the cancellation as an error on its node's `onError` transition**, like any task
+- **A covered step receives the cancellation as an error on its task's `onError` transition**, like any task
   error, except that the task's own changes are kept, because it ran. `workflow.IsCancelled(onErr)` tells a
   cancellation apart from a real failure, so the handler can compensate and let the flow carry on, or stop.
 - **An error the task itself returns wins over the cancellation.** It takes the ordinary error path - its
