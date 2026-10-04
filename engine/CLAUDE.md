@@ -273,8 +273,9 @@ column off a write they make anyway, so an uncancelled flow pays no extra round 
 write on MySQL**, which lacks `RETURNING`/`OUTPUT` and reads the mark with a follow-up `SELECT`: +1 round trip per
 completed step (+1 to `k` in the ceiling equation), accepted like the claim's own follow-up read. Returning it
 through `LAST_INSERT_ID(expr)` in the UPDATE would avoid that; it was declined as a one-off idiom for a dialect
-that is not the recommended one. The successor INSERT...SELECT adds no round trip but two indexed lookups per
-insert; neither cost has been measured on the cloud rig yet.
+that is not the recommended one. The successor's mark adds no round trip: the transition's flow-row lock grab
+returns the watermark (MySQL's per-row `INSERT...SELECT` reads it with two indexed lookups per insert); neither
+cost has been measured on the cloud rig yet.
 
 - **The claim.** The claim CAS returns `cancelling`; a marked step is preempted - `ExecuteTask` is skipped and
   `cancelmarker.New(reason)` takes the path a task error would (`onError`, else `failStep`). Retry-rewound,
@@ -288,15 +289,19 @@ insert; neither cost has been measured on the cloud rig yet.
 *The one step the mark cannot reach is a step between its completion write and its transition* - terminal, so
 never marked, with its successors not inserted yet. Left alone, a `Cancel` landing there is lost outright: the
 successors are inserted unmarked and a linear flow runs to `completed` although `Cancel` returned nil. So every
-successor is inserted by one `INSERT...SELECT` (`successorInsertSQL`) that marks it when its source step's
-`step_id` is at or below the flow's `cancel_watermark` - the flow's highest `step_id` when `Cancel` ran - and the
-source was not itself covered. Both halves of that condition are load-bearing. The watermark is what exempts a
-handler that caught the cancellation and everything after it - they were inserted after the `Cancel`, so their
-ids sit above it - and so a flow can still recover; the "not covered" exemption covers the handler's own insert,
-whose source existed before. Among steps that existed at the `Cancel`, "at or below the watermark and not
-covered" is exactly "terminal when the mark ran", which is the gap. It is race-free and free of round trips
-because every insert of a flow's steps holds that flow row's lock and `cancel()` writes the watermark under it:
-either the insert sees the new watermark, or `cancel()` waits and its mark then finds the successors pending.
+successor is inserted marked when its source step's `step_id` is at or below the flow's `cancel_watermark` - the
+flow's highest `step_id` when `Cancel` ran - and the source was not itself covered. Both halves of that condition
+are load-bearing. The watermark is what exempts a handler that caught the cancellation and everything after it -
+they were inserted after the `Cancel`, so their ids sit above it - and so a flow can still recover; the "not
+covered" exemption covers the handler's own insert, whose source existed before. Among steps that existed at the
+`Cancel`, "at or below the watermark and not covered" is exactly "terminal when the mark ran", which is the gap.
+It is race-free and free of round trips because every insert of a flow's steps holds that flow row's lock and
+`cancel()` writes the watermark under it: either the insert sees the new watermark, or `cancel()` waits and its
+mark then finds the successors pending. A transition's successors (`successorBatch`) take the watermark from the
+transaction's flow-row lock grab (`RETURNING`/`OUTPUT`) - the row as locked, which on Postgres is the version
+re-read after any wait for the lock, not the statement's starting snapshot - and decide the flag in Go, once for
+all of them. MySQL, and the two fan-in inserts, use the `INSERT...SELECT` form (`successorInsertSQL`), which
+reads the watermark in the same statement.
 `cancel_watermark` defaults to 0 (never cancelled), and **Fork deliberately does not copy it**: a fork is not
 under cancellation. Pinned by `engine/cancelgap_test.go` and by `ran_covered_with_onerror`'s handler successor.
 
@@ -1136,6 +1141,11 @@ not parallelism:
   workflow URL from `graphCache` (`flowGraph`) and reads the row only on a miss, so every `computeFinalState`
   caller on a replica that dispatched the flow pays no graph round trip. Every field of `cachedGraph` must
   stay frozen for the flow's life - nothing invalidates an entry.
+- **A transition's successors go in as multi-row INSERTs** (`successorBatch`), in power-of-two chunks of at
+  most 64 rows (19 binds each, under SQL Server's 2,100-parameter ceiling), so a fan-out of N costs a handful of
+  round trips rather than N - and the transaction its branches wait on grows with N far more slowly. The ids come back by `RETURNING`/`OUTPUT` and are matched to rows by `step_token`, since neither promises
+  VALUES order. MySQL inserts row by row: it has no `RETURNING`, and under the default
+  `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed contiguous.
 - **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`), so the surgraph linkage, the
   disposable flag and the status cost no second statement. MySQL, lacking `RETURNING`, reads them with a
   follow-up `SELECT`.

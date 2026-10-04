@@ -68,15 +68,19 @@ func cohortLockStripe(shard, spawnStepID int) int {
 // leads to, stays unmarked, which is what lets a flow recover. The inserting transaction already holds the flow
 // row's lock and Cancel writes the watermark to that row, so the read cannot race it, and it costs no extra round
 // trip. Arguments: the eighteen step columns in order, then the inherit flag, the flow id and the source step id.
+// A transition's own successors use it only on MySQL; elsewhere successorBatch inserts them several to a statement.
 //
 // Do not compare timestamps here (the flow's cancel time against the source's started_at). Three dialects store
 // milliseconds, and a source that starts in the same millisecond as the Cancel reads as not-before it, losing the
 // Cancel - measured at ~1 in 4 runs of TestCancelInTransitionGap on SQLite. Making it inclusive only moves the tie
 // to the handler, whose successors would then be cancelled too.
-const successorInsertSQL = "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling)" +
+const successorInsertSQL = "INSERT INTO dwarf_steps (" + successorCols + ")" +
 	" SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD_MILLIS(NOW_UTC(), ?), ?, ?, ?, ?," +
 	" CASE WHEN ?=1 AND s.step_id <= f.cancel_watermark THEN 1 ELSE 0 END" +
 	" FROM dwarf_flows f, dwarf_steps s WHERE f.flow_id=? AND s.step_id=?"
+
+// successorCols are the columns every successor insert writes, in bind order.
+const successorCols = "flow_id, step_depth, step_token, task_name, task_url, state, state_refs, status, parked, time_budget_ms, lineage_id, fan_out_ordinal, predecessor_id, not_before, priority, fairness_key, fairness_weight, engine_id, cancelling"
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
 //
@@ -1209,21 +1213,43 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			// RowsAffected still reflects the WHERE match (the terminal guard below) on every driver.
 			//
 			// Reports whether the flow is still non-terminal; a false return means the caller must bail (nil).
+			//
+			// Where the driver can return the row it locked, the grab also reads the flow's cancel_watermark, which
+			// the successor inserts need for their Cancel mark (see successorBatch). It is the row as locked - on
+			// Postgres the version re-read after any wait for the lock, not the statement's starting snapshot - and
+			// Cancel writes it only under this lock, so it holds for the rest of the transaction.
 			flowRowLocked := false
+			cancelWatermark, cancelWatermarkRead := 0, false
 			lockFlowRow := func() (bool, error) {
 				if e.seams.Enabled() { // counting checkpoint; Enabled gates the assembled name in production
 					e.seams.Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowRowWrite, strconv.Itoa(flowID)))
 				}
-				flowRes, flowErr := tx.ExecContext(ctx,
-					"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=? AND status NOT IN ("+terminalStatusesSQL+")",
-					flowID,
-				)
+				const grab = "UPDATE dwarf_flows SET touch=1-touch"
+				where := " WHERE flow_id=? AND status NOT IN (" + terminalStatusesSQL + ")"
+				var flowErr error
+				switch driver := tx.DriverName(); {
+				case !batchesSuccessors(driver):
+					flowRes, xerr := tx.ExecContext(ctx, grab+where, flowID)
+					if xerr != nil {
+						return false, errors.Trace(xerr)
+					}
+					n, _ := flowRes.RowsAffected()
+					flowRowLocked = n > 0
+					return flowRowLocked, nil
+				case driver == "mssql":
+					flowErr = tx.QueryRowContext(ctx, grab+" OUTPUT INSERTED.cancel_watermark"+where, flowID).Scan(&cancelWatermark)
+				default:
+					flowErr = tx.QueryRowContext(ctx, grab+where+" RETURNING cancel_watermark", flowID).Scan(&cancelWatermark)
+				}
+				if flowErr == sql.ErrNoRows {
+					flowRowLocked = false
+					return false, nil
+				}
 				if flowErr != nil {
 					return false, errors.Trace(flowErr)
 				}
-				n, _ := flowRes.RowsAffected()
-				flowRowLocked = n > 0
-				return flowRowLocked, nil
+				flowRowLocked, cancelWatermarkRead = true, true
+				return true, nil
 			}
 
 			// A NON-FINAL cohort arrival is the one disposition that neither extends nor terminalizes the flow:
@@ -1259,6 +1285,12 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				}
 			}
 
+			batch := successorBatch{
+				flowID: flowID, stepDepth: nextStepDepth, timeBudgetMs: flowTimeBudgetMs, lineageID: childLineageID,
+				predecessorID: stepID, sleepMs: sleepMs, priority: flowPriority, fairnessKey: flowFairnessKey,
+				fairnessWeight: flowFairnessWeight, engineID: e.engineID, inheritCancel: inheritCancel,
+				cancelWatermark: cancelWatermark, watermarkRead: cancelWatermarkRead,
+			}
 			for i, next := range normalNexts {
 				// fan_out_ordinal identifies the BRANCH within a cohort so the fan-in folds order-sensitive
 				// reducers (append/concat/union) in input-array order. A fan-out SOURCE stamps each new branch
@@ -1301,16 +1333,19 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 						return errors.Trace(mintErr)
 					}
 				}
-				nextURL := dispatchURLOf(graph, next.taskName)
-				newStepID, err := tx.InsertReturnID(ctx, "step_id", successorInsertSQL,
-					flowID, nextStepDepth, keys.RandomIdentifier(16), next.taskName, nextURL, stepStateJSON, stepRefsJSON, workflow.StatusPending, parkedNone, flowTimeBudgetMs, childLineageID, successorOrdinal, stepID, sleepMs, flowPriority, flowFairnessKey, flowFairnessWeight, e.engineID,
-					inheritCancel, flowID, stepID,
-				)
-				if err != nil {
-					return errors.Trace(err)
-				}
+				batch.rows = append(batch.rows, successorRow{
+					taskName: next.taskName, taskURL: dispatchURLOf(graph, next.taskName),
+					stateJSON: stepStateJSON, refsJSON: stepRefsJSON, ordinal: successorOrdinal,
+				})
 				txBytes.stateWritten += len(stepStateJSON)
-				newStepIDs = append(newStepIDs, int(newStepID))
+				if len(batch.rows) == successorBatchMax {
+					if err := batch.flush(ctx, tx, &newStepIDs); err != nil {
+						return errors.Trace(err)
+					}
+				}
+			}
+			if err := batch.flush(ctx, tx, &newStepIDs); err != nil {
+				return errors.Trace(err)
 			}
 
 			// The dispatched row's own write - its successor link, its cohort size, and the advancing clear - is ONE

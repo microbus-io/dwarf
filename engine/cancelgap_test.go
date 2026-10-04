@@ -73,6 +73,51 @@ func TestCancelInTransitionGap(t *testing.T) {
 	assert.Equal(int32(0), bRan.Load(), "B must be preempted, not run")
 }
 
+// TestCancelInTransitionGap_WideFanOut is the transition-gap Cancel on a fan-out wide enough to be inserted in
+// several multi-row chunks: every branch takes its mark from the watermark the transition's lock grab read, so
+// every branch must be preempted and the flow must resolve cancelled.
+func TestCancelInTransitionGap_WideFanOut(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	var workRan atomic.Int32
+	mux := NewHostMux()
+	g := workflow.NewGraph("CancelGapWide")
+	g.SetURL("Seed", "cgapw/seed")
+	g.SetURL("Work", "cgapw/work")
+	g.SetURL("Join", "cgapw/join")
+	g.SetFanIn("Join")
+	g.AddTransitionForEach("Seed", "Work", "items", "n")
+	g.AddTransitionChain("Work", "Join", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("cgapw/g", g)
+	mux.HandleTask("cgapw/seed", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("cgapw/work", func(ctx context.Context, f *workflow.Flow) error { workRan.Add(1); return nil })
+	mux.HandleTask("cgapw/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.NoError(e.Startup(t.Context()))
+
+	items := make([]int, 150)
+	e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+	fk, err := e.Create(ctx, "cgapw/g", map[string]any{"items": items}, nil)
+	assert.NoError(err)
+	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointBeforeTransitionTx")
+
+	assert.NoError(e.Cancel(ctx, fk, "wide gap"))
+	e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
+
+	outcome, err := e.Await(ctx, fk)
+	if !assert.NoError(err) {
+		return
+	}
+	assert.Equal(workflow.StatusCancelled, outcome.Status, "every branch must inherit the cancellation")
+	assert.Equal(int32(0), workRan.Load(), "every branch must be preempted, not run")
+}
+
 // TestCancelMarkSparesAHandlerInsertedAfterTheWatermark pins that Cancel's step mark stops at the watermark.
 // The mark runs after the watermark commits, and in between a step can be preempted and route to its onError
 // handler: the handler is inserted above the watermark, unmarked on purpose, since its source was covered.
