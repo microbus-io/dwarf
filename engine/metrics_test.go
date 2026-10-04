@@ -154,9 +154,18 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, outcome.Status)
 
+	// Run can return before dwarf_flows_ended is recorded: the completing worker counts it after its transaction
+	// commits, and the await's database poll can see that commit first. Collect until the counter lands.
 	var rm metricdata.ResourceMetrics
-	if !assert.NoError(reader.Collect(ctx, &rm)) {
-		return
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if !assert.NoError(reader.Collect(ctx, &rm)) {
+			return
+		}
+		if _, ok := sumCounter(rm, "dwarf_flows_ended", "status", workflow.StatusCompleted); ok || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	// Counters. Instrument names carry no _total suffix (the Prometheus exporter appends it); the manual
