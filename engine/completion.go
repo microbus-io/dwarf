@@ -172,8 +172,13 @@ func (e *Engine) mergeTerminalSteps(ctx context.Context, db sequel.Executor, sha
 	return workflow.State{}, 0, nil
 }
 
-// computeFinalState computes the merged state for a flow.
-func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) ([]byte, string, error) {
+// flowGraph returns a flow's parsed graph and workflow URL, from the graph cache when the flow has been
+// dispatched on this replica and from its row otherwise. The returned graph may be shared with concurrent
+// dispatches and must not be mutated. A cache hit reads nothing, so it does not prove the flow row still exists.
+func (e *Engine) flowGraph(ctx context.Context, db sequel.Executor, shardNum, flowID int) (*workflow.Graph, string, error) {
+	if cg, ok := e.graphCache.Load(graphCacheKey{shard: shardNum, flowID: flowID}); ok {
+		return cg.graph, cg.workflowURL, nil
+	}
 	var workflowURL string
 	var graphJSON []byte
 	err := db.QueryRowContext(ctx,
@@ -183,8 +188,17 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
-	var graph workflow.Graph
-	err = json.Unmarshal(graphJSON, &graph)
+	graph := &workflow.Graph{}
+	err = json.Unmarshal(graphJSON, graph)
+	if err != nil {
+		return nil, "", errors.Trace(err)
+	}
+	return graph, workflowURL, nil
+}
+
+// computeFinalState computes the merged state for a flow.
+func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int) ([]byte, string, error) {
+	graph, workflowURL, err := e.flowGraph(ctx, db, shardNum, flowID)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
@@ -207,7 +221,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 	// Every step of a per-element sub-pipeline inherits the spawn's lineage, so "every cohort member" is one
 	// indexed scan and it covers Cell AND Enrich, for every branch.
 	if baseLineageID != 0 {
-		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, baseLineageID, &graph, workflowURL)
+		merged, err = e.mergeCohortState(ctx, db, shardNum, flowID, baseLineageID, graph, workflowURL)
 		if err != nil {
 			return nil, "", errors.Trace(err)
 		}
@@ -233,7 +247,7 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 		return nil, "", errors.Trace(err)
 	}
 	for _, spawnTask := range spawns {
-		stripForEachBookkeeping(merged, &graph, spawnTask)
+		stripForEachBookkeeping(merged, graph, spawnTask)
 	}
 
 	data, err := json.Marshal(merged)
@@ -594,16 +608,35 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, flo
 		// Lock-grab flips the non-indexed `touch`, not `updated_at`: the flow's `updated_at` moves only
 		// on the genuine status transition below, so idx_dwarf_flows_status is not churned twice per
 		// completion. `touch` always changes, so a later RowsAffected check stays meaningful.
-		_, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET touch=1-touch WHERE flow_id=?", flowID)
-		if err != nil {
-			return errors.Trace(err)
+		//
+		// The lock grab also reads back the surgraph linkage and the disposable flag - needed for the post-tx
+		// surgraph revival and the atomic disposable delete below - in the same round trip. It stays unguarded on
+		// status: the status gate is the later UPDATE, and the status read here drives the revive re-drive.
+		const lockGrab = "UPDATE dwarf_flows SET touch=1-touch"
+		const lockWhere = " WHERE flow_id=?"
+		var err error
+		switch tx.DriverName() {
+		case "pgx", "sqlite":
+			err = tx.QueryRowContext(ctx,
+				lockGrab+lockWhere+" RETURNING surgraph_flow_id, surgraph_step_id, delete_on_completion, status",
+				flowID,
+			).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &currentStatus)
+		case "mssql":
+			err = tx.QueryRowContext(ctx,
+				lockGrab+" OUTPUT INSERTED.surgraph_flow_id, INSERTED.surgraph_step_id, INSERTED.delete_on_completion, INSERTED.status"+lockWhere,
+				flowID,
+			).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &currentStatus)
+		default:
+			// MySQL lacks RETURNING: lock, then read the row this transaction now holds.
+			_, err = tx.ExecContext(ctx, lockGrab+lockWhere, flowID)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			err = tx.QueryRowContext(ctx,
+				"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, status FROM dwarf_flows WHERE flow_id=?",
+				flowID,
+			).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &currentStatus)
 		}
-		// Read the surgraph linkage and the disposable flag under the write lock - needed for the post-tx
-		// surgraph revival and the atomic disposable delete below.
-		err = tx.QueryRowContext(ctx,
-			"SELECT surgraph_flow_id, surgraph_step_id, delete_on_completion, status FROM dwarf_flows WHERE flow_id=?",
-			flowID,
-		).Scan(&surgraphFlowID, &surgraphStepID, &deleteOnCompletion, &currentStatus)
 		if err != nil {
 			return errors.Trace(err)
 		}

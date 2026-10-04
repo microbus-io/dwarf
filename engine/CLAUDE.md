@@ -1130,7 +1130,15 @@ not parallelism:
   an independent read snapshot can observe the pre-transition row and deliver an empty resume payload (the reason is
   spelled out at the claim site in `execution.go`). The lease size comes from the step row's own `time_budget_ms`
   (referenced self-referentially in the claim UPDATE), not a pre-SELECT.
-- **Flow data** - runs after the claim+read, since it needs the `flow_id`.
+- **Flow data** - runs after the claim+read, since it needs the `flow_id`. On a `graphCache` hit it does not
+  select the `graph` column: the graph is frozen at `Create`, and its JSON is the largest payload on the row.
+- **The flow's graph is read once per replica, not once per completion.** `computeFinalState` takes the graph and
+  workflow URL from `graphCache` (`flowGraph`) and reads the row only on a miss, so every `computeFinalState`
+  caller on a replica that dispatched the flow pays no graph round trip. Every field of `cachedGraph` must
+  stay frozen for the flow's life - nothing invalidates an entry.
+- **`completeFlow`'s lock grab returns the row it locked** (`RETURNING`/`OUTPUT`), so the surgraph linkage, the
+  disposable flag and the status cost no second statement. MySQL, lacking `RETURNING`, reads them with a
+  follow-up `SELECT`.
 
 Fan-in accounting issues no sibling/subgraph COUNT queries at all - it reads the
 `cohort_arrivals`/`cohort_failures`/`cohort_size` counter columns.
@@ -1839,7 +1847,7 @@ has exactly one fenced write to the dispatched step, and everything after it is 
   so no claim can take it (claim needs `pending`). The one thing that can is the orphan sweep's rewind, which
   bumps `lease_seq` - so the transition transaction carries ONE fenced write of its own, folded into a statement
   it already makes on the dispatched row: the successor-link/cohort-size write, the cohort bump
-  (`bumpCohortArrivals`, a two-row statement), or `fireFanInDirect`'s cohort-size write. Each also clears
+  (`bumpCohortArrivals`, a two-row statement), or `fireFanInDirect`'s successor-link/cohort-size write. Each also clears
   `advancing`; a zero-row match rolls the transaction back via `errLeaseFenced`, which `persist` turns into
   `errPersistFenced` and a quiet abandon. Each fenced clear also requires `advancing=1`, which fences one more case:
   persist re-running the transition after a COMMIT that landed but reported an error finds the flag cleared and

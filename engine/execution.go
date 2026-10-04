@@ -287,11 +287,18 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	var flowFairnessWeight float64
 	var flowTimeBudgetMs int
 	var flowCancelReason string
+	// The graph is frozen at flow creation, so a cached parse makes its JSON - the largest payload on this
+	// row - dead weight; it is selected only on a miss.
+	graphKey := graphCacheKey{shard: shardNum, flowID: flowID} // scopes the cache by shard, since flow_id is only unique within a shard
+	cg, cached := e.graphCache.Load(graphKey)
+	flowCols := "flow_token, status, workflow_url, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms, cancel_reason"
+	flowDest := []any{&flowToken, &flowStatus, &workflowURL, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs, &flowCancelReason}
+	if !cached {
+		flowCols += ", graph"
+		flowDest = append(flowDest, &graphJSON)
+	}
 	flowPass := turnstile.WaitTurn(ctx)
-	err = db.QueryRowContext(ctx,
-		"SELECT flow_token, status, workflow_url, graph, baggage, trace_parent, created_at, updated_at, priority, fairness_key, fairness_weight, time_budget_ms, cancel_reason FROM dwarf_flows WHERE flow_id=?",
-		flowID,
-	).Scan(&flowToken, &flowStatus, &workflowURL, &graphJSON, &baggageJSON, &traceParent, &flowCreatedAt, &flowUpdatedAt, &flowPriority, &flowFairnessKey, &flowFairnessWeight, &flowTimeBudgetMs, &flowCancelReason)
+	err = db.QueryRowContext(ctx, "SELECT "+flowCols+" FROM dwarf_flows WHERE flow_id=?", flowID).Scan(flowDest...)
 	flowPass.Return()
 	if err != nil {
 		return errors.Trace(err)
@@ -316,10 +323,6 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		return errors.Trace(err)
 	}
 
-	// Parse graph, reusing the cached parse — graphJSON is frozen at flow creation, so every step of
-	// the same flow sees identical bytes.
-	graphKey := graphCacheKey{shard: shardNum, flowID: flowID} // scopes the cache by shard, since flow_id is only unique within a shard
-	cg, cached := e.graphCache.Load(graphKey)
 	if !cached {
 		parsed := &workflow.Graph{}
 		err = json.Unmarshal(graphJSON, parsed)
@@ -333,7 +336,7 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 			return errors.Trace(err)
 		}
 		// Derive the fan-in routing map once per flow and cache it with the graph; it is not persisted.
-		cg = &cachedGraph{graph: parsed, fanIn: faninmap.New(parsed)}
+		cg = &cachedGraph{graph: parsed, fanIn: faninmap.New(parsed), workflowURL: workflowURL}
 		e.graphCache.Store(graphKey, cg)
 	}
 	graph := cg.graph
@@ -1744,14 +1747,6 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		if n, _ := flowRes.RowsAffected(); n == 0 {
 			return nil
 		}
-		// The dispatched row's advancing clear rides this write, fenced exactly as in the transition transaction.
-		stepRes, stepErr := tx.ExecContext(ctx, "UPDATE dwarf_steps SET cohort_size=0, advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", stepID, leaseSeq)
-		if stepErr != nil {
-			return errors.Trace(stepErr)
-		}
-		if n, _ := stepRes.RowsAffected(); n == 0 {
-			return errLeaseFenced
-		}
 
 		var ourStateJSON, ourChangesJSON, ourRefsJSON []byte
 		tx.QueryRowContext(ctx, "SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", stepID).Scan(&ourStateJSON, &ourChangesJSON, &ourRefsJSON)
@@ -1794,7 +1789,16 @@ func (e *Engine) fireFanInDirect(ctx context.Context, shardNum int, db *sequel.D
 		if err != nil {
 			return errors.Trace(err)
 		}
-		tx.ExecContext(ctx, "UPDATE dwarf_steps SET successor_id=? WHERE step_id=?", int(fanInStepID), stepID)
+		// The dispatched row's own write - its successor link, its (empty) cohort size and the advancing clear - is
+		// ONE statement fenced exactly as in the transition transaction, and like it, it follows the INSERT: a
+		// fenced attempt returns errLeaseFenced and the rollback takes the INSERT with it.
+		stepRes, stepErr := tx.ExecContext(ctx, "UPDATE dwarf_steps SET successor_id=?, cohort_size=0, advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", int(fanInStepID), stepID, leaseSeq)
+		if stepErr != nil {
+			return errors.Trace(stepErr)
+		}
+		if n, _ := stepRes.RowsAffected(); n == 0 {
+			return errLeaseFenced
+		}
 		tx.ExecContext(ctx, "UPDATE dwarf_flows SET step_id=?, touch=1-touch WHERE flow_id=?", int(fanInStepID), flowID)
 		return nil
 	})

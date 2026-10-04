@@ -41,7 +41,11 @@ type graphCacheKey struct {
 // cachedGraph is the per-flow parsed graph paired with its derived fan-in map. The fan-in map is a pure
 // function of the graph, not persisted with it, so it is computed once when a flow's graph is first parsed
 // and cached alongside - amortizing the O(V+E) analysis across every step of the flow.
+//
+// Every field must be frozen for the flow's life: nothing invalidates an entry, so a field that could change
+// would go stale silently. The key relies on a flow_id not being reused while its entry lives.
 type cachedGraph struct {
-	graph *workflow.Graph
-	fanIn *faninmap.Map
+	graph       *workflow.Graph
+	fanIn       *faninmap.Map
+	workflowURL string
 }
