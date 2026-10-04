@@ -403,15 +403,15 @@ delay the drain: it notices the shutdown, hands the step back for another replic
 
 Recovery of a crashed replica's work is built in. Every in-flight step holds a lease of its `TimeBudget`
 plus a 30-second margin; if the replica running it dies, the lease lapses and a background sweep, which
-runs every 5 minutes, returns the step to `pending` for another replica. So a step claimed by a crashed
-replica runs again within `TimeBudget` + 30 s + 5 minutes. Steps that were pending but not yet claimed
+runs every minute, returns the step to `pending` for another replica. So a step claimed by a crashed
+replica runs again within `TimeBudget` + 30 s + 1 minute. Steps that were pending but not yet claimed
 are picked up by the surviving replicas within seconds. Steps that aren't idempotent under re-dispatch
 should be written defensively: the engine guarantees at-least-once dispatch, not exactly-once.
 
 One crash window is repaired differently. A replica that dies after recording a step as completed but
 before inserting the step that follows it leaves the flow `running` with nothing left to dispatch. Once
-the flow has been idle for 5 minutes and the step's lease has lapsed, the recovery sweep hands the step
-back, and dispatch creates its successor from the recorded output, without running the task again. These
+the flow has been idle for 5 minutes and the step's lease has lapsed, the recovery sweep, which looks for
+this every 5 minutes, hands the step back, and dispatch creates its successor from the recorded output, without running the task again. These
 recoveries count in `dwarf_steps_recovered`. A flow the engine cannot repair this way counts in
 `dwarf_flows_orphaned` and needs manual recovery, described in the
 [Runbook](runbook.md#dwarf_flows_orphaned-is-non-zero).

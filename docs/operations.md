@@ -16,8 +16,8 @@ schedule is what tells you whether to intervene or wait — and the answer is us
 
 | Situation | What happens | How long |
 |---|---|---|
-| A replica dies holding in-flight steps | Each step's lease lapses and the step returns to `pending` for another replica | Up to the flow's `TimeBudget` + 30s, then within the next 5-minute recovery sweep |
-| A replica dies after completing a step but before creating its successor | A sweep hands the step back and dispatch creates the successor from its recorded output — the task does **not** re-run | Once the flow has been idle 5 minutes and the step's lease has lapsed, within the next 5-minute recovery sweep |
+| A replica dies holding in-flight steps | Each step's lease lapses and the step returns to `pending` for another replica | Up to the flow's `TimeBudget` + 30s, then within the next 1-minute recovery sweep |
+| A replica dies after completing a step but before creating its successor | A sweep hands the step back and dispatch creates the successor from its recorded output — the task does **not** re-run | Once the flow has been idle 5 minutes and the step's lease has lapsed, within the following 5 minutes |
 | A database blip mid-write | The step's outcome write retries in place, holding its lease — the task does **not** re-run | 1s, 2s, 4s; longer outages fall through to lease recovery |
 | A replica joins or leaves | Every peer re-reads the shared registry and re-divides each database's connection budget | Registry read every 250ms; a dead replica stops counting after 40s |
 | A doorbell is missed between replicas | The owning replica's next selection cycle finds the work by scanning | Under a second at the derived cycle rate |

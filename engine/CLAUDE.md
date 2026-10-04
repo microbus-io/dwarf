@@ -1065,25 +1065,32 @@ dominated:
   *at* the instant a lease lapses instead of within a sweep of it, for a per-shard query every sweep plus a
   deadline field, a mutex, an error clamp and a fault seam.
 
-**Lease recovery costs latency, and that cost is ACCEPTED.** Worst-case recovery of a claimed step is
-`budget + leaseMargin + wedgeSweepInterval` - 2m + 30s + 5m at the defaults, and ~10x the lease at a 2s budget
-(measured on a multi-process `kill -9`: a claimed step still `running` 134s after the crash, its flow's `Await`
-timed out at 90s). It is accepted because the path runs only when a replica dies without draining - a graceful
-shutdown releases its leases - and because a faster sweep is not cheap: `recoverExpiredLeases` reads every
-`running` non-parked row (`lease_expires` is not a seekable key in the selection index), so its cost grows with
-the in-flight count, and every dispatcher of a shard runs it, up to ~16 at 64 vCPU. Making that scan O(expired)
-needs a `lease_expires` index on `running` rows, maintained on every claim and completion of the hottest table.
-The orphan-flow repair (Background Recovery #3) carries the same 5-minute floor through `orphanFlowThreshold`, so
-a crash costs minutes on both paths regardless.
+**Lease recovery costs a tick of latency after a crash.** Worst-case recovery of a claimed step is
+`budget + leaseMargin + recoveryInterval` - 2m + 30s + 1m at the defaults, ~3x the lease at a 2s budget. The path
+runs only when a replica dies without draining - a graceful shutdown releases its leases. One ticker serves two
+rates: `recoverExpiredLeases` every tick (1m), the heavy detectors every `heavyRepairEvery`-th (5m), since they
+carry 5-minute age guards and running them more often finds nothing. The tick's cost is the lease reset's scan:
+it reads every `running` non-parked row (`lease_expires` is not a seekable key in the selection index), so it
+grows with the in-flight count, and every dispatcher of a shard runs it, up to ~16 at 64 vCPU - about one scan
+of the in-flight set every 4s per shard at the top end, against a piston scanning ~15 times a second. Making that
+scan O(expired) would need a `lease_expires` index on `running` rows, maintained on every claim and completion of
+the hottest table; not worth it at this rate. The orphan-flow repair (Background Recovery #3) keeps its
+5-minute floor through `orphanFlowThreshold`, so a crash between a step's completion and its transition still
+costs 5-10 minutes.
 
-If it must be shortened, four constraints hold:
+**Do not replace the tick with crash detection** - repairs triggered by a peer's `dwarf_peers` row going
+stale. A stale row is weak evidence in both directions: a database outage longer than the fresh window stales
+live peers (their beats resume up to a beat after the readings do), and when every dispatcher of a shard dies
+at once the survivors taking the slot do not yet know their role. Closing those gaps takes a settle delay, role
+prediction, per-incident lease timers and a dedupe set - far more code than the ~minute it saves over this
+tick, on a crash-only path.
+
+If the tick must be shortened further, three constraints hold:
 
 - **Derive the tick from `leaseMargin`, never from the engine's `TimeBudget`.** `FlowOptions.TimeBudget` is per
   flow and each lease comes from its own step row, so an engine-wide budget bounds nothing - a 2s flow on a
-  2m-default engine still waits minutes. `leaseMargin` is the term every lease shares: a `leaseMargin/2` tick
-  bounds recovery at `lease + 15s`, at most 1.5x the lease, for every budget.
-- **Keep one ticker and run the heavy detectors every Nth tick.** They carry 5-minute age guards, so running them
-  more often finds nothing.
+  2m-default engine waits the tick regardless. `leaseMargin` is the term every lease shares: a `leaseMargin/2`
+  tick bounds recovery at `lease + 15s`, at most 1.5x the lease, for every budget.
 - **Size the bound for ONE sweeper.** Several dispatchers sweeping a shard lower the expected wait to
   ~`tick/(dispatchers+1)`, but the crash being recovered removed one, and the floor is two. Do not stagger or
   coordinate sweepers: that is a peer signal, and it buys only the average.
@@ -3910,7 +3917,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    `TestBumpCohortArrivals_Fence`, and `enginetest.AssertInvariants`' check that no quiesced live flow holds a
    `completed` step still flagged - the signature of a transition path that forgot to clear it.
 
-   Worst-case repair latency is `max(orphanFlowThreshold, budget + leaseMargin) + wedgeSweepInterval`. It runs on
+   Worst-case repair latency is `max(orphanFlowThreshold, budget + leaseMargin)` plus up to one heavy-repair
+   interval (`heavyRepairEvery` x `recoveryInterval`, 5m). It runs on
    the same **dedicated `recoveryLoop`** as the wedge sweep (#4), for the same heavy-scan reason (its `NOT EXISTS`
    clauses over `dwarf_steps` are latency-tolerant). **Both staleness conditions are on `dwarf_steps`,
    deliberately.** **Do not age-guard on the flow row** (`dwarf_flows.updated_at older than the threshold`): the
@@ -3928,7 +3936,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    called inline from `runRecoverySweep`) - defense in depth for the `parkedSubgraph` park, whose releasing
    condition could in principle never fire (a parked step is invisible to selection, and `parkedSubgraph` is
    invisible to lease recovery too). Runs on the **dedicated recovery goroutine** (`recoveryLoop`) on a plain
-   `wedgeSweepInterval` (5m) ticker; the loop is drained before the pistons in `drainRuntime` since a recovered
+   5m cadence (every `heavyRepairEvery`-th tick of `recoveryInterval`); the loop is drained before the pistons in `drainRuntime` since a recovered
    park can re-offer a step. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation
    never trips a
    false positive (the guard sits comfortably beyond normal subgraph-completion latency). Like the orphan-flow repair,

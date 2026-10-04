@@ -33,35 +33,42 @@ import (
 // recoveryLoop is THE recovery cadence - every background repair the engine performs runs here, on one
 // plain ticker, and nowhere else.
 //
-// One cadence for all of them is the point. These are repairs for states that are not supposed to occur -
-// a dead worker's lease, a caller whose child can no longer revive it, a child whose parent went terminal,
-// a flow whose every step is terminal - so none of them is on a latency path, and the scans are heavy
-// enough (NOT EXISTS, DISTINCT) that they want a slow, un-nudged clock. Nothing here may be given its own
-// timer or an early wake: if a repair ever needs to be prompt, that is evidence the state it repairs is
-// reachable in normal operation, which is a bug to fix at the source rather than to sweep faster.
+// One ticker, two rates. Lease recovery runs every tick: it is one UPDATE over a shard's `running` rows, and
+// its tick is the term a crash adds to recovering a claimed step. The heavy repairs (NOT EXISTS, DISTINCT) run
+// every heavyRepairEvery-th tick: they carry 5-minute age guards, so running them more often finds nothing
+// new, and their scans are the expensive ones.
+//
+// These are repairs for states that are not supposed to occur - a dead worker's lease, a caller whose child
+// can no longer revive it, a child whose parent went terminal, a flow whose every step is terminal - so none
+// of them is on a latency path. Nothing here may be given its own timer or an early wake: if a repair ever
+// needs to be prompt, that is evidence the state it repairs is reachable in normal operation, which is a bug
+// to fix at the source rather than to sweep faster.
 //
 // It sweeps on entry rather than after the first tick, because a replica restarting after a crash inherits
-// its own expired leases and reclaiming those is exactly this loop's job. The wedge detectors are no-ops
-// that early: their age guards exclude everything younger than parkWedgeThreshold.
+// its own expired leases and reclaiming those is exactly this loop's job. The entry pass is a heavy one, though
+// the wedge detectors are no-ops that early: their age guards exclude everything younger than parkWedgeThreshold.
 //
 // Every repair runs only on the shards this replica DISPATCHES. Each repair is idempotent, so one sweeper
 // per shard is enough, and every shard always has a dispatcher; a replica that only reads a shard would
 // otherwise run these heavy scans through its two-connection reader pool, once per replica in the fleet.
 func (e *Engine) recoveryLoop(ctx context.Context) {
-	ticker := time.NewTicker(e.wedgeSweepInterval)
+	ticker := time.NewTicker(e.recoveryInterval)
 	defer ticker.Stop()
-	e.runRecoverySweep(ctx)
-	for {
+	for tick := 0; ; tick++ {
+		e.runRecoverySweep(ctx, tick%heavyRepairEvery == 0)
 		select {
 		case <-e.recoveryStop:
 			return
 		case <-ticker.C:
 		}
-		e.runRecoverySweep(ctx)
 	}
 }
 
-// runRecoverySweep is one pass of every recovery routine.
+// heavyRepairEvery is how many recovery ticks pass between runs of the heavy repairs - every 5 minutes at the
+// 1-minute tick, matching the 5-minute age guards those repairs carry.
+const heavyRepairEvery = 5
+
+// runRecoverySweep is one recovery pass: lease recovery always, and the heavy repairs when heavy is set.
 //
 // The two park detectors are mirror images and both must run: one finds a live CALLER whose child can no
 // longer revive it, the other a live CHILD whose caller went terminal. Each carries a parkWedgeThreshold
@@ -70,21 +77,23 @@ func (e *Engine) recoveryLoop(ctx context.Context) {
 // idempotent, and harmless under a concurrent resolution, a false positive, or a peer sweeping the same
 // shard. A nonzero dwarf_steps_unwedged means a latent bug let a step wedge: the sweep papered over the
 // effect, and the cause is still worth finding.
-func (e *Engine) runRecoverySweep(ctx context.Context) {
+func (e *Engine) runRecoverySweep(ctx context.Context, heavy bool) {
 	e.recoverExpiredLeases(ctx)
-	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		if !e.dispatchesOn(shard) {
-			return nil // see recoveryLoop
-		}
-		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
-		// connections like any other caller instead of taking them from work already under way.
-		ctx, doneTurn := e.dbTurn(ctx, shard)
-		defer doneTurn()
-		e.recoverWedgedSubgraphParks(ctx, db, shard, e.parkWedgeThreshold)
-		e.recoverOrphanedSubgraphChildren(ctx, db, shard, e.parkWedgeThreshold)
-		e.recoverOrphanedFlows(ctx, db, shard)
-		return nil
-	})
+	if heavy {
+		e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
+			if !e.dispatchesOn(shard) {
+				return nil // see recoveryLoop
+			}
+			// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
+			// connections like any other caller instead of taking them from work already under way.
+			ctx, doneTurn := e.dbTurn(ctx, shard)
+			defer doneTurn()
+			e.recoverWedgedSubgraphParks(ctx, db, shard, e.parkWedgeThreshold)
+			e.recoverOrphanedSubgraphChildren(ctx, db, shard, e.parkWedgeThreshold)
+			e.recoverOrphanedFlows(ctx, db, shard)
+			return nil
+		})
+	}
 	// Test rendezvous: this pass is over, so every detector below has already read the database. A test that
 	// FORGES a wedge/orphan shape and then drives one detector itself must wait for this, or the background
 	// pass races its forge and the shape is counted twice (see engineseams.CheckpointRecoverySweepDone).
@@ -99,15 +108,16 @@ func (e *Engine) runRecoverySweep(ctx context.Context) {
 // shard's next piston cycle (~67ms at the derived interval) selects it like any other, and the only
 // latency this cadence governs is how long a DEAD worker's step waits past its own lease.
 //
-// THE CADENCE COSTS RECOVERY LATENCY, and it is accepted: worst case is `budget + leaseMargin +
-// wedgeSweepInterval` - 2m + 30s + 5m at the defaults, and ~10x the lease at a 2s budget (measured: a claimed
-// step still `running` 134s after a `kill -9`). The path runs only when a replica died without draining, and
-// a faster sweep is not cheap: this UPDATE reads every `running` non-parked row (`lease_expires` is not a
-// seekable key in the selection index), and every dispatcher of the shard runs it. If it must be shortened,
-// derive the tick from leaseMargin - the one term every lease shares - not from the engine's TimeBudget,
-// which bounds nothing because FlowOptions.TimeBudget is per flow; keep the heavy detectors on their own
-// every-Nth-tick cadence; and size the bound for ONE surviving sweeper. Do not give this its own timer or
-// size a wake from a per-sweep `MIN(lease_expires)` query.
+// THE TICK IS THE COST OF A CRASH: worst case is `budget + leaseMargin + recoveryInterval` - 2m + 30s + 1m at the
+// defaults, and ~3x the lease at a 2s budget. The path runs only when a replica died without draining. This
+// UPDATE reads every `running` non-parked row (`lease_expires` is not a seekable key in the selection index), and
+// every dispatcher of the shard runs it, so its cost is O(in-flight) per dispatcher per tick - small at a minute.
+// Do not derive the tick from the engine's TimeBudget, which bounds nothing because FlowOptions.TimeBudget is per
+// flow; size the bound for ONE surviving sweeper (the crash removed one of them); and do not give this its own
+// timer, an early wake, or a wake sized from a per-sweep `MIN(lease_expires)` query. Do not replace the tick with
+// repairs triggered by a peer's stale registry row either: a stale row is weak evidence of a crash in both
+// directions (a database outage stales live peers; the replicas taking over a dead dispatcher's slot do not yet
+// know their role), and closing those gaps costs far more than the minute it saves.
 //
 // A failed UPDATE is logged and left for the next sweep. The sweep is idempotent and unconditional, so a
 // transient DB error costs one deferred pass and needs no retry or backoff of its own.

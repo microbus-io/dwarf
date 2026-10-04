@@ -77,7 +77,7 @@ var terminalStatusesSQL = "'" + strings.Join([]string{
 	workflow.StatusCompleted, workflow.StatusFailed, workflow.StatusTerminated, workflow.StatusCancelled,
 }, "', '") + "'"
 
-// The recovery/await/reap timing knobs (leaseMargin, wedgeSweepInterval, parkWedgeThreshold,
+// The recovery/await/reap timing knobs (leaseMargin, recoveryInterval, parkWedgeThreshold,
 // orphanFlowThreshold, deletionGrace, reapInterval, awaitDefaultBudget) are per-engine fields on Engine
 // (defaulted in NewEngine), not package globals. They are effectively constants in production - read-only
 // after NewEngine - but a white-box test in this package shortens one directly (e.g. e.reapInterval = 20ms,
@@ -296,11 +296,11 @@ type Engine struct {
 
 	// Recovery/await/reap timing. Effectively constants in production (defaulted in NewEngine, then
 	// read-only); a white-box test shortens one directly, before Startup for the two read once at Startup
-	// (reapInterval, wedgeSweepInterval), so an otherwise minutes-long path is observable.
+	// (reapInterval, recoveryInterval), so an otherwise minutes-long path is observable.
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	latchSweepInterval  time.Duration // Await latch detector cadence - the bound on cross-replica wake (50ms)
 	awaitDefaultBudget  time.Duration // how long Await blocks when the caller's ctx carries no deadline (15m)
-	wedgeSweepInterval  time.Duration // parked-step wedge sweep tick; read once at Startup (5m)
+	recoveryInterval    time.Duration // recovery sweep tick; the heavy repairs run every heavyRepairEvery-th; read once at Startup (1m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
 	orphanFlowThreshold time.Duration // min age before a stranded running flow is repaired or reported orphaned (5m)
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
@@ -351,7 +351,7 @@ func NewEngine() *Engine {
 	// is cutting short a wait somebody legitimately asked for.
 	e.awaitDefaultBudget = 15 * time.Minute
 	e.persistBackoff = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
-	e.wedgeSweepInterval = 5 * time.Minute
+	e.recoveryInterval = time.Minute
 	e.parkWedgeThreshold = 5 * time.Minute
 	e.orphanFlowThreshold = 5 * time.Minute
 	e.deletionGrace = 1 * time.Minute
