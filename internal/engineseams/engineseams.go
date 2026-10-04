@@ -81,7 +81,7 @@ const (
 	FaultContention         = "contention"         // a dispatch transaction returns a lock-contention error
 	FaultLeaseStaleWrite    = "leaseStaleWrite"    // the completion write carries a stale lease_seq (zombie)
 	FaultPersistErr         = "persistErr"         // the step-completion write returns a non-contention database error (consumed per attempt, so InjectN sets how many attempts fail)
-	FaultSubgraphSpawnErr   = "subgraphSpawnErr"   // the subgraph child's creation errors after the caller step parked
+	FaultSubgraphSpawnErr   = "subgraphSpawnErr"   // the subgraph spawn errors before its transaction, with the caller step not yet parked
 
 	// Scoped by workflow URL of the subgraph child:
 	FaultSubgraphReviveLost = "subgraphReviveLost" // the subgraph-completion path skips reviving the parked caller
@@ -111,15 +111,19 @@ const (
 
 // --- Execution checkpoints ---
 const (
-	CheckpointResumeBeforeFlowWrite   = "resumeBeforeFlowWrite"   // Resume, just before its transaction's flow-status gate write
-	CheckpointBeforeTransitionTx      = "beforeTransitionTx"      // step execution, after the step is marked completed, before whichever transaction transitions it
-	CheckpointCancelBeforeMark        = "cancelBeforeMark"        // Cancel, after its watermark transaction commits, before it marks the steps
-	CheckpointAfterCallerPark         = "afterCallerPark"         // step execution, after the subgraph caller step is parked, before the child is created
-	CheckpointBeforeRetryRewind       = "beforeRetryRewind"       // step execution, before the flow.Retry rewind transaction
-	CheckpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // flow completion, just before its transaction's status-gate write
-	CheckpointBeforeDeleteWrite       = "beforeDeleteWrite"       // Delete, just before its transaction's delete-stamp/interrupted-CAS write
-	CheckpointBeforeReviveWrite       = "beforeReviveWrite"       // the subgraph-completion path, just before its transaction's caller-revive write
-	CheckpointBeforeRecoveryReset     = "beforeRecoveryReset"     // the post-execution recovery path, just before its fenced step-reset transaction
+	CheckpointResumeBeforeFlowWrite     = "resumeBeforeFlowWrite"     // Resume, just before its transaction's flow-status gate write
+	CheckpointBeforeTransitionTx        = "beforeTransitionTx"        // step execution, after the step is marked completed, before whichever transaction transitions it
+	CheckpointCancelBeforeMark          = "cancelBeforeMark"          // Cancel, after its watermark transaction commits, before it marks the steps
+	CheckpointBeforeSubgraphSpawn       = "beforeSubgraphSpawn"       // step execution, before the transaction that parks a subgraph caller and creates its child
+	CheckpointTerminateAfterScan        = "terminateAfterScan"        // Terminate, after its pre-transaction scan of the tree, before its transaction
+	CheckpointTerminateAfterStepsLocked = "terminateAfterStepsLocked" // Terminate, in its transaction, after its first step UPDATE and before it locks the flow rows
+	CheckpointTerminateAfterRescan      = "terminateAfterRescan"      // Terminate, in its transaction, after its scan for children spawned since the first scan
+	CheckpointSubgraphSpawnAbandoned    = "subgraphSpawnAbandoned"    // step execution, a subgraph spawn rolled back because its caller step is no longer running
+	CheckpointBeforeRetryRewind         = "beforeRetryRewind"         // step execution, before the flow.Retry rewind transaction
+	CheckpointBeforeCompleteFlowWrite   = "beforeCompleteFlowWrite"   // flow completion, just before its transaction's status-gate write
+	CheckpointBeforeDeleteWrite         = "beforeDeleteWrite"         // Delete, just before its transaction's delete-stamp/interrupted-CAS write
+	CheckpointBeforeReviveWrite         = "beforeReviveWrite"         // the subgraph-completion path, just before its transaction's caller-revive write
+	CheckpointBeforeRecoveryReset       = "beforeRecoveryReset"       // the post-execution recovery path, just before its fenced step-reset transaction
 
 	// A COUNTING checkpoint (read with Visits, never a rendezvous), scoped by flow id so concurrent flows
 	// count independently. No test arms Wait/Break on it, so Checkpoint just increments and returns; both the

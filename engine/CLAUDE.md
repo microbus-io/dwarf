@@ -241,7 +241,10 @@ interrupted steps remain.
 **Terminate** - Aborts a created, running, or interrupted flow, forcefully and unconditionally: in-flight work is
 abandoned immediately, with no chance for any task to react. Walks **down** (`allSubgraphFlows`) the hierarchy,
 atomically terminates all steps across all flows, computes `final_state` per flow, and sets every flow to
-`terminated` via CASE - all in one transaction (`terminateSubtree`). Must be addressed by the **root** flow key
+`terminated` via CASE - all in one transaction (`terminateSubtree`). Inside it, the steps are terminated, the flow
+rows locked, the steps terminated again, and the tree scanned once more; a scan that finds a flow the set missed
+rolls the transaction back and re-runs it over the larger set. So neither a step created mid-terminate nor a
+subgraph spawned since the first scan escapes (see the orphaned-child sweep under "Background Recovery"). Must be addressed by the **root** flow key
 (a subgraph-child key is rejected with 400 - see "Subgraph keys are read-only"). Takes a reason string surfaced
 as `FlowOutcome.TerminateReason`.
 
@@ -333,10 +336,9 @@ flow is cancelled once, and a repeat call is a no-op - see "one cancel per flow"
   cancellation; running on it would keep a cancelled flow acting on a human response.
 
 *Parked callers are marked like any other running step - a caller's cancellation is its own, not its child's to
-decide.* Excluding them loses the cancellation outright in two windows: after the park commits but before the
-child flow is inserted, and after the child completes but before the caller is revived (`completeFlow` and
-`completeSurgraphFlow` are separate transactions). In both the caller is skipped and the child is either absent
-or terminal, so nothing is marked and the flow runs on as if never cancelled.
+decide.* Excluding them loses the cancellation outright in the window after the child completes but before the
+caller is revived (`completeFlow` and `completeSurgraphFlow` are separate transactions): the caller is skipped and
+the child is terminal, so nothing is marked and the flow runs on as if never cancelled.
 
 *The reason is written before the mark*, so a step that sees the mark finds the reason. A step already running
 when Cancel landed read its flow row at claim time, before the reason existed, so the completion-write path
@@ -1996,7 +1998,7 @@ before the child terminalizes, so there is no live sibling to strand - and a sib
 *interrupts* propagates up normally, so the whole tree parks `interrupted` and a root `Resume` still threads down
 to it (rather than the grandchild's approval being silently cancelled). `deliverSubgraphError` is used **only**
 by the wedge sweep (a wedged caller whose child already went terminal); the live failStep path does not call it.
-Defense in depth for any residual orphan (e.g. the Terminate-vs-spawn race) is
+Defense in depth for any residual orphan is
 `recoverOrphanedSubgraphChildren` (see "Background Recovery"). `fixtures`/`engine`
 `TestSubgraphCohortFail_NoStrandOnBranchFailure` pins the child staying `running` after one branch failed while a
 sibling is parked on a live grandchild, then converging to a clean terminal tree with the branch error surfaced
@@ -3617,7 +3619,7 @@ that came due while a replica was down is removed on the next tick (single-repli
 descendant. The deferred path stamps only the root (whose own status is 409-guarded, so a non-terminal root is never
 stamped) and the reaper deletes the whole
 `root_flow_id` tree regardless of descendant status. The only running descendant a terminal-rooted tree can hold is
-the **orphaned-child residue** (the Terminate-vs-spawn race: a live child whose parent already terminalized - see
+an **orphaned child** (a live child whose parent already terminalized, which only a bug leaves - see
 `recoverOrphanedSubgraphChildren`), a bug-state row the wedge sweep would terminate anyway. Deleting it is safe: a
 worker mid-dispatch on the orphan no-ops via the lease fence (claim/write matches zero rows once the tree is gone),
 so no strand and no corruption. Whichever of the reaper and the wedge sweep reaches the orphan first wins. The
@@ -3925,10 +3927,10 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      non-terminal child** (`surgraph_step_id = step_id`, status created/running/interrupted) is wedged - the child
      reached terminal but the revive was lost, or the child was deleted. The sweep re-drives the release on the
      latest child (`flow_id DESC`): `completeSurgraphFlow` for a completed child, `deliverSubgraphError` for a
-     failed/terminated/cancelled/absent one. **The absent-child case (`childFlowID == 0`) is the one the whole sweep
-     exists
-     for** - a worker that committed the park and died before inserting the child leaves a step no lease can
-     recover (`parkedSubgraph` carries no lease) - and it must skip every child-directed write: aiming them at
+     failed/terminated/cancelled/absent one. **The absent-child case (`childFlowID == 0`)** cannot be reached by a
+     crash - the park and the child's insert commit in one transaction - so it is defense against a bug or a
+     hand-deleted row. A parked caller carries no lease, so nothing else would recover it, and the case must skip
+     every child-directed write: aiming them at
      id `0` made `computeFinalState` SELECT `WHERE flow_id=0`, hit `sql.ErrNoRows`, and roll the recovery back on
      every sweep, so the flow hung forever. There is no child to terminalize; the recovery IS failing the caller,
      which the parent re-arm does. Pinned by `TestWedgeSweep_SubgraphCallerWithNoChildFails`.
@@ -3942,12 +3944,24 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      non-terminal child flow (`created`/`running`/`interrupted`) whose *parent flow* is already terminal
      (`completed`/`failed`/`terminated`/`cancelled`). Where the `parkedSubgraph` case is a live caller whose child
      vanished,
-     this is a live child whose caller/parent vanished. It is the residue of a `Terminate` that terminalized the
-     tree in the narrow window **after the caller step parked but before the child flow was inserted**
-     (`execution.go`: the park UPDATE commits, then `createSubgraphFlow` runs), so the teardown - working from a
-     scan taken before the child existed - missed it. (A fan-out sibling's `failStep` does not produce this
-     residue: a subgraph child fails via cohort accounting after every branch settles, never eagerly while a
-     sibling is live - see "Failure back to the parent".) The orphan has no path out on its
+     this is a live child whose caller/parent vanished. **Nothing in the engine leaves one, and the sweep is
+     defense in depth for a bug that would.** A `Terminate` racing a subgraph spawn cannot, and four rules hold
+     that up:
+     - **The spawn parks its caller in the transaction that inserts the child.** A park committed on its own
+       leaves a window in which the child is inserted under a parent the teardown already finished.
+     - **`terminateSubtree` terminates the steps, locks the flow rows, then terminates the steps AGAIN.** A
+       transition locks its flow row before inserting a step, so once the rows are held no step can be added -
+       but one that committed between the first step UPDATE and the lock was not covered by it, and left running
+       it can still spawn (measured on Postgres and SQL Server; MySQL's gap locks happen to block it).
+     - **It scans for children inside the transaction, after those writes.** Every live step of the tree is then
+       locked, so a spawn has either committed (the scan sees its child) or will find its caller terminated.
+     - **ONE scan per transaction; new flows mean roll back and re-run.** On MySQL's REPEATABLE READ the first
+       plain read fixes the transaction's snapshot, so a second scan in the same transaction misses a grandchild
+       spawned in between - measured as a live grandchild under a terminated child on MySQL and MariaDB. The
+       re-run's first write covers the new flows before its own scan takes a fresh snapshot.
+     `TestTerminateVsSubgraphSpawn_Deterministic` has a subtest that fails with each rule removed. (A fan-out sibling's
+     `failStep` does not produce an orphan either: a subgraph child fails via cohort accounting after every branch
+     settles, never eagerly while a sibling is live - see "Failure back to the parent".) The orphan has no path out on its
      own: the terminal root 409s `Resume`/`Terminate`, the child's own key is read-only (400), and
      `recoverWedgedSubgraphParks` is blind because the caller step is *terminal*, not `running`+`parkedSubgraph`.
      The sweep terminates the orphan's whole subtree (`terminateOrphanedSubtree`, which *shares* `Terminate`'s
@@ -4094,12 +4108,12 @@ perturbing the timing under test and obliging a `Resume`. So:
 
 - **`e.seams.Waiter(name)`** - arms and hands back a channel; receive after the trigger. The only form that works
   when the test's *own next statement* drives the engine to the checkpoint.
-- **`e.seams.WaitTimeout(ctx, timeout, name, scope...)`** - arms and blocks, reporting arrival. Use it where the
+- **`e.seams.WaitTimeout(ctx, name, timeout)`** - arms and blocks, reporting arrival. Use it where the
   engine is *already* running into the checkpoint: after a `Break` froze it there, or with the trigger in flight.
-  Spelled `assert.True(e.seams.WaitTimeout(ctx, 10*time.Second, cp), "engine never reached checkpoint cp")` so a
-  miss fails with a diagnostic rather than hanging to the suite deadline. (`Wait(ctx, name, scope...)` is the
-  same thing bounded only by ctx; `WaitTimeout` is sugar over it for the usual "wait this long" shape, and takes
-  its timeout *before* the name so the scope stays variadic and trailing.)
+  Spelled `assert.True(e.seams.WaitTimeout(ctx, cp, 10*time.Second), "engine never reached checkpoint cp")` so a
+  miss fails with a diagnostic rather than hanging to the suite deadline. (`Wait(ctx, name)` is the same thing
+  bounded only by ctx; `WaitTimeout` is sugar over it for the usual "wait this long" shape. A targeted name is
+  built with `engineseams.Join` first.)
 
 Because `Waiter` makes a rendezvous race-free on its own, **`Break` is reserved for what it is actually for** -
 genuinely *holding* the engine while a racing operation runs - and is never armed merely to make an observation
@@ -4112,28 +4126,28 @@ check `Visits`. **That order is load-bearing** - a stop before the call is caugh
 channel, one landing between the two lines by the channel (the waiter is already registered). Reversing them
 reintroduces precisely the race `Waiter` exists to remove.
 
-**A targeted seam name is built by `On`** (`engineundertest.go`), which joins a base name with the entity it
+**A targeted seam name is built by `engineseams.Join`**, which joins a base name with the entity it
 targets. A consult site and the test that arms it both call it, which is what keeps the two from spelling the
 join differently - the seam itself keys on a plain string and knows nothing about the parts. `signalStop` fires
-the stop checkpoint **both bare and targeted at `(flowKey, status)`**: `Checkpoint(ctx, checkpointFlowStopped)`
-and `Checkpoint(ctx, On(checkpointFlowStopped, flowKey, status))`. Both are needed because **the two are
+the stop checkpoint **both bare and targeted at `(flowKey, status)`**: `Checkpoint(ctx, engineseams.CheckpointFlowStopped)`
+and `Checkpoint(ctx, engineseams.Join(engineseams.CheckpointFlowStopped, flowKey, status))`. Both are needed because **the two are
 different names, and firing one does not wake a waiter on the other** (the same contract faults carry) - the
 bare name serves "any flow stopped", the targeted one lets a test wait for one flow while a subgraph child, a
 fan-out sibling, or a peer replica's flows stop concurrently. The targeted form is meaningful only because
 `signalStop` runs **post-commit**: when it fires the status is durable, so a test reading the row immediately
 after sees it - the exact fact a status poll was spinning to sample.
 
-**Every `seamsJoin` call outside a test is wrapped in `e.seams.Enabled()`, without exception.** The join
+**Every join outside a test is wrapped in `e.seams.Enabled()`, without exception.** The join
 assembles a string, and a caller assembles it *before* the seam's own gate can short-circuit - so an unguarded
 site allocates on every pass in production, for a seam that can never fire there. A consult reads
-`if e.seams.Enabled() && e.seams.IsFault(seamsJoin(...))`, whose `&&` short-circuits before the join; a
+`if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(...))`, whose `&&` short-circuits before the join; a
 checkpoint pair puts both fires inside one `if e.seams.Enabled()` block, since the bare fire is a no-op when
 disabled anyway. A **bare constant** name costs nothing and needs no guard - that is most sites.
 
-The join is package-local and unexported everywhere it appears (`engine`, `fixtures`, `internal/enginetest`,
-`internal/piston`, `internal/peers`), because it exists for tests and has no business on any package's public
-surface. The copies must agree on the separator; a drift makes a wait target a name nothing fires, so it times
-out and fails loudly rather than going quietly wrong.
+`engine`, `fixtures` and `internal/enginetest` share `engineseams.Join`; `internal/piston` and
+`internal/peers` keep unexported copies, since they sit below the engine. The copies must agree on the
+separator; a drift makes a wait target a name nothing fires, so it times out and fails loudly rather than going
+quietly wrong.
 
 Two limits: only stops routed through `signalStop` have a rendezvous (completed/failed/terminated/cancelled/interrupted),
 and because `Visits` is monotonic a **repeated** status (interrupt → resume → interrupt) is satisfied by the

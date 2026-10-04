@@ -663,31 +663,33 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 				errors.New("invalid subgraph graph %s: %v", subgraphURL, verr, http.StatusBadRequest), taskName)
 			return errors.Trace(err)
 		}
-		// Persist the task's changes AND park the caller step in one UPDATE, BEFORE the child flow is made
-		// dispatchable by start below. The ordering is load-bearing: completeSurgraphFlow revives this
-		// caller only WHERE parked=parkedSubgraph, and a parkedSubgraph step is excluded from lease recovery,
-		// so if the child completes and runs that revive before a later park lands, the no-op revive loses
-		// the wakeup and the caller is stranded permanently - its fan-in then never fires and the flow hangs.
-		// Observed deterministically when the caller is one of several fan-out siblings (the workers stay busy
-		// so the child wins the race), e.g. examples/creditflow's identity-verification branch. The
-		// status=running guard parks no row (n==0) if the step was concurrently terminated; the error is
-		// checked so a lost park fails the step rather than stranding it.
-		parkRes, err := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
-			changesJSON, parkedSubgraph, stepID, leaseSeq,
-		)
-		if err != nil {
-			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
-			return errors.Trace(err)
-		}
-		if n, _ := parkRes.RowsAffected(); n == 0 {
+		// Persist the task's changes and park the caller step in the SAME transaction that inserts the child.
+		// Two orderings are load-bearing here:
+		//
+		//   - The park must be visible before the child can complete: completeSurgraphFlow revives this caller
+		//     only WHERE parked=parkedSubgraph, and a parkedSubgraph step is excluded from lease recovery, so a
+		//     revive that ran before the park landed would lose the wakeup and strand the caller - its fan-in
+		//     then never fires and the flow hangs. One transaction makes the two visible together.
+		//   - A Terminate must not miss the child. Terminate locks every live step of the tree, this caller
+		//     included, before scanning for children inside its own transaction (terminateSubtree). So this
+		//     spawn either commits first, and Terminate's scan sees the child, or it waits on that lock and its
+		//     park then matches no row, rolling back so no child is created.
+		//
+		// The park is guarded on status=running and the lease, so a terminated or re-claimed caller rolls the
+		// spawn back too, and this worker returns quietly.
+		parkCaller := func(tx *sequel.Tx) error {
+			res, err := tx.ExecContext(ctx,
+				"UPDATE dwarf_steps SET changes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
+				changesJSON, parkedSubgraph, stepID, leaseSeq,
+			)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return errCallerGone
+			}
 			return nil
 		}
-		e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
-		// Test checkpoint: a breakpoint here freezes the worker after the caller step is parked but before the
-		// child flow is inserted, so a test can Terminate the tree in exactly the window that produces an orphaned
-		// subgraph child (the recoverOrphanedSubgraphChildren case).
-		e.seams.Checkpoint(ctx, engineseams.CheckpointAfterCallerPark)
 		childInputState := subgraphInput
 		if childInputState.IsZero() {
 			childInputState, _ = workflow.NewState()
@@ -695,12 +697,18 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 		// The caller step's span is still live on taskCtx; parent the subgraph's "workflow" span under it
 		// so the subgraph subtree nests beneath this task in the trace.
 		callerTraceParent := extractTraceParent(taskCtx)
+		e.seams.Checkpoint(ctx, engineseams.CheckpointBeforeSubgraphSpawn)
 		// createSubgraphFlow inserts the child already surgraph-linked and running, so no separate start.
-		_, err = e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphURL, subgraphGraph, childInputState, baggageJSON, callerTraceParent)
+		_, err = e.createSubgraphFlow(ctx, shardNum, flowID, stepDepth, stepID, subgraphURL, subgraphGraph, childInputState, baggageJSON, callerTraceParent, parkCaller)
+		if errors.Is(err, errCallerGone) {
+			e.seams.Checkpoint(ctx, engineseams.CheckpointSubgraphSpawnAbandoned)
+			return nil
+		}
 		if err != nil {
 			err = e.failAndReturn(ctx, shardNum, stepID, leaseSeq, flowID, flowToken, err, taskName)
 			return errors.Trace(err)
 		}
+		e.metricStateWriteBytes(ctx, workflowURL, "changes", len(changesJSON))
 		e.metricStepExecuted(ctx, taskName, "subgraph", shardNum)
 		return nil
 	}
@@ -1976,6 +1984,10 @@ func (e *Engine) insertFanInStep(ctx context.Context, tx sequel.Executor, shardN
 	}
 	return int(fanInStepID), bytes, nil
 }
+
+// errCallerGone rolls back a subgraph spawn whose caller step is no longer running under this worker's lease -
+// terminated, or re-claimed by a peer - so no child is created for it.
+var errCallerGone = errors.New("subgraph caller is no longer running")
 
 // dispatchURLOf resolves a graph node name to its dispatch URL.
 func dispatchURLOf(graph *workflow.Graph, name string) string {

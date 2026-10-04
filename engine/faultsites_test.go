@@ -110,9 +110,9 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	enginetest.AssertInvariants(t, e)
 }
 
-// TestFaultSite_SubgraphSpawnErr pins that a subgraph spawn failing AFTER the caller step parked
-// (execution.go's park-then-create ordering) fails the caller cleanly rather than leaving it parked forever,
-// and leaves no orphan child flow.
+// TestFaultSite_SubgraphSpawnErr pins that a subgraph spawn that fails fails the caller cleanly rather than
+// leaving it parked, and leaves no child flow. The park and the child's insert share a transaction, so a failed
+// spawn never leaves a parked caller behind.
 func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -134,8 +134,8 @@ func TestFaultSite_SubgraphSpawnErr(t *testing.T) {
 	reader := withManualReader(e)
 	assert.NoError(e.Startup(t.Context()))
 
-	// The caller parks, then createSubgraphFlow errors (no child inserted): failAndReturn must fail the caller
-	// step (un-parked) and the flow, not strand it parked.
+	// createSubgraphFlow errors before its transaction (no park, no child): failAndReturn must fail the caller
+	// step and the flow.
 	e.seams.Inject(engineseams.Join(engineseams.FaultSubgraphSpawnErr, "ftbspawn/child"))
 	fk, out := batteryRun(t, e, "ftbspawn/parent")
 	assert.Equal(workflow.StatusFailed, out.Status)

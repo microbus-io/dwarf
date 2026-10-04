@@ -481,7 +481,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 // TestLeaseFence_SubgraphParkFenced pins the subgraph-park fence: a zombie whose task armed flow.Subgraph must not
 // park its step (running -> running+parkedSubgraph) and spawn a *second* child for a flow the current owner already
 // completed. The park UPDATE is gated on `status='running' AND lease_seq=?`, so the zombie's stale generation
-// matches zero rows and createSubgraphFlow never runs. A (calls a subgraph) -> END; A's first dispatch is the
+// matches zero rows, rolling the spawn back before any child is inserted. A (calls a subgraph) -> END; A's first dispatch is the
 // zombie, a peer re-runs A so the real child spawns and completes, then the released zombie's fenced park is a no-op.
 func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 	t.Parallel()

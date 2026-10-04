@@ -233,11 +233,11 @@ func (e *Engine) recoverWedgedSubgraphParks(ctx context.Context, db *sequel.DB, 
 // this handles a live child whose caller/parent is gone). Such a child is orphaned: its parent can never process
 // its completion or interrupt, and no lifecycle op reaches it - the root key 409s (the root is terminal), the
 // child's own key is read-only (Resume/Terminate 400), and recoverWedgedSubgraphParks is blind to it (the caller
-// step is terminal, not running+parked). It is the residue of a Terminate that terminalized the tree in the narrow
-// window after the caller step parked but before the child flow was inserted, so the teardown, working from a scan
-// taken before the child existed, missed it. (A fan-out sibling's failStep no longer produces this residue - a
-// subgraph child now fails via cohort accounting after every branch settles, never eagerly while a sibling is
-// live - so this is defense in depth for the Terminate race and any future orphan cause.) The sweep tears the
+// step is terminal, not running+parked). Nothing in the engine leaves one: a spawn parks its caller and inserts
+// the child in one transaction, and Terminate re-scans the tree inside its own after locking the tree's steps
+// (terminateSubtree), so a Terminate racing a spawn either prevents the child or terminates it; and a subgraph
+// child fails via cohort accounting after every branch settles, never eagerly while a sibling is live. This is
+// defense in depth for a bug that would. The sweep tears the
 // orphan down by terminating its subtree, sharing the parent's terminal fate. In steady state a parent goes
 // terminal only after its live subgraphs resolve, so a non-terminal child under a terminal parent older than
 // minAge is genuinely orphaned; the age guard excludes the sub-second window in which a just-terminalized

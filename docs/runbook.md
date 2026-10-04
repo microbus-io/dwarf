@@ -86,9 +86,8 @@ and no manual recovery is needed. What the counter tells you is that a step reac
 have been able to reach.
 
 **Respond.** Nothing urgent. The `park_type` label distinguishes the two cases: `orphaned_child` is a live
-subgraph child whose parent already terminalized (usually the residue of a `Terminate` that raced a subgraph
-spawn — benign and expected at low rates under heavy termination); anything else is a caller whose child
-vanished, which is worth reporting.
+subgraph child whose parent already ended, and anything else is a caller whose child vanished. Neither is
+expected in normal operation, including under heavy use of `Terminate`, so either is worth reporting.
 
 **Escalate** with the `park_type` label and the timing if the rate is sustained rather than occasional.
 

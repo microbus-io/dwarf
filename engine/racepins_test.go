@@ -248,94 +248,275 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 	enginetest.AssertInvariants(t, e) // no orphan
 }
 
-// TestTerminateVsSubgraphSpawn_Deterministic pins the orphaned-child recovery: a Terminate that terminalizes
-// the tree in the window after the caller step parked but before the child flow was inserted leaves a live
-// child under a terminal parent - an orphan no lifecycle op reaches. The wedge sweep's
-// recoverOrphanedSubgraphChildren must terminate it. The checkpoint manufactures this residue
-// deterministically (vs. the Terminate-vs-spawn timing race).
+// TestTerminateVsSubgraphSpawn_Deterministic pins that a Terminate racing a subgraph spawn never leaves a live
+// flow, or a live step, under an ended parent. A spawn parks its caller step in the transaction that inserts the
+// child; Terminate terminates the tree's steps, locks its flow rows, terminates the steps again, scans for children
+// once, and re-runs over the larger set if the scan found any. Each subtest drives one ordering:
+//
+//   - terminate_first: the spawn finds its caller terminated and rolls back, creating no child.
+//   - spawn_after_terminate_scan: the child commits after Terminate's pre-transaction scan; Terminate's
+//     in-transaction scan finds and terminates it.
+//   - grandchild_after_rescan: a child found by Terminate's scan spawns a grandchild before Terminate locks the
+//     child's steps. Terminate must re-run rather than scan again in the same transaction - on MySQL's
+//     REPEATABLE READ a second scan would reuse the first one's snapshot and miss the grandchild.
+//   - step_created_during_terminate: a transition creates the caller step after Terminate's first step UPDATE,
+//     so that UPDATE never touched it; the second one, after the flow rows are locked, does - so the step is
+//     terminated and its spawn rolls back. (On SQLite, Terminate's write lock
+//     holds the transition off entirely, so the subtest passes without reaching the race there.)
+//
+// None of them runs the wedge sweep's orphaned-child repair.
 func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := context.Background()
 
-	xRelease := make(chan struct{})
-	mux := NewHostMux()
-	parent := workflow.NewGraph("Parent")
-	parent.SetURL("Call", "cvs/call")
-	parent.AddTransition("Call", workflow.End)
-	assert.NoError(parent.Validate())
-	mux.HandleGraph("cvs/parent", parent)
-	child := workflow.NewGraph("Child")
-	child.SetURL("X", "cvs/x")
-	child.AddTransition("X", workflow.End)
-	assert.NoError(child.Validate())
-	mux.HandleGraph("cvs/child", child)
-	mux.HandleTask("cvs/call", func(ctx context.Context, f *workflow.Flow) error {
-		yield, err := f.Subgraph("cvs/child", nil, nil)
-		if yield || err != nil {
-			return err
+	type rig struct {
+		e        *Engine
+		mux      *HostMux
+		release  chan struct{}
+		xEntered chan struct{}
+	}
+	newRig := func(t *testing.T) (*rig, func()) {
+		r := &rig{mux: NewHostMux(), release: make(chan struct{}), xEntered: make(chan struct{}, 8)}
+		// Leaf tasks block so a flow that escaped termination would stay running; released at cleanup.
+		r.mux.HandleTask("cvs/x", func(ctx context.Context, f *workflow.Flow) error {
+			r.xEntered <- struct{}{}
+			<-r.release
+			return nil
+		})
+		child := workflow.NewGraph("Child")
+		child.SetURL("X", "cvs/x")
+		child.AddTransition("X", workflow.End)
+		testarossa.For(t).NoError(child.Validate())
+		r.mux.HandleGraph("cvs/child", child)
+		r.e = NewEngineUnderTest(t.Name())
+		r.e.SetHost(r.mux)
+		return r, func() { close(r.release); r.e.Shutdown(context.Background()) }
+	}
+	callSubgraph := func(url string, before func()) func(ctx context.Context, f *workflow.Flow) error {
+		return func(ctx context.Context, f *workflow.Flow) error {
+			if before != nil {
+				before()
+			}
+			yield, err := f.Subgraph(url, nil, nil)
+			if yield || err != nil {
+				return err
+			}
+			return nil
 		}
-		return nil
+	}
+	// assertAllTerminated checks every flow on the shard ended terminated - none left running under a terminated
+	// parent - and that the tree's invariants hold.
+	assertAllTerminated := func(t *testing.T, e *Engine, fk string) {
+		assert := testarossa.For(t)
+		shardNum, _, _, _ := keys.ParseFlowKey(fk)
+		db, _ := e.db.Shard(shardNum)
+		rows, err := db.QueryContext(t.Context(), "SELECT flow_id, workflow_url, status FROM dwarf_flows ORDER BY flow_id")
+		if !assert.NoError(err) {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int
+			var url, status string
+			assert.NoError(rows.Scan(&id, &url, &status))
+			assert.Equal(workflow.StatusTerminated, status, "flow %d (%s)", id, url)
+		}
+		enginetest.AssertInvariants(t, e)
+	}
+	countFlows := func(t *testing.T, e *Engine, fk, workflowURL string) int {
+		shardNum, _, _, _ := keys.ParseFlowKey(fk)
+		db, _ := e.db.Shard(shardNum)
+		var n int
+		db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dwarf_flows WHERE workflow_url=?", workflowURL).Scan(&n)
+		return n
+	}
+	awaitFlow := func(t *testing.T, e *Engine, fk, workflowURL string) bool {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if countFlows(t, e, fk, workflowURL) > 0 {
+				return true
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		return false
+	}
+	parentGraph := func(t *testing.T, r *rig) {
+		parent := workflow.NewGraph("Parent")
+		parent.SetURL("Call", "cvs/call")
+		parent.AddTransition("Call", workflow.End)
+		testarossa.For(t).NoError(parent.Validate())
+		r.mux.HandleGraph("cvs/parent", parent)
+		r.mux.HandleTask("cvs/call", callSubgraph("cvs/child", nil))
+	}
+
+	t.Run("terminate_first", func(t *testing.T) {
+		assert := testarossa.For(t)
+		ctx := t.Context()
+		r, done := newRig(t)
+		defer done()
+		parentGraph(t, r)
+		assert.NoError(r.e.Startup(ctx))
+
+		r.e.seams.Break(engineseams.CheckpointBeforeSubgraphSpawn)
+		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
+		assert.NoError(err)
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeSubgraphSpawn, 10*time.Second), "engine never reached the spawn")
+		assert.NoError(r.e.Terminate(ctx, fk, "test"))
+		abandoned := r.e.seams.Waiter(engineseams.CheckpointSubgraphSpawnAbandoned)
+		r.e.seams.Resume(engineseams.CheckpointBeforeSubgraphSpawn)
+		select {
+		case <-abandoned:
+		case <-time.After(10 * time.Second):
+			assert.True(false, "the spawn was never abandoned")
+		}
+		assert.Zero(countFlows(t, r.e, fk, "cvs/child"), "a spawn after Terminate must create no child")
+		assertAllTerminated(t, r.e, fk)
 	})
-	// X blocks so the orphaned child stays non-terminal (running) when the sweep runs; released at cleanup.
-	mux.HandleTask("cvs/x", func(ctx context.Context, f *workflow.Flow) error {
-		<-xRelease
-		return nil
+
+	t.Run("spawn_after_terminate_scan", func(t *testing.T) {
+		assert := testarossa.For(t)
+		ctx := t.Context()
+		r, done := newRig(t)
+		defer done()
+		parentGraph(t, r)
+		assert.NoError(r.e.Startup(ctx))
+
+		r.e.seams.Break(engineseams.CheckpointBeforeSubgraphSpawn)
+		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
+		assert.NoError(err)
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeSubgraphSpawn, 10*time.Second), "engine never reached the spawn")
+
+		// Terminate scans the tree (no child yet) and freezes before its transaction.
+		r.e.seams.Break(engineseams.CheckpointTerminateAfterScan)
+		terminated := make(chan error, 1)
+		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
+
+		// The spawn commits its child under a tree Terminate scanned without it.
+		r.e.seams.Resume(engineseams.CheckpointBeforeSubgraphSpawn)
+		ok := awaitFlow(t, r.e, fk, "cvs/child")
+		r.e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+		assert.NoError(<-terminated)
+		if assert.True(ok, "the spawn never committed its child") {
+			assertAllTerminated(t, r.e, fk)
+		}
 	})
 
-	e := NewEngineUnderTest(t.Name())
-	defer e.Shutdown(ctx)
-	e.SetHost(mux)
-	assert.NoError(e.Startup(t.Context()))
-	// Release X here, AFTER the Shutdown defer, so it unwinds FIRST (defers are LIFO): Shutdown drains
-	// workers, so a worker still blocked in X must be unblocked first or the drain deadlocks.
-	defer close(xRelease)
+	t.Run("grandchild_after_rescan", func(t *testing.T) {
+		assert := testarossa.For(t)
+		ctx := t.Context()
+		r, done := newRig(t)
+		defer done()
+		parentGraph(t, r)
+		// The child calls a grandchild, gated so it spawns only when the test says.
+		middle := workflow.NewGraph("Middle")
+		middle.SetURL("CallGrand", "cvs/callgrand")
+		middle.AddTransition("CallGrand", workflow.End)
+		assert.NoError(middle.Validate())
+		r.mux.HandleGraph("cvs/middle", middle)
+		r.mux.HandleTask("cvs/call", callSubgraph("cvs/middle", nil))
+		gate, entered := make(chan struct{}), make(chan struct{}, 1)
+		r.mux.HandleTask("cvs/callgrand", callSubgraph("cvs/child", func() {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-gate
+		}))
+		assert.NoError(r.e.Startup(ctx))
 
-	// Freeze the caller after it parked, before createSubgraphFlow inserts the child.
-	e.seams.Break(engineseams.CheckpointAfterCallerPark)
-	fk, err := e.Create(ctx, "cvs/parent", nil, nil)
-	assert.NoError(err)
-	assert.True(e.seams.WaitTimeout(ctx, engineseams.CheckpointAfterCallerPark, 10*time.Second), "engine never reached checkpoint engineseams.CheckpointAfterCallerPark")
+		r.e.seams.Break(engineseams.CheckpointBeforeSubgraphSpawn)
+		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
+		assert.NoError(err)
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeSubgraphSpawn, 10*time.Second), "engine never reached the spawn")
 
-	// Terminate the tree while the child does not yet exist: teardown works from a scan taken before the child.
-	assert.NoError(e.Terminate(ctx, fk, "test"))
-
-	// Release the caller: createSubgraphFlow now inserts the child under the already-terminated parent - orphan.
-	e.seams.Resume(engineseams.CheckpointAfterCallerPark)
-
-	shardNum, parentFlowID, _, err := keys.ParseFlowKey(fk)
-	assert.NoError(err)
-	db, err := e.db.Shard(shardNum)
-	assert.NoError(err)
-
-	// Wait for the orphaned child flow to be inserted (surgraph_flow_id -> the terminated parent).
-	var childFlowID int
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		db.QueryRowContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID).Scan(&childFlowID)
-		if childFlowID != 0 {
-			break
+		// Terminate scans before the middle flow exists, then the middle flow commits and its task starts.
+		r.e.seams.Break(engineseams.CheckpointTerminateAfterScan)
+		r.e.seams.Break(engineseams.CheckpointTerminateAfterRescan)
+		terminated := make(chan error, 1)
+		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
+		r.e.seams.Resume(engineseams.CheckpointBeforeSubgraphSpawn)
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			assert.True(false, "the middle flow's task never ran")
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !assert.True(childFlowID != 0, "orphaned child flow was never inserted") {
-		return
-	}
 
-	// The sweep (minAge 0, bypassing the steady-state age guard) must terminate the orphaned child's subtree.
-	e.recoverOrphanedSubgraphChildren(ctx, db, shardNum, 0)
-
-	var childStatus string
-	deadline = time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", childFlowID).Scan(&childStatus)
-		if childStatus == workflow.StatusTerminated {
-			break
+		// Terminate's transaction locks the root, scans, finds the middle flow, and freezes. Now the middle flow's
+		// task spawns the grandchild, committing after that scan's snapshot. The grandchild is observed through its
+		// task starting, not by reading the database: Terminate holds its transaction open here, and on SQLite
+		// that write lock blocks a read - and the spawn - until it is released.
+		r.e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterRescan, 10*time.Second), "Terminate never scanned inside its transaction")
+		close(gate)
+		select {
+		case <-r.xEntered:
+		case <-time.After(3 * time.Second): // SQLite: the spawn waits behind Terminate's write lock
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	assert.Equal(workflow.StatusTerminated, childStatus) // orphan shares the parent's terminal fate
-	enginetest.AssertInvariants(t, e)
+		r.e.seams.Resume(engineseams.CheckpointTerminateAfterRescan)
+		assert.NoError(<-terminated)
+		assertAllTerminated(t, r.e, fk)
+	})
+
+	t.Run("step_created_during_terminate", func(t *testing.T) {
+		assert := testarossa.For(t)
+		ctx := t.Context()
+		r, done := newRig(t)
+		defer done()
+		parent := workflow.NewGraph("Parent")
+		parent.SetURL("A", "cvs/a")
+		parent.SetURL("Call", "cvs/call")
+		parent.AddTransition("A", "Call")
+		parent.AddTransition("Call", workflow.End)
+		assert.NoError(parent.Validate())
+		r.mux.HandleGraph("cvs/parent", parent)
+		r.mux.HandleTask("cvs/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+		gate, entered := make(chan struct{}), make(chan struct{}, 1)
+		r.mux.HandleTask("cvs/call", callSubgraph("cvs/child", func() {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-gate
+		}))
+		assert.NoError(r.e.Startup(ctx))
+
+		// A completes and freezes before the transition that creates Call.
+		r.e.seams.Break(engineseams.CheckpointBeforeTransitionTx)
+		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
+		assert.NoError(err)
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointBeforeTransitionTx, 10*time.Second), "A never reached its transition")
+
+		// Terminate terminates the steps that exist, and freezes before it locks the flow rows.
+		r.e.seams.Break(engineseams.CheckpointTerminateAfterStepsLocked)
+		terminated := make(chan error, 1)
+		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterStepsLocked, 10*time.Second), "Terminate never locked the steps")
+
+		// The transition creates Call, which Terminate's step UPDATE never saw, and Call is claimed. (Where
+		// Terminate's write lock holds the transition off - SQLite - Call is never created at all.)
+		r.e.seams.Resume(engineseams.CheckpointBeforeTransitionTx)
+		claimed := false
+		select {
+		case <-entered:
+			claimed = true
+		case <-time.After(3 * time.Second):
+		}
+		r.e.seams.Resume(engineseams.CheckpointTerminateAfterStepsLocked)
+		assert.NoError(<-terminated)
+		// Call was terminated by Terminate's second step UPDATE, so its spawn must roll back.
+		abandoned := r.e.seams.Waiter(engineseams.CheckpointSubgraphSpawnAbandoned)
+		close(gate)
+		if claimed {
+			select {
+			case <-abandoned:
+			case <-time.After(10 * time.Second):
+				assert.True(false, "the spawn under a terminated flow was never abandoned")
+			}
+		}
+		assert.Zero(countFlows(t, r.e, fk, "cvs/child"), "a spawn under a terminated flow must create no child")
+		assertAllTerminated(t, r.e, fk)
+	})
 }
 
 // TestRetryRewindVsTerminate_Deterministic pins the flow.Retry rewind's status='running' guard: a Terminate

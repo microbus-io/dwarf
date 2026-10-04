@@ -118,13 +118,8 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 		return
 	}
 
-	// Wait until the subgraph child is fully started (status=running), not merely until the caller parks.
-	// The launch is three sequential steps - park the caller (parkedSubgraph), create the child (created),
-	// then start the child (running) - and the park commits and is visible before the child is started. If
-	// the test forged the child to completed in that window, the engine's start(child) would find it
-	// non-created and fail the caller with "flow is already started". A running child implies start(child)
-	// has run and the caller is parked. (SQLite serializes these writes so the window never opens; MySQL and
-	// Postgres expose it.)
+	// Wait until the subgraph child exists and is running. The caller's park and the child's insert commit
+	// together, so a running child implies the caller is parked.
 	var parentStepID int
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -161,7 +156,7 @@ func TestWedgeSweep_SubgraphCallerRevived(t *testing.T) {
 
 // TestWedgeSweep_SubgraphCallerWithNoChildFails forges the wedge the sweep's designated last-resort branch
 // exists for and could never actually recover: a caller step parked on a subgraph whose child flow does not
-// exist (a worker committed the park and died before inserting the child; or the child was deleted). Such a
+// exist. The park and the child's insert commit together, so only a bug or a deleted row produces it. Such a
 // step is invisible to lease recovery BY DESIGN - parkedSubgraph carries no lease - so the sweep is the only
 // way out. It must fail the caller: the parent re-arm writes the error onto the parked step, the
 // re-dispatched flow.Subgraph returns it, and the task fails through its normal disposition.

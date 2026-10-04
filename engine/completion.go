@@ -36,11 +36,12 @@ import (
 
 // createSubgraphFlow creates a subgraph flow for a dynamic subgraph transition. callerStepDepth is the
 // caller step's step_depth, so the child's entry step (and thus its whole subtree) is numbered as a
-// continuation of the caller (callerStepDepth+1).
-func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState workflow.State, baggageJSON []byte, callerTraceParent string) (string, error) {
-	// engineseams.FaultSubgraphSpawnErr simulates the spawn failing after the caller step already parked (processStep's
-	// park-then-create ordering): no child is inserted, and the caller must be failed cleanly (failAndReturn)
-	// rather than left parked forever. Scoped by the child workflow URL.
+// continuation of the caller (callerStepDepth+1). parkCaller runs first in the child's insert transaction, so
+// the caller is parked and its child created atomically; see processStep for why.
+func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState workflow.State, baggageJSON []byte, callerTraceParent string, parkCaller func(tx *sequel.Tx) error) (string, error) {
+	// engineseams.FaultSubgraphSpawnErr simulates the spawn failing before its transaction: the caller is not
+	// parked and no child is inserted, so the caller must be failed cleanly (failAndReturn). Scoped by the
+	// child workflow URL.
 	if e.seams.Enabled() && e.seams.IsFault(engineseams.Join(engineseams.FaultSubgraphSpawnErr, subgraphWorkflowURL)) {
 		return "", errors.New("injected fault: "+engineseams.FaultSubgraphSpawnErr+" "+subgraphWorkflowURL, http.StatusInternalServerError)
 	}
@@ -64,11 +65,11 @@ func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphF
 	inheritedBaggage, _ := workflow.NewState(baggageJSON)
 	inherited.Baggage = inheritedBaggage
 
-	// The child is inserted already surgraph-linked and running in one transaction, so it can never complete
-	// before its parent pointer is set (which would lose the parent's revive). The caller step is parked by
-	// processStep before this call - the complementary half of that ordering. The child's "workflow" span is
-	// parented to the caller step's span (callerTraceParent), nesting the subtree under the launching task.
-	return e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, 0, "", callerTraceParent, &inherited, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID)
+	// The child is inserted already surgraph-linked and running, in the transaction that parks the caller, so it
+	// can never complete before its parent pointer is set or before the caller is parked (either would lose the
+	// parent's revive). The child's "workflow" span is parented to the caller step's span (callerTraceParent),
+	// nesting the subtree under the launching task.
+	return e.createWithGraph(ctx, shardNum, subgraphWorkflowURL, subgraphGraph, childState, 0, "", callerTraceParent, &inherited, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID, parkCaller)
 }
 
 // completeFlowSequential marks a flow completed when no successor exists.
@@ -319,6 +320,10 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 // rolls back and reports success.
 var errTreeSettled = errors.New("tree already terminal")
 
+// errTreeGrew is an in-transaction sentinel: terminateSubtree's scan found flows its write set did not cover, so
+// the transaction rolls back and re-runs over the larger set.
+var errTreeGrew = errors.New("tree grew during terminate")
+
 // terminateSubtree forcefully stops a flow and every non-terminal flow beneath it, in one transaction: the steps
 // first (write-first, per the flow-terminating-transaction rule), then each flow's `final_state`, then one
 // CASE-per-flow terminalization guarded on non-terminal status. It signals every flow it stopped.
@@ -339,10 +344,11 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 	if err != nil {
 		return errors.Trace(err)
 	}
-	descendantFlowIDs, descendantCompositeIDs, urlByFlowID, err := e.allSubgraphFlows(ctx, shardNum, flowID)
+	descendantFlowIDs, descendantCompositeIDs, urlByFlowID, err := e.allSubgraphFlows(ctx, db, shardNum, flowID)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterScan)
 	allFlowIDs := append([]any{flowID}, descendantFlowIDs...)
 	allCompositeIDs := append(
 		[]string{keys.New(shardNum, flowID, flowToken)},
@@ -350,54 +356,109 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 	)
 
 	reason = strings.TrimSpace(reason)
-	finalStates := make([][]byte, len(allFlowIDs))
 	settled := false
-	err = db.Transact(ctx, func(tx *sequel.Tx) error {
-		settled = false
-		if commitFault != "" && e.seams.IsFault(commitFault) {
-			return errors.New("injected fault: " + commitFault)
-		}
-		flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
-		// Write-first (the step-terminate UPDATE) per the flow-terminating-transaction rule.
-		stepArgs := append([]any{workflow.StatusTerminated, parkedNone}, allFlowIDs...)
-		tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
-			stepArgs...,
-		)
-
-		for i, fid := range allFlowIDs {
-			fs, _, err := e.computeFinalState(ctx, tx, shardNum, fid.(int))
+	for {
+		grew := false
+		err = db.Transact(ctx, func(tx *sequel.Tx) error {
+			settled, grew = false, false
+			if commitFault != "" && e.seams.IsFault(commitFault) {
+				return errors.New("injected fault: " + commitFault)
+			}
+			flowPlaceholders := strings.Repeat("?,", len(allFlowIDs)-1) + "?"
+			stepArgs := append([]any{workflow.StatusTerminated, parkedNone}, allFlowIDs...)
+			terminateSteps := func() {
+				tx.ExecContext(ctx,
+					"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+flowPlaceholders+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
+					stepArgs...,
+				)
+			}
+			// Write-first (the step-terminate UPDATE) per the flow-terminating-transaction rule, and steps before
+			// flows, the order Resume and handleInterrupt take the same rows in.
+			terminateSteps()
+			e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterStepsLocked)
+			// Lock the flow rows, then terminate the steps again. A transition locks its flow row before it inserts
+			// a step, so once these rows are held no step can be added to these flows - but one that committed
+			// between the UPDATE above and this lock exists now and was not covered by it. The second UPDATE
+			// catches it, so no step of the tree is left running, and none can go on to spawn a subgraph.
+			lockRes, err := tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
+				allFlowIDs...,
+			)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			finalStates[i] = fs
-		}
+			if n, _ := lockRes.RowsAffected(); n == 0 {
+				settled = true
+				return errTreeSettled
+			}
+			terminateSteps()
+			// The scan before this transaction misses a child spawned since. A spawn parks its caller step in the
+			// transaction that inserts the child, and every live step of the tree is now locked here, so each spawn
+			// has either committed or will find its caller terminated: ONE scan settles it. It is the transaction's first plain read,
+			// so on a snapshot-per-transaction dialect (MySQL's REPEATABLE READ) its snapshot is taken now - a
+			// second scan in this transaction would reuse it and miss a grandchild spawned in between. A scan that
+			// finds new flows therefore rolls back and the whole transaction re-runs over the larger set.
+			rescannedIDs, rescannedComposite, rescannedURLs, err := e.allSubgraphFlows(ctx, tx, shardNum, flowID)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterRescan)
+			known := make(map[int]bool, len(allFlowIDs))
+			for _, fid := range allFlowIDs {
+				known[fid.(int)] = true
+			}
+			for i, fid := range rescannedIDs {
+				if known[fid.(int)] {
+					continue
+				}
+				grew = true
+				allFlowIDs = append(allFlowIDs, fid)
+				allCompositeIDs = append(allCompositeIDs, rescannedComposite[i])
+				urlByFlowID[fid.(int)] = rescannedURLs[fid.(int)]
+			}
+			if grew {
+				return errTreeGrew
+			}
 
-		var caseClause strings.Builder
-		caseClause.WriteString("CASE")
-		var flowArgs []any
-		for i, fid := range allFlowIDs {
-			caseClause.WriteString(" WHEN flow_id=? THEN ?")
-			flowArgs = append(flowArgs, fid, finalStates[i])
+			finalStates := make([][]byte, len(allFlowIDs))
+			for i, fid := range allFlowIDs {
+				fs, _, err := e.computeFinalState(ctx, tx, shardNum, fid.(int))
+				if err != nil {
+					return errors.Trace(err)
+				}
+				finalStates[i] = fs
+			}
+
+			var caseClause strings.Builder
+			caseClause.WriteString("CASE")
+			var flowArgs []any
+			for i, fid := range allFlowIDs {
+				caseClause.WriteString(" WHEN flow_id=? THEN ?")
+				flowArgs = append(flowArgs, fid, finalStates[i])
+			}
+			caseClause.WriteString(" END")
+			// cancel_reason is the one reason column both Terminate and Cancel write into; the two are told apart
+			// by status at the Go API level (FlowOutcome's TerminateReason vs CancelReason, in snapshot()).
+			flowArgs = append(flowArgs, workflow.StatusTerminated, reason)
+			flowArgs = append(flowArgs, allFlowIDs...)
+			res, err := tx.ExecContext(ctx,
+				"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
+				flowArgs...,
+			)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				settled = true
+				return errTreeSettled
+			}
+			return nil
+		})
+		if grew {
+			continue
 		}
-		caseClause.WriteString(" END")
-		// cancel_reason is the one reason column both Terminate and Cancel write into; the two are told apart
-		// by status at the Go API level (FlowOutcome's TerminateReason vs CancelReason, in snapshot()).
-		flowArgs = append(flowArgs, workflow.StatusTerminated, reason)
-		flowArgs = append(flowArgs, allFlowIDs...)
-		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_flows SET final_state="+caseClause.String()+", status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id IN ("+flowPlaceholders+") AND status NOT IN ("+terminalStatusesSQL+")",
-			flowArgs...,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			settled = true
-			return errTreeSettled
-		}
-		return nil
-	})
+		break
+	}
 	if settled {
 		return nil
 	}
@@ -948,9 +1009,9 @@ func (e *Engine) dynamicSubgraphParent(ctx context.Context, db *sequel.DB, flowI
 //
 //   - childFlowID != 0: the child went terminal but the revive was lost. The child writes are no-ops
 //     under the status guard; the point is the parent re-arm.
-//   - childFlowID == 0: the child flow is GONE (a worker died between committing the caller's park and
-//     inserting the child, or the child was deleted). Nothing to terminalize - failing the caller is the
-//     only way out, and it is what the parent re-arm does.
+//   - childFlowID == 0: the child flow is GONE. The caller's park and the child's insert commit in one
+//     transaction, so only a bug or a hand-deleted row leaves this. Nothing to terminalize - failing the
+//     caller is the only way out, and it is what the parent re-arm does.
 func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, childFlowID int, parentStepID int, taskErr error) error {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
@@ -1075,11 +1136,7 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 // urlByFlowID carries every scanned flow's workflow_url, keyed by flow id and covering the ROOT as well as
 // the returned descendants, so a caller terminalizing the tree can label each flow with its own workflow.
 // It rides the scan that was already happening: the column is one more in a projection, not a query.
-func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int) (flowIDs []any, compositeFlowIDs []string, urlByFlowID map[int]string, err error) {
-	db, err := e.db.Shard(shardNum)
-	if err != nil {
-		return nil, nil, nil, errors.Trace(err)
-	}
+func (e *Engine) allSubgraphFlows(ctx context.Context, db sequel.Executor, shardNum int, flowID int) (flowIDs []any, compositeFlowIDs []string, urlByFlowID map[int]string, err error) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT flow_id, flow_token, surgraph_flow_id, status, workflow_url FROM dwarf_flows WHERE root_flow_id=(SELECT root_flow_id FROM dwarf_flows WHERE flow_id=?)",
 		flowID,
@@ -1108,8 +1165,8 @@ func (e *Engine) allSubgraphFlows(ctx context.Context, shardNum int, flowID int)
 		}
 	}
 	rows.Close()
-	// A truncated read (mid-stream error) would make the tree walk act on a partial tree; this is a
-	// non-tx read (no Transact latch backstops it), so the check is explicit.
+	// A truncated read (mid-stream error) would make the tree walk act on a partial tree; outside a transaction
+	// no Transact latch backstops it, so the check is explicit.
 	if err := rows.Err(); err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}

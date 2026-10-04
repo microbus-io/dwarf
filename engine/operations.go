@@ -123,7 +123,7 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	// is the nesting the enclosure rule forbids: with as many turns as connections, holders waiting on a
 	// second turn deadlock against each other.
 	ctx, doneTurn := e.dbTurn(ctx, shardNum)
-	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, state, threadID, threadToken, "", opts, 0, 0, 0, 0)
+	flowKey, err = e.createWithGraph(ctx, shardNum, workflowURL, graph, state, threadID, threadToken, "", opts, 0, 0, 0, 0, nil)
 	doneTurn()
 	return flowKey, errors.Trace(err)
 }
@@ -256,10 +256,11 @@ func insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (newFlowID, ne
 // surgraphFlowID/surgraphStepID link a subgraph child to its parent caller step; they are 0 for a
 // top-level flow. The linkage is written in the SAME insert transaction, so the child is fully
 // parent-linked before it can be dispatched and complete - otherwise its completion could not revive the
-// parent. (The parent caller is parked by processStep before this is called, the complementary half of
+// parent. (The parent caller is parked by beforeInsert, in the same transaction, the complementary half of
 // that ordering.) callerStepDepth is the caller step's step_depth (0 for a top-level flow): the entry step
 // is created at callerStepDepth+1, so a subgraph's depths continue from the caller (informational only).
-func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState workflow.State, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID int) (flowKey string, err error) {
+// beforeInsert, when not nil, runs first in the insert's transaction; an error from it rolls the insert back.
+func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState workflow.State, threadID int, threadToken string, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID int, beforeInsert func(tx *sequel.Tx) error) (flowKey string, err error) {
 	entryPoint := graph.EntryPoint()
 	if entryPoint == "" {
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
@@ -328,6 +329,11 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 
 	var newFlowID, newStepID int64
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		if beforeInsert != nil {
+			if err := beforeInsert(tx); err != nil {
+				return err
+			}
+		}
 		var err error
 		newFlowID, newStepID, err = insertFlowTx(ctx, tx, seed)
 		return err
@@ -690,8 +696,8 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 // Parked subgraph callers are marked like any other running step. A caller's cancellation is its own, not
 // its child's to decide: when the child returns, the caller runs once more to see the child's result, and is
 // then redirected by the mark. Excluding parked callers would lose the cancellation outright whenever it lands
-// between the park and the child's insert, or between the child's completion and the caller's revive - the
-// caller is skipped and the child is either not yet there or already terminal, so nothing is marked at all.
+// between the child's completion and the caller's revive - the caller is skipped and the child is already
+// terminal, so nothing is marked at all.
 //
 // The first write is to the flow rows - the reason, and cancel_watermark - and must come BEFORE the mark.
 // A step claimed between the two reads the reason off its flow row, and the opposite order hands it an empty
@@ -744,7 +750,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	// only) - a terminal descendant's steps are already all-terminal (step immutability), so it would
 	// contribute nothing to the mark below even if included; excluding it here is just one fewer flow_id
 	// in the IN-list.
-	descendantFlowIDs, _, _, err := e.allSubgraphFlows(ctx, shardNum, flowID)
+	descendantFlowIDs, _, _, err := e.allSubgraphFlows(ctx, db, shardNum, flowID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -835,7 +841,7 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		}
 		// The 409 guards only the ROOT's status; a running subgraph descendant does not block the delete. The
 		// reaper later removes the whole root_flow_id tree regardless of descendant status - safe because the
-		// only running descendant a terminal-rooted tree can hold is a live orphan (Terminate-vs-spawn residue) the
+		// only running descendant a terminal-rooted tree can hold is a live orphan (which only a bug leaves) the
 		// wedge sweep would terminate anyway, and a worker mid-dispatch on it no-ops via the lease fence. This is a
 		// deliberate change from the old inline delete, which 409'd on any running descendant (see reapDueFlows).
 		if flowStatus == workflow.StatusRunning {
