@@ -3800,11 +3800,25 @@ the leased step and re-polls) and, last-resort, lease recovery. The recommended 
 forcing the flow-terminating transactions steps-first would reintroduce the SQLite deadlock and the orphan-strand,
 and forcing `Terminate` flow-first buys nothing on SQLite (it serializes writes, so its only exposed deadlock is the
 read-first-upgrade one the write-first rule already closes) while giving `Terminate` a wider flow-row lock hold.
+`Terminate`'s flow-row lock (below) widens this same cross: on MySQL at `REPEATABLE READ` a transition holding the
+flow row and waiting on `Terminate`'s gap lock cycles with `Terminate` waiting on that flow row - observed in
+`TestTerminateVsSubgraphSpawn_Deterministic`, retry-recovered like the rest.
+
+**`Terminate` takes steps, then flows, then steps AGAIN, and the second pass is the one exception to steps-first.**
+`terminateSubtree` locks the tree's flow rows after its first step UPDATE and then re-runs that UPDATE, to catch a
+step a transition committed in between (see the orphaned-child rules under "Background Recovery"). The second
+pass can only reach a step created after the first one - every older step is already locked by it - so it crosses
+only a transaction that took such a just-created step first and then wants the flow row: a worker that claimed it
+and is already in `failStep` or `handleInterrupt` (both steps, then flows). That needs the step inserted, claimed,
+executed and failed or interrupted inside `Terminate`'s own transaction; the cycle is retry-recovered by
+`db.Transact` like the cross above. Do not drop the second pass to remove it - it is what keeps a step created
+mid-terminate from running on, and spawning, under a terminated flow.
 
 **Do not make `handleInterrupt` flow-first.** A flow-first `handleInterrupt` against steps-first `Resume` on a
 shared interrupt chain is the more dangerous cross, because it locks *two* overlapping resources (chain flow rows
 **and** chain step rows) in opposite order. With `handleInterrupt`, `Resume`, and `Terminate` all acquiring that
-chain's steps before its flows, none can cycle against another. Steps-first is safe for `handleInterrupt`
+chain's existing steps before its flows, none can cycle against another over them (`Terminate`'s second step pass,
+above, reaches only steps created after its first). Steps-first is safe for `handleInterrupt`
 precisely because interrupt is non-terminating (no orphan-strand obligation), and it shares only the *single* flow
 row with the flow-first cluster (`advanceFlow`/`completeFlow` never lock a
 sibling's step row), which cannot form a cycle - the same reason steps-first `Resume` already coexisted with them.
@@ -3952,7 +3966,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
      - **`terminateSubtree` terminates the steps, locks the flow rows, then terminates the steps AGAIN.** A
        transition locks its flow row before inserting a step, so once the rows are held no step can be added -
        but one that committed between the first step UPDATE and the lock was not covered by it, and left running
-       it can still spawn (measured on Postgres and SQL Server; MySQL's gap locks happen to block it).
+       it can still spawn (measured on Postgres, SQL Server and MySQL at READ COMMITTED; at REPEATABLE READ
+       MySQL's gap locks block the insert instead).
      - **It scans for children inside the transaction, after those writes.** Every live step of the tree is then
        locked, so a spawn has either committed (the scan sees its child) or will find its caller terminated.
      - **ONE scan per transaction; new flows mean roll back and re-run.** On MySQL's REPEATABLE READ the first

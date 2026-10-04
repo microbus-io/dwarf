@@ -324,21 +324,24 @@ var errTreeSettled = errors.New("tree already terminal")
 // the transaction rolls back and re-runs over the larger set.
 var errTreeGrew = errors.New("tree grew during terminate")
 
-// terminateSubtree forcefully stops a flow and every non-terminal flow beneath it, in one transaction: the steps
-// first (write-first, per the flow-terminating-transaction rule), then each flow's `final_state`, then one
-// CASE-per-flow terminalization guarded on non-terminal status. It signals every flow it stopped.
+// maxTerminateRuns bounds terminateSubtree's re-runs. Each re-run needs a flow found by the previous one to have
+// committed a subgraph spawn before the re-run locked its steps, so a tree that keeps outrunning it is pathological;
+// failing then is safe, since every run rolls back cleanly, and the caller may retry.
+const maxTerminateRuns = 16
+
+// terminateSubtree forcefully stops a flow and every non-terminal flow beneath it, in one transaction, and signals
+// every flow it stopped. Inside the transaction it terminates the tree's steps (write-first, per the
+// flow-terminating-transaction rule), locks the tree's flow rows, terminates the steps again, scans for flows its
+// set does not cover, and only then writes each flow's `final_state` and terminal status. A scan that finds new
+// flows rolls back and re-runs over the larger set, at most maxTerminateRuns times.
 //
-// It walks DOWN only. Termination is always initiated at a flow that has no live ancestor to reconcile with -
-// the public Terminate is root-only (a subgraph-child key is rejected, not silently widened), and the internal
-// orphan sweep starts at a child whose whole ancestor chain is already terminal. The `surgraphChain` up-walk the
-// public path used to run was therefore dead: on a root it returns no ancestor steps at all, so the block that
-// terminated them could never execute, and the call itself was an expensive way (a full root_flow_id tree scan) to
-// learn the flow's own id and token, which the caller already holds.
+// It walks DOWN only. Termination is always initiated at a flow that has no live ancestor to reconcile with - the
+// public Terminate is root-only (a subgraph-child key is rejected, not silently widened), and the internal orphan
+// sweep starts at a child whose whole ancestor chain is already terminal.
 //
-// A tree that went terminal concurrently - every flow UPDATE matches zero rows - is a no-op, for both callers: the
-// transaction rolls back so the step writes never touch a frozen tree, and nothing is counted or signalled.
-// commitFault is a test-only seam name, checked before any write so a fired fault proves the whole transaction
-// rolls back atomically; pass "" for none.
+// A tree that went terminal concurrently is a no-op, for both callers: the transaction rolls back so the step
+// writes never touch a frozen tree, and nothing is counted or signalled. commitFault is a test-only seam name,
+// checked before any write so a fired fault proves the whole transaction rolls back atomically; pass "" for none.
 func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flowToken, reason, commitFault string) error {
 	db, err := e.db.Shard(shardNum)
 	if err != nil {
@@ -357,7 +360,10 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 
 	reason = strings.TrimSpace(reason)
 	settled := false
-	for {
+	for run := 1; ; run++ {
+		if run > maxTerminateRuns {
+			return errors.New("terminate did not settle after %d runs; the tree kept spawning subgraphs", maxTerminateRuns, http.StatusServiceUnavailable)
+		}
 		grew := false
 		err = db.Transact(ctx, func(tx *sequel.Tx) error {
 			settled, grew = false, false
@@ -373,7 +379,8 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 				)
 			}
 			// Write-first (the step-terminate UPDATE) per the flow-terminating-transaction rule, and steps before
-			// flows, the order Resume and handleInterrupt take the same rows in.
+			// flows, the order Resume and handleInterrupt take the same rows in. The second step UPDATE below takes
+			// steps AFTER flows; it reaches only steps created in between, see engine/CLAUDE.md "Transactions".
 			terminateSteps()
 			e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterStepsLocked)
 			// Lock the flow rows, then terminate the steps again. A transition locks its flow row before it inserts
@@ -393,16 +400,34 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			}
 			terminateSteps()
 			// The scan before this transaction misses a child spawned since. A spawn parks its caller step in the
-			// transaction that inserts the child, and every live step of the tree is now locked here, so each spawn
-			// has either committed or will find its caller terminated: ONE scan settles it. It is the transaction's first plain read,
-			// so on a snapshot-per-transaction dialect (MySQL's REPEATABLE READ) its snapshot is taken now - a
-			// second scan in this transaction would reuse it and miss a grandchild spawned in between. A scan that
-			// finds new flows therefore rolls back and the whole transaction re-runs over the larger set.
+			// transaction that inserts the child, and every live step of these flows is now locked here, so each
+			// spawn from them has either committed or will find its caller terminated: ONE scan settles them. It is
+			// the transaction's first plain read, so on a snapshot-per-transaction dialect (MySQL's REPEATABLE READ)
+			// its snapshot is taken now - a second scan in this transaction would reuse it and miss a grandchild
+			// spawned in between. A scan that finds new flows therefore rolls back, and the whole transaction re-runs
+			// over the larger set.
 			rescannedIDs, rescannedComposite, rescannedURLs, err := e.allSubgraphFlows(ctx, tx, shardNum, flowID)
 			if err != nil {
 				return errors.Trace(err)
 			}
 			e.seams.Checkpoint(ctx, engineseams.CheckpointTerminateAfterRescan)
+			// The scan returns the tree's live flows. A flow of the set that is missing from it ended or was
+			// removed after the first scan - a flow.Retry on a subgraph caller deletes its old child - and is
+			// dropped, so the final-state reads below do not look for a row that is gone. The root stays: its own
+			// status is what the flow UPDATE's guard settles.
+			live := make(map[int]bool, len(rescannedIDs)+1)
+			live[flowID] = true
+			for _, fid := range rescannedIDs {
+				live[fid.(int)] = true
+			}
+			keptIDs, keptComposite := allFlowIDs[:0:0], allCompositeIDs[:0:0]
+			for i, fid := range allFlowIDs {
+				if live[fid.(int)] {
+					keptIDs = append(keptIDs, fid)
+					keptComposite = append(keptComposite, allCompositeIDs[i])
+				}
+			}
+			allFlowIDs, allCompositeIDs = keptIDs, keptComposite
 			known := make(map[int]bool, len(allFlowIDs))
 			for _, fid := range allFlowIDs {
 				known[fid.(int)] = true
@@ -419,6 +444,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID int, flo
 			if grew {
 				return errTreeGrew
 			}
+			flowPlaceholders = strings.Repeat("?,", len(allFlowIDs)-1) + "?"
 
 			finalStates := make([][]byte, len(allFlowIDs))
 			for i, fid := range allFlowIDs {

@@ -118,6 +118,7 @@ const (
 	CheckpointTerminateAfterScan        = "terminateAfterScan"        // Terminate, after its pre-transaction scan of the tree, before its transaction
 	CheckpointTerminateAfterStepsLocked = "terminateAfterStepsLocked" // Terminate, in its transaction, after its first step UPDATE and before it locks the flow rows
 	CheckpointTerminateAfterRescan      = "terminateAfterRescan"      // Terminate, in its transaction, after its scan for children spawned since the first scan
+	CheckpointSubgraphSpawnParked       = "subgraphSpawnParked"       // step execution, inside the subgraph spawn's transaction, after the caller is parked and before the child is inserted
 	CheckpointSubgraphSpawnAbandoned    = "subgraphSpawnAbandoned"    // step execution, a subgraph spawn rolled back because its caller step is no longer running
 	CheckpointBeforeRetryRewind         = "beforeRetryRewind"         // step execution, before the flow.Retry rewind transaction
 	CheckpointBeforeCompleteFlowWrite   = "beforeCompleteFlowWrite"   // flow completion, just before its transaction's status-gate write

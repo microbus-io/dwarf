@@ -266,6 +266,9 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
 	}
 
+	// The span is minted before the insert because the insert writes its context (trace_parent). A spawn that
+	// beforeInsert rolls back has therefore already exported a span for a child that never exists - accepted:
+	// the alternative is a second write to fill trace_parent in after the commit.
 	traceParent := e.mintWorkflowSpan(ctx, workflowURL, parentTraceParent)
 
 	// A non-marshalable host-supplied value (a NaN/Inf/channel in Baggage or a map initialState, which
@@ -333,6 +336,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 			if err := beforeInsert(tx); err != nil {
 				return err
 			}
+			e.seams.Checkpoint(ctx, engineseams.CheckpointSubgraphSpawnParked)
 		}
 		var err error
 		newFlowID, newStepID, err = insertFlowTx(ctx, tx, seed)
@@ -842,8 +846,8 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		// The 409 guards only the ROOT's status; a running subgraph descendant does not block the delete. The
 		// reaper later removes the whole root_flow_id tree regardless of descendant status - safe because the
 		// only running descendant a terminal-rooted tree can hold is a live orphan (which only a bug leaves) the
-		// wedge sweep would terminate anyway, and a worker mid-dispatch on it no-ops via the lease fence. This is a
-		// deliberate change from the old inline delete, which 409'd on any running descendant (see reapDueFlows).
+		// wedge sweep would terminate anyway, and a worker mid-dispatch on it no-ops via the lease fence (see
+		// reapDueFlows).
 		if flowStatus == workflow.StatusRunning {
 			return errors.New("cannot delete a running flow; terminate it first", http.StatusConflict)
 		}

@@ -131,8 +131,8 @@ func TestResumeLosesToDelete_Deterministic(t *testing.T) {
 }
 
 // TestReaperDeletesRunningDescendant pins the reaper's tree-delete: it removes the whole root_flow_id tree regardless of
-// descendant status. deleteFlow 409s only on a running *root*; a running subgraph *descendant* (the
-// Terminate-vs-spawn orphan residue) is deleted anyway. Here the descendant is forged into `running` under a
+// descendant status. deleteFlow 409s only on a running *root*; a running subgraph *descendant* (an orphan, a
+// state only a bug leaves) is deleted anyway. Here the descendant is forged into `running` under a
 // terminal root, then the reaper removes it along with the root.
 func TestReaperDeletesRunningDescendant(t *testing.T) {
 	t.Parallel()
@@ -174,8 +174,8 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(2, shardFlowCount(t, e, shardNum)) // root + child
 
-	// Forge the orphan residue: flip the completed child to `running` (a live descendant under a terminal
-	// root, as the Terminate-vs-spawn race leaves it - here it inherits root_flow_id = rootID).
+	// Forge an orphan: flip the completed child to `running` (a live descendant under a terminal root, a state
+	// only a bug leaves - here it inherits root_flow_id = rootID).
 	res, err := db.ExecContext(ctx, "UPDATE dwarf_flows SET status='"+workflow.StatusRunning+"' WHERE root_flow_id=? AND surgraph_flow_id<>0", rootID)
 	assert.NoError(err)
 	if n, _ := res.RowsAffected(); assert.Equal(int64(1), n) {
@@ -254,15 +254,21 @@ func TestTerminateVsTransition_Deterministic(t *testing.T) {
 // once, and re-runs over the larger set if the scan found any. Each subtest drives one ordering:
 //
 //   - terminate_first: the spawn finds its caller terminated and rolls back, creating no child.
+//   - terminate_during_spawn: Terminate arrives while the spawn's transaction holds its parked caller. It must
+//     wait for the spawn to commit - so the park and the child's insert must share a transaction - and then
+//     terminate the child.
 //   - spawn_after_terminate_scan: the child commits after Terminate's pre-transaction scan; Terminate's
 //     in-transaction scan finds and terminates it.
 //   - grandchild_after_rescan: a child found by Terminate's scan spawns a grandchild before Terminate locks the
 //     child's steps. Terminate must re-run rather than scan again in the same transaction - on MySQL's
 //     REPEATABLE READ a second scan would reuse the first one's snapshot and miss the grandchild.
+//   - flow_vanishes_before_transaction: a flow the first scan found is removed before Terminate's transaction;
+//     Terminate drops it rather than failing to read its final state.
 //   - step_created_during_terminate: a transition creates the caller step after Terminate's first step UPDATE,
 //     so that UPDATE never touched it; the second one, after the flow rows are locked, does - so the step is
-//     terminated and its spawn rolls back. (On SQLite, Terminate's write lock
-//     holds the transition off entirely, so the subtest passes without reaching the race there.)
+//     terminated and its spawn rolls back. Where Terminate's locks hold the transition off - SQLite's write lock,
+//     MySQL's gap locks at REPEATABLE READ - the race is not reached there; on Postgres and SQL Server, which
+//     always reach it, the subtest fails if Call was not claimed in time rather than passing without the race.
 //
 // None of them runs the wedge sweep's orphaned-child repair.
 func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
@@ -372,6 +378,36 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		assertAllTerminated(t, r.e, fk)
 	})
 
+	t.Run("terminate_during_spawn", func(t *testing.T) {
+		assert := testarossa.For(t)
+		ctx := t.Context()
+		r, done := newRig(t)
+		defer done()
+		parentGraph(t, r)
+		assert.NoError(r.e.Startup(ctx))
+
+		// The spawn's transaction parks the caller and freezes before inserting the child.
+		r.e.seams.Break(engineseams.CheckpointSubgraphSpawnParked)
+		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
+		assert.NoError(err)
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointSubgraphSpawnParked, 10*time.Second), "the spawn never parked its caller")
+
+		// Terminate must wait for the spawn: the parked caller is locked by the spawn's open transaction. Had the
+		// park committed on its own, Terminate would finish here and the child would be inserted after it.
+		terminated := make(chan error, 1)
+		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
+		select {
+		case err := <-terminated:
+			assert.True(false, "Terminate finished while the spawn was mid-transaction")
+			terminated <- err
+		case <-time.After(300 * time.Millisecond):
+		}
+		r.e.seams.Resume(engineseams.CheckpointSubgraphSpawnParked)
+		assert.NoError(<-terminated)
+		assert.Equal(1, countFlows(t, r.e, fk, "cvs/child"), "the spawn committed first, so its child exists")
+		assertAllTerminated(t, r.e, fk)
+	})
+
 	t.Run("spawn_after_terminate_scan", func(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := t.Context()
@@ -451,11 +487,45 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		close(gate)
 		select {
 		case <-r.xEntered:
-		case <-time.After(3 * time.Second): // SQLite: the spawn waits behind Terminate's write lock
+		case <-time.After(time.Second): // the spawn waits behind Terminate's locks (SQLite; MySQL at REPEATABLE READ)
 		}
 		r.e.seams.Resume(engineseams.CheckpointTerminateAfterRescan)
 		assert.NoError(<-terminated)
 		assertAllTerminated(t, r.e, fk)
+	})
+
+	t.Run("flow_vanishes_before_transaction", func(t *testing.T) {
+		assert := testarossa.For(t)
+		ctx := t.Context()
+		r, done := newRig(t)
+		defer done()
+		parentGraph(t, r)
+		assert.NoError(r.e.Startup(ctx))
+
+		fk, err := r.e.Create(ctx, "cvs/parent", nil, nil)
+		assert.NoError(err)
+		select {
+		case <-r.xEntered: // the child exists and its task is running
+		case <-time.After(10 * time.Second):
+			assert.True(false, "the child never ran")
+			return
+		}
+
+		// Terminate scans the tree, child included, and freezes; the child's rows then disappear, as a flow.Retry
+		// on its caller would remove them. Terminate must drop the vanished flow, not fail looking for it.
+		r.e.seams.Break(engineseams.CheckpointTerminateAfterScan)
+		terminated := make(chan error, 1)
+		go func() { terminated <- r.e.Terminate(ctx, fk, "test") }()
+		assert.True(r.e.seams.WaitTimeout(ctx, engineseams.CheckpointTerminateAfterScan, 10*time.Second), "Terminate never finished its scan")
+		shardNum, parentFlowID, _, _ := keys.ParseFlowKey(fk)
+		db, _ := r.e.db.Shard(shardNum)
+		_, err = db.ExecContext(ctx, "DELETE FROM dwarf_steps WHERE flow_id IN (SELECT flow_id FROM dwarf_flows WHERE surgraph_flow_id=?)", parentFlowID)
+		assert.NoError(err)
+		_, err = db.ExecContext(ctx, "DELETE FROM dwarf_flows WHERE surgraph_flow_id=?", parentFlowID)
+		assert.NoError(err)
+		r.e.seams.Resume(engineseams.CheckpointTerminateAfterScan)
+		assert.NoError(<-terminated)
+		assert.Equal(workflow.StatusTerminated, enginetest.FlowStatus(t, r.e, fk))
 	})
 
 	t.Run("step_created_during_terminate", func(t *testing.T) {
@@ -500,7 +570,7 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 		select {
 		case <-entered:
 			claimed = true
-		case <-time.After(3 * time.Second):
+		case <-time.After(2 * time.Second):
 		}
 		r.e.seams.Resume(engineseams.CheckpointTerminateAfterStepsLocked)
 		assert.NoError(<-terminated)
@@ -515,6 +585,14 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 			}
 		}
 		assert.Zero(countFlows(t, r.e, fk, "cvs/child"), "a spawn under a terminated flow must create no child")
+		// Postgres and SQL Server always reach the race: nothing holds the transition off, so Call is created and
+		// claimed while Terminate is frozen. Elsewhere the outcome depends on the locks (and on MySQL's isolation
+		// level), and not claiming Call is legitimate.
+		shardNum, _, _, _ := keys.ParseFlowKey(fk)
+		db, _ := r.e.db.Shard(shardNum)
+		if driver := db.DriverName(); driver == "pgx" || driver == "mssql" {
+			assert.True(claimed, "Call was not claimed in time, so the race was not exercised")
+		}
 		assertAllTerminated(t, r.e, fk)
 	})
 }
