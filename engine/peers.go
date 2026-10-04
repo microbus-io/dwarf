@@ -246,7 +246,7 @@ func (e *Engine) leaveFleet(ctx context.Context) {
 //
 // A pull rather than a notification, and the reason is not taste. Its invariant is "the applied pool sizes
 // match the currently observed fleet", which is a job that exists whether or not anything announces a
-// change: it also absorbs drift no notification could express - a SetMaxOpenConns override landing, a push
+// change: it also absorbs drift no notification could express - a setMaxOpenConns override landing, a push
 // that errored, a count moving while a previous push was in flight. An edge would additionally have to be
 // fired from every path that can move a published value (a confirmed fall, a recovery from blindness, a
 // registration repair, a prune), and missing one would leave the derived sizes stale forever with no

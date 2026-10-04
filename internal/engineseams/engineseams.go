@@ -17,7 +17,8 @@ limitations under the License.
 // Package engineseams is the engine's test and benchmark surface for code in this module outside package
 // engine: the names of the engine's fault-injection, checkpoint and recorded-variable seams, Join for their
 // targeted forms, DB and Seams, which reach a running engine's shard set and seam registry, and
-// SetRefillInterval, the benchmark's override of the refill cycle period.
+// SetMaxOpenConns and SetRefillInterval, the test and benchmark overrides of the pool size and the refill
+// cycle period.
 //
 // The engine fires these seams from its own production code and consults one seamster.Seamster per engine,
 // enabled only under testing.Testing(); the mechanism (arming, scoping, Wait/Break/Resume) is the seamster
@@ -44,6 +45,11 @@ var DB func(eng any) *database.ShardSet
 
 // Seams returns the engine's seam registry, for a test to arm faults and checkpoints and wait on them.
 var Seams func(eng any) *seamster.Seamster
+
+// SetMaxOpenConns pins every shard's connection pool to exactly n connections on a running or configured
+// engine, replacing the pool the engine derives from each shard's vCPUs and round-trip time, for a test or a
+// pool-size sweep. With it set, every replica dispatches every shard.
+var SetMaxOpenConns func(eng any, n int) error
 
 // SetRefillInterval pins every shard's refill cycle period to d on a running or configured engine, for a
 // benchmark sweep to hold the period at fixed values; d <= 0 restores the derived period.

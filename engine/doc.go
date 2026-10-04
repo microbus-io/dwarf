@@ -35,8 +35,7 @@ limitations under the License.
 //	if err != nil { ... }
 //	defer eng.Shutdown(ctx)
 //
-// Each Set* method returns an error. The live ones (SetMaxOpenConns - an expert override,
-// SetTimeBudget, SetDefaultPriority) take effect immediately on a running engine; the
+// Each Set* method returns an error. The live ones (SetTimeBudget, SetDefaultPriority) take effect immediately on a running engine; the
 // construction-time-only ones (SetShard, SetWorkers, SetHost, SetLogger, SetMeterProvider,
 // SetTracerProvider) return an error if called after Startup. Tuning derives from the facts the host
 // declares plus what the engine observes: ShardSpec.VirtualCPUs drives each shard's connection budget
@@ -46,8 +45,8 @@ limitations under the License.
 // is sent between replicas to establish it); and the
 // worker maximum is derived from the crash-recovery lease margin and the
 // round-trip time measured at Startup, so it holds for any task duration (the pool grows into it only
-// on demand, so short-task deployments never pay for the headroom). The SetWorkers/SetMaxOpenConns
-// overrides exist for tests, benchmarks, and externally-constrained hosts.
+// on demand, so short-task deployments never pay for the headroom). The SetWorkers override exists for
+// tests, benchmarks, and memory-bounded hosts.
 //
 // # Host
 //

@@ -59,7 +59,7 @@ func TestSetters_ConstructionTimeOnly(t *testing.T) {
 	// Live: succeed after Startup.
 	assert.NoError(e.SetTimeBudget(30 * time.Second))
 	assert.NoError(e.SetDefaultPriority(5))
-	assert.NoError(e.SetMaxOpenConns(4))
+	assert.NoError(e.setMaxOpenConns(4))
 }
 
 // TestSetShard_RejectsBadSpecs pins the status codes of construction-time configuration mistakes: an invalid

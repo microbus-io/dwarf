@@ -84,7 +84,7 @@ const (
 //
 // The drain takes the TIGHTER of two channels, since sustained throughput cannot exceed either: this
 // replica's connection pool, or the shard's database CPU split across the fleet. They are equal by
-// construction in the derived path, so the min bites only when SetMaxOpenConns pins a pool independently
+// construction in the derived path, so the min bites only when setMaxOpenConns pins a pool independently
 // of the declared vCPUs - without it, a large pinned pool with vCPUs undeclared derives its drain from the
 // default 2 and overshoots to the cap (a starved refiller), and a small pooler-capped pool over-scans on a
 // drain it cannot sustain. vCPUs <= 0 is undeclared: the CPU ceiling is unknown, so the drain falls to the
@@ -155,7 +155,7 @@ func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[
 	// worker term exists to hold, i.e. straight back into the over-supply regime it was added to close.
 	dispatchers := max(1, share/2)
 	override := time.Duration(e.refillIntervalOverride.Load())
-	pinned := int(e.maxOpenConns.Load()) // >0 when SetMaxOpenConns pins every shard's pool
+	pinned := int(e.maxOpenConns.Load()) // >0 when setMaxOpenConns pins every shard's pool
 	for idx, p := range e.pistons {
 		if override > 0 {
 			// The gap is the fuse against a 100%-duty-cycle loop, and a bench sweep measuring below it is the
@@ -167,7 +167,7 @@ func (e *Engine) recomputeRefillIntervalsWith(specs map[int]ShardSpec, rtts map[
 			p.SetSupplyCadence(override, gap)
 			continue
 		}
-		// Pass the shard's ACTUAL pool (shardPool resolves the SetMaxOpenConns pin) and its RAW declared
+		// Pass the shard's ACTUAL pool (shardPool resolves the setMaxOpenConns pin) and its RAW declared
 		// vCPUs (0 = undeclared), so the drain is bounded by whichever channel is real - the pinned pool,
 		// not a defaulted vCPU count. An unconfigured shard's zero-value spec falls to the conn channel.
 		spec := specs[idx]

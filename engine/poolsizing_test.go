@@ -269,7 +269,7 @@ func TestPoolSizing_ObservedReplicasLive(t *testing.T) {
 	assert.Equal(budget8(e, 1), db.DB.Stats().MaxOpenConnections, "departures restore the full budget")
 
 	// The pinned override wins over any fleet change.
-	assert.NoError(e.SetMaxOpenConns(11))
+	assert.NoError(e.setMaxOpenConns(11))
 	addPeerRow(t, e, 1003)
 	assert.Equal(11, db.DB.Stats().MaxOpenConnections, "the pinned override is never divided")
 }
@@ -416,7 +416,7 @@ func TestPoolSizing_PoolGrowsForLongTasks(t *testing.T) {
 
 // TestPoolSizing_CeilingFollowsLivePoolChange pins that the worker ceiling tracks a LIVE pool change.
 // The ceiling bounds how fast a completion storm drains through M connections, so it is a function of
-// the pool: a SetMaxOpenConns that shrinks the pool must shrink it too. Leaving it stale would keep a
+// the pool: a setMaxOpenConns that shrinks the pool must shrink it too. Leaving it stale would keep a
 // bound many times too permissive on exactly the storm it exists to contain - and the override path is
 // the only one that can re-derive it, because recomputePools (the fleet-change path) early-returns while
 // an override pins the pools.
@@ -438,13 +438,13 @@ func TestPoolSizing_CeilingFollowsLivePoolChange(t *testing.T) {
 	assert.NoError(err)
 	derivedOpen := db.DB.Stats().MaxOpenConnections
 
-	// Shrink the pool to 4 (the external-pooler case): the ceiling must shrink with it.
-	assert.NoError(e.SetMaxOpenConns(4))
+	// Shrink the pool to 4: the ceiling must shrink with it.
+	assert.NoError(e.setMaxOpenConns(4))
 	shrunk := int(e.workers.Load())
 	assert.True(shrunk < derived/8, "the ceiling followed the pool down (was %d, now %d)", derived, shrunk)
 
 	// And back up: a larger pool drains a storm faster, so it permits more workers.
-	assert.NoError(e.SetMaxOpenConns(2 * derivedOpen))
+	assert.NoError(e.setMaxOpenConns(2 * derivedOpen))
 	grown := int(e.workers.Load())
 	assert.True(grown > derived, "the ceiling followed the pool up (derived %d, now %d)", derived, grown)
 }
@@ -474,7 +474,7 @@ func TestPoolSizing_SaturationDoesNotGrowThePool(t *testing.T) {
 	defer e.Shutdown(ctx)
 	assert.NoError(e.SetHost(mux))
 	// A deliberately tiny pool makes the connection the binding resource: workers WILL queue on it.
-	assert.NoError(e.SetMaxOpenConns(2))
+	assert.NoError(e.setMaxOpenConns(2))
 	assert.NoError(e.Startup(t.Context()))
 	resident := int32(e.crew.Resident())
 
@@ -610,9 +610,9 @@ func TestPoolSizing_ConcurrentRecomputeAppliesLatestR(t *testing.T) {
 }
 
 // TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride is the same race against the OTHER writer of pool
-// sizes, and the damaging half: recomputePools reads maxOpenConns and only THEN pushes, so a SetMaxOpenConns
-// landing in that window had its pinned pools silently overwritten by derived ones. The operator's explicit
-// override - the external-pooler / benchmark path - just evaporated, and stayed gone until the next fleet
+// sizes, and the damaging half: recomputePools reads maxOpenConns and only THEN pushes, so a setMaxOpenConns
+// landing in that window had its pinned pools silently overwritten by derived ones. The explicit override
+// just evaporated, and stayed gone until the next fleet
 // change. poolsLock spans the read through the push, so whichever of the two goes second sees a settled world:
 // the override applies last, or the recompute early-returns because the override is already set. Either way
 // the pin stands.
@@ -642,8 +642,8 @@ func TestPoolSizing_ConcurrentRecomputeDoesNotClobberOverride(t *testing.T) {
 	})
 	time.Sleep(slowPoolPushDelay / 10)
 
-	// The operator pins the pool while that recompute is mid-flight.
-	assert.NoError(e.SetMaxOpenConns(7))
+	// The pool is pinned while that recompute is mid-flight.
+	assert.NoError(e.setMaxOpenConns(7))
 	wg.Wait()
 
 	assert.Equal(7, db.DB.Stats().MaxOpenConnections,
@@ -727,7 +727,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	is503("ShardInfo", err)
 }
 
-// TestPoolSizing_LiveOverride pins that SetMaxOpenConns pushes the pinned pool to every live shard
+// TestPoolSizing_LiveOverride pins that setMaxOpenConns pushes the pinned pool to every live shard
 // immediately (the expert/benchmark path).
 func TestPoolSizing_LiveOverride(t *testing.T) {
 	t.Parallel()
@@ -750,13 +750,13 @@ func TestPoolSizing_LiveOverride(t *testing.T) {
 	}
 
 	// Live override pins exactly.
-	assert.NoError(e.SetMaxOpenConns(11))
+	assert.NoError(e.setMaxOpenConns(11))
 	for i := 1; i <= 2; i++ {
 		db, _ := e.db.Shard(i)
 		assert.Equal(11, db.DB.Stats().MaxOpenConnections, "shard %d after override", i)
 	}
 
-	assert.Error(e.SetMaxOpenConns(0)) // must be >= 1
+	assert.Error(e.setMaxOpenConns(0)) // must be >= 1
 }
 
 // TestPoolSizing_WorkerCeiling pins the lease-margin ceiling: N_max = M x margin / txTime x safety,
@@ -952,7 +952,7 @@ func TestPoolSizing_StartupSizesFromRegisteredFleet(t *testing.T) {
 	assert.Equal(open8(eng1, 1, 2), db1.DB.Stats().MaxOpenConnections, "eng1 converges to R=2 by reading the registry")
 }
 
-// TestPoolSizing_StartupOverridePins pins that SetMaxOpenConns - the expert / external-pooler path -
+// TestPoolSizing_StartupOverridePins pins that setMaxOpenConns - the test/bench override -
 // pins the pool exactly at Startup and is not divided by R (the discovery still runs so peers count this
 // replica, but the override is never second-guessed).
 func TestPoolSizing_StartupOverridePins(t *testing.T) {
@@ -963,7 +963,7 @@ func TestPoolSizing_StartupOverridePins(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, VirtualCPUs: 8}))
-	assert.NoError(e.SetMaxOpenConns(40))
+	assert.NoError(e.setMaxOpenConns(40))
 	assert.NoError(e.Startup(t.Context()))
 
 	db, err := e.db.Shard(1)

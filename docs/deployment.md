@@ -10,7 +10,7 @@ configuration, and running multiple replicas.
 ## Configuration
 
 All configuration is set with `Set*` methods, each returning an `error`. They split by whether the knob can
-change on a running engine: the **live** ones (`SetMaxOpenConns`, `SetTimeBudget`,
+change on a running engine: the **live** ones (`SetTimeBudget`,
 `SetDefaultPriority`) take effect immediately, even after `Startup`; the **construction-time-only** ones
 (`SetShard`, `SetWorkers`, and the dependency-injection setters below) are rejected if called
 after `Startup`.
@@ -21,7 +21,6 @@ after `Startup`.
 | `SetWorkers(n)` | derived | Expert override: pins the worker *maximum* (deterministic tests, benchmarks, memory-bounded hosts). Normally unset — derived from the crash-recovery lease margin and the round-trip time measured at startup, so it holds for any task duration; the pool grows into it only on demand |
 | `SetTimeBudget(d)` | 2m | Per-step `ExecuteTask` deadline |
 | `SetDefaultPriority(p)` | 100 | Priority for flows that don't set one |
-| `SetMaxOpenConns(n)` | derived | Expert override: pins every shard's pool exactly and has every replica dispatch every shard (benchmarks, external poolers). Normally unset - each shard's pool derives from its `VirtualCPUs` |
 
 Provide `ShardSpec.VirtualCPUs` (the database server's CPU count - a fact off its spec sheet) and the
 engine derives the shard's connection budget (the measured knee, beyond which connections only queue, and
@@ -233,9 +232,7 @@ current-generation RDS class, so the guess cannot undershoot there, and it stays
 1-vCPU machine (that tier sustained its load on 3 connections and ran clean at 14). What it cannot do is
 use a large database: **declare
 `VirtualCPUs`.** It is a fact off the server's spec sheet, and it is the single most valuable thing you
-can tell the engine. `SetMaxOpenConns` is an expert override that pins every shard's pool exactly —
-for benchmarking sweeps, externally-constrained connection budgets, or a connection pooler in front of the
-database — and bypasses both axes above. It is otherwise best left unset. The measurements behind these
+can tell the engine. The pool is always derived; there is no setting that pins it. The measurements behind these
 constants are in the [cloud benchmarks](benchmark-cloud.md).
 
 > **Declare it correctly.** `VirtualCPUs` is trusted, not verified — the engine has no way to check it
@@ -270,8 +267,7 @@ constants are in the [cloud benchmarks](benchmark-cloud.md).
 > continued on a replica that does not dispatch its shard waits for the next scan (well under a second)
 > before its first step runs, and then runs normally. The engine warns in the log when a fleet's
 > connections to a shard approach the server's `max_connections`; past that, put a connection pooler in
-> front of the database. `SetMaxOpenConns`, when used, is an exact per-replica number, is never divided,
-> and makes every replica a dispatcher of every shard.
+> front of the database.
 
 > **Crashing replicas and `SetEngineID`.** A replica identifies itself in the registry by an id that is
 > random by default. A replica that *crashes* (rather than shutting down cleanly) leaves its last entry

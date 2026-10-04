@@ -208,9 +208,8 @@ func probeRTT(ctx context.Context, db *sequel.DB) float64 {
 // connection, so the shard exceeds its budget by at most slots/2, inside the margin poolSafetyMargin
 // already builds into every budget.
 //
-// The explicit SetMaxOpenConns override wins and pins the pool to exactly that size (the
-// benchmarking/external-pooler path): it is the operator's exact per-replica number, is never divided,
-// and bypasses the RTT term with it.
+// The setMaxOpenConns override (tests and benchmarks) wins and pins the pool to exactly that size: an exact
+// per-replica number, never divided, and it bypasses the RTT term with it.
 //
 // rttMs is the value probed at Startup and held, never a live reading - a latency change re-derives on
 // restart, the same posture as the shard set itself.
@@ -252,7 +251,7 @@ func dispatcherSlots(spec ShardSpec, replicas int) int {
 //
 // Every doubt resolves toward dispatching, because the two errors are not symmetric: a replica wrongly
 // dispatching over-connects the shard by one share, while a shard nobody dispatches runs nothing at all.
-// A shard with no Sonar dispatches solo. Under a SetMaxOpenConns override every replica dispatches - the
+// A shard with no Sonar dispatches solo. Under a setMaxOpenConns override every replica dispatches - the
 // pools are pinned and never divided, so there is no budget for the ranking to protect - and the count is
 // every candidate, which is who drains the shard.
 func (e *Engine) slotsOn(shard int, spec ShardSpec) int {
@@ -643,9 +642,9 @@ var slowPoolPushDelay = 200 * time.Millisecond
 // No-ops when the engine is not running and when no shard's role has moved since the last application.
 // (Startup itself sizes the pools directly from what it read, not through here, and records the roles.)
 //
-// Under a SetMaxOpenConns override the roles are still applied - every replica dispatches then, and one
+// Under a setMaxOpenConns override the roles are still applied - every replica dispatches then, and one
 // that was a reader when the override landed must start - but the pinned pools are left alone:
-// SetMaxOpenConns pushed them, and it owns everything that follows from them.
+// setMaxOpenConns pushed them, and it owns everything that follows from them.
 //
 // The divisor is PER SHARD because the budget is: it belongs to the shard's database, so the replicas that
 // matter are the ones dispatching from THAT database. One shard's fleet changing must not re-push another's
@@ -654,7 +653,7 @@ func (e *Engine) recomputePools() {
 	// poolsLock is held across the whole read-then-push, not just the dedupe: lastAppliedSlots keeps a no-op
 	// recompute from touching the pools, but it does not ORDER two live ones, so without this a push derived
 	// from an older reading could land after a newer one (over-connecting the fleet), and a concurrent
-	// SetMaxOpenConns could have its pinned pools overwritten by derived ones. The poolsLock -> shardsLock
+	// setMaxOpenConns could have its pinned pools overwritten by derived ones. The poolsLock -> shardsLock
 	// order below cannot cycle (the roles are lock-free reads of the Sonars' published state).
 	e.poolsLock.Lock()
 	defer e.poolsLock.Unlock()
@@ -761,7 +760,7 @@ func (e *Engine) recomputePools() {
 			e.applyRole(idx, true)
 		}
 	}
-	// Under an override the pools were pushed by SetMaxOpenConns, but what follows from WHICH shards this
+	// Under an override the pools were pushed by setMaxOpenConns, but what follows from WHICH shards this
 	// replica dispatches still moves with the roles: a replica promoted by the override landing was sized at
 	// Startup as a reader, with the minimum cache and no refill period on shards it now dispatches.
 	//

@@ -107,8 +107,8 @@ type Engine struct {
 	workersSet             atomic.Bool // SetWorkers was called: skip the derived default
 	timeBudgetMs           atomic.Int64
 	defaultPriority        atomic.Int32
-	maxOpenConns           atomic.Int32 // expert override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
-	refillIntervalOverride atomic.Int64 // expert override (nanoseconds): pins every piston's cycle period; <=0 = derive
+	maxOpenConns           atomic.Int32 // test/bench override: exact per-shard pool size; 0 = derive from ShardSpec.VirtualCPUs
+	refillIntervalOverride atomic.Int64 // bench override (nanoseconds): pins every piston's cycle period; <=0 = derive
 
 	// engineID is a random positive identifier minted per engine instance (fresh on every restart). It is
 	// this replica's identity in the shared dwarf_peers registry - the primary key its Sonars own a row
@@ -189,11 +189,11 @@ type Engine struct {
 	shardMaxConns  map[int]int
 	fleetOverLimit map[int]bool
 	// poolsLock serializes every APPLICATION of a pool size - the derived recompute (recomputePools) and
-	// the live override (SetMaxOpenConns). Deduping the recompute on lastAppliedSlots is not enough: two peer
+	// the live override (setMaxOpenConns). Deduping the recompute on lastAppliedSlots is not enough: two peer
 	// signals microseconds apart during a rolling deploy each read a different R, and nothing orders their
 	// pushes, so the R=2 sizes can land AFTER the R=3 sizes and leave every replica over-connecting a fleet
 	// of 3 - sticky until the next fleet change. The override races the same way, and worse: recomputePools
-	// reads maxOpenConns and then pushes, so a SetMaxOpenConns landing in that window has its PINNED pools
+	// reads maxOpenConns and then pushes, so a setMaxOpenConns landing in that window has its PINNED pools
 	// silently overwritten by derived ones. Holding this across read-of-R/override + push makes the last
 	// writer win with the value it actually read. Lock order: poolsLock -> peersLock -> shardsLock.
 	poolsLock sync.Mutex
@@ -522,17 +522,14 @@ func (e *Engine) SetDefaultPriority(p int) error {
 	return nil
 }
 
-// SetMaxOpenConns is an expert override that pins every shard's connection pool to exactly n open (and
-// idle) connections, replacing the per-shard budget the engine derives from ShardSpec.VirtualCPUs.
-// Operators normally never call this - provide VirtualCPUs instead and let the engine size the pool from
-// a measured connections-per-vCPU table indexed by both vCPU count and round-trip time to the database
-// (see the connection pool guidance in the deployment docs). The override exists for benchmarking (pool-size
-// sweeps) and for deployments whose connection budget is constrained by something the engine cannot see
-// (e.g. a shared database or an external pooler). Live: pushes to every open shard immediately.
+// setMaxOpenConns is the test and benchmark override that pins every shard's connection pool to exactly n
+// open (and idle) connections, replacing the pool derived from each shard's vCPUs and RTT. Reached through
+// internal/engineseams, never by a host: a pinned pool cannot follow the database's size or distance, so the
+// engine offers no production way to set one. Live: pushes to every open shard immediately.
 //
 // With the override set, every replica dispatches every shard: the derived pools are what bound each
 // shard's connections to a few dispatching replicas, and a pinned pool replaces them.
-func (e *Engine) SetMaxOpenConns(n int) error {
+func (e *Engine) setMaxOpenConns(n int) error {
 	if n < 1 {
 		return errors.New("max open connections must be >= 1", http.StatusBadRequest)
 	}
@@ -543,8 +540,7 @@ func (e *Engine) SetMaxOpenConns(n int) error {
 	e.db.SetMaxOpenConns(n)
 	// The worker ceiling is a function of the pool - it bounds how fast a completion storm can drain
 	// through M connections - so a live pool change must re-derive it. Skipping this leaves the ceiling
-	// at the size computed for the OLD pool: an override that shrinks the pool (the external-pooler case)
-	// would keep a bound many times too permissive on exactly the storm the ceiling exists to contain.
+	// at the size computed for the OLD pool: an override that shrinks the pool would keep a bound many times too permissive on exactly the storm the ceiling exists to contain.
 	// recomputePools also re-derives it under an override, but only when a role moves, so a new pin with an
 	// unchanged fleet reaches the ceiling only through here.
 	if e.started.Load() {
@@ -671,7 +667,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if e.host == nil {
 		return errors.New("host is required", http.StatusBadRequest)
 	}
-	// Per-shard pool sizes: the SetMaxOpenConns override pins every pool; otherwise each shard's budget
+	// Per-shard pool sizes: the setMaxOpenConns override pins every pool; otherwise each shard's budget
 	// derives from its own VirtualCPUs (heterogeneous fleets get heterogeneous pools), split across the
 	// replicas that DISPATCH that shard, while every other replica holds a small reader pool there. Which
 	// replicas dispatch comes from the shared dwarf_peers registry, which needs open connections to read -
@@ -717,7 +713,7 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// ceiling is a function of the shard's POOL, which changes when the fleet changes or an override
 	// lands, so the ceiling is re-derived on those events (recomputeWorkerCeiling) rather than frozen
 	// here. The map is published under shardsLock because its readers are the reconcile loop and the live
-	// SetMaxOpenConns, and a Shutdown/Startup restart reassigns it - an unsynchronized map read/write is a
+	// setMaxOpenConns, and a Shutdown/Startup restart reassigns it - an unsynchronized map read/write is a
 	// fatal throw, not a recoverable panic.
 	rtts := make(map[int]float64, len(shards))
 	maxConns := make(map[int]int, len(shards))

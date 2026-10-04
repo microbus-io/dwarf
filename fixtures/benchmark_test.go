@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/engine"
+	"github.com/microbus-io/dwarf/internal/engineseams"
 	"github.com/microbus-io/dwarf/workflow"
 )
 
@@ -66,7 +67,7 @@ const benchConcurrency = 32
 // benchWorkers is the engine worker-pool size, fixed for reproducibility across dialects/shard counts.
 const benchWorkers = 32
 
-// benchMaxOpenConns is the per-shard connection pool, pinned exactly via SetMaxOpenConns. The test default
+// benchMaxOpenConns is the per-shard connection pool, pinned exactly via engineseams.SetMaxOpenConns. The test default
 // (4) is sized to keep many parallel CI test engines under a server's connection cap; a single benchmark
 // engine wants far more or the pool, not the engine, is what's measured. 30 per shard keeps
 // shards * pool under PostgreSQL's default max_connections=100 at 3 co-located shards (≈90). MySQL (151)
@@ -127,7 +128,7 @@ func benchEngine(b *testing.B, numShards int) (*engine.Engine, string) {
 	if err := eng.SetWorkers(benchWorkers); err != nil {
 		b.Fatal(err)
 	}
-	if err := eng.SetMaxOpenConns(benchMaxOpenConns); err != nil {
+	if err := engineseams.SetMaxOpenConns(eng, benchMaxOpenConns); err != nil {
 		b.Fatal(err)
 	}
 	if err := setShards(eng, numShards); err != nil {

@@ -240,9 +240,7 @@ later campaign found distance to be the axis this one never varied. These arms a
 
 **No cell above reaches 15 arms**, which is about what a 7–22% event needs before zero is distinguishable
 from luck — so read the table as evidence that the higher ratio is riskier at every size, not as a
-safe/unsafe line drawn at any particular one. A deployment that would rather not meet the collapse mode at
-all can override the pool with `SetMaxOpenConns` — note it pins a per-replica connection count outright
-rather than a ratio, so divide the budget you want by your replica count — and give up 5–14% of peak.
+safe/unsafe line drawn at any particular one.
 
 Connection ratios can only be compared open-loop, by interleaved A/B against the **same** instance:
 closed-loop load never reaches the collapse state, and two same-spec instances differ by more than the
@@ -584,7 +582,7 @@ configuration, alternating, on a fresh database each (`linear`, 512 in-flight fl
 
 | Configuration | steps/s (3 runs) | mean | worker goroutines |
 |---|---|---|---|
-| Hand-tuned (`SetWorkers(512)`, `SetMaxOpenConns(48)`) | 3454, 3439, 3623 | **3,505** | 512 |
+| Hand-tuned (`SetWorkers(512)`, a pinned pool of 48) | 3454, 3439, 3623 | **3,505** | 512 |
 | Derived (`ShardSpec.VirtualCPUs: 8`, nothing else) | 3408, 3379, 3536 | **3,441** | 384 |
 
 Within 2% — and with fewer goroutines, because the connection budget is what actually bounds dispatch.
@@ -710,8 +708,8 @@ engine merely queues, while an over-driven database degrades non-linearly.
 **The engine applies most of this automatically**: provide `ShardSpec.VirtualCPUs` and it derives each
 shard's connection pool (divided among the replicas that dispatch it, which the fleet agrees on through
 the shared databases — nothing to declare), its capacity-proportional share of new-flow placement, and the worker set it grows on
-demand. `SetWorkers` and `SetMaxOpenConns` survive as expert overrides for tests, benchmark sweeps,
-memory-bounded hosts, and externally-constrained connection budgets.
+demand. `SetWorkers` survives as an expert override for tests, benchmark sweeps and memory-bounded hosts;
+the bench pins the pool with its `-max-open-conns` flag.
 
 ## Known gaps
 

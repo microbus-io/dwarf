@@ -194,7 +194,7 @@ func TestRefillInterval_DerivedFromStaticConfig(t *testing.T) {
 	assert.True(deriveRefillInterval(1536, 8, 48, 1, max(1, 1536/2)) > rig)
 	assert.True(deriveRefillInterval(768, 32, 192, 1, max(1, 768/2)) < rig)
 
-	// The FOOTGUN: an operator pins a large pool with SetMaxOpenConns but leaves VirtualCPUs undeclared.
+	// The FOOTGUN: a large pool pinned with setMaxOpenConns while VirtualCPUs is undeclared.
 	// The buffer is sized off the big pool; the drain must follow the SAME pool. Deriving it from the
 	// default 2 vCPUs instead (the old bug) overshot the period to the 1s cap and starved the refiller -
 	// the rig's 20-80s fan-out latency. With the pool driving the drain, the period stays at the optimum.

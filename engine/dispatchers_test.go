@@ -308,7 +308,7 @@ func TestDispatchers_PromotionWhileHeldClearsTheHold(t *testing.T) {
 	}
 }
 
-// TestDispatchers_OverrideReleasesAHold pins that a SetMaxOpenConns override landing while a pool is held
+// TestDispatchers_OverrideReleasesAHold pins that a setMaxOpenConns override landing while a pool is held
 // releases the hold. The override pins every pool and dispatches every shard, so there is no budget left to
 // divide; a hold left recorded would keep the draining statement up - shrinking every peer's pool - for the
 // life of the process.
@@ -349,7 +349,7 @@ func TestDispatchers_OverrideReleasesAHold(t *testing.T) {
 	assert.False(e.dispatchesOn(1))
 	assert.Equal(1, awaitDrainingRow(t, db, readerID, 1), "fixture: the pool is held")
 
-	assert.NoError(e.SetMaxOpenConns(10))
+	assert.NoError(e.setMaxOpenConns(10))
 	e.recomputePools()
 	assert.True(e.dispatchesOn(1), "the override dispatches every shard")
 	e.poolsLock.Lock()
@@ -441,7 +441,7 @@ func TestDispatchers_DrainingReplicasDivideTheBudget(t *testing.T) {
 	assert.Equal(split, awaitPoolSize(t, db, split), "cleared statements return the pool to the dispatcher split")
 }
 
-// TestDispatchers_OverrideDispatchesEveryReplica pins the pooler path: with SetMaxOpenConns pinning the
+// TestDispatchers_OverrideDispatchesEveryReplica pins the override path: with setMaxOpenConns pinning the
 // pools there is no budget to divide, so a replica ranked below the cut dispatches anyway - including one
 // that was already a reader when the override landed.
 func TestDispatchers_OverrideDispatchesEveryReplica(t *testing.T) {
@@ -458,7 +458,7 @@ func TestDispatchers_OverrideDispatchesEveryReplica(t *testing.T) {
 	joinFakeFleet(t, e)
 	assert.False(e.dispatchesOn(1))
 
-	assert.NoError(e.SetMaxOpenConns(9))
+	assert.NoError(e.setMaxOpenConns(9))
 	e.recomputePools()
 	assert.True(e.dispatchesOn(1), "an override makes every replica a dispatcher")
 	assert.False(e.pistons[1].Idle())
@@ -713,7 +713,7 @@ func TestDispatchers_RoleFlagsSurviveARestartUnderLoad(t *testing.T) {
 	assert.True(e.dispatchesOn(1))
 }
 
-// TestDispatchers_OverridePromotionResizesTheCache pins that a replica promoted by SetMaxOpenConns re-derives
+// TestDispatchers_OverridePromotionResizesTheCache pins that a replica promoted by setMaxOpenConns re-derives
 // what follows from dispatching, not only its role. Sized at Startup as a reader on its only shard, it holds
 // the minimum cache; once it dispatches, the cache follows the pinned pool it now claims through.
 func TestDispatchers_OverridePromotionResizesTheCache(t *testing.T) {
@@ -729,7 +729,7 @@ func TestDispatchers_OverridePromotionResizesTheCache(t *testing.T) {
 	assert.False(e.dispatchesOn(1))
 	before := e.cache.Capacity()
 
-	assert.NoError(e.SetMaxOpenConns(40))
+	assert.NoError(e.setMaxOpenConns(40))
 	e.recomputePools()
 	assert.True(e.dispatchesOn(1))
 	// The cache holds twice the workers it is sized for.

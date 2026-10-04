@@ -89,8 +89,8 @@ func run() error {
 		// pool from VirtualCPUs). A sweep pins them; a validation run must not.
 		workers = flag.Int("workers", 0, "engine worker goroutines (0 = derived from the lease-margin ceiling)")
 		vcpus   = flag.Int("vcpus", 0, "ShardSpec.VirtualCPUs for every shard (0 = undeclared; the engine assumes 2)")
-		// SetMaxOpenConns is the expert override: it pins every shard's pool to exactly this size, which
-		// is what a pool-size sweep needs.
+		// engineseams.SetMaxOpenConns pins every shard's pool to exactly this size, which is what a
+		// pool-size sweep needs.
 		maxOpenConns     = flag.Int("max-open-conns", 0, "engine per-shard pool size (0 = derived from -vcpus; else pinned exactly)")
 		refillIntervalMs = flag.Int("refill-interval-ms", 0, "pin each shard's refill cycle period in ms (0 = derived from capacity/vcpus/replicas); the scan-rate sweep knob")
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
@@ -228,7 +228,7 @@ func run() error {
 			setters = append(setters, eng.SetWorkers(replicaWorkerCount))
 		}
 		if *maxOpenConns > 0 {
-			setters = append(setters, eng.SetMaxOpenConns(*maxOpenConns))
+			setters = append(setters, engineseams.SetMaxOpenConns(eng, *maxOpenConns))
 		}
 		if *refillIntervalMs > 0 {
 			setters = append(setters, engineseams.SetRefillInterval(eng, time.Duration(*refillIntervalMs)*time.Millisecond))

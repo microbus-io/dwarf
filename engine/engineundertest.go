@@ -84,5 +84,6 @@ func NewEngineUnderTest(testName string) *Engine {
 func init() {
 	engineseams.DB = func(eng any) *database.ShardSet { return &eng.(*Engine).db }
 	engineseams.Seams = func(eng any) *seamster.Seamster { return eng.(*Engine).seams }
+	engineseams.SetMaxOpenConns = func(eng any, n int) error { return eng.(*Engine).setMaxOpenConns(n) }
 	engineseams.SetRefillInterval = func(eng any, d time.Duration) error { return eng.(*Engine).setRefillInterval(d) }
 }
